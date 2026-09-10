@@ -22,6 +22,8 @@ class CFDSolver3DCuda : public CFDSolver3DImplBase {
     mutable void* d_max_s_buf = nullptr;
     mutable void* d_slice_buf = nullptr;
     mutable size_t d_slice_buf_capacity = 0;
+    mutable void* d_sample_coords = nullptr;
+    mutable size_t d_sample_coords_capacity = 0;
     mutable void* d_tile_active_temp = nullptr;
     mutable void* d_active_tile_indices = nullptr;  // int* compact index buffer
     mutable void* d_active_count = nullptr;          // int* device counter
@@ -141,6 +143,15 @@ public:
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
     std::vector<float> extractSlice(const Slice3D& slice) const override;
     std::vector<SlicePayload3D> extractAllSlices(const Slice3D& slice) const override;
+    void sampleSurfacePoints(
+        const std::vector<Point3D>& points,
+        const std::vector<std::string>& quantities,
+        double dom_xmin, double dom_xmax,
+        double dom_ymin, double dom_ymax,
+        double dom_zmin, double dom_zmax,
+        float outside_val,
+        std::vector<std::vector<float>>& out_quantities
+    ) const override;
     void captureBulkSnapshot(CFDBulkSnapshot3D& out_snap, bool need_vel = false, bool need_E = false, bool need_species = false) const override;
     void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const override;
     using CFDSolver3D::getSliceDimensions;

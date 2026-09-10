@@ -738,8 +738,6 @@ void MPMSolver3D::particleToGrid() {
 
     // P2G Scatter in 3D
     for (const auto& p : m_particles) {
-        if (p.state == 1) continue; // Only DEM grains are decoupled from the Eulerian continuum grid
-
         float px = p.x[0] - m_xmin;
         float py = p.x[1] - m_ymin;
         float pz = p.x[2] - m_zmin;
@@ -1194,7 +1192,7 @@ void MPMSolver3D::updateGridKinematics(float dt) {
 }
 
 void MPMSolver3D::gridToParticle(float dt) {
-    float max_B = 5000.0f / std::min({m_dx, m_dy, m_dz});
+    float max_B = 25000.0f / std::min({m_dx, m_dy, m_dz});
     m_last_v_max = 0.0f;
 
     for (auto& p : m_particles) {
@@ -1643,8 +1641,10 @@ void MPMSolver3D::gridToParticle(float dt) {
         float target_vy = v_pic_y;
         float target_vz = v_pic_z;
 
-        if (p.has_failed || p.damage >= 1.0f) {
-            // Pure FLIP velocity update for failed debris particles (0% PIC grid velocity averaging).
+        const auto& mat = getMaterialTable(p.object_id);
+        bool is_melted = (mat.T_melt > mat.T_room && p.temperature >= mat.T_melt);
+        if (p.has_failed || p.damage >= 1.0f || is_melted) {
+            // Pure FLIP velocity update for failed debris / fluid / melted particles (0% PIC grid velocity averaging).
             // Preserves relative particle separation speeds and enables discrete fragment breakup.
             target_vx = p.v[0] + delta_v_grid_x;
             target_vy = p.v[1] + delta_v_grid_y;
@@ -1659,16 +1659,16 @@ void MPMSolver3D::gridToParticle(float dt) {
             target_vz = alpha * v_flip_z + (1.0f - alpha) * v_pic_z;
         }
 
-        p.v[0] = std::clamp(target_vx, -5000.0f, 5000.0f);
-        p.v[1] = std::clamp(target_vy, -5000.0f, 5000.0f);
-        p.v[2] = std::clamp(target_vz, -5000.0f, 5000.0f);
+        p.v[0] = std::clamp(target_vx, -25000.0f, 25000.0f);
+        p.v[1] = std::clamp(target_vy, -25000.0f, 25000.0f);
+        p.v[2] = std::clamp(target_vz, -25000.0f, 25000.0f);
 
         float p_speed = std::sqrt(p.v[0]*p.v[0] + p.v[1]*p.v[1] + p.v[2]*p.v[2]);
         if (p_speed > m_last_v_max) m_last_v_max = p_speed;
 
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
-                p.B[r][c] = (!p.has_failed && m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[r][c], -max_B, max_B) : 0.0f;
+                p.B[r][c] = (!p.has_failed && !is_melted && m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[r][c], -max_B, max_B) : 0.0f;
                 p.L_grad[r][c] = std::clamp(L_new[r][c], -max_B, max_B);
             }
         }
@@ -1738,49 +1738,8 @@ void MPMSolver3D::updateStressState(float dt) {
 
         // --- Unified Parent Material Response for Eroded / Failed / Fractured Particles ---
         if (p.has_failed || p.damage >= 1.0f) {
-            bool first_fail = (!p.has_failed || p.state == 0);
             p.has_failed = true;
             p.damage = 1.0f;
-            if (mat.dem_transition_enabled) {
-                p.state = 1; // Transition to DEM particle
-            }
-
-            if (first_fail) {
-                // 1. Deviatoric Elastic Strain Energy conversion to radial kinetic ejection jitter
-                const float E_mod = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
-                const float nu    = std::clamp(mat.poissons_ratio, 0.01f, 0.49f);
-                const float G_mod = E_mod / (2.0f * (1.0f + nu));
-                const float rho   = mat.density > 0.0f ? mat.density : 7850.0f;
-
-                float p_hyd = -(p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
-                float s00 = p.sigma[0][0] + p_hyd;
-                float s11 = p.sigma[1][1] + p_hyd;
-                float s22 = p.sigma[2][2] + p_hyd;
-                float s_dev_sq = s00*s00 + s11*s11 + s22*s22 + 2.0f * (p.sigma[0][1]*p.sigma[0][1] + p.sigma[1][2]*p.sigma[1][2] + p.sigma[2][0]*p.sigma[2][0]);
-                float U_e = 0.5f * s_dev_sq / std::max(1.0e6f, 2.0f * G_mod);
-                float v_kick = mat.fragment_ejection_jitter * std::sqrt(std::max(0.0f, 2.0f * U_e / rho));
-                v_kick = std::min(v_kick, 30.0f); // Clamp to physical crack opening speed
-
-                // Deterministic pseudo-random direction based on particle address
-                uint32_t seed = static_cast<uint32_t>((reinterpret_cast<uintptr_t>(&p) ^ static_cast<uintptr_t>(m_step_count)) * 1664525u + 1013904223u);
-                float rx = (static_cast<float>(seed & 0xFFFF) / 65535.0f - 0.5f) * 2.0f; seed = seed * 1664525u + 1013904223u;
-                float ry = (static_cast<float>(seed & 0xFFFF) / 65535.0f - 0.5f) * 2.0f; seed = seed * 1664525u + 1013904223u;
-                float rz = (static_cast<float>(seed & 0xFFFF) / 65535.0f - 0.5f) * 2.0f;
-                float r_len = std::sqrt(rx*rx + ry*ry + rz*rz) + 1.0e-5f;
-                p.v[0] += v_kick * (rx / r_len);
-                p.v[1] += v_kick * (ry / r_len);
-                p.v[2] += v_kick * (rz / r_len);
-
-                // 2. Statistical Rosin-Rammler / Mott-Grady fragment diameter assignment
-                seed = seed * 1664525u + 1013904223u;
-                float u_rand = std::clamp(static_cast<float>(seed & 0xFFFF) / 65535.0f, 1.0e-4f, 0.999f);
-                float d_min = std::max(0.0005f, mat.fragment_min_size);
-                float d_max = std::max(d_min * 1.5f, mat.fragment_max_size);
-                float weibull_n = std::max(0.5f, mat.fragment_weibull_n);
-                float d_frag = d_min + (d_max - d_min) * std::pow(-std::log(1.0f - u_rand), 1.0f / weibull_n);
-                d_frag = std::clamp(d_frag, d_min, d_max * 2.0f);
-                p.contact_radius = 0.5f * d_frag;
-            }
 
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c)
@@ -1804,15 +1763,25 @@ void MPMSolver3D::updateStressState(float dt) {
             }
 
             // 2. Frictional Shear Resistance under Confinement (Mohr-Coulomb / Drucker-Prager: q <= M * p_comp)
-            float M_friction = 0.30f;
+            // Hydrodynamic shear response for failed or melted metals: zero shear resistance (q_max = 0)
+            float M_friction = 0.0f;
             if (mat.material_model == MPMMaterialModel::RHTConcrete ||
                 mat.material_model == MPMMaterialModel::KCConcrete ||
                 mat.material_model == MPMMaterialModel::CSCMConcrete) {
                 M_friction = 0.60f; // Concrete/rock aggregate friction
-            } else if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
-                M_friction = 0.15f; // Ductile metal shear resistance under high pressure
+            } else if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen ||
+                       mat.material_model == MPMMaterialModel::Hypoelastic ||
+                       mat.material_model == MPMMaterialModel::LinearElastic) {
+                M_friction = 0.0f; // Pure hydrodynamic fluid response for failed or melted metals
             }
             const float q_max = M_friction * p_comp;
+
+            if (q_max <= 0.0f) {
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        p.sigma[r][c] = (r == c) ? -p_comp : 0.0f;
+                continue;
+            }
 
             const float E_mod = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
             const float nu = std::clamp(mat.poissons_ratio, 0.01f, 0.49f);
@@ -2079,6 +2048,16 @@ void MPMSolver3D::updateStressState(float dt) {
             float T_star = (p.temperature - mat.T_room) / std::max(1.0f, mat.T_melt - mat.T_room);
             T_star = std::clamp(T_star, 0.0f, 1.0f);
 
+            if (T_star >= 1.0f) {
+                // Melted metal behaves hydrodynamically: zero deviatoric shear stress and zero affine B
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c) {
+                        p.sigma[r][c] = (r == c) ? -p_hydro : 0.0f;
+                        p.B[r][c] = 0.0f;
+                    }
+                continue;
+            }
+
             float strain_term = A + B * std::pow(std::max(1.0e-6f, p.ep_bar), n);
             float rate_term   = (eps_dot_star > 1.0f) ? (1.0f + C * std::log(eps_dot_star)) : 1.0f;
             float temp_term   = 1.0f - std::pow(T_star, m);
@@ -2095,7 +2074,6 @@ void MPMSolver3D::updateStressState(float dt) {
             }
 
             float jc_yield = strain_term * rate_term * temp_term * w_factor * aniso_factor;
-            jc_yield = std::max(1.0e6f, jc_yield);
 
             // 4. Radial Return Mapping for JC
             float delta_ep = 0.0f;
@@ -2454,7 +2432,7 @@ float MPMSolver3D::computeStepSize(float cfl) const {
         }
         if (std::isnan(c_s) || std::isinf(c_s)) continue;
         float v_mag = std::sqrt(p.v[0] * p.v[0] + p.v[1] * p.v[1] + p.v[2] * p.v[2]);
-        v_mag = std::min(5000.0f, v_mag);
+        v_mag = std::min(25000.0f, v_mag);
         float total_speed = c_s + v_mag;
         if (total_speed > max_speed) max_speed = total_speed;
     }
@@ -2514,199 +2492,17 @@ void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
     }
 
     // 3. Resolve Discrete Element (DEM) Contact & Collisions for Fractured Debris
-    evaluateDEMContact(dt);
     if (m_step_count % 10 == 0) {
         updateFragmentClusters();
     }
 }
 
 void MPMSolver3D::evaluateDEMContact(float dt) {
-    if (m_particles.empty()) return;
-
-    float cell_size = std::max(m_dx, std::max(m_dy, m_dz));
-    for (const auto& p : m_particles) {
-        float r = p.contact_radius > 0.0f ? p.contact_radius : (p.lp[0] > 0.0f ? p.lp[0] : 0.5f * std::cbrt(std::max(1.0e-30f, p.V)));
-        cell_size = std::max(cell_size, 2.0f * r);
-    }
-    float inv_cell = 1.0f / cell_size;
-
-    std::unordered_map<int64_t, std::vector<size_t>> grid_hash;
-    auto get_hash = [&](float x, float y, float z) -> int64_t {
-        int64_t ix = static_cast<int64_t>(std::floor(x * inv_cell));
-        int64_t iy = static_cast<int64_t>(std::floor(y * inv_cell));
-        int64_t iz = static_cast<int64_t>(std::floor(z * inv_cell));
-        return (ix * 73856093) ^ (iy * 19349663) ^ (iz * 83492791);
-    };
-
-    // Index ALL active particles (both intact MPM and discrete DEM grains)
-    for (size_t idx = 0; idx < m_particles.size(); ++idx) {
-        const auto& p = m_particles[idx];
-        grid_hash[get_hash(p.x[0], p.x[1], p.x[2])].push_back(idx);
-    }
-
-    // Evaluate pairwise contact (DEM-DEM and DEM vs external intact MPM body)
-    for (size_t idx_i = 0; idx_i < m_particles.size(); ++idx_i) {
-        auto& p_i = m_particles[idx_i];
-        bool is_dem_i = (p_i.state == 1);
-        if (!is_dem_i) continue; // Intact continuum MPM particles are governed strictly by the Eulerian grid
-
-        const auto& mat_i = getMaterialTable(p_i.object_id);
-        float r_i = p_i.contact_radius > 0.0f ? p_i.contact_radius : (p_i.lp[0] > 0.0f ? p_i.lp[0] : 0.5f * std::cbrt(std::max(1.0e-30f, p_i.V)));
-        float E_i = mat_i.youngs_modulus > 0 ? mat_i.youngs_modulus : 200.0e9f;
-
-        int64_t base_ix = static_cast<int64_t>(std::floor(p_i.x[0] * inv_cell));
-        int64_t base_iy = static_cast<int64_t>(std::floor(p_i.x[1] * inv_cell));
-        int64_t base_iz = static_cast<int64_t>(std::floor(p_i.x[2] * inv_cell));
-
-        for (int64_t dix = -1; dix <= 1; ++dix) {
-            for (int64_t diy = -1; diy <= 1; ++diy) {
-                for (int64_t diz = -1; diz <= 1; ++diz) {
-                    int64_t h = ((base_ix + dix) * 73856093) ^ ((base_iy + diy) * 19349663) ^ ((base_iz + diz) * 83492791);
-                    auto it = grid_hash.find(h);
-                    if (it == grid_hash.end()) continue;
-
-                    for (auto idx_j : it->second) {
-                        if (idx_i >= idx_j) continue;
-                        auto& p_j = m_particles[idx_j];
-                        bool is_dem_j = (p_j.state == 1);
-
-                        // Contact applies ONLY between two DEM grains or a DEM grain hitting an external intact body
-                        if (!is_dem_j && p_i.object_id == p_j.object_id) continue;
-
-                        float r_j = p_j.contact_radius > 0.0f ? p_j.contact_radius : (p_j.lp[0] > 0.0f ? p_j.lp[0] : 0.5f * std::cbrt(std::max(1.0e-30f, p_j.V)));
-                        float r_sum = r_i + r_j;
-
-                        float dx = p_i.x[0] - p_j.x[0];
-                        float dy = p_i.x[1] - p_j.x[1];
-                        float dz = p_i.x[2] - p_j.x[2];
-                        float dist_sq = dx*dx + dy*dy + dz*dz;
-
-                        if (dist_sq < r_sum * r_sum && dist_sq > 1.0e-14f) {
-                            float dist = std::sqrt(dist_sq);
-                            float overlap = r_sum - dist;
-                            float nx = dx / dist;
-                            float ny = dy / dist;
-                            float nz = dz / dist;
-
-                            float v_rel_x = p_i.v[0] - p_j.v[0];
-                            float v_rel_y = p_i.v[1] - p_j.v[1];
-                            float v_rel_z = p_i.v[2] - p_j.v[2];
-                            float v_rel_n = v_rel_x * nx + v_rel_y * ny + v_rel_z * nz;
-
-                            const auto& mat_j = getMaterialTable(p_j.object_id);
-                            float E_j = mat_j.youngs_modulus > 0 ? mat_j.youngs_modulus : 200.0e9f;
-                            float E_eff = 2.0f * (E_i * E_j) / (E_i + E_j + 1.0f);
-                            float m_eff = (p_i.m * p_j.m) / (p_i.m + p_j.m);
-
-                            float k_n_phys = 0.05f * E_eff * std::sqrt(std::max(0.0001f, (r_i * r_j) / (r_i + r_j)));
-                            float k_n_stab = 0.05f * m_eff / (dt * dt + 1.0e-20f);
-                            float k_n = std::min(k_n_phys, k_n_stab);
-
-                            float rest = std::max(0.0f, std::min(1.0f, mat_i.fragment_restitution));
-                            float gamma_n = 2.0f * (1.0f - rest) * std::sqrt(k_n * m_eff);
-
-                            float f_n = std::max(0.0f, k_n * overlap - gamma_n * v_rel_n);
-                            float max_fn = 0.25f * p_i.m * (5000.0f / dt);
-                            f_n = std::min(f_n, max_fn);
-
-                            float v_tx = v_rel_x - v_rel_n * nx;
-                            float v_ty = v_rel_y - v_rel_n * ny;
-                            float v_tz = v_rel_z - v_rel_n * nz;
-                            float v_t_mag = std::sqrt(v_tx*v_tx + v_ty*v_ty + v_tz*v_tz);
-
-                            float f_tx = 0.0f, f_ty = 0.0f, f_tz = 0.0f;
-                            if (v_t_mag > 1.0e-6f) {
-                                float mu = mat_i.fragment_contact_friction > 0.0f ? mat_i.fragment_contact_friction : 0.50f;
-                                float f_t_max = mu * f_n;
-                                float scale = std::min(f_t_max, 0.5f * k_n * v_t_mag * dt) / v_t_mag;
-                                f_tx = -scale * v_tx;
-                                f_ty = -scale * v_ty;
-                                f_tz = -scale * v_tz;
-                            }
-
-                            float total_fx = f_n * nx + f_tx;
-                            float total_fy = f_n * ny + f_ty;
-                            float total_fz = f_n * nz + f_tz;
-
-                            float inv_mi = 1.0f / std::max(1.0e-12f, p_i.m);
-                            float inv_mj = 1.0f / std::max(1.0e-12f, p_j.m);
-
-                            p_i.v[0] += dt * total_fx * inv_mi;
-                            p_i.v[1] += dt * total_fy * inv_mi;
-                            p_i.v[2] += dt * total_fz * inv_mi;
-
-                            p_j.v[0] -= dt * total_fx * inv_mj;
-                            p_j.v[1] -= dt * total_fy * inv_mj;
-                            p_j.v[2] -= dt * total_fz * inv_mj;
-
-                            // Direct anti-penetration push
-                            float mass_ratio_i = p_j.m / (p_i.m + p_j.m);
-                            float mass_ratio_j = p_i.m / (p_i.m + p_j.m);
-                            float d_sep = std::min(0.5f * overlap, 0.02f * m_dx);
-                            p_i.x[0] += d_sep * nx * mass_ratio_i;
-                            p_i.x[1] += d_sep * ny * mass_ratio_i;
-                            p_i.x[2] += d_sep * nz * mass_ratio_i;
-
-                            p_j.x[0] -= d_sep * nx * mass_ratio_j;
-                            p_j.x[1] -= d_sep * ny * mass_ratio_j;
-                            p_j.x[2] -= d_sep * nz * mass_ratio_j;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Solid background grid boundary for DEM debris particles
-        if (is_dem_i) {
-            int bi = static_cast<int>(std::floor((p_i.x[0] - m_xmin) / m_dx));
-            int bj = static_cast<int>(std::floor((p_i.x[1] - m_ymin) / m_dy));
-            int bk = static_cast<int>(std::floor((p_i.x[2] - m_zmin) / m_dz));
-            if (bi >= 1 && bi < m_nx - 2 && bj >= 1 && bj < m_ny - 2 && bk >= 1 && bk < m_nz - 2) {
-                size_t n_c = (static_cast<size_t>(bi) * m_ny + bj) * m_nz + bk;
-                float local_m = m_grid[n_c].m;
-                if (local_m > MPMGridNode3D::MIN_MASS * 10.0f) {
-                    float grad_mx = (m_grid[(static_cast<size_t>(bi+1)*m_ny + bj)*m_nz + bk].m - m_grid[(static_cast<size_t>(bi-1)*m_ny + bj)*m_nz + bk].m) / (2.0f * m_dx);
-                    float grad_my = (m_grid[(static_cast<size_t>(bi)*m_ny + (bj+1))*m_nz + bk].m - m_grid[(static_cast<size_t>(bi)*m_ny + (bj-1))*m_nz + bk].m) / (2.0f * m_dy);
-                    float grad_mz = (m_grid[(static_cast<size_t>(bi)*m_ny + bj)*m_nz + (bk+1)].m - m_grid[(static_cast<size_t>(bi)*m_ny + bj)*m_nz + (bk-1)].m) / (2.0f * m_dz);
-                    float g_len = std::sqrt(grad_mx*grad_mx + grad_my*grad_my + grad_mz*grad_mz);
-                    if (g_len > 1.0e-6f) {
-                        float n_out_x = -grad_mx / g_len;
-                        float n_out_y = -grad_my / g_len;
-                        float n_out_z = -grad_mz / g_len;
-
-                        float v_solid_x = m_grid[n_c].p[0] / local_m;
-                        float v_solid_y = m_grid[n_c].p[1] / local_m;
-                        float v_solid_z = m_grid[n_c].p[2] / local_m;
-
-                        float v_rel_x = p_i.v[0] - v_solid_x;
-                        float v_rel_y = p_i.v[1] - v_solid_y;
-                        float v_rel_z = p_i.v[2] - v_solid_z;
-                        float v_rel_n = v_rel_x * n_out_x + v_rel_y * n_out_y + v_rel_z * n_out_z;
-
-                        if (v_rel_n < 0.0f) {
-                            float k_wall = 0.20f * E_i * m_dx;
-                            float f_wall_n = -2.0f * k_wall * v_rel_n * dt;
-                            p_i.v[0] += dt * (f_wall_n * n_out_x) / p_i.m;
-                            p_i.v[1] += dt * (f_wall_n * n_out_y) / p_i.m;
-                            p_i.v[2] += dt * (f_wall_n * n_out_z) / p_i.m;
-                            p_i.x[0] += 0.5f * m_dx * n_out_x;
-                            p_i.x[1] += 0.5f * m_dx * n_out_y;
-                            p_i.x[2] += 0.5f * m_dx * n_out_z;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    (void)dt;
 }
 
 void MPMSolver3D::updateFragmentClusters() {
     float clump_r = 0.015f;
-    for (const auto& mat : m_material_tables) {
-        if (mat.fragment_clumping_radius > 0.0f) {
-            clump_r = std::max(clump_r, mat.fragment_clumping_radius);
-        }
-    }
     float clump_r_sq = clump_r * clump_r;
     float inv_clump = 1.0f / clump_r;
 
@@ -2775,118 +2571,10 @@ void MPMSolver3D::initMaterialHeterogeneity(int obj_id) {
             }
         }
     }
-    if (mat.fragment_distribution == "Mott-Grady") {
-        seedMottGradyFragments(obj_id);
-    }
 }
 
 void MPMSolver3D::seedMottGradyFragments(int obj_id) {
-    if (obj_id < 0 || obj_id >= static_cast<int>(m_material_tables.size())) return;
-    const auto& mat = m_material_tables[obj_id];
-
-    // Only seed Mott-Grady Voronoi clumping if explicitly configured
-    if (mat.fragment_distribution != "Mott-Grady") {
-        return;
-    }
-
-    float clumping_radius = (mat.fragment_clumping_radius > 0.0005f) ? mat.fragment_clumping_radius : 0.015f;
-    float weibull_modulus = (mat.weibull_modulus > 0.001f) ? mat.weibull_modulus : 8.0f;
-    float weibull_scale   = (mat.weibull_scale > 0.001f) ? mat.weibull_scale : 1.0f;
-
-    // 1. Gather particles belonging to this object
-    std::vector<size_t> obj_particles;
-    float min_x = 1e9f, max_x = -1e9f, min_y = 1e9f, max_y = -1e9f, min_z = 1e9f, max_z = -1e9f;
-    for (size_t i = 0; i < m_particles.size(); ++i) {
-        if (m_particles[i].object_id == obj_id) {
-            obj_particles.push_back(i);
-            min_x = std::min(min_x, m_particles[i].x[0]); max_x = std::max(max_x, m_particles[i].x[0]);
-            min_y = std::min(min_y, m_particles[i].x[1]); max_y = std::max(max_y, m_particles[i].x[1]);
-            min_z = std::min(min_z, m_particles[i].x[2]); max_z = std::max(max_z, m_particles[i].x[2]);
-        }
-    }
-    if (obj_particles.empty()) return;
-
-    // 2. Generate pseudo-random 3D Mott-Grady Voronoi seeds
-    struct VoronoiSeed {
-        float x, y, z;
-        int id;
-        float flaw_factor;
-    };
-    std::vector<VoronoiSeed> seeds;
-
-    float span_x = std::max(clumping_radius, max_x - min_x);
-    float span_y = std::max(clumping_radius, max_y - min_y);
-    float span_z = std::max(clumping_radius, max_z - min_z);
-    int nx_s = std::max(1, static_cast<int>(std::ceil(span_x / clumping_radius)));
-    int ny_s = std::max(1, static_cast<int>(std::ceil(span_y / clumping_radius)));
-    int nz_s = std::max(1, static_cast<int>(std::ceil(span_z / clumping_radius)));
-
-    int seed_id = 1;
-    for (int ix = 0; ix < nx_s; ++ix) {
-        for (int iy = 0; iy < ny_s; ++iy) {
-            for (int iz = 0; iz < nz_s; ++iz) {
-                uint32_t s_hash = (static_cast<uint32_t>(ix) * 73856093u) ^ (static_cast<uint32_t>(iy) * 19349663u) ^ (static_cast<uint32_t>(iz) * 83492791u) ^ (static_cast<uint32_t>(obj_id) * 2654435761u);
-                s_hash = (s_hash ^ 61u) ^ (s_hash >> 16);
-                s_hash *= 9u;
-                s_hash = s_hash ^ (s_hash >> 4);
-                s_hash *= 0x27d4eb2du;
-                s_hash = s_hash ^ (s_hash >> 15);
-
-                float jx = (static_cast<float>(s_hash & 0xFF) / 255.0f - 0.5f) * 0.5f * clumping_radius;
-                float jy = (static_cast<float>((s_hash >> 8) & 0xFF) / 255.0f - 0.5f) * 0.5f * clumping_radius;
-                float jz = (static_cast<float>((s_hash >> 16) & 0xFF) / 255.0f - 0.5f) * 0.5f * clumping_radius;
-
-                float sx = min_x + (static_cast<float>(ix) + 0.5f) * (span_x / static_cast<float>(nx_s)) + jx;
-                float sy = min_y + (static_cast<float>(iy) + 0.5f) * (span_y / static_cast<float>(ny_s)) + jy;
-                float sz = min_z + (static_cast<float>(iz) + 0.5f) * (span_z / static_cast<float>(nz_s)) + jz;
-
-                float u_rand = std::clamp(static_cast<float>((s_hash >> 20) & 0xFF) / 255.0f, 0.01f, 0.99f);
-                float gamma_mean = std::tgamma(1.0f + 1.0f / weibull_modulus);
-                float flaw = (std::pow(-std::log(1.0f - u_rand), 1.0f / weibull_modulus) / gamma_mean) * weibull_scale;
-                seeds.push_back({sx, sy, sz, seed_id++, std::clamp(flaw, 0.20f, 2.50f)});
-            }
-        }
-    }
-
-    // 3. For each particle, assign nearest Voronoi seed and compute crack band factor
-    float crack_band_width = 0.20f * clumping_radius; // 20% of fragment diameter is the crack shear band
-    for (size_t p_idx : obj_particles) {
-        auto& p = m_particles[p_idx];
-        float best_d1 = 1e9f;
-        float best_d2 = 1e9f;
-        int best_seed = 1;
-        float best_flaw = 1.0f;
-
-        for (const auto& s : seeds) {
-            float dx = p.x[0] - s.x;
-            float dy = p.x[1] - s.y;
-            float dz = p.x[2] - s.z;
-            float d = std::sqrt(dx*dx + dy*dy + dz*dz);
-            if (d < best_d1) {
-                best_d2 = best_d1;
-                best_d1 = d;
-                best_seed = s.id;
-                best_flaw = s.flaw_factor;
-            } else if (d < best_d2) {
-                best_d2 = d;
-            }
-        }
-
-        p.cluster_id = best_seed;
-        float boundary_dist = best_d2 - best_d1;
-        float base_w = (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f)
-            ? computeWeibullFactor(p.x[0], p.x[1], p.x[2], mat.weibull_modulus, mat.weibull_scale)
-            : 1.0f;
-        if (boundary_dist < crack_band_width) {
-            // Particle is in inter-fragment crack shear band -> attenuated so it fractures first along Voronoi seams
-            float norm_dist = boundary_dist / crack_band_width;
-            float atten = 0.50f + 0.50f * norm_dist;
-            p.weibull_factor = base_w * atten * best_flaw;
-        } else {
-            // Particle is inside cohesive fragment interior
-            p.weibull_factor = base_w * best_flaw;
-        }
-    }
+    (void)obj_id;
 }
 
 void MPMSolver3D::step(float cfl) {

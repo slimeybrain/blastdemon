@@ -69,7 +69,6 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
         'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
         'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-        'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution',
         'mg_gamma0', 'mg_c0', 'mg_s',
         'ppc',
         'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
@@ -111,7 +110,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'export_slices', 'export_volumes', 'export_fem', 'export_mpm', 'export_pvd',
         'roi_enabled', 'is_ideal_gas', 'directional_crack_band', 'enable_heterogeneity',
         'enable_anisotropy', 'enable_strain_erosion', 'enable_stress_erosion',
-        'enable_timestep_erosion', 'kc_auto_generate', 'dem_transition_enabled',
+        'enable_timestep_erosion', 'kc_auto_generate',
         'convert_failed_elements_to_mpm', 'use_pvd_collection', 'enable_compression',
         'export_raw_binary', 'show_stl', 'stl_show_results',
         'show_timing_breakdown', 'show_memory', 'show_wallclock', 'show_dt'
@@ -1496,21 +1495,23 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
             });
 
-            const meshConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'mesh');
-            if (meshConn) {
-                const meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
-                if (meshNode) {
-                    Object.entries(meshNode.parameters).forEach(([key, value]) => {
-                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
-                    });
-                    const cellSize = Number(meshNode.parameters?.cell_size ?? 0.005);
-                    const maxR = Number(meshNode.parameters?.max_r ?? 1.0);
-                    const maxZ = Number(meshNode.parameters?.max_z ?? 1.0);
-                    flattenedParams['nr'] = Math.round(maxR / cellSize);
-                    flattenedParams['nz'] = Math.round(maxZ / cellSize);
-                    flattenedParams['max_r'] = maxR;
-                    flattenedParams['max_z'] = maxZ;
-                }
+            const meshConn = state.connections.find(c => 
+                (c.toNode === mpmDomain.id && (c.toPort === 'mesh' || c.toPort === 'in' || c.toPort === 'grid')) ||
+                (c.fromNode === mpmDomain.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            );
+            const meshId = meshConn ? (meshConn.toNode === mpmDomain.id ? meshConn.fromNode : meshConn.toNode) : '';
+            const meshNode = meshId ? state.nodes.find(n => n.id === meshId) : state.nodes.find(n => n.type === 'DomainMesh2D');
+            if (meshNode) {
+                Object.entries(meshNode.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                });
+                const cellSize = Number(meshNode.parameters?.cell_size ?? 0.005);
+                const maxR = Number(meshNode.parameters?.max_r ?? 1.0);
+                const maxZ = Number(meshNode.parameters?.max_z ?? 1.0);
+                flattenedParams['nr'] = Math.round(maxR / cellSize);
+                flattenedParams['nz'] = Math.round(maxZ / cellSize);
+                flattenedParams['max_r'] = maxR;
+                flattenedParams['max_z'] = maxZ;
             }
 
             const domainPpc = Number(mpmDomain.parameters?.ppc ?? 4);
@@ -1575,6 +1576,16 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     detonators.push(detParams);
                 }
             }
+            if (detonators.length === 0) {
+                const fallbackDets = state.nodes.filter(n => n.type === 'DetonatorLocation');
+                for (const detNode of fallbackDets) {
+                    const detParams: any = {};
+                    Object.entries(detNode.parameters).forEach(([key, value]) => {
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                    detonators.push(detParams);
+                }
+            }
             if (detonators.length > 0) {
                 flattenedParams['detonators'] = detonators;
                 Object.entries(detonators[0]).forEach(([key, value]) => {
@@ -1593,26 +1604,31 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
     } else if (command === "INIT_MPM_3D" || command === "INIT_3D_MPM") {
         const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain3D');
         if (mpmDomain) {
-            let meshConn = state.connections.find(c => c.toNode === mpmDomain.id && c.toPort === 'mesh');
-            let meshNode = meshConn ? state.nodes.find(n => n.id === meshConn.fromNode) : state.nodes.find(n => n.type === 'DomainMesh3D');
-            if (meshNode) {
-                Object.entries(meshNode.parameters).forEach(([key, value]) => {
-                    flattenedParams[key] = castParam(key, value);
-                });
+            let meshConn = state.connections.find(c => 
+                (c.toNode === mpmDomain.id && (c.toPort === 'mesh' || c.toPort === 'in' || c.toPort === 'grid')) ||
+                (c.fromNode === mpmDomain.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            );
+            let meshId = meshConn ? (meshConn.toNode === mpmDomain.id ? meshConn.fromNode : meshConn.toNode) : '';
+            let meshNode = meshId ? state.nodes.find(n => n.id === meshId) : state.nodes.find(n => n.type === 'DomainMesh3D');
+            if (!meshNode) {
+                throw new Error("Cannot initialize MPM 3D: No DomainMesh3D background grid connected to MPM Domain 3D. You must define a background grid.");
             }
+            Object.entries(meshNode.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = castParam(key, value);
+            });
 
             // MPMDomain3D parameters MUST HAVE ABSOLUTE PRECEDENCE
             Object.entries(mpmDomain.parameters).forEach(([key, value]) => {
                 flattenedParams[key] = castParam(key, value);
             });
 
-            const cellSize = Number(mpmDomain.parameters?.cell_size ?? meshNode?.parameters?.cell_size ?? 0.001);
-            const xmin = Number(mpmDomain.parameters?.xmin ?? mpmDomain.parameters?.x_min ?? meshNode?.parameters?.xmin ?? meshNode?.parameters?.x_min ?? -0.015);
-            const xmax = Number(mpmDomain.parameters?.xmax ?? mpmDomain.parameters?.x_max ?? meshNode?.parameters?.xmax ?? meshNode?.parameters?.x_max ?? 0.015);
-            const ymin = Number(mpmDomain.parameters?.ymin ?? mpmDomain.parameters?.y_min ?? meshNode?.parameters?.ymin ?? meshNode?.parameters?.y_min ?? -0.015);
-            const ymax = Number(mpmDomain.parameters?.ymax ?? mpmDomain.parameters?.y_max ?? meshNode?.parameters?.ymax ?? meshNode?.parameters?.y_max ?? 0.015);
+            const cellSize = Number(mpmDomain.parameters?.cell_size ?? meshNode?.parameters?.cell_size ?? 0.01);
+            const xmin = Number(mpmDomain.parameters?.xmin ?? mpmDomain.parameters?.x_min ?? meshNode?.parameters?.xmin ?? meshNode?.parameters?.x_min ?? 0.0);
+            const xmax = Number(mpmDomain.parameters?.xmax ?? mpmDomain.parameters?.x_max ?? meshNode?.parameters?.xmax ?? meshNode?.parameters?.x_max ?? 1.0);
+            const ymin = Number(mpmDomain.parameters?.ymin ?? mpmDomain.parameters?.y_min ?? meshNode?.parameters?.ymin ?? meshNode?.parameters?.y_min ?? 0.0);
+            const ymax = Number(mpmDomain.parameters?.ymax ?? mpmDomain.parameters?.y_max ?? meshNode?.parameters?.ymax ?? meshNode?.parameters?.y_max ?? 1.0);
             const zmin = Number(mpmDomain.parameters?.zmin ?? mpmDomain.parameters?.z_min ?? meshNode?.parameters?.zmin ?? meshNode?.parameters?.z_min ?? 0.0);
-            const zmax = Number(mpmDomain.parameters?.zmax ?? mpmDomain.parameters?.z_max ?? meshNode?.parameters?.zmax ?? meshNode?.parameters?.z_max ?? 0.06);
+            const zmax = Number(mpmDomain.parameters?.zmax ?? mpmDomain.parameters?.z_max ?? meshNode?.parameters?.zmax ?? meshNode?.parameters?.z_max ?? 1.0);
 
             flattenedParams['cell_size'] = cellSize;
             flattenedParams['xmin'] = xmin;
@@ -1667,7 +1683,17 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     matNode = state.nodes.find(n => n.id === objNode.parameters.material);
                 }
                 if (!matNode) {
-                    matNode = state.nodes.find(n => n.type === 'Material' && !isJWLMaterialNode(n) && !isIdealGasMaterialNode(n)) || state.nodes.find(n => n.type === 'Material');
+                    const isObjExplosive = (objNode.id + ' ' + (objNode.parameters?.name || '') + ' ' + (objNode.parameters?.shape_type || '')).toLowerCase().includes('explosive');
+                    if (isObjExplosive) {
+                        matNode = state.nodes.find(n => n.type === 'Material' && (
+                            (n.id + ' ' + (n.parameters?.name || '')).toLowerCase().includes('explosive') ||
+                            n.parameters?.material_model === 'CREST Reactive Burn' ||
+                            isJWLMaterialNode(n)
+                        ));
+                    }
+                    if (!matNode) {
+                        matNode = state.nodes.find(n => n.type === 'Material' && !isJWLMaterialNode(n) && !isIdealGasMaterialNode(n)) || state.nodes.find(n => n.type === 'Material');
+                    }
                 }
                 if (matNode) {
                     Object.entries(matNode.parameters).forEach(([k, v]) => {
@@ -1712,6 +1738,16 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             for (const conn of detConns) {
                 const detNode = state.nodes.find(n => n.id === conn.fromNode);
                 if (detNode && (detNode.type === 'DetonatorLocation3D' || detNode.type === 'DetonatorLocation')) {
+                    const detParams: any = {};
+                    Object.entries(detNode.parameters).forEach(([key, value]) => {
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                    });
+                    detonators.push(detParams);
+                }
+            }
+            if (detonators.length === 0) {
+                const fallbackDets = state.nodes.filter(n => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
+                for (const detNode of fallbackDets) {
                     const detParams: any = {};
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
                         detParams[key] = numericKeys.includes(key) ? Number(value) : value;

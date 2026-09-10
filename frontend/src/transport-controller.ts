@@ -327,6 +327,24 @@ export class TransportController {
         const currentActive = this.isLayerActive(key);
         const nextActive = !currentActive;
         this.activeLayers[key] = nextActive;
+        const vpNode = this.getActiveViewportNode();
+        if (vpNode) {
+            const updates: Record<string, any> = {};
+            switch (key) {
+                case 'slices': updates.show_slices = nextActive; break;
+                case 'grid': updates.show_grid = nextActive; break;
+                case 'gridBox': updates.show_grid_box = nextActive; break;
+                case 'fem': updates.showFEMMesh = nextActive; break;
+                case 'mpm': updates.showMPMParticles = nextActive; break;
+                case 'beams': updates.showBeams = nextActive; updates.showRebar = nextActive; break;
+                case 'stl': updates.show_stl = nextActive; break;
+                case 'obstacles': updates.show_obstacles = nextActive; break;
+                case 'gauges': updates.show_gauges = nextActive; break;
+            }
+            if (Object.keys(updates).length > 0) {
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
+            }
+        }
         this.updateAllLayerChips();
         this.onLayerToggle?.(key, nextActive);
     }
@@ -373,14 +391,29 @@ export class TransportController {
         // 2. Query active model
         const targetModel = this.stateManager.getActiveModel();
         if (targetModel) {
-            const vp = targetModel.nodes.find(n => n.type === 'Telemetry3DViewport');
+            let vp = targetModel.nodes.find(n => n.type === 'Telemetry3DViewport');
+            if (!vp) {
+                const has3D = targetModel.nodes.some(n => 
+                    n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || 
+                    n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || 
+                    n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || 
+                    n.type === 'STLGeometry'
+                );
+                if (has3D) {
+                    this.stateManager.healModelGraph(targetModel);
+                    vp = targetModel.nodes.find(n => n.type === 'Telemetry3DViewport');
+                }
+            }
             if (vp) return vp;
         }
 
-        // 3. Fallback across all models
-        return this.stateManager.getAllModels()
-            .flatMap(m => m.nodes)
-            .find(n => n.type === 'Telemetry3DViewport') || null;
+        // 3. Fallback across all models only if no active model exists
+        if (!targetModel) {
+            return this.stateManager.getAllModels()
+                .flatMap(m => m.nodes)
+                .find(n => n.type === 'Telemetry3DViewport') || null;
+        }
+        return null;
     }
 
     private getActiveDomainNode(): any {
@@ -2120,6 +2153,30 @@ export class TransportController {
         return list;
     }
 
+    public getMPMQuantities(): Array<{ val: string; label: string }> {
+        return [
+            { val: 'vonMises', label: 'von Mises Stress (Pa)' },
+            { val: 'plastic_strain', label: 'Equivalent Plastic Strain' },
+            { val: 'damage', label: 'Damage (D)' },
+            { val: 'velocity', label: 'Velocity Magnitude (m/s)' },
+            { val: 'cluster_id', label: 'Cluster ID (Fragments)' },
+            { val: 'object_id', label: 'Object / Body ID' },
+            { val: 'density', label: 'Density (kg/m³)' },
+            { val: 'pressure', label: 'Hydrostatic Pressure (Pa)' }
+        ];
+    }
+
+    public getFEMQuantities(): Array<{ val: string; label: string }> {
+        return [
+            { val: 'vonMises', label: 'von Mises Stress (Pa)' },
+            { val: 'plasticStrain', label: 'Equivalent Plastic Strain' },
+            { val: 'displacement', label: 'Displacement (m)' },
+            { val: 'damage', label: 'Damage (D)' },
+            { val: 'velocity', label: 'Velocity Magnitude (m/s)' },
+            { val: 'pressure', label: 'Hydrostatic Pressure (Pa)' }
+        ];
+    }
+
     public getSlices(): any[] {
         const domainNode = this.getActiveDomainNode();
         if (domainNode?.parameters?.slices && Array.isArray(domainNode.parameters.slices) && domainNode.parameters.slices.length > 0) {
@@ -2437,7 +2494,69 @@ export class TransportController {
             };
         }
 
-        // 8. Global CFD / Viewport Fallback
+        // 8. Global Modality-Aware Viewport Fallback
+        const hasMPM = activeModel?.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D');
+        const hasFEM = activeModel?.nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+        const hasCFD = activeModel?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+
+        if (hasMPM && !hasCFD) {
+            const rawMpmQ = params.mpmParticleQuantity || this.activeQuantity || 'vonMises';
+            const mpmQ = canonicalizeQuantity(rawMpmQ);
+            const mpmRange = params.quantity_ranges?.[mpmQ] || DEFAULT_QUANTITY_RANGES[mpmQ] || [0.0, 500000000.0];
+            const mpmCmap = (params.mpmParticleColormap || params.colormap || this.activeColormap || 'plasma') as ColormapType;
+            const mpmAuto = params.mpmParticleAutoScale !== false;
+            const mpmLog = params.mpmParticleLogScale === true;
+            const mpmMin = params.mpmParticleMinVal !== undefined ? Number(params.mpmParticleMinVal) : mpmRange[0];
+            const mpmMax = params.mpmParticleMaxVal !== undefined ? Number(params.mpmParticleMaxVal) : mpmRange[1];
+
+            return {
+                targetType: 'global',
+                targetLabel: 'Global MPM',
+                targetIcon: '✨',
+                nodeId: vpNode?.id,
+                quantity: mpmQ,
+                availableQuantities: this.getMPMQuantities(),
+                colormap: mpmCmap,
+                autoScale: mpmAuto,
+                minVal: mpmMin,
+                maxVal: mpmMax,
+                logScale: mpmLog,
+                isLocked: isGloballyLocked,
+                showColorbar: params.mpmParticleShowColorbar !== false,
+                showMeshLines: this.activeLayers.grid !== false || params.show_grid !== false,
+                visibility: this.isLayerActive('mpm')
+            };
+        }
+
+        if (hasFEM && !hasCFD) {
+            const rawFemQ = params.femQuantity || this.activeQuantity || 'vonMises';
+            const femQ = canonicalizeQuantity(rawFemQ);
+            const femRange = params.quantity_ranges?.[femQ] || DEFAULT_QUANTITY_RANGES[femQ] || [0.0, 500000000.0];
+            const femCmap = (params.femColormap || params.colormap || this.activeColormap || 'plasma') as ColormapType;
+            const femAuto = params.femAutoScale !== false;
+            const femLog = params.femLogScale === true;
+            const femMin = params.femMinVal !== undefined ? Number(params.femMinVal) : femRange[0];
+            const femMax = params.femMaxVal !== undefined ? Number(params.femMaxVal) : femRange[1];
+
+            return {
+                targetType: 'global',
+                targetLabel: 'Global FEM',
+                targetIcon: '🏗️',
+                nodeId: vpNode?.id,
+                quantity: femQ,
+                availableQuantities: this.getFEMQuantities(),
+                colormap: femCmap,
+                autoScale: femAuto,
+                minVal: femMin,
+                maxVal: femMax,
+                logScale: femLog,
+                isLocked: isGloballyLocked,
+                showColorbar: params.show_colorbar !== false,
+                showMeshLines: params.femWireframe !== false,
+                visibility: this.isLayerActive('fem')
+            };
+        }
+
         const rawGlobQ = params.focusedQuantity || this.activeQuantity || 'pressure';
         const globQ = canonicalizeQuantity(rawGlobQ);
         const defaultGlobRange = params.quantity_ranges?.[globQ] || DEFAULT_QUANTITY_RANGES[globQ] || [0.0, 1.0];
@@ -2469,8 +2588,23 @@ export class TransportController {
     public getAvailableContextTargets(): Array<{ id: string; label: string; icon: string; targetType: ContextTargetType; sliceIndex?: number; nodeId?: string }> {
         const targets: Array<{ id: string; label: string; icon: string; targetType: ContextTargetType; sliceIndex?: number; nodeId?: string }> = [];
         
-        // 1. Global CFD
-        targets.push({ id: 'global', label: 'Global CFD / Viewport', icon: '🌐', targetType: 'global' });
+        const activeModel = this.stateManager.getActiveModel();
+        const hasMPM = activeModel?.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D');
+        const hasFEM = activeModel?.nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+        const hasCFD = activeModel?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+
+        let globalLabel = 'Global CFD / Viewport';
+        let globalIcon = '🌐';
+        if (hasMPM && !hasCFD) {
+            globalLabel = 'Global MPM / Viewport';
+            globalIcon = '✨';
+        } else if (hasFEM && !hasCFD) {
+            globalLabel = 'Global FEM / Viewport';
+            globalIcon = '🏗️';
+        }
+
+        // 1. Global Viewport
+        targets.push({ id: 'global', label: globalLabel, icon: globalIcon, targetType: 'global' });
 
         // 2. Slices
         const domainNode = this.getActiveDomainNode();
@@ -2489,7 +2623,6 @@ export class TransportController {
         });
 
         // 3. 3D Objects in Scene
-        const activeModel = this.stateManager.getActiveModel();
         if (activeModel?.nodes) {
             activeModel.nodes.forEach((n: any) => {
                 if (n.type === 'STLGeometry') {
@@ -2980,7 +3113,12 @@ export class TransportController {
             }
             this.onShadingChange?.(key, value);
         } else {
-            // Global CFD / Viewport
+            // Global Modality-Aware Viewport
+            const activeModel = this.stateManager.getActiveModel();
+            const hasMPM = activeModel?.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D');
+            const hasFEM = activeModel?.nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+            const hasCFD = activeModel?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+
             if (key === 'quantity') {
                 let q = value;
                 if (q === 'species_1' || q === 'species') q = 'species1';
@@ -2989,31 +3127,99 @@ export class TransportController {
                 else if (q === 'von_mises') q = 'vonMises';
                 else if (q === 'plastic_strain') q = 'plasticStrain';
                 this.activeQuantity = q;
-                if (vpNode) this.stateManager.updateNodeParametersInPlace(vpNode.id, { focusedQuantity: q });
+                const mpmQ = q === 'plasticStrain' ? 'plastic_strain' : q;
+                const femQ = q === 'plastic_strain' ? 'plasticStrain' : q;
+                if (vpNode) {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, {
+                        focusedQuantity: q,
+                        mpmParticleQuantity: mpmQ,
+                        femQuantity: femQ,
+                        stl_quantity: q
+                    });
+                }
                 this.onQuantityChange?.(q);
+                this.onShadingChange?.('mpmParticleQuantity', mpmQ);
+                this.onShadingChange?.('femQuantity', femQ);
             } else if (key === 'colormap') {
                 this.activeColormap = value;
-                if (vpNode) this.stateManager.updateNodeParametersInPlace(vpNode.id, { colormap: value });
+                if (vpNode) {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, {
+                        colormap: value,
+                        mpmParticleColormap: value,
+                        femColormap: value,
+                        stl_colormap: value
+                    });
+                }
                 this.onColormapChange?.(value);
+                this.onShadingChange?.('mpmParticleColormap', value);
+                this.onShadingChange?.('femColormap', value);
             } else if (key === 'autoScale') {
                 this.autoScale = value;
-                if (vpNode) this.stateManager.updateNodeParametersInPlace(vpNode.id, { autoScale: value });
+                if (vpNode) {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, {
+                        autoScale: value,
+                        mpmParticleAutoScale: value,
+                        femAutoScale: value
+                    });
+                }
                 this.onShadingChange?.('autoScale', value);
+                this.onShadingChange?.('mpmParticleAutoScale', value);
+                this.onShadingChange?.('femAutoScale', value);
             } else if (key === 'minVal') {
                 this.minScalarVal = value;
                 this.autoScale = false;
+                if (vpNode) {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, {
+                        min_val: value,
+                        mpmParticleMinVal: value,
+                        femMinVal: value,
+                        autoScale: false,
+                        mpmParticleAutoScale: false,
+                        femAutoScale: false
+                    });
+                }
                 this.onColormapChange?.(this.activeColormap, this.minScalarVal, this.maxScalarVal);
+                this.onShadingChange?.('minVal', value);
+                this.onShadingChange?.('mpmParticleMinVal', value);
+                this.onShadingChange?.('femMinVal', value);
             } else if (key === 'maxVal') {
                 this.maxScalarVal = value;
                 this.autoScale = false;
+                if (vpNode) {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, {
+                        max_val: value,
+                        mpmParticleMaxVal: value,
+                        femMaxVal: value,
+                        autoScale: false,
+                        mpmParticleAutoScale: false,
+                        femAutoScale: false
+                    });
+                }
                 this.onColormapChange?.(this.activeColormap, this.minScalarVal, this.maxScalarVal);
+                this.onShadingChange?.('maxVal', value);
+                this.onShadingChange?.('mpmParticleMaxVal', value);
+                this.onShadingChange?.('femMaxVal', value);
             } else if (key === 'logScale') {
                 this.logScale = value;
-                if (vpNode) this.stateManager.updateNodeParametersInPlace(vpNode.id, { logScale: value });
+                if (vpNode) {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, {
+                        logScale: value,
+                        mpmParticleLogScale: value,
+                        femLogScale: value
+                    });
+                }
                 this.onShadingChange?.('logScale', value);
+                this.onShadingChange?.('mpmParticleLogScale', value);
+                this.onShadingChange?.('femLogScale', value);
             } else if (key === 'showColorbar') {
-                this.activeLayers.slices = value;
-                this.onLayerToggle?.('slices', value);
+                if (vpNode) {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, {
+                        show_colorbar: value,
+                        mpmParticleShowColorbar: value
+                    });
+                }
+                this.onShadingChange?.('show_colorbar', value);
+                this.onShadingChange?.('mpmParticleShowColorbar', value);
             } else if (key === 'showMeshLines') {
                 this.activeLayers.grid = value;
                 this.activeLayers.gridBox = value;
@@ -3021,8 +3227,19 @@ export class TransportController {
                 this.onLayerToggle?.('grid', value);
                 this.onLayerToggle?.('gridBox', value);
             } else if (key === 'visibility') {
-                this.activeLayers.slices = value;
-                this.onLayerToggle?.('slices', value);
+                if (hasMPM && !hasCFD) {
+                    this.activeLayers.mpm = value;
+                    if (vpNode) this.stateManager.updateNodeParametersInPlace(vpNode.id, { showMPMParticles: value });
+                    this.onLayerToggle?.('mpm', value);
+                } else if (hasFEM && !hasCFD) {
+                    this.activeLayers.fem = value;
+                    if (vpNode) this.stateManager.updateNodeParametersInPlace(vpNode.id, { showFEMMesh: value });
+                    this.onLayerToggle?.('fem', value);
+                } else {
+                    this.activeLayers.slices = value;
+                    if (vpNode) this.stateManager.updateNodeParametersInPlace(vpNode.id, { show_slices: value });
+                    this.onLayerToggle?.('slices', value);
+                }
             }
         }
         this.renderActiveTabContent();

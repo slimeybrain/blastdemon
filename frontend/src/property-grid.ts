@@ -6,7 +6,7 @@
  */
 
 import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, resolveMeshCounts, resolveMPMCounts, resolveFEMCounts, resolveGeometryCounts, resolveCouplerCounts, resolveTelemetryCounts, syncMPMMaterialParameters, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, getSliceAxisLabel, resolveResourcePath } from './state-manager.js';
-import { Node, NodeType } from './types.js';
+import { Node, NodeType, SimulationState } from './types.js';
 import { HostFileBrowserModal, FileFilterPreset } from './host-file-browser.js';
 import { GaugeManagerModal } from './gauge-manager-modal.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, getConstitutiveModels, getPresetsForConstitutiveModel, getCategorizedPresetsForModel, getDefaultPresetForModel } from './mpm-presets.js';
@@ -76,7 +76,6 @@ const NUMERIC_KEYS = new Set([
     'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
     'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
     'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-    'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution',
     'mg_gamma0', 'mg_c0', 'mg_s',
     'ppc',
     'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
@@ -519,6 +518,11 @@ export class PropertyGrid {
 
         if (node.type === 'VirtualGauges') {
             this.renderVirtualGaugesSection(container, node, selectedGaugeIdx);
+        }
+
+        const connAccordion = this.createConnectionAccordion(node, state);
+        if (connAccordion) {
+            container.appendChild(connAccordion);
         }
 
         const groups = this.groupParameters(node);
@@ -2825,7 +2829,6 @@ export class PropertyGrid {
         const dropdowns: Record<string, string[]> = {
             'preset': dynamicPresets,
             'material_model': getConstitutiveModels(),
-            'fragment_distribution': ['Rosin-Rammler', 'Mott-Grady', 'Lognormal', 'Monodisperse'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
@@ -3404,7 +3407,19 @@ export class PropertyGrid {
         if (node?.type === 'Telemetry3DViewport') return node;
         const owningModel = node ? (this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel()) : this.stateManager.getActiveModel();
         if (owningModel) {
-            const vp = owningModel.nodes.find((n: any) => n.type === 'Telemetry3DViewport');
+            let vp = owningModel.nodes.find((n: any) => n.type === 'Telemetry3DViewport');
+            if (!vp) {
+                const has3D = owningModel.nodes.some((n: any) => 
+                    n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || 
+                    n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || 
+                    n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || 
+                    n.type === 'STLGeometry'
+                );
+                if (has3D) {
+                    this.stateManager.healModelGraph(owningModel);
+                    vp = owningModel.nodes.find((n: any) => n.type === 'Telemetry3DViewport');
+                }
+            }
             if (vp) return vp;
         }
         const focusedId = this.stateManager.getFocusedViewportId();
@@ -3414,7 +3429,10 @@ export class PropertyGrid {
                 if (found) return found;
             }
         }
-        return this.stateManager.getAllModels().flatMap(m => m.nodes).find(n => n.type === 'Telemetry3DViewport') || null;
+        if (!owningModel) {
+            return this.stateManager.getAllModels().flatMap(m => m.nodes).find(n => n.type === 'Telemetry3DViewport') || null;
+        }
+        return null;
     }
 
     private getSelectedNode(): Node | null {
@@ -3787,8 +3805,7 @@ export class PropertyGrid {
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'tensile_failure_stress',
                     'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'Johnson-Cook + Mie-Grüneisen' || matModel === 'Johnson-Cook') {
                 return [
@@ -3803,8 +3820,7 @@ export class PropertyGrid {
                     'T_melt', 'T_room', 'Cp',
                     'mg_gamma0', 'mg_c0', 'mg_s',
                     'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'CREST Reactive Burn') {
                 return [
@@ -3841,8 +3857,7 @@ export class PropertyGrid {
                     'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
                     'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
                     'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'K&C Concrete') {
                 return [
@@ -3856,8 +3871,7 @@ export class PropertyGrid {
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
                     'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'CSCM Concrete') {
                 return [
@@ -3871,8 +3885,7 @@ export class PropertyGrid {
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
                     'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                    'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'Ideal Gas') {
                 return [
@@ -4205,9 +4218,9 @@ export class PropertyGrid {
                 addGroup('mat_failure', 'Constitutive Failure & Erosion', failureKeys);
 
                 const flawsKeys = visibleKeys.filter(k => 
-                    k === 'enable_heterogeneity' || k.startsWith('weibull_') || k === 'fracture_toughness' || k === 'debris_bulk_factor' || k === 'dem_transition_enabled' || k.startsWith('fragment_')
+                    k === 'enable_heterogeneity' || k.startsWith('weibull_') || k === 'fracture_toughness' || k === 'debris_bulk_factor'
                 );
-                addGroup('mat_flaws_dem', 'Microstructural Flaws & Heterogeneity', flawsKeys);
+                addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', flawsKeys);
 
                 const anisoKeys = visibleKeys.filter(k => 
                     k === 'enable_anisotropy' || k.startsWith('anisotropy_')
@@ -4230,7 +4243,8 @@ export class PropertyGrid {
         }
 
         if (node.type === 'MPMObject2D' || node.type === 'MPMObject3D') {
-            addGroup('mpm_seeding', 'Particle Seeding & Discretization', ['particle_distribution', 'boundary_filling']);
+            addGroup('obj_mat', 'Constitutive Material & EOS', ['material']);
+            addGroup('mpm_seeding', 'Particle Seeding & Discretization', ['particle_distribution', 'boundary_filling', 'ppc']);
             addGroup('mpm_geom', 'Geometry, Mesh & Domain Bounds', ['shape_type', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z']);
             addGroup('mpm_kinematics', 'Boundary Conditions & Kinematics', ['vel_x', 'vel_y', 'vel_z', 'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
@@ -4435,6 +4449,501 @@ export class PropertyGrid {
         const targetModel = this.stateManager.getModelForNode(nodeId) || this.stateManager.getActiveModel();
         if (targetModel) {
             this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
+        }
+        this.stateManager.pushState(state);
+    }
+
+    private createConnectionAccordion(node: Node, state: SimulationState | null): HTMLElement | null {
+        const isSolver = ['MPMDomain3D', 'MPMDomain2D', 'CFDSolver3D', 'CFDSolver2D', 'CFDSolver', 'FEMDomain3D'].includes(node.type);
+        const isMesh = ['DomainMesh3D', 'DomainMesh2D', 'DomainMesh'].includes(node.type);
+        const isMpmObject = node.type === 'MPMObject3D' || node.type === 'MPMObject2D';
+        const isFemObject = node.type === 'FEMObject3D';
+
+        if (!isSolver && !isMesh && !isMpmObject && !isFemObject) {
+            return null;
+        }
+
+        const sectionId = `conn_${node.id}`;
+        let sectionTitle = '🔗 System Topology & Connections';
+        if (isSolver) {
+            sectionTitle = '📐 Eulerian Background Grid Connection';
+        } else if (isMesh) {
+            sectionTitle = '⚙️ Solver & Physics Domain Binding';
+        } else if (isMpmObject) {
+            sectionTitle = '🌐 Target MPM Domain & Background Grid';
+        } else if (isFemObject) {
+            sectionTitle = '🌐 Target FEM Domain Binding';
+        }
+
+        const isCollapsed = this.collapsedAccordions.has(sectionId);
+        const accordion = document.createElement('div');
+        accordion.className = `property-accordion ${isCollapsed ? 'collapsed' : 'open'}`;
+
+        const header = document.createElement('div');
+        header.className = 'accordion-header';
+        header.innerHTML = `
+            <span class="accordion-caret">${isCollapsed ? '▶' : '▼'}</span>
+            <span class="accordion-title">${sectionTitle}</span>
+            <span class="accordion-count" style="color: #38bdf8;">(Topology)</span>
+        `;
+        header.addEventListener('click', () => {
+            if (this.collapsedAccordions.has(sectionId)) {
+                this.collapsedAccordions.delete(sectionId);
+            } else {
+                this.collapsedAccordions.add(sectionId);
+            }
+            this.render(true);
+        });
+        accordion.appendChild(header);
+
+        if (isCollapsed) return accordion;
+
+        const content = document.createElement('div');
+        content.className = 'accordion-content';
+
+        const table = document.createElement('table');
+        table.className = 'property-table';
+
+        const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+        const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+        const allProjectNodes = state ? state.nodes : candidateNodes;
+
+        if (isSolver) {
+            let currentMeshId = '';
+            if (state) {
+                const conn = state.connections.find((c: any) =>
+                    (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in' || c.toPort === 'grid')) ||
+                    (c.fromNode === node.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+                );
+                if (conn) {
+                    currentMeshId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
+                }
+            }
+
+            let targetMeshTypes: string[] = ['DomainMesh3D'];
+            if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') targetMeshTypes = ['DomainMesh2D'];
+            else if (node.type === 'CFDSolver') targetMeshTypes = ['DomainMesh'];
+
+            const modelMeshNodes = candidateNodes.filter((n: Node) => targetMeshTypes.includes(n.type));
+            const otherMeshNodes = allProjectNodes.filter((n: Node) => targetMeshTypes.includes(n.type) && !modelMeshNodes.some(m => m.id === n.id));
+
+            const select = document.createElement('select');
+            select.className = 'property-select';
+            select.id = `conn-select-${node.id}-mesh`;
+
+            const defOption = document.createElement('option');
+            defOption.value = '';
+            defOption.textContent = '(None / Disconnected)';
+            select.appendChild(defOption);
+
+            modelMeshNodes.forEach((mesh: Node) => {
+                const opt = document.createElement('option');
+                opt.value = mesh.id;
+                const p = mesh.parameters || {};
+                const summary = mesh.type === 'DomainMesh3D'
+                    ? `dx=${p.cell_size ?? 0.01}m, ${p.nx ?? '?'}x${p.ny ?? '?'}x${p.nz ?? '?'}`
+                    : (mesh.type === 'DomainMesh2D' ? `dx=${p.cell_size ?? 0.01}m, ${p.nr ?? '?'}x${p.nz ?? '?'}` : `dx=${p.cell_size ?? 0.01}m`);
+                opt.textContent = `${(mesh as any).name || mesh.parameters?.name || mesh.type} [${mesh.id.substring(0, 8)}] (${summary})`;
+                if (mesh.id === currentMeshId) opt.selected = true;
+                select.appendChild(opt);
+            });
+
+            otherMeshNodes.forEach((mesh: Node) => {
+                const opt = document.createElement('option');
+                opt.value = mesh.id;
+                opt.textContent = `[Project] ${(mesh as any).name || mesh.parameters?.name || mesh.type} [${mesh.id.substring(0, 8)}]`;
+                if (mesh.id === currentMeshId) opt.selected = true;
+                select.appendChild(opt);
+            });
+
+            select.addEventListener('change', () => {
+                this.syncMeshConnection(node.id, select.value);
+                this.render(true);
+            });
+
+            table.appendChild(this.createTableRow('Background Grid / Mesh', select));
+
+            const connectedMesh = allProjectNodes.find(n => n.id === currentMeshId);
+            if (connectedMesh) {
+                const meshCounts = resolveMeshCounts(connectedMesh, state ?? undefined);
+                table.appendChild(this.createStatRow('Connected Grid Entity', `${(connectedMesh as any).name || connectedMesh.parameters?.name || connectedMesh.type} [${connectedMesh.id.substring(0, 8)}]`, '#38bdf8'));
+                if (meshCounts.dimension === '3D') {
+                    table.appendChild(this.createStatRow('Grid Resolution', `${meshCounts.nx} × ${meshCounts.ny} × ${meshCounts.nz} cells (Total: ${meshCounts.totalCells.toLocaleString()})`, '#38bdf8'));
+                    table.appendChild(this.createStatRow('Cell Size (dx=dy=dz)', `${((meshCounts.cellSize ?? 0.01) * 1000).toFixed(2)} mm`, '#4ec9b0'));
+                    table.appendChild(this.createStatRow('Domain Bounds Box', `[${(connectedMesh.parameters?.xmin ?? 0).toFixed(3)} .. ${(connectedMesh.parameters?.xmax ?? 1).toFixed(3)}] × [${(connectedMesh.parameters?.ymin ?? 0).toFixed(3)} .. ${(connectedMesh.parameters?.ymax ?? 1).toFixed(3)}] × [${(connectedMesh.parameters?.zmin ?? 0).toFixed(3)} .. ${(connectedMesh.parameters?.zmax ?? 1).toFixed(3)}] m`, '#cbd5e1'));
+                    table.appendChild(this.createStatRow('Domain Box Volume', `${(meshCounts.volume ?? 0).toFixed(4)} m³`, '#cbd5e1'));
+                } else if (meshCounts.dimension === '2D') {
+                    table.appendChild(this.createStatRow('Grid Resolution', `${meshCounts.nr} × ${meshCounts.nz} cells (Total: ${meshCounts.totalCells.toLocaleString()})`, '#38bdf8'));
+                    table.appendChild(this.createStatRow('Cell Size (dr=dz)', `${((meshCounts.cellSize ?? 0.01) * 1000).toFixed(2)} mm`, '#4ec9b0'));
+                }
+                table.appendChild(this.createStatRow('Connection Port', `Wired: [${connectedMesh.id.substring(0, 8)}:mesh] ➔ [${node.id.substring(0, 8)}:mesh]`, '#4ade80'));
+            } else {
+                table.appendChild(this.createStatRow('Connection Status', '⚠️ No Background Grid Connected (Select from dropdown)', '#f87171'));
+                table.appendChild(this.createStatRow('Model Readiness', '❌ INCOMPLETE: Background grid must be defined and connected', '#f87171'));
+            }
+        } else if (isMesh) {
+            let currentSolverId = '';
+            if (state) {
+                const conn = state.connections.find((c: any) =>
+                    (c.fromNode === node.id && (c.fromPort === 'mesh' || c.toPort === 'mesh')) ||
+                    (c.toNode === node.id && (c.toPort === 'mesh' || c.fromPort === 'mesh'))
+                );
+                if (conn) {
+                    currentSolverId = conn.fromNode === node.id ? conn.toNode : conn.fromNode;
+                }
+            }
+
+            const targetSolverTypes: string[] = ['DomainMesh3D', 'RefinementMesh3D'].includes(node.type)
+                ? ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D']
+                : (node.type === 'DomainMesh2D' ? ['MPMDomain2D', 'CFDSolver2D'] : ['CFDSolver']);
+
+            const modelSolverNodes = candidateNodes.filter((n: Node) => targetSolverTypes.includes(n.type));
+            const otherSolverNodes = allProjectNodes.filter((n: Node) => targetSolverTypes.includes(n.type) && !modelSolverNodes.some(m => m.id === n.id));
+
+            const select = document.createElement('select');
+            select.className = 'property-select';
+            select.id = `conn-select-${node.id}-solver`;
+
+            const defOption = document.createElement('option');
+            defOption.value = '';
+            defOption.textContent = '(None / Disconnected)';
+            select.appendChild(defOption);
+
+            modelSolverNodes.forEach((solver: Node) => {
+                const opt = document.createElement('option');
+                opt.value = solver.id;
+                opt.textContent = `${(solver as any).name || solver.parameters?.name || solver.type} [${solver.id.substring(0, 8)}]`;
+                if (solver.id === currentSolverId) opt.selected = true;
+                select.appendChild(opt);
+            });
+
+            otherSolverNodes.forEach((solver: Node) => {
+                const opt = document.createElement('option');
+                opt.value = solver.id;
+                opt.textContent = `[Project] ${(solver as any).name || solver.parameters?.name || solver.type} [${solver.id.substring(0, 8)}]`;
+                if (solver.id === currentSolverId) opt.selected = true;
+                select.appendChild(opt);
+            });
+
+            select.addEventListener('change', () => {
+                this.syncMeshTargetConnection(node.id, select.value);
+                this.render(true);
+            });
+
+            table.appendChild(this.createTableRow('Connected Solver / Domain', select));
+
+            const connectedSolver = allProjectNodes.find(n => n.id === currentSolverId);
+            if (connectedSolver) {
+                table.appendChild(this.createStatRow('Bound Solver Entity', `${(connectedSolver as any).name || connectedSolver.parameters?.name || connectedSolver.type} [${connectedSolver.id.substring(0, 8)}]`, '#38bdf8'));
+                if (connectedSolver.type === 'MPMDomain3D' || connectedSolver.type === 'MPMDomain2D') {
+                    const ppc = connectedSolver.parameters?.ppc ?? 8;
+                    const scheme = connectedSolver.parameters?.space_time_scheme ?? 'Leapfrog';
+                    table.appendChild(this.createStatRow('MPM Formulation', `PPC = ${ppc} · Scheme = ${scheme}`, '#c084fc'));
+                } else if (connectedSolver.type === 'CFDSolver3D' || connectedSolver.type === 'CFDSolver2D' || connectedSolver.type === 'CFDSolver') {
+                    const cfl = connectedSolver.parameters?.cfl ?? 0.6;
+                    const scheme = connectedSolver.parameters?.space_time_scheme || 'ADER-2';
+                    table.appendChild(this.createStatRow('CFD Formulation', `CFL = ${cfl} · Scheme = ${scheme}`, '#38bdf8'));
+                }
+                table.appendChild(this.createStatRow('Connection Port', `Wired: [${node.id.substring(0, 8)}:mesh] ➔ [${connectedSolver.id.substring(0, 8)}:mesh]`, '#4ade80'));
+            } else {
+                table.appendChild(this.createStatRow('Connection Status', '⚠️ Not Bound to Any Solver (Select from dropdown)', '#eab308'));
+            }
+        } else if (isMpmObject) {
+            let currentDomainId = '';
+            if (state) {
+                const conn = state.connections.find((c: any) =>
+                    (c.fromNode === node.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in')) ||
+                    (c.toNode === node.id && c.toPort === 'objects')
+                );
+                if (conn) {
+                    currentDomainId = conn.fromNode === node.id ? conn.toNode : conn.fromNode;
+                }
+            }
+
+            const targetDomainType = node.type === 'MPMObject3D' ? 'MPMDomain3D' : 'MPMDomain2D';
+            const modelDomainNodes = candidateNodes.filter((n: Node) => n.type === targetDomainType);
+            const otherDomainNodes = allProjectNodes.filter((n: Node) => n.type === targetDomainType && !modelDomainNodes.some(m => m.id === n.id));
+
+            const select = document.createElement('select');
+            select.className = 'property-select';
+            select.id = `conn-select-${node.id}-domain`;
+
+            const defOption = document.createElement('option');
+            defOption.value = '';
+            defOption.textContent = '(None / Disconnected)';
+            select.appendChild(defOption);
+
+            modelDomainNodes.forEach((domain: Node) => {
+                const opt = document.createElement('option');
+                opt.value = domain.id;
+                const p = domain.parameters || {};
+                opt.textContent = `${(domain as any).name || domain.parameters?.name || domain.type} [${domain.id.substring(0, 8)}] (PPC=${p.ppc ?? 8})`;
+                if (domain.id === currentDomainId) opt.selected = true;
+                select.appendChild(opt);
+            });
+
+            otherDomainNodes.forEach((domain: Node) => {
+                const opt = document.createElement('option');
+                opt.value = domain.id;
+                opt.textContent = `[Project] ${(domain as any).name || domain.parameters?.name || domain.type} [${domain.id.substring(0, 8)}]`;
+                if (domain.id === currentDomainId) opt.selected = true;
+                select.appendChild(opt);
+            });
+
+            select.addEventListener('change', () => {
+                this.syncObjectDomainConnection(node.id, select.value);
+                this.render(true);
+            });
+
+            table.appendChild(this.createTableRow('Target MPM Domain', select));
+
+            const connectedDomain = allProjectNodes.find(n => n.id === currentDomainId);
+            if (connectedDomain) {
+                const domainPpc = Number(connectedDomain.parameters?.ppc ?? 8);
+                const domainScheme = connectedDomain.parameters?.space_time_scheme ?? 'Leapfrog';
+                table.appendChild(this.createStatRow('Assigned MPM Domain', `${(connectedDomain as any).name || connectedDomain.parameters?.name || connectedDomain.type} [${connectedDomain.id.substring(0, 8)}]`, '#c084fc'));
+                table.appendChild(this.createStatRow('Domain Discretization', `PPC = ${domainPpc} · Time Scheme = ${domainScheme}`, '#c084fc'));
+
+                let domainMeshConn = state?.connections.find((c: any) =>
+                    (c.toNode === connectedDomain.id && (c.toPort === 'mesh' || c.toPort === 'in' || c.toPort === 'grid')) ||
+                    (c.fromNode === connectedDomain.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+                );
+                let domainMeshId = domainMeshConn ? (domainMeshConn.toNode === connectedDomain.id ? domainMeshConn.fromNode : domainMeshConn.toNode) : '';
+                let domainMeshNode = domainMeshId ? allProjectNodes.find(n => n.id === domainMeshId) : null;
+
+                if (domainMeshNode) {
+                    const p = domainMeshNode.parameters || {};
+                    const cellSize = Number(p.cell_size ?? 0.01);
+                    table.appendChild(this.createStatRow('Associated Background Grid', `${(domainMeshNode as any).name || domainMeshNode.parameters?.name || domainMeshNode.type} [${domainMeshNode.id.substring(0, 8)}]`, '#38bdf8'));
+                    table.appendChild(this.createStatRow('Grid Cell Spacing (dx)', `dx = ${(cellSize * 1000).toFixed(2)} mm`, '#4ec9b0'));
+
+                    const pSpacing = (cellSize / (node.type === 'MPMObject3D' ? Math.cbrt(domainPpc) : Math.sqrt(domainPpc))) * 1000;
+                    table.appendChild(this.createStatRow('Particle Sampling Spacing', `~${pSpacing.toFixed(2)} mm (${domainPpc} particles/cell)`, '#4ec9b0'));
+
+                    if (node.type === 'MPMObject3D' && domainMeshNode.type === 'DomainMesh3D') {
+                        const gxMin = Number(p.xmin ?? 0.0);
+                        const gxMax = Number(p.xmax ?? 1.0);
+                        const gyMin = Number(p.ymin ?? 0.0);
+                        const gyMax = Number(p.ymax ?? 1.0);
+                        const gzMin = Number(p.zmin ?? 0.0);
+                        const gzMax = Number(p.zmax ?? 1.0);
+                        table.appendChild(this.createStatRow('Grid Domain Bounds Box', `[${gxMin.toFixed(2)}..${gxMax.toFixed(2)}] × [${gyMin.toFixed(2)}..${gyMax.toFixed(2)}] × [${gzMin.toFixed(2)}..${gzMax.toFixed(2)}] m`, '#cbd5e1'));
+
+                        const shape = node.parameters?.shape_type || node.parameters?.shape || 'Box';
+                        const px = Number(node.parameters?.pos_x ?? 0.5);
+                        const py = Number(node.parameters?.pos_y ?? 0.5);
+                        const pz = Number(node.parameters?.pos_z ?? 0.5);
+                        let oxMin = px, oxMax = px, oyMin = py, oyMax = py, ozMin = pz, ozMax = pz;
+
+                        if (shape === 'Sphere') {
+                            const r = Number(node.parameters?.radius ?? 0.1);
+                            oxMin = px - r; oxMax = px + r;
+                            oyMin = py - r; oyMax = py + r;
+                            ozMin = pz - r; ozMax = pz + r;
+                        } else if (shape === 'Cylinder') {
+                            const r = Number(node.parameters?.radius ?? 0.1);
+                            const h = Number(node.parameters?.height ?? 0.2);
+                            oxMin = px - r; oxMax = px + r;
+                            oyMin = py - r; oyMax = py + r;
+                            ozMin = pz - h / 2; ozMax = pz + h / 2;
+                        } else {
+                            const sx = Number(node.parameters?.size_x ?? 0.2);
+                            const sy = Number(node.parameters?.size_y ?? 0.2);
+                            const sz = Number(node.parameters?.size_z ?? 0.2);
+                            oxMin = px - sx / 2; oxMax = px + sx / 2;
+                            oyMin = py - sy / 2; oyMax = py + sy / 2;
+                            ozMin = pz - sz / 2; ozMax = pz + sz / 2;
+                        }
+
+                        const fits = oxMin >= gxMin - 1e-5 && oxMax <= gxMax + 1e-5 &&
+                                     oyMin >= gyMin - 1e-5 && oyMax <= gyMax + 1e-5 &&
+                                     ozMin >= gzMin - 1e-5 && ozMax <= gzMax + 1e-5;
+
+                        if (fits) {
+                            table.appendChild(this.createStatRow('Domain Containment', '✅ Object fits entirely inside background grid', '#4ade80'));
+                        } else {
+                            table.appendChild(this.createStatRow('Domain Containment', '⚠️ Warning: Object bounds extend outside background grid!', '#f87171'));
+                        }
+                    }
+                } else {
+                    table.appendChild(this.createStatRow('Background Grid', '⚠️ MPM Domain has no background grid connected!', '#f87171'));
+                    table.appendChild(this.createStatRow('Model Readiness', '❌ INCOMPLETE: Background grid must be defined and connected', '#f87171'));
+                }
+            } else {
+                table.appendChild(this.createStatRow('Connection Status', '⚠️ Not assigned to any MPM Domain (Select from dropdown)', '#eab308'));
+            }
+        } else if (isFemObject) {
+            let currentDomainId = '';
+            if (state) {
+                const conn = state.connections.find((c: any) =>
+                    (c.fromNode === node.id && (c.toPort === 'elements' || c.toPort === 'fem_objects' || c.toPort === 'in')) ||
+                    (c.toNode === node.id && c.toPort === 'elements')
+                );
+                if (conn) {
+                    currentDomainId = conn.fromNode === node.id ? conn.toNode : conn.fromNode;
+                }
+            }
+
+            const modelDomainNodes = candidateNodes.filter((n: Node) => n.type === 'FEMDomain3D');
+            const otherDomainNodes = allProjectNodes.filter((n: Node) => n.type === 'FEMDomain3D' && !modelDomainNodes.some(m => m.id === n.id));
+
+            const select = document.createElement('select');
+            select.className = 'property-select';
+            select.id = `conn-select-${node.id}-femdomain`;
+
+            const defOption = document.createElement('option');
+            defOption.value = '';
+            defOption.textContent = '(None / Disconnected)';
+            select.appendChild(defOption);
+
+            modelDomainNodes.forEach((domain: Node) => {
+                const opt = document.createElement('option');
+                opt.value = domain.id;
+                opt.textContent = `${(domain as any).name || domain.parameters?.name || domain.type} [${domain.id.substring(0, 8)}]`;
+                if (domain.id === currentDomainId) opt.selected = true;
+                select.appendChild(opt);
+            });
+
+            otherDomainNodes.forEach((domain: Node) => {
+                const opt = document.createElement('option');
+                opt.value = domain.id;
+                opt.textContent = `[Project] ${(domain as any).name || domain.parameters?.name || domain.type} [${domain.id.substring(0, 8)}]`;
+                if (domain.id === currentDomainId) opt.selected = true;
+                select.appendChild(opt);
+            });
+
+            select.addEventListener('change', () => {
+                this.syncFemObjectDomainConnection(node.id, select.value);
+                this.render(true);
+            });
+
+            table.appendChild(this.createTableRow('Target FEM Domain', select));
+
+            const connectedDomain = allProjectNodes.find(n => n.id === currentDomainId);
+            if (connectedDomain) {
+                table.appendChild(this.createStatRow('Assigned FEM Domain', `${(connectedDomain as any).name || connectedDomain.parameters?.name || connectedDomain.type} [${connectedDomain.id.substring(0, 8)}]`, '#4ade80'));
+            } else {
+                table.appendChild(this.createStatRow('Connection Status', '⚠️ Not assigned to any FEM Domain (Select from dropdown)', '#eab308'));
+            }
+        }
+
+        content.appendChild(table);
+        accordion.appendChild(content);
+        return accordion;
+    }
+
+    private syncMeshConnection(nodeId: string, meshId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c => 
+            !(c.toNode === nodeId && (c.toPort === 'mesh' || c.toPort === 'in' || c.toPort === 'grid')) &&
+            !(c.fromNode === nodeId && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+        );
+
+        if (meshId) {
+            const meshNode = state.nodes.find(n => n.id === meshId);
+            if (meshNode) {
+                state.connections.push({
+                    fromNode: meshId,
+                    fromPort: 'mesh',
+                    toNode: nodeId,
+                    toPort: 'mesh'
+                });
+            }
+        }
+
+        const targetModel = this.stateManager.getModelForNode(nodeId) || this.stateManager.getActiveModel();
+        if (targetModel) {
+            this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
+            this.stateManager.healModelGraph(targetModel);
+        }
+        this.stateManager.pushState(state);
+    }
+
+    private syncMeshTargetConnection(meshId: string, targetId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c => 
+            !(c.fromNode === meshId && (c.fromPort === 'mesh' || c.toPort === 'mesh')) &&
+            !(c.toNode === meshId && (c.toPort === 'mesh' || c.fromPort === 'mesh'))
+        );
+
+        if (targetId) {
+            const targetNode = state.nodes.find(n => n.id === targetId);
+            if (targetNode) {
+                state.connections.push({
+                    fromNode: meshId,
+                    fromPort: 'mesh',
+                    toNode: targetId,
+                    toPort: 'mesh'
+                });
+            }
+        }
+
+        const targetModel = this.stateManager.getModelForNode(meshId) || this.stateManager.getActiveModel();
+        if (targetModel) {
+            this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
+            this.stateManager.healModelGraph(targetModel);
+        }
+        this.stateManager.pushState(state);
+    }
+
+    private syncObjectDomainConnection(objId: string, domainId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c => 
+            !(c.fromNode === objId && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in')) &&
+            !(c.toNode === objId && c.toPort === 'objects')
+        );
+
+        if (domainId) {
+            const domainNode = state.nodes.find(n => n.id === domainId);
+            if (domainNode) {
+                state.connections.push({
+                    fromNode: objId,
+                    fromPort: 'out',
+                    toNode: domainId,
+                    toPort: 'objects'
+                });
+            }
+        }
+
+        const targetModel = this.stateManager.getModelForNode(objId) || this.stateManager.getActiveModel();
+        if (targetModel) {
+            this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
+            this.stateManager.healModelGraph(targetModel);
+        }
+        this.stateManager.pushState(state);
+    }
+
+    private syncFemObjectDomainConnection(objId: string, domainId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c => 
+            !(c.fromNode === objId && (c.toPort === 'elements' || c.toPort === 'in' || c.toPort === 'fem_objects')) &&
+            !(c.toNode === objId && c.toPort === 'elements')
+        );
+
+        if (domainId) {
+            const domainNode = state.nodes.find(n => n.id === domainId);
+            if (domainNode) {
+                state.connections.push({
+                    fromNode: objId,
+                    fromPort: 'out',
+                    toNode: domainId,
+                    toPort: 'elements'
+                });
+            }
+        }
+
+        const targetModel = this.stateManager.getModelForNode(objId) || this.stateManager.getActiveModel();
+        if (targetModel) {
+            this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
+            this.stateManager.healModelGraph(targetModel);
         }
         this.stateManager.pushState(state);
     }

@@ -36,6 +36,12 @@ struct Slice3D {
     std::vector<std::string> quantities;
     int stride = 1;
     bool enabled = true;
+
+    // ROI sub-volume bounds
+    bool roi_enabled = false;
+    int roi_i_start = 0, roi_i_end = 0;
+    int roi_j_start = 0, roi_j_end = 0;
+    int roi_k_start = 0, roi_k_end = 0;
 };
 
 struct SlicePayload3D {
@@ -153,7 +159,16 @@ public:
     virtual std::vector<float> sampleGauge(const Gauge3D& gauge) const = 0;
     virtual std::vector<float> extractSlice(const Slice3D& slice) const = 0;
     virtual std::vector<SlicePayload3D> extractAllSlices(const Slice3D& slice) const = 0;
-    virtual void captureBulkSnapshot(CFDBulkSnapshot3D& out_snap, bool need_vel = false, bool need_E = false, bool need_species = false) const = 0;
+    virtual void sampleSurfacePoints(
+        const std::vector<Point3D>& points,
+        const std::vector<std::string>& quantities,
+        double dom_xmin, double dom_xmax,
+        double dom_ymin, double dom_ymax,
+        double dom_zmin, double dom_zmax,
+        float outside_val,
+        std::vector<std::vector<float>>& out_quantities
+    ) const = 0;
+    virtual void captureBulkSnapshot(CFDBulkSnapshot3D& /*out_snap*/, bool /*need_vel*/ = false, bool /*need_E*/ = false, bool /*need_species*/ = false) const {}
     virtual void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const {
         int stride = slice.stride > 0 ? slice.stride : 1;
         depth = 1;
@@ -167,9 +182,15 @@ public:
             w = (getNy() + stride - 1) / stride;
             h = (getNz() + stride - 1) / stride;
         } else if (slice.axis == "volume") {
-            w = (getNx() + stride - 1) / stride;
-            h = (getNy() + stride - 1) / stride;
-            depth = (getNz() + stride - 1) / stride;
+            if (slice.roi_enabled) {
+                w = (slice.roi_i_end - slice.roi_i_start + stride - 1) / stride;
+                h = (slice.roi_j_end - slice.roi_j_start + stride - 1) / stride;
+                depth = (slice.roi_k_end - slice.roi_k_start + stride - 1) / stride;
+            } else {
+                w = (getNx() + stride - 1) / stride;
+                h = (getNy() + stride - 1) / stride;
+                depth = (getNz() + stride - 1) / stride;
+            }
         } else {
             w = 0; h = 0; depth = 0;
         }
@@ -379,6 +400,15 @@ public:
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
     std::vector<float> extractSlice(const Slice3D& slice) const override;
     std::vector<SlicePayload3D> extractAllSlices(const Slice3D& slice) const override;
+    void sampleSurfacePoints(
+        const std::vector<Point3D>& points,
+        const std::vector<std::string>& quantities,
+        double dom_xmin, double dom_xmax,
+        double dom_ymin, double dom_ymax,
+        double dom_zmin, double dom_zmax,
+        float outside_val,
+        std::vector<std::vector<float>>& out_quantities
+    ) const override;
     void captureBulkSnapshot(CFDBulkSnapshot3D& out_snap, bool need_vel = false, bool need_E = false, bool need_species = false) const override;
     void getSliceDimensions(const Slice3D& slice, int& w, int& h, int& depth) const override;
     using CFDSolver3D::getSliceDimensions;
@@ -556,28 +586,45 @@ public:
             nz_dec = (dir == 2) ? sign_dir : 0.0f;
         }
 
-        // Topological Corner Detection:
-        // Count solid cells in 3x3x3 neighborhood of the surface boundary cell bx, by, bz
+        // Topological Corner Detection (Thin-Shell & Coplanar Invariant):
+        // Count solid cells and coplanar neighbors in 3x3x3 neighborhood of boundary cell bx, by, bz
         int solid_count = 0;
+        int coplanar_count = 0;
         for (int sz = -1; sz <= 1; ++sz) {
             int nz_val = bz + sz;
             for (int sy = -1; sy <= 1; ++sy) {
                 int ny_val = by + sy;
                 for (int sx = -1; sx <= 1; ++sx) {
+                    if (sx == 0 && sy == 0 && sz == 0) continue;
                     int nx_val = bx + sx;
+                    bool is_solid = false;
                     if (nx_val >= 0 && nx_val < nx && ny_val >= 0 && ny_val < ny && nz_val >= 0 && nz_val < nz) {
                         int t_idx = (nx_val >> 3) + (ny_val >> 3) * n_tiles_x + (nz_val >> 3) * n_tiles_x * n_tiles_y;
                         int c_idx = (nx_val & 7) + (ny_val & 7) * 8 + (nz_val & 7) * 64;
                         if (geom_pool[t_idx].cells[c_idx].is_boundary) {
-                            solid_count++;
+                            is_solid = true;
                         }
                     } else {
-                        solid_count++; // boundary conditions treat out of bounds as solid
+                        is_solid = true; // boundary conditions treat out of bounds as solid
+                    }
+                    if (is_solid) {
+                        solid_count++;
+                        float dot_n = (float)sx * nx_true + (float)sy * ny_true + (float)sz * nz_true;
+                        if (std::fabs(dot_n) <= 0.707f) {
+                            coplanar_count++;
+                        }
                     }
                 }
             }
         }
-        bool is_convex_corner = (solid_count <= 14);
+        bool is_convex_corner;
+        if (solid_count <= 10) {
+            // Thin-shell regime: flat 3x3 sheet has ~8 coplanar solid neighbors. A true corner/tip has < 4.
+            is_convex_corner = (coplanar_count < 4);
+        } else {
+            // Volumetric solid regime:
+            is_convex_corner = (solid_count <= 14);
+        }
 
         // Adaptive normal selection:
         // Use true normal for flat/diagonal walls (smooth anti-aliased slip)
@@ -586,9 +633,22 @@ public:
         float ny_reflect = is_convex_corner ? ny_dec : ny_true;
         float nz_reflect = is_convex_corner ? nz_dec : nz_true;
 
-        // Adaptive projection distance:
-        // 0.5 for corners to minimize extrapolation error near the singularity, 1.5 for flat/diagonal walls
-        float proj_dist = is_convex_corner ? 0.5f : 1.5f;
+        // Gap-adaptive projection distance:
+        float d_clearance = 1.5f;
+        for (int step = 1; step <= 2; ++step) {
+            int step_x = qx + (int)std::round(nx_reflect * (float)step);
+            int step_y = qy + (int)std::round(ny_reflect * (float)step);
+            int step_z = qz + (int)std::round(nz_reflect * (float)step);
+            if (step_x >= 0 && step_x < nx && step_y >= 0 && step_y < ny && step_z >= 0 && step_z < nz) {
+                int t_s = (step_x >> 3) + (step_y >> 3) * n_tiles_x + (step_z >> 3) * n_tiles_x * n_tiles_y;
+                int c_s = (step_x & 7) + (step_y & 7) * 8 + (step_z & 7) * 64;
+                if (geom_pool[t_s].cells[c_s].is_boundary) {
+                    d_clearance = std::min(d_clearance, (float)step * 0.5f);
+                    break;
+                }
+            }
+        }
+        float proj_dist = is_convex_corner ? 0.5f : std::max(0.5f, d_clearance);
 
         // Project along the adaptive normal
         float p_img_x = (float)target_x + nx_reflect * proj_dist;
@@ -599,6 +659,13 @@ public:
         float sum_alpha1 = 0.0f, sum_alpha2 = 0.0f, sum_arho1 = 0.0f, sum_arho2 = 0.0f;
         float sum_peak_op = 0.0f, sum_peak_imp = 0.0f;
         float W_total = 0.0f;
+
+        auto is_solid_cpu = [&](int x, int y, int z) {
+            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return true;
+            int tx = (x >> 3) + (y >> 3) * n_tiles_x + (z >> 3) * n_tiles_x * n_tiles_y;
+            int cx = (x & 7) + (y & 7) * 8 + (z & 7) * 64;
+            return geom_pool[tx].cells[cx].is_boundary != 0;
+        };
 
         for (int k = -1; k <= 1; ++k) {
             int nz_val = qz + k;
@@ -613,6 +680,23 @@ public:
                     int t_neigh = (nx_val >> 3) + (ny_val >> 3) * n_tiles_x + (nz_val >> 3) * n_tiles_x * n_tiles_y;
                     int c_neigh = (nx_val & 7) + (ny_val & 7) * 8 + (nz_val & 7) * 64;
                     if (geom_pool[t_neigh].cells[c_neigh].is_boundary) continue;
+
+                    // Topological Line-of-Sight Barrier: prevent diagonal cross-wall tunneling
+                    int tc_dist = (i != 0 ? 1 : 0) + (j != 0 ? 1 : 0) + (k != 0 ? 1 : 0);
+                    if (tc_dist == 2) {
+                        if (i != 0 && j != 0) {
+                            if (is_solid_cpu(qx + i, qy, qz) && is_solid_cpu(qx, qy + j, qz)) continue;
+                        } else if (i != 0 && k != 0) {
+                            if (is_solid_cpu(qx + i, qy, qz) && is_solid_cpu(qx, qy, qz + k)) continue;
+                        } else if (j != 0 && k != 0) {
+                            if (is_solid_cpu(qx, qy + j, qz) && is_solid_cpu(qx, qy, qz + k)) continue;
+                        }
+                    } else if (tc_dist == 3) {
+                        bool b_x = is_solid_cpu(qx + i, qy, qz);
+                        bool b_y = is_solid_cpu(qx, qy + j, qz);
+                        bool b_z = is_solid_cpu(qx, qy, qz + k);
+                        if ((b_x && b_y) || (b_x && b_z) || (b_y && b_z)) continue;
+                    }
 
                     // Visibility Half-Space Clipping using the adaptive normal:
                     float dx_plane = (float)nx_val - (float)target_x;

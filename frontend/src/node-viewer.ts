@@ -1,4 +1,4 @@
-import { StateManager, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, syncMPMMaterialParameters, getCompatibleMaterialsForNode, resolveResourcePath } from './state-manager.js';
+import { StateManager, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, syncMPMMaterialParameters, getCompatibleMaterialsForNode, resolveResourcePath, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS } from './state-manager.js';
 import { Node, NodeType } from './types.js';
 import { PropertyEditor } from './property-editor.js';
 import { HostFileBrowserModal, FileFilterPreset } from './host-file-browser.js';
@@ -2805,7 +2805,6 @@ export class NodeViewer {
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
             'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
             'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-            'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution',
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
             'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
@@ -2864,7 +2863,6 @@ export class NodeViewer {
             'storage_backend': ['HDF5 Stream', 'Live Telemetry'],
             'material_model': getConstitutiveModels(),
             'preset': dynamicPresets,
-            'fragment_distribution': ['Rosin-Rammler', 'Mott-Grady', 'Lognormal', 'Monodisperse'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
@@ -3658,7 +3656,46 @@ export class NodeViewer {
             updates['geometry_hash'] = 'k_' + Math.floor(Math.random() * 1000000).toString(36);
         }
 
-        this.stateManager.updateNodeParameters(node.id, updates);
+        const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'cfl';
+        const isDynamicEndtime = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'endtime';
+
+        if (NON_PHYSICAL_NODE_TYPES.has(node.type) || DISPLAY_ONLY_KEYS.has(key) || isDynamicCfl || isDynamicEndtime) {
+            this.stateManager.updateNodeParametersInPlace(node.id, updates);
+        } else {
+            this.stateManager.updateNodeParameters(node.id, updates);
+        }
+
+        if (isDynamicCfl || isDynamicEndtime) {
+            const net = (window as any).networkManager;
+            if (net && net.isConnected()) {
+                let targetModelId = node.id;
+                const models = this.stateManager.getAppState().models;
+                for (const [mid, m] of Object.entries(models)) {
+                    if (m.nodes.some(n => n.id === node.id)) {
+                        targetModelId = mid;
+                        break;
+                    }
+                }
+                let scope = "1d";
+                if (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') scope = "3d";
+                else if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D' || node.type === 'FSICoupler2D') scope = "2d";
+                if (isDynamicCfl) {
+                    net.send({
+                        command: "UPDATE_CFL",
+                        modelId: targetModelId,
+                        cfl: Number(value),
+                        scope: scope
+                    });
+                } else {
+                    net.send({
+                        command: "UPDATE_ENDTIME",
+                        modelId: targetModelId,
+                        endtime: Number(value),
+                        scope: scope
+                    });
+                }
+            }
+        }
         this.render();
     }
 

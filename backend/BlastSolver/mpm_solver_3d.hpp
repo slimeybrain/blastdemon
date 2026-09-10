@@ -151,17 +151,6 @@ struct MaterialTable3D {
     float jc_d4{0.002f};                  // Johnson-Cook damage parameter D4
     float jc_d5{0.61f};                   // Johnson-Cook damage parameter D5
     float debris_bulk_factor{0.10f};      // Residual post-failure debris bulk modulus factor (0.10 * K_intact)
-
-    // Statistical Fragment Size Distribution & DEM Parameters
-    std::string fragment_distribution{"Rosin-Rammler"}; // "Rosin-Rammler", "Mott-Grady", "Uniform", "Bi-Modal"
-    float fragment_min_size{0.002f};      // Minimum fragment diameter (m)
-    float fragment_max_size{0.040f};      // Maximum fragment diameter (m)
-    float fragment_weibull_n{1.80f};      // Rosin-Rammler shape uniformity index
-    float fragment_clumping_radius{0.015f}; // Spatial clustering threshold for macro-fragments (m)
-    float fragment_ejection_jitter{0.35f}; // Strain energy conversion ratio to kinetic ejection scatter
-    float fragment_contact_friction{0.55f}; // DEM Coulomb friction coefficient
-    float fragment_restitution{0.30f};    // Inelastic collision restitution coefficient
-    bool dem_transition_enabled{true};    // Enable MPM-to-DEM grid eviction upon failure
 };
 
 struct MPMParticle3D {

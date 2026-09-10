@@ -1262,10 +1262,10 @@ struct StaticMeshCache {
     std::string types_b64;
 };
 
-static StaticMeshCache s_obstacle_cache;
+static std::shared_ptr<const StaticMeshCache> s_obstacle_cache = nullptr;
 static std::mutex s_obstacle_mutex;
 
-static StaticMeshCache s_stl_faces_cache;
+static std::shared_ptr<const StaticMeshCache> s_stl_faces_cache = nullptr;
 static std::mutex s_stl_faces_mutex;
 
 void export_vtu_obstacle_surface_snapshot(const std::string& filename, const ObstacleSurfaceSnapshot3D& snap, const std::string& format) {
@@ -1277,15 +1277,15 @@ void export_vtu_obstacle_surface_snapshot(const std::string& filename, const Obs
     int num_cells = snap.num_faces;
     if (num_points <= 0 || num_cells <= 0) return;
 
-    std::string enc_points, enc_conn, enc_offsets, enc_types;
+    std::shared_ptr<const StaticMeshCache> mesh_cache;
     {
         std::lock_guard<std::mutex> lock(s_obstacle_mutex);
-        if (s_obstacle_cache.num_points == num_points && s_obstacle_cache.num_cells == num_cells && !s_obstacle_cache.points_b64.empty()) {
-            enc_points = s_obstacle_cache.points_b64;
-            enc_conn = s_obstacle_cache.connectivity_b64;
-            enc_offsets = s_obstacle_cache.offsets_b64;
-            enc_types = s_obstacle_cache.types_b64;
+        if (s_obstacle_cache && s_obstacle_cache->num_points == num_points && s_obstacle_cache->num_cells == num_cells && !s_obstacle_cache->points_b64.empty()) {
+            mesh_cache = s_obstacle_cache;
         } else {
+            auto new_cache = std::make_shared<StaticMeshCache>();
+            new_cache->num_points = num_points;
+            new_cache->num_cells = num_cells;
 #ifdef _OPENMP
             #pragma omp parallel sections
 #endif
@@ -1293,26 +1293,22 @@ void export_vtu_obstacle_surface_snapshot(const std::string& filename, const Obs
 #ifdef _OPENMP
                 #pragma omp section
 #endif
-                { enc_points = binary_encode(snap.points); }
+                { new_cache->points_b64 = binary_encode(snap.points); }
 #ifdef _OPENMP
                 #pragma omp section
 #endif
-                { enc_conn = binary_encode(snap.connectivity); }
+                { new_cache->connectivity_b64 = binary_encode(snap.connectivity); }
 #ifdef _OPENMP
                 #pragma omp section
 #endif
-                { enc_offsets = binary_encode(snap.offsets); }
+                { new_cache->offsets_b64 = binary_encode(snap.offsets); }
 #ifdef _OPENMP
                 #pragma omp section
 #endif
-                { enc_types = binary_encode(snap.types); }
+                { new_cache->types_b64 = binary_encode(snap.types); }
             }
-            s_obstacle_cache.num_points = num_points;
-            s_obstacle_cache.num_cells = num_cells;
-            s_obstacle_cache.points_b64 = enc_points;
-            s_obstacle_cache.connectivity_b64 = enc_conn;
-            s_obstacle_cache.offsets_b64 = enc_offsets;
-            s_obstacle_cache.types_b64 = enc_types;
+            s_obstacle_cache = new_cache;
+            mesh_cache = new_cache;
         }
     }
 
@@ -1346,19 +1342,19 @@ void export_vtu_obstacle_surface_snapshot(const std::string& filename, const Obs
 
     out << "      <Points>\n";
     out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"binary\">\n";
-    out << "          " << enc_points << "\n";
+    out << "          " << mesh_cache->points_b64 << "\n";
     out << "        </DataArray>\n";
     out << "      </Points>\n";
 
     out << "      <Cells>\n";
     out << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"binary\">\n";
-    out << "          " << enc_conn << "\n";
+    out << "          " << mesh_cache->connectivity_b64 << "\n";
     out << "        </DataArray>\n";
     out << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"binary\">\n";
-    out << "          " << enc_offsets << "\n";
+    out << "          " << mesh_cache->offsets_b64 << "\n";
     out << "        </DataArray>\n";
     out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"binary\">\n";
-    out << "          " << enc_types << "\n";
+    out << "          " << mesh_cache->types_b64 << "\n";
     out << "        </DataArray>\n";
     out << "      </Cells>\n";
 
@@ -1370,10 +1366,10 @@ void export_vtu_obstacle_surface_snapshot(const std::string& filename, const Obs
         out << "        <DataArray type=\"Float32\" Name=\"Density\" format=\"binary\">\n          " << enc_rho << "\n        </DataArray>\n";
     }
     if (snap.has_overpressure && !enc_overp.empty()) {
-        out << "        <DataArray type=\"Float32\" Name=\"PeakOverpressure\" format=\"binary\">\n          " << enc_overp << "\n        </DataArray>\n";
+        out << "        <DataArray type=\"Float32\" Name=\"Peak_Overpressure\" format=\"binary\">\n          " << enc_overp << "\n        </DataArray>\n";
     }
     if (snap.has_impulse && !enc_imp.empty()) {
-        out << "        <DataArray type=\"Float32\" Name=\"PositiveImpulse\" format=\"binary\">\n          " << enc_imp << "\n        </DataArray>\n";
+        out << "        <DataArray type=\"Float32\" Name=\"Peak_Impulse\" format=\"binary\">\n          " << enc_imp << "\n        </DataArray>\n";
     }
     out << "      </CellData>\n";
 
@@ -1393,15 +1389,15 @@ void export_vtu_stl_faces_snapshot(const std::string& filename, const STLFacesSn
     int num_cells = snap.num_faces;
     if (num_points <= 0 || num_cells <= 0) return;
 
-    std::string enc_points, enc_conn, enc_offsets, enc_types;
+    std::shared_ptr<const StaticMeshCache> mesh_cache;
     {
         std::lock_guard<std::mutex> lock(s_stl_faces_mutex);
-        if (s_stl_faces_cache.num_points == num_points && s_stl_faces_cache.num_cells == num_cells && !s_stl_faces_cache.points_b64.empty()) {
-            enc_points = s_stl_faces_cache.points_b64;
-            enc_conn = s_stl_faces_cache.connectivity_b64;
-            enc_offsets = s_stl_faces_cache.offsets_b64;
-            enc_types = s_stl_faces_cache.types_b64;
+        if (s_stl_faces_cache && s_stl_faces_cache->num_points == num_points && s_stl_faces_cache->num_cells == num_cells && !s_stl_faces_cache->points_b64.empty()) {
+            mesh_cache = s_stl_faces_cache;
         } else {
+            auto new_cache = std::make_shared<StaticMeshCache>();
+            new_cache->num_points = num_points;
+            new_cache->num_cells = num_cells;
 #ifdef _OPENMP
             #pragma omp parallel sections
 #endif
@@ -1409,26 +1405,22 @@ void export_vtu_stl_faces_snapshot(const std::string& filename, const STLFacesSn
 #ifdef _OPENMP
                 #pragma omp section
 #endif
-                { enc_points = binary_encode(snap.points); }
+                { new_cache->points_b64 = binary_encode(snap.points); }
 #ifdef _OPENMP
                 #pragma omp section
 #endif
-                { enc_conn = binary_encode(snap.connectivity); }
+                { new_cache->connectivity_b64 = binary_encode(snap.connectivity); }
 #ifdef _OPENMP
                 #pragma omp section
 #endif
-                { enc_offsets = binary_encode(snap.offsets); }
+                { new_cache->offsets_b64 = binary_encode(snap.offsets); }
 #ifdef _OPENMP
                 #pragma omp section
 #endif
-                { enc_types = binary_encode(snap.types); }
+                { new_cache->types_b64 = binary_encode(snap.types); }
             }
-            s_stl_faces_cache.num_points = num_points;
-            s_stl_faces_cache.num_cells = num_cells;
-            s_stl_faces_cache.points_b64 = enc_points;
-            s_stl_faces_cache.connectivity_b64 = enc_conn;
-            s_stl_faces_cache.offsets_b64 = enc_offsets;
-            s_stl_faces_cache.types_b64 = enc_types;
+            s_stl_faces_cache = new_cache;
+            mesh_cache = new_cache;
         }
     }
 
@@ -1462,19 +1454,19 @@ void export_vtu_stl_faces_snapshot(const std::string& filename, const STLFacesSn
 
     out << "      <Points>\n";
     out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"binary\">\n";
-    out << "          " << enc_points << "\n";
+    out << "          " << mesh_cache->points_b64 << "\n";
     out << "        </DataArray>\n";
     out << "      </Points>\n";
 
     out << "      <Cells>\n";
     out << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"binary\">\n";
-    out << "          " << enc_conn << "\n";
+    out << "          " << mesh_cache->connectivity_b64 << "\n";
     out << "        </DataArray>\n";
     out << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"binary\">\n";
-    out << "          " << enc_offsets << "\n";
+    out << "          " << mesh_cache->offsets_b64 << "\n";
     out << "        </DataArray>\n";
     out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"binary\">\n";
-    out << "          " << enc_types << "\n";
+    out << "          " << mesh_cache->types_b64 << "\n";
     out << "        </DataArray>\n";
     out << "      </Cells>\n";
 
@@ -1486,10 +1478,10 @@ void export_vtu_stl_faces_snapshot(const std::string& filename, const STLFacesSn
         out << "        <DataArray type=\"Float32\" Name=\"Density\" format=\"binary\">\n          " << enc_rho << "\n        </DataArray>\n";
     }
     if (snap.has_overpressure && !enc_overp.empty()) {
-        out << "        <DataArray type=\"Float32\" Name=\"PeakOverpressure\" format=\"binary\">\n          " << enc_overp << "\n        </DataArray>\n";
+        out << "        <DataArray type=\"Float32\" Name=\"Peak_Overpressure\" format=\"binary\">\n          " << enc_overp << "\n        </DataArray>\n";
     }
     if (snap.has_impulse && !enc_imp.empty()) {
-        out << "        <DataArray type=\"Float32\" Name=\"PositiveImpulse\" format=\"binary\">\n          " << enc_imp << "\n        </DataArray>\n";
+        out << "        <DataArray type=\"Float32\" Name=\"Peak_Impulse\" format=\"binary\">\n          " << enc_imp << "\n        </DataArray>\n";
     }
     out << "      </PointData>\n";
 
@@ -1537,9 +1529,9 @@ std::vector<Triangle> subdivide_triangles_to_cell_size(const std::vector<Triangl
 
     std::cout << "[INFO] Tessellating " << large_count << " large triangles (out of " << n_in << ") to max edge " << target_edge << " m using OpenMP with " << num_threads << " threads..." << std::endl;
 
-    // Phase 2: Parallel chunked bisection
+    // Phase 2: Parallel chunked subdivision with Longest-Edge Bisection
     std::vector<std::vector<Triangle>> thread_buffers(num_threads);
-    const size_t max_total_triangles = 2000000;
+    const size_t max_total_triangles = std::max((size_t)16000000, n_in * 6);
     std::atomic<size_t> global_triangle_count{n_in};
 
 #ifdef _OPENMP
@@ -1559,7 +1551,7 @@ std::vector<Triangle> subdivide_triangles_to_cell_size(const std::vector<Triangl
             int depth;
         };
         std::vector<LocalTri> stack;
-        stack.reserve(16);
+        stack.reserve(32);
 
 #ifdef _OPENMP
         #pragma omp for schedule(dynamic, 2048)
@@ -1567,17 +1559,37 @@ std::vector<Triangle> subdivide_triangles_to_cell_size(const std::vector<Triangl
         for (size_t i = 0; i < n_in; ++i) {
             const auto& tri = input_triangles[i];
 
-            double l01_2 = (double)(tri.v1.x - tri.v0.x)*(tri.v1.x - tri.v0.x) + (double)(tri.v1.y - tri.v0.y)*(tri.v1.y - tri.v0.y) + (double)(tri.v1.z - tri.v0.z)*(tri.v1.z - tri.v0.z);
-            double l12_2 = (double)(tri.v2.x - tri.v1.x)*(tri.v2.x - tri.v1.x) + (double)(tri.v2.y - tri.v1.y)*(tri.v2.y - tri.v1.y) + (double)(tri.v2.z - tri.v1.z)*(tri.v2.z - tri.v1.z);
-            double l20_2 = (double)(tri.v0.x - tri.v2.x)*(tri.v0.x - tri.v2.x) + (double)(tri.v0.y - tri.v2.y)*(tri.v0.y - tri.v2.y) + (double)(tri.v0.z - tri.v2.z)*(tri.v0.z - tri.v2.z);
+            // Ensure input triangle has a valid unit normal
+            Triangle safe_tri = tri;
+            double n_len2 = (double)tri.normal.x * tri.normal.x + (double)tri.normal.y * tri.normal.y + (double)tri.normal.z * tri.normal.z;
+            if (n_len2 < 1e-8) {
+                double ex1 = tri.v1.x - tri.v0.x, ey1 = tri.v1.y - tri.v0.y, ez1 = tri.v1.z - tri.v0.z;
+                double ex2 = tri.v2.x - tri.v0.x, ey2 = tri.v2.y - tri.v0.y, ez2 = tri.v2.z - tri.v0.z;
+                double nx = ey1 * ez2 - ez1 * ey2;
+                double ny = ez1 * ex2 - ex1 * ez2;
+                double nz = ex1 * ey2 - ey1 * ex2;
+                double elen = std::sqrt(nx * nx + ny * ny + nz * nz);
+                if (elen > 1e-12) {
+                    safe_tri.normal = { (float)(nx / elen), (float)(ny / elen), (float)(nz / elen) };
+                } else {
+                    safe_tri.normal = { 0.0f, 0.0f, 1.0f };
+                }
+            } else {
+                double inv = 1.0 / std::sqrt(n_len2);
+                safe_tri.normal = { (float)(tri.normal.x * inv), (float)(tri.normal.y * inv), (float)(tri.normal.z * inv) };
+            }
+
+            double l01_2 = (double)(safe_tri.v1.x - safe_tri.v0.x)*(safe_tri.v1.x - safe_tri.v0.x) + (double)(safe_tri.v1.y - safe_tri.v0.y)*(safe_tri.v1.y - safe_tri.v0.y) + (double)(safe_tri.v1.z - safe_tri.v0.z)*(safe_tri.v1.z - safe_tri.v0.z);
+            double l12_2 = (double)(safe_tri.v2.x - safe_tri.v1.x)*(safe_tri.v2.x - safe_tri.v1.x) + (double)(safe_tri.v2.y - safe_tri.v1.y)*(safe_tri.v2.y - safe_tri.v1.y) + (double)(safe_tri.v2.z - safe_tri.v1.z)*(safe_tri.v2.z - safe_tri.v1.z);
+            double l20_2 = (double)(safe_tri.v0.x - safe_tri.v2.x)*(safe_tri.v0.x - safe_tri.v2.x) + (double)(safe_tri.v0.y - safe_tri.v2.y)*(safe_tri.v0.y - safe_tri.v2.y) + (double)(safe_tri.v0.z - safe_tri.v2.z)*(safe_tri.v0.z - safe_tri.v2.z);
 
             if (std::max({l01_2, l12_2, l20_2}) <= target_edge2 || global_triangle_count.load(std::memory_order_relaxed) >= max_total_triangles) {
-                local_out.push_back(tri);
+                local_out.push_back(safe_tri);
                 continue;
             }
 
             stack.clear();
-            stack.push_back({tri, 0});
+            stack.push_back({safe_tri, 0});
 
             while (!stack.empty()) {
                 LocalTri lt = stack.back();
@@ -1588,16 +1600,41 @@ std::vector<Triangle> subdivide_triangles_to_cell_size(const std::vector<Triangl
                 double a_l12_2 = (double)(t.v2.x - t.v1.x)*(t.v2.x - t.v1.x) + (double)(t.v2.y - t.v1.y)*(t.v2.y - t.v1.y) + (double)(t.v2.z - t.v1.z)*(t.v2.z - t.v1.z);
                 double a_l20_2 = (double)(t.v0.x - t.v2.x)*(t.v0.x - t.v2.x) + (double)(t.v0.y - t.v2.y)*(t.v0.y - t.v2.y) + (double)(t.v0.z - t.v2.z)*(t.v0.z - t.v2.z);
 
-                if (std::max({a_l01_2, a_l12_2, a_l20_2}) > target_edge2 && lt.depth < std::min(max_depth, 4) && global_triangle_count.load(std::memory_order_relaxed) < max_total_triangles) {
-                    Point3D m01 = { 0.5f * (t.v0.x + t.v1.x), 0.5f * (t.v0.y + t.v1.y), 0.5f * (t.v0.z + t.v1.z) };
-                    Point3D m12 = { 0.5f * (t.v1.x + t.v2.x), 0.5f * (t.v1.y + t.v2.y), 0.5f * (t.v1.z + t.v2.z) };
-                    Point3D m20 = { 0.5f * (t.v2.x + t.v0.x), 0.5f * (t.v2.y + t.v0.y), 0.5f * (t.v2.z + t.v0.z) };
+                double max_edge_sq = std::max({a_l01_2, a_l12_2, a_l20_2});
 
-                    stack.push_back({ {t.v0, m01, m20, t.normal}, lt.depth + 1 });
-                    stack.push_back({ {m01, t.v1, m12, t.normal}, lt.depth + 1 });
-                    stack.push_back({ {m20, m12, t.v2, t.normal}, lt.depth + 1 });
-                    stack.push_back({ {m01, m12, m20, t.normal}, lt.depth + 1 });
-                    global_triangle_count.fetch_add(3, std::memory_order_relaxed);
+                if (max_edge_sq > target_edge2 && lt.depth < max_depth && global_triangle_count.load(std::memory_order_relaxed) < max_total_triangles) {
+                    int num_long_edges = (a_l01_2 > target_edge2 ? 1 : 0) +
+                                         (a_l12_2 > target_edge2 ? 1 : 0) +
+                                         (a_l20_2 > target_edge2 ? 1 : 0);
+
+                    if (num_long_edges == 1 || (max_edge_sq > 2.5 * std::min({a_l01_2, a_l12_2, a_l20_2}))) {
+                        // Longest-Edge Bisection (1-to-2)
+                        if (a_l01_2 >= a_l12_2 && a_l01_2 >= a_l20_2) {
+                            Point3D m01 = { 0.5f * (t.v0.x + t.v1.x), 0.5f * (t.v0.y + t.v1.y), 0.5f * (t.v0.z + t.v1.z) };
+                            stack.push_back({ {t.v0, m01, t.v2, t.normal}, lt.depth + 1 });
+                            stack.push_back({ {m01, t.v1, t.v2, t.normal}, lt.depth + 1 });
+                        } else if (a_l12_2 >= a_l01_2 && a_l12_2 >= a_l20_2) {
+                            Point3D m12 = { 0.5f * (t.v1.x + t.v2.x), 0.5f * (t.v1.y + t.v2.y), 0.5f * (t.v1.z + t.v2.z) };
+                            stack.push_back({ {t.v0, t.v1, m12, t.normal}, lt.depth + 1 });
+                            stack.push_back({ {t.v0, m12, t.v2, t.normal}, lt.depth + 1 });
+                        } else {
+                            Point3D m20 = { 0.5f * (t.v2.x + t.v0.x), 0.5f * (t.v2.y + t.v0.y), 0.5f * (t.v2.z + t.v0.z) };
+                            stack.push_back({ {t.v0, t.v1, m20, t.normal}, lt.depth + 1 });
+                            stack.push_back({ {m20, t.v1, t.v2, t.normal}, lt.depth + 1 });
+                        }
+                        global_triangle_count.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        // Regular 1-to-4 Subdivision
+                        Point3D m01 = { 0.5f * (t.v0.x + t.v1.x), 0.5f * (t.v0.y + t.v1.y), 0.5f * (t.v0.z + t.v1.z) };
+                        Point3D m12 = { 0.5f * (t.v1.x + t.v2.x), 0.5f * (t.v1.y + t.v2.y), 0.5f * (t.v1.z + t.v2.z) };
+                        Point3D m20 = { 0.5f * (t.v2.x + t.v0.x), 0.5f * (t.v2.y + t.v0.y), 0.5f * (t.v2.z + t.v0.z) };
+
+                        stack.push_back({ {t.v0, m01, m20, t.normal}, lt.depth + 1 });
+                        stack.push_back({ {m01, t.v1, m12, t.normal}, lt.depth + 1 });
+                        stack.push_back({ {m20, m12, t.v2, t.normal}, lt.depth + 1 });
+                        stack.push_back({ {m01, m12, m20, t.normal}, lt.depth + 1 });
+                        global_triangle_count.fetch_add(3, std::memory_order_relaxed);
+                    }
                 } else {
                     local_out.push_back(t);
                 }
@@ -1630,5 +1667,16 @@ std::vector<Triangle> subdivide_triangles_to_cell_size(const std::vector<Triangl
     std::cout << "[INFO] Multi-core tessellation finished: generated " << total_out << " triangles from " << n_in << " in " << ms << " ms (" << num_threads << " OpenMP threads)." << std::endl;
 
     return result;
+}
+
+void clear_vtu_mesh_cache() {
+    {
+        std::lock_guard<std::mutex> lock1(s_obstacle_mutex);
+        s_obstacle_cache.reset();
+    }
+    {
+        std::lock_guard<std::mutex> lock2(s_stl_faces_mutex);
+        s_stl_faces_cache.reset();
+    }
 }
 

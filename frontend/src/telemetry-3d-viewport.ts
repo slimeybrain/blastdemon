@@ -50,6 +50,7 @@ export class Telemetry3DViewport {
     private latestQuantityRanges: Record<string, [number, number]> = {};
     private colorbarUpdateRafId: number | null = null;
     private _lastSliceKey: string = '';
+    private _updatingSlices: boolean = false;
 
     // Colorbar Overlay Container
     private colorbarContainer: HTMLElement | null = null;
@@ -247,7 +248,7 @@ export class Telemetry3DViewport {
                 if (p.showSlices !== undefined) workerData.showSlices = p.showSlices;
                 if (p.slices !== undefined) {
                     workerData.slices = p.slices;
-                    this.updateSlices(p.slices);
+                    workerData.sliceOpacities = p.slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
                 }
 
                 if (p.colormap !== undefined) workerData.colormap = p.colormap;
@@ -298,7 +299,21 @@ export class Telemetry3DViewport {
                     this.worker.postMessage({ type: 'setConfig', data: workerData });
                 }
                 this.requestColorbarUpdate();
-                this.syncControls(true);
+                // Do NOT call syncControls(true) when the ONLY changed keys are pure camera
+                // navigation params (camera_pitch, camera_yaw, camera_distance, target_x/y/z,
+                // camera_fov). These are written back to state by the cameraChanged handler
+                // as a persistence record – posting a full setConfig+requestRender in response
+                // causes a 1-frame flash with stale stlMinVal/stlMaxVal after every rotation.
+                const CAMERA_ONLY_KEYS = new Set([
+                    'camera_pitch', 'camera_yaw', 'camera_distance',
+                    'target_x', 'target_y', 'target_z', 'camera_fov'
+                ]);
+                const changedKeys = Object.keys(parameters);
+                const isCameraOnlyChange = changedKeys.length > 0 &&
+                    changedKeys.every(k => CAMERA_ONLY_KEYS.has(k));
+                if (!isCameraOnlyChange) {
+                    this.syncControls(true);
+                }
             }
         });
 
@@ -5687,7 +5702,8 @@ export class Telemetry3DViewport {
         }
         const state = this.stateManager.getCurrentState();
         if (state) {
-            const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'MPMDomain3D' || n.type === 'DomainMesh' || n.type === 'CFDSolver3D');
+            const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'CFDSolver3D');
+            const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain3D');
             const xmin = Number(mpmMesh?.parameters['xmin'] ?? mpmMesh?.parameters['x_min'] ?? 0);
             const xmax = Number(mpmMesh?.parameters['xmax'] ?? mpmMesh?.parameters['x_max'] ?? 1);
             const nx = Number(mpmMesh?.parameters['nx'] ?? 0);
@@ -5698,7 +5714,7 @@ export class Telemetry3DViewport {
                 cellSize = Number(mpmMesh?.parameters['cell_size'] ?? mpmMesh?.parameters['dx'] ?? 0.001);
             }
             const objPpc = state.nodes.find(n => n.type === 'MPMObject3D')?.parameters['ppc'];
-            const domainPpc = Number(objPpc ?? mpmMesh?.parameters['ppc'] ?? 8);
+            const domainPpc = Number(objPpc ?? mpmDomain?.parameters['ppc'] ?? mpmMesh?.parameters['ppc'] ?? 8);
             const pPerDim = Math.max(1, Math.round(Math.cbrt(domainPpc)));
             return (cellSize / pPerDim) * 0.8;
         }
@@ -5744,9 +5760,10 @@ export class Telemetry3DViewport {
         if (state) {
             let totalEst = 0;
             let objCount = 0;
-            const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'MPMDomain3D');
-            const cellSize = Number(mpmMesh?.parameters['cell_size'] ?? 0.01);
-            const domainPpc = Number(mpmMesh?.parameters['ppc'] ?? 8);
+            const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+            const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain3D');
+            const cellSize = Number(mpmMesh?.parameters['cell_size'] ?? mpmDomain?.parameters['cell_size'] ?? 0.01);
+            const domainPpc = Number(mpmDomain?.parameters['ppc'] ?? mpmMesh?.parameters['ppc'] ?? 8);
             const mpmObjects = state.nodes.filter(n => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
             for (const objNode of mpmObjects) {
                 objCount++;
@@ -6754,7 +6771,19 @@ export class Telemetry3DViewport {
         const currentModelId = this.getCurrentModelId();
         if (currentModelId) {
             const targetModel = allModels.find(m => m.id === currentModelId);
-            const node = targetModel?.nodes.find(n => n.type === 'Telemetry3DViewport');
+            let node = targetModel?.nodes.find(n => n.type === 'Telemetry3DViewport');
+            if (!node && targetModel) {
+                const has3D = targetModel.nodes.some(n => 
+                    n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || 
+                    n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || 
+                    n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || 
+                    n.type === 'STLGeometry'
+                );
+                if (has3D) {
+                    this.stateManager.healModelGraph(targetModel);
+                    node = targetModel.nodes.find(n => n.type === 'Telemetry3DViewport');
+                }
+            }
             if (node) return node;
 
             if (!this.virtualNodes[currentModelId]) {
@@ -6766,15 +6795,8 @@ export class Telemetry3DViewport {
                     id: 'virtual-viewport-' + currentModelId,
                     type: 'Telemetry3DViewport',
                     parameters: {
-                        slices: defaultSlices,
-                        show_grid: true,
-                        show_grid_box: true,
-                        cell_edges: false,
-                        show_stl: true,
-                        stl_opacity: 0.5,
-                        show_obstacles: true,
-                        obstacles_opacity: 1.0,
-                        refresh_rate: 0.5
+                        ...this.stateManager.getDefaultParameters('Telemetry3DViewport'),
+                        slices: defaultSlices
                     }
                 };
             }
@@ -6817,8 +6839,8 @@ export class Telemetry3DViewport {
             return { layer: 'beam', quantity: qty, colormap: cmap };
         }
 
-        // If MPM is present or MPM particles are visible
-        if (hasMPM || (vpNode?.parameters?.showMPMParticles !== false)) {
+        // If MPM is present and MPM particles are visible
+        if (hasMPM && (vpNode?.parameters?.showMPMParticles !== false)) {
             const qty = vpNode?.parameters?.mpmParticleQuantity || 'vonMises';
             const cmap = vpNode?.parameters?.mpmParticleColormap || 'rainbow';
             return { layer: 'mpm', quantity: qty, colormap: cmap };
@@ -6954,31 +6976,37 @@ export class Telemetry3DViewport {
     }
 
     public updateSlices(slices: any[], immediateNetwork: boolean = true) {
-        const carrier = this.getSlicesCarrierNode();
-        if (carrier) {
-            this.stateManager.updateNodeParametersInPlace(carrier.id, { slices });
-        }
-        const vpNode = this.getViewportNode();
-        if (vpNode && carrier?.id !== vpNode.id) {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { slices });
-        }
-        const modelId = this.getCurrentModelId();
-        if (modelId) {
-            this.stateManager.updateModelActiveViewSlices(modelId, slices);
-        }
-        
-        const opacities = slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
-        this.worker.postMessage({
-            type: 'setConfig',
-            data: {
-                slices: slices,
-                sliceOpacities: opacities,
-                focusedSliceIndex: vpNode?.parameters.focusedSliceIndex ?? 0,
-                quantityRanges: vpNode?.parameters.quantity_ranges || {}
+        if (this._updatingSlices) return;
+        this._updatingSlices = true;
+        try {
+            const carrier = this.getSlicesCarrierNode();
+            if (carrier) {
+                this.stateManager.updateNodeParametersInPlace(carrier.id, { slices });
             }
-        });
+            const vpNode = this.getViewportNode();
+            if (vpNode && carrier?.id !== vpNode.id) {
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { slices });
+            }
+            const modelId = this.getCurrentModelId();
+            if (modelId) {
+                this.stateManager.updateModelActiveViewSlices(modelId, slices);
+            }
+            
+            const opacities = slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
+            this.worker.postMessage({
+                type: 'setConfig',
+                data: {
+                    slices: slices,
+                    sliceOpacities: opacities,
+                    focusedSliceIndex: vpNode?.parameters.focusedSliceIndex ?? 0,
+                    quantityRanges: vpNode?.parameters.quantity_ranges || {}
+                }
+            });
 
-        this.sendView3DConfig(immediateNetwork);
+            this.sendView3DConfig(immediateNetwork);
+        } finally {
+            this._updatingSlices = false;
+        }
     }
 
     public setSlices(slices: any[], immediateNetwork: boolean = true): void {
@@ -7109,7 +7137,7 @@ export class Telemetry3DViewport {
         if (!targetModel) return null;
 
         const solverNode = this.getSolverNode();
-        if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'MPMDomain3D')) {
+        if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'MPMDomain3D' || solverNode.type === 'FEMDomain3D')) {
             const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'mesh');
             if (connToSolver) {
                 let currNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
@@ -7120,16 +7148,22 @@ export class Telemetry3DViewport {
                     currNode = targetModel.nodes.find((n: any) => n.id === parentConn.fromNode);
                     depth++;
                 }
-                if (currNode && (currNode.type === 'DomainMesh3D' || currNode.type === 'DomainMesh2D')) {
+                if (currNode && (currNode.type === 'DomainMesh3D' || currNode.type === 'DomainMesh2D' || currNode.type === 'DomainMesh')) {
                     return currNode;
                 }
             }
         }
+        // Fallback to explicit DomainMesh in targetModel
+        const explicitMesh = targetModel.nodes.find((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh');
+        if (explicitMesh) return explicitMesh;
+
+        // Fallback: check if domain node has explicit spatial parameters
         const mpmDomain = targetModel.nodes.find((n: any) => n.type === 'MPMDomain3D');
-        if (mpmDomain) return mpmDomain;
+        if (mpmDomain && mpmDomain.parameters?.xmin !== undefined && mpmDomain.parameters?.xmax !== undefined) return mpmDomain;
         const femDomain = targetModel.nodes.find((n: any) => n.type === 'FEMDomain3D');
-        if (femDomain) return femDomain;
-        return targetModel.nodes.find((n: any) => n.type === 'DomainMesh3D') || null;
+        if (femDomain && femDomain.parameters?.xmin !== undefined && femDomain.parameters?.xmax !== undefined) return femDomain;
+
+        return null;
     }
 
     public isIdealGas(): boolean {
@@ -9569,6 +9603,10 @@ export class Telemetry3DViewport {
         if (min !== undefined && max !== undefined) {
             updates.min_val = min;
             updates.max_val = max;
+            updates.mpmParticleMinVal = min;
+            updates.mpmParticleMaxVal = max;
+            updates.femMinVal = min;
+            updates.femMaxVal = max;
         }
         this.stateManager.updateNodeParametersInPlace(vp.id, updates);
         this.worker.postMessage({
@@ -9578,7 +9616,11 @@ export class Telemetry3DViewport {
                 mpmParticleColormap: cmap,
                 femColormap: cmap,
                 stlColormap: cmap,
-                ...(min !== undefined && max !== undefined ? { minVal: min, maxVal: max } : {})
+                ...(min !== undefined && max !== undefined ? { 
+                    minVal: min, maxVal: max,
+                    mpmParticleMinVal: min, mpmParticleMaxVal: max,
+                    femMinVal: min, femMaxVal: max
+                } : {})
             }
         });
         this.updateSlices(slices);
@@ -9711,8 +9753,19 @@ export class Telemetry3DViewport {
     public setShadingConfig(config: any): void {
         const vp = this.getViewportNode();
         if (vp) {
-            this.stateManager.updateNodeParametersInPlace(vp.id, config);
-            this.worker.postMessage({ type: 'setConfig', data: config });
+            const expandedConfig = { ...config };
+            if (config.autoScale !== undefined) {
+                expandedConfig.mpmParticleAutoScale = config.autoScale;
+                expandedConfig.femAutoScale = config.autoScale;
+            }
+            if (config.logScale !== undefined || config.useLogScale !== undefined) {
+                const ls = config.logScale ?? config.useLogScale;
+                expandedConfig.mpmParticleLogScale = ls;
+                expandedConfig.femLogScale = ls;
+                expandedConfig.useLogScale = ls;
+            }
+            this.stateManager.updateNodeParametersInPlace(vp.id, expandedConfig);
+            this.worker.postMessage({ type: 'setConfig', data: expandedConfig });
             this.syncControls(true);
         }
     }

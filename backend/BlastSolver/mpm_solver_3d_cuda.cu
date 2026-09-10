@@ -307,7 +307,6 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                               const MaterialTable3D* d_mat_tables) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (p_idx >= num_particles) return;
-    if (soa.has_failed[p_idx] != 0 || (soa.damage && soa.damage[p_idx] >= 1.0f) || (soa.state && soa.state[p_idx] != 0)) return;
 
     int obj_id = soa.object_id[p_idx];
     const MaterialTable3D& mat = d_mat_tables[obj_id];
@@ -830,7 +829,7 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
     float weight_sum = 0.0f;
 
     // APIC B_p & L_grad computation setup
-    float max_B = 5000.0f / fminf(fminf(dx, dy), dz);
+    float max_B = 25000.0f / fminf(fminf(dx, dy), dz);
     float B_new[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
     float L_new[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
 
@@ -1283,11 +1282,13 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
     float target_vy = v_pic_y;
     float target_vz = v_pic_z;
 
-    // Pure Lagrangian ballistic velocity for DEM / failed particles (0% grid interpolation)
-    if (has_failed_p || (soa.damage && soa.damage[p_idx] >= 1.0f) || (soa.state && soa.state[p_idx] != 0)) {
-        target_vx = v_prev_x;
-        target_vy = v_prev_y;
-        target_vz = v_prev_z;
+    // Pure FLIP velocity update for failed debris / fluid / melted particles (0% PIC grid velocity averaging).
+    // Preserves relative particle separation speeds and enables fluid jetting.
+    bool is_melted = (mat.T_melt > mat.T_room && soa.temperature && soa.temperature[p_idx] >= mat.T_melt);
+    if (has_failed_p || (soa.damage && soa.damage[p_idx] >= 1.0f) || is_melted) {
+        target_vx = v_prev_x + delta_v_grid_x;
+        target_vy = v_prev_y + delta_v_grid_y;
+        target_vz = v_prev_z + delta_v_grid_z;
     } else if (velocity_scheme == 2) {
         float alpha = fminf(fmaxf(flip_blend, 0.0f), 1.0f);
         float v_flip_x = v_prev_x + delta_v_grid_x;
@@ -1298,19 +1299,19 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
         target_vz = alpha * v_flip_z + (1.0f - alpha) * v_pic_z;
     }
 
-    float final_vx = fminf(fmaxf(target_vx, -5000.0f), 5000.0f);
-    float final_vy = fminf(fmaxf(target_vy, -5000.0f), 5000.0f);
-    float final_vz = fminf(fmaxf(target_vz, -5000.0f), 5000.0f);
+    float final_vx = fminf(fmaxf(target_vx, -25000.0f), 25000.0f);
+    float final_vy = fminf(fmaxf(target_vy, -25000.0f), 25000.0f);
+    float final_vz = fminf(fmaxf(target_vz, -25000.0f), 25000.0f);
 
     soa.v[0][p_idx] = final_vx;
     soa.v[1][p_idx] = final_vy;
     soa.v[2][p_idx] = final_vz;
 
-    // Store particle velocity gradient B_p for constitutive stress update (only for intact APIC particles)
+    // Store particle velocity gradient B_p for constitutive stress update (only for intact solid APIC particles)
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
             float b_val = fminf(fmaxf(B_new[r][c], -max_B), max_B);
-            soa.B[r][c][p_idx] = (!has_failed_p && velocity_scheme == 0) ? b_val : 0.0f;
+            soa.B[r][c][p_idx] = (!has_failed_p && !is_melted && velocity_scheme == 0) ? b_val : 0.0f;
             soa.L_grad[r][c][p_idx] = (velocity_scheme == 0) ? b_val : fminf(fmaxf(L_new[r][c], -max_B), max_B);
         }
     }
@@ -1397,51 +1398,8 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
 
     // --- Unified Parent Material Response for Eroded / Failed / Fractured Particles ---
     if (has_failed_p || damage_p >= 1.0f) {
-        bool first_fail = (!has_failed_p || (soa.state && soa.state[p_idx] == 0));
         soa.has_failed[p_idx] = 1;
         soa.damage[p_idx] = 1.0f;
-        if (soa.state && mat.dem_transition_enabled) {
-            soa.state[p_idx] = 1; // Mark as DEM particle
-        }
-
-        if (first_fail) {
-            // 1. Deviatoric Elastic Strain Energy conversion to radial kinetic ejection jitter
-            const float E_mod = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
-            const float nu_d  = fminf(fmaxf(mat.poissons_ratio, 0.01f), 0.49f);
-            const float G_mod = E_mod / (2.0f * (1.0f + nu_d));
-            const float rho   = mat.density > 0.0f ? mat.density : 7850.0f;
-
-            float p_hyd = -(sigma_p[0][0] + sigma_p[1][1] + sigma_p[2][2]) / 3.0f;
-            float s00 = sigma_p[0][0] + p_hyd;
-            float s11 = sigma_p[1][1] + p_hyd;
-            float s22 = sigma_p[2][2] + p_hyd;
-            float s_dev_sq = s00*s00 + s11*s11 + s22*s22 + 2.0f * (sigma_p[0][1]*sigma_p[0][1] + sigma_p[1][2]*sigma_p[1][2] + sigma_p[2][0]*sigma_p[2][0]);
-            float U_e = 0.5f * s_dev_sq / fmaxf(1.0e6f, 2.0f * G_mod);
-            float v_kick = mat.fragment_ejection_jitter * sqrtf(fmaxf(0.0f, 2.0f * U_e / rho));
-            v_kick = fminf(v_kick, 30.0f); // Clamp to physical crack opening speed
-
-            // Deterministic pseudo-random direction based on particle index
-            unsigned int seed = static_cast<unsigned int>(p_idx * 1664525u + 1013904223u);
-            float rx = (static_cast<float>(seed & 0xFFFF) / 65535.0f - 0.5f) * 2.0f; seed = seed * 1664525u + 1013904223u;
-            float ry = (static_cast<float>(seed & 0xFFFF) / 65535.0f - 0.5f) * 2.0f; seed = seed * 1664525u + 1013904223u;
-            float rz = (static_cast<float>(seed & 0xFFFF) / 65535.0f - 0.5f) * 2.0f;
-            float r_len = sqrtf(rx*rx + ry*ry + rz*rz) + 1.0e-5f;
-            soa.v[0][p_idx] += v_kick * (rx / r_len);
-            soa.v[1][p_idx] += v_kick * (ry / r_len);
-            soa.v[2][p_idx] += v_kick * (rz / r_len);
-
-            // 2. Statistical Rosin-Rammler / Mott-Grady fragment diameter assignment
-            seed = seed * 1664525u + 1013904223u;
-            float u_rand = fminf(fmaxf(static_cast<float>(seed & 0xFFFF) / 65535.0f, 1.0e-4f), 0.999f);
-            float d_min = fmaxf(0.0005f, mat.fragment_min_size);
-            float d_max = fmaxf(d_min * 1.5f, mat.fragment_max_size);
-            float weibull_n = fmaxf(0.5f, mat.fragment_weibull_n);
-            float d_frag = d_min + (d_max - d_min) * powf(-logf(1.0f - u_rand), 1.0f / weibull_n);
-            d_frag = fminf(fmaxf(d_frag, d_min), d_max * 2.0f);
-            if (soa.contact_radius) {
-                soa.contact_radius[p_idx] = 0.5f * d_frag;
-            }
-        }
 
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
@@ -1465,15 +1423,25 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
         }
 
         // 2. Frictional Shear Resistance under Confinement (Mohr-Coulomb / Drucker-Prager: q <= M * p_comp)
-        float M_friction = 0.30f;
+        // Hydrodynamic shear response for failed or melted metals: zero shear resistance (q_max = 0)
+        float M_friction = 0.0f;
         if (mat.material_model == MPMMaterialModel::RHTConcrete ||
             mat.material_model == MPMMaterialModel::KCConcrete ||
             mat.material_model == MPMMaterialModel::CSCMConcrete) {
             M_friction = 0.60f; // Concrete/rock aggregate friction
-        } else if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
-            M_friction = 0.15f; // Ductile metal shear resistance under high pressure
+        } else if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen ||
+                   mat.material_model == MPMMaterialModel::Hypoelastic ||
+                   mat.material_model == MPMMaterialModel::LinearElastic) {
+            M_friction = 0.0f; // Pure hydrodynamic fluid response for failed or melted metals
         }
         const float q_max = M_friction * p_comp;
+
+        if (q_max <= 0.0f) {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    soa.sigma[r][c][p_idx] = (r == c) ? -p_comp : 0.0f;
+            return;
+        }
 
         const float E_mod = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
         const float nu = fminf(fmaxf(mat.poissons_ratio, 0.01f), 0.49f);
@@ -1751,7 +1719,15 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
 
         float soft_damage = fminf(fmaxf(1.0f - damage_p, 0.05f), 1.0f);
         float jc_yield = term_strain * term_rate * term_temp * soft_damage * aniso_factor * w_factor;
-        if (T_star >= 1.0f) jc_yield = 0.0f;
+        if (T_star >= 1.0f) {
+            // Melted metal behaves hydrodynamically: zero deviatoric shear stress and zero affine B
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    soa.sigma[r][c][p_idx] = (r == c) ? -p_hydro : 0.0f;
+                    soa.B[r][c][p_idx] = 0.0f;
+                }
+            return;
+        }
 
         float H_jc = (mat.jc_n > 0.0f && ep_bar_p > 1.0e-6f)
             ? (mat.jc_n * mat.jc_B * powf(ep_bar_p, mat.jc_n - 1.0f) * term_rate * term_temp)
@@ -2099,7 +2075,7 @@ __global__ void kernel_compute_max_speed(MPMParticle3DSoA soa, int num_particles
         if (isnan(c_s) || isinf(c_s)) c_s = 5000.0f;
         float vx = soa.v[0][idx], vy = soa.v[1][idx], vz = soa.v[2][idx];
         float v_mag = sqrtf(vx * vx + vy * vy + vz * vz);
-        v_mag = fminf(5000.0f, v_mag);
+        v_mag = fminf(25000.0f, v_mag);
         local_max = fmaxf(local_max, c_s + v_mag);
     }
     s_max[tid] = local_max;
@@ -2940,247 +2916,8 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
     evaluateDEMContactDevice(dt);
 }
 
-__global__ void kernel_reset_cell_heads_3d(int* cell_head, int total_cells) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < total_cells) {
-        cell_head[idx] = -1;
-    }
-}
-
-__global__ void kernel_bin_particles_3d(MPMParticle3DSoA soa, int num_particles,
-                                       int* cell_head, int* particle_next,
-                                       int nx, int ny, int nz,
-                                       float dx, float dy, float dz,
-                                       float xmin, float ymin, float zmin) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= num_particles) return;
-
-    particle_next[i] = -1;
-
-    float px = soa.x[0][i];
-    float py = soa.x[1][i];
-    float pz = soa.x[2][i];
-
-    int ci = static_cast<int>(floorf((px - xmin) / dx));
-    int cj = static_cast<int>(floorf((py - ymin) / dy));
-    int ck = static_cast<int>(floorf((pz - zmin) / dz));
-
-    if (ci >= 0 && ci < nx && cj >= 0 && cj < ny && ck >= 0 && ck < nz) {
-        size_t cell_idx = (static_cast<size_t>(ci) * ny + cj) * nz + ck;
-        int prev = atomicExch(&cell_head[cell_idx], i);
-        particle_next[i] = prev;
-    }
-}
-
-__global__ void kernel_dem_contact_3d(MPMParticle3DSoA soa, int num_particles, float dt,
-                                     const MPMGridNode3D* grid, int nx, int ny, int nz,
-                                     float dx, float dy, float dz, float xmin, float ymin, float zmin,
-                                     const MaterialTable3D* d_mat_tables,
-                                     const int* cell_head, const int* particle_next) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= num_particles) return;
-
-    bool is_dem_i = (soa.state && soa.state[i] == 1);
-    if (!is_dem_i) return; // Intact continuum MPM particles are governed strictly by the Eulerian grid
-
-    int obj_id_i = soa.object_id[i];
-    const MaterialTable3D& mat_i = d_mat_tables[obj_id_i];
-
-    float px_i = soa.x[0][i];
-    float py_i = soa.x[1][i];
-    float pz_i = soa.x[2][i];
-
-    float r_i = (soa.contact_radius && soa.contact_radius[i] > 0.0f) ? soa.contact_radius[i] : 
-                ((soa.lp[0][i] > 0.0f) ? soa.lp[0][i] : 0.5f * cbrtf(fmaxf(1.0e-30f, soa.V[i])));
-    float m_i = fmaxf(1.0e-12f, soa.m[i]);
-    float E_i = mat_i.youngs_modulus > 0.0f ? mat_i.youngs_modulus : 200.0e9f;
-
-    float vx_i = soa.v[0][i];
-    float vy_i = soa.v[1][i];
-    float vz_i = soa.v[2][i];
-
-    float fx = 0.0f, fy = 0.0f, fz = 0.0f;
-    float dx_corr = 0.0f, dy_corr = 0.0f, dz_corr = 0.0f;
-
-    int ci = static_cast<int>(floorf((px_i - xmin) / dx));
-    int cj = static_cast<int>(floorf((py_i - ymin) / dy));
-    int ck = static_cast<int>(floorf((pz_i - zmin) / dz));
-
-    // Evaluate Pairwise Contact (DEM-DEM and DEM vs external intact MPM body)
-    if (cell_head != nullptr && particle_next != nullptr && ci >= 0 && ci < nx && cj >= 0 && cj < ny && ck >= 0 && ck < nz) {
-        for (int dix = -1; dix <= 1; ++dix) {
-            int nci = ci + dix;
-            if (nci < 0 || nci >= nx) continue;
-            for (int diy = -1; diy <= 1; ++diy) {
-                int ncj = cj + diy;
-                if (ncj < 0 || ncj >= ny) continue;
-                for (int diz = -1; diz <= 1; ++diz) {
-                    int nck = ck + diz;
-                    if (nck < 0 || nck >= nz) continue;
-
-                    size_t n_cell = (static_cast<size_t>(nci) * ny + ncj) * nz + nck;
-                    int j = cell_head[n_cell];
-                    int iter = 0;
-                    while (j != -1 && iter++ < 128) {
-                        if (j != i) {
-                            bool is_dem_j = (soa.state && soa.state[j] == 1);
-                            int obj_id_j = soa.object_id[j];
-
-                            // Valid contact: either two DEM grains, or DEM grain hitting an external intact body
-                            if (is_dem_j || obj_id_i != obj_id_j) {
-                                float px_j = soa.x[0][j];
-                                float py_j = soa.x[1][j];
-                                float pz_j = soa.x[2][j];
-
-                                float r_j = (soa.contact_radius && soa.contact_radius[j] > 0.0f) ? soa.contact_radius[j] :
-                                            ((soa.lp[0][j] > 0.0f) ? soa.lp[0][j] : 0.5f * cbrtf(fmaxf(1.0e-30f, soa.V[j])));
-                                float r_sum = r_i + r_j;
-
-                                float dx_ij = px_i - px_j;
-                                float dy_ij = py_i - py_j;
-                                float dz_ij = pz_i - pz_j;
-                                float dist_sq = dx_ij * dx_ij + dy_ij * dy_ij + dz_ij * dz_ij;
-
-                                if (dist_sq < r_sum * r_sum && dist_sq > 1.0e-14f) {
-                                    float dist = sqrtf(dist_sq);
-                                    float overlap = r_sum - dist;
-                                    float nx_ij = dx_ij / dist;
-                                    float ny_ij = dy_ij / dist;
-                                    float nz_ij = dz_ij / dist;
-
-                                    float vx_j = soa.v[0][j];
-                                    float vy_j = soa.v[1][j];
-                                    float vz_j = soa.v[2][j];
-
-                                    float v_rel_x = vx_i - vx_j;
-                                    float v_rel_y = vy_i - vy_j;
-                                    float v_rel_z = vz_i - vz_j;
-                                    float v_rel_n = v_rel_x * nx_ij + v_rel_y * ny_ij + v_rel_z * nz_ij;
-
-                                    const MaterialTable3D& mat_j = d_mat_tables[obj_id_j];
-                                    float E_j = mat_j.youngs_modulus > 0.0f ? mat_j.youngs_modulus : 200.0e9f;
-                                    float E_eff = 2.0f * (E_i * E_j) / (E_i + E_j + 1.0f);
-                                    float m_j = fmaxf(1.0e-12f, soa.m[j]);
-                                    float m_eff = (m_i * m_j) / (m_i + m_j);
-
-                                    float k_n_phys = 0.05f * E_eff * sqrtf(fmaxf(0.0001f, (r_i * r_j) / (r_i + r_j)));
-                                    float k_n_stab = 0.05f * m_eff / (dt * dt + 1.0e-20f);
-                                    float k_n = fminf(k_n_phys, k_n_stab);
-
-                                    float rest = fmaxf(0.0f, fminf(1.0f, mat_i.fragment_restitution));
-                                    float gamma_n = 2.0f * (1.0f - rest) * sqrtf(k_n * m_eff);
-
-                                    float f_n = fmaxf(0.0f, k_n * overlap - gamma_n * v_rel_n);
-                                    float max_fn = 0.25f * m_i * (5000.0f / dt);
-                                    f_n = fminf(f_n, max_fn);
-
-                                    float v_tx = v_rel_x - v_rel_n * nx_ij;
-                                    float v_ty = v_rel_y - v_rel_n * ny_ij;
-                                    float v_tz = v_rel_z - v_rel_n * nz_ij;
-                                    float v_t_mag = sqrtf(v_tx * v_tx + v_ty * v_ty + v_tz * v_tz);
-
-                                    float f_tx = 0.0f, f_ty = 0.0f, f_tz = 0.0f;
-                                    if (v_t_mag > 1.0e-6f) {
-                                        float mu = mat_i.fragment_contact_friction > 0.0f ? mat_i.fragment_contact_friction : 0.50f;
-                                        float f_t_max = mu * f_n;
-                                        float scale = fminf(f_t_max, 0.5f * k_n * v_t_mag * dt) / v_t_mag;
-                                        f_tx = -scale * v_tx;
-                                        f_ty = -scale * v_ty;
-                                        f_tz = -scale * v_tz;
-                                    }
-
-                                    fx += f_n * nx_ij + f_tx;
-                                    fy += f_n * ny_ij + f_ty;
-                                    fz += f_n * nz_ij + f_tz;
-
-                                    float mass_ratio = m_j / (m_i + m_j);
-                                    float d_sep = fminf(0.5f * overlap, 0.02f * dx);
-                                    dx_corr += d_sep * nx_ij * mass_ratio;
-                                    dy_corr += d_sep * ny_ij * mass_ratio;
-                                    dz_corr += d_sep * nz_ij * mass_ratio;
-                                }
-                            }
-                        }
-                        j = particle_next[j];
-                    }
-                }
-            }
-        }
-    }
-
-    // Resolve solid background grid boundary for DEM debris particles
-    if (is_dem_i && grid && ci >= 1 && ci < nx - 2 && cj >= 1 && cj < ny - 2 && ck >= 1 && ck < nz - 2) {
-        size_t n_c = (static_cast<size_t>(ci) * ny + cj) * nz + ck;
-        float local_m = grid[n_c].m;
-        if (local_m > 1.0e-8f) {
-            float grad_mx = (grid[(static_cast<size_t>(ci+1)*ny + cj)*nz + ck].m - grid[(static_cast<size_t>(ci-1)*ny + cj)*nz + ck].m) / (2.0f * dx);
-            float grad_my = (grid[(static_cast<size_t>(ci)*ny + (cj+1))*nz + ck].m - grid[(static_cast<size_t>(ci)*ny + (cj-1))*nz + ck].m) / (2.0f * dy);
-            float grad_mz = (grid[(static_cast<size_t>(ci)*ny + cj)*nz + (ck+1)].m - grid[(static_cast<size_t>(ci)*ny + cj)*nz + (ck-1)].m) / (2.0f * dz);
-            float g_len = sqrtf(grad_mx * grad_mx + grad_my * grad_my + grad_mz * grad_mz);
-            if (g_len > 1.0e-6f) {
-                float n_out_x = -grad_mx / g_len;
-                float n_out_y = -grad_my / g_len;
-                float n_out_z = -grad_mz / g_len;
-
-                float v_solid_x = grid[n_c].p[0] / local_m;
-                float v_solid_y = grid[n_c].p[1] / local_m;
-                float v_solid_z = grid[n_c].p[2] / local_m;
-
-                float v_rel_x = vx_i - v_solid_x;
-                float v_rel_y = vy_i - v_solid_y;
-                float v_rel_z = vz_i - v_solid_z;
-                float v_rel_n = v_rel_x * n_out_x + v_rel_y * n_out_y + v_rel_z * n_out_z;
-
-                if (v_rel_n < 0.0f) {
-                    float k_wall = 0.20f * E_i * dx;
-                    float f_wall_n = -2.0f * k_wall * v_rel_n * dt;
-                    fx += f_wall_n * n_out_x;
-                    fy += f_wall_n * n_out_y;
-                    fz += f_wall_n * n_out_z;
-                    dx_corr += 0.5f * dx * n_out_x;
-                    dy_corr += 0.5f * dx * n_out_y;
-                    dz_corr += 0.5f * dx * n_out_z;
-                }
-            }
-        }
-    }
-
-    soa.v[0][i] = vx_i + dt * fx / m_i;
-    soa.v[1][i] = vy_i + dt * fy / m_i;
-    soa.v[2][i] = vz_i + dt * fz / m_i;
-
-    soa.x[0][i] = px_i + dx_corr;
-    soa.x[1][i] = py_i + dy_corr;
-    soa.x[2][i] = pz_i + dz_corr;
-}
-
 void MPMSolver3DCUDA::evaluateDEMContactDevice(float dt) {
-    if (m_host_particles.empty()) return;
-    size_t num_particles = m_host_particles.size();
-    size_t total_cells = static_cast<size_t>(m_nx) * m_ny * m_nz;
-
-    int threads_per_block = 256;
-    int blocks_cells = (static_cast<int>(total_cells) + threads_per_block - 1) / threads_per_block;
-    int blocks_particles = (static_cast<int>(num_particles) + threads_per_block - 1) / threads_per_block;
-
-    // Reset cell heads
-    kernel_reset_cell_heads_3d<<<blocks_cells, threads_per_block>>>(d_cell_head, static_cast<int>(total_cells));
-
-    // Bin all particles into spatial cell linked list
-    kernel_bin_particles_3d<<<blocks_particles, threads_per_block>>>(
-        d_soa, static_cast<int>(num_particles),
-        d_cell_head, d_particle_next,
-        m_nx, m_ny, m_nz,
-        m_dx, m_dy, m_dz,
-        m_xmin, m_ymin, m_zmin);
-
-    // Evaluate DEM-DEM and DEM-MPM pairwise & grid contact
-    kernel_dem_contact_3d<<<blocks_particles, threads_per_block>>>(
-        d_soa, static_cast<int>(num_particles), dt,
-        d_grid, m_nx, m_ny, m_nz,
-        m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin,
-        d_material_tables,
-        d_cell_head, d_particle_next);
+    (void)dt;
 }
 
 __global__ void kernel_extract_slice_3d(const MPMGridNode3D* grid, float* slice_out, int nx, int ny, int nz, int axis_code, int offset_idx, int req_qty_code) {

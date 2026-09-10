@@ -612,8 +612,12 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                     if (!is_boundary) {
                         auto sC = sampleStateInternal(gx, gy, gz);
 
-                        auto get_f = [&](const CellState3DT<RealType, IsMultiMaterial>& L, const CellState3DT<RealType, IsMultiMaterial>& R, int d) {
-                            return useAUSM ? getAUSMPlusFlux3D<RealType, IsMultiMaterial>(L, R, d, gamma_r, currentMaterials.products, currentMaterials.unreacted) : getRusanovFlux3D<RealType, IsMultiMaterial>(L, R, d, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto is_solid_cell = [&](int x, int y, int z) -> bool {
+                            if (geom_pool.empty()) return false;
+                            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return true;
+                            int t_idx = (x >> 3) + (y >> 3) * n_tiles_x + (z >> 3) * n_tiles_x * n_tiles_y;
+                            int c_idx = (x & 7) + (y & 7) * 8 + (z & 7) * 64;
+                            return geom_pool[t_idx].cells[c_idx].is_boundary;
                         };
 
                         RealType dt_dx = dt_r * invDx;
@@ -626,126 +630,89 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                             }
                         };
 
+                        auto compute_face_flux = [&](int dir,
+                                                     int xL, int yL, int zL,
+                                                     int xR, int yR, int zR,
+                                                     int xLL, int yLL, int zLL,
+                                                     int xRR, int yRR, int zRR) -> Flux3DT<RealType, IsMultiMaterial> {
+                            bool solid_L = !is_interior_tile && is_solid_cell(xL, yL, zL);
+                            bool solid_R = !is_interior_tile && is_solid_cell(xR, yR, zR);
+                            if (solid_L && solid_R) {
+                                return Flux3DT<RealType, IsMultiMaterial>{};
+                            }
+                            if (solid_L || solid_R) {
+                                // Physically correct inviscid slip-wall boundary flux.
+                                // Static wall: zero mass/energy flux, pure pressure in normal direction.
+                                // Moving wall (FSI): p_wall * vn_wall work term (zero for static obstacles)
+                                auto sL1 = sample_func(xL, yL, zL, gx, gy, gz, dir);
+                                auto sR1 = sample_func(xR, yR, zR, gx, gy, gz, dir);
+                                const auto& s_fluid = solid_L ? sR1 : sL1;
+                                RealType p_wall = s_fluid.p;
+                                RealType vn_wall = (RealType)0.0;
+                                if (!solid_vel_tiles.empty()) {
+                                    int s_gx = solid_L ? xL : xR;
+                                    int s_gy = solid_L ? yL : yR;
+                                    int s_gz = solid_L ? zL : zR;
+                                    int tx = s_gx / 8, ty = s_gy / 8, tz = s_gz / 8;
+                                    int ntx_dim = (nx + 7) / 8, nty_dim = (ny + 7) / 8;
+                                    int t_idx = tx + ty * ntx_dim + tz * ntx_dim * nty_dim;
+                                    int cx = s_gx % 8, cy = s_gy % 8, cz = s_gz % 8;
+                                    int c_idx = cx + cy * 8 + cz * 64;
+                                    if (t_idx >= 0 && t_idx < (int)solid_vel_tiles.size()) {
+                                        vn_wall = (dir == 0) ? (RealType)solid_vel_tiles[t_idx].vx[c_idx] :
+                                                  ((dir == 1) ? (RealType)solid_vel_tiles[t_idx].vy[c_idx] : (RealType)solid_vel_tiles[t_idx].vz[c_idx]);
+                                    }
+                                }
+                                Flux3DT<RealType, IsMultiMaterial> flx{};
+                                flx.rho = (RealType)0.0;
+                                flx.rhoux = (dir == 0) ? p_wall : (RealType)0.0;
+                                flx.rhouy = (dir == 1) ? p_wall : (RealType)0.0;
+                                flx.rhouz = (dir == 2) ? p_wall : (RealType)0.0;
+                                flx.E = p_wall * vn_wall;
+                                flx.v_face = vn_wall;
+                                return flx;
+                            }
+                            int eff_order = spatialOrder;
+                            if (!is_interior_tile && (is_solid_cell(xLL, yLL, zLL) || is_solid_cell(xRR, yRR, zRR))) {
+                                eff_order = 1;
+                            }
+                            auto sL2 = sample_func(xLL, yLL, zLL, gx, gy, gz, dir);
+                            auto sL1 = sample_func(xL, yL, zL, gx, gy, gz, dir);
+                            auto sR1 = sample_func(xR, yR, zR, gx, gy, gz, dir);
+                            auto sR2 = sample_func(xRR, yRR, zRR, gx, gy, gz, dir);
+                            auto wL = reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, eff_order, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                            auto wR = reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, eff_order, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                            return useAUSM ? getAUSMPlusFlux3D<RealType, IsMultiMaterial>(wL, wR, dir, gamma_r, currentMaterials.products, currentMaterials.unreacted)
+                                           : getRusanovFlux3D<RealType, IsMultiMaterial>(wL, wR, dir, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        };
+
                         // X-Fluxes
-                        RealType fxL_rho = 0.0, fxL_rhoux = 0.0, fxL_rhouy = 0.0, fxL_rhouz = 0.0, fxL_E = 0.0;
-                        RealType fxL_alpha1 = 0.0, fxL_alpha2 = 0.0, fxL_arho1 = 0.0, fxL_arho2 = 0.0, fxL_v_face = 0.0;
-
-                        {
-                            auto sL2 = sample_func(gx - 2, gy, gz, gx, gy, gz, 0);
-                            auto sL1 = sample_func(gx - 1, gy, gz, gx, gy, gz, 0);
-                            auto sR1 = sC;
-                            auto sR2 = sample_func(gx + 1, gy, gz, gx, gy, gz, 0);
-                            auto fxL = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                             reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 0);
-                            fxL_rho = fxL.rho; fxL_rhoux = fxL.rhoux; fxL_rhouy = fxL.rhouy; fxL_rhouz = fxL.rhouz; fxL_E = fxL.E;
-                            fxL_v_face = fxL.v_face;
-                            if constexpr (IsMultiMaterial) {
-                                fxL_alpha1 = fxL.alpha1; fxL_alpha2 = fxL.alpha2; fxL_arho1 = fxL.arho1; fxL_arho2 = fxL.arho2;
-                            }
-                        }
-
-                        RealType fxR_rho = 0.0, fxR_rhoux = 0.0, fxR_rhouy = 0.0, fxR_rhouz = 0.0, fxR_E = 0.0;
-                        RealType fxR_alpha1 = 0.0, fxR_alpha2 = 0.0, fxR_arho1 = 0.0, fxR_arho2 = 0.0, fxR_v_face = 0.0;
-
-                        {
-                            auto sL2 = sample_func(gx - 1, gy, gz, gx, gy, gz, 0);
-                            auto sL1 = sC;
-                            auto sR1 = sample_func(gx + 1, gy, gz, gx, gy, gz, 0);
-                            auto sR2 = sample_func(gx + 2, gy, gz, gx, gy, gz, 0);
-                            auto fxR = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                             reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 0);
-                            fxR_rho = fxR.rho; fxR_rhoux = fxR.rhoux; fxR_rhouy = fxR.rhouy; fxR_rhouz = fxR.rhouz; fxR_E = fxR.E;
-                            fxR_v_face = fxR.v_face;
-                            if constexpr (IsMultiMaterial) {
-                                fxR_alpha1 = fxR.alpha1; fxR_alpha2 = fxR.alpha2; fxR_arho1 = fxR.arho1; fxR_arho2 = fxR.arho2;
-                            }
-                        }
+                        auto fxL = compute_face_flux(0, gx - 1, gy, gz, gx, gy, gz, gx - 2, gy, gz, gx + 1, gy, gz);
+                        auto fxR = compute_face_flux(0, gx, gy, gz, gx + 1, gy, gz, gx - 1, gy, gz, gx + 2, gy, gz);
 
                         // Y-Fluxes
-                        RealType fyB_rho = 0.0, fyB_rhoux = 0.0, fyB_rhouy = 0.0, fyB_rhouz = 0.0, fyB_E = 0.0;
-                        RealType fyB_alpha1 = 0.0, fyB_alpha2 = 0.0, fyB_arho1 = 0.0, fyB_arho2 = 0.0, fyB_v_face = 0.0;
-
-                        {
-                            auto sL2 = sample_func(gx, gy - 2, gz, gx, gy, gz, 1);
-                            auto sL1 = sample_func(gx, gy - 1, gz, gx, gy, gz, 1);
-                            auto sR1 = sC;
-                            auto sR2 = sample_func(gx, gy + 1, gz, gx, gy, gz, 1);
-                            auto fyB = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                             reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 1);
-                            fyB_rho = fyB.rho; fyB_rhoux = fyB.rhoux; fyB_rhouy = fyB.rhouy; fyB_rhouz = fyB.rhouz; fyB_E = fyB.E;
-                            fyB_v_face = fyB.v_face;
-                            if constexpr (IsMultiMaterial) {
-                                fyB_alpha1 = fyB.alpha1; fyB_alpha2 = fyB.alpha2; fyB_arho1 = fyB.arho1; fyB_arho2 = fyB.arho2;
-                            }
-                        }
-
-                        RealType fyT_rho = 0.0, fyT_rhoux = 0.0, fyT_rhouy = 0.0, fyT_rhouz = 0.0, fyT_E = 0.0;
-                        RealType fyT_alpha1 = 0.0, fyT_alpha2 = 0.0, fyT_arho1 = 0.0, fyT_arho2 = 0.0, fyT_v_face = 0.0;
-
-                        {
-                            auto sL2 = sample_func(gx, gy - 1, gz, gx, gy, gz, 1);
-                            auto sL1 = sC;
-                            auto sR1 = sample_func(gx, gy + 1, gz, gx, gy, gz, 1);
-                            auto sR2 = sample_func(gx, gy + 2, gz, gx, gy, gz, 1);
-                            auto fyT = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                             reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 1);
-                            fyT_rho = fyT.rho; fyT_rhoux = fyT.rhoux; fyT_rhouy = fyT.rhouy; fyT_rhouz = fyT.rhouz; fyT_E = fyT.E;
-                            fyT_v_face = fyT.v_face;
-                            if constexpr (IsMultiMaterial) {
-                                fyT_alpha1 = fyT.alpha1; fyT_alpha2 = fyT.alpha2; fyT_arho1 = fyT.arho1; fyT_arho2 = fyT.arho2;
-                            }
-                        }
+                        auto fyB = compute_face_flux(1, gx, gy - 1, gz, gx, gy, gz, gx, gy - 2, gz, gx, gy + 1, gz);
+                        auto fyT = compute_face_flux(1, gx, gy, gz, gx, gy + 1, gz, gx, gy - 1, gz, gx, gy + 2, gz);
 
                         // Z-Fluxes
-                        RealType fzD_rho = 0.0, fzD_rhoux = 0.0, fzD_rhouy = 0.0, fzD_rhouz = 0.0, fzD_E = 0.0;
-                        RealType fzD_alpha1 = 0.0, fzD_alpha2 = 0.0, fzD_arho1 = 0.0, fzD_arho2 = 0.0, fzD_v_face = 0.0;
+                        auto fzD = compute_face_flux(2, gx, gy, gz - 1, gx, gy, gz, gx, gy, gz - 2, gx, gy, gz + 1);
+                        auto fzU = compute_face_flux(2, gx, gy, gz, gx, gy, gz + 1, gx, gy, gz - 1, gx, gy, gz + 2);
 
-                        {
-                            auto sL2 = sample_func(gx, gy, gz - 2, gx, gy, gz, 2);
-                            auto sL1 = sample_func(gx, gy, gz - 1, gx, gy, gz, 2);
-                            auto sR1 = sC;
-                            auto sR2 = sample_func(gx, gy, gz + 1, gx, gy, gz, 2);
-                            auto fzD = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                             reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 2);
-                            fzD_rho = fzD.rho; fzD_rhoux = fzD.rhoux; fzD_rhouy = fzD.rhouy; fzD_rhouz = fzD.rhouz; fzD_E = fzD.E;
-                            fzD_v_face = fzD.v_face;
-                            if constexpr (IsMultiMaterial) {
-                                fzD_alpha1 = fzD.alpha1; fzD_alpha2 = fzD.alpha2; fzD_arho1 = fzD.arho1; fzD_arho2 = fzD.arho2;
-                            }
-                        }
-
-                        RealType fzU_rho = 0.0, fzU_rhoux = 0.0, fzU_rhouy = 0.0, fzU_rhouz = 0.0, fzU_E = 0.0;
-                        RealType fzU_alpha1 = 0.0, fzU_alpha2 = 0.0, fzU_arho1 = 0.0, fzU_arho2 = 0.0, fzU_v_face = 0.0;
-
-                        {
-                            auto sL2 = sample_func(gx, gy, gz - 1, gx, gy, gz, 2);
-                            auto sL1 = sC;
-                            auto sR1 = sample_func(gx, gy, gz + 1, gx, gy, gz, 2);
-                            auto sR2 = sample_func(gx, gy, gz + 2, gx, gy, gz, 2);
-                            auto fzU = get_f(reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted),
-                                             reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted), 2);
-                            fzU_rho = fzU.rho; fzU_rhoux = fzU.rhoux; fzU_rhouy = fzU.rhouy; fzU_rhouz = fzU.rhouz; fzU_E = fzU.E;
-                            fzU_v_face = fzU.v_face;
-                            if constexpr (IsMultiMaterial) {
-                                fzU_alpha1 = fzU.alpha1; fzU_alpha2 = fzU.alpha2; fzU_arho1 = fzU.arho1; fzU_arho2 = fzU.arho2;
-                            }
-                        }
-
-                        u.rho[idx] -= dt_dx * (fxR_rho - fxL_rho + fyT_rho - fyB_rho + fzU_rho - fzD_rho);
-                        u.rhoux[idx] -= dt_dx * (fxR_rhoux - fxL_rhoux + fyT_rhoux - fyB_rhoux + fzU_rhoux - fzD_rhoux);
-                        u.rhouy[idx] -= dt_dx * (fxR_rhouy - fxL_rhouy + fyT_rhouy - fyB_rhouy + fzU_rhouy - fzD_rhouy);
-                        u.rhouz[idx] -= dt_dx * (fxR_rhouz - fxL_rhouz + fyT_rhouz - fyB_rhouz + fzU_rhouz - fzD_rhouz);
-                        u.E[idx] -= dt_dx * (fxR_E - fxL_E + fyT_E - fyB_E + fzU_E - fzD_E);
+                        u.rho[idx] -= dt_dx * (fxR.rho - fxL.rho + fyT.rho - fyB.rho + fzU.rho - fzD.rho);
+                        u.rhoux[idx] -= dt_dx * (fxR.rhoux - fxL.rhoux + fyT.rhoux - fyB.rhoux + fzU.rhoux - fzD.rhoux);
+                        u.rhouy[idx] -= dt_dx * (fxR.rhouy - fxL.rhouy + fyT.rhouy - fyB.rhouy + fzU.rhouy - fzD.rhouy);
+                        u.rhouz[idx] -= dt_dx * (fxR.rhouz - fxL.rhouz + fyT.rhouz - fyB.rhouz + fzU.rhouz - fzD.rhouz);
+                        u.E[idx] -= dt_dx * (fxR.E - fxL.E + fyT.E - fyB.E + fzU.E - fzD.E);
 
                         if constexpr (IsMultiMaterial) {
-                            u.alpha1[idx] -= dt_dx * (fxR_alpha1 - fxL_alpha1 + fyT_alpha1 - fyB_alpha1 + fzU_alpha1 - fzD_alpha1);
-                            u.alpha2[idx] -= dt_dx * (fxR_alpha2 - fxL_alpha2 + fyT_alpha2 - fyB_alpha2 + fzU_alpha2 - fzD_alpha2);
+                            u.alpha1[idx] -= dt_dx * (fxR.alpha1 - fxL.alpha1 + fyT.alpha1 - fyB.alpha1 + fzU.alpha1 - fzD.alpha1);
+                            u.alpha2[idx] -= dt_dx * (fxR.alpha2 - fxL.alpha2 + fyT.alpha2 - fyB.alpha2 + fzU.alpha2 - fzD.alpha2);
                             
-                            RealType div_u = fxR_v_face - fxL_v_face + fyT_v_face - fyB_v_face + fzU_v_face - fzD_v_face;
+                            RealType div_u = fxR.v_face - fxL.v_face + fyT.v_face - fyB.v_face + fzU.v_face - fzD.v_face;
                             u.alpha1[idx] += dt_dx * sC.alpha1 * div_u;
                             u.alpha2[idx] += dt_dx * sC.alpha2 * div_u;
 
-                            u.arho1[idx] -= dt_dx * (fxR_arho1 - fxL_arho1 + fyT_arho1 - fyB_arho1 + fzU_arho1 - fzD_arho1);
+                            u.arho1[idx] -= dt_dx * (fxR.arho1 - fxL.arho1 + fyT.arho1 - fyB.arho1 + fzU.arho1 - fzD.arho1);
                         }
                     }
                 }
@@ -1327,44 +1294,91 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                         auto sZ_D = sample_func(gx, gy, gz - 1, gx, gy, gz, 2);
                         auto sZ_U = sample_func(gx, gy, gz + 1, gx, gy, gz, 2);
                         
+                        auto is_solid_cell = [&](int x, int y, int z) -> bool {
+                            if (geom_pool.empty()) return false;
+                            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return true;
+                            int t_idx = (x >> 3) + (y >> 3) * n_tiles_x + (z >> 3) * n_tiles_x * n_tiles_y;
+                            int c_idx = (x & 7) + (y & 7) * 8 + (z & 7) * 64;
+                            return geom_pool[t_idx].cells[c_idx].is_boundary;
+                        };
+
+                        bool solid_x_L = !is_interior_tile && is_solid_cell(gx - 1, gy, gz);
+                        bool solid_x_R = !is_interior_tile && is_solid_cell(gx + 1, gy, gz);
+                        bool is_confined_x = solid_x_L && solid_x_R;
+
+                        bool solid_y_B = !is_interior_tile && is_solid_cell(gx, gy - 1, gz);
+                        bool solid_y_T = !is_interior_tile && is_solid_cell(gx, gy + 1, gz);
+                        bool is_confined_y = solid_y_B && solid_y_T;
+
+                        bool solid_z_D = !is_interior_tile && is_solid_cell(gx, gy, gz - 1);
+                        bool solid_z_U = !is_interior_tile && is_solid_cell(gx, gy, gz + 1);
+                        bool is_confined_z = solid_z_D && solid_z_U;
+
                         CellState3DT<RealType, IsMultiMaterial> d_x, d_y, d_z;
-                        d_x.rho = slope(sX_L.rho, sC.rho, sX_R.rho);
-                        d_x.ux = slope(sX_L.ux, sC.ux, sX_R.ux);
-                        d_x.uy = slope(sX_L.uy, sC.uy, sX_R.uy);
-                        d_x.uz = slope(sX_L.uz, sC.uz, sX_R.uz);
-                        d_x.p = slope(sX_L.p, sC.p, sX_R.p);
-                        if constexpr (IsMultiMaterial) {
-                            d_x.alpha1 = slope(sX_L.alpha1, sC.alpha1, sX_R.alpha1);
-                            d_x.alpha2 = slope(sX_L.alpha2, sC.alpha2, sX_R.alpha2);
-                            d_x.arho1 = slope(sX_L.arho1, sC.arho1, sX_R.arho1);
-                        } else {
+                        if (is_confined_x) {
+                            d_x.rho = 0; d_x.ux = 0; d_x.uy = 0; d_x.uz = 0; d_x.p = 0;
                             d_x.alpha1 = 0; d_x.alpha2 = 0; d_x.arho1 = 0; d_x.arho2 = 0;
+                        } else if (solid_x_L || solid_x_R) {
+                            // Suppress ALL slopes near solid boundaries
+                            d_x.rho = 0; d_x.ux = 0; d_x.uy = 0; d_x.uz = 0; d_x.p = 0;
+                            d_x.alpha1 = 0; d_x.alpha2 = 0; d_x.arho1 = 0; d_x.arho2 = 0;
+                        } else {
+                            d_x.rho = slope(sX_L.rho, sC.rho, sX_R.rho);
+                            d_x.ux = slope(sX_L.ux, sC.ux, sX_R.ux);
+                            d_x.uy = slope(sX_L.uy, sC.uy, sX_R.uy);
+                            d_x.uz = slope(sX_L.uz, sC.uz, sX_R.uz);
+                            d_x.p = slope(sX_L.p, sC.p, sX_R.p);
+                            if constexpr (IsMultiMaterial) {
+                                d_x.alpha1 = slope(sX_L.alpha1, sC.alpha1, sX_R.alpha1);
+                                d_x.alpha2 = slope(sX_L.alpha2, sC.alpha2, sX_R.alpha2);
+                                d_x.arho1 = slope(sX_L.arho1, sC.arho1, sX_R.arho1);
+                            } else {
+                                d_x.alpha1 = 0; d_x.alpha2 = 0; d_x.arho1 = 0; d_x.arho2 = 0;
+                            }
                         }
 
-                        d_y.rho = slope(sY_B.rho, sC.rho, sY_T.rho);
-                        d_y.ux = slope(sY_B.ux, sC.ux, sY_T.ux);
-                        d_y.uy = slope(sY_B.uy, sC.uy, sY_T.uy);
-                        d_y.uz = slope(sY_B.uz, sC.uz, sY_T.uz);
-                        d_y.p = slope(sY_B.p, sC.p, sY_T.p);
-                        if constexpr (IsMultiMaterial) {
-                            d_y.alpha1 = slope(sY_B.alpha1, sC.alpha1, sY_T.alpha1);
-                            d_y.alpha2 = slope(sY_B.alpha2, sC.alpha2, sY_T.alpha2);
-                            d_y.arho1 = slope(sY_B.arho1, sC.arho1, sY_T.arho1);
-                        } else {
+                        if (is_confined_y) {
+                            d_y.rho = 0; d_y.ux = 0; d_y.uy = 0; d_y.uz = 0; d_y.p = 0;
                             d_y.alpha1 = 0; d_y.alpha2 = 0; d_y.arho1 = 0; d_y.arho2 = 0;
+                        } else if (solid_y_B || solid_y_T) {
+                            // Suppress ALL slopes near solid boundaries
+                            d_y.rho = 0; d_y.ux = 0; d_y.uy = 0; d_y.uz = 0; d_y.p = 0;
+                            d_y.alpha1 = 0; d_y.alpha2 = 0; d_y.arho1 = 0; d_y.arho2 = 0;
+                        } else {
+                            d_y.rho = slope(sY_B.rho, sC.rho, sY_T.rho);
+                            d_y.ux = slope(sY_B.ux, sC.ux, sY_T.ux);
+                            d_y.uy = slope(sY_B.uy, sC.uy, sY_T.uy);
+                            d_y.uz = slope(sY_B.uz, sC.uz, sY_T.uz);
+                            d_y.p = slope(sY_B.p, sC.p, sY_T.p);
+                            if constexpr (IsMultiMaterial) {
+                                d_y.alpha1 = slope(sY_B.alpha1, sC.alpha1, sY_T.alpha1);
+                                d_y.alpha2 = slope(sY_B.alpha2, sC.alpha2, sY_T.alpha2);
+                                d_y.arho1 = slope(sY_B.arho1, sC.arho1, sY_T.arho1);
+                            } else {
+                                d_y.alpha1 = 0; d_y.alpha2 = 0; d_y.arho1 = 0; d_y.arho2 = 0;
+                            }
                         }
 
-                        d_z.rho = slope(sZ_D.rho, sC.rho, sZ_U.rho);
-                        d_z.ux = slope(sZ_D.ux, sC.ux, sZ_U.ux);
-                        d_z.uy = slope(sZ_D.uy, sC.uy, sZ_U.uy);
-                        d_z.uz = slope(sZ_D.uz, sC.uz, sZ_U.uz);
-                        d_z.p = slope(sZ_D.p, sC.p, sZ_U.p);
-                        if constexpr (IsMultiMaterial) {
-                            d_z.alpha1 = slope(sZ_D.alpha1, sC.alpha1, sZ_U.alpha1);
-                            d_z.alpha2 = slope(sZ_D.alpha2, sC.alpha2, sZ_U.alpha2);
-                            d_z.arho1 = slope(sZ_D.arho1, sC.arho1, sZ_U.arho1);
-                        } else {
+                        if (is_confined_z) {
+                            d_z.rho = 0; d_z.ux = 0; d_z.uy = 0; d_z.uz = 0; d_z.p = 0;
                             d_z.alpha1 = 0; d_z.alpha2 = 0; d_z.arho1 = 0; d_z.arho2 = 0;
+                        } else if (solid_z_D || solid_z_U) {
+                            // Suppress ALL slopes near solid boundaries
+                            d_z.rho = 0; d_z.ux = 0; d_z.uy = 0; d_z.uz = 0; d_z.p = 0;
+                            d_z.alpha1 = 0; d_z.alpha2 = 0; d_z.arho1 = 0; d_z.arho2 = 0;
+                        } else {
+                            d_z.rho = slope(sZ_D.rho, sC.rho, sZ_U.rho);
+                            d_z.ux = slope(sZ_D.ux, sC.ux, sZ_U.ux);
+                            d_z.uy = slope(sZ_D.uy, sC.uy, sZ_U.uy);
+                            d_z.uz = slope(sZ_D.uz, sC.uz, sZ_U.uz);
+                            d_z.p = slope(sZ_D.p, sC.p, sZ_U.p);
+                            if constexpr (IsMultiMaterial) {
+                                d_z.alpha1 = slope(sZ_D.alpha1, sC.alpha1, sZ_U.alpha1);
+                                d_z.alpha2 = slope(sZ_D.alpha2, sC.alpha2, sZ_U.alpha2);
+                                d_z.arho1 = slope(sZ_D.arho1, sC.arho1, sZ_U.arho1);
+                            } else {
+                                d_z.alpha1 = 0; d_z.alpha2 = 0; d_z.arho1 = 0; d_z.arho2 = 0;
+                            }
                         }
                         
                         CellState3DT<RealType, IsMultiMaterial> dW_dt;
@@ -1470,44 +1484,91 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                             auto sZ_D = sample_func(gx, gy, gz - 1, gx, gy, gz, 2);
                             auto sZ_U = sample_func(gx, gy, gz + 1, gx, gy, gz, 2);
                             
+                            auto is_solid_cell = [&](int x, int y, int z) -> bool {
+                                if (geom_pool.empty()) return false;
+                                if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return true;
+                                int t_idx = (x >> 3) + (y >> 3) * n_tiles_x + (z >> 3) * n_tiles_x * n_tiles_y;
+                                int c_idx = (x & 7) + (y & 7) * 8 + (z & 7) * 64;
+                                return geom_pool[t_idx].cells[c_idx].is_boundary;
+                            };
+
+                            bool solid_x_L = !is_interior_tile && is_solid_cell(gx - 1, gy, gz);
+                            bool solid_x_R = !is_interior_tile && is_solid_cell(gx + 1, gy, gz);
+                            bool is_confined_x = solid_x_L && solid_x_R;
+
+                            bool solid_y_B = !is_interior_tile && is_solid_cell(gx, gy - 1, gz);
+                            bool solid_y_T = !is_interior_tile && is_solid_cell(gx, gy + 1, gz);
+                            bool is_confined_y = solid_y_B && solid_y_T;
+
+                            bool solid_z_D = !is_interior_tile && is_solid_cell(gx, gy, gz - 1);
+                            bool solid_z_U = !is_interior_tile && is_solid_cell(gx, gy, gz + 1);
+                            bool is_confined_z = solid_z_D && solid_z_U;
+
                             CellState3DT<RealType, IsMultiMaterial> d_x, d_y, d_z;
-                            d_x.rho = slope(sX_L.rho, sC.rho, sX_R.rho);
-                            d_x.ux = slope(sX_L.ux, sC.ux, sX_R.ux);
-                            d_x.uy = slope(sX_L.uy, sC.uy, sX_R.uy);
-                            d_x.uz = slope(sX_L.uz, sC.uz, sX_R.uz);
-                            d_x.p = slope(sX_L.p, sC.p, sX_R.p);
-                            if constexpr (IsMultiMaterial) {
-                                d_x.alpha1 = slope(sX_L.alpha1, sC.alpha1, sX_R.alpha1);
-                                d_x.alpha2 = slope(sX_L.alpha2, sC.alpha2, sX_R.alpha2);
-                                d_x.arho1 = slope(sX_L.arho1, sC.arho1, sX_R.arho1);
-                            } else {
+                            if (is_confined_x) {
+                                d_x.rho = 0; d_x.ux = 0; d_x.uy = 0; d_x.uz = 0; d_x.p = 0;
                                 d_x.alpha1 = 0; d_x.alpha2 = 0; d_x.arho1 = 0; d_x.arho2 = 0;
+                            } else if (solid_x_L || solid_x_R) {
+                                // Suppress ALL slopes near solid boundaries
+                                d_x.rho = 0; d_x.ux = 0; d_x.uy = 0; d_x.uz = 0; d_x.p = 0;
+                                d_x.alpha1 = 0; d_x.alpha2 = 0; d_x.arho1 = 0; d_x.arho2 = 0;
+                            } else {
+                                d_x.rho = slope(sX_L.rho, sC.rho, sX_R.rho);
+                                d_x.ux = slope(sX_L.ux, sC.ux, sX_R.ux);
+                                d_x.uy = slope(sX_L.uy, sC.uy, sX_R.uy);
+                                d_x.uz = slope(sX_L.uz, sC.uz, sX_R.uz);
+                                d_x.p = slope(sX_L.p, sC.p, sX_R.p);
+                                if constexpr (IsMultiMaterial) {
+                                    d_x.alpha1 = slope(sX_L.alpha1, sC.alpha1, sX_R.alpha1);
+                                    d_x.alpha2 = slope(sX_L.alpha2, sC.alpha2, sX_R.alpha2);
+                                    d_x.arho1 = slope(sX_L.arho1, sC.arho1, sX_R.arho1);
+                                } else {
+                                    d_x.alpha1 = 0; d_x.alpha2 = 0; d_x.arho1 = 0; d_x.arho2 = 0;
+                                }
                             }
 
-                            d_y.rho = slope(sY_B.rho, sC.rho, sY_T.rho);
-                            d_y.ux = slope(sY_B.ux, sC.ux, sY_T.ux);
-                            d_y.uy = slope(sY_B.uy, sC.uy, sY_T.uy);
-                            d_y.uz = slope(sY_B.uz, sC.uz, sY_T.uz);
-                            d_y.p = slope(sY_B.p, sC.p, sY_T.p);
-                            if constexpr (IsMultiMaterial) {
-                                d_y.alpha1 = slope(sY_B.alpha1, sC.alpha1, sY_T.alpha1);
-                                d_y.alpha2 = slope(sY_B.alpha2, sC.alpha2, sY_T.alpha2);
-                                d_y.arho1 = slope(sY_B.arho1, sC.arho1, sY_T.arho1);
-                            } else {
+                            if (is_confined_y) {
+                                d_y.rho = 0; d_y.ux = 0; d_y.uy = 0; d_y.uz = 0; d_y.p = 0;
                                 d_y.alpha1 = 0; d_y.alpha2 = 0; d_y.arho1 = 0; d_y.arho2 = 0;
+                            } else if (solid_y_B || solid_y_T) {
+                                // Suppress ALL slopes near solid boundaries
+                                d_y.rho = 0; d_y.ux = 0; d_y.uy = 0; d_y.uz = 0; d_y.p = 0;
+                                d_y.alpha1 = 0; d_y.alpha2 = 0; d_y.arho1 = 0; d_y.arho2 = 0;
+                            } else {
+                                d_y.rho = slope(sY_B.rho, sC.rho, sY_T.rho);
+                                d_y.ux = slope(sY_B.ux, sC.ux, sY_T.ux);
+                                d_y.uy = slope(sY_B.uy, sC.uy, sY_T.uy);
+                                d_y.uz = slope(sY_B.uz, sC.uz, sY_T.uz);
+                                d_y.p = slope(sY_B.p, sC.p, sY_T.p);
+                                if constexpr (IsMultiMaterial) {
+                                    d_y.alpha1 = slope(sY_B.alpha1, sC.alpha1, sY_T.alpha1);
+                                    d_y.alpha2 = slope(sY_B.alpha2, sC.alpha2, sY_T.alpha2);
+                                    d_y.arho1 = slope(sY_B.arho1, sC.arho1, sY_T.arho1);
+                                } else {
+                                    d_y.alpha1 = 0; d_y.alpha2 = 0; d_y.arho1 = 0; d_y.arho2 = 0;
+                                }
                             }
 
-                            d_z.rho = slope(sZ_D.rho, sC.rho, sZ_U.rho);
-                            d_z.ux = slope(sZ_D.ux, sC.ux, sZ_U.ux);
-                            d_z.uy = slope(sZ_D.uy, sC.uy, sZ_U.uy);
-                            d_z.uz = slope(sZ_D.uz, sC.uz, sZ_U.uz);
-                            d_z.p = slope(sZ_D.p, sC.p, sZ_U.p);
-                            if constexpr (IsMultiMaterial) {
-                                d_z.alpha1 = slope(sZ_D.alpha1, sC.alpha1, sZ_U.alpha1);
-                                d_z.alpha2 = slope(sZ_D.alpha2, sC.alpha2, sZ_U.alpha2);
-                                d_z.arho1 = slope(sZ_D.arho1, sC.arho1, sZ_U.arho1);
-                            } else {
+                            if (is_confined_z) {
+                                d_z.rho = 0; d_z.ux = 0; d_z.uy = 0; d_z.uz = 0; d_z.p = 0;
                                 d_z.alpha1 = 0; d_z.alpha2 = 0; d_z.arho1 = 0; d_z.arho2 = 0;
+                            } else if (solid_z_D || solid_z_U) {
+                                // Suppress ALL slopes near solid boundaries
+                                d_z.rho = 0; d_z.ux = 0; d_z.uy = 0; d_z.uz = 0; d_z.p = 0;
+                                d_z.alpha1 = 0; d_z.alpha2 = 0; d_z.arho1 = 0; d_z.arho2 = 0;
+                            } else {
+                                d_z.rho = slope(sZ_D.rho, sC.rho, sZ_U.rho);
+                                d_z.ux = slope(sZ_D.ux, sC.ux, sZ_U.ux);
+                                d_z.uy = slope(sZ_D.uy, sC.uy, sZ_U.uy);
+                                d_z.uz = slope(sZ_D.uz, sC.uz, sZ_U.uz);
+                                d_z.p = slope(sZ_D.p, sC.p, sZ_U.p);
+                                if constexpr (IsMultiMaterial) {
+                                    d_z.alpha1 = slope(sZ_D.alpha1, sC.alpha1, sZ_U.alpha1);
+                                    d_z.alpha2 = slope(sZ_D.alpha2, sC.alpha2, sZ_U.alpha2);
+                                    d_z.arho1 = slope(sZ_D.arho1, sC.arho1, sZ_U.arho1);
+                                } else {
+                                    d_z.alpha1 = 0; d_z.alpha2 = 0; d_z.arho1 = 0; d_z.arho2 = 0;
+                                }
                             }
                             
                             CellState3DT<RealType, IsMultiMaterial> dW_dt_mid;
@@ -1700,53 +1761,27 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
 
     if (slice.axis == "volume") {
         int factor = 1;
-        int out_nx = ((nx + stride - 1) / stride) * factor;
-        int out_ny = ((ny + stride - 1) / stride) * factor;
-        int out_nz = ((nz + stride - 1) / stride) * factor;
-        data.resize((size_t)out_nx * out_ny * out_nz);
+        int i_start = slice.roi_enabled ? slice.roi_i_start : 0;
+        int j_start = slice.roi_enabled ? slice.roi_j_start : 0;
+        int k_start = slice.roi_enabled ? slice.roi_k_start : 0;
+        int i_end   = slice.roi_enabled ? slice.roi_i_end   : nx;
+        int j_end   = slice.roi_enabled ? slice.roi_j_end   : ny;
+        int k_end   = slice.roi_enabled ? slice.roi_k_end   : nz;
 
-        double h_ref = (cellSize * stride) / factor;
+        int out_nx = ((i_end - i_start + stride - 1) / stride) * factor;
+        int out_ny = ((j_end - j_start + stride - 1) / stride) * factor;
+        int out_nz = ((k_end - k_start + stride - 1) / stride) * factor;
+        data.resize((size_t)out_nx * out_ny * out_nz);
 
         #pragma omp parallel for collapse(3)
         for (int gz = 0; gz < out_nz; ++gz) {
             for (int gy = 0; gy < out_ny; ++gy) {
                 for (int gx = 0; gx < out_nx; ++gx) {
-                    double px = xmin + (gx + 0.5) * h_ref;
-                    double py = ymin + (gy + 0.5) * h_ref;
-                    double pz = zmin + (gz + 0.5) * h_ref;
+                    int base_gx = std::clamp(i_start + (gx * stride) / factor, 0, nx - 1);
+                    int base_gy = std::clamp(j_start + (gy * stride) / factor, 0, ny - 1);
+                    int base_gz = std::clamp(k_start + (gz * stride) / factor, 0, nz - 1);
 
-                    int base_gx = std::clamp((int)std::floor((px - xmin) / cellSize), 0, nx - 1);
-                    int base_gy = std::clamp((int)std::floor((py - ymin) / cellSize), 0, ny - 1);
-                    int base_gz = std::clamp((int)std::floor((pz - zmin) / cellSize), 0, nz - 1);
-
-                    int target_base_gx = base_gx;
-                    int target_base_gy = base_gy;
-                    int target_base_gz = base_gz;
-
-                    if (is_solid(base_gx, base_gy, base_gz)) {
-                        bool found = false;
-                        int max_r = std::max(4, stride * 3);
-                        for (int r = 1; r <= max_r && !found; ++r) {
-                            for (int dz = -r; dz <= r && !found; ++dz) {
-                                for (int dy = -r; dy <= r && !found; ++dy) {
-                                    for (int dx = -r; dx <= r && !found; ++dx) {
-                                        int nx_c = base_gx + dx;
-                                        int ny_c = base_gy + dy;
-                                        int nz_c = base_gz + dz;
-                                        if (nx_c >= 0 && nx_c < nx && ny_c >= 0 && ny_c < ny && nz_c >= 0 && nz_c < nz) {
-                                            if (!is_solid(nx_c, ny_c, nz_c)) {
-                                                target_base_gx = nx_c;
-                                                target_base_gy = ny_c;
-                                                target_base_gz = nz_c;
-                                                found = true;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    data[(size_t)gx + (size_t)gy * out_nx + (size_t)gz * out_nx * out_ny] = getVal(sampleState(target_base_gx, target_base_gy, target_base_gz), target_base_gx, target_base_gy, target_base_gz);
+                    data[(size_t)gx + (size_t)gy * out_nx + (size_t)gz * out_nx * out_ny] = getVal(sampleState(base_gx, base_gy, base_gz), base_gx, base_gy, base_gz);
                 }
             }
         }
@@ -1808,6 +1843,144 @@ std::vector<SlicePayload3D> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractA
 
     results.push_back(std::move(parent_sp));
     return results;
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::sampleSurfacePoints(
+    const std::vector<Point3D>& points,
+    const std::vector<std::string>& quantities,
+    double dom_xmin, double dom_xmax,
+    double dom_ymin, double dom_ymax,
+    double dom_zmin, double dom_zmax,
+    float outside_val,
+    std::vector<std::vector<float>>& out_quantities
+) const {
+    size_t num_points = points.size();
+    size_t num_qtys = quantities.size();
+    out_quantities.resize(num_qtys);
+    for (size_t q = 0; q < num_qtys; ++q) {
+        out_quantities[q].resize(num_points, outside_val);
+    }
+    if (num_points == 0 || num_qtys == 0) return;
+
+    const double tol = 1e-4 * cellSize;
+
+    auto is_solid = [&](int cx, int cy, int cz) {
+        if (geom_pool.empty()) return false;
+        if (cx < 0 || cx >= nx || cy < 0 || cy >= ny || cz < 0 || cz >= nz) return false;
+        int t = (cx >> 3) + (cy >> 3) * n_tiles_x + (cz >> 3) * n_tiles_x * n_tiles_y;
+        int c = (cx & 7) + (cy & 7) * 8 + (cz & 7) * 64;
+        return geom_pool[t].cells[c].is_boundary != 0;
+    };
+
+    auto getVal = [&](const CellState3D<IsMultiMaterial>& s, int gx_c, int gy_c, int gz_c, const std::string& qty) -> float {
+        if (qty == "solid" || qty == "solid_cells") {
+            return is_solid(gx_c, gy_c, gz_c) ? 1.0f : 0.0f;
+        }
+        if (qty == "density" || qty == "rho") return (float)s.rho;
+        if (qty == "velocity" || qty == "speed") return (float)std::sqrt(s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
+        if (qty == "energy" || qty == "internal_energy") return (float)(s.E / std::max(s.rho, 1e-6));
+        if (qty == "species1" || qty == "alpha1" || qty == "reacted" || qty == "reacted_gas") return (float)s.alpha1;
+        if (qty == "species2" || qty == "alpha2" || qty == "unreacted" || qty == "unreacted_solid") return (float)s.alpha2;
+        if (qty == "species3" || qty == "air" || qty == "ambient_air") return (float)(1.0 - s.alpha1 - s.alpha2);
+        if (qty == "overpressure" || qty == "peak_overpressure") return (float)s.peak_overpressure;
+        if (qty == "impulse" || qty == "peak_impulse") return (float)s.peak_impulse;
+        return (float)s.p;
+    };
+
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (size_t i = 0; i < num_points; ++i) {
+        const auto& pt = points[i];
+        if (pt.x < dom_xmin - tol || pt.x > dom_xmax + tol ||
+            pt.y < dom_ymin - tol || pt.y > dom_ymax + tol ||
+            pt.z < dom_zmin - tol || pt.z > dom_zmax + tol) {
+            continue; // already initialized to outside_val
+        }
+
+        int gx = std::clamp((int)std::floor((pt.x - xmin) / cellSize), 0, nx - 1);
+        int gy = std::clamp((int)std::floor((pt.y - ymin) / cellSize), 0, ny - 1);
+        int gz = std::clamp((int)std::floor((pt.z - zmin) / cellSize), 0, nz - 1);
+
+        int orig_gx = gx, orig_gy = gy, orig_gz = gz;
+        bool point_is_solid = is_solid(orig_gx, orig_gy, orig_gz);
+
+        if (point_is_solid) {
+            double best_dist2 = 1e30;
+            int best_gx = gx, best_gy = gy, best_gz = gz;
+            bool found = false;
+
+            // Search radius 1 (26 neighbors)
+            for (int dz = -1; dz <= 1; ++dz) {
+                int cz = gz + dz;
+                if (cz < 0 || cz >= nz) continue;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    int cy = gy + dy;
+                    if (cy < 0 || cy >= ny) continue;
+                    for (int dx_ = -1; dx_ <= 1; ++dx_) {
+                        if (dx_ == 0 && dy == 0 && dz == 0) continue;
+                        int cx = gx + dx_;
+                        if (cx < 0 || cx >= nx) continue;
+
+                        if (!is_solid(cx, cy, cz)) {
+                            double ccx = xmin + (cx + 0.5) * cellSize;
+                            double ccy = ymin + (cy + 0.5) * cellSize;
+                            double ccz = zmin + (cz + 0.5) * cellSize;
+                            double dist2 = (pt.x - ccx)*(pt.x - ccx) + (pt.y - ccy)*(pt.y - ccy) + (pt.z - ccz)*(pt.z - ccz);
+                            if (dist2 < best_dist2) {
+                                best_dist2 = dist2;
+                                best_gx = cx; best_gy = cy; best_gz = cz;
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Search radius 2 if entirely surrounded in radius 1
+            if (!found) {
+                for (int dz = -2; dz <= 2; ++dz) {
+                    int cz = gz + dz;
+                    if (cz < 0 || cz >= nz) continue;
+                    for (int dy = -2; dy <= 2; ++dy) {
+                        int cy = gy + dy;
+                        if (cy < 0 || cy >= ny) continue;
+                        for (int dx_ = -2; dx_ <= 2; ++dx_) {
+                            if (std::abs(dx_) <= 1 && std::abs(dy) <= 1 && std::abs(dz) <= 1) continue;
+                            int cx = gx + dx_;
+                            if (cx < 0 || cx >= nx) continue;
+
+                            if (!is_solid(cx, cy, cz)) {
+                                double ccx = xmin + (cx + 0.5) * cellSize;
+                                double ccy = ymin + (cy + 0.5) * cellSize;
+                                double ccz = zmin + (cz + 0.5) * cellSize;
+                                double dist2 = (pt.x - ccx)*(pt.x - ccx) + (pt.y - ccy)*(pt.y - ccy) + (pt.z - ccz)*(pt.z - ccz);
+                                if (dist2 < best_dist2) {
+                                    best_dist2 = dist2;
+                                    best_gx = cx; best_gy = cy; best_gz = cz;
+                                    found = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (found) {
+                gx = best_gx; gy = best_gy; gz = best_gz;
+            }
+        }
+
+        auto s = sampleState(gx, gy, gz);
+        for (size_t q = 0; q < num_qtys; ++q) {
+            if (quantities[q] == "solid" || quantities[q] == "solid_cells") {
+                out_quantities[q][i] = point_is_solid ? 1.0f : 0.0f;
+            } else {
+                out_quantities[q][i] = getVal(s, gx, gy, gz, quantities[q]);
+            }
+        }
+    }
 }
 
 template <typename RealType, bool IsMultiMaterial>

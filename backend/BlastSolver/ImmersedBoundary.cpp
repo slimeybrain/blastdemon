@@ -225,6 +225,12 @@ void voxelize_geometry(
             N_accum.x = ey1 * ez2 - ez1 * ey2;
             N_accum.y = ez1 * ex2 - ex1 * ez2;
             N_accum.z = ex1 * ey2 - ey1 * ex2;
+            nlen_accum = std::sqrt(N_accum.x*N_accum.x + N_accum.y*N_accum.y + N_accum.z*N_accum.z);
+        }
+        if (nlen_accum > 1e-6f) {
+            N_accum.x /= nlen_accum;
+            N_accum.y /= nlen_accum;
+            N_accum.z /= nlen_accum;
         }
 
         int updated_cells[128];
@@ -250,17 +256,27 @@ void voxelize_geometry(
             }
 
             has_boundary[linear_idx] = 1;
+            Point3D aligned_N = N_accum;
+            float cur_x = accumulated_normals[linear_idx].x;
+            float cur_y = accumulated_normals[linear_idx].y;
+            float cur_z = accumulated_normals[linear_idx].z;
+            float dot = cur_x * aligned_N.x + cur_y * aligned_N.y + cur_z * aligned_N.z;
+            if (dot < 0.0f) {
+                aligned_N.x = -aligned_N.x;
+                aligned_N.y = -aligned_N.y;
+                aligned_N.z = -aligned_N.z;
+            }
 #ifdef _OPENMP
             #pragma omp atomic
-            accumulated_normals[linear_idx].x += N_accum.x;
+            accumulated_normals[linear_idx].x += aligned_N.x;
             #pragma omp atomic
-            accumulated_normals[linear_idx].y += N_accum.y;
+            accumulated_normals[linear_idx].y += aligned_N.y;
             #pragma omp atomic
-            accumulated_normals[linear_idx].z += N_accum.z;
+            accumulated_normals[linear_idx].z += aligned_N.z;
 #else
-            accumulated_normals[linear_idx].x += N_accum.x;
-            accumulated_normals[linear_idx].y += N_accum.y;
-            accumulated_normals[linear_idx].z += N_accum.z;
+            accumulated_normals[linear_idx].x += aligned_N.x;
+            accumulated_normals[linear_idx].y += aligned_N.y;
+            accumulated_normals[linear_idx].z += aligned_N.z;
 #endif
         };
 
@@ -556,6 +572,10 @@ void voxelize_geometry(
 
     #pragma omp parallel for
     for (int t = 0; t < total_tiles; ++t) {
+        int tx = t % n_tiles_x;
+        int rem_t = t / n_tiles_x;
+        int ty = rem_t % n_tiles_y;
+        int tz = rem_t / n_tiles_y;
         for (int i = 0; i < TILE_CELLS_3D; ++i) {
             int linear_idx = t * TILE_CELLS_3D + i;
             if (has_boundary[linear_idx]) {
@@ -566,7 +586,56 @@ void voxelize_geometry(
                 if (nlen > 1e-6f) {
                     nx_val /= nlen; ny_val /= nlen; nz_val /= nlen;
                 } else {
-                    nx_val = 1.0f; ny_val = 0.0f; nz_val = 0.0f;
+                    // Inherit continuous surface normal from 26-neighboring boundary cells
+                    int cx = i % TILE_SIZE_3D;
+                    int rem_c = i / TILE_SIZE_3D;
+                    int cy = rem_c % TILE_SIZE_3D;
+                    int cz = rem_c / TILE_SIZE_3D;
+                    int gx = tx * TILE_SIZE_3D + cx;
+                    int gy = ty * TILE_SIZE_3D + cy;
+                    int gz = tz * TILE_SIZE_3D + cz;
+
+                    float n_sum_x = 0.0f, n_sum_y = 0.0f, n_sum_z = 0.0f;
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        int ngz = gz + dz;
+                        if (ngz < 0 || ngz >= nz) continue;
+                        for (int dy = -1; dy <= 1; ++dy) {
+                            int ngy = gy + dy;
+                            if (ngy < 0 || ngy >= ny) continue;
+                            for (int dx = -1; dx <= 1; ++dx) {
+                                if (dx == 0 && dy == 0 && dz == 0) continue;
+                                int ngx = gx + dx;
+                                if (ngx < 0 || ngx >= nx) continue;
+                                int ntx = ngx / TILE_SIZE_3D;
+                                int nty = ngy / TILE_SIZE_3D;
+                                int ntz = ngz / TILE_SIZE_3D;
+                                int nt_idx = ntx + nty * n_tiles_x + ntz * n_tiles_x * n_tiles_y;
+                                int ncx = ngx % TILE_SIZE_3D;
+                                int ncy = ngy % TILE_SIZE_3D;
+                                int ncz = ngz % TILE_SIZE_3D;
+                                int nl_idx = nt_idx * TILE_CELLS_3D + (ncx + ncy * TILE_SIZE_3D + ncz * TILE_SIZE_3D * TILE_SIZE_3D);
+                                if (has_boundary[nl_idx]) {
+                                    float nnx = accumulated_normals[nl_idx].x;
+                                    float nny = accumulated_normals[nl_idx].y;
+                                    float nnz = accumulated_normals[nl_idx].z;
+                                    float nnlen = std::sqrt(nnx*nnx + nny*nny + nnz*nnz);
+                                    if (nnlen > 1e-4f) {
+                                        n_sum_x += nnx / nnlen;
+                                        n_sum_y += nny / nnlen;
+                                        n_sum_z += nnz / nnlen;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    float n_sum_len = std::sqrt(n_sum_x*n_sum_x + n_sum_y*n_sum_y + n_sum_z*n_sum_z);
+                    if (n_sum_len > 1e-4f) {
+                        nx_val = n_sum_x / n_sum_len;
+                        ny_val = n_sum_y / n_sum_len;
+                        nz_val = n_sum_z / n_sum_len;
+                    } else {
+                        nx_val = 1.0f; ny_val = 0.0f; nz_val = 0.0f;
+                    }
                 }
                 geom_pool[t].cells[i] = pack_geometry_payload(true, nx_val, ny_val, nz_val);
             } else if (is_inside[linear_idx]) {
@@ -618,7 +687,19 @@ void voxelize_geometry(
                         if (is_solid(gx, gy, gz-1)) solid_neighbors++;
                         
                         if (solid_neighbors >= 5) {
-                            new_geom_pool[t_idx].cells[idx] = pack_geometry_payload(true, 0.0f, 0.0f, 0.0f);
+                            // Assign outward normal pointing towards remaining fluid direction
+                            float n_out_x = 0.0f, n_out_y = 0.0f, n_out_z = 0.0f;
+                            if (!is_solid(gx+1, gy, gz)) n_out_x += 1.0f;
+                            if (!is_solid(gx-1, gy, gz)) n_out_x -= 1.0f;
+                            if (!is_solid(gx, gy+1, gz)) n_out_y += 1.0f;
+                            if (!is_solid(gx, gy-1, gz)) n_out_y -= 1.0f;
+                            if (!is_solid(gx, gy, gz+1)) n_out_z += 1.0f;
+                            if (!is_solid(gx, gy, gz-1)) n_out_z -= 1.0f;
+                            float n_out_len = std::sqrt(n_out_x*n_out_x + n_out_y*n_out_y + n_out_z*n_out_z);
+                            if (n_out_len > 1e-4f) {
+                                n_out_x /= n_out_len; n_out_y /= n_out_len; n_out_z /= n_out_len;
+                            }
+                            new_geom_pool[t_idx].cells[idx] = pack_geometry_payload(true, n_out_x, n_out_y, n_out_z);
                             removed_this_iter++;
                         }
                     }
@@ -861,7 +942,18 @@ void voxelize_primitives(
                         if (is_solid(gx, gy, gz-1)) solid_neighbors++;
                         
                         if (solid_neighbors >= 5) {
-                            new_geom_pool[t_idx].cells[idx] = pack_geometry_payload(true, 0.0f, 0.0f, 0.0f);
+                            float n_out_x = 0.0f, n_out_y = 0.0f, n_out_z = 0.0f;
+                            if (!is_solid(gx+1, gy, gz)) n_out_x += 1.0f;
+                            if (!is_solid(gx-1, gy, gz)) n_out_x -= 1.0f;
+                            if (!is_solid(gx, gy+1, gz)) n_out_y += 1.0f;
+                            if (!is_solid(gx, gy-1, gz)) n_out_y -= 1.0f;
+                            if (!is_solid(gx, gy, gz+1)) n_out_z += 1.0f;
+                            if (!is_solid(gx, gy, gz-1)) n_out_z -= 1.0f;
+                            float n_out_len = std::sqrt(n_out_x*n_out_x + n_out_y*n_out_y + n_out_z*n_out_z);
+                            if (n_out_len > 1e-4f) {
+                                n_out_x /= n_out_len; n_out_y /= n_out_len; n_out_z /= n_out_len;
+                            }
+                            new_geom_pool[t_idx].cells[idx] = pack_geometry_payload(true, n_out_x, n_out_y, n_out_z);
                             removed_this_iter++;
                         }
                     }

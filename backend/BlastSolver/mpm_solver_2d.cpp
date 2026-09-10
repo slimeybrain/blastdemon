@@ -600,7 +600,7 @@ void MPMSolver2D::updateGridKinematics(float dt) {
 }
 
 void MPMSolver2D::gridToParticle(float dt) {
-    float max_B = 5000.0f / std::min(m_dx, m_dy);
+    float max_B = 25000.0f / std::min(m_dx, m_dy);
 
     for (auto& p : m_particles) {
         int base_i = static_cast<int>(std::floor((p.x[0]) / m_dx));
@@ -837,7 +837,8 @@ void MPMSolver2D::gridToParticle(float dt) {
         float target_vx = v_pic_x;
         float target_vy = v_pic_y;
 
-        if (p.has_failed || p.damage >= 1.0f) {
+        bool is_melted = (p.T_melt > p.T_room && p.temperature >= p.T_melt);
+        if (p.has_failed || p.damage >= 1.0f || is_melted) {
             target_vx = v_flip_x;
             target_vy = v_flip_y;
         } else if (m_velocity_scheme == MPMVelocityScheme::FLIP) {
@@ -846,13 +847,13 @@ void MPMSolver2D::gridToParticle(float dt) {
             target_vy = alpha * v_flip_y + (1.0f - alpha) * v_pic_y;
         }
 
-        p.v[0] = std::clamp(target_vx, -5000.0f, 5000.0f);
-        p.v[1] = std::clamp(target_vy, -5000.0f, 5000.0f);
+        p.v[0] = std::clamp(target_vx, -25000.0f, 25000.0f);
+        p.v[1] = std::clamp(target_vy, -25000.0f, 25000.0f);
 
-        p.B[0][0] = (m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[0][0], -max_B, max_B) : 0.0f;
-        p.B[0][1] = (m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[0][1], -max_B, max_B) : 0.0f;
-        p.B[1][0] = (m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[1][0], -max_B, max_B) : 0.0f;
-        p.B[1][1] = (m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[1][1], -max_B, max_B) : 0.0f;
+        p.B[0][0] = (!p.has_failed && !is_melted && m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[0][0], -max_B, max_B) : 0.0f;
+        p.B[0][1] = (!p.has_failed && !is_melted && m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[0][1], -max_B, max_B) : 0.0f;
+        p.B[1][0] = (!p.has_failed && !is_melted && m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[1][0], -max_B, max_B) : 0.0f;
+        p.B[1][1] = (!p.has_failed && !is_melted && m_velocity_scheme == MPMVelocityScheme::APIC) ? std::clamp(B_new[1][1], -max_B, max_B) : 0.0f;
 
         p.L_grad[0][0] = std::clamp(L_new[0][0], -max_B, max_B);
         p.L_grad[0][1] = std::clamp(L_new[0][1], -max_B, max_B);
@@ -925,8 +926,26 @@ void MPMSolver2D::updateStressState(float dt) {
             }
 
             // 2. Frictional Shear Resistance (Drucker-Prager cone limit: q <= M * p_comp)
-            const float M_friction = 1.0f;
+            // Hydrodynamic response for failed or melted metals: zero shear resistance (q_max = 0)
+            float M_friction = 0.0f;
+            if (p.material_model == MPMMaterialModel::RHTConcrete ||
+                p.material_model == MPMMaterialModel::KCConcrete ||
+                p.material_model == MPMMaterialModel::CSCMConcrete) {
+                M_friction = 1.0f;
+            } else if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen ||
+                       p.material_model == MPMMaterialModel::Hypoelastic ||
+                       p.material_model == MPMMaterialModel::LinearElastic) {
+                M_friction = 0.0f; // Pure hydrodynamic fluid response for failed or melted metals
+            }
             const float q_max = M_friction * p_comp;
+
+            if (q_max <= 0.0f) {
+                p.sigma[0][0] = -p_comp;
+                p.sigma[1][1] = -p_comp;
+                p.sigma[0][1] = 0.0f;
+                p.sigma[1][0] = 0.0f;
+                continue;
+            }
 
             const float E_mod = p.youngs_modulus;
             const float nu = p.poissons_ratio;
@@ -1020,7 +1039,16 @@ void MPMSolver2D::updateStressState(float dt) {
             if (term_temp < 0.0f) term_temp = 0.0f;
 
             float jc_yield = term_strain * term_rate * term_temp;
-            if (T_star >= 1.0f) jc_yield = 0.0f; // Liquid state
+            if (T_star >= 1.0f) {
+                // Liquid / melted state behaves hydrodynamically: zero deviatoric shear and zero affine B
+                p.sigma[0][0] = -p_hydro;
+                p.sigma[1][1] = -p_hydro;
+                p.sigma[0][1] = 0.0f;
+                p.sigma[1][0] = 0.0f;
+                p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
+                p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
+                continue;
+            }
 
             // 4. Radial Return Mapping & Plastic Work Dissipation
             float delta_ep = 0.0f;
@@ -1236,7 +1264,7 @@ float MPMSolver2D::computeStepSize(float cfl) const {
         }
         if (std::isnan(c_s) || std::isinf(c_s)) continue;
         float v_mag = std::sqrt(p.v[0] * p.v[0] + p.v[1] * p.v[1]);
-        if (v_mag > 5000.0f) v_mag = 5000.0f;
+        if (v_mag > 25000.0f) v_mag = 25000.0f;
         if (v_mag > max_v) max_v = v_mag;
         float total_speed = c_s + v_mag;
         if (total_speed > max_speed) max_speed = total_speed;

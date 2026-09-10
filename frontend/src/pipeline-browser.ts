@@ -10,6 +10,7 @@ import { PlatformBridge } from './PlatformBridge.js';
 import { CustomDialog } from './custom-dialog.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { GaugeManagerModal } from './gauge-manager-modal.js';
+import { PipelineConnectionModal } from './pipeline-connection-modal.js';
 
 interface EntityCategory {
     id: string;
@@ -709,6 +710,12 @@ export class PipelineBrowser {
         const statusBadge = document.createElement('span');
         statusBadge.className = `pipeline-status-badge status-${status.toLowerCase()}`;
         statusBadge.textContent = status;
+        if (status === 'INCOMPLETE') {
+            const completeness = this.stateManager.isModelComplete(model.id);
+            if (!completeness.complete && completeness.reason) {
+                statusBadge.title = completeness.reason;
+            }
+        }
 
         const step = this.stateManager.getModelStep(model.id);
         const simTime = this.stateManager.getModelSimTime(model.id);
@@ -733,18 +740,7 @@ export class PipelineBrowser {
             id: newId,
             name: newName,
             filename: null,
-            nodes: [
-                {
-                    id: `mesh-${newId}`,
-                    type: 'DomainMesh3D',
-                    x: 50,
-                    y: 50,
-                    displayMode: 'expanded',
-                    inputs: this.stateManager.getDefaultInputs('DomainMesh3D'),
-                    outputs: this.stateManager.getDefaultOutputs('DomainMesh3D'),
-                    parameters: this.stateManager.getDefaultParameters('DomainMesh3D')
-                }
-            ],
+            nodes: [],
             connections: []
         };
         this.stateManager.addModelToWorkspace(newModel);
@@ -1061,6 +1057,7 @@ export class PipelineBrowser {
         let compositeStatus: SimulationStatus = 'UNINITIALIZED';
         if (statuses.some(s => s === 'RUNNING')) compositeStatus = 'RUNNING';
         else if (statuses.some(s => s === 'ERROR')) compositeStatus = 'ERROR';
+        else if (statuses.some(s => s === 'INCOMPLETE')) compositeStatus = 'INCOMPLETE';
         else if (statuses.some(s => s === 'PAUSED')) compositeStatus = 'PAUSED';
         else if (statuses.every(s => s === 'INITIALIZED')) compositeStatus = 'INITIALIZED';
 
@@ -1208,6 +1205,12 @@ export class PipelineBrowser {
         const statusBadge = document.createElement('span');
         statusBadge.className = `pipeline-status-badge status-${status.toLowerCase()}`;
         statusBadge.textContent = status;
+        if (status === 'INCOMPLETE') {
+            const completeness = this.stateManager.isModelComplete(model.id);
+            if (!completeness.complete && completeness.reason) {
+                statusBadge.title = completeness.reason;
+            }
+        }
         rightGroup.appendChild(statusBadge);
 
         // Execution Action Deck
@@ -1384,8 +1387,20 @@ export class PipelineBrowser {
             }
         });
 
+        // Manage Connections Modal
+        const connBtn = document.createElement('button');
+        connBtn.className = 'pipeline-tool-btn conn-btn';
+        connBtn.textContent = '🔗 Connections';
+        connBtn.title = 'Manage and wire entity connections in this model (Meshes, Solvers, Detonators, Materials, Objects)';
+        connBtn.addEventListener('click', () => {
+            new PipelineConnectionModal(this.stateManager, model, () => {
+                this.render();
+            });
+        });
+
         toolbar.appendChild(addBtn);
         toolbar.appendChild(deleteBtn);
+        toolbar.appendChild(connBtn);
         toolbar.appendChild(runAllBtn);
 
         // Collapse All / Expand All Toggle
@@ -1572,10 +1587,16 @@ export class PipelineBrowser {
         typeChip.className = 'pipeline-type-chip';
         typeChip.textContent = this.getNodeTypeSummary(node);
 
+        // Connection status chip
+        const connChip = this.createNodeConnectionChip(node, model);
+
         item.appendChild(eyeBtn);
         item.appendChild(badge);
         item.appendChild(label);
         item.appendChild(typeChip);
+        if (connChip) {
+            item.appendChild(connChip);
+        }
 
         // Click to select node
         item.addEventListener('click', (e) => {
@@ -2927,7 +2948,23 @@ export class PipelineBrowser {
                 if (matType === 'Air') return node.parameters.preset || 'Air (Ambient STP)';
                 if (matType === 'JWL Charge') return `JWL (${node.parameters.composition || 'TNT'})`;
                 if (matType === 'Ideal Gas Charge') return `Ideal Gas (${node.parameters.composition || 'TNT'})`;
-                return node.parameters.preset || node.parameters.material_model || 'Material';
+                const matModel = node.parameters.material_model || 'Material';
+                const preset = node.parameters.preset;
+                if (preset === 'Custom') {
+                    return `${matModel} (Custom)`;
+                }
+                return preset || matModel || 'Material';
+            }
+            case 'DetonatorLocation3D': {
+                const x = Number(node.parameters.detonator_x ?? 0.5);
+                const y = Number(node.parameters.detonator_y ?? 0.5);
+                const z = Number(node.parameters.detonator_z ?? 0.5);
+                return `xyz=(${x}, ${y}, ${z})`;
+            }
+            case 'DetonatorLocation': {
+                const r = Number(node.parameters.detonator_r ?? 0.0);
+                const z = Number(node.parameters.detonator_z ?? 0.1);
+                return `rz=(${r}, ${z})`;
             }
             case 'Charge3D':
                 return `${node.parameters.charge_mass || '0.85'} kg`;
@@ -2959,6 +2996,156 @@ export class PipelineBrowser {
             default:
                 return node.type;
         }
+    }
+
+    private createNodeConnectionChip(node: Node, model: Model): HTMLElement | null {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return null;
+
+        const chip = document.createElement('span');
+        chip.className = 'pipeline-conn-chip';
+
+        // Detonator nodes
+        if (node.type === 'DetonatorLocation3D' || node.type === 'DetonatorLocation') {
+            const conn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'detonator' || c.toPort === 'detonators'));
+            if (conn) {
+                const target = model.nodes.find(n => n.id === conn.toNode);
+                const targetName = target?.parameters?.name || target?.type || 'Solver';
+                chip.classList.add('connected');
+                chip.textContent = `🔗 ${targetName}`;
+                chip.title = `Detonator is wired to ${targetName}. Click to modify connections.`;
+            } else {
+                chip.classList.add('unconnected');
+                chip.textContent = '⚠️ Unwired';
+                chip.title = 'Detonator is not connected to any solver domain! Click to connect.';
+            }
+            chip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                new PipelineConnectionModal(this.stateManager, model, () => this.render());
+            });
+            return chip;
+        }
+
+        // Domain meshes
+        if (node.type === 'DomainMesh3D' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh') {
+            const conn = state.connections.find(c => (c.fromNode === node.id && c.toPort === 'mesh') || (c.toNode === node.id && c.fromPort === 'mesh'));
+            if (conn) {
+                const solverId = conn.fromNode === node.id ? conn.toNode : conn.fromNode;
+                const solver = model.nodes.find(n => n.id === solverId);
+                const solverName = solver?.parameters?.name || solver?.type || 'Solver';
+                chip.classList.add('connected');
+                chip.textContent = `🔗 ${solverName}`;
+                chip.title = `Background mesh wired to ${solverName}. Click to manage connections.`;
+            } else {
+                chip.classList.add('unconnected');
+                chip.textContent = '⚠️ No Solver';
+                chip.title = 'Mesh is not connected to any solver domain! Click to connect.';
+            }
+            chip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                new PipelineConnectionModal(this.stateManager, model, () => this.render());
+            });
+            return chip;
+        }
+
+        // Objects (MPM / FEM)
+        if (node.type === 'MPMObject3D' || node.type === 'FEMObject3D' || node.type === 'MPMObject2D') {
+            const domainConn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects'));
+            const matConn = state.connections.find(c => (c.toNode === node.id || c.fromNode === node.id) && (c.toPort === 'material' || c.fromPort === 'material'));
+
+            if (!domainConn && !matConn) {
+                chip.classList.add('unconnected');
+                chip.textContent = '⚠️ Unconnected';
+                chip.title = 'Object is not connected to a domain or material! Click to connect.';
+            } else if (!domainConn) {
+                chip.classList.add('unconnected');
+                chip.textContent = '⚠️ No Domain';
+                chip.title = 'Object is not connected to an MPM/FEM domain! Click to connect.';
+            } else if (!matConn) {
+                chip.classList.add('unconnected');
+                chip.textContent = '⚠️ No Material';
+                chip.title = 'Object has no constitutive material wired! Click to connect.';
+            } else {
+                const domain = model.nodes.find(n => n.id === domainConn.toNode);
+                const domainName = domain?.parameters?.name || domain?.type || 'Domain';
+                chip.classList.add('connected');
+                chip.textContent = `🔗 ${domainName}`;
+                chip.title = `Object wired to ${domainName}. Click to modify connections.`;
+            }
+            chip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                new PipelineConnectionModal(this.stateManager, model, () => this.render());
+            });
+            return chip;
+        }
+
+        // Material nodes
+        if (node.type === 'Material' || (node.type as string).startsWith('MPMMaterial')) {
+            const conns = state.connections.filter(c => (c.fromNode === node.id || c.toNode === node.id) && (c.toPort === 'material' || c.fromPort === 'material'));
+            if (conns.length > 0) {
+                chip.classList.add('connected');
+                chip.textContent = `🔗 ${conns.length} obj`;
+                chip.title = `Material assigned to ${conns.length} object(s). Click to modify connections.`;
+            } else {
+                chip.classList.add('unconnected');
+                chip.textContent = '⚠️ Unused';
+                chip.title = 'Material is not assigned to any object or domain! Click to connect.';
+            }
+            chip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                new PipelineConnectionModal(this.stateManager, model, () => this.render());
+            });
+            return chip;
+        }
+
+        // Solvers (CFD / MPM / FEM)
+        if (['CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D', 'CFDSolver2D', 'MPMDomain2D'].includes(node.type)) {
+            const hasMesh = state.connections.some(c => c.toNode === node.id && c.toPort === 'mesh');
+            const hasDet = state.connections.some(c => c.toNode === node.id && (c.toPort === 'detonator' || c.toPort === 'detonators'));
+            if (!hasMesh) {
+                chip.classList.add('unconnected');
+                chip.textContent = '⚠️ No Mesh';
+                chip.title = 'Solver domain has no background mesh wired! Click to connect.';
+                chip.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    new PipelineConnectionModal(this.stateManager, model, () => this.render());
+                });
+                return chip;
+            } else if (hasDet) {
+                chip.classList.add('connected');
+                chip.textContent = '💥 Det Wired';
+                chip.title = 'Detonator is actively connected to this solver. Click to manage connections.';
+                chip.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    new PipelineConnectionModal(this.stateManager, model, () => this.render());
+                });
+                return chip;
+            }
+            return null;
+        }
+
+        // Charges
+        if (node.type === 'Charge3D' || node.type === 'Charge2D' || node.type === 'Charge1D') {
+            const conn = state.connections.find(c => c.fromNode === node.id && c.toPort === 'charge');
+            if (conn) {
+                const solver = model.nodes.find(n => n.id === conn.toNode);
+                const name = solver?.parameters?.name || solver?.type || 'CFD';
+                chip.classList.add('connected');
+                chip.textContent = `🔗 ${name}`;
+                chip.title = `Charge wired to ${name}. Click to modify connections.`;
+            } else {
+                chip.classList.add('unconnected');
+                chip.textContent = '⚠️ Connect CFD';
+                chip.title = 'Charge is not connected to any CFD solver! Click to connect.';
+            }
+            chip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                new PipelineConnectionModal(this.stateManager, model, () => this.render());
+            });
+            return chip;
+        }
+
+        return null;
     }
 
     private handleSelectionChange(nodeId: string | null, sliceIdx: number | null, gaugeIdx: number | null): void {
@@ -3515,6 +3702,227 @@ export class PipelineBrowser {
             menu.appendChild(gaugeMgrItem);
         }
 
+        // Context Connection Shortcuts
+        const state = this.stateManager.getCurrentState();
+        if (state) {
+            // Detonator nodes
+            if (node.type === 'DetonatorLocation3D' || node.type === 'DetonatorLocation') {
+                const solverNodes = model.nodes.filter(n => ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MPMDomain2D', 'CFDSolver2D'].includes(n.type));
+                for (const solver of solverNodes) {
+                    const solverName = solver.parameters?.name || solver.type;
+                    const isConnected = state.connections.some(c => c.fromNode === node.id && c.toNode === solver.id && (c.toPort === 'detonator' || c.toPort === 'detonators'));
+                    const connItem = document.createElement('div');
+                    connItem.className = 'context-menu-item';
+                    if (!isConnected) {
+                        connItem.style.color = '#38bdf8';
+                        connItem.textContent = `💥 Connect to ${solverName}`;
+                        connItem.addEventListener('click', () => {
+                            menu.remove();
+                            state.connections.push({
+                                fromNode: node.id,
+                                fromPort: 'detonator',
+                                toNode: solver.id,
+                                toPort: 'detonator'
+                            });
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                            this.stateManager.pushState(state);
+                            this.render();
+                        });
+                    } else {
+                        connItem.style.color = '#f87171';
+                        connItem.textContent = `❌ Disconnect from ${solverName}`;
+                        connItem.addEventListener('click', () => {
+                            menu.remove();
+                            state.connections = state.connections.filter(c => !(c.fromNode === node.id && c.toNode === solver.id));
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                            this.stateManager.pushState(state);
+                            this.render();
+                        });
+                    }
+                    menu.appendChild(connItem);
+                }
+            } else if (['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MPMDomain2D', 'CFDSolver2D'].includes(node.type)) {
+                // Background mesh options
+                const meshNodes = model.nodes.filter(n => ['DomainMesh3D', 'DomainMesh2D', 'DomainMesh'].includes(n.type));
+                for (const mesh of meshNodes) {
+                    const meshName = mesh.parameters?.name || mesh.type;
+                    const isConnected = state.connections.some(c => (c.fromNode === mesh.id && c.toNode === node.id && c.toPort === 'mesh') || (c.toNode === mesh.id && c.fromNode === node.id && c.fromPort === 'mesh'));
+                    if (!isConnected) {
+                        const connItem = document.createElement('div');
+                        connItem.className = 'context-menu-item';
+                        connItem.style.color = '#38bdf8';
+                        connItem.textContent = `📐 Connect Mesh [${meshName}]`;
+                        connItem.addEventListener('click', () => {
+                            menu.remove();
+                            state.connections.push({
+                                fromNode: mesh.id,
+                                fromPort: 'mesh',
+                                toNode: node.id,
+                                toPort: 'mesh'
+                            });
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                            this.stateManager.pushState(state);
+                            this.render();
+                        });
+                        menu.appendChild(connItem);
+                    }
+                }
+
+                // Detonator options for this solver
+                const detonators = model.nodes.filter(n => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
+                for (const det of detonators) {
+                    const detName = det.parameters?.name || det.type;
+                    const isConnected = state.connections.some(c => c.fromNode === det.id && c.toNode === node.id && (c.toPort === 'detonator' || c.toPort === 'detonators'));
+                    const detItem = document.createElement('div');
+                    detItem.className = 'context-menu-item';
+                    if (!isConnected) {
+                        detItem.style.color = '#fb923c';
+                        detItem.textContent = `💥 Connect Detonator [${detName}]`;
+                        detItem.addEventListener('click', () => {
+                            menu.remove();
+                            state.connections.push({
+                                fromNode: det.id,
+                                fromPort: 'detonator',
+                                toNode: node.id,
+                                toPort: 'detonator'
+                            });
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                            this.stateManager.pushState(state);
+                            this.render();
+                        });
+                    } else {
+                        detItem.style.color = '#f87171';
+                        detItem.textContent = `❌ Disconnect Detonator [${detName}]`;
+                        detItem.addEventListener('click', () => {
+                            menu.remove();
+                            state.connections = state.connections.filter(c => !(c.fromNode === det.id && c.toNode === node.id));
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                            this.stateManager.pushState(state);
+                            this.render();
+                        });
+                    }
+                    menu.appendChild(detItem);
+                }
+            } else if (node.type === 'DomainMesh3D' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh') {
+                const solverNodes = model.nodes.filter(n => ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MPMDomain2D', 'CFDSolver2D'].includes(n.type));
+                for (const solver of solverNodes) {
+                    const solverName = solver.parameters?.name || solver.type;
+                    const isConnected = state.connections.some(c => (c.fromNode === node.id && c.toNode === solver.id && c.toPort === 'mesh') || (c.toNode === node.id && c.fromNode === solver.id && c.fromPort === 'mesh'));
+                    if (!isConnected) {
+                        const connItem = document.createElement('div');
+                        connItem.className = 'context-menu-item';
+                        connItem.style.color = '#38bdf8';
+                        connItem.textContent = `🔗 Connect to ${solverName}`;
+                        connItem.addEventListener('click', () => {
+                            menu.remove();
+                            state.connections.push({
+                                fromNode: node.id,
+                                fromPort: 'mesh',
+                                toNode: solver.id,
+                                toPort: 'mesh'
+                            });
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                            this.stateManager.pushState(state);
+                            this.render();
+                        });
+                        menu.appendChild(connItem);
+                    }
+                }
+            } else if (node.type === 'MPMObject3D' || node.type === 'FEMObject3D' || node.type === 'MPMObject2D') {
+                const domainNodes = model.nodes.filter(n => ['MPMDomain3D', 'FEMDomain3D', 'MPMDomain2D'].includes(n.type));
+                for (const domain of domainNodes) {
+                    const domainName = domain.parameters?.name || domain.type;
+                    const isConnected = state.connections.some(c => c.fromNode === node.id && c.toNode === domain.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects'));
+                    if (!isConnected) {
+                        const connItem = document.createElement('div');
+                        connItem.className = 'context-menu-item';
+                        connItem.style.color = '#c084fc';
+                        connItem.textContent = `🔗 Connect to ${domainName}`;
+                        connItem.addEventListener('click', () => {
+                            menu.remove();
+                            state.connections.push({
+                                fromNode: node.id,
+                                fromPort: 'out',
+                                toNode: domain.id,
+                                toPort: 'objects'
+                            });
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                            this.stateManager.pushState(state);
+                            this.render();
+                        });
+                        menu.appendChild(connItem);
+                    }
+                }
+
+                // Material assignments
+                const matNodes = model.nodes.filter(n => n.type === 'Material' || (n.type as string).startsWith('MPMMaterial'));
+                for (const mat of matNodes) {
+                    const matName = mat.parameters?.name || mat.parameters?.preset || mat.parameters?.material_model || mat.type;
+                    const isConnected = state.connections.some(c => c.fromNode === mat.id && c.toNode === node.id && c.toPort === 'material');
+                    if (!isConnected) {
+                        const matItem = document.createElement('div');
+                        matItem.className = 'context-menu-item';
+                        matItem.style.color = '#4ade80';
+                        matItem.textContent = `🧪 Assign Material [${matName}]`;
+                        matItem.addEventListener('click', () => {
+                            menu.remove();
+                            state.connections = state.connections.filter(c => !(c.toNode === node.id && c.toPort === 'material'));
+                            state.connections.push({
+                                fromNode: mat.id,
+                                fromPort: 'material',
+                                toNode: node.id,
+                                toPort: 'material'
+                            });
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                            this.stateManager.pushState(state);
+                            this.render();
+                        });
+                        menu.appendChild(matItem);
+                    }
+                }
+            } else if (node.type === 'Material' || (node.type as string).startsWith('MPMMaterial')) {
+                const objectNodes = model.nodes.filter(n => ['MPMObject3D', 'FEMObject3D', 'MPMObject2D'].includes(n.type));
+                for (const obj of objectNodes) {
+                    const objName = obj.parameters?.name || obj.type;
+                    const isConnected = state.connections.some(c => c.fromNode === node.id && c.toNode === obj.id && c.toPort === 'material');
+                    if (!isConnected) {
+                        const matItem = document.createElement('div');
+                        matItem.className = 'context-menu-item';
+                        matItem.style.color = '#4ade80';
+                        matItem.textContent = `🧪 Assign to [${objName}]`;
+                        matItem.addEventListener('click', () => {
+                            menu.remove();
+                            state.connections = state.connections.filter(c => !(c.toNode === obj.id && c.toPort === 'material'));
+                            state.connections.push({
+                                fromNode: node.id,
+                                fromPort: 'material',
+                                toNode: obj.id,
+                                toPort: 'material'
+                            });
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                            this.stateManager.pushState(state);
+                            this.render();
+                        });
+                        menu.appendChild(matItem);
+                    }
+                }
+            }
+
+            // Always provide "Manage Model Connections..."
+            const manageItem = document.createElement('div');
+            manageItem.className = 'context-menu-item';
+            manageItem.style.color = '#38bdf8';
+            manageItem.style.fontWeight = '500';
+            manageItem.textContent = '🔗 Manage Model Connections...';
+            manageItem.addEventListener('click', () => {
+                menu.remove();
+                new PipelineConnectionModal(this.stateManager, model, () => {
+                    this.render();
+                });
+            });
+            menu.appendChild(manageItem);
+        }
+
         // Duplicate
         const dupItem = document.createElement('div');
         dupItem.className = 'context-menu-item';
@@ -3555,11 +3963,22 @@ export class PipelineBrowser {
         const outputs = this.stateManager.getDefaultOutputs(type);
         const defaultParams = this.stateManager.getDefaultParameters(type) || {};
 
+        // Calculate layout position to prevent stacking on (100, 100)
+        const modelNodes = model.nodes || [];
+        let newX = 100;
+        let newY = 100;
+        if (modelNodes.length > 0) {
+            const maxX = Math.max(...modelNodes.map(n => n.x || 100));
+            const lastNode = modelNodes.find(n => (n.x || 100) === maxX) || modelNodes[modelNodes.length - 1];
+            newX = (lastNode.x || 100) + 320;
+            newY = lastNode.y || 100;
+        }
+
         const newNode: Node = {
             id,
             type,
-            x: 100,
-            y: 100,
+            x: newX,
+            y: newY,
             displayMode: 'expanded',
             inputs,
             outputs,
@@ -3567,6 +3986,94 @@ export class PipelineBrowser {
         };
 
         state.nodes.push(newNode);
+        model.nodes.push(newNode);
+
+        // Auto-connect complementary nodes within the same model
+        if (type === 'MPMDomain3D') {
+            const meshNode = model.nodes.find(n => n.id !== id && n.type === 'DomainMesh3D');
+            const hasMeshConn = state.connections.some(c => c.toNode === id && c.toPort === 'mesh');
+            if (meshNode && !hasMeshConn) {
+                state.connections.push({
+                    fromNode: meshNode.id,
+                    fromPort: 'mesh',
+                    toNode: id,
+                    toPort: 'mesh'
+                });
+                model.connections.push({
+                    fromNode: meshNode.id,
+                    fromPort: 'mesh',
+                    toNode: id,
+                    toPort: 'mesh'
+                });
+            }
+            const objNode = model.nodes.find(n => n.id !== id && n.type === 'MPMObject3D');
+            const hasObjConn = state.connections.some(c => c.toNode === id && (c.toPort === 'objects' || c.toPort === 'mpm_objects'));
+            if (objNode && !hasObjConn) {
+                state.connections.push({
+                    fromNode: objNode.id,
+                    fromPort: 'out',
+                    toNode: id,
+                    toPort: 'objects'
+                });
+                model.connections.push({
+                    fromNode: objNode.id,
+                    fromPort: 'out',
+                    toNode: id,
+                    toPort: 'objects'
+                });
+            }
+        } else if (type === 'DomainMesh3D') {
+            const solverNode = model.nodes.find(n => n.id !== id && ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D'].includes(n.type));
+            const hasMeshConn = solverNode && state.connections.some(c => c.toNode === solverNode.id && c.toPort === 'mesh');
+            if (solverNode && !hasMeshConn) {
+                state.connections.push({
+                    fromNode: id,
+                    fromPort: 'mesh',
+                    toNode: solverNode.id,
+                    toPort: 'mesh'
+                });
+                model.connections.push({
+                    fromNode: id,
+                    fromPort: 'mesh',
+                    toNode: solverNode.id,
+                    toPort: 'mesh'
+                });
+            }
+        } else if (type === 'MPMObject3D') {
+            const mpmDomain = model.nodes.find(n => n.id !== id && n.type === 'MPMDomain3D');
+            if (mpmDomain) {
+                state.connections.push({
+                    fromNode: id,
+                    fromPort: 'out',
+                    toNode: mpmDomain.id,
+                    toPort: 'objects'
+                });
+                model.connections.push({
+                    fromNode: id,
+                    fromPort: 'out',
+                    toNode: mpmDomain.id,
+                    toPort: 'objects'
+                });
+            }
+            const matNode = model.nodes.find(n => n.id !== id && n.type === 'Material');
+            if (matNode) {
+                state.connections.push({
+                    fromNode: matNode.id,
+                    fromPort: 'out',
+                    toNode: id,
+                    toPort: 'material'
+                });
+                model.connections.push({
+                    fromNode: matNode.id,
+                    fromPort: 'out',
+                    toNode: id,
+                    toPort: 'material'
+                });
+                newNode.parameters['material'] = matNode.id;
+            }
+        }
+
+        this.stateManager.healModelGraph(model);
         this.stateManager.pushState(state);
         this.stateManager.selectNode(model.id, id);
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');

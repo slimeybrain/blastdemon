@@ -71,6 +71,7 @@ export class GraphRenderer {
     private isDraggingWire: boolean = false;
     private dragSourceNodeId: string | null = null;
     private dragSourcePortId: string | null = null;
+    private dragSourceIsInput: boolean = false;
     private mouseWorldPosition: { x: number, y: number } = { x: 0, y: 0 };
     private hoveredPort: { nodeId: string, portId: string, isInput: boolean } | null = null;
 
@@ -645,26 +646,50 @@ export class GraphRenderer {
                 );
 
                 for (const node of nearbyNodes) {
-                    const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
-                        || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
-                    const inputsToCheck = useRepresentative ? (node.inputs.length > 0 ? [node.inputs[0]] : []) : node.inputs;
-                    for (const input of inputsToCheck) {
-                        // Check compatibility
-                        if (this.dragSourceNodeId && this.dragSourcePortId) {
-                            const fromNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
-                            if (fromNode && !this.isConnectionCompatible(fromNode, this.dragSourcePortId, node, input.id)) {
-                                continue;
+                    if (this.dragSourceIsInput) {
+                        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
+                            || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
+                        const outputsToCheck = useRepresentative ? (node.outputs.length > 0 ? [node.outputs[0]] : []) : node.outputs;
+                        for (const output of outputsToCheck) {
+                            if (this.dragSourceNodeId && this.dragSourcePortId) {
+                                const targetInputNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
+                                if (targetInputNode && !this.isConnectionCompatible(node, output.id, targetInputNode, this.dragSourcePortId)) {
+                                    continue;
+                                }
+                            }
+                            const pos = this.getPortPosition(node, output.id, false);
+                            if (pos) {
+                                const localDist = Math.sqrt(Math.pow(pos.x - worldX, 2) + Math.pow(pos.y - worldY, 2));
+                                const screenDist = localDist * this.zoom;
+                                if (screenDist < 25) {
+                                    this.mouseWorldPosition = { x: pos.x, y: pos.y };
+                                    this.hoveredPort = { nodeId: node.id, portId: output.id, isInput: false };
+                                    break;
+                                }
                             }
                         }
+                    } else {
+                        const useRepresentative = node.displayMode === 'compact' || node.displayMode === 'full-panel'
+                            || (node.type === 'TelemetryText' && (node.orientation || 'HORIZ') === 'HORIZ');
+                        const inputsToCheck = useRepresentative ? (node.inputs.length > 0 ? [node.inputs[0]] : []) : node.inputs;
+                        for (const input of inputsToCheck) {
+                            // Check compatibility
+                            if (this.dragSourceNodeId && this.dragSourcePortId) {
+                                const fromNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
+                                if (fromNode && !this.isConnectionCompatible(fromNode, this.dragSourcePortId, node, input.id)) {
+                                    continue;
+                                }
+                            }
 
-                        const pos = this.getPortPosition(node, input.id, true);
-                        if (pos) {
-                            const localDist = Math.sqrt(Math.pow(pos.x - worldX, 2) + Math.pow(pos.y - worldY, 2));
-                            const screenDist = localDist * this.zoom;
-                            if (screenDist < 25) { // Snapping threshold of 25 screen pixels
-                                this.mouseWorldPosition = { x: pos.x, y: pos.y };
-                                this.hoveredPort = { nodeId: node.id, portId: input.id, isInput: true };
-                                break;
+                            const pos = this.getPortPosition(node, input.id, true);
+                            if (pos) {
+                                const localDist = Math.sqrt(Math.pow(pos.x - worldX, 2) + Math.pow(pos.y - worldY, 2));
+                                const screenDist = localDist * this.zoom;
+                                if (screenDist < 25) { // Snapping threshold of 25 screen pixels
+                                    this.mouseWorldPosition = { x: pos.x, y: pos.y };
+                                    this.hoveredPort = { nodeId: node.id, portId: input.id, isInput: true };
+                                    break;
+                                }
                             }
                         }
                     }
@@ -792,7 +817,8 @@ export class GraphRenderer {
 
         const sourceNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
         if (!sourceNode) return;
-        const fromPos = this.getPortPosition(sourceNode, this.dragSourcePortId!, false);
+        const isInput = !!this.dragSourceIsInput;
+        const fromPos = this.getPortPosition(sourceNode, this.dragSourcePortId!, isInput);
         if (!fromPos) return;
 
         const toPos = this.mouseWorldPosition;
@@ -800,11 +826,19 @@ export class GraphRenderer {
         const strength = Math.max(dist * 0.5, 50);
 
         const fromOrient = sourceNode.orientation || 'HORIZ';
-        const cp1X = fromOrient === 'VERT' ? fromPos.x : fromPos.x + strength;
-        const cp1Y = fromOrient === 'VERT' ? fromPos.y + strength : fromPos.y;
+        const cp1X = fromOrient === 'VERT' 
+            ? fromPos.x 
+            : (isInput ? fromPos.x - strength : fromPos.x + strength);
+        const cp1Y = fromOrient === 'VERT' 
+            ? (isInput ? fromPos.y - strength : fromPos.y + strength) 
+            : fromPos.y;
 
-        const cp2X = this.layoutOrientation === 'VERT' ? toPos.x : toPos.x - strength;
-        const cp2Y = this.layoutOrientation === 'VERT' ? toPos.y - strength : toPos.y;
+        const cp2X = this.layoutOrientation === 'VERT' 
+            ? toPos.x 
+            : (isInput ? toPos.x + strength : toPos.x - strength);
+        const cp2Y = this.layoutOrientation === 'VERT' 
+            ? (isInput ? toPos.y + strength : toPos.y - strength) 
+            : toPos.y;
 
         const d = `M ${fromPos.x} ${fromPos.y} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${toPos.x} ${toPos.y}`;
 
@@ -962,46 +996,77 @@ export class GraphRenderer {
         }
 
         if (this.isDraggingWire) {
-            if (this.hoveredPort && this.hoveredPort.isInput) {
-                const state = this.stateManager.getCurrentState();
-                if (state) {
-                    const targetNode = state.nodes.find(n => n.id === this.hoveredPort!.nodeId);
-                    const isMultiInput = ((targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'MPMDomain3D' || targetNode?.type === 'FEMDomain3D') && (this.hoveredPort!.portId === 'objects' || this.hoveredPort!.portId === 'detonator'))
-                        || targetNode?.type === 'TelemetryText'
-                        || targetNode?.type === 'TelemetryContour';
+            const state = this.stateManager.getCurrentState();
+            if (state) {
+                let fromNodeId: string | null = null;
+                let fromPortId: string | null = null;
+                let toNodeId: string | null = null;
+                let toPortId: string | null = null;
 
-                    if (!isMultiInput) {
-                        const existingIdx = state.connections.findIndex(conn =>
-                            conn.toNode === this.hoveredPort!.nodeId &&
-                            conn.toPort === this.hoveredPort!.portId
-                        );
-                        if (existingIdx !== -1) {
-                            state.connections.splice(existingIdx, 1);
-                        }
+                if (this.dragSourceIsInput) {
+                    // Reverse drag: drag source was an input port, hoveredPort is an output port
+                    if (this.hoveredPort && !this.hoveredPort.isInput) {
+                        fromNodeId = this.hoveredPort.nodeId;
+                        fromPortId = this.hoveredPort.portId;
+                        toNodeId = this.dragSourceNodeId;
+                        toPortId = this.dragSourcePortId;
                     }
+                } else {
+                    // Forward drag: drag source was an output port, hoveredPort is an input port
+                    if (this.hoveredPort && this.hoveredPort.isInput) {
+                        fromNodeId = this.dragSourceNodeId;
+                        fromPortId = this.dragSourcePortId;
+                        toNodeId = this.hoveredPort.nodeId;
+                        toPortId = this.hoveredPort.portId;
+                    }
+                }
 
-                    const exists = state.connections.some(conn =>
-                        conn.fromNode === this.dragSourceNodeId &&
-                        conn.fromPort === this.dragSourcePortId &&
-                        conn.toNode === this.hoveredPort!.nodeId &&
-                        conn.toPort === this.hoveredPort!.portId
-                    );
-                    if (!exists) {
-                        state.connections.push({
-                            fromNode: this.dragSourceNodeId!,
-                            fromPort: this.dragSourcePortId!,
-                            toNode: this.hoveredPort.nodeId,
-                            toPort: this.hoveredPort.portId
-                        });
-                        if (this.hoveredPort.portId === 'material' && targetNode) {
-                            targetNode.parameters['material'] = this.dragSourceNodeId;
-                            this.stateManager.updateNodeParametersInPlace(targetNode.id, { material: this.dragSourceNodeId });
+                if (fromNodeId && fromPortId && toNodeId && toPortId) {
+                    const fromNode = state.nodes.find(n => n.id === fromNodeId);
+                    const targetNode = state.nodes.find(n => n.id === toNodeId);
+                    if (fromNode && targetNode && this.isConnectionCompatible(fromNode, fromPortId, targetNode, toPortId)) {
+                        const isMultiInput = ((targetNode.type === 'MPMDomain2D' || targetNode.type === 'MPMDomain3D' || targetNode.type === 'FEMDomain3D') && (toPortId === 'objects' || toPortId === 'detonator'))
+                            || targetNode.type === 'TelemetryText'
+                            || targetNode.type === 'TelemetryContour';
+
+                        if (!isMultiInput) {
+                            const existingIdx = state.connections.findIndex(conn =>
+                                conn.toNode === toNodeId &&
+                                conn.toPort === toPortId
+                            );
+                            if (existingIdx !== -1) {
+                                state.connections.splice(existingIdx, 1);
+                            }
                         }
-                        this.stateManager.pushState(state);
+
+                        const exists = state.connections.some(conn =>
+                            conn.fromNode === fromNodeId &&
+                            conn.fromPort === fromPortId &&
+                            conn.toNode === toNodeId &&
+                            conn.toPort === toPortId
+                        );
+                        if (!exists) {
+                            state.connections.push({
+                                fromNode: fromNodeId,
+                                fromPort: fromPortId,
+                                toNode: toNodeId,
+                                toPort: toPortId
+                            });
+                            if (toPortId === 'material' && targetNode) {
+                                targetNode.parameters['material'] = fromNodeId;
+                                this.stateManager.updateNodeParametersInPlace(targetNode.id, { material: fromNodeId });
+                            }
+                            const owningModel = this.stateManager.getModelForNode(toNodeId) || this.stateManager.getActiveModel();
+                            if (owningModel) {
+                                this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+                            }
+                            this.stateManager.pushState(state);
+                        }
                     }
                 }
             }
             this.isDraggingWire = false;
+            this.dragSourceIsInput = false;
             this.hoveredPort = null;
             this.detachedConnection = null;
             const wirePreview = this.svg.querySelector('.dragging-wire-preview');
@@ -1580,6 +1645,10 @@ export class GraphRenderer {
         }
 
         state.nodes.push(newNode);
+        const targetModel = this.stateManager.getActiveModel();
+        if (targetModel) {
+            this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
+        }
         this.stateManager.pushState(state);
     }
 
@@ -2215,6 +2284,7 @@ export class GraphRenderer {
                                 p.addEventListener('mousedown', (e) => {
                                     e.stopPropagation();
                                     this.isDraggingWire = true;
+                                    this.dragSourceIsInput = false;
                                     this.dragSourceNodeId = node.id;
                                     this.dragSourcePortId = node.outputs[0].id;
                                 });
@@ -2239,6 +2309,7 @@ export class GraphRenderer {
                                 p.addEventListener('mousedown', (e) => {
                                     e.stopPropagation();
                                     this.isDraggingWire = true;
+                                    this.dragSourceIsInput = false;
                                     this.dragSourceNodeId = node.id;
                                     this.dragSourcePortId = node.outputs[0].id;
                                 });
@@ -2266,6 +2337,7 @@ export class GraphRenderer {
                                 p.addEventListener('mousedown', (e) => {
                                     e.stopPropagation();
                                     this.isDraggingWire = true;
+                                    this.dragSourceIsInput = false;
                                     this.dragSourceNodeId = node.id;
                                     this.dragSourcePortId = node.outputs[0].id;
                                 });
@@ -2290,6 +2362,7 @@ export class GraphRenderer {
                                 p.addEventListener('mousedown', (e) => {
                                     e.stopPropagation();
                                     this.isDraggingWire = true;
+                                    this.dragSourceIsInput = false;
                                     this.dragSourceNodeId = node.id;
                                     this.dragSourcePortId = node.outputs[0].id;
                                 });
@@ -2316,6 +2389,7 @@ export class GraphRenderer {
                                 p.addEventListener('mousedown', (e) => {
                                     e.stopPropagation();
                                     this.isDraggingWire = true;
+                                    this.dragSourceIsInput = false;
                                     this.dragSourceNodeId = node.id;
                                     this.dragSourcePortId = output.id;
                                 });
@@ -2340,6 +2414,7 @@ export class GraphRenderer {
                                 p.addEventListener('mousedown', (e) => {
                                     e.stopPropagation();
                                     this.isDraggingWire = true;
+                                    this.dragSourceIsInput = false;
                                     this.dragSourceNodeId = node.id;
                                     this.dragSourcePortId = node.outputs[0].id;
                                 });
@@ -2364,6 +2439,7 @@ export class GraphRenderer {
                                 p.addEventListener('mousedown', (e) => {
                                     e.stopPropagation();
                                     this.isDraggingWire = true;
+                                    this.dragSourceIsInput = false;
                                     this.dragSourceNodeId = node.id;
                                     this.dragSourcePortId = output.id;
                                 });
@@ -2580,9 +2656,27 @@ export class GraphRenderer {
             this.isDraggingWire = true;
             this.dragSourceNodeId = conn.fromNode;
             this.dragSourcePortId = conn.fromPort;
+            this.dragSourceIsInput = false;
             this.detachedConnection = conn;
 
             // Set mouse position
+            const ctm = this.svg.getScreenCTM();
+            if (ctm) {
+                const pt = new DOMPoint(e.clientX, e.clientY);
+                const worldPoint = pt.matrixTransform(ctm.inverse());
+                this.mouseWorldPosition = { x: worldPoint.x, y: worldPoint.y };
+            }
+            this.render();
+        } else {
+            // Dragging directly from an unconnected input port (reverse wire drag)
+            e.stopPropagation();
+            e.preventDefault();
+            this.isDraggingWire = true;
+            this.dragSourceNodeId = nodeId;
+            this.dragSourcePortId = portId;
+            this.dragSourceIsInput = true;
+            this.detachedConnection = null;
+
             const ctm = this.svg.getScreenCTM();
             if (ctm) {
                 const pt = new DOMPoint(e.clientX, e.clientY);
@@ -2697,7 +2791,8 @@ export class GraphRenderer {
 
         if (this.isDraggingWire && this.dragSourceNodeId) {
             const sourceNode = state.nodes.find(n => n.id === this.dragSourceNodeId);
-            const fromPos = this.getPortPosition(sourceNode!, this.dragSourcePortId!, false);
+            const isInput = !!this.dragSourceIsInput;
+            const fromPos = this.getPortPosition(sourceNode!, this.dragSourcePortId!, isInput);
             if (fromPos) {
                 const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 const toPos = this.mouseWorldPosition;
@@ -2705,11 +2800,19 @@ export class GraphRenderer {
                 const strength = Math.max(dist * 0.5, 50);
 
                 const fromOrient = sourceNode!.orientation || 'HORIZ';
-                const cp1X = fromOrient === 'VERT' ? fromPos.x : fromPos.x + strength;
-                const cp1Y = fromOrient === 'VERT' ? fromPos.y + strength : fromPos.y;
+                const cp1X = fromOrient === 'VERT' 
+                    ? fromPos.x 
+                    : (isInput ? fromPos.x - strength : fromPos.x + strength);
+                const cp1Y = fromOrient === 'VERT' 
+                    ? (isInput ? fromPos.y - strength : fromPos.y + strength) 
+                    : fromPos.y;
 
-                const cp2X = this.layoutOrientation === 'VERT' ? toPos.x : toPos.x - strength;
-                const cp2Y = this.layoutOrientation === 'VERT' ? toPos.y - strength : toPos.y;
+                const cp2X = this.layoutOrientation === 'VERT' 
+                    ? toPos.x 
+                    : (isInput ? toPos.x + strength : toPos.x - strength);
+                const cp2Y = this.layoutOrientation === 'VERT' 
+                    ? (isInput ? toPos.y + strength : toPos.y - strength) 
+                    : toPos.y;
 
                 const d = `M ${fromPos.x} ${fromPos.y} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${toPos.x} ${toPos.y}`;
                 path.setAttribute('d', d);
@@ -4059,7 +4162,6 @@ export class GraphRenderer {
                 const eAniso = !!node.parameters['enable_anisotropy'];
                 const anisoAxis = node.parameters['anisotropy_axis'] || 'X';
                 const kcAuto = node.parameters['kc_auto_generate'] !== false;
-                const demTrans = !!node.parameters['dem_transition_enabled'];
                 const dCrack = !!node.parameters['directional_crack_band'];
                 if (form.dataset.renderedComposition !== comp.toString() ||
                     form.dataset.renderedMaterialType !== matType.toString() ||
@@ -4072,7 +4174,6 @@ export class GraphRenderer {
                     form.dataset.renderedEnableAnisotropy !== eAniso.toString() ||
                     form.dataset.renderedAnisotropyAxis !== anisoAxis.toString() ||
                     form.dataset.renderedKcAutoGenerate !== kcAuto.toString() ||
-                    form.dataset.renderedDemTransitionEnabled !== demTrans.toString() ||
                     form.dataset.renderedDirectionalCrackBand !== dCrack.toString()) {
                     needsRebuild = true;
                 }
@@ -4233,7 +4334,6 @@ export class GraphRenderer {
             const eAniso = !!node.parameters['enable_anisotropy'];
             const anisoAxis = node.parameters['anisotropy_axis'] || 'X';
             const kcAuto = node.parameters['kc_auto_generate'] !== false;
-            const demTrans = !!node.parameters['dem_transition_enabled'];
             const dCrack = !!node.parameters['directional_crack_band'];
             form.dataset.renderedComposition = comp.toString();
             form.dataset.renderedMaterialType = matType.toString();
@@ -4246,7 +4346,6 @@ export class GraphRenderer {
             form.dataset.renderedEnableAnisotropy = eAniso.toString();
             form.dataset.renderedAnisotropyAxis = anisoAxis.toString();
             form.dataset.renderedKcAutoGenerate = kcAuto.toString();
-            form.dataset.renderedDemTransitionEnabled = demTrans.toString();
             form.dataset.renderedDirectionalCrackBand = dCrack.toString();
         } else if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
             const shape = node.parameters['charge_shape'] || 'Sphere';
@@ -4555,7 +4654,6 @@ export class GraphRenderer {
                 'filter_level': ['All', 'Metrics Only', 'Logs Only'],
                 'timestamp_mode': ['None', 'Relative', 'Clock'],
                 'material_model': getConstitutiveModels(),
-                'fragment_distribution': ['Rosin-Rammler', 'Mott-Grady', 'Lognormal', 'Monodisperse'],
                 'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
                 'coupling_scheme': ['Two-Way Staggered', 'Sub-Cycling'],
                 'pressure_integration': ['2x2 Gauss Quadrature', '1-Point Centroid'],
@@ -4791,7 +4889,6 @@ export class GraphRenderer {
                             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
                             'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
                             'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                            'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution',
                             'mg_gamma0', 'mg_c0', 'mg_s',
                             'ppc',
                             'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
@@ -5299,7 +5396,8 @@ export class GraphRenderer {
                     }
                     
                     const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'cfl';
-                    if (isDynamicCfl) {
+                    const isDynamicEndtime = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'endtime';
+                    if (isDynamicCfl || isDynamicEndtime) {
                         this.stateManager.updateNodeParametersInPlace(node.id, updates);
                         const net = (window as any).networkManager;
                         if (net && net.isConnected()) {
@@ -5314,12 +5412,21 @@ export class GraphRenderer {
                             let scope = "1d";
                             if (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') scope = "3d";
                             else if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D' || node.type === 'FSICoupler2D') scope = "2d";
-                            net.send({
-                                command: "UPDATE_CFL",
-                                modelId: targetModelId,
-                                cfl: Number(newVal),
-                                scope: scope
-                            });
+                            if (isDynamicCfl) {
+                                net.send({
+                                    command: "UPDATE_CFL",
+                                    modelId: targetModelId,
+                                    cfl: Number(newVal),
+                                    scope: scope
+                                });
+                            } else {
+                                net.send({
+                                    command: "UPDATE_ENDTIME",
+                                    modelId: targetModelId,
+                                    endtime: Number(newVal),
+                                    scope: scope
+                                });
+                            }
                         }
                     } else {
                         this.stateManager.updateNodeParameters(node.id, updates);

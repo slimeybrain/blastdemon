@@ -70,10 +70,10 @@ void FSICoupler3D::applyFluidPressureToSolid(float dt) {
         }
     }
 
-    // Apply blast aerodynamic drag to discrete DEM particles
+    // Apply blast aerodynamic drag to failed MPM debris particles
     auto& particles = m_mpm_solver->getParticles();
     for (auto& p : particles) {
-        if (p.state == 1 || p.has_failed) {
+        if (p.has_failed) {
             int ci = std::clamp(static_cast<int>(std::floor((p.x[0] - m_mpm_solver->getXMin()) / dx)), 0, nx - 1);
             int cj = std::clamp(static_cast<int>(std::floor((p.x[1] - m_mpm_solver->getYMin()) / dy)), 0, ny - 1);
             int ck = std::clamp(static_cast<int>(std::floor((p.x[2] - m_mpm_solver->getZMin()) / dz)), 0, nz - 1);

@@ -1436,6 +1436,19 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
         const m = stateManager.getAllModels().find(m => m.id === mid);
         return m?.nodes.find(n => n.type === 'FEMFSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D' || n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D');
     };
+
+    // ── Incomplete Model Gate ────────────────────────────────────────────────
+    if (command === "INIT" || command === "EXEC_ALL" || command === "STEP") {
+        const completeness = stateManager.isModelComplete(targetModelId);
+        if (!completeness.complete) {
+            const errorMsg = `Cannot execute simulation: Model is incomplete.\n\n${completeness.reason}`;
+            stateManager.pushTelemetry(targetModelId, `[ERROR] ${completeness.reason}`);
+            console.error(`[executeModelCommand] ${completeness.reason}`);
+            CustomDialog.alert(errorMsg, "Model Incomplete");
+            return;
+        }
+    }
+
     // ── INIT ─────────────────────────────────────────────────────────────────
     if (command === "INIT") {
         const checkState = stateManager.getSimulationState(targetModelId);
@@ -2390,10 +2403,7 @@ networkManager.onMessage(async (data) => {
                 }
                 
                 if (dataJson.percent === 100) {
-                    const currentStatus = stateManager.getModelStatus(modelId);
-                    if (currentStatus !== 'TERMINATED') {
-                        stateManager.setModelStatus(modelId, 'PAUSED');
-                    }
+                    stateManager.setModelStatus(modelId, 'PAUSED');
                     // Auto-trigger remap for downstream pipeline 2D/3D model if any!
                     const allModels = stateManager.getAllModels();
                     for (const m of allModels) {
@@ -2445,7 +2455,13 @@ networkManager.onMessage(async (data) => {
                     stateManager.setModelStatus(modelId, 'INITIALIZED');
                     stateManager.setModelProgress(modelId, 0);
                 } else if (dataJson.is_terminated === true) {
-                    stateManager.setModelStatus(modelId, 'TERMINATED');
+                    const endtime = getEndTimeFromSolver(modelId);
+                    const currentProgress = stateManager.getModelProgress(modelId);
+                    if (currentProgress !== 100 && (endtime <= 0 || dataJson.time < endtime - 1e-12)) {
+                        stateManager.setModelStatus(modelId, 'TERMINATED');
+                    } else {
+                        stateManager.setModelStatus(modelId, 'PAUSED');
+                    }
                 } else if (dataJson.type === 'TELEMETRY_2D' || dataJson.type === 'TELEMETRY_MPM_2D' || dataJson.type === 'TELEMETRY_FEM_3D') {
                     // Check if we just transitioned from 1D phase (progress is 100)
                     const currentProgress = stateManager.getModelProgress(modelId);

@@ -151,7 +151,9 @@ struct STLFacesSnapshot3D {
 
 void export_vtu_stl_faces_snapshot(const std::string& filename, const STLFacesSnapshot3D& snap, const std::string& format = "Binary");
 
-std::vector<Triangle> subdivide_triangles_to_cell_size(const std::vector<Triangle>& input_triangles, double target_cell_size, int max_depth = 5);
+std::vector<Triangle> subdivide_triangles_to_cell_size(const std::vector<Triangle>& input_triangles, double target_cell_size, int max_depth = 12);
+
+void clear_vtu_mesh_cache();
 
 void append_pvd_timestep(const std::string& pvd_filename, double sim_time, const std::string& relative_vtu_path, const std::string& part = "0");
 

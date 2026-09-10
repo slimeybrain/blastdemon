@@ -743,38 +743,98 @@ __device__ __forceinline__ GPUCellStateT<RealType, IsMultiMaterial> sample_gpu(
         }
     }
 
-    // Topological Corner Detection:
-    // Count solid cells in 3x3x3 neighborhood of the surface boundary cell bx, by, bz
+    // Topological Corner Detection (Thin-Shell & Coplanar Invariant):
+    // Count solid cells and coplanar neighbors in 3x3x3 neighborhood of boundary cell bx, by, bz
     int solid_count = 0;
+    int coplanar_count = 0;
     for (int sz = -1; sz <= 1; ++sz) {
         int nz_val = bz + sz;
         for (int sy = -1; sy <= 1; ++sy) {
             int ny_val = by + sy;
             for (int sx = -1; sx <= 1; ++sx) {
+                if (sx == 0 && sy == 0 && sz == 0) continue;
                 int nx_val = bx + sx;
+                bool is_solid = false;
                 if (nx_val >= 0 && nx_val < d_nx && ny_val >= 0 && ny_val < d_ny && nz_val >= 0 && nz_val < d_nz) {
-                    if (is_solid_cell_gpu(geom, nx_val, ny_val, nz_val)) {
-                        solid_count++;
-                    }
+                    is_solid = is_solid_cell_gpu(geom, nx_val, ny_val, nz_val);
                 } else {
-                    solid_count++; // Treat out of bounds as solid
+                    is_solid = true; // Treat out of bounds as solid
+                }
+                if (is_solid) {
+                    solid_count++;
+                    float dot_n = (float)sx * nx_true + (float)sy * ny_true + (float)sz * nz_true;
+                    if (fabsf(dot_n) <= 0.707f) {
+                        coplanar_count++;
+                    }
                 }
             }
         }
     }
-    bool is_convex_corner = (solid_count <= 14);
+    bool is_convex_corner;
+    if (solid_count <= 10) {
+        // Thin-shell regime: flat 3x3 sheet has ~8 coplanar solid neighbors. A true corner/tip has < 4.
+        is_convex_corner = (coplanar_count < 4);
+    } else {
+        // Volumetric solid regime:
+        is_convex_corner = (solid_count <= 14);
+    }
+
+    // Decouple normal for velocity reflection and corner clipping at convex corners:
+    float nx_dec = nx_true;
+    float ny_dec = ny_true;
+    float nz_dec = nz_true;
+    if (dir == 0) {
+        ny_dec = 0.0f;
+        nz_dec = 0.0f;
+    } else if (dir == 1) {
+        nx_dec = 0.0f;
+        nz_dec = 0.0f;
+    } else if (dir == 2) {
+        nx_dec = 0.0f;
+        ny_dec = 0.0f;
+    }
+    float n_len_dec = sqrtf(nx_dec * nx_dec + ny_dec * ny_dec + nz_dec * nz_dec);
+    if (n_len_dec > 1e-3f) {
+        nx_dec /= n_len_dec;
+        ny_dec /= n_len_dec;
+        nz_dec /= n_len_dec;
+    } else {
+        float sign_dir = 0.0f;
+        if (dir == 0) sign_dir = (qx >= target_x) ? 1.0f : -1.0f;
+        else if (dir == 1) sign_dir = (qy >= target_y) ? 1.0f : -1.0f;
+        else if (dir == 2) sign_dir = (qz >= target_z) ? 1.0f : -1.0f;
+        nx_dec = (dir == 0) ? sign_dir : 0.0f;
+        ny_dec = (dir == 1) ? sign_dir : 0.0f;
+        nz_dec = (dir == 2) ? sign_dir : 0.0f;
+    }
 
     // Adaptive normal selection for projection (sampling):
-    // Always use the true normal for projecting the sample point into the fluid
-    float nx_proj = nx_true;
-    float ny_proj = ny_true;
-    float nz_proj = nz_true;
+    // Use true normal for flat/diagonal walls; use decoupled normal for convex corners/edges
+    float nx_reflect = is_convex_corner ? nx_dec : nx_true;
+    float ny_reflect = is_convex_corner ? ny_dec : ny_true;
+    float nz_reflect = is_convex_corner ? nz_dec : nz_true;
+
+    float nx_proj = nx_reflect;
+    float ny_proj = ny_reflect;
+    float nz_proj = nz_reflect;
     
-    // Adaptive projection distance:
-    // 0.5 for corners to minimize extrapolation error near the singularity, 1.5 for flat/diagonal walls
-    float proj_dist = is_convex_corner ? 0.5f : 1.5f;
+    // Gap-adaptive projection distance:
+    // Determine clearance in the fluid direction to prevent the image point from hitting opposing walls
+    float d_clearance = 1.5f;
+    for (int step = 1; step <= 2; ++step) {
+        int step_x = qx + (int)roundf(nx_proj * (float)step);
+        int step_y = qy + (int)roundf(ny_proj * (float)step);
+        int step_z = qz + (int)roundf(nz_proj * (float)step);
+        if (step_x >= 0 && step_x < d_nx && step_y >= 0 && step_y < d_ny && step_z >= 0 && step_z < d_nz) {
+            if (is_solid_cell_gpu(geom, step_x, step_y, step_z)) {
+                d_clearance = fminf(d_clearance, (float)step * 0.5f);
+                break;
+            }
+        }
+    }
+    float proj_dist = is_convex_corner ? 0.5f : fmaxf(0.5f, d_clearance);
     
-    // Project along the true normal:
+    // Project along the adaptive normal:
     float p_img_x = (float)target_x + nx_proj * proj_dist;
     float p_img_y = (float)target_y + ny_proj * proj_dist;
     float p_img_z = (float)target_z + nz_proj * proj_dist;
@@ -802,6 +862,23 @@ __device__ __forceinline__ GPUCellStateT<RealType, IsMultiMaterial> sample_gpu(
                 if (nx_val < 0 || nx_val >= d_nx) continue;
                 
                 if (is_solid_cell_gpu(geom, nx_val, ny_val, nz_val)) continue;
+
+                // Topological Line-of-Sight Barrier: prevent diagonal cross-wall tunneling
+                int tc_dist = (i != 0 ? 1 : 0) + (j != 0 ? 1 : 0) + (k != 0 ? 1 : 0);
+                if (tc_dist == 2) {
+                    if (i != 0 && j != 0) {
+                        if (is_solid_cell_gpu(geom, qx + i, qy, qz) && is_solid_cell_gpu(geom, qx, qy + j, qz)) continue;
+                    } else if (i != 0 && k != 0) {
+                        if (is_solid_cell_gpu(geom, qx + i, qy, qz) && is_solid_cell_gpu(geom, qx, qy, qz + k)) continue;
+                    } else if (j != 0 && k != 0) {
+                        if (is_solid_cell_gpu(geom, qx, qy + j, qz) && is_solid_cell_gpu(geom, qx, qy, qz + k)) continue;
+                    }
+                } else if (tc_dist == 3) {
+                    bool b_x = is_solid_cell_gpu(geom, qx + i, qy, qz);
+                    bool b_y = is_solid_cell_gpu(geom, qx, qy + j, qz);
+                    bool b_z = is_solid_cell_gpu(geom, qx, qy, qz + k);
+                    if ((b_x && b_y) || (b_x && b_z) || (b_y && b_z)) continue;
+                }
                 
                 // Visibility Half-Space Clipping using the true surface normal
                 float dx_plane = (float)nx_val - (float)target_x;
@@ -989,16 +1066,61 @@ __device__ __forceinline__ void get_face_flux_gpu(
     int qx, int qy, int qz,
     bool is_near_boundary
 ) {
+    bool solid_L = false;
+    bool solid_R = false;
+    if (is_near_boundary && geom_pool) {
+        solid_L = is_solid_cell_gpu(geom_pool, gx_L, gy_L, gz_L);
+        solid_R = is_solid_cell_gpu(geom_pool, gx_R, gy_R, gz_R);
+    }
+
+    if (solid_L && solid_R) {
+        #pragma unroll
+        for (int v = 0; v < 10; ++v) flx[v] = (RealType)0.0;
+        return;
+    }
+
+    if (solid_L || solid_R) {
+        // Physically correct inviscid slip-wall boundary flux.
+        // For a stationary wall: zero mass/energy flux, pure pressure thrust in normal direction.
+        // This eliminates the energy pump that occurred when ghost-state residual velocities
+        // multiplied huge E_fluid values at shock fronts.
+        GPUCellStateT<RealType, IsMultiMaterial> sL, sR;
+        reconstruct_gpu<RealType, IsMultiMaterial, SpatialOrder, TileType>(
+            states, geom_pool, gx_R, gy_R, gz_R, dir, sL, sR, qx, qy, qz, is_near_boundary, true, true
+        );
+
+        const auto& s_fluid = solid_L ? sR : sL;
+        RealType p_wall = s_fluid.p;
+
+        // Static wall: vn_wall = 0 => mass flux = 0, energy flux = 0
+        // Moving wall (FSI): sample raw solid velocity (identically zero for static walls)
+        auto s_solid_raw = sample_gpu_raw<RealType, IsMultiMaterial, TileType>(
+            states, solid_L ? gx_L : gx_R, solid_L ? gy_L : gy_R, solid_L ? gz_L : gz_R
+        );
+        RealType vn_wall = (dir == 0) ? s_solid_raw.ux : ((dir == 1) ? s_solid_raw.uy : s_solid_raw.uz);
+
+        flx[0] = (RealType)0.0;                           // mass flux
+        flx[1] = (dir == 0) ? p_wall : (RealType)0.0;     // x-momentum: pressure if x-face
+        flx[2] = (dir == 1) ? p_wall : (RealType)0.0;     // y-momentum: pressure if y-face
+        flx[3] = (dir == 2) ? p_wall : (RealType)0.0;     // z-momentum: pressure if z-face
+        flx[4] = p_wall * vn_wall;                       // energy flux: p * vn_wall (work done by moving wall)
+
+        flx[5] = (RealType)0.0;  // alpha1 transport
+        flx[6] = (RealType)0.0;  // alpha2 transport
+        flx[7] = (RealType)0.0;  // arho1 transport
+        flx[8] = (RealType)0.0;  // arho2 transport
+        flx[9] = (RealType)0.0;  // velocity divergence
+        return;
+    }
+
     bool force_first = false;
     if (is_near_boundary && geom_pool) {
         int dx = (dir == 0 ? 1 : 0);
         int dy = (dir == 1 ? 1 : 0);
         int dz = (dir == 2 ? 1 : 0);
         bool m2 = is_solid_cell_gpu(geom_pool, gx_L - dx, gy_L - dy, gz_L - dz);
-        bool m1 = is_solid_cell_gpu(geom_pool, gx_L, gy_L, gz_L);
-        bool p0 = is_solid_cell_gpu(geom_pool, gx_R, gy_R, gz_R);
         bool p1 = is_solid_cell_gpu(geom_pool, gx_R + dx, gy_R + dy, gz_R + dz);
-        force_first = m2 || m1 || p0 || p1;
+        force_first = m2 || p1;
     }
 
     GPUCellStateT<RealType, IsMultiMaterial> sL, sR;
@@ -2591,6 +2713,147 @@ static __global__ void extract_obstacles_kernel(
 }
 
 template <typename RealType, bool IsMultiMaterial>
+static __global__ void sample_surface_points_kernel(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states,
+    const GeometryTile3D* __restrict__ geom,
+    const Point3D* __restrict__ points,
+    float* __restrict__ out_buf,
+    int num_points,
+    int qty_id,
+    double dom_xmin, double dom_xmax,
+    double dom_ymin, double dom_ymax,
+    double dom_zmin, double dom_zmax,
+    float outside_val,
+    int nx, int ny, int nz,
+    double xmin, double ymin, double zmin,
+    double dx, int ntx, int nty) {
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_points) return;
+
+    Point3D pt = points[idx];
+    const double tol = 1e-4 * dx;
+    if (pt.x < dom_xmin - tol || pt.x > dom_xmax + tol ||
+        pt.y < dom_ymin - tol || pt.y > dom_ymax + tol ||
+        pt.z < dom_zmin - tol || pt.z > dom_zmax + tol) {
+        out_buf[idx] = outside_val;
+        return;
+    }
+
+    int gx = max(0, min(nx - 1, (int)floor((pt.x - xmin) / dx)));
+    int gy = max(0, min(ny - 1, (int)floor((pt.y - ymin) / dx)));
+    int gz = max(0, min(nz - 1, (int)floor((pt.z - zmin) / dx)));
+
+    int tx = gx / 8;
+    int ty = gy / 8;
+    int tz = gz / 8;
+    int t_idx = tx + ty * ntx + tz * ntx * nty;
+    int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+
+    if (qty_id == 7) {
+        out_buf[idx] = (geom && geom[t_idx].cells[c_idx].is_boundary) ? 1.0f : 0.0f;
+        return;
+    }
+
+    bool is_solid = (geom != nullptr && geom[t_idx].cells[c_idx].is_boundary != 0);
+    if (is_solid) {
+        double best_dist2 = 1e30;
+        int best_gx = gx, best_gy = gy, best_gz = gz;
+        bool found = false;
+
+        // Search radius 1 (26 neighbors)
+        #pragma unroll
+        for (int dz = -1; dz <= 1; ++dz) {
+            int cz = gz + dz;
+            if (cz < 0 || cz >= nz) continue;
+            int ctz = cz / 8;
+            int ccz = (cz & 7) * 64;
+
+            #pragma unroll
+            for (int dy = -1; dy <= 1; ++dy) {
+                int cy = gy + dy;
+                if (cy < 0 || cy >= ny) continue;
+                int cty = cy / 8;
+                int ccy = (cy & 7) * 8;
+
+                #pragma unroll
+                for (int ddx = -1; ddx <= 1; ++ddx) {
+                    if (ddx == 0 && dy == 0 && dz == 0) continue;
+                    int cx = gx + ddx;
+                    if (cx < 0 || cx >= nx) continue;
+
+                    int nt_idx = (cx / 8) + cty * ntx + ctz * ntx * nty;
+                    int nc_idx = (cx & 7) + ccy + ccz;
+
+                    if (geom[nt_idx].cells[nc_idx].is_boundary == 0) {
+                        double ccx = xmin + (cx + 0.5) * dx;
+                        double ccy_pos = ymin + (cy + 0.5) * dx;
+                        double ccz_pos = zmin + (cz + 0.5) * dx;
+                        double dist2 = (pt.x - ccx)*(pt.x - ccx) + (pt.y - ccy_pos)*(pt.y - ccy_pos) + (pt.z - ccz_pos)*(pt.z - ccz_pos);
+                        if (dist2 < best_dist2) {
+                            best_dist2 = dist2;
+                            best_gx = cx; best_gy = cy; best_gz = cz;
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Search radius 2 if entirely surrounded in radius 1
+        if (!found) {
+            for (int dz = -2; dz <= 2; ++dz) {
+                int cz = gz + dz;
+                if (cz < 0 || cz >= nz) continue;
+                int ctz = cz / 8;
+                int ccz = (cz & 7) * 64;
+
+                for (int dy = -2; dy <= 2; ++dy) {
+                    int cy = gy + dy;
+                    if (cy < 0 || cy >= ny) continue;
+                    int cty = cy / 8;
+                    int ccy = (cy & 7) * 8;
+
+                    for (int ddx = -2; ddx <= 2; ++ddx) {
+                        int abs_x = (ddx < 0 ? -ddx : ddx);
+                        int abs_y = (dy < 0 ? -dy : dy);
+                        int abs_z = (dz < 0 ? -dz : dz);
+                        if (abs_x <= 1 && abs_y <= 1 && abs_z <= 1) continue;
+                        int cx = gx + ddx;
+                        if (cx < 0 || cx >= nx) continue;
+
+                        int nt_idx = (cx / 8) + cty * ntx + ctz * ntx * nty;
+                        int nc_idx = (cx & 7) + ccy + ccz;
+
+                        if (geom[nt_idx].cells[nc_idx].is_boundary == 0) {
+                            double ccx = xmin + (cx + 0.5) * dx;
+                            double ccy_pos = ymin + (cy + 0.5) * dx;
+                            double ccz_pos = zmin + (cz + 0.5) * dx;
+                            double dist2 = (pt.x - ccx)*(pt.x - ccx) + (pt.y - ccy_pos)*(pt.y - ccy_pos) + (pt.z - ccz_pos)*(pt.z - ccz_pos);
+                            if (dist2 < best_dist2) {
+                                best_dist2 = dist2;
+                                best_gx = cx; best_gy = cy; best_gz = cz;
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (found) {
+            gx = best_gx; gy = best_gy; gz = best_gz;
+            tx = gx / 8; ty = gy / 8; tz = gz / 8;
+            t_idx = tx + ty * ntx + tz * ntx * nty;
+            c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+        }
+    }
+
+    RealType val = get_value_by_qty<RealType, IsMultiMaterial>(states[t_idx], c_idx, qty_id);
+    out_buf[idx] = (float)val;
+}
+
+template <typename RealType, bool IsMultiMaterial>
 __global__ void extract_slice_kernel(const PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states, const GeometryTile3D* __restrict__ geom, float* __restrict__ data, int nx, int ny, int nz, int axis, double offset, double xmin, double ymin, double zmin, double dx, int qty_id, int stride) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -2643,16 +2906,16 @@ __global__ void extract_slice_kernel(const PrimitiveTile3D<RealType, IsMultiMate
 }
 
 template <typename RealType, bool IsMultiMaterial>
-__global__ void extract_volume_kernel(const PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states, const GeometryTile3D* __restrict__ geom, float* __restrict__ data, int nx, int ny, int nz, int out_nx, int out_ny, int out_nz, double xmin, double ymin, double zmin, double dx, int qty_id, int stride, int factor = 1) {
+__global__ void extract_volume_kernel(const PrimitiveTile3D<RealType, IsMultiMaterial>* __restrict__ states, const GeometryTile3D* __restrict__ geom, float* __restrict__ data, int nx, int ny, int nz, int out_nx, int out_ny, int out_nz, double xmin, double ymin, double zmin, double dx, int qty_id, int stride, int factor = 1, int i_start = 0, int j_start = 0, int k_start = 0) {
     int gx = blockIdx.x * blockDim.x + threadIdx.x;
     int gy = blockIdx.y * blockDim.y + threadIdx.y;
     int gz = blockIdx.z * blockDim.z + threadIdx.z;
 
     if (gx >= out_nx || gy >= out_ny || gz >= out_nz) return;
 
-    int orig_x = (gx * stride) / factor;
-    int orig_y = (gy * stride) / factor;
-    int orig_z = (gz * stride) / factor;
+    int orig_x = i_start + (gx * stride) / factor;
+    int orig_y = j_start + (gy * stride) / factor;
+    int orig_z = k_start + (gz * stride) / factor;
 
     if (orig_x >= nx || orig_y >= ny || orig_z >= nz) return;
 
@@ -2690,40 +2953,18 @@ __global__ void extract_volume_kernel(const PrimitiveTile3D<RealType, IsMultiMat
             int cz = orig_z % 8;
             int c_idx = cx + cy * 8 + cz * 64;
             if (geom[t_idx].cells[c_idx].is_boundary) {
-                bool found = false;
-                int max_r = max(4, stride * 3);
-                for (int r = 1; r <= max_r && !found; ++r) {
-                    for (int dz = -r; dz <= r && !found; ++dz) {
-                        for (int dy = -r; dy <= r && !found; ++dy) {
-                            for (int dx_c = -r; dx_c <= r && !found; ++dx_c) {
-                                int nx_c = orig_x + dx_c;
-                                int ny_c = orig_y + dy;
-                                int nz_c = orig_z + dz;
-                                if (nx_c >= 0 && nx_c < nx && ny_c >= 0 && ny_c < ny && nz_c >= 0 && nz_c < nz) {
-                                    int n_tx = nx_c / 8;
-                                    int n_ty = ny_c / 8;
-                                    int n_tz = nz_c / 8;
-                                    int n_t_idx = n_tx + n_ty * ttx + n_tz * ttx * tty;
-                                    int n_cx = nx_c % 8;
-                                    int n_cy = ny_c % 8;
-                                    int n_cz = nz_c % 8;
-                                    int n_c_idx = n_cx + n_cy * 8 + n_cz * 64;
-                                    if (!geom[n_t_idx].cells[n_c_idx].is_boundary) {
-                                        target_x = nx_c;
-                                        target_y = ny_c;
-                                        target_z = nz_c;
-                                        found = true;
-                                    }
-                                }
-                            }
-                        }
+                float nx_b, ny_b, nz_b;
+                if (get_solid_normal_gpu(geom, orig_x, orig_y, orig_z, nx_b, ny_b, nz_b)) {
+                    float n_len = sqrtf(nx_b*nx_b + ny_b*ny_b + nz_b*nz_b);
+                    if (n_len > 1e-3f) {
+                        GPUCellStateT<RealType, IsMultiMaterial> sC = sample_state_with_mirror_gpu<RealType, IsMultiMaterial>(states, geom, orig_x, orig_y, orig_z, xmin, ymin, zmin, dx);
+                        data[out_idx] = get_value_by_qty_struct<RealType, IsMultiMaterial>(sC, qty_id);
+                        return;
                     }
                 }
-                if (found) {
-                    GPUCellStateT<RealType, IsMultiMaterial> sC = sample_gpu_raw<RealType, IsMultiMaterial>(states, target_x, target_y, target_z);
-                    data[out_idx] = get_value_by_qty_struct<RealType, IsMultiMaterial>(sC, qty_id);
-                    return;
-                }
+                GPUCellStateT<RealType, IsMultiMaterial> sC = sample_gpu_raw<RealType, IsMultiMaterial>(states, orig_x, orig_y, orig_z);
+                data[out_idx] = get_value_by_qty_struct<RealType, IsMultiMaterial>(sC, qty_id);
+                return;
             }
         }
         GPUCellStateT<RealType, IsMultiMaterial> sC = sample_state_with_mirror_gpu<RealType, IsMultiMaterial>(states, geom, target_x, target_y, target_z, xmin, ymin, zmin, dx);
@@ -2892,6 +3133,7 @@ CFDSolver3DCuda<RealType, IsMultiMaterial>::~CFDSolver3DCuda() {
     if (d_active_count) cudaFree(d_active_count);
     if (d_max_s_buf) cudaFree(d_max_s_buf);
     if (d_slice_buf) { cudaFree(d_slice_buf); d_slice_buf_capacity = 0; }
+    if (d_sample_coords) { cudaFree(d_sample_coords); d_sample_coords = nullptr; d_sample_coords_capacity = 0; }
     if (d_tile_mass) cudaFree(d_tile_mass);
     if (d_tile_energy) cudaFree(d_tile_energy);
     if (d_tile_is_near_boundary) cudaFree(d_tile_is_near_boundary);
@@ -3006,6 +3248,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::ensure_paged_out() const {
     if (d_active_count) { cudaFree(d_active_count); d_active_count = nullptr; }
     if (d_max_s_buf) { cudaFree(d_max_s_buf); d_max_s_buf = nullptr; }
     if (d_slice_buf) { cudaFree(d_slice_buf); d_slice_buf = nullptr; d_slice_buf_capacity = 0; }
+    if (d_sample_coords) { cudaFree(d_sample_coords); d_sample_coords = nullptr; d_sample_coords_capacity = 0; }
     if (d_tile_mass) { cudaFree(d_tile_mass); d_tile_mass = nullptr; }
     if (d_tile_energy) { cudaFree(d_tile_energy); d_tile_energy = nullptr; }
     if (d_tile_is_near_boundary) { cudaFree(d_tile_is_near_boundary); d_tile_is_near_boundary = nullptr; }
@@ -3485,6 +3728,25 @@ __global__ void __launch_bounds__(512) predict_states_gpu_kernel_3d(
             d_z.alpha2 = (sL_zP1.alpha2 - sR_z.alpha2) * invDx;
             d_z.arho1 = (sL_zP1.arho1 - sR_z.arho1) * invDx;
         }
+        if (is_near_boundary && geom) {
+            // Suppress ALL slopes in each direction near solid boundaries
+            // to prevent predictor overshoot at shock-wall interactions
+            if (is_solid_cell_gpu(geom, gx - 1, gy, gz) || is_solid_cell_gpu(geom, gx + 1, gy, gz)) {
+                d_x.rho = (RealType)0.0; d_x.ux = (RealType)0.0; d_x.uy = (RealType)0.0;
+                d_x.uz = (RealType)0.0; d_x.p = (RealType)0.0;
+                if constexpr (IsMultiMaterial) { d_x.alpha1 = (RealType)0.0; d_x.alpha2 = (RealType)0.0; d_x.arho1 = (RealType)0.0; }
+            }
+            if (is_solid_cell_gpu(geom, gx, gy - 1, gz) || is_solid_cell_gpu(geom, gx, gy + 1, gz)) {
+                d_y.rho = (RealType)0.0; d_y.ux = (RealType)0.0; d_y.uy = (RealType)0.0;
+                d_y.uz = (RealType)0.0; d_y.p = (RealType)0.0;
+                if constexpr (IsMultiMaterial) { d_y.alpha1 = (RealType)0.0; d_y.alpha2 = (RealType)0.0; d_y.arho1 = (RealType)0.0; }
+            }
+            if (is_solid_cell_gpu(geom, gx, gy, gz - 1) || is_solid_cell_gpu(geom, gx, gy, gz + 1)) {
+                d_z.rho = (RealType)0.0; d_z.ux = (RealType)0.0; d_z.uy = (RealType)0.0;
+                d_z.uz = (RealType)0.0; d_z.p = (RealType)0.0;
+                if constexpr (IsMultiMaterial) { d_z.alpha1 = (RealType)0.0; d_z.alpha2 = (RealType)0.0; d_z.arho1 = (RealType)0.0; }
+            }
+        }
     } else {
         GPUCellStateT<RealType, IsMultiMaterial> sX_L, sX_R, sY_B, sY_T, sZ_D, sZ_U;
         if (is_near_boundary) {
@@ -3503,41 +3765,128 @@ __global__ void __launch_bounds__(512) predict_states_gpu_kernel_3d(
             sZ_U = sample_gpu_raw<RealType, IsMultiMaterial>(states, gx, gy, gz + 1);
         }
 
+        bool solid_x_L = is_near_boundary && is_solid_cell_gpu(geom, gx - 1, gy, gz);
+        bool solid_x_R = is_near_boundary && is_solid_cell_gpu(geom, gx + 1, gy, gz);
+        bool is_confined_x = solid_x_L && solid_x_R;
+
+        bool solid_y_B = is_near_boundary && is_solid_cell_gpu(geom, gx, gy - 1, gz);
+        bool solid_y_T = is_near_boundary && is_solid_cell_gpu(geom, gx, gy + 1, gz);
+        bool is_confined_y = solid_y_B && solid_y_T;
+
+        bool solid_z_D = is_near_boundary && is_solid_cell_gpu(geom, gx, gy, gz - 1);
+        bool solid_z_U = is_near_boundary && is_solid_cell_gpu(geom, gx, gy, gz + 1);
+        bool is_confined_z = solid_z_D && solid_z_U;
+
         auto slope = [=](RealType L, RealType C, RealType R) {
             return minmod_gpu(C - L, R - C) * invDx;
         };
 
-        d_x.rho = slope(sX_L.rho, sC.rho, sX_R.rho);
-        d_x.ux = slope(sX_L.ux, sC.ux, sX_R.ux);
-        d_x.uy = slope(sX_L.uy, sC.uy, sX_R.uy);
-        d_x.uz = slope(sX_L.uz, sC.uz, sX_R.uz);
-        d_x.p = slope(sX_L.p, sC.p, sX_R.p);
-        if constexpr (IsMultiMaterial) {
-            d_x.alpha1 = slope(sX_L.alpha1, sC.alpha1, sX_R.alpha1);
-            d_x.alpha2 = slope(sX_L.alpha2, sC.alpha2, sX_R.alpha2);
-            d_x.arho1 = slope(sX_L.arho1, sC.arho1, sX_R.arho1);
+        if (is_confined_x) {
+            d_x.rho = (RealType)0.0;
+            d_x.ux  = (RealType)0.0;
+            d_x.uy  = (RealType)0.0;
+            d_x.uz  = (RealType)0.0;
+            d_x.p   = (RealType)0.0;
+            if constexpr (IsMultiMaterial) {
+                d_x.alpha1 = (RealType)0.0;
+                d_x.alpha2 = (RealType)0.0;
+                d_x.arho1  = (RealType)0.0;
+            }
+        } else if (solid_x_L || solid_x_R) {
+            // Suppress ALL slopes near solid boundaries to prevent predictor overshoot
+            d_x.rho = (RealType)0.0;
+            d_x.ux  = (RealType)0.0;
+            d_x.uy  = (RealType)0.0;
+            d_x.uz  = (RealType)0.0;
+            d_x.p   = (RealType)0.0;
+            if constexpr (IsMultiMaterial) {
+                d_x.alpha1 = (RealType)0.0;
+                d_x.alpha2 = (RealType)0.0;
+                d_x.arho1  = (RealType)0.0;
+            }
+        } else {
+            d_x.rho = slope(sX_L.rho, sC.rho, sX_R.rho);
+            d_x.ux = slope(sX_L.ux, sC.ux, sX_R.ux);
+            d_x.uy = slope(sX_L.uy, sC.uy, sX_R.uy);
+            d_x.uz = slope(sX_L.uz, sC.uz, sX_R.uz);
+            d_x.p = slope(sX_L.p, sC.p, sX_R.p);
+            if constexpr (IsMultiMaterial) {
+                d_x.alpha1 = slope(sX_L.alpha1, sC.alpha1, sX_R.alpha1);
+                d_x.alpha2 = slope(sX_L.alpha2, sC.alpha2, sX_R.alpha2);
+                d_x.arho1 = slope(sX_L.arho1, sC.arho1, sX_R.arho1);
+            }
         }
 
-        d_y.rho = slope(sY_B.rho, sC.rho, sY_T.rho);
-        d_y.ux = slope(sY_B.ux, sC.ux, sY_T.ux);
-        d_y.uy = slope(sY_B.uy, sC.uy, sY_T.uy);
-        d_y.uz = slope(sY_B.uz, sC.uz, sY_T.uz);
-        d_y.p = slope(sY_B.p, sC.p, sY_T.p);
-        if constexpr (IsMultiMaterial) {
-            d_y.alpha1 = slope(sY_B.alpha1, sC.alpha1, sY_T.alpha1);
-            d_y.alpha2 = slope(sY_B.alpha2, sC.alpha2, sY_T.alpha2);
-            d_y.arho1 = slope(sY_B.arho1, sC.arho1, sY_T.arho1);
+        if (is_confined_y) {
+            d_y.rho = (RealType)0.0;
+            d_y.ux  = (RealType)0.0;
+            d_y.uy  = (RealType)0.0;
+            d_y.uz  = (RealType)0.0;
+            d_y.p   = (RealType)0.0;
+            if constexpr (IsMultiMaterial) {
+                d_y.alpha1 = (RealType)0.0;
+                d_y.alpha2 = (RealType)0.0;
+                d_y.arho1  = (RealType)0.0;
+            }
+        } else if (solid_y_B || solid_y_T) {
+            // Suppress ALL slopes near solid boundaries to prevent predictor overshoot
+            d_y.rho = (RealType)0.0;
+            d_y.ux  = (RealType)0.0;
+            d_y.uy  = (RealType)0.0;
+            d_y.uz  = (RealType)0.0;
+            d_y.p   = (RealType)0.0;
+            if constexpr (IsMultiMaterial) {
+                d_y.alpha1 = (RealType)0.0;
+                d_y.alpha2 = (RealType)0.0;
+                d_y.arho1  = (RealType)0.0;
+            }
+        } else {
+            d_y.rho = slope(sY_B.rho, sC.rho, sY_T.rho);
+            d_y.ux = slope(sY_B.ux, sC.ux, sY_T.ux);
+            d_y.uy = slope(sY_B.uy, sC.uy, sY_T.uy);
+            d_y.uz = slope(sY_B.uz, sC.uz, sY_T.uz);
+            d_y.p = slope(sY_B.p, sC.p, sY_T.p);
+            if constexpr (IsMultiMaterial) {
+                d_y.alpha1 = slope(sY_B.alpha1, sC.alpha1, sY_T.alpha1);
+                d_y.alpha2 = slope(sY_B.alpha2, sC.alpha2, sY_T.alpha2);
+                d_y.arho1 = slope(sY_B.arho1, sC.arho1, sY_T.arho1);
+            }
         }
 
-        d_z.rho = slope(sZ_D.rho, sC.rho, sZ_U.rho);
-        d_z.ux = slope(sZ_D.ux, sC.ux, sZ_U.ux);
-        d_z.uy = slope(sZ_D.uy, sC.uy, sZ_U.uy);
-        d_z.uz = slope(sZ_D.uz, sC.uz, sZ_U.uz);
-        d_z.p = slope(sZ_D.p, sC.p, sZ_U.p);
-        if constexpr (IsMultiMaterial) {
-            d_z.alpha1 = slope(sZ_D.alpha1, sC.alpha1, sZ_U.alpha1);
-            d_z.alpha2 = slope(sZ_D.alpha2, sC.alpha2, sZ_U.alpha2);
-            d_z.arho1 = slope(sZ_D.arho1, sC.arho1, sZ_U.arho1);
+        if (is_confined_z) {
+            d_z.rho = (RealType)0.0;
+            d_z.ux  = (RealType)0.0;
+            d_z.uy  = (RealType)0.0;
+            d_z.uz  = (RealType)0.0;
+            d_z.p   = (RealType)0.0;
+            if constexpr (IsMultiMaterial) {
+                d_z.alpha1 = (RealType)0.0;
+                d_z.alpha2 = (RealType)0.0;
+                d_z.arho1  = (RealType)0.0;
+            }
+        } else if (solid_z_D || solid_z_U) {
+            // Suppress ALL slopes near solid boundaries to prevent predictor overshoot
+            d_z.rho = (RealType)0.0;
+            d_z.ux  = (RealType)0.0;
+            d_z.uy  = (RealType)0.0;
+            d_z.uz  = (RealType)0.0;
+            d_z.p   = (RealType)0.0;
+            if constexpr (IsMultiMaterial) {
+                d_z.alpha1 = (RealType)0.0;
+                d_z.alpha2 = (RealType)0.0;
+                d_z.arho1  = (RealType)0.0;
+            }
+        } else {
+            d_z.rho = slope(sZ_D.rho, sC.rho, sZ_U.rho);
+            d_z.ux = slope(sZ_D.ux, sC.ux, sZ_U.ux);
+            d_z.uy = slope(sZ_D.uy, sC.uy, sZ_U.uy);
+            d_z.uz = slope(sZ_D.uz, sC.uz, sZ_U.uz);
+            d_z.p = slope(sZ_D.p, sC.p, sZ_U.p);
+            if constexpr (IsMultiMaterial) {
+                d_z.alpha1 = slope(sZ_D.alpha1, sC.alpha1, sZ_U.alpha1);
+                d_z.alpha2 = slope(sZ_D.alpha2, sC.alpha2, sZ_U.alpha2);
+                d_z.arho1 = slope(sZ_D.arho1, sC.arho1, sZ_U.arho1);
+            }
         }
     }
 
@@ -3645,38 +3994,125 @@ __global__ void __launch_bounds__(512) predict_states_ader3_gpu_kernel_3d(
         return minmod_gpu(C - L, R - C) * invDx;
     };
 
+    bool solid_x_L = is_near_boundary && is_solid_cell_gpu(geom, gx - 1, gy, gz);
+    bool solid_x_R = is_near_boundary && is_solid_cell_gpu(geom, gx + 1, gy, gz);
+    bool is_confined_x = solid_x_L && solid_x_R;
+
+    bool solid_y_B = is_near_boundary && is_solid_cell_gpu(geom, gx, gy - 1, gz);
+    bool solid_y_T = is_near_boundary && is_solid_cell_gpu(geom, gx, gy + 1, gz);
+    bool is_confined_y = solid_y_B && solid_y_T;
+
+    bool solid_z_D = is_near_boundary && is_solid_cell_gpu(geom, gx, gy, gz - 1);
+    bool solid_z_U = is_near_boundary && is_solid_cell_gpu(geom, gx, gy, gz + 1);
+    bool is_confined_z = solid_z_D && solid_z_U;
+
     GPUCellStateT<RealType, IsMultiMaterial> d_x, d_y, d_z;
-    d_x.rho = slope(sX_L.rho, sC.rho, sX_R.rho);
-    d_x.ux = slope(sX_L.ux, sC.ux, sX_R.ux);
-    d_x.uy = slope(sX_L.uy, sC.uy, sX_R.uy);
-    d_x.uz = slope(sX_L.uz, sC.uz, sX_R.uz);
-    d_x.p = slope(sX_L.p, sC.p, sX_R.p);
-    if constexpr (IsMultiMaterial) {
-        d_x.alpha1 = slope(sX_L.alpha1, sC.alpha1, sX_R.alpha1);
-        d_x.alpha2 = slope(sX_L.alpha2, sC.alpha2, sX_R.alpha2);
-        d_x.arho1 = slope(sX_L.arho1, sC.arho1, sX_R.arho1);
+    if (is_confined_x) {
+        d_x.rho = (RealType)0.0;
+        d_x.ux  = (RealType)0.0;
+        d_x.uy  = (RealType)0.0;
+        d_x.uz  = (RealType)0.0;
+        d_x.p   = (RealType)0.0;
+        if constexpr (IsMultiMaterial) {
+            d_x.alpha1 = (RealType)0.0;
+            d_x.alpha2 = (RealType)0.0;
+            d_x.arho1  = (RealType)0.0;
+        }
+    } else if (solid_x_L || solid_x_R) {
+        // Suppress ALL slopes near solid boundaries to prevent predictor overshoot
+        d_x.rho = (RealType)0.0;
+        d_x.ux  = (RealType)0.0;
+        d_x.uy  = (RealType)0.0;
+        d_x.uz  = (RealType)0.0;
+        d_x.p   = (RealType)0.0;
+        if constexpr (IsMultiMaterial) {
+            d_x.alpha1 = (RealType)0.0;
+            d_x.alpha2 = (RealType)0.0;
+            d_x.arho1  = (RealType)0.0;
+        }
+    } else {
+        d_x.rho = slope(sX_L.rho, sC.rho, sX_R.rho);
+        d_x.ux = slope(sX_L.ux, sC.ux, sX_R.ux);
+        d_x.uy = slope(sX_L.uy, sC.uy, sX_R.uy);
+        d_x.uz = slope(sX_L.uz, sC.uz, sX_R.uz);
+        d_x.p = slope(sX_L.p, sC.p, sX_R.p);
+        if constexpr (IsMultiMaterial) {
+            d_x.alpha1 = slope(sX_L.alpha1, sC.alpha1, sX_R.alpha1);
+            d_x.alpha2 = slope(sX_L.alpha2, sC.alpha2, sX_R.alpha2);
+            d_x.arho1 = slope(sX_L.arho1, sC.arho1, sX_R.arho1);
+        }
     }
 
-    d_y.rho = slope(sY_B.rho, sC.rho, sY_T.rho);
-    d_y.ux = slope(sY_B.ux, sC.ux, sY_T.ux);
-    d_y.uy = slope(sY_B.uy, sC.uy, sY_T.uy);
-    d_y.uz = slope(sY_B.uz, sC.uz, sY_T.uz);
-    d_y.p = slope(sY_B.p, sC.p, sY_T.p);
-    if constexpr (IsMultiMaterial) {
-        d_y.alpha1 = slope(sY_B.alpha1, sC.alpha1, sY_T.alpha1);
-        d_y.alpha2 = slope(sY_B.alpha2, sC.alpha2, sY_T.alpha2);
-        d_y.arho1 = slope(sY_B.arho1, sC.arho1, sY_T.arho1);
+    if (is_confined_y) {
+        d_y.rho = (RealType)0.0;
+        d_y.ux  = (RealType)0.0;
+        d_y.uy  = (RealType)0.0;
+        d_y.uz  = (RealType)0.0;
+        d_y.p   = (RealType)0.0;
+        if constexpr (IsMultiMaterial) {
+            d_y.alpha1 = (RealType)0.0;
+            d_y.alpha2 = (RealType)0.0;
+            d_y.arho1  = (RealType)0.0;
+        }
+    } else if (solid_y_B || solid_y_T) {
+        // Suppress ALL slopes near solid boundaries to prevent predictor overshoot
+        d_y.rho = (RealType)0.0;
+        d_y.ux  = (RealType)0.0;
+        d_y.uy  = (RealType)0.0;
+        d_y.uz  = (RealType)0.0;
+        d_y.p   = (RealType)0.0;
+        if constexpr (IsMultiMaterial) {
+            d_y.alpha1 = (RealType)0.0;
+            d_y.alpha2 = (RealType)0.0;
+            d_y.arho1  = (RealType)0.0;
+        }
+    } else {
+        d_y.rho = slope(sY_B.rho, sC.rho, sY_T.rho);
+        d_y.ux = slope(sY_B.ux, sC.ux, sY_T.ux);
+        d_y.uy = slope(sY_B.uy, sC.uy, sY_T.uy);
+        d_y.uz = slope(sY_B.uz, sC.uz, sY_T.uz);
+        d_y.p = slope(sY_B.p, sC.p, sY_T.p);
+        if constexpr (IsMultiMaterial) {
+            d_y.alpha1 = slope(sY_B.alpha1, sC.alpha1, sY_T.alpha1);
+            d_y.alpha2 = slope(sY_B.alpha2, sC.alpha2, sY_T.alpha2);
+            d_y.arho1 = slope(sY_B.arho1, sC.arho1, sY_T.arho1);
+        }
     }
 
-    d_z.rho = slope(sZ_D.rho, sC.rho, sZ_U.rho);
-    d_z.ux = slope(sZ_D.ux, sC.ux, sZ_U.ux);
-    d_z.uy = slope(sZ_D.uy, sC.uy, sZ_U.uy);
-    d_z.uz = slope(sZ_D.uz, sC.uz, sZ_U.uz);
-    d_z.p = slope(sZ_D.p, sC.p, sZ_U.p);
-    if constexpr (IsMultiMaterial) {
-        d_z.alpha1 = slope(sZ_D.alpha1, sC.alpha1, sZ_U.alpha1);
-        d_z.alpha2 = slope(sZ_D.alpha2, sC.alpha2, sZ_U.alpha2);
-        d_z.arho1 = slope(sZ_D.arho1, sC.arho1, sZ_U.arho1);
+    if (is_confined_z) {
+        d_z.rho = (RealType)0.0;
+        d_z.ux  = (RealType)0.0;
+        d_z.uy  = (RealType)0.0;
+        d_z.uz  = (RealType)0.0;
+        d_z.p   = (RealType)0.0;
+        if constexpr (IsMultiMaterial) {
+            d_z.alpha1 = (RealType)0.0;
+            d_z.alpha2 = (RealType)0.0;
+            d_z.arho1  = (RealType)0.0;
+        }
+    } else if (solid_z_D || solid_z_U) {
+        // Suppress ALL slopes near solid boundaries to prevent predictor overshoot
+        d_z.rho = (RealType)0.0;
+        d_z.ux  = (RealType)0.0;
+        d_z.uy  = (RealType)0.0;
+        d_z.uz  = (RealType)0.0;
+        d_z.p   = (RealType)0.0;
+        if constexpr (IsMultiMaterial) {
+            d_z.alpha1 = (RealType)0.0;
+            d_z.alpha2 = (RealType)0.0;
+            d_z.arho1  = (RealType)0.0;
+        }
+    } else {
+        d_z.rho = slope(sZ_D.rho, sC.rho, sZ_U.rho);
+        d_z.ux = slope(sZ_D.ux, sC.ux, sZ_U.ux);
+        d_z.uy = slope(sZ_D.uy, sC.uy, sZ_U.uy);
+        d_z.uz = slope(sZ_D.uz, sC.uz, sZ_U.uz);
+        d_z.p = slope(sZ_D.p, sC.p, sZ_U.p);
+        if constexpr (IsMultiMaterial) {
+            d_z.alpha1 = slope(sZ_D.alpha1, sC.alpha1, sZ_U.alpha1);
+            d_z.alpha2 = slope(sZ_D.alpha2, sC.alpha2, sZ_U.alpha2);
+            d_z.arho1 = slope(sZ_D.arho1, sC.arho1, sZ_U.arho1);
+        }
     }
 
     GPUCellStateT<RealType, IsMultiMaterial> dW_dt_mid;
@@ -3816,11 +4252,13 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
     if (!d_states_pred) {
         CHECK_CUDA(cudaMalloc(&d_states_pred, total_tiles * sizeof(PrimitivePredictorTile3D<RealType, IsMultiMaterial>)));
         CHECK_CUDA(cudaMemset(d_states_pred, 0, total_tiles * sizeof(PrimitivePredictorTile3D<RealType, IsMultiMaterial>)));
+    }
+    if (temporalOrder == 6 && !d_dW_dt) {
         CHECK_CUDA(cudaMalloc(&d_dW_dt, total_tiles * sizeof(PrimitivePredictorTile3D<RealType, IsMultiMaterial>)));
         CHECK_CUDA(cudaMemset(d_dW_dt, 0, total_tiles * sizeof(PrimitivePredictorTile3D<RealType, IsMultiMaterial>)));
     }
     auto states_pred_ptr = (PrimitivePredictorTile3D<RealType, IsMultiMaterial>*)d_states_pred;
-    auto dW_dt_ptr = (PrimitivePredictorTile3D<RealType, IsMultiMaterial>*)d_dW_dt;
+    auto dW_dt_ptr = (temporalOrder == 6) ? (PrimitivePredictorTile3D<RealType, IsMultiMaterial>*)d_dW_dt : nullptr;
 
     copy_active_primitive_tiles_kernel_3d<RealType, IsMultiMaterial><<<n_active, 512>>>(
         states_pred_ptr, (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (const int*)d_active_tile_indices
@@ -3932,7 +4370,12 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setFluxScheme(const std::string
 }
 
 template <typename RealType, bool IsMultiMaterial>
-__global__ void __launch_bounds__(512) compute_max_speed_kernel_3d(const PrimitiveTile3D<RealType, IsMultiMaterial>* states, const int* active_tile_indices, RealType gamma, RealType* max_s_block) {
+__global__ void __launch_bounds__(512) compute_max_speed_kernel_3d(
+    const PrimitiveTile3D<RealType, IsMultiMaterial>* states,
+    const GeometryTile3D* geom,
+    const int* active_tile_indices,
+    RealType gamma,
+    RealType* max_s_block) {
 
     int t_idx = active_tile_indices[blockIdx.x];
     int tx = t_idx % d_ntx;
@@ -3970,7 +4413,22 @@ __global__ void __launch_bounds__(512) compute_max_speed_kernel_3d(const Primiti
         } else {
             c = sqrt(gamma * p / max((RealType)1e-6, rho));
         }
-        max_s = abs(ux) + abs(uy) + abs(uz) + (RealType)3.0 * c;
+
+        RealType acoustic_mult = (RealType)1.0;
+        if (geom) {
+            int solid_faces = 0;
+            if (is_solid_cell_gpu(geom, gx - 1, gy, gz)) solid_faces++;
+            if (is_solid_cell_gpu(geom, gx + 1, gy, gz)) solid_faces++;
+            if (is_solid_cell_gpu(geom, gx, gy - 1, gz)) solid_faces++;
+            if (is_solid_cell_gpu(geom, gx, gy + 1, gz)) solid_faces++;
+            if (is_solid_cell_gpu(geom, gx, gy, gz - 1)) solid_faces++;
+            if (is_solid_cell_gpu(geom, gx, gy, gz + 1)) solid_faces++;
+            if (solid_faces >= 2) {
+                acoustic_mult = (RealType)1.5;
+            }
+        }
+
+        max_s = abs(ux) + abs(uy) + abs(uz) + (RealType)3.0 * c * acoustic_mult;
     }
 
     sdata[tid] = max_s;
@@ -4066,7 +4524,12 @@ double CFDSolver3DCuda<RealType, IsMultiMaterial>::computeStepSize(double cfl) c
 
     int n_active = h_num_active_tiles;
     dim3 threads(8, 8, 8);
-    compute_max_speed_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>((const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (const int*)d_active_tile_indices, (RealType)gamma, (RealType*)d_max_s_buf);
+    compute_max_speed_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>(
+        (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+        (const GeometryTile3D*)d_geom,
+        (const int*)d_active_tile_indices,
+        (RealType)gamma,
+        (RealType*)d_max_s_buf);
 
     // GPU-side second-pass reduction to a single scalar
     reduce_max_kernel<RealType><<<1, 256>>>((const RealType*)d_max_s_buf, n_active, (RealType*)d_max_s_buf);
@@ -4271,7 +4734,7 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(cons
             size_t required_size = (size_t)num_obstacle_faces * sizeof(float);
             if (d_slice_buf_capacity < required_size) {
                 if (d_slice_buf) cudaFree(d_slice_buf);
-                d_slice_buf_capacity = std::max(required_size * 2, static_cast<size_t>(1024 * 1024 * sizeof(float)));
+                d_slice_buf_capacity = required_size;
                 CHECK_CUDA(cudaMalloc(&d_slice_buf, d_slice_buf_capacity));
             }
 
@@ -4295,15 +4758,22 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(cons
         int stride = slice.stride > 0 ? slice.stride : 1;
         int factor = 1;
 
-        int out_nx = ((nx + stride - 1) / stride) * factor;
-        int out_ny = ((ny + stride - 1) / stride) * factor;
-        int out_nz = ((nz + stride - 1) / stride) * factor;
+        int i_start = slice.roi_enabled ? slice.roi_i_start : 0;
+        int j_start = slice.roi_enabled ? slice.roi_j_start : 0;
+        int k_start = slice.roi_enabled ? slice.roi_k_start : 0;
+        int i_end   = slice.roi_enabled ? slice.roi_i_end   : nx;
+        int j_end   = slice.roi_enabled ? slice.roi_j_end   : ny;
+        int k_end   = slice.roi_enabled ? slice.roi_k_end   : nz;
+
+        int out_nx = ((i_end - i_start + stride - 1) / stride) * factor;
+        int out_ny = ((j_end - j_start + stride - 1) / stride) * factor;
+        int out_nz = ((k_end - k_start + stride - 1) / stride) * factor;
         size_t total_voxels = (size_t)out_nx * out_ny * out_nz;
         h_data.resize(total_voxels, 0.0f);
         size_t required_size = total_voxels * sizeof(float);
         if (d_slice_buf_capacity < required_size) {
             if (d_slice_buf) cudaFree(d_slice_buf);
-            d_slice_buf_capacity = std::max(required_size * 2, static_cast<size_t>(1024 * 1024 * sizeof(float)));
+            d_slice_buf_capacity = required_size;
             CHECK_CUDA(cudaMalloc(&d_slice_buf, d_slice_buf_capacity));
         }
         dim3 threads(8, 8, 8);
@@ -4315,7 +4785,8 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(cons
             nx, ny, nz,
             out_nx, out_ny, out_nz,
             xmin, ymin, zmin, cellSize,
-            qty_id, stride, factor
+            qty_id, stride, factor,
+            i_start, j_start, k_start
         );
         CHECK_CUDA(cudaMemcpy(h_data.data(), d_slice_buf, required_size, cudaMemcpyDeviceToHost));
         return h_data;
@@ -4342,7 +4813,7 @@ std::vector<float> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractSlice(cons
     size_t required_size = (size_t)base_w * (size_t)base_h * sizeof(float);
     if (d_slice_buf_capacity < required_size) {
         if (d_slice_buf) cudaFree(d_slice_buf);
-        d_slice_buf_capacity = std::max(required_size * 2, static_cast<size_t>(1024 * 1024 * sizeof(float)));
+        d_slice_buf_capacity = required_size;
         CHECK_CUDA(cudaMalloc(&d_slice_buf, d_slice_buf_capacity));
     }
 
@@ -4383,98 +4854,81 @@ std::vector<SlicePayload3D> CFDSolver3DCuda<RealType, IsMultiMaterial>::extractA
 }
 
 template <typename RealType, bool IsMultiMaterial>
-void CFDSolver3DCuda<RealType, IsMultiMaterial>::captureBulkSnapshot(CFDBulkSnapshot3D& out_snap, bool need_vel, bool need_E, bool need_species) const {
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::sampleSurfacePoints(
+    const std::vector<Point3D>& points,
+    const std::vector<std::string>& quantities,
+    double dom_xmin, double dom_xmax,
+    double dom_ymin, double dom_ymax,
+    double dom_zmin, double dom_zmax,
+    float outside_val,
+    std::vector<std::vector<float>>& out_quantities
+) const {
     ensure_paged_in();
     bind_constants();
 
-    size_t N = (size_t)nx * ny * nz;
-    out_snap.nx = nx; out_snap.ny = ny; out_snap.nz = nz;
-    out_snap.cellSize = cellSize;
-    out_snap.xmin = xmin; out_snap.ymin = ymin; out_snap.zmin = zmin;
-    out_snap.has_vel = need_vel;
-    out_snap.has_E = need_E;
-    out_snap.has_species = need_species;
-
-    out_snap.p.resize(N);
-    out_snap.rho.resize(N);
-    out_snap.overpressure.resize(N);
-    out_snap.impulse.resize(N);
-    out_snap.solid.resize(N);
-    if (need_vel) out_snap.vel.resize(N);
-    if (need_E) out_snap.E.resize(N);
-    if (need_species) {
-        out_snap.alpha1.resize(N);
-        out_snap.alpha2.resize(N);
-        out_snap.air.resize(N);
+    size_t num_points = points.size();
+    size_t num_qtys = quantities.size();
+    out_quantities.resize(num_qtys);
+    for (size_t q = 0; q < num_qtys; ++q) {
+        out_quantities[q].resize(num_points, outside_val);
     }
+    if (num_points == 0 || num_qtys == 0) return;
 
-    int num_channels = 5 + (need_vel ? 1 : 0) + (need_E ? 1 : 0) + (need_species ? 3 : 0);
-    size_t required_bytes = (size_t)num_channels * N * sizeof(float);
+    size_t required_points_bytes = num_points * sizeof(Point3D);
+    if (d_sample_coords_capacity < required_points_bytes) {
+        if (d_sample_coords) cudaFree(d_sample_coords);
+        d_sample_coords_capacity = required_points_bytes;
+        CHECK_CUDA(cudaMalloc(&d_sample_coords, d_sample_coords_capacity));
+    }
+    CHECK_CUDA(cudaMemcpy(d_sample_coords, points.data(), required_points_bytes, cudaMemcpyHostToDevice));
 
-    if (d_slice_buf_capacity < required_bytes) {
+    size_t required_slice_bytes = num_points * sizeof(float);
+    if (d_slice_buf_capacity < required_slice_bytes) {
         if (d_slice_buf) cudaFree(d_slice_buf);
-        d_slice_buf_capacity = std::max(required_bytes * 2, static_cast<size_t>(1024 * 1024 * sizeof(float)));
+        d_slice_buf_capacity = required_slice_bytes;
         CHECK_CUDA(cudaMalloc(&d_slice_buf, d_slice_buf_capacity));
     }
 
-    float* d_base = (float*)d_slice_buf;
-    float* d_p = d_base + 0 * N;
-    float* d_rho = d_base + 1 * N;
-    float* d_overp = d_base + 2 * N;
-    float* d_imp = d_base + 3 * N;
-    float* d_solid = d_base + 4 * N;
-    size_t curr_ch = 5;
-    float* d_vel = nullptr;
-    if (need_vel) { d_vel = d_base + curr_ch * N; curr_ch++; }
-    float* d_E = nullptr;
-    if (need_E) { d_E = d_base + curr_ch * N; curr_ch++; }
-    float* d_alpha1 = nullptr;
-    float* d_alpha2 = nullptr;
-    float* d_air = nullptr;
-    if (need_species) {
-        d_alpha1 = d_base + curr_ch * N; curr_ch++;
-        d_alpha2 = d_base + curr_ch * N; curr_ch++;
-        d_air = d_base + curr_ch * N; curr_ch++;
-    }
+    int ntx = (nx + 7) / 8;
+    int nty = (ny + 7) / 8;
+    dim3 threads(256);
+    dim3 blocks((static_cast<int>(num_points) + 255) / 256);
 
-    dim3 threads(8, 8, 8);
-    dim3 blocks((nx + 7) / 8, (ny + 7) / 8, (nz + 7) / 8);
+    for (size_t q = 0; q < num_qtys; ++q) {
+        std::string qty = quantities[q];
+        int qty_id = 0;
+        if (qty == "density" || qty == "rho") qty_id = 1;
+        else if (qty == "velocity" || qty == "speed") qty_id = 2;
+        else if (qty == "energy" || qty == "internal_energy") qty_id = 3;
+        else if (qty == "species1" || qty == "alpha1" || qty == "reacted" || qty == "reacted_gas") qty_id = 4;
+        else if (qty == "species2" || qty == "alpha2" || qty == "unreacted" || qty == "unreacted_solid") qty_id = 5;
+        else if (qty == "species3" || qty == "air" || qty == "ambient_air") qty_id = 6;
+        else if (qty == "solid" || qty == "solid_cells") qty_id = 7;
+        else if (qty == "overpressure" || qty == "peak_overpressure") qty_id = 8;
+        else if (qty == "impulse" || qty == "peak_impulse") qty_id = 9;
 
-    extract_bulk_snapshot_kernel<RealType, IsMultiMaterial><<<blocks, threads>>>(
-        (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
-        (const GeometryTile3D*)d_geom,
-        d_p, d_rho, d_overp, d_imp, d_solid,
-        d_vel, d_E, d_alpha1, d_alpha2, d_air,
-        nx, ny, nz,
-        (RealType)gamma,
-        need_vel, need_E, need_species
-    );
+        sample_surface_points_kernel<RealType, IsMultiMaterial><<<blocks, threads>>>(
+            (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (const GeometryTile3D*)d_geom,
+            (const Point3D*)d_sample_coords,
+            (float*)d_slice_buf,
+            static_cast<int>(num_points),
+            qty_id,
+            dom_xmin, dom_xmax,
+            dom_ymin, dom_ymax,
+            dom_zmin, dom_zmax,
+            outside_val,
+            nx, ny, nz,
+            xmin, ymin, zmin,
+            cellSize, ntx, nty
+        );
+        CHECK_CUDA(cudaMemcpy(out_quantities[q].data(), d_slice_buf, required_slice_bytes, cudaMemcpyDeviceToHost));
+    }
+}
 
-    std::vector<float> h_raw_buf(num_channels * N);
-    CHECK_CUDA(cudaMemcpy(h_raw_buf.data(), d_base, required_bytes, cudaMemcpyDeviceToHost));
-
-    std::memcpy(out_snap.p.data(), h_raw_buf.data() + 0 * N, N * sizeof(float));
-    std::memcpy(out_snap.rho.data(), h_raw_buf.data() + 1 * N, N * sizeof(float));
-    std::memcpy(out_snap.overpressure.data(), h_raw_buf.data() + 2 * N, N * sizeof(float));
-    std::memcpy(out_snap.impulse.data(), h_raw_buf.data() + 3 * N, N * sizeof(float));
-    std::memcpy(out_snap.solid.data(), h_raw_buf.data() + 4 * N, N * sizeof(float));
-    size_t h_ch = 5;
-    if (need_vel) {
-        std::memcpy(out_snap.vel.data(), h_raw_buf.data() + h_ch * N, N * sizeof(float));
-        h_ch++;
-    }
-    if (need_E) {
-        std::memcpy(out_snap.E.data(), h_raw_buf.data() + h_ch * N, N * sizeof(float));
-        h_ch++;
-    }
-    if (need_species) {
-        std::memcpy(out_snap.alpha1.data(), h_raw_buf.data() + h_ch * N, N * sizeof(float));
-        h_ch++;
-        std::memcpy(out_snap.alpha2.data(), h_raw_buf.data() + h_ch * N, N * sizeof(float));
-        h_ch++;
-        std::memcpy(out_snap.air.data(), h_raw_buf.data() + h_ch * N, N * sizeof(float));
-        h_ch++;
-    }
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::captureBulkSnapshot(CFDBulkSnapshot3D& /*out_snap*/, bool /*need_vel*/, bool /*need_E*/, bool /*need_species*/) const {
+    // Deprecated: VTK outputs now use direct GPU surface and ROI sampling with zero bulk allocations.
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -4492,10 +4946,15 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::getSliceDimensions(const Slice3
         w = ((ny + stride - 1) / stride) * scale;
         h = ((nz + stride - 1) / stride) * scale;
     } else if (slice.axis == "volume") {
-        int factor = 1;
-        w = ((nx + stride - 1) / stride) * factor;
-        h = ((ny + stride - 1) / stride) * factor;
-        depth = ((nz + stride - 1) / stride) * factor;
+        if (slice.roi_enabled) {
+            w = ((slice.roi_i_end - slice.roi_i_start + stride - 1) / stride) * scale;
+            h = ((slice.roi_j_end - slice.roi_j_start + stride - 1) / stride) * scale;
+            depth = ((slice.roi_k_end - slice.roi_k_start + stride - 1) / stride) * scale;
+        } else {
+            w = ((nx + stride - 1) / stride) * scale;
+            h = ((ny + stride - 1) / stride) * scale;
+            depth = ((nz + stride - 1) / stride) * scale;
+        }
     } else {
         w = 0; h = 0; depth = 0;
     }
@@ -5576,6 +6035,15 @@ size_t CFDSolver3DCuda<RealType, IsMultiMaterial>::getAllocatedVRAM() const {
     }
     if (d_solid_vel_fsi) {
         total += d_solid_vel_fsi_capacity;
+    }
+    if (d_slice_buf) {
+        total += d_slice_buf_capacity;
+    }
+    if (d_sample_coords) {
+        total += d_sample_coords_capacity;
+    }
+    if (d_obstacle_faces && num_obstacle_faces > 0) {
+        total += (size_t)num_obstacle_faces * sizeof(GPUObstacleFace);
     }
     return total;
 }

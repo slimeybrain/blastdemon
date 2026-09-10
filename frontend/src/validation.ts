@@ -33,6 +33,13 @@ export function isIdealGasChargeMaterial(node: Node | undefined): boolean {
     return model === 'Ideal Gas' || type === 'Ideal Gas Charge';
 }
 
+export function isExplosiveMaterialNode(node: Node | undefined): boolean {
+    if (!node || node.type !== 'Material') return false;
+    const model = node.parameters?.material_model;
+    const type = node.parameters?.material_type;
+    return model === 'JWL Detonation Gas' || type === 'JWL Charge' || model === 'Ideal Gas Charge' || type === 'Ideal Gas Charge' || model === 'CREST Reactive Burn';
+}
+
 export function isParameterRelevant(node: Node, key: string): boolean {
     if (!node || !node.parameters) return true;
 
@@ -474,11 +481,15 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
 
         // Mesh 3D connection check
-        const meshConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'mesh');
+        const meshConn3D = state.connections.find(c => 
+            (c.toNode === solver3D.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+            (c.fromNode === solver3D.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+        );
         if (!meshConn3D) {
-            addMessage(solver3D.id, 'error', "No Mesh node connected to CFD Solver 3D. A DomainMesh3D node is required.");
+            addMessage(solver3D.id, 'error', "Incomplete Model: No background grid connected to CFD Solver 3D. A DomainMesh3D node must be defined and connected to the 'mesh' input port.");
         } else {
-            const fromNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
+            const otherId = meshConn3D.toNode === solver3D.id ? meshConn3D.fromNode : meshConn3D.toNode;
+            const fromNode = state.nodes.find(n => n.id === otherId);
             if (!fromNode || fromNode.type !== 'DomainMesh3D') {
                 const connKey = `${meshConn3D.fromNode}:${meshConn3D.fromPort}->${meshConn3D.toNode}:${meshConn3D.toPort}`;
                 flawedConnections.set(connKey, "Only DomainMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
@@ -707,13 +718,25 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
 
         if (node.type === 'MPMDomain2D') {
-            const meshConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'mesh');
+            const meshConn = state.connections.find(c => 
+                (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+                (c.fromNode === node.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            );
             if (!meshConn) {
-                addMessage(node.id, 'error', "No Mesh node connected to MPM Domain 2D. A DomainMesh2D node is required.");
+                addMessage(node.id, 'error', "Incomplete Model: No background grid connected to MPM Domain 2D. A DomainMesh2D background grid must be defined and connected to the 'mesh' input port.");
+            } else {
+                const otherId = meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode;
+                const meshNode = state.nodes.find(n => n.id === otherId);
+                if (!meshNode || meshNode.type !== 'DomainMesh2D') {
+                    addMessage(node.id, 'error', "Connected background grid is not a valid DomainMesh2D node.");
+                }
             }
-            const objConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'objects');
+            const objConn = state.connections.find(c => 
+                (c.toNode === node.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in')) ||
+                (c.fromNode === node.id && (c.fromPort === 'objects' || c.fromPort === 'out'))
+            );
             if (!objConn) {
-                addMessage(node.id, 'error', "No MPM Object 2D connected to MPM Domain 2D. At least one MPM Object node is required.");
+                addMessage(node.id, 'error', "Incomplete Model: No MPM Object 2D connected to MPM Domain 2D. At least one MPM Object node is required.");
             }
             const detConns = state.connections.filter(c => c.toNode === node.id && c.toPort === 'detonator');
             for (const detConn of detConns) {
@@ -727,13 +750,25 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
 
         if (node.type === 'MPMDomain3D') {
-            const meshConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'mesh');
+            const meshConn = state.connections.find(c => 
+                (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+                (c.fromNode === node.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            );
             if (!meshConn) {
-                addMessage(node.id, 'error', "No Mesh node connected to MPM Domain 3D. A DomainMesh3D node is required.");
+                addMessage(node.id, 'error', "Incomplete Model: No background grid connected to MPM Domain 3D. A DomainMesh3D background grid must be defined and connected to the 'mesh' input port.");
+            } else {
+                const otherId = meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode;
+                const meshNode = state.nodes.find(n => n.id === otherId);
+                if (!meshNode || meshNode.type !== 'DomainMesh3D') {
+                    addMessage(node.id, 'error', "Connected background grid is not a valid DomainMesh3D node.");
+                }
             }
-            const objConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'objects');
+            const objConn = state.connections.find(c => 
+                (c.toNode === node.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in')) ||
+                (c.fromNode === node.id && (c.fromPort === 'objects' || c.fromPort === 'out'))
+            );
             if (!objConn) {
-                addMessage(node.id, 'error', "No MPM Object 3D connected to MPM Domain 3D. At least one MPM Object node is required.");
+                addMessage(node.id, 'error', "Incomplete Model: No MPM Object 3D connected to MPM Domain 3D. At least one MPM Object node is required.");
             }
             const detConns = state.connections.filter(c => c.toNode === node.id && c.toPort === 'detonator');
             for (const detConn of detConns) {
@@ -742,6 +777,26 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     const connKey = `${detConn.fromNode}:${detConn.fromPort}->${detConn.toNode}:${detConn.toPort}`;
                     flawedConnections.set(connKey, "Only DetonatorLocation3D node can be connected to the Detonator input of MPM Domain 3D.");
                     addMessage(node.id, 'error', "Only DetonatorLocation3D node can be connected to the Detonator input of MPM Domain 3D.");
+                }
+            }
+
+            // Check if any MPM object is an explosive body requiring a detonator
+            const mpmObjects = state.nodes.filter(n => n.type === 'MPMObject3D');
+            const hasExplosiveObject = mpmObjects.some(obj => {
+                const matConn = state.connections.find(c => (c.toNode === obj.id || c.fromNode === obj.id) && (c.toPort === 'material' || c.fromPort === 'material'));
+                const matNode = matConn ? state.nodes.find(n => n.id === (matConn.toNode === obj.id ? matConn.fromNode : matConn.toNode)) :
+                    (obj.parameters?.material ? state.nodes.find(n => n.id === obj.parameters.material) : null);
+                const isObjNamedExplosive = (obj.id + ' ' + (obj.parameters?.name || '')).toLowerCase().includes('explosive');
+                const isMatExplosive = matNode ? (isExplosiveMaterialNode(matNode) || matNode.parameters?.material_model === 'CREST Reactive Burn') : isObjNamedExplosive;
+                return isMatExplosive || isObjNamedExplosive;
+            });
+
+            if (hasExplosiveObject && detConns.length === 0) {
+                const hasDetNode = state.nodes.some(n => n.type === 'DetonatorLocation3D');
+                if (hasDetNode) {
+                    addMessage(node.id, 'warning', "MPM Domain 3D has an explosive body, but DetonatorLocation3D is not wired to its 'detonator' port.");
+                } else {
+                    addMessage(node.id, 'warning', "MPM Domain 3D has an explosive body, but no DetonatorLocation3D node exists in the model.");
                 }
             }
         }
@@ -1001,31 +1056,28 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             const detY = Number(node.parameters?.detonator_y ?? 0.5);
             const detZ = Number(node.parameters?.detonator_z ?? 0.5);
 
-            // Cross-validation with connected mesh
-            if (detConn) {
-                const connectedSolver = state.nodes.find(n => n.id === detConn.toNode);
-                if (connectedSolver && (connectedSolver.type === 'CFDSolver3D' || connectedSolver.type === 'MPMDomain3D')) {
-                    const meshConn3D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
-                    if (meshConn3D) {
-                        const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
-                        if (meshNode && meshNode.type === 'DomainMesh3D') {
-                            const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
-                            const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
-                            const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
-                            const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
-                            const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
-                            const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+            // Cross-validation with connected or solver mesh
+            const connectedSolver = detConn ? state.nodes.find(n => n.id === detConn.toNode) :
+                state.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D');
+            if (connectedSolver && (connectedSolver.type === 'CFDSolver3D' || connectedSolver.type === 'MPMDomain3D')) {
+                const meshConn3D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
+                const meshNode = meshConn3D ? state.nodes.find(n => n.id === meshConn3D.fromNode) : state.nodes.find(n => n.type === 'DomainMesh3D');
+                if (meshNode && meshNode.type === 'DomainMesh3D') {
+                    const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                    const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                    const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                    const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                    const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                    const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
 
-                            if (detX < xmin || detX > xmax) {
-                                addMessage(node.id, 'warning', `Detonator position (x = ${detX}) is outside the mesh domain [${xmin}, ${xmax}].`);
-                            }
-                            if (detY < ymin || detY > ymax) {
-                                addMessage(node.id, 'warning', `Detonator position (y = ${detY}) is outside the mesh domain [${ymin}, ${ymax}].`);
-                            }
-                            if (detZ < zmin || detZ > zmax) {
-                                addMessage(node.id, 'warning', `Detonator position (z = ${detZ}) is outside the mesh domain [${zmin}, ${zmax}].`);
-                            }
-                        }
+                    if (detX < xmin || detX > xmax) {
+                        addMessage(node.id, 'warning', `Detonator position (x = ${detX}) is outside the mesh domain [${xmin}, ${xmax}].`);
+                    }
+                    if (detY < ymin || detY > ymax) {
+                        addMessage(node.id, 'warning', `Detonator position (y = ${detY}) is outside the mesh domain [${ymin}, ${ymax}].`);
+                    }
+                    if (detZ < zmin || detZ > zmax) {
+                        addMessage(node.id, 'warning', `Detonator position (z = ${detZ}) is outside the mesh domain [${zmin}, ${zmax}].`);
                     }
                 }
             }

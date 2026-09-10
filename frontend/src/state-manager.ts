@@ -165,7 +165,6 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         const materialKeys = [
             'transfer_scheme', 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
             'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-            'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
@@ -191,15 +190,6 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
     if (parameters['weibull_scale'] === undefined) parameters['weibull_scale'] = 1.0;
     if (parameters['fracture_toughness'] === undefined) parameters['fracture_toughness'] = 0.0;
     if (parameters['debris_bulk_factor'] === undefined) parameters['debris_bulk_factor'] = 0.1;
-    if (parameters['dem_transition_enabled'] === undefined) parameters['dem_transition_enabled'] = true;
-    if (parameters['fragment_distribution'] === undefined) parameters['fragment_distribution'] = 'Rosin-Rammler';
-    if (parameters['fragment_min_size'] === undefined) parameters['fragment_min_size'] = 0.002;
-    if (parameters['fragment_max_size'] === undefined) parameters['fragment_max_size'] = 0.040;
-    if (parameters['fragment_weibull_n'] === undefined) parameters['fragment_weibull_n'] = 1.80;
-    if (parameters['fragment_clumping_radius'] === undefined) parameters['fragment_clumping_radius'] = 0.015;
-    if (parameters['fragment_ejection_jitter'] === undefined) parameters['fragment_ejection_jitter'] = 0.35;
-    if (parameters['fragment_contact_friction'] === undefined) parameters['fragment_contact_friction'] = 0.55;
-    if (parameters['fragment_restitution'] === undefined) parameters['fragment_restitution'] = 0.30;
     if (parameters['jc_d1'] === undefined) parameters['jc_d1'] = 0.0;
     if (parameters['jc_d2'] === undefined) parameters['jc_d2'] = 0.0;
     if (parameters['jc_d3'] === undefined) parameters['jc_d3'] = 0.0;
@@ -232,12 +222,13 @@ export function isExplosiveMaterialNode(node: Node | undefined): boolean {
     const type = node.parameters?.material_type;
     const model = node.parameters?.material_model;
     if (type === 'JWL Charge' || type === 'Ideal Gas Charge') return true;
-    if (model === 'JWL Detonation Gas' || model === 'Ideal Gas Charge' || model === 'CREST Reactive High Explosive') return true;
+    if (model === 'JWL Detonation Gas' || model === 'Ideal Gas Charge' || model === 'CREST Reactive High Explosive' || model === 'CREST Reactive Burn' || model === 'CREST') return true;
     if (type === 'Air' || model === 'Ideal Gas') return false;
     const comp = String(node.parameters?.composition || '').toLowerCase();
     const preset = String(node.parameters?.preset || '').toLowerCase();
-    const explosiveNames = ['tnt', 'c-4', 'c4', 'comp b', 'composition b', 'petn', 'hmx', 'rdx', 'pbx', 'anfo', 'ammonal', 'tritonal', 'pentolite', 'semtex', 'tetryl', 'emulsion', 'nitromethane', 'nm'];
-    if (explosiveNames.some(e => comp.includes(e) || preset.includes(e))) {
+    const name = String((node as any).name || node.parameters?.name || node.id || '').toLowerCase();
+    const explosiveNames = ['tnt', 'c-4', 'c4', 'comp b', 'composition b', 'petn', 'hmx', 'rdx', 'pbx', 'anfo', 'ammonal', 'tritonal', 'pentolite', 'semtex', 'tetryl', 'emulsion', 'nitromethane', 'nm', 'explosive', 'davis', 'crest'];
+    if (explosiveNames.some(e => comp.includes(e) || preset.includes(e) || name.includes(e))) {
         return true;
     }
     return false;
@@ -254,14 +245,16 @@ export function isSolidMaterialNode(node: Node | undefined): boolean {
 
 export function getCompatibleMaterialsForNode(targetNode: Node, candidateNodes: Node[]): Node[] {
     const isCharge = ['Charge1D', 'Charge2D', 'Charge3D'].includes(targetNode.type);
-    const isSolid = ['MPMObject2D', 'MPMObject3D', 'FEMObject3D'].includes(targetNode.type);
+    const isMPM = ['MPMObject2D', 'MPMObject3D'].includes(targetNode.type);
+    const isFEM = ['FEMObject3D'].includes(targetNode.type);
     const currentMatId = targetNode.parameters?.material;
 
     return candidateNodes.filter(n => {
         if (n.type !== 'Material') return false;
         if (currentMatId && n.id === currentMatId) return true;
         if (isCharge) return isExplosiveMaterialNode(n);
-        if (isSolid) return isSolidMaterialNode(n);
+        if (isFEM) return isSolidMaterialNode(n);
+        if (isMPM) return isSolidMaterialNode(n) || isExplosiveMaterialNode(n);
         return true;
     });
 }
@@ -312,6 +305,11 @@ export const NON_PHYSICAL_NODE_TYPES = new Set<string>([
     'VirtualGauges',
     'VirtualGauges3D',
     'VirtualGauge'
+]);
+
+export const DYNAMIC_RUNTIME_KEYS = new Set<string>([
+    'endtime',
+    'cfl'
 ]);
 
 export const DISPLAY_ONLY_KEYS = new Set([
@@ -594,15 +592,6 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         anisotropy_dir_x: 1.0,
         anisotropy_dir_y: 0.0,
         anisotropy_dir_z: 0.0,
-        dem_transition_enabled: true,
-        fragment_distribution: 'Rosin-Rammler',
-        fragment_min_size: 0.002,
-        fragment_max_size: 0.040,
-        fragment_weibull_n: 1.80,
-        fragment_clumping_radius: 0.015,
-        fragment_ejection_jitter: 0.35,
-        fragment_contact_friction: 0.55,
-        fragment_restitution: 0.30,
         jc_A: 250.0e6,
         jc_B: 510.0e6,
         jc_n: 0.26,
@@ -1071,7 +1060,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         stl_opacity: 0.5,
         stl_show_results: false,
         stl_quantity: 'pressure',
-        stl_sampling_mode: 'nearest',
+        stl_sampling_mode: 'linear',
         stl_auto_scale: true,
         stl_log_scale: false,
         stl_show_colorbar: false,
@@ -1288,6 +1277,14 @@ export class StateManager {
     private saveTimeout: any = null;
     private clipboardModel: Model | null = null;
 
+    /** Reentrancy guard: true while notifyListeners is dispatching.
+     *  Prevents any synchronous state mutation inside a listener from causing
+     *  an infinite recursive notification storm (e.g. WorkspaceManager.saveStageOptions
+     *  calling updatePanelOptions during initial render). When a re-entrant call is
+     *  detected the notification is deferred until the current batch completes. */
+    private _notifying: boolean = false;
+    private _pendingNotify: boolean = false;
+
     constructor(initialState?: SimulationState) {
         const defaultModelId = 'model-default';
         const defaultModel: Model = {
@@ -1329,32 +1326,156 @@ export class StateManager {
 
     // Removed runTarget methods
 
+    public isModelComplete(modelId: string): { complete: boolean; missingGrid: boolean; reason?: string } {
+        const model = this.appState.models[modelId];
+        if (!model || !model.nodes) return { complete: true, missingGrid: false };
+
+        // 1. MPM 3D: Background grid (DomainMesh3D) is strictly mandatory
+        const mpmDomain3D = model.nodes.find(n => n.type === 'MPMDomain3D');
+        if (mpmDomain3D) {
+            const hasMeshConn = (model.connections || []).some(c =>
+                (c.toNode === mpmDomain3D.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+                (c.fromNode === mpmDomain3D.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            );
+            if (!hasMeshConn) {
+                return {
+                    complete: false,
+                    missingGrid: true,
+                    reason: "No background grid connected. A DomainMesh3D node must be defined and connected to MPM Domain 3D."
+                };
+            }
+            const connectedMesh = model.nodes.find(n => n.type === 'DomainMesh3D' && (model.connections || []).some(c =>
+                ((c.toNode === mpmDomain3D.id && c.fromNode === n.id) || (c.fromNode === mpmDomain3D.id && c.toNode === n.id)) &&
+                (c.toPort === 'mesh' || c.fromPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')
+            ));
+            if (!connectedMesh) {
+                return {
+                    complete: false,
+                    missingGrid: true,
+                    reason: "Connected background grid is not a valid DomainMesh3D node."
+                };
+            }
+        }
+
+        // 2. MPM 2D: Background grid (DomainMesh2D) is strictly mandatory
+        const mpmDomain2D = model.nodes.find(n => n.type === 'MPMDomain2D');
+        if (mpmDomain2D) {
+            const hasMeshConn = (model.connections || []).some(c =>
+                (c.toNode === mpmDomain2D.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+                (c.fromNode === mpmDomain2D.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            );
+            if (!hasMeshConn) {
+                return {
+                    complete: false,
+                    missingGrid: true,
+                    reason: "No background grid connected. A DomainMesh2D node must be defined and connected to MPM Domain 2D."
+                };
+            }
+            const connectedMesh = model.nodes.find(n => n.type === 'DomainMesh2D' && (model.connections || []).some(c =>
+                ((c.toNode === mpmDomain2D.id && c.fromNode === n.id) || (c.fromNode === mpmDomain2D.id && c.toNode === n.id)) &&
+                (c.toPort === 'mesh' || c.fromPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')
+            ));
+            if (!connectedMesh) {
+                return {
+                    complete: false,
+                    missingGrid: true,
+                    reason: "Connected background grid is not a valid DomainMesh2D node."
+                };
+            }
+        }
+
+        // 3. CFD Solver 3D: DomainMesh3D is mandatory
+        const cfdSolver3D = model.nodes.find(n => n.type === 'CFDSolver3D');
+        if (cfdSolver3D) {
+            const hasMeshConn = (model.connections || []).some(c =>
+                (c.toNode === cfdSolver3D.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+                (c.fromNode === cfdSolver3D.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            );
+            if (!hasMeshConn) {
+                return {
+                    complete: false,
+                    missingGrid: true,
+                    reason: "No background grid connected. A DomainMesh3D node must be defined and connected to CFD Solver 3D."
+                };
+            }
+        }
+
+        // 4. CFD Solver 2D: DomainMesh2D is mandatory
+        const cfdSolver2D = model.nodes.find(n => n.type === 'CFDSolver2D');
+        if (cfdSolver2D) {
+            const hasMeshConn = (model.connections || []).some(c =>
+                (c.toNode === cfdSolver2D.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+                (c.fromNode === cfdSolver2D.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            );
+            if (!hasMeshConn) {
+                return {
+                    complete: false,
+                    missingGrid: true,
+                    reason: "No background grid connected. A DomainMesh2D node must be defined and connected to CFD Solver 2D."
+                };
+            }
+        }
+
+        // 5. FEM Domain 3D: DomainMesh3D is mandatory
+        const femDomain3D = model.nodes.find(n => n.type === 'FEMDomain3D');
+        if (femDomain3D) {
+            const hasMeshConn = (model.connections || []).some(c =>
+                (c.toNode === femDomain3D.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+                (c.fromNode === femDomain3D.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            );
+            if (!hasMeshConn) {
+                return {
+                    complete: false,
+                    missingGrid: true,
+                    reason: "No background grid connected. A DomainMesh3D node must be defined and connected to FEM Domain 3D."
+                };
+            }
+        }
+
+        return { complete: true, missingGrid: false };
+    }
+
     getModelStatus(modelId: string): SimulationStatus {
-        return this.modelStatuses.get(modelId) || 'UNINITIALIZED';
+        const status = this.modelStatuses.get(modelId);
+        if (status === 'RUNNING' || status === 'PAUSED' || status === 'TERMINATED' || status === 'ERROR') {
+            return status;
+        }
+        const completeness = this.isModelComplete(modelId);
+        if (!completeness.complete) {
+            return 'INCOMPLETE';
+        }
+        return status || 'UNINITIALIZED';
     }
 
     setModelStatus(modelId: string, status: SimulationStatus): void {
+        let effectiveStatus = status;
+        if (status === 'UNINITIALIZED' || status === 'INITIALIZED') {
+            const completeness = this.isModelComplete(modelId);
+            if (!completeness.complete) {
+                effectiveStatus = 'INCOMPLETE';
+            }
+        }
         const oldStatus = this.modelStatuses.get(modelId);
-        if (oldStatus !== status) {
-            this.modelStatuses.set(modelId, status);
-            this.modelStatusListeners.forEach(l => l(modelId, status));
+        if (oldStatus !== effectiveStatus) {
+            this.modelStatuses.set(modelId, effectiveStatus);
+            this.modelStatusListeners.forEach(l => l(modelId, effectiveStatus));
             
-            if (status === 'UNINITIALIZED' || status === 'INITIALIZED') {
+            if (effectiveStatus === 'UNINITIALIZED' || effectiveStatus === 'INITIALIZED' || effectiveStatus === 'INCOMPLETE') {
                 this.modelSteps.set(modelId, 0);
                 this.modelSimTimes.set(modelId, 0.0);
                 this.modelDts.set(modelId, 0.0);
                 this.modelTelemetryTiming.delete(modelId);
             }
 
-            if (status === 'PAUSED' && oldStatus === 'RUNNING') {
+            if (effectiveStatus === 'PAUSED' && oldStatus === 'RUNNING') {
                 this.pushTelemetry('Simulation Interrupted/Paused', undefined, modelId);
-            } else if (status === 'TERMINATED') {
+            } else if (effectiveStatus === 'TERMINATED') {
                 this.pushTelemetry('Simulation Terminated', undefined, modelId);
             }
             
             const activeWs = this.getActiveWorkspace();
             if (activeWs && activeWs.activeModelId === modelId) {
-                this.setStatus(status);
+                this.setStatus(effectiveStatus);
             }
         }
     }
@@ -2225,9 +2346,32 @@ export class StateManager {
                 
                 if (!NON_PHYSICAL_NODE_TYPES.has(node.type)) {
                     for (const key of Object.keys(parameters)) {
-                        if (!DISPLAY_ONLY_KEYS.has(key)) {
+                        if (!DISPLAY_ONLY_KEYS.has(key) && !DYNAMIC_RUNTIME_KEYS.has(key)) {
                             isPhysicalChange = true;
                             break;
+                        }
+                    }
+                }
+
+                if (targetModelId && parameters['endtime'] !== undefined) {
+                    const newEndTime = Number(parameters['endtime']);
+                    if (!isNaN(newEndTime)) {
+                        const currentSimTime = this.getModelSimTime(targetModelId) || 0;
+                        const currentStatus = this.getModelStatus(targetModelId);
+
+                        if (newEndTime > currentSimTime) {
+                            if (newEndTime > 0) {
+                                const newProgress = Math.min(99, Math.max(0, Math.floor((currentSimTime / newEndTime) * 100)));
+                                this.setModelProgress(targetModelId, newProgress);
+                            }
+                            if (currentStatus === 'PAUSED' || currentStatus === 'TERMINATED') {
+                                this.setModelStatus(targetModelId, 'PAUSED');
+                            }
+                        } else if (newEndTime <= currentSimTime && currentSimTime > 0) {
+                            this.setModelProgress(targetModelId, 100);
+                            if (currentStatus === 'RUNNING') {
+                                this.setModelStatus(targetModelId, 'PAUSED');
+                            }
                         }
                     }
                 }
@@ -2253,6 +2397,21 @@ export class StateManager {
     }
 
     updateNodeParametersInPlace(nodeId: string, parameters: Record<string, any>): void {
+        if (nodeId.startsWith('virtual-viewport-')) {
+            const mId = nodeId.substring('virtual-viewport-'.length);
+            const targetM = this.appState.models[mId];
+            if (targetM) {
+                let vp = targetM.nodes.find(n => n.type === 'Telemetry3DViewport');
+                if (!vp) {
+                    this.healModelGraph(targetM);
+                    vp = targetM.nodes.find(n => n.type === 'Telemetry3DViewport');
+                }
+                if (vp) {
+                    nodeId = vp.id;
+                }
+            }
+        }
+
         let found = false;
         let changed = false;
         let targetModelId: string | null = null;
@@ -2278,9 +2437,32 @@ export class StateManager {
 
                 if (!NON_PHYSICAL_NODE_TYPES.has(node.type)) {
                     for (const key of Object.keys(parameters)) {
-                        if (!DISPLAY_ONLY_KEYS.has(key)) {
+                        if (!DISPLAY_ONLY_KEYS.has(key) && !DYNAMIC_RUNTIME_KEYS.has(key)) {
                             isPhysicalChange = true;
                             break;
+                        }
+                    }
+                }
+
+                if (targetModelId && parameters['endtime'] !== undefined) {
+                    const newEndTime = Number(parameters['endtime']);
+                    if (!isNaN(newEndTime)) {
+                        const currentSimTime = this.getModelSimTime(targetModelId) || 0;
+                        const currentStatus = this.getModelStatus(targetModelId);
+
+                        if (newEndTime > currentSimTime) {
+                            if (newEndTime > 0) {
+                                const newProgress = Math.min(99, Math.max(0, Math.floor((currentSimTime / newEndTime) * 100)));
+                                this.setModelProgress(targetModelId, newProgress);
+                            }
+                            if (currentStatus === 'PAUSED' || currentStatus === 'TERMINATED') {
+                                this.setModelStatus(targetModelId, 'PAUSED');
+                            }
+                        } else if (newEndTime <= currentSimTime && currentSimTime > 0) {
+                            this.setModelProgress(targetModelId, 100);
+                            if (currentStatus === 'RUNNING') {
+                                this.setModelStatus(targetModelId, 'PAUSED');
+                            }
                         }
                     }
                 }
@@ -2395,6 +2577,10 @@ export class StateManager {
     }
 
     getStatus(): SimulationStatus {
+        const activeWs = this.getActiveWorkspace();
+        if (activeWs && activeWs.activeModelId) {
+            return this.getModelStatus(activeWs.activeModelId);
+        }
         return this.simulationStatus;
     }
 
@@ -3106,9 +3292,29 @@ export class StateManager {
     }
 
     private notifyListeners(): void {
+        if (this._notifying) {
+            // Re-entrant call: a listener is synchronously mutating state.
+            // Schedule a deferred re-notification after the current batch
+            // completes so the final state is still broadcast, but without
+            // creating an infinite synchronous recursion / CPU spin.
+            this._pendingNotify = true;
+            return;
+        }
         const currentState = this.getCurrentState();
-        if (currentState) {
-            this.listeners.forEach(listener => listener(currentState));
+        if (!currentState) return;
+        this._notifying = true;
+        try {
+            this.listeners.forEach(listener => {
+                try { listener(currentState); } catch (e) { console.error('[StateManager] listener error:', e); }
+            });
+        } finally {
+            this._notifying = false;
+            if (this._pendingNotify) {
+                this._pendingNotify = false;
+                // Use setTimeout(0) to break the synchronous call stack before
+                // re-notifying, guaranteeing the deferred mutation is visible.
+                setTimeout(() => this.notifyListeners(), 0);
+            }
         }
     }
 
@@ -3468,207 +3674,165 @@ export class StateManager {
             m.nodes.forEach(n => tempExistingIds.add(n.id));
         });
 
-        // 1. If model has MPMDomain3D
-        const mpmDomain3D = model.nodes.find(n => n.type === 'MPMDomain3D');
-        if (mpmDomain3D) {
-            let meshNode = model.nodes.find(n => n.type === 'DomainMesh3D');
-            if (!meshNode) {
-                const existingMesh1D = model.nodes.find(n => n.type === 'DomainMesh');
-                if (existingMesh1D) {
-                    existingMesh1D.type = 'DomainMesh3D';
-                    const cellSize = existingMesh1D.parameters?.cell_size ?? 0.01;
-                    existingMesh1D.parameters = {
-                        ...this.getDefaultParameters('DomainMesh3D'),
-                        cell_size: cellSize
-                    };
-                    existingMesh1D.inputs = this.getDefaultInputs('DomainMesh3D');
-                    existingMesh1D.outputs = this.getDefaultOutputs('DomainMesh3D');
-                    meshNode = existingMesh1D;
-                    changed = true;
-                } else {
-                    const meshId = this.getUniqueNodeId('DomainMesh3D', tempExistingIds);
-                    meshNode = {
-                        id: meshId,
-                        type: 'DomainMesh3D',
-                        x: mpmDomain3D.x - 280,
-                        y: mpmDomain3D.y - 100,
-                        parameters: this.getDefaultParameters('DomainMesh3D'),
-                        inputs: this.getDefaultInputs('DomainMesh3D'),
-                        outputs: this.getDefaultOutputs('DomainMesh3D')
-                    };
-                    model.nodes.push(meshNode);
+
+
+        // 5. Ensure 3D simulation models have a Telemetry3DViewport node
+        const has3DEntities = model.nodes.some(n => 
+            n.type === 'DomainMesh3D' || 
+            n.type === 'CFDSolver3D' || 
+            n.type === 'MPMDomain3D' || 
+            n.type === 'MPMObject3D' || 
+            n.type === 'FEMDomain3D' || 
+            n.type === 'FEMObject3D' || 
+            n.type === 'STLGeometry'
+        );
+        if (has3DEntities) {
+            let vpNode = model.nodes.find(n => n.type === 'Telemetry3DViewport');
+            if (!vpNode) {
+                const vpId = this.getUniqueNodeId('Telemetry3DViewport', tempExistingIds);
+                vpNode = {
+                    id: vpId,
+                    type: 'Telemetry3DViewport',
+                    x: 600,
+                    y: 120,
+                    parameters: this.getDefaultParameters('Telemetry3DViewport'),
+                    inputs: this.getDefaultInputs('Telemetry3DViewport'),
+                    outputs: this.getDefaultOutputs('Telemetry3DViewport')
+                };
+                model.nodes.push(vpNode);
+                changed = true;
+            }
+
+            const hasVpConn = model.connections.some(c => c.toNode === vpNode!.id);
+            if (!hasVpConn) {
+                const sourceNode = model.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'DomainMesh3D');
+                if (sourceNode) {
+                    model.connections.push({
+                        fromNode: sourceNode.id,
+                        fromPort: sourceNode.type === 'DomainMesh3D' ? 'mesh' : 'telemetry',
+                        toNode: vpNode.id,
+                        toPort: 'in'
+                    });
                     changed = true;
                 }
             }
-            const hasMeshConn = model.connections.some(c => c.toNode === mpmDomain3D.id && c.toPort === 'mesh');
-            if (!hasMeshConn) {
-                model.connections.push({
-                    fromNode: meshNode.id,
-                    fromPort: 'mesh',
-                    toNode: mpmDomain3D.id,
-                    toPort: 'mesh'
-                });
-                changed = true;
-            }
+        }
 
-            let objNode = model.nodes.find(n => n.type === 'MPMObject3D');
-            if (!objNode) {
-                const objId = this.getUniqueNodeId('MPMObject3D', tempExistingIds);
-                objNode = {
-                    id: objId,
-                    type: 'MPMObject3D',
-                    x: mpmDomain3D.x - 280,
-                    y: mpmDomain3D.y + 100,
-                    parameters: this.getDefaultParameters('MPMObject3D'),
-                    inputs: this.getDefaultInputs('MPMObject3D'),
-                    outputs: this.getDefaultOutputs('MPMObject3D')
-                };
-                model.nodes.push(objNode);
-                changed = true;
-            }
-            const hasObjConn = model.connections.some(c => c.toNode === mpmDomain3D.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in'));
-            if (!hasObjConn) {
-                model.connections.push({
-                    fromNode: objNode.id,
-                    fromPort: 'object',
-                    toNode: mpmDomain3D.id,
-                    toPort: 'objects'
-                });
-                changed = true;
-            }
-
-            let matNode = model.nodes.find(n => n.type === 'Material');
-            if (!matNode) {
-                const matId = this.getUniqueNodeId('Material', tempExistingIds);
-                matNode = {
-                    id: matId,
-                    type: 'Material',
-                    x: objNode.x - 280,
-                    y: objNode.y,
-                    parameters: this.getDefaultParameters('Material'),
-                    inputs: this.getDefaultInputs('Material'),
-                    outputs: this.getDefaultOutputs('Material')
-                };
-                model.nodes.push(matNode);
-                changed = true;
-            }
-            const hasMatConn = model.connections.some(c => c.toNode === objNode.id && c.toPort === 'material');
-            if (!hasMatConn) {
-                model.connections.push({
-                    fromNode: matNode.id,
-                    fromPort: 'material',
-                    toNode: objNode.id,
-                    toPort: 'material'
-                });
-                changed = true;
+        // 6. Auto-heal Detonator connections
+        const detNodes = model.nodes.filter(n => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
+        const solverNodes = model.nodes.filter(n => ['MPMDomain3D', 'CFDSolver3D', 'MPMDomain2D', 'CFDSolver2D'].includes(n.type));
+        for (const det of detNodes) {
+            const isDet3D = det.type === 'DetonatorLocation3D';
+            const compatibleSolvers = solverNodes.filter(s => isDet3D ? (s.type === 'MPMDomain3D' || s.type === 'CFDSolver3D') : (s.type === 'MPMDomain2D' || s.type === 'CFDSolver2D'));
+            if (compatibleSolvers.length > 0) {
+                const isConnected = model.connections.some(c => c.fromNode === det.id && c.toPort === 'detonator');
+                if (!isConnected) {
+                    const targetSolver = compatibleSolvers.find(s => s.type === 'MPMDomain3D' || s.type === 'MPMDomain2D') || compatibleSolvers[0];
+                    model.connections.push({
+                        fromNode: det.id,
+                        fromPort: 'detonator',
+                        toNode: targetSolver.id,
+                        toPort: 'detonator'
+                    });
+                    changed = true;
+                }
             }
         }
 
-        // 2. If model has CFDSolver3D
-        const cfdSolver3D = model.nodes.find(n => n.type === 'CFDSolver3D');
-        if (cfdSolver3D) {
-            let meshNode = model.nodes.find(n => n.type === 'DomainMesh3D');
-            if (!meshNode) {
-                const meshId = this.getUniqueNodeId('DomainMesh3D', tempExistingIds);
-                meshNode = {
-                    id: meshId,
-                    type: 'DomainMesh3D',
-                    x: cfdSolver3D.x - 280,
-                    y: cfdSolver3D.y - 120,
-                    parameters: {
-                        xmin: 0.0, xmax: 1.0,
-                        ymin: 0.0, ymax: 1.0,
-                        zmin: 0.0, zmax: 1.0,
-                        cell_size: 0.02,
-                        bc_xmin: 'Transmitting', bc_xmax: 'Transmitting',
-                        bc_ymin: 'Transmitting', bc_ymax: 'Transmitting',
-                        bc_zmin: 'Transmitting', bc_zmax: 'Transmitting'
-                    },
-                    inputs: this.getDefaultInputs('DomainMesh3D'),
-                    outputs: this.getDefaultOutputs('DomainMesh3D')
-                };
-                model.nodes.push(meshNode);
-                changed = true;
-            }
-            const hasMeshConn = model.connections.some(c => c.toNode === cfdSolver3D.id && c.toPort === 'mesh');
-            if (!hasMeshConn) {
-                model.connections.push({
-                    fromNode: meshNode.id,
-                    fromPort: 'mesh',
-                    toNode: cfdSolver3D.id,
-                    toPort: 'mesh'
-                });
-                changed = true;
+        // 7. Auto-heal Background Grid connections
+        const meshNodes = model.nodes.filter(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh2D');
+        for (const mesh of meshNodes) {
+            const isMesh3D = mesh.type === 'DomainMesh3D';
+            const targetSolvers = model.nodes.filter(s => isMesh3D 
+                ? ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D'].includes(s.type)
+                : ['MPMDomain2D', 'CFDSolver2D'].includes(s.type));
+            for (const solver of targetSolvers) {
+                const isConnected = model.connections.some(c => c.fromNode === mesh.id && c.toNode === solver.id && c.toPort === 'mesh');
+                if (!isConnected) {
+                    model.connections.push({
+                        fromNode: mesh.id,
+                        fromPort: 'mesh',
+                        toNode: solver.id,
+                        toPort: 'mesh'
+                    });
+                    changed = true;
+                }
             }
         }
 
-        // 3. If model has CFDSolver2D
-        const cfdSolver2D = model.nodes.find(n => n.type === 'CFDSolver2D');
-        if (cfdSolver2D) {
-            let meshNode = model.nodes.find(n => n.type === 'DomainMesh2D');
-            if (!meshNode) {
-                const meshId = this.getUniqueNodeId('DomainMesh2D', tempExistingIds);
-                meshNode = {
-                    id: meshId,
-                    type: 'DomainMesh2D',
-                    x: cfdSolver2D.x - 280,
-                    y: cfdSolver2D.y - 120,
-                    parameters: {
-                        domain_width: 1.0,
-                        domain_height: 1.0,
-                        cell_size: 0.01,
-                        bc_left: 'Transmitting', bc_right: 'Transmitting',
-                        bc_top: 'Transmitting', bc_bottom: 'Transmitting'
-                    },
-                    inputs: this.getDefaultInputs('DomainMesh2D'),
-                    outputs: this.getDefaultOutputs('DomainMesh2D')
-                };
-                model.nodes.push(meshNode);
-                changed = true;
+        // 8. Auto-heal MPM and FEM Objects connections
+        const mpmObjects = model.nodes.filter(n => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
+        for (const obj of mpmObjects) {
+            const isObj3D = obj.type === 'MPMObject3D';
+            const domain = model.nodes.find(n => isObj3D ? n.type === 'MPMDomain3D' : n.type === 'MPMDomain2D');
+            if (domain) {
+                const isConnected = model.connections.some(c => c.fromNode === obj.id && c.toNode === domain.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects'));
+                if (!isConnected) {
+                    model.connections.push({
+                        fromNode: obj.id,
+                        fromPort: 'out',
+                        toNode: domain.id,
+                        toPort: 'objects'
+                    });
+                    changed = true;
+                }
             }
-            const hasMeshConn = model.connections.some(c => c.toNode === cfdSolver2D.id && c.toPort === 'mesh');
-            if (!hasMeshConn) {
-                model.connections.push({
-                    fromNode: meshNode.id,
-                    fromPort: 'mesh',
-                    toNode: cfdSolver2D.id,
-                    toPort: 'mesh'
-                });
-                changed = true;
+            const matConn = model.connections.find(c => (c.toNode === obj.id || c.fromNode === obj.id) && (c.toPort === 'material' || c.fromPort === 'material'));
+            if (!matConn) {
+                const isObjExplosive = (obj.id + ' ' + (obj.parameters?.name || '')).toLowerCase().includes('explosive');
+                const matNodes = model.nodes.filter(n => n.type === 'Material');
+                let targetMat = null;
+                if (isObjExplosive) {
+                    targetMat = matNodes.find(m => (m.id + ' ' + (m.parameters?.name || '')).toLowerCase().includes('explosive') || m.parameters?.material_model === 'CREST Reactive Burn' || m.parameters?.material_model === 'JWL Detonation Gas');
+                }
+                if (!targetMat) {
+                    targetMat = matNodes.find(m => m.parameters?.material_model !== 'Ideal Gas');
+                }
+                if (targetMat) {
+                    model.connections.push({
+                        fromNode: targetMat.id,
+                        fromPort: 'out',
+                        toNode: obj.id,
+                        toPort: 'material'
+                    });
+                    obj.parameters['material'] = targetMat.id;
+                    changed = true;
+                }
             }
         }
 
-        // 4. If model has 1D CFDSolver
-        const cfdSolver1D = model.nodes.find(n => n.type === 'CFDSolver');
-        if (cfdSolver1D) {
-            let meshNode = model.nodes.find(n => n.type === 'DomainMesh');
-            if (!meshNode) {
-                const meshId = this.getUniqueNodeId('DomainMesh', tempExistingIds);
-                meshNode = {
-                    id: meshId,
-                    type: 'DomainMesh',
-                    x: cfdSolver1D.x - 280,
-                    y: cfdSolver1D.y - 120,
-                    parameters: {
-                        domain_radius: 1.0,
-                        cell_size: 0.001,
-                        left_bc: 'Transmitting', right_bc: 'Transmitting'
-                    },
-                    inputs: this.getDefaultInputs('DomainMesh'),
-                    outputs: this.getDefaultOutputs('DomainMesh')
-                };
-                model.nodes.push(meshNode);
-                changed = true;
+        const femObjects = model.nodes.filter(n => n.type === 'FEMObject3D');
+        for (const obj of femObjects) {
+            const femDomain = model.nodes.find(n => n.type === 'FEMDomain3D');
+            if (femDomain) {
+                const isConnected = model.connections.some(c => c.fromNode === obj.id && c.toNode === femDomain.id && (c.toPort === 'objects' || c.toPort === 'fem_objects'));
+                if (!isConnected) {
+                    model.connections.push({
+                        fromNode: obj.id,
+                        fromPort: 'out',
+                        toNode: femDomain.id,
+                        toPort: 'objects'
+                    });
+                    changed = true;
+                }
             }
-            const hasMeshConn = model.connections.some(c => c.toNode === cfdSolver1D.id && c.toPort === 'mesh');
-            if (!hasMeshConn) {
-                model.connections.push({
-                    fromNode: meshNode.id,
-                    fromPort: 'mesh',
-                    toNode: cfdSolver1D.id,
-                    toPort: 'mesh'
-                });
-                changed = true;
+        }
+
+        // 9. Auto-heal Charge connections for CFD
+        const chargeNodes = model.nodes.filter(n => ['Charge3D', 'Charge2D', 'Charge1D'].includes(n.type));
+        for (const charge of chargeNodes) {
+            const cfdSolver = model.nodes.find(s => ['CFDSolver3D', 'CFDSolver2D', 'CFDSolver'].includes(s.type));
+            if (cfdSolver) {
+                const isConnected = model.connections.some(c => c.fromNode === charge.id && c.toNode === cfdSolver.id && c.toPort === 'charge');
+                if (!isConnected) {
+                    model.connections.push({
+                        fromNode: charge.id,
+                        fromPort: 'out',
+                        toNode: cfdSolver.id,
+                        toPort: 'charge'
+                    });
+                    changed = true;
+                }
             }
         }
 
@@ -4674,20 +4838,20 @@ export function resolveMeshCounts(node: Node, state?: SimulationState): MeshCoun
         const volume = dim_x * dim_y * dim_z;
 
         return { dimension: '3D', n_cells: totalCells, nr: 0, nz, nx, ny, totalCells, cellSize, xmin, xmax, ymin, ymax, zmin, zmax, dim_x, dim_y, dim_z, volume };
-    } else if (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D') {
+    } else if (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D' || node.type === 'FEMDomain3D') {
         let meshNode: Node | undefined;
         if (state) {
             const meshConn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in'));
             if (meshConn) meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
             if (!meshNode) {
-                const targetMeshType = node.type === 'CFDSolver3D' ? 'DomainMesh3D' : (node.type === 'CFDSolver2D' ? 'DomainMesh2D' : 'DomainMesh');
+                const targetMeshType = (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D') ? 'DomainMesh3D' : ((node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') ? 'DomainMesh2D' : 'DomainMesh');
                 meshNode = state.nodes.find(n => n.type === targetMeshType);
             }
         }
         if (meshNode) {
             return resolveMeshCounts(meshNode, state);
         }
-        return { dimension: node.type === 'CFDSolver3D' ? '3D' : (node.type === 'CFDSolver2D' ? '2D' : '1D'), n_cells: 0, nr: 0, nz: 0, nx: 0, ny: 0, totalCells: 0, cellSize: 0.001, dim_x: 0, dim_y: 0, dim_z: 0, volume: 0 };
+        return { dimension: (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D') ? '3D' : ((node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') ? '2D' : '1D'), n_cells: 0, nr: 0, nz: 0, nx: 0, ny: 0, totalCells: 0, cellSize: 0.001, dim_x: 0, dim_y: 0, dim_z: 0, volume: 0 };
     }
     return { dimension: '3D', n_cells: 0, nr: 0, nz: 0, nx: 0, ny: 0, totalCells: 0, cellSize: 0.001, dim_x: 0, dim_y: 0, dim_z: 0, volume: 0 };
 }
@@ -4933,12 +5097,17 @@ export function getMeshDisplayHTML(node: Node, state?: SimulationState): string 
         const total = counts.totalCells;
         const vol = counts.volume;
 
+        const isMPM = node.type === 'MPMDomain3D';
+        const isFEM = node.type === 'FEMDomain3D';
+        const title = isMPM ? '📐 MPM Background Grid Specification' : (isFEM ? '📐 FEM Hex Background Grid' : '📐 3D Cartesian Grid Specification');
+        const memLine = (!isMPM && !isFEM) ? `<div>Est. CFD State ${mem.isCpu ? 'RAM (CPU)' : 'VRAM'}: <b style="color: #4ec9b0;">${mem.formattedMemory}</b> <span style="font-size: 10px; color: #94a3b8;">(${mem.schemeShort} · ${mem.matShort} · ${mem.precShort} · ${mem.fluxShort})</span></div>` : '';
+
         return `<div style="background: rgba(56, 189, 248, 0.08); border: 1px solid #38bdf8; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
-               `<div style="color: #38bdf8; font-weight: bold; margin-bottom: 2px;">📐 3D Cartesian Grid Specification</div>` +
+               `<div style="color: #38bdf8; font-weight: bold; margin-bottom: 2px;">${title}</div>` +
                `<div>Grid Discretization: <b style="color: #fff;">${nx} x ${ny} x ${nz} cells</b> (Total: <b style="color: #38bdf8;">${total.toLocaleString()}</b>)</div>` +
                `<div>Cell Size: <b>dx = dy = dz = ${(counts.cellSize * 1000).toFixed(2)} mm</b></div>` +
                `<div>Domain Box: <b>${(counts.dim_x ?? 1).toFixed(2)}m × ${(counts.dim_y ?? 1).toFixed(2)}m × ${(counts.dim_z ?? 1).toFixed(2)}m</b> (Vol: ${vol.toFixed(4)} m³)</div>` +
-               `<div>Est. CFD State ${mem.isCpu ? 'RAM (CPU)' : 'VRAM'}: <b style="color: #4ec9b0;">${mem.formattedMemory}</b> <span style="font-size: 10px; color: #94a3b8;">(${mem.schemeShort} · ${mem.matShort} · ${mem.precShort} · ${mem.fluxShort})</span></div>` +
+               memLine +
                `</div>`;
     }
     return '';

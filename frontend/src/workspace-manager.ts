@@ -66,6 +66,12 @@ export class WorkspaceManager {
     private titleElement: HTMLElement | null = null;
     private stateListener: () => void;
 
+    /** True while the constructor's buildStage() is running. Prevents saveStageOptions
+     *  from calling updatePanelOptions synchronously during initialisation, which would
+     *  immediately trigger notifyListeners → LayoutManager.render → new WorkspaceManager
+     *  → buildStage → saveStageOptions → ... (infinite recursion / CPU spin). */
+    private _initializing: boolean = false;
+
     private stlGeometries: Map<string, { vertices: Float32Array | null, meshId: string }> = new Map();
     private obstacleGeometries: Map<string, { vertices: Float32Array | null, cells: Int32Array | null, meshId: string }> = new Map();
     private windowResizeListener: (() => void) | null = null;
@@ -117,7 +123,11 @@ export class WorkspaceManager {
         this.windowResizeListener = () => this.triggerResize();
         window.addEventListener('resize', this.windowResizeListener);
 
+        // Guard: suppress saveStageOptions → updatePanelOptions mutations during
+        // initial buildStage so we don't trigger a re-entrant state notification.
+        this._initializing = true;
         this.buildStage();
+        this._initializing = false;
     }
 
     public triggerResize(): void {
@@ -165,6 +175,12 @@ export class WorkspaceManager {
     public saveStageOptions(): void {
         localStorage.setItem('blastdemon_stage_theme', this.activeTheme);
         localStorage.setItem('blastdemon_stage_grid', String(this.showStudioGrid));
+        // Skip the state mutation entirely while we're still inside the constructor's
+        // buildStage() call. The options are already reflected in this.savedOptions (passed
+        // in from the persisted layout), so there is nothing new to write yet. Writing here
+        // would trigger notifyListeners → LayoutManager.render → new WorkspaceManager →
+        // buildStage → saveStageOptions → … causing an infinite synchronous recursion.
+        if (this._initializing) return;
         if (!this.panelId) return;
         const options: ViewportOptions = {
             preset: this.activePreset,

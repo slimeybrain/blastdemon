@@ -40,13 +40,14 @@ void main() {
     if (uParticleDiameter > 0.0) {
         float fovY = uProjection[1][1];
         float vH = uViewportHeight > 0.0 ? uViewportHeight : 800.0;
+        float viewDepth = max(0.05, -vViewPos.z);
         if (uProjection[3][3] == 0.0) {
-            gl_PointSize = clamp((uParticleDiameter * fovY * vH * 0.5) / max(0.0001, -vViewPos.z), 1.0, 1024.0);
+            gl_PointSize = clamp((uParticleDiameter * fovY * vH * 0.5) / viewDepth, 1.0, 48.0);
         } else {
-            gl_PointSize = clamp(uParticleDiameter * fovY * vH * 0.5, 1.0, 1024.0);
+            gl_PointSize = clamp(uParticleDiameter * fovY * vH * 0.5, 1.0, 48.0);
         }
     } else {
-        gl_PointSize = uParticleSize > 0.0 ? uParticleSize : 4.0;
+        gl_PointSize = clamp(uParticleSize > 0.0 ? uParticleSize : 4.0, 1.0, 48.0);
     }
     vTexCoord = texCoord;
     vSliceSize = sliceSize;
@@ -90,6 +91,7 @@ uniform float uDx;
 uniform float uStlMin;
 uniform float uStlMax;
 uniform bool uStlLogScale;
+uniform float uParticleDiameter;
 
 uniform int uAxis;
 uniform int uIsSubmesh;
@@ -345,6 +347,11 @@ void main() {
             if (distSq > 1.0) {
                 discard;
             }
+            vec3 col = vec3(vTexCoord.x, vTexCoord.y, vSliceSize.x);
+            if (uParticleDiameter <= 0.0) {
+                outColor = vec4(col, uAlpha);
+                return;
+            }
             float z = sqrt(max(0.0, 1.0 - distSq));
             vec3 normal = vec3(pcoord.x, -pcoord.y, z);
             vec3 lightDir = normalize(vec3(0.4, 0.6, 0.9));
@@ -362,7 +369,6 @@ void main() {
                     aoFactor = pow(max(normal.z, 0.0), 0.5);
                 }
             }
-            vec3 col = vec3(vTexCoord.x, vTexCoord.y, vSliceSize.x);
             vec3 lit = col * (uAmbientLevel * aoFactor + 0.7 * diff) + vec3(spec);
             outColor = vec4(lit, uAlpha);
             return;
@@ -460,7 +466,22 @@ void main() {
 
         // STL Geometry (5 = Solid, 6 = Wireframe, 7 = Solid + Wireframe) or Gauges (8 = Solid Spheres)
         if (uIsWireframe >= 5) {
-            vec3 relDomainPos = (vLocalPos - uDomainMin) / max(uDomainExtent, vec3(1e-6));
+            vec3 probePos = vLocalPos;
+            if (uIsWireframe <= 7) {
+                vec3 dLocalX = dFdx(vLocalPos);
+                vec3 dLocalY = dFdy(vLocalPos);
+                vec3 surfNormal = cross(dLocalX, dLocalY);
+                float lN = length(surfNormal);
+                if (lN > 1e-6) {
+                    surfNormal /= lN;
+                    vec3 viewNorm = cross(dFdx(vViewPos.xyz), dFdy(vViewPos.xyz));
+                    if (viewNorm.z < 0.0) {
+                        surfNormal = -surfNormal;
+                    }
+                    probePos += surfNormal * (0.5 * max(uDx, 1e-4));
+                }
+            }
+            vec3 relDomainPos = (probePos - uDomainMin) / max(uDomainExtent, vec3(1e-6));
             bool inStlDomain = (relDomainPos.x >= -1e-4 && relDomainPos.x <= 1.0001 &&
                                 relDomainPos.y >= -1e-4 && relDomainPos.y <= 1.0001 &&
                                 relDomainPos.z >= -1e-4 && relDomainPos.z <= 1.0001);
@@ -650,13 +671,14 @@ void main() {
     if (uParticleDiameter > 0.0) {
         float fovY = uProjection[1][1];
         float vH = uViewportHeight > 0.0 ? uViewportHeight : 800.0;
+        float viewDepth = max(0.05, -vViewPos.z);
         if (uProjection[3][3] == 0.0) {
-            gl_PointSize = clamp((uParticleDiameter * fovY * vH * 0.5) / max(0.0001, -vViewPos.z), 1.0, 1024.0);
+            gl_PointSize = clamp((uParticleDiameter * fovY * vH * 0.5) / viewDepth, 1.0, 48.0);
         } else {
-            gl_PointSize = clamp(uParticleDiameter * fovY * vH * 0.5, 1.0, 1024.0);
+            gl_PointSize = clamp(uParticleDiameter * fovY * vH * 0.5, 1.0, 48.0);
         }
     } else {
-        gl_PointSize = uParticleSize > 0.0 ? uParticleSize : 4.0;
+        gl_PointSize = clamp(uParticleSize > 0.0 ? uParticleSize : 4.0, 1.0, 48.0);
     }
     vTexCoord = texCoord;
     vSliceSize = sliceSize;
@@ -692,6 +714,7 @@ uniform vec3 uDomainExtent;
 uniform float uDx;
 uniform float uStlMin;
 uniform float uStlMax;
+uniform float uParticleDiameter;
 
 uniform int uAxis;
 uniform int uIsSubmesh;
@@ -907,13 +930,17 @@ void main() {
             if (distSq > 1.0) {
                 discard;
             }
+            vec3 col = vec3(vTexCoord.x, vTexCoord.y, vSliceSize.x);
+            if (uParticleDiameter <= 0.0) {
+                outColor = vec4(col, uAlpha);
+                return;
+            }
             float z = sqrt(max(0.0, 1.0 - distSq));
             vec3 normal = vec3(pcoord.x, -pcoord.y, z);
             vec3 lightDir = normalize(vec3(0.4, 0.6, 0.9));
             float diff = max(dot(normal, lightDir), 0.0);
             vec3 reflectDir = reflect(-lightDir, normal);
             float spec = pow(max(dot(reflectDir, vec3(0.0, 0.0, 1.0)), 0.0), 16.0) * (uSpecularLevel * 0.75);
-            vec3 col = vec3(vTexCoord.x, vTexCoord.y, vSliceSize.x);
             vec3 lit = col * (uAmbientLevel + 0.7 * diff) + vec3(spec);
             outColor = vec4(lit, uAlpha);
             return;
@@ -1529,7 +1556,20 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
 
         // STL Geometry (5.0 = Solid, 6.0 = Wireframe, 7.0 = Solid + Wireframe)
         if (uniforms.isWireframe >= 4.5 && uniforms.isWireframe < 7.5) {
-            let relDomainPos = (vLocalPos - uniforms.domainMin) / max(uniforms.domainExtent, vec3<f32>(1e-6, 1e-6, 1e-6));
+            var probePos = vLocalPos;
+            let dLocalX = dpdx(vLocalPos);
+            let dLocalY = dpdy(vLocalPos);
+            var surfNormal = cross(dLocalX, dLocalY);
+            let lN = length(surfNormal);
+            if (lN > 1e-6) {
+                surfNormal = surfNormal / lN;
+                let viewNormal = (uniforms.view * uniforms.model * vec4<f32>(surfNormal, 0.0)).xyz;
+                if (viewNormal.z < 0.0) {
+                    surfNormal = -surfNormal;
+                }
+                probePos = probePos + surfNormal * (0.5 * max(uniforms.dx, 1e-4));
+            }
+            let relDomainPos = (probePos - uniforms.domainMin) / max(uniforms.domainExtent, vec3<f32>(1e-6, 1e-6, 1e-6));
             let inStlDomain = (relDomainPos.x >= -1e-4 && relDomainPos.x <= 1.0001 &&
                                relDomainPos.y >= -1e-4 && relDomainPos.y <= 1.0001 &&
                                relDomainPos.z >= -1e-4 && relDomainPos.z <= 1.0001);
@@ -1707,6 +1747,8 @@ let gpuSlicePipeline: any = null;
 let gpuLinePipeline: any = null;
 let gpuHighlightLinePipeline: any = null;
 let gpuSTLLinePipeline: any = null;
+let gpuSTLPipelineFront: any = null;
+let gpuSTLPipelineBack: any = null;
 let gpuPointPipeline: any = null;
 let gpuParticleBillboardPipeline: any = null;
 let gpuMPMParticlesBuffer: any = null;
@@ -1874,7 +1916,7 @@ let stlOpacity = 0.5;
 let stlColormap = 'rainbow';
 let stlShowResults = true;
 let stlQuantity = 'pressure';
-let stlSamplingMode = 'nearest';
+let stlSamplingMode = 'linear';
 let stlAutoScale = true;
 let stlLogScale = false;
 let stlMinVal = 101325.0;
@@ -3082,6 +3124,75 @@ async function initContext(canvas: OffscreenCanvas) {
                             }]
                         },
                         primitive: { topology: 'line-list' },
+                        multisample: { count: 4 },
+                        depthStencil: {
+                            depthWriteEnabled: true,
+                            depthCompare: 'less-equal',
+                            format: 'depth24plus'
+                        }
+                    });
+
+                    // Dedicated STL solid pipelines with backface culling and guaranteed depth writing
+                    gpuSTLPipelineFront = gpuDevice.createRenderPipeline({
+                        layout: pipelineLayout,
+                        vertex: {
+                            module: shaderModule,
+                            entryPoint: 'vs_main',
+                            buffers: [{
+                                arrayStride: 28, // 7 floats (x, y, z, u, v, w, h)
+                                attributes: [
+                                    { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                                    { shaderLocation: 1, offset: 12, format: 'float32x2' },
+                                    { shaderLocation: 2, offset: 20, format: 'float32x2' }
+                                ]
+                            }]
+                        },
+                        fragment: {
+                            module: shaderModule,
+                            entryPoint: 'fs_main',
+                            targets: [{
+                                format: nav.gpu.getPreferredCanvasFormat(),
+                                blend: {
+                                    color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                                    alpha: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' }
+                                }
+                            }]
+                        },
+                        primitive: { topology: 'triangle-list', cullMode: 'back' },
+                        multisample: { count: 4 },
+                        depthStencil: {
+                            depthWriteEnabled: true,
+                            depthCompare: 'less-equal',
+                            format: 'depth24plus'
+                        }
+                    });
+
+                    gpuSTLPipelineBack = gpuDevice.createRenderPipeline({
+                        layout: pipelineLayout,
+                        vertex: {
+                            module: shaderModule,
+                            entryPoint: 'vs_main',
+                            buffers: [{
+                                arrayStride: 28,
+                                attributes: [
+                                    { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                                    { shaderLocation: 1, offset: 12, format: 'float32x2' },
+                                    { shaderLocation: 2, offset: 20, format: 'float32x2' }
+                                ]
+                            }]
+                        },
+                        fragment: {
+                            module: shaderModule,
+                            entryPoint: 'fs_main',
+                            targets: [{
+                                format: nav.gpu.getPreferredCanvasFormat(),
+                                blend: {
+                                    color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                                    alpha: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' }
+                                }
+                            }]
+                        },
+                        primitive: { topology: 'triangle-list', cullMode: 'front' },
                         multisample: { count: 4 },
                         depthStencil: {
                             depthWriteEnabled: true,
@@ -6712,7 +6823,6 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
         addLine([x1, y0, z1], [x1, y1, z1]);
         addLine([x1, y1, z1], [x0, y1, z1]);
         addLine([x0, y1, z1], [x0, y0, z1]);
-
         addLine([x0, y0, z0], [x0, y0, z1]);
         addLine([x1, y0, z0], [x1, y0, z1]);
         addLine([x1, y1, z0], [x1, y1, z1]);
@@ -6725,22 +6835,17 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
         const nParticles = Math.floor(latestMPMParticlesData.length / stride);
         if (nParticles === 0) return false;
 
-        const pPerDim = Math.max(1, Math.round(Math.cbrt(ppc || 8)));
-        const autoDiam = (latestEmpiricalSpacing > 0) ? (latestEmpiricalSpacing * 0.8) : (((dx || 0.001) / pPerDim) * 0.8);
-        const pDiam = (mpmParticleDiameter !== undefined && mpmParticleDiameter > 0) ? mpmParticleDiameter : autoDiam;
-        const halfD = Math.max(1e-5, pDiam * 0.65);
-        const rNormX = halfD / sizeX;
-        const rNormY = halfD / sizeY;
-        const rNormZ = halfD / sizeZ;
-
         const hasMultipleObjects = (mpmObjectsData && mpmObjectsData.length > 1);
         const targetStr1 = String(targetObjIdx);
         const targetStr2 = String(targetObjIdx + 1);
 
-        let matched = 0;
-        const step = nParticles > 20000 ? Math.ceil(nParticles / 10000) : 1;
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+        let matchedCount = 0;
 
-        for (let i = 0; i < nParticles; i += step) {
+        // Pass 1: compute bounds of target object's particles
+        const sampleStep = nParticles > 5000 ? Math.ceil(nParticles / 5000) : 1;
+        for (let i = 0; i < nParticles; i += sampleStep) {
             const base = i * stride;
             if (hasMultipleObjects) {
                 const pObjId = latestMPMParticlesData[base + 12] !== undefined ? String(Math.round(latestMPMParticlesData[base + 12])) : undefined;
@@ -6748,34 +6853,65 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
                     continue;
                 }
             }
-
             const px = latestMPMParticlesData[base + 0];
             const py = latestMPMParticlesData[base + 1];
             const pz = latestMPMParticlesData[base + 2];
-            const nx = normX(px);
-            const ny = normY(py);
-            const nz = normZ(pz);
-
-            // Draw tight perimeter circle ring directly on each active particle
-            const segs = 8;
-            let prev: number[] | null = null;
-            for (let s = 0; s <= segs; s++) {
-                const ang = (s / segs) * Math.PI * 2;
-                const ca = Math.cos(ang) * rNormX * 1.15;
-                const sa = Math.sin(ang) * rNormY * 1.15;
-                const pt = [nx + ca, ny + sa, nz];
-                if (prev) addLine(prev, pt);
-                prev = pt;
-            }
-
-            // Crosshair tick marks on particle
-            addLine([nx - rNormX * 1.2, ny, nz], [nx + rNormX * 1.2, ny, nz]);
-            addLine([nx, ny - rNormY * 1.2, nz], [nx, ny + rNormY * 1.2, nz]);
-            addLine([nx, ny, nz - rNormZ * 1.2], [nx, ny, nz + rNormZ * 1.2]);
-            matched++;
+            if (px < minX) minX = px; if (px > maxX) maxX = px;
+            if (py < minY) minY = py; if (py > maxY) maxY = py;
+            if (pz < minZ) minZ = pz; if (pz > maxZ) maxZ = pz;
+            matchedCount++;
         }
 
-        return matched > 0;
+        if (matchedCount === 0 || !isFinite(minX)) return false;
+
+        // Draw crisp 3D bounding box around the selected particle cluster
+        const bminX = normX(minX); const bmaxX = normX(maxX);
+        const bminY = normY(minY); const bmaxY = normY(maxY);
+        const bminZ = normZ(minZ); const bmaxZ = normZ(maxZ);
+
+        // 12 edges of cluster bounding box
+        addLine([bminX, bminY, bminZ], [bmaxX, bminY, bminZ]);
+        addLine([bmaxX, bminY, bminZ], [bmaxX, bmaxY, bminZ]);
+        addLine([bmaxX, bmaxY, bminZ], [bminX, bmaxY, bminZ]);
+        addLine([bminX, bmaxY, bminZ], [bminX, bminY, bminZ]);
+
+        addLine([bminX, bminY, bmaxZ], [bmaxX, bminY, bmaxZ]);
+        addLine([bmaxX, bminY, bmaxZ], [bmaxX, bmaxY, bmaxZ]);
+        addLine([bmaxX, bmaxY, bmaxZ], [bminX, bmaxY, bmaxZ]);
+        addLine([bminX, bmaxY, bmaxZ], [bminX, bminY, bmaxZ]);
+
+        addLine([bminX, bminY, bminZ], [bminX, bminY, bmaxZ]);
+        addLine([bmaxX, bminY, bminZ], [bmaxX, bminY, bmaxZ]);
+        addLine([bmaxX, bmaxY, bminZ], [bmaxX, bmaxY, bmaxZ]);
+        addLine([bminX, bmaxY, bminZ], [bminX, bmaxY, bmaxZ]);
+
+        // Draw sample particle crosshairs (capped at 50 particles max to prevent memory spikes)
+        const maxSample = 50;
+        const drawStep = Math.max(1, Math.floor(nParticles / maxSample));
+        const rNormX = Math.max(0.002, (maxX - minX) * 0.01 / sizeX);
+        const rNormY = Math.max(0.002, (maxY - minY) * 0.01 / sizeY);
+        const rNormZ = Math.max(0.002, (maxZ - minZ) * 0.01 / sizeZ);
+
+        let sampled = 0;
+        for (let i = 0; i < nParticles && sampled < maxSample; i += drawStep) {
+            const base = i * stride;
+            if (hasMultipleObjects) {
+                const pObjId = latestMPMParticlesData[base + 12] !== undefined ? String(Math.round(latestMPMParticlesData[base + 12])) : undefined;
+                if (pObjId !== undefined && pObjId !== targetStr1 && pObjId !== targetStr2) {
+                    continue;
+                }
+            }
+            const nx = normX(latestMPMParticlesData[base + 0]);
+            const ny = normY(latestMPMParticlesData[base + 1]);
+            const nz = normZ(latestMPMParticlesData[base + 2]);
+
+            addLine([nx - rNormX, ny, nz], [nx + rNormX, ny, nz]);
+            addLine([nx, ny - rNormY, nz], [nx, ny + rNormY, nz]);
+            addLine([nx, ny, nz - rNormZ], [nx, ny, nz + rNormZ]);
+            sampled++;
+        }
+
+        return true;
     }
 
     function addFEMMeshHighlights(): boolean {
@@ -7149,6 +7285,9 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
         objectType === 'FSICoupler3D' ||
         objectType === 'FEMFSICoupler3D'
     ) {
+        // Full domain bounding box wireframe highlight
+        addCleanBoxWireframe([-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]);
+
         // Coordinate axis origin triad at [x0, y0, z0] = [-0.5, -0.5, -0.5]
         const origin = [-0.5, -0.5, -0.5];
         const axisLen = 0.25;
@@ -8067,12 +8206,20 @@ function render() {
                     ]
                 });
 
-                const pipelineToUse = (stlOpacity < 0.999 && gpuSlicePipeline) ? gpuSlicePipeline : (gpuPipeline || gpuSlicePipeline);
+                const pipelineToUse = gpuSTLPipelineFront || gpuPipeline;
+                if (stlOpacity < 0.999 && gpuSTLPipelineBack) {
+                    // Pass 1: Draw interior/back faces first so they appear behind
+                    passEncoder.setPipeline(gpuSTLPipelineBack);
+                    passEncoder.setBindGroup(0, solidBindGroup);
+                    passEncoder.setVertexBuffer(0, gpuSTLBuffer);
+                    passEncoder.draw(count);
+                }
+                // Pass 2 (or Opaque pass): Draw front faces cleanly on top with depth test
                 passEncoder.setPipeline(pipelineToUse);
                 passEncoder.setBindGroup(0, solidBindGroup);
                 passEncoder.setVertexBuffer(0, gpuSTLBuffer);
                 passEncoder.draw(count);
-            } else if (stlWireframe && gpuPipeline) {
+            } else if (stlWireframe && (gpuSTLLinePipeline || gpuPipeline)) {
                 stlDrawnThisFrameWebGPU = true;
                 const uWire = new Float32Array(uniformData);
                 uWire.set(stlFinalModel, 32);
@@ -8098,7 +8245,7 @@ function render() {
                     ]
                 });
 
-                passEncoder.setPipeline(gpuPipeline);
+                passEncoder.setPipeline(gpuSTLLinePipeline || gpuPipeline);
                 passEncoder.setBindGroup(0, wireBindGroup);
                 passEncoder.setVertexBuffer(0, gpuSTLBuffer);
                 passEncoder.draw(count);
@@ -8261,13 +8408,11 @@ function render() {
             uMPM[48] = mpmParticleOpacity;
             uMPM[53] = 14.0; // 14.0 for MPM particles
             const maxSize = Math.max(getDimX(), getDimY(), getDimZ()) || 1.0;
-            const pPerDim = Math.max(1, Math.round(Math.cbrt(ppc || 8)));
-            const autoDiam = (latestEmpiricalSpacing > 0) ? (latestEmpiricalSpacing * 0.8) : (((dx || 0.001) / pPerDim) * 0.8);
-            const pDiam = (mpmParticleDiameter !== undefined && mpmParticleDiameter > 0)
-                ? mpmParticleDiameter
-                : autoDiam;
-            const viewRadius = (pDiam * 0.5) / maxSize;
-            uMPM[54] = Math.max(0.00005, viewRadius); // particle radius in view space
+            const pDiam = (mpmParticleDiameter !== undefined && mpmParticleDiameter !== null && !isNaN(Number(mpmParticleDiameter)))
+                ? Number(mpmParticleDiameter)
+                : 0.0;
+            const viewRadius = (pDiam > 0 && maxSize > 0) ? ((pDiam * 0.5) / maxSize) : 0.0;
+            uMPM[54] = viewRadius; // particle radius in view space (0.0 for screen-space point cloud)
             gpuDevice.queue.writeBuffer(gpuUniformBufferMPM, 0, uMPM.buffer);
 
             const mpmBindGroup = gpuDevice.createBindGroup({
@@ -8280,7 +8425,12 @@ function render() {
                 ]
             });
 
-            if (gpuParticleBillboardPipeline) {
+            if (gpuPointPipeline && viewRadius <= 0.0) {
+                passEncoder.setPipeline(gpuPointPipeline);
+                passEncoder.setBindGroup(0, mpmBindGroup);
+                passEncoder.setVertexBuffer(0, gpuMPMParticlesBuffer);
+                passEncoder.draw(mpmParticlesCount);
+            } else if (gpuParticleBillboardPipeline) {
                 passEncoder.setPipeline(gpuParticleBillboardPipeline);
                 passEncoder.setBindGroup(0, mpmBindGroup);
                 passEncoder.setVertexBuffer(0, gpuMPMParticlesBuffer);
@@ -8553,10 +8703,7 @@ function render() {
                 });
             }
 
-            // Transparent STL pass (if opacity < 0.999, rendered after opaque slices)
-            if (stlOpacity < 0.999) {
-                drawSTLWebGPU();
-            }
+            // Transparent STL is drawn once after all slices (see unified call below)
 
             // Pass 2: Transparent Slices (depth write disabled, sorted back-to-front)
             if (transparentSlices.length > 0) {
@@ -8599,7 +8746,7 @@ function render() {
             }
         }
 
-        // Transparent STL fallback if no slices were active
+        // Draw transparent STL exactly once, after all slice passes (whether or not slices were active)
         if (stlOpacity < 0.999) {
             drawSTLWebGPU();
         }
@@ -8946,19 +9093,26 @@ function render() {
 
         if (stlSolids && stlOpacity > 0.001) {
             stlDrawnThisFrameWebGL = true;
-            const isTransparent = stlOpacity < 0.999;
-            if (isTransparent) activeGl.depthMask(false);
+            activeGl.depthMask(true);
             if (uIsWF) activeGl.uniform1i(uIsWF, stlWireframe ? 7 : 5); // 7 = Solid + Wireframe, 5 = Solid only
             if (uAlpha) activeGl.uniform1f(uAlpha, stlOpacity);
+
+            activeGl.enable(activeGl.CULL_FACE);
+            if (stlOpacity < 0.999) {
+                // Pass 1: Draw interior/back faces first so they appear behind
+                activeGl.cullFace(activeGl.FRONT);
+                activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
+            }
+            // Pass 2 (or Opaque pass): Draw front faces cleanly on top with depth test
+            activeGl.cullFace(activeGl.BACK);
             activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
-            if (isTransparent) activeGl.depthMask(true);
+            activeGl.disable(activeGl.CULL_FACE);
         } else if (stlWireframe) {
             stlDrawnThisFrameWebGL = true;
-            activeGl.depthMask(false);
+            activeGl.depthMask(true);
             if (uIsWF) activeGl.uniform1i(uIsWF, 6); // 6 = Wireframe only
             if (uAlpha) activeGl.uniform1f(uAlpha, 0.0);
             activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
-            activeGl.depthMask(true);
         }
 
         // Restore base model matrix for slices and reset uStlMatrix
@@ -9174,10 +9328,7 @@ function render() {
             gl!.drawArrays(gl!.TRIANGLES, 0, 6);
         });
 
-        // Transparent STL pass (if opacity < 0.999, rendered after opaque slices)
-        if (stlOpacity < 0.999) {
-            drawSTLWebGL();
-        }
+            // Transparent STL is drawn once after all slices (see unified call below)
 
         // Pass 2: Transparent Slices (depth write disabled, sorted back-to-front)
         if (transparentSlices.length > 0) {
@@ -9242,7 +9393,7 @@ function render() {
         }
     }
 
-    // Transparent STL fallback if no slices were active
+    // Draw transparent STL exactly once, after all slice passes (whether or not slices were active)
     if (stlOpacity < 0.999) {
         drawSTLWebGL();
     }
@@ -9253,9 +9404,9 @@ function render() {
         if (uAlpha) gl.uniform1f(uAlpha, mpmParticleOpacity);
         if (glUniforms.uParticleSize) gl.uniform1f(glUniforms.uParticleSize, mpmParticleSize || 4.0);
         const maxSize = Math.max(getDimX(), getDimY(), getDimZ()) || 1.0;
-        const pPerDim = Math.max(1, Math.round(Math.cbrt(ppc || 8)));
-        const autoDiam = (latestEmpiricalSpacing > 0) ? (latestEmpiricalSpacing * 0.8) : (((dx || 0.001) / pPerDim) * 0.8);
-        const pDiam = (mpmParticleDiameter !== undefined && mpmParticleDiameter > 0) ? mpmParticleDiameter : autoDiam;
+        const pDiam = (mpmParticleDiameter !== undefined && mpmParticleDiameter !== null && !isNaN(Number(mpmParticleDiameter)))
+            ? Number(mpmParticleDiameter)
+            : 0.0;
         const viewDiam = (pDiam > 0 && maxSize > 0) ? (pDiam / maxSize) : 0.0;
         if (glUniforms.uParticleDiameter) gl.uniform1f(glUniforms.uParticleDiameter, viewDiam);
         if (glUniforms.uViewportHeight) gl.uniform1f(glUniforms.uViewportHeight, canvasHeight());

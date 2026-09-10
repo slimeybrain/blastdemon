@@ -633,6 +633,22 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Cartesian Y coordinate of detonation point',
         detailedDesc: 'Y-coordinate (m) of detonation point source in 3D Cartesian space.'
     },
+    'target_domain': {
+        key: 'target_domain',
+        label: 'Target Domain / Solver',
+        unit: '',
+        category: 'Wiring & Connectivity',
+        shortDesc: 'Physics solver domain connected to this entity in the model DAG',
+        detailedDesc: 'Selects the target physics domain (such as MPMDomain3D, CFDSolver3D, or FEMDomain3D) that receives spatial point initiation, boundary conditions, or body particles from this entity.'
+    },
+    'connected_detonators': {
+        key: 'connected_detonators',
+        label: 'Connected Detonator',
+        unit: '',
+        category: 'Point Detonator & Ignition',
+        shortDesc: 'Point source detonator locations wired to this physics domain',
+        detailedDesc: 'Lists point-source detonator nodes wired to this solver domain. Initiates hot-spot ignition for CREST reactive burn in MPM or high-pressure gas seeding in Eulerian CFD.'
+    },
 
     // --- Solution Remapping ---
     'explosive_r': {
@@ -1207,76 +1223,6 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Material Heterogeneity & Fragmentation',
         shortDesc: 'Parent material post-failure bulk stiffness ratio (Default: 0.10)',
         detailedDesc: 'Dimensionless fraction (0.0 to 1.0) of intact bulk modulus retained by completely failed/fragmented parent material when subjected to hydrostatic re-compression (J < 1.0). In the unified parent material framework, particles preserve their parent EOS, density, and shock impedance while using this factor for crushed aggregate re-compaction.'
-    },
-    'dem_transition_enabled': {
-        key: 'dem_transition_enabled',
-        label: 'MPM-to-DEM Dynamic Transition',
-        category: 'Discrete Fracture & DEM Dynamics',
-        shortDesc: 'Transition failed material points into discrete DEM contact grains',
-        detailedDesc: 'When enabled, material points reaching full damage (D >= 1.0) dynamically decouple from the background Eulerian grid and transition into discrete Lagrangian DEM grains. This eliminates grid velocity smoothing across crack interfaces and enables discrete, non-smeared fragment flight with pairwise contact and friction.'
-    },
-    'fragment_distribution': {
-        key: 'fragment_distribution',
-        label: 'Fragment Size Distribution Model',
-        category: 'Discrete Fracture & DEM Dynamics',
-        shortDesc: 'Statistical fragment size model (Rosin-Rammler, Mott-Grady, Lognormal, Monodisperse)',
-        detailedDesc: 'Selects the statistical probability distribution function used to assign physical fragment grain diameters upon fracture. Rosin-Rammler and Mott-Grady capture multi-scale fragments ranging from fine dust/spall to large macro-fragments.'
-    },
-    'fragment_min_size': {
-        key: 'fragment_min_size',
-        label: 'Minimum Fragment Diameter (d_min)',
-        unit: 'm',
-        category: 'Discrete Fracture & DEM Dynamics',
-        shortDesc: 'Smallest fragment grain size (Default: 0.002 m)',
-        detailedDesc: 'Lower bound for the fragment size distribution (m). Represents fine spallation grains and dust with high aerodynamic drag.'
-    },
-    'fragment_max_size': {
-        key: 'fragment_max_size',
-        label: 'Maximum Fragment Diameter (d_max)',
-        unit: 'm',
-        category: 'Discrete Fracture & DEM Dynamics',
-        shortDesc: 'Largest fragment grain size (Default: 0.040 m)',
-        detailedDesc: 'Upper characteristic scale for macro-fragments (m). Governs the size of large structural chunks and casing fragments.'
-    },
-    'fragment_weibull_n': {
-        key: 'fragment_weibull_n',
-        label: 'Fragment Dispersion Exponent (n)',
-        unit: 'dim',
-        category: 'Discrete Fracture & DEM Dynamics',
-        shortDesc: 'Rosin-Rammler / Weibull slope exponent n (Recommended: 1.2 to 2.5)',
-        detailedDesc: 'Shape parameter n of the Rosin-Rammler cumulative mass distribution F(d) = 1 - exp(-(d/d_0)^n). Lower n produces wide multi-modal fragment dispersion with both very fine dust and large chunks; higher n produces more uniform fragment sizing.'
-    },
-    'fragment_clumping_radius': {
-        key: 'fragment_clumping_radius',
-        label: 'Fragment Clumping Radius',
-        unit: 'm',
-        category: 'Discrete Fracture & DEM Dynamics',
-        shortDesc: 'Spatial neighborhood search radius for multi-particle fragment clusters (Default: 0.015 m)',
-        detailedDesc: 'Spatial search radius (m) used to group contiguous failed DEM particles into unified rigid/deformable fragment clusters with shared cluster identifiers.'
-    },
-    'fragment_ejection_jitter': {
-        key: 'fragment_ejection_jitter',
-        label: 'Strain-Energy Kinetic Ejection Jitter',
-        unit: 'dim',
-        category: 'Discrete Fracture & DEM Dynamics',
-        shortDesc: 'Elastic energy to kinetic breakup velocity fraction (Default: 0.35)',
-        detailedDesc: 'Fraction (0.0 to 1.0) of stored elastic strain energy U_e = 0.5 * (sigma : eps_e) instantaneously converted into radial kinetic separation jitter v_kick = jitter * sqrt(2 * U_e / rho) at the moment of fracture.'
-    },
-    'fragment_contact_friction': {
-        key: 'fragment_contact_friction',
-        label: 'Fragment Inter-Grain Friction (mu_dem)',
-        unit: 'dim',
-        category: 'Discrete Fracture & DEM Dynamics',
-        shortDesc: 'Coulomb friction coefficient between colliding fragments (Default: 0.55)',
-        detailedDesc: 'Coulomb sliding friction coefficient between colliding DEM debris grains and against solid boundaries.'
-    },
-    'fragment_restitution': {
-        key: 'fragment_restitution',
-        label: 'Fragment Coefficient of Restitution (e_dem)',
-        unit: 'dim',
-        category: 'Discrete Fracture & DEM Dynamics',
-        shortDesc: 'Normal restitution coefficient for DEM collisions (Default: 0.30)',
-        detailedDesc: 'Normal coefficient of restitution (0.0 = fully plastic energy dissipation, 1.0 = perfectly elastic rebound) for DEM grain-to-grain and grain-to-wall collisions.'
     },
     'T_melt': {
         key: 'T_melt',
@@ -3215,10 +3161,7 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
 
     // Material parameters key-based mapping
     const mpmOnlyKeys = [
-        'transfer_scheme', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-        'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size',
-        'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter',
-        'fragment_contact_friction', 'fragment_restitution'
+        'transfer_scheme', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
     ];
     if (mpmOnlyKeys.includes(key)) return 'MPM';
 
@@ -3538,8 +3481,7 @@ export function getParamKeysForNode(
                 'density', 'youngs_modulus', 'poissons_ratio',
                 'tensile_failure_stress',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
             keys = [
@@ -3554,8 +3496,7 @@ export function getParamKeysForNode(
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else if (matModel === 'CREST Reactive Burn') {
             keys = [
@@ -3582,8 +3523,7 @@ export function getParamKeysForNode(
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case') {
             keys = [
@@ -3597,8 +3537,7 @@ export function getParamKeysForNode(
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else if (matModel === 'CSCM Concrete') {
             keys = [
@@ -3612,8 +3551,7 @@ export function getParamKeysForNode(
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else {
             // Default Hypoelastic
@@ -3627,8 +3565,7 @@ export function getParamKeysForNode(
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-                'dem_transition_enabled', 'fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         }
     } else if (nodeType === 'DomainMesh') {
@@ -3647,21 +3584,21 @@ export function getParamKeysForNode(
     } else if (nodeType === 'Charge3D') {
         keys = ['material', 'charge_mass', 'charge_shape', 'charge_x', 'charge_y', 'charge_z', 'charge_radius', 'charge_height', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z'];
     } else if (nodeType === 'DetonatorLocation') {
-        keys = ['detonator_r', 'detonator_z', 'detonator_radius'];
+        keys = ['target_domain', 'detonator_r', 'detonator_z', 'detonator_radius'];
     } else if (nodeType === 'DetonatorLocation3D') {
-        keys = ['detonator_x', 'detonator_y', 'detonator_z', 'detonator_radius'];
+        keys = ['target_domain', 'detonator_x', 'detonator_y', 'detonator_z', 'detonator_radius'];
     } else if (nodeType === 'CFDSolver3D') {
-        keys = ['device', 'precision', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
+        keys = ['device', 'precision', 'connected_detonators', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
     } else if (nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver') {
-        keys = ['init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
+        keys = ['connected_detonators', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
     } else if (nodeType === 'MPMDomain3D') {
-        keys = ['device', 'precision', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
+        keys = ['device', 'precision', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
     } else if (nodeType === 'MPMDomain2D') {
-        keys = ['precision', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
+        keys = ['precision', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
     } else if (nodeType === 'MPMObject2D') {
-        keys = ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'];
+        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'];
     } else if (nodeType === 'MPMObject3D') {
-        keys = ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
+        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
     } else if (nodeType === 'FEMDomain3D') {
         keys = [
             'device', 'precision', 'cfl', 'endtime',
@@ -3740,7 +3677,6 @@ export function shouldSkipNodeParameter(
         if ((key === 'anisotropy_ratio' || key === 'anisotropy_axis' || key === 'anisotropy_dir_x' || key === 'anisotropy_dir_y' || key === 'anisotropy_dir_z') && !parameters['enable_anisotropy']) return true;
         if ((key === 'anisotropy_dir_x' || key === 'anisotropy_dir_y' || key === 'anisotropy_dir_z') && parameters['anisotropy_axis'] !== 'Custom') return true;
         if (['kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'].includes(key) && parameters['kc_auto_generate'] !== false) return true;
-        if (['fragment_distribution', 'fragment_min_size', 'fragment_max_size', 'fragment_weibull_n', 'fragment_clumping_radius', 'fragment_ejection_jitter', 'fragment_contact_friction', 'fragment_restitution'].includes(key) && !parameters['dem_transition_enabled']) return true;
     } else if (nodeType === 'Charge2D' || nodeType === 'Charge1D') {
         const shape = parameters['charge_shape'] || 'Sphere';
         if ((key === 'charge_height' || key === 'charge_aspect_ratio') && shape !== 'Cylinder') return true;
@@ -3838,7 +3774,6 @@ export function getNodeSectionInfo(
         if (key === 'enable_strain_erosion') return { title: 'ELEMENT & PARTICLE EROSION [FEM · MPM]', color: '#f59e0b', defaultCollapsed: true };
         if (key === 'enable_heterogeneity') return { title: 'WEIBULL HETEROGENEITY [MPM · FEM]', color: '#c084fc', defaultCollapsed: true };
         if (key === 'enable_anisotropy') return { title: 'DIRECTIONAL ANISOTROPY [MPM · FEM]', color: '#38bdf8', defaultCollapsed: true };
-        if (key === 'dem_transition_enabled') return { title: 'STATISTICAL FRAGMENTATION & DEM [MPM]', color: '#f43f5e', defaultCollapsed: true };
     } else if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || nodeType === 'DomainMesh3D') {
         if (key === 'cell_size' || key === 'nx') return { title: 'GRID RESOLUTION', color: '#569cd6', defaultCollapsed: false };
         if (key === 'left_bc' || key === 'bc_x_min' || key === 'bc_r_min' || key === 'x_min_bc') return { title: 'BOUNDARY CONDITIONS', color: '#569cd6', defaultCollapsed: true };
