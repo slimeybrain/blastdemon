@@ -763,9 +763,11 @@ void MPMSolver3D::particleToGrid() {
         if (eff_scheme == static_cast<int>(MPMTransferScheme::RadialMLS)) {
             float R_supp = 2.0f * std::max({m_dx, m_dy, m_dz});
 
-            // Pass 1: Compute local partition of unity sum and stencil centroid (xc, yc, zc)
+            // Pass 1: Local partition of unity sum, centroid displacement, and 2nd-moment tensor via Parallel-Axis Theorem
             float local_w_sum = 0.0f;
-            float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+            float sum_wx = 0.0f, sum_wy = 0.0f, sum_wz = 0.0f;
+            float sum_wxx = 0.0f, sum_wxy = 0.0f, sum_wxz = 0.0f;
+            float sum_wyy = 0.0f, sum_wyz = 0.0f, sum_wzz = 0.0f;
 
             for (int offset_i = -2; offset_i <= 2; ++offset_i) {
                 int i = base_i + offset_i;
@@ -792,61 +794,41 @@ void MPMSolver3D::particleToGrid() {
                         if (w < 1.0e-7f) continue;
 
                         local_w_sum += w;
-                        cx += w * node_x;
-                        cy += w * node_y;
-                        cz += w * node_z;
+                        sum_wx += w * dist_x;
+                        sum_wy += w * dist_y;
+                        sum_wz += w * dist_z;
+
+                        sum_wxx += w * dist_x * dist_x;
+                        sum_wxy += w * dist_x * dist_y;
+                        sum_wxz += w * dist_x * dist_z;
+                        sum_wyy += w * dist_y * dist_y;
+                        sum_wyz += w * dist_y * dist_z;
+                        sum_wzz += w * dist_z * dist_z;
                     }
                 }
             }
 
             if (local_w_sum <= 1.0e-7f) continue;
             float inv_w_sum = 1.0f / local_w_sum;
-            float xc = cx * inv_w_sum;
-            float yc = cy * inv_w_sum;
-            float zc = cz * inv_w_sum;
+            float delta_x = sum_wx * inv_w_sum;
+            float delta_y = sum_wy * inv_w_sum;
+            float delta_z = sum_wz * inv_w_sum;
+            float xc = px + delta_x;
+            float yc = py + delta_y;
+            float zc = pz + delta_z;
 
-            float D[3][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
-            for (int offset_i = -2; offset_i <= 2; ++offset_i) {
-                int i = base_i + offset_i;
-                if (i < 0 || i >= m_nx) continue;
-                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
-
-                for (int offset_j = -2; offset_j <= 2; ++offset_j) {
-                    int j = base_j + offset_j;
-                    if (j < 0 || j >= m_ny) continue;
-                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
-
-                    for (int offset_k = -2; offset_k <= 2; ++offset_k) {
-                        int k = base_k + offset_k;
-                        if (k < 0 || k >= m_nz) continue;
-                        float node_z = (static_cast<float>(k) + 0.5f) * m_dz;
-
-                        float dist_x = node_x - px;
-                        float dist_y = node_y - py;
-                        float dist_z = node_z - pz;
-                        float r = std::sqrt(dist_x * dist_x + dist_y * dist_y + dist_z * dist_z);
-                        if (r >= R_supp) continue;
-
-                        float w = evalWendland_C2(r, R_supp);
-                        if (w < 1.0e-7f) continue;
-
-                        float dc_x = node_x - xc;
-                        float dc_y = node_y - yc;
-                        float dc_z = node_z - zc;
-
-                        D[0][0] += w * dc_x * dc_x;
-                        D[0][1] += w * dc_x * dc_y;
-                        D[0][2] += w * dc_x * dc_z;
-                        D[1][1] += w * dc_y * dc_y;
-                        D[1][2] += w * dc_y * dc_z;
-                        D[2][2] += w * dc_z * dc_z;
-                    }
-                }
-            }
-
-            D[0][0] *= inv_w_sum; D[0][1] *= inv_w_sum; D[0][2] *= inv_w_sum;
-            D[1][0] = D[0][1];    D[1][1] *= inv_w_sum; D[1][2] *= inv_w_sum;
-            D[2][0] = D[0][2];    D[2][1] = D[1][2];    D[2][2] *= inv_w_sum;
+            // Parallel-Axis Moment Tensor: D = sum(w * (x - xc)(x - xc)^T) / w_sum
+            //                                = sum(w * (x - p)(x - p)^T) / w_sum - delta * delta^T
+            float D[3][3];
+            D[0][0] = sum_wxx * inv_w_sum - delta_x * delta_x;
+            D[0][1] = sum_wxy * inv_w_sum - delta_x * delta_y;
+            D[0][2] = sum_wxz * inv_w_sum - delta_x * delta_z;
+            D[1][0] = D[0][1];
+            D[1][1] = sum_wyy * inv_w_sum - delta_y * delta_y;
+            D[1][2] = sum_wyz * inv_w_sum - delta_y * delta_z;
+            D[2][0] = D[0][2];
+            D[2][1] = D[1][2];
+            D[2][2] = sum_wzz * inv_w_sum - delta_z * delta_z;
 
             float D_inv[3][3];
             float det = D[0][0] * (D[1][1] * D[2][2] - D[1][2] * D[1][2]) -
@@ -1250,9 +1232,11 @@ void MPMSolver3D::gridToParticleInternal(float dt) {
         if (eff_scheme == static_cast<int>(MPMTransferScheme::RadialMLS)) {
             float R_supp = 2.0f * std::max({m_dx, m_dy, m_dz});
 
-            // Pass 1: Compute local partition of unity sum and stencil centroid (xc, yc, zc)
+            // Pass 1: Local partition of unity sum, centroid displacement, and 2nd-moment tensor via Parallel-Axis Theorem
             float local_w_sum = 0.0f;
-            float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+            float sum_wx = 0.0f, sum_wy = 0.0f, sum_wz = 0.0f;
+            float sum_wxx = 0.0f, sum_wxy = 0.0f, sum_wxz = 0.0f;
+            float sum_wyy = 0.0f, sum_wyz = 0.0f, sum_wzz = 0.0f;
 
             for (int offset_i = -2; offset_i <= 2; ++offset_i) {
                 int i = base_i + offset_i;
@@ -1279,61 +1263,41 @@ void MPMSolver3D::gridToParticleInternal(float dt) {
                         if (w < 1.0e-7f) continue;
 
                         local_w_sum += w;
-                        cx += w * node_x;
-                        cy += w * node_y;
-                        cz += w * node_z;
+                        sum_wx += w * dist_x;
+                        sum_wy += w * dist_y;
+                        sum_wz += w * dist_z;
+
+                        sum_wxx += w * dist_x * dist_x;
+                        sum_wxy += w * dist_x * dist_y;
+                        sum_wxz += w * dist_x * dist_z;
+                        sum_wyy += w * dist_y * dist_y;
+                        sum_wyz += w * dist_y * dist_z;
+                        sum_wzz += w * dist_z * dist_z;
                     }
                 }
             }
 
             if (local_w_sum > 1.0e-7f) {
                 float inv_w_sum = 1.0f / local_w_sum;
-                float xc = cx * inv_w_sum;
-                float yc = cy * inv_w_sum;
-                float zc = cz * inv_w_sum;
+                float delta_x = sum_wx * inv_w_sum;
+                float delta_y = sum_wy * inv_w_sum;
+                float delta_z = sum_wz * inv_w_sum;
+                float xc = px + delta_x;
+                float yc = py + delta_y;
+                float zc = pz + delta_z;
 
-                float D[3][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
-                for (int offset_i = -2; offset_i <= 2; ++offset_i) {
-                    int i = base_i + offset_i;
-                    if (i < 0 || i >= m_nx) continue;
-                    float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
-
-                    for (int offset_j = -2; offset_j <= 2; ++offset_j) {
-                        int j = base_j + offset_j;
-                        if (j < 0 || j >= m_ny) continue;
-                        float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
-
-                        for (int offset_k = -2; offset_k <= 2; ++offset_k) {
-                            int k = base_k + offset_k;
-                            if (k < 0 || k >= m_nz) continue;
-                            float node_z = (static_cast<float>(k) + 0.5f) * m_dz;
-
-                            float dist_x = node_x - px;
-                            float dist_y = node_y - py;
-                            float dist_z = node_z - pz;
-                            float r = std::sqrt(dist_x * dist_x + dist_y * dist_y + dist_z * dist_z);
-                            if (r >= R_supp) continue;
-
-                            float w = evalWendland_C2(r, R_supp);
-                            if (w < 1.0e-7f) continue;
-
-                            float dc_x = node_x - xc;
-                            float dc_y = node_y - yc;
-                            float dc_z = node_z - zc;
-
-                            D[0][0] += w * dc_x * dc_x;
-                            D[0][1] += w * dc_x * dc_y;
-                            D[0][2] += w * dc_x * dc_z;
-                            D[1][1] += w * dc_y * dc_y;
-                            D[1][2] += w * dc_y * dc_z;
-                            D[2][2] += w * dc_z * dc_z;
-                        }
-                    }
-                }
-
-                D[0][0] *= inv_w_sum; D[0][1] *= inv_w_sum; D[0][2] *= inv_w_sum;
-                D[1][0] = D[0][1];    D[1][1] *= inv_w_sum; D[1][2] *= inv_w_sum;
-                D[2][0] = D[0][2];    D[2][1] = D[1][2];    D[2][2] *= inv_w_sum;
+                // Parallel-Axis Moment Tensor: D = sum(w * (x - xc)(x - xc)^T) / w_sum
+                //                                = sum(w * (x - p)(x - p)^T) / w_sum - delta * delta^T
+                float D[3][3];
+                D[0][0] = sum_wxx * inv_w_sum - delta_x * delta_x;
+                D[0][1] = sum_wxy * inv_w_sum - delta_x * delta_y;
+                D[0][2] = sum_wxz * inv_w_sum - delta_x * delta_z;
+                D[1][0] = D[0][1];
+                D[1][1] = sum_wyy * inv_w_sum - delta_y * delta_y;
+                D[1][2] = sum_wyz * inv_w_sum - delta_y * delta_z;
+                D[2][0] = D[0][2];
+                D[2][1] = D[1][2];
+                D[2][2] = sum_wzz * inv_w_sum - delta_z * delta_z;
 
                 float D_inv[3][3];
                 float det = D[0][0] * (D[1][1] * D[2][2] - D[1][2] * D[1][2]) -

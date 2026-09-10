@@ -153,6 +153,61 @@ struct MaterialTable3D {
     float debris_bulk_factor{0.10f};      // Residual post-failure debris bulk modulus factor (0.10 * K_intact)
 };
 
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#define HD_MPM_FUNC __host__ __device__
+#else
+#define HD_MPM_FUNC
+#endif
+
+// Cauchy stress tensor stored compactly in symmetric Voigt format:
+// data[0]=xx, data[1]=yy, data[2]=zz, data[3]=xy, data[4]=yz, data[5]=zx
+struct SymmetricTensor3D {
+    float data[6]{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+    HD_MPM_FUNC SymmetricTensor3D() = default;
+    HD_MPM_FUNC SymmetricTensor3D(float xx, float yy, float zz, float xy, float yz, float zx)
+        : data{xx, yy, zz, xy, yz, zx} {}
+    HD_MPM_FUNC SymmetricTensor3D(const float s[3][3]) {
+        data[0] = s[0][0]; data[1] = s[1][1]; data[2] = s[2][2];
+        data[3] = s[0][1]; data[4] = s[1][2]; data[5] = s[2][0];
+    }
+
+    HD_MPM_FUNC inline void zero() {
+        data[0] = data[1] = data[2] = data[3] = data[4] = data[5] = 0.0f;
+    }
+
+    struct RowProxy {
+        float* ptr;
+        int r;
+        HD_MPM_FUNC inline float& operator[](int c) {
+            if (r == c) return ptr[r];
+            if ((r == 0 && c == 1) || (r == 1 && c == 0)) return ptr[3];
+            if ((r == 1 && c == 2) || (r == 2 && c == 1)) return ptr[4];
+            return ptr[5];
+        }
+        HD_MPM_FUNC inline float operator[](int c) const {
+            if (r == c) return ptr[r];
+            if ((r == 0 && c == 1) || (r == 1 && c == 0)) return ptr[3];
+            if ((r == 1 && c == 2) || (r == 2 && c == 1)) return ptr[4];
+            return ptr[5];
+        }
+    };
+
+    struct ConstRowProxy {
+        const float* ptr;
+        int r;
+        HD_MPM_FUNC inline float operator[](int c) const {
+            if (r == c) return ptr[r];
+            if ((r == 0 && c == 1) || (r == 1 && c == 0)) return ptr[3];
+            if ((r == 1 && c == 2) || (r == 2 && c == 1)) return ptr[4];
+            return ptr[5];
+        }
+    };
+
+    HD_MPM_FUNC inline RowProxy operator[](int r) { return RowProxy{data, r}; }
+    HD_MPM_FUNC inline ConstRowProxy operator[](int r) const { return ConstRowProxy{data, r}; }
+};
+
 struct MPMParticle3D {
     // Kinematics & Position in 3D
     float x[3];         // Position (x, y, z)
@@ -169,7 +224,7 @@ struct MPMParticle3D {
     // Dynamic State Variables
     float e_int{0.0f};           // Specific internal energy (J/kg)
     float temperature{293.0f};   // Current temperature (K)
-    float sigma[3][3];           // Cauchy stress tensor (3x3 symmetric)
+    SymmetricTensor3D sigma;     // Cauchy stress tensor (compact 6-float Voigt: xx, yy, zz, xy, yz, zx)
     float ep_bar{0.0f};          // Equivalent plastic strain
     float damage{0.0f};          // Scalar damage D in [0, 1]
     float lambda{0.0f};          // Modified damage scaling parameter (K&C / CSCM cap) / CREST reaction progress [0, 1]

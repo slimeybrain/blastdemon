@@ -299,8 +299,10 @@ void MPMSolver2D::particleToGrid() {
         if (eff_scheme == static_cast<int>(MPMTransferScheme::RadialMLS)) {
             // Radial Moving Least Squares MPM (Wendland C2 kernel with Centroid-Centered Linear Completeness)
             float R_supp = 2.0f * std::max(m_dx, m_dy);
+            // Pass 1: Local partition of unity sum, centroid displacement, and 2nd-moment tensor via Parallel-Axis Theorem
             float weight_sum = 0.0f;
-            float cx = 0.0f, cy = 0.0f;
+            float sum_wx = 0.0f, sum_wy = 0.0f;
+            float sum_wxx = 0.0f, sum_wxy = 0.0f, sum_wyy = 0.0f;
 
             for (int offset_i = -2; offset_i <= 2; ++offset_i) {
                 int i = base_i + offset_i;
@@ -321,46 +323,29 @@ void MPMSolver2D::particleToGrid() {
                     if (w < 1.0e-7f) continue;
 
                     weight_sum += w;
-                    cx += w * node_x;
-                    cy += w * node_y;
+                    sum_wx += w * dist_x;
+                    sum_wy += w * dist_y;
+
+                    sum_wxx += w * dist_x * dist_x;
+                    sum_wxy += w * dist_x * dist_y;
+                    sum_wyy += w * dist_y * dist_y;
                 }
             }
 
             if (weight_sum <= 1.0e-7f) continue;
             float inv_w_sum = 1.0f / weight_sum;
-            float xc = cx * inv_w_sum;
-            float yc = cy * inv_w_sum;
+            float delta_x = sum_wx * inv_w_sum;
+            float delta_y = sum_wy * inv_w_sum;
+            float xc = p.x[0] + delta_x;
+            float yc = p.x[1] + delta_y;
 
-            float D[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
-            for (int offset_i = -2; offset_i <= 2; ++offset_i) {
-                int i = base_i + offset_i;
-                if (i < 0 || i >= m_nx) continue;
-                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
-
-                for (int offset_j = -2; offset_j <= 2; ++offset_j) {
-                    int j = base_j + offset_j;
-                    if (j < 0 || j >= m_ny) continue;
-                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
-
-                    float dist_x = node_x - p.x[0];
-                    float dist_y = node_y - p.x[1];
-                    float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
-                    if (r >= R_supp) continue;
-
-                    float w = evalWendland_C2(r, R_supp);
-                    if (w < 1.0e-7f) continue;
-
-                    float dc_x = node_x - xc;
-                    float dc_y = node_y - yc;
-
-                    D[0][0] += w * dc_x * dc_x;
-                    D[0][1] += w * dc_x * dc_y;
-                    D[1][1] += w * dc_y * dc_y;
-                }
-            }
-
-            D[0][0] *= inv_w_sum; D[0][1] *= inv_w_sum;
-            D[1][0] = D[0][1];    D[1][1] *= inv_w_sum;
+            // Parallel-Axis Moment Tensor: D = sum(w * (x - xc)(x - xc)^T) / w_sum
+            //                                = sum(w * (x - p)(x - p)^T) / w_sum - delta * delta^T
+            float D[2][2];
+            D[0][0] = sum_wxx * inv_w_sum - delta_x * delta_x;
+            D[0][1] = sum_wxy * inv_w_sum - delta_x * delta_y;
+            D[1][0] = D[0][1];
+            D[1][1] = sum_wyy * inv_w_sum - delta_y * delta_y;
 
             float D_inv[2][2];
             float det = D[0][0] * D[1][1] - D[0][1] * D[0][1];
@@ -638,8 +623,10 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
         int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme : static_cast<int>(m_transfer_scheme);
         if (eff_scheme == static_cast<int>(MPMTransferScheme::RadialMLS)) {
             float R_supp = 2.0f * std::max(m_dx, m_dy);
+            // Pass 1: Local partition of unity sum, centroid displacement, and 2nd-moment tensor via Parallel-Axis Theorem
             float weight_sum_local = 0.0f;
-            float cx = 0.0f, cy = 0.0f;
+            float sum_wx = 0.0f, sum_wy = 0.0f;
+            float sum_wxx = 0.0f, sum_wxy = 0.0f, sum_wyy = 0.0f;
 
             for (int offset_i = -2; offset_i <= 2; ++offset_i) {
                 int i = base_i + offset_i;
@@ -660,8 +647,12 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                     if (w < 1.0e-7f) continue;
 
                     weight_sum_local += w;
-                    cx += w * node_x;
-                    cy += w * node_y;
+                    sum_wx += w * dist_x;
+                    sum_wy += w * dist_y;
+
+                    sum_wxx += w * dist_x * dist_x;
+                    sum_wxy += w * dist_x * dist_y;
+                    sum_wyy += w * dist_y * dist_y;
                 }
             }
 
@@ -669,39 +660,18 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                 v_pic_x = p.v[0]; v_pic_y = p.v[1];
             } else {
                 float inv_w_sum = 1.0f / weight_sum_local;
-                float xc = cx * inv_w_sum;
-                float yc = cy * inv_w_sum;
+                float delta_x = sum_wx * inv_w_sum;
+                float delta_y = sum_wy * inv_w_sum;
+                float xc = p.x[0] + delta_x;
+                float yc = p.x[1] + delta_y;
 
-                float D[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
-                for (int offset_i = -2; offset_i <= 2; ++offset_i) {
-                    int i = base_i + offset_i;
-                    if (i < 0 || i >= m_nx) continue;
-                    float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
-
-                    for (int offset_j = -2; offset_j <= 2; ++offset_j) {
-                        int j = base_j + offset_j;
-                        if (j < 0 || j >= m_ny) continue;
-                        float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
-
-                        float dist_x = node_x - p.x[0];
-                        float dist_y = node_y - p.x[1];
-                        float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
-                        if (r >= R_supp) continue;
-
-                        float w = evalWendland_C2(r, R_supp);
-                        if (w < 1.0e-7f) continue;
-
-                        float dc_x = node_x - xc;
-                        float dc_y = node_y - yc;
-
-                        D[0][0] += w * dc_x * dc_x;
-                        D[0][1] += w * dc_x * dc_y;
-                        D[1][1] += w * dc_y * dc_y;
-                    }
-                }
-
-                D[0][0] *= inv_w_sum; D[0][1] *= inv_w_sum;
-                D[1][0] = D[0][1];    D[1][1] *= inv_w_sum;
+                // Parallel-Axis Moment Tensor: D = sum(w * (x - xc)(x - xc)^T) / w_sum
+                //                                = sum(w * (x - p)(x - p)^T) / w_sum - delta * delta^T
+                float D[2][2];
+                D[0][0] = sum_wxx * inv_w_sum - delta_x * delta_x;
+                D[0][1] = sum_wxy * inv_w_sum - delta_x * delta_y;
+                D[1][0] = D[0][1];
+                D[1][1] = sum_wyy * inv_w_sum - delta_y * delta_y;
 
                 float D_inv[2][2];
                 float det = D[0][0] * D[1][1] - D[0][1] * D[0][1];
