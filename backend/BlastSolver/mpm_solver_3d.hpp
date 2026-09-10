@@ -169,7 +169,6 @@ struct MPMParticle3D {
     // Dynamic State Variables
     float e_int{0.0f};           // Specific internal energy (J/kg)
     float temperature{293.0f};   // Current temperature (K)
-    float F[3][3];               // Deformation gradient
     float sigma[3][3];           // Cauchy stress tensor (3x3 symmetric)
     float ep_bar{0.0f};          // Equivalent plastic strain
     float damage{0.0f};          // Scalar damage D in [0, 1]
@@ -324,6 +323,10 @@ private:
     void updateGridKinematics(float dt);
     void gridToParticle(float dt);
     void updateStressState(float dt);
+    void gridToParticleAndStress(float dt);
+    template <bool FUSE_STRESS>
+    void gridToParticleInternal(float dt);
+    void updateParticleStress(MPMParticle3D& p, float dt, const float L[3][3], const MaterialTable3D& mat);
 
     // Shape Function Evaluators (1D & 3D)
     float evalGIMP_S(float x_p, float x_i, float h, float l_p) const;

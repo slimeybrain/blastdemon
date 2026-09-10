@@ -249,12 +249,6 @@ private:
     void allocateActiveNodeBuffers();
     void freeActiveNodeBuffers();
 
-    // Spatial cell linked-list buffers for DEM-DEM and DEM-MPM contact
-    int* d_cell_head{nullptr};
-    int* d_particle_next{nullptr};
-    size_t m_allocated_cell_head{0};
-    size_t m_allocated_particle_next{0};
-
     MPMParticle3D* d_temp_aos_particles{nullptr};
     size_t m_allocated_temp_aos_particles{0};
 

@@ -2328,18 +2328,6 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
         m_allocated_material_tables = num_materials;
     }
 
-    if (num_grid_nodes > m_allocated_cell_head) {
-        if (d_cell_head) cudaFree(d_cell_head);
-        cudaMalloc(&d_cell_head, num_grid_nodes * sizeof(int));
-        m_allocated_cell_head = num_grid_nodes;
-    }
-
-    if (num_particles > m_allocated_particle_next) {
-        if (d_particle_next) cudaFree(d_particle_next);
-        cudaMalloc(&d_particle_next, num_particles * sizeof(int));
-        m_allocated_particle_next = num_particles;
-    }
-
     if (!d_max_v_buf) {
         cudaMalloc(&d_max_v_buf, sizeof(float));
     }
@@ -2367,8 +2355,6 @@ size_t MPMSolver3DCUDA::getAllocatedVRAM() const {
     total += m_allocated_f_ext_fsi * sizeof(float);             // d_f_ext_fsi
     total += m_allocated_temp_aos_particles * sizeof(MPMParticle3D); // d_temp_aos_particles
     total += m_allocated_slice_buf;                             // d_telemetry_slice_buf
-    total += m_allocated_cell_head * sizeof(int);              // d_cell_head
-    total += m_allocated_particle_next * sizeof(int);          // d_particle_next
     if (d_max_v_buf) total += sizeof(float);
     if (d_num_active_nodes) total += sizeof(int);
     if (d_num_active_tiles) total += sizeof(int);
@@ -2408,10 +2394,6 @@ void MPMSolver3DCUDA::freeDeviceMemory() {
     if (d_max_v_pinned) { cudaFreeHost(d_max_v_pinned); d_max_v_pinned = nullptr; }
     if (d_telemetry_slice_buf) { cudaFree(d_telemetry_slice_buf); d_telemetry_slice_buf = nullptr; m_allocated_slice_buf = 0; }
     if (d_f_ext_fsi) { cudaFree(d_f_ext_fsi); d_f_ext_fsi = nullptr; }
-    if (d_cell_head) { cudaFree(d_cell_head); d_cell_head = nullptr; }
-    if (d_particle_next) { cudaFree(d_particle_next); d_particle_next = nullptr; }
-    m_allocated_cell_head = 0;
-    m_allocated_particle_next = 0;
     freeActiveNodeBuffers();
     m_allocated_grid_nodes = 0;
     m_allocated_particles = 0;

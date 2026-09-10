@@ -152,9 +152,6 @@ void MPMSolver2D::addRectangleObject(int obj_id, float pos_x, float pos_y, float
             p.damage = 0.0f;
             p.has_failed = false;
 
-            p.F[0][0] = 1.0f; p.F[0][1] = 0.0f;
-            p.F[1][0] = 0.0f; p.F[1][1] = 1.0f;
-
             p.sigma[0][0] = 0.0f; p.sigma[0][1] = 0.0f;
             p.sigma[1][0] = 0.0f; p.sigma[1][1] = 0.0f;
 
@@ -256,9 +253,6 @@ void MPMSolver2D::addCircleObject(int obj_id, float pos_x, float pos_y, float ra
             p.tensile_failure_stress = tensile_failure_stress;
             p.damage = 0.0f;
             p.has_failed = false;
-
-            p.F[0][0] = 1.0f; p.F[0][1] = 0.0f;
-            p.F[1][0] = 0.0f; p.F[1][1] = 1.0f;
 
             p.sigma[0][0] = 0.0f; p.sigma[0][1] = 0.0f;
             p.sigma[1][0] = 0.0f; p.sigma[1][1] = 0.0f;
@@ -600,7 +594,8 @@ void MPMSolver2D::updateGridKinematics(float dt) {
     }
 }
 
-void MPMSolver2D::gridToParticle(float dt) {
+template <bool FUSE_STRESS>
+void MPMSolver2D::gridToParticleInternal(float dt) {
     float max_B = 25000.0f / std::min(m_dx, m_dy);
     const size_t num_particles = m_particles.size();
 
@@ -887,27 +882,29 @@ void MPMSolver2D::gridToParticle(float dt) {
         if (p.x[1] < min_margin_y) {
             p.x[1] = min_margin_y;
             if (p.v[1] < 0.0f) p.v[1] = 0.0f;
-            p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
+            p.B[1][0] = 0.0f; p.B[1][0] = 0.0f;
         } else if (p.x[1] > max_margin_y) {
             p.x[1] = max_margin_y;
             if (p.v[1] > 0.0f) p.v[1] = 0.0f;
             p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
         }
+
+        if constexpr (FUSE_STRESS) {
+            updateParticleStress(p, dt, p.L_grad);
+        }
     }
 }
 
-void MPMSolver2D::updateStressState(float dt) {
-    const size_t num_particles = m_particles.size();
-    #pragma omp parallel for schedule(dynamic, 64)
-    for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
-        auto& p = m_particles[p_idx];
-        // True velocity gradient L evaluated from exact shape function derivatives L_grad
-        float L[2][2] = {
-            { p.L_grad[0][0], p.L_grad[0][1] },
-            { p.L_grad[1][0], p.L_grad[1][1] }
-        };
+void MPMSolver2D::gridToParticle(float dt) {
+    gridToParticleInternal<false>(dt);
+}
 
-        // Strain rate D = 0.5 * (L + L^T)
+void MPMSolver2D::gridToParticleAndStress(float dt) {
+    gridToParticleInternal<true>(dt);
+}
+
+void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L[2][2]) {
+    // Strain rate D = 0.5 * (L + L^T)
         float deps_xx = L[0][0] * dt;
         float deps_yy = L[1][1] * dt;
         float deps_xy = 0.5f * (L[0][1] + L[1][0]) * dt;
@@ -951,7 +948,7 @@ void MPMSolver2D::updateStressState(float dt) {
                 p.sigma[1][1] = -p_comp;
                 p.sigma[0][1] = 0.0f;
                 p.sigma[1][0] = 0.0f;
-                continue;
+                return;
             }
 
             const float E_mod = p.youngs_modulus;
@@ -981,7 +978,7 @@ void MPMSolver2D::updateStressState(float dt) {
                 p.sigma[1][0] = p.sigma[0][1];
             }
 
-            continue;
+            return;
         }
 
         // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
@@ -1054,7 +1051,7 @@ void MPMSolver2D::updateStressState(float dt) {
                 p.sigma[1][0] = 0.0f;
                 p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
                 p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
-                continue;
+                return;
             }
 
             // 4. Radial Return Mapping & Plastic Work Dissipation
@@ -1113,7 +1110,7 @@ void MPMSolver2D::updateStressState(float dt) {
                     p.sigma[0][1] = 0.0f;
                     p.sigma[1][0] = 0.0f;
 
-                    continue;
+                    return;
                 }
             }
 
@@ -1125,7 +1122,7 @@ void MPMSolver2D::updateStressState(float dt) {
                 p.sigma[1][0] *= soft_factor;
             }
 
-            continue;
+            return;
         }
 
 
@@ -1163,7 +1160,7 @@ void MPMSolver2D::updateStressState(float dt) {
             p.sigma[1][1] = sig_yy_trial;
             p.sigma[0][1] = sig_xy_trial;
             p.sigma[1][0] = sig_xy_trial;
-            continue;
+            return;
         }
 
         // Hydrostatic Pressure & Deviatoric Stress
@@ -1229,7 +1226,7 @@ void MPMSolver2D::updateStressState(float dt) {
             p.sigma[0][1] = 0.0f;
             p.sigma[1][0] = 0.0f;
 
-            continue;
+            return;
         }
 
         // Stress Tensor Softening & Degradation
@@ -1243,6 +1240,18 @@ void MPMSolver2D::updateStressState(float dt) {
 
         // Update Volume incrementally using det(F) = 1 + tr(deps)
         p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+}
+
+void MPMSolver2D::updateStressState(float dt) {
+    const size_t num_particles = m_particles.size();
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
+        auto& p = m_particles[p_idx];
+        float L[2][2] = {
+            { p.L_grad[0][0], p.L_grad[0][1] },
+            { p.L_grad[1][0], p.L_grad[1][1] }
+        };
+        updateParticleStress(p, dt, L);
     }
 }
 
@@ -1298,21 +1307,18 @@ void MPMSolver2D::stepWithDt(float dt, bool run_p2g) {
             particleToGrid();
         }
         updateGridKinematics(0.5f * dt);
-        gridToParticle(0.5f * dt);
-        updateStressState(0.5f * dt);
+        gridToParticleAndStress(0.5f * dt);
 
         particleToGrid();
         updateGridKinematics(dt);
-        gridToParticle(dt * 0.5f);
-        updateStressState(dt * 0.5f);
+        gridToParticleAndStress(dt * 0.5f);
     } else {
         // Default: 2nd-Order Symplectic Staggered Leapfrog / USL (Single-pass)
         if (run_p2g) {
             particleToGrid();
         }
         updateGridKinematics(dt);
-        gridToParticle(dt);
-        updateStressState(dt);
+        gridToParticleAndStress(dt);
     }
 }
 

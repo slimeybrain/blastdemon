@@ -2809,7 +2809,6 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
                 p.sigma[r][c] = 0.0f;
-                p.F[r][c] = (r == c) ? 1.0f : 0.0f;
                 p.B[r][c] = 0.0f;
                 p.L_grad[r][c] = 0.0f;
             }
@@ -2997,7 +2996,6 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
                     p.sigma[r][c] = 0.0f;
-                    p.F[r][c] = (r == c) ? 1.0f : 0.0f;
                     p.B[r][c] = 0.0f;
                     p.L_grad[r][c] = 0.0f;
                 }

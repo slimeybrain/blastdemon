@@ -218,7 +218,6 @@ void MPMSolver3D::addBoxObject(int obj_id, float pos_x, float pos_y, float pos_z
 
                 for (int i = 0; i < 3; ++i) {
                     for (int j = 0; j < 3; ++j) {
-                        p.F[i][j] = (i == j) ? 1.0f : 0.0f;
                         p.sigma[i][j] = 0.0f;
                     }
                 }
@@ -361,7 +360,6 @@ void MPMSolver3D::addSphereObject(int obj_id, float pos_x, float pos_y, float po
 
                 for (int i = 0; i < 3; ++i) {
                     for (int j = 0; j < 3; ++j) {
-                        p.F[i][j] = (i == j) ? 1.0f : 0.0f;
                         p.sigma[i][j] = 0.0f;
                     }
                 }
@@ -509,7 +507,6 @@ void MPMSolver3D::addCylinderObject(int obj_id, float pos_x, float pos_y, float 
 
                 for (int i = 0; i < 3; ++i) {
                     for (int j = 0; j < 3; ++j) {
-                        p.F[i][j] = (i == j) ? 1.0f : 0.0f;
                         p.sigma[i][j] = 0.0f;
                     }
                 }
@@ -702,7 +699,6 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
 
                     for (int i = 0; i < 3; ++i) {
                         for (int j = 0; j < 3; ++j) {
-                            p.F[i][j] = (i == j) ? 1.0f : 0.0f;
                             p.sigma[i][j] = 0.0f;
                         }
                     }
@@ -1192,7 +1188,8 @@ void MPMSolver3D::updateGridKinematics(float dt) {
     }
 }
 
-void MPMSolver3D::gridToParticle(float dt) {
+template <bool FUSE_STRESS>
+void MPMSolver3D::gridToParticleInternal(float dt) {
     float max_B = 25000.0f / std::min({m_dx, m_dy, m_dz});
     float v_max_global = 0.0f;
     const size_t num_particles = m_particles.size();
@@ -1710,26 +1707,24 @@ void MPMSolver3D::gridToParticle(float dt) {
             p.x[2] = phys_max_z;
             if (p.v[2] > 0.0f) { p.v[2] = 0.0f; }
         }
+
+        if constexpr (FUSE_STRESS) {
+            updateParticleStress(p, dt, p.L_grad, mat);
+        }
     }
     m_last_v_max = v_max_global;
 }
 
-void MPMSolver3D::updateStressState(float dt) {
-    const size_t num_particles = m_particles.size();
-    #pragma omp parallel for schedule(dynamic, 64)
-    for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
-        auto& p = m_particles[p_idx];
-        const auto& mat = getMaterialTable(p.object_id);
+void MPMSolver3D::gridToParticle(float dt) {
+    gridToParticleInternal<false>(dt);
+}
 
-        // Fully failed particles: erase stress and APIC affine matrix.
-        // This prevents failed debris from elastically coupling back to intact material.
-        // Velocity gradient L evaluated from exact shape function derivatives L_grad
-        float L[3][3];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                L[r][c] = p.L_grad[r][c];
+void MPMSolver3D::gridToParticleAndStress(float dt) {
+    gridToParticleInternal<true>(dt);
+}
 
-        // Symmetric strain increment D*dt and spin tensor W
+void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L[3][3], const MaterialTable3D& mat) {
+    // Symmetric strain increment D*dt and spin tensor W
         float deps[3][3], W[3][3];
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c) {
@@ -1788,7 +1783,7 @@ void MPMSolver3D::updateStressState(float dt) {
                 for (int r = 0; r < 3; ++r)
                     for (int c = 0; c < 3; ++c)
                         p.sigma[r][c] = (r == c) ? -p_comp : 0.0f;
-                continue;
+                return;
             }
 
             const float E_mod = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
@@ -1831,7 +1826,7 @@ void MPMSolver3D::updateStressState(float dt) {
             for (int r = 0; r < 3; ++r)
                 p.sigma[r][r] -= p_comp;
 
-            continue;
+            return;
         }
 
         // --- Linear Elastic Model (Hooke's Law with Jaumann Rotation) ---
@@ -1880,7 +1875,7 @@ void MPMSolver3D::updateStressState(float dt) {
                 for (int c = 0; c < 3; ++c)
                     p.sigma[r][c] = s_trial[r][c] - (r == c ? p_hydro : 0.0f);
 
-            continue;
+            return;
         }
 
         // --- CREST Reactive Burn Model with Davis Reactant & Product EOS ---
@@ -1979,7 +1974,7 @@ void MPMSolver3D::updateStressState(float dt) {
                 for (int c = 0; c < 3; ++c)
                     p.sigma[r][c] = s_trial[r][c] - (r == c ? p_mix : 0.0f);
 
-            continue;
+            return;
         }
 
         // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
@@ -2063,7 +2058,7 @@ void MPMSolver3D::updateStressState(float dt) {
                         p.sigma[r][c] = (r == c) ? -p_hydro : 0.0f;
                         p.B[r][c] = 0.0f;
                     }
-                continue;
+                return;
             }
 
             float strain_term = A + B * std::pow(std::max(1.0e-6f, p.ep_bar), n);
@@ -2141,8 +2136,8 @@ void MPMSolver3D::updateStressState(float dt) {
                     for (int c = 0; c < 3; ++c)
                         p.B[r][c] = 0.0f;
 
-                    // Relax failed particles: zero shear/tensile stress, retain compressive hydrostatic pressure from parent EOS
-                    float p_comp = 0.0f;
+                // Relax failed particles: zero shear/tensile stress, retain compressive hydrostatic pressure from parent EOS
+                float p_comp = 0.0f;
                     if (J < 1.0f) {
                         if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen && mat.mg_c0 > 0.0f) {
                             const float mu_vol = (1.0f - J) / std::max(0.01f, J);
@@ -2160,10 +2155,10 @@ void MPMSolver3D::updateStressState(float dt) {
                         for (int c = 0; c < 3; ++c)
                             p.sigma[r][c] = (r == c) ? -p_comp : 0.0f;
 
-                    continue;
+                    return;
                 }
 
-            continue;
+            return;
         }
 
         // --- Concrete / Geotechnical / Generic Hypoelastic Plasticity Models ---
@@ -2398,12 +2393,24 @@ void MPMSolver3D::updateStressState(float dt) {
                 for (int c = 0; c < 3; ++c)
                     p.sigma[r][c] = (r == c) ? -p_comp : 0.0f;
 
-            continue;
+            return;
         }
 
         // Volume update
         p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+}
 
+void MPMSolver3D::updateStressState(float dt) {
+    const size_t num_particles = m_particles.size();
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
+        auto& p = m_particles[p_idx];
+        const auto& mat = getMaterialTable(p.object_id);
+        float L[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                L[r][c] = p.L_grad[r][c];
+        updateParticleStress(p, dt, L, mat);
     }
 }
 
@@ -2470,18 +2477,16 @@ void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
             particleToGrid();
         }
         updateGridKinematics(0.5f * dt);
-        gridToParticle(0.5f * dt);
-        updateStressState(0.5f * dt);
+        gridToParticleAndStress(0.5f * dt);
 
         // 2. Corrector Stage: full step from t^{n+1/2} state to t^{n+1}
         // Grid kinematics uses full dt for acceleration; particles advance by dt/2
         // (midpoint rule: position updated once at dt/2 in predictor, once at dt/2 here).
         particleToGrid();
         updateGridKinematics(dt);
-        gridToParticle(dt * 0.5f);
-        updateStressState(dt * 0.5f);
+        gridToParticleAndStress(dt * 0.5f);
     } else {
-        // --- 1st-Order USL / USF ---
+        // --- 2nd-Order Symplectic Staggered Leapfrog / USL (Single-pass) ---
         if (run_p2g) {
             for (auto& node : m_grid) {
                 node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f; node.f_ext[2] = 0.0f;
@@ -2491,15 +2496,12 @@ void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
         
         if (m_time_scheme == MPMTimeIntegrationScheme::USF) {
             // USF: Update Stress First
-            // In USF, stress is updated using the kinematics from the previous step/initial grid scatter
             updateGridKinematics(dt);
-            gridToParticle(dt);
-            updateStressState(dt);
+            gridToParticleAndStress(dt);
         } else {
             // USL: Update Stress Last (default)
             updateGridKinematics(dt);
-            gridToParticle(dt);
-            updateStressState(dt);
+            gridToParticleAndStress(dt);
         }
     }
 
