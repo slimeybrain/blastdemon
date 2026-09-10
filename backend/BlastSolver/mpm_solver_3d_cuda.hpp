@@ -10,6 +10,7 @@ struct MPMParticle3DSoA {
     float* x[3]{nullptr, nullptr, nullptr};
     float* v[3]{nullptr, nullptr, nullptr};
     float* sigma[3][3]{};
+    float* sigma_voigt[6]{}; // Voigt notation: 0=xx, 1=yy, 2=zz, 3=xy, 4=yz, 5=zx
     float* B[3][3]{};
     float* L_grad[3][3]{};
     float* lp[3]{nullptr, nullptr, nullptr};

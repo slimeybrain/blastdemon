@@ -563,6 +563,7 @@ void MPMSolver2D::updateGridKinematics(float dt) {
         avg_p_mass = m_particles[0].m;
     }
 
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < m_nx; ++i) {
         for (int j = 0; j < m_ny; ++j) {
             int idx = i * m_ny + j;
@@ -601,8 +602,11 @@ void MPMSolver2D::updateGridKinematics(float dt) {
 
 void MPMSolver2D::gridToParticle(float dt) {
     float max_B = 25000.0f / std::min(m_dx, m_dy);
+    const size_t num_particles = m_particles.size();
 
-    for (auto& p : m_particles) {
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
+        auto& p = m_particles[p_idx];
         int base_i = static_cast<int>(std::floor((p.x[0]) / m_dx));
         int base_j = static_cast<int>(std::floor((p.x[1]) / m_dy));
 
@@ -893,7 +897,10 @@ void MPMSolver2D::gridToParticle(float dt) {
 }
 
 void MPMSolver2D::updateStressState(float dt) {
-    for (auto& p : m_particles) {
+    const size_t num_particles = m_particles.size();
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
+        auto& p = m_particles[p_idx];
         // True velocity gradient L evaluated from exact shape function derivatives L_grad
         float L[2][2] = {
             { p.L_grad[0][0], p.L_grad[0][1] },
@@ -1244,7 +1251,11 @@ float MPMSolver2D::computeStepSize(float cfl) const {
     if (m_particles.empty()) return 1.0e-6f;
     float max_speed = 100.0f;
     float max_v = 0.0f;
-    for (const auto& p : m_particles) {
+    const size_t num_particles = m_particles.size();
+
+    #pragma omp parallel for reduction(max:max_speed, max_v) schedule(static)
+    for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
+        const auto& p = m_particles[p_idx];
         if (std::isnan(p.v[0]) || std::isnan(p.v[1]) || std::isinf(p.v[0]) || std::isinf(p.v[1])) continue;
         float E = p.youngs_modulus;
         float rho = std::max(10.0f, p.density);

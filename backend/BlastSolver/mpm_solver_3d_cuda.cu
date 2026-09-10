@@ -195,15 +195,31 @@ __global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSo
     soa.x[0][idx] = p.x[0]; soa.x[1][idx] = p.x[1]; soa.x[2][idx] = p.x[2];
     soa.v[0][idx] = p.v[0]; soa.v[1][idx] = p.v[1]; soa.v[2][idx] = p.v[2];
 
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            soa.sigma[r][c][idx] = p.sigma[r][c];
-            soa.B[r][c][idx] = p.B[r][c];
-            soa.L_grad[r][c][idx] = p.L_grad[r][c];
+    if (soa.sigma_voigt[0]) {
+        soa.sigma_voigt[0][idx] = p.sigma[0][0];
+        soa.sigma_voigt[1][idx] = p.sigma[1][1];
+        soa.sigma_voigt[2][idx] = p.sigma[2][2];
+        soa.sigma_voigt[3][idx] = p.sigma[0][1];
+        soa.sigma_voigt[4][idx] = p.sigma[1][2];
+        soa.sigma_voigt[5][idx] = p.sigma[2][0];
+    } else {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                soa.sigma[r][c][idx] = p.sigma[r][c];
+            }
         }
     }
 
-    soa.lp[0][idx] = p.lp[0]; soa.lp[1][idx] = p.lp[1]; soa.lp[2][idx] = p.lp[2];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            soa.B[r][c][idx] = p.B[r][c];
+            if (soa.L_grad[r][c] && soa.L_grad[r][c] != soa.B[r][c]) {
+                soa.L_grad[r][c][idx] = p.L_grad[r][c];
+            }
+        }
+    }
+
+    soa.lp[0][idx] = p.lp[0];
     soa.m[idx] = p.m;
     soa.V0[idx] = p.V0;
     soa.V[idx] = p.V;
@@ -230,15 +246,29 @@ __global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA so
     p.x[0] = soa.x[0][idx]; p.x[1] = soa.x[1][idx]; p.x[2] = soa.x[2][idx];
     p.v[0] = soa.v[0][idx]; p.v[1] = soa.v[1][idx]; p.v[2] = soa.v[2][idx];
 
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            p.sigma[r][c] = soa.sigma[r][c][idx];
-            p.B[r][c] = soa.B[r][c][idx];
-            p.L_grad[r][c] = soa.L_grad[r][c][idx];
+    if (soa.sigma_voigt[0]) {
+        p.sigma[0][0] = soa.sigma_voigt[0][idx];
+        p.sigma[1][1] = soa.sigma_voigt[1][idx];
+        p.sigma[2][2] = soa.sigma_voigt[2][idx];
+        p.sigma[0][1] = p.sigma[1][0] = soa.sigma_voigt[3][idx];
+        p.sigma[1][2] = p.sigma[2][1] = soa.sigma_voigt[4][idx];
+        p.sigma[2][0] = p.sigma[0][2] = soa.sigma_voigt[5][idx];
+    } else {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                p.sigma[r][c] = soa.sigma[r][c][idx];
+            }
         }
     }
 
-    p.lp[0] = soa.lp[0][idx]; p.lp[1] = soa.lp[1][idx]; p.lp[2] = soa.lp[2][idx];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            p.B[r][c] = soa.B[r][c][idx];
+            p.L_grad[r][c] = (soa.L_grad[r][c] && soa.L_grad[r][c] != soa.B[r][c]) ? soa.L_grad[r][c][idx] : soa.B[r][c][idx];
+        }
+    }
+
+    p.lp[0] = soa.lp[0][idx]; p.lp[1] = soa.lp[0][idx]; p.lp[2] = soa.lp[0][idx];
     p.m = soa.m[idx];
     p.V0 = soa.V0[idx];
     p.V = soa.V[idx];
@@ -279,12 +309,12 @@ __global__ void kernel_extract_mpm_vtk_snapshot_3d(
         d_vel[idx * 3 + 2] = soa.v[2][idx];
     }
     if (has_stress) {
-        float s00 = soa.sigma[0][0][idx];
-        float s11 = soa.sigma[1][1][idx];
-        float s22 = soa.sigma[2][2][idx];
-        float s01 = soa.sigma[0][1][idx];
-        float s12 = soa.sigma[1][2][idx];
-        float s20 = soa.sigma[2][0][idx];
+        float s00 = soa.sigma_voigt[0] ? soa.sigma_voigt[0][idx] : soa.sigma[0][0][idx];
+        float s11 = soa.sigma_voigt[1] ? soa.sigma_voigt[1][idx] : soa.sigma[1][1][idx];
+        float s22 = soa.sigma_voigt[2] ? soa.sigma_voigt[2][idx] : soa.sigma[2][2][idx];
+        float s01 = soa.sigma_voigt[3] ? soa.sigma_voigt[3][idx] : soa.sigma[0][1][idx];
+        float s12 = soa.sigma_voigt[4] ? soa.sigma_voigt[4][idx] : soa.sigma[1][2][idx];
+        float s20 = soa.sigma_voigt[5] ? soa.sigma_voigt[5][idx] : soa.sigma[2][0][idx];
         float mean_s = (s00 + s11 + s22) * (1.0f / 3.0f);
         float dev00 = s00 - mean_s;
         float dev11 = s11 - mean_s;
@@ -792,15 +822,20 @@ __global__ void kernel_copy_smoothed_plastic_strain_3d(MPMGridNode3D* grid_in, c
     }
 }
 
-__global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
-                              const MPMGridNode3D* grid, int nx, int ny, int nz,
-                              float dx, float dy, float dz, float dt, int transfer_scheme,
-                              int velocity_scheme, float flip_blend,
-                              float xmin, float ymin, float zmin,
-                              int bc_x_min, int bc_x_max,
-                              int bc_y_min, int bc_y_max,
-                              int bc_z_min, int bc_z_max,
-                              const MaterialTable3D* d_mat_tables) {
+// Forward declaration of constitutive stress update
+__device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat);
+
+// Unified G2P Device Implementation (FUSE_STRESS = true: eliminates L_grad global memory round-trip)
+template <bool FUSE_STRESS>
+__device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
+                                      const MPMGridNode3D* grid, int nx, int ny, int nz,
+                                      float dx, float dy, float dz, float dt, int transfer_scheme,
+                                      int velocity_scheme, float flip_blend,
+                                      float xmin, float ymin, float zmin,
+                                      int bc_x_min, int bc_x_max,
+                                      int bc_y_min, int bc_y_max,
+                                      int bc_z_min, int bc_z_max,
+                                      const MaterialTable3D* d_mat_tables) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (p_idx >= num_particles) return;
 
@@ -1308,11 +1343,17 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
     soa.v[2][p_idx] = final_vz;
 
     // Store particle velocity gradient B_p for constitutive stress update (only for intact solid APIC particles)
+    float L_eff[3][3];
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
             float b_val = fminf(fmaxf(B_new[r][c], -max_B), max_B);
             soa.B[r][c][p_idx] = (!has_failed_p && !is_melted && velocity_scheme == 0) ? b_val : 0.0f;
-            soa.L_grad[r][c][p_idx] = (velocity_scheme == 0) ? b_val : fminf(fmaxf(L_new[r][c], -max_B), max_B);
+            float l_val = (velocity_scheme == 0) ? b_val : fminf(fmaxf(L_new[r][c], -max_B), max_B);
+            if constexpr (!FUSE_STRESS) {
+                soa.L_grad[r][c][p_idx] = l_val;
+            } else {
+                L_eff[r][c] = l_val;
+            }
         }
     }
 
@@ -1351,22 +1392,44 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
     soa.x[0][p_idx] = new_x;
     soa.x[1][p_idx] = new_y;
     soa.x[2][p_idx] = new_z;
+
+    if constexpr (FUSE_STRESS) {
+        update_particle_stress_constitutive(p_idx, dt, L_eff, soa, mat);
+    }
 }
 
-// 4. Stress Update Kernel (Coalesced SoA)
-__global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles, float dt, const MaterialTable3D* d_mat_tables) {
-    int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (p_idx >= num_particles) return;
+// 3. Grid-to-Particle (G2P) Gather Kernel (Standalone)
+__global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
+                              const MPMGridNode3D* grid, int nx, int ny, int nz,
+                              float dx, float dy, float dz, float dt, int transfer_scheme,
+                              int velocity_scheme, float flip_blend,
+                              float xmin, float ymin, float zmin,
+                              int bc_x_min, int bc_x_max,
+                              int bc_y_min, int bc_y_max,
+                              int bc_z_min, int bc_z_max,
+                              const MaterialTable3D* d_mat_tables) {
+    g2p_device_impl<false>(soa, num_particles, grid, nx, ny, nz, dx, dy, dz, dt, transfer_scheme,
+                           velocity_scheme, flip_blend, xmin, ymin, zmin,
+                           bc_x_min, bc_x_max, bc_y_min, bc_y_max, bc_z_min, bc_z_max, d_mat_tables);
+}
 
-    int obj_id = soa.object_id[p_idx];
-    const MaterialTable3D& mat = d_mat_tables[obj_id];
+// 3b. Fused G2P + Constitutive Stress Update Kernel (Single-Pass Leapfrog / Zero L_grad VRAM Traffic)
+__global__ void kernel_g2p_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
+                                           const MPMGridNode3D* grid, int nx, int ny, int nz,
+                                           float dx, float dy, float dz, float dt, int transfer_scheme,
+                                           int velocity_scheme, float flip_blend,
+                                           float xmin, float ymin, float zmin,
+                                           int bc_x_min, int bc_x_max,
+                                           int bc_y_min, int bc_y_max,
+                                           int bc_z_min, int bc_z_max,
+                                           const MaterialTable3D* d_mat_tables) {
+    g2p_device_impl<true>(soa, num_particles, grid, nx, ny, nz, dx, dy, dz, dt, transfer_scheme,
+                          velocity_scheme, flip_blend, xmin, ymin, zmin,
+                          bc_x_min, bc_x_max, bc_y_min, bc_y_max, bc_z_min, bc_z_max, d_mat_tables);
+}
 
-    float L[3][3];
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            L[r][c] = soa.L_grad[r][c][p_idx];
-        }
-    }
+// 4. Stress Update Constitutive Routine (Shared by Fused G2P-Stress and Standalone Stress Update)
+__device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat) {
 
     float deps[3][3], W[3][3];
     for (int r = 0; r < 3; ++r) {
@@ -2038,6 +2101,24 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
     }
 }
 
+// Standalone stress update kernel (loads L_grad from SoA and invokes constitutive math)
+__global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles, float dt, const MaterialTable3D* d_mat_tables) {
+    int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p_idx >= num_particles) return;
+
+    int obj_id = soa.object_id[p_idx];
+    const MaterialTable3D& mat = d_mat_tables[obj_id];
+
+    float L[3][3];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            L[r][c] = soa.L_grad[r][c][p_idx];
+        }
+    }
+
+    update_particle_stress_constitutive(p_idx, dt, L, soa, mat);
+}
+
 __global__ void kernel_compute_max_speed(MPMParticle3DSoA soa, int num_particles, float* d_max_speed, const MaterialTable3D* d_mat_tables) {
     extern __shared__ float s_max[];
     int tid = threadIdx.x;
@@ -2101,7 +2182,9 @@ MPMSolver3DCUDA::~MPMSolver3DCUDA() {
 }
 
 void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
-    size_t required_bytes = count * (48 * sizeof(float) + 4 * sizeof(int));
+    // 3(x) + 3(v) + 6(sigma_voigt) + 9(B) + 1(lp) + 12(m..contact_radius) = 34 floats
+    // + 4 ints = 34 * 4 + 16 = 152 bytes per particle (reduced from 208 bytes)
+    size_t required_bytes = count * (34 * sizeof(float) + 4 * sizeof(int));
     if (required_bytes > m_allocated_soa_bytes) {
         if (d_soa_buffer) cudaFree(d_soa_buffer);
         cudaMalloc(&d_soa_buffer, required_bytes);
@@ -2117,24 +2200,31 @@ void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
     d_soa.v[1] = fptr; fptr += count;
     d_soa.v[2] = fptr; fptr += count;
 
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c) {
-            d_soa.sigma[r][c] = fptr; fptr += count;
-        }
+    // 6 Voigt stress components: xx, yy, zz, xy, yz, zx
+    d_soa.sigma_voigt[0] = fptr; fptr += count; // xx
+    d_soa.sigma_voigt[1] = fptr; fptr += count; // yy
+    d_soa.sigma_voigt[2] = fptr; fptr += count; // zz
+    d_soa.sigma_voigt[3] = fptr; fptr += count; // xy
+    d_soa.sigma_voigt[4] = fptr; fptr += count; // yz
+    d_soa.sigma_voigt[5] = fptr; fptr += count; // zx
 
-    for (int r = 0; r < 3; ++r)
+    // Alias 3x3 sigma tensor directly to Voigt components for seamless backwards compatibility
+    d_soa.sigma[0][0] = d_soa.sigma_voigt[0];
+    d_soa.sigma[1][1] = d_soa.sigma_voigt[1];
+    d_soa.sigma[2][2] = d_soa.sigma_voigt[2];
+    d_soa.sigma[0][1] = d_soa.sigma[1][0] = d_soa.sigma_voigt[3];
+    d_soa.sigma[1][2] = d_soa.sigma[2][1] = d_soa.sigma_voigt[4];
+    d_soa.sigma[2][0] = d_soa.sigma[0][2] = d_soa.sigma_voigt[5];
+
+    for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
             d_soa.B[r][c] = fptr; fptr += count;
+            d_soa.L_grad[r][c] = d_soa.B[r][c]; // Alias L_grad to B to eliminate 9 redundant float arrays
         }
+    }
 
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c) {
-            d_soa.L_grad[r][c] = fptr; fptr += count;
-        }
-
-    d_soa.lp[0] = fptr; fptr += count;
-    d_soa.lp[1] = fptr; fptr += count;
-    d_soa.lp[2] = fptr; fptr += count;
+    // Isotropic lp: single buffer aliased to all 3 axes
+    d_soa.lp[0] = d_soa.lp[1] = d_soa.lp[2] = fptr; fptr += count;
 
     d_soa.m = fptr; fptr += count;
     d_soa.V0 = fptr; fptr += count;
@@ -2813,17 +2903,15 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
             kernel_copy_smoothed_plastic_strain_3d<<<blocks_active, threads_per_block>>>(d_grid, d_grid_n, static_cast<int>(num_nodes), d_active_nodes, m_num_active_nodes);
         }
 
-        kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles),
-                                                               d_grid, m_nx, m_ny, m_nz,
-                                                               m_dx, m_dy, m_dz, 0.5f * dt, static_cast<int>(m_transfer_scheme),
-                                                               static_cast<int>(m_velocity_scheme), m_flip_blend,
-                                                               m_xmin, m_ymin, m_zmin,
-                                                               static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
-                                                               static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
-                                                               static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
-                                                               d_material_tables);
-
-        kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles), 0.5f * dt, d_material_tables);
+        kernel_g2p_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles),
+                                                                             d_grid, m_nx, m_ny, m_nz,
+                                                                             m_dx, m_dy, m_dz, 0.5f * dt, static_cast<int>(m_transfer_scheme),
+                                                                             static_cast<int>(m_velocity_scheme), m_flip_blend,
+                                                                             m_xmin, m_ymin, m_zmin,
+                                                                             static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                                                                             static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                                                                             static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
+                                                                             d_material_tables);
 
         // 2. Corrector Stage — P2G from predictor midpoint state
         clearGridDevice();
@@ -2855,17 +2943,15 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
             kernel_copy_smoothed_plastic_strain_3d<<<blocks_active, threads_per_block>>>(d_grid, d_grid_n, static_cast<int>(num_nodes), d_active_nodes, m_num_active_nodes);
         }
 
-        kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles),
-                                                               d_grid, m_nx, m_ny, m_nz,
-                                                               m_dx, m_dy, m_dz, 0.5f * dt, static_cast<int>(m_transfer_scheme),
-                                                               static_cast<int>(m_velocity_scheme), m_flip_blend,
-                                                               m_xmin, m_ymin, m_zmin,
-                                                               static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
-                                                               static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
-                                                               static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
-                                                               d_material_tables);
-
-        kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles), 0.5f * dt, d_material_tables);
+        kernel_g2p_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles),
+                                                                             d_grid, m_nx, m_ny, m_nz,
+                                                                             m_dx, m_dy, m_dz, 0.5f * dt, static_cast<int>(m_transfer_scheme),
+                                                                             static_cast<int>(m_velocity_scheme), m_flip_blend,
+                                                                             m_xmin, m_ymin, m_zmin,
+                                                                             static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                                                                             static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                                                                             static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
+                                                                             d_material_tables);
     } else {
         // --- 1st-Order USL / USF ---
         if (run_p2g) {
@@ -2899,17 +2985,15 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
             kernel_copy_smoothed_plastic_strain_3d<<<blocks_active, threads_per_block>>>(d_grid, d_grid_n, static_cast<int>(num_nodes), d_active_nodes, m_num_active_nodes);
         }
 
-        kernel_g2p_3d<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles),
-                                                               d_grid, m_nx, m_ny, m_nz,
-                                                               m_dx, m_dy, m_dz, dt, static_cast<int>(m_transfer_scheme),
-                                                               static_cast<int>(m_velocity_scheme), m_flip_blend,
-                                                               m_xmin, m_ymin, m_zmin,
-                                                               static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
-                                                               static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
-                                                               static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
-                                                               d_material_tables);
-
-        kernel_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles), dt, d_material_tables);
+        kernel_g2p_stress_update_3d<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles),
+                                                                             d_grid, m_nx, m_ny, m_nz,
+                                                                             m_dx, m_dy, m_dz, dt, static_cast<int>(m_transfer_scheme),
+                                                                             static_cast<int>(m_velocity_scheme), m_flip_blend,
+                                                                             m_xmin, m_ymin, m_zmin,
+                                                                             static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                                                                             static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                                                                             static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
+                                                                             d_material_tables);
     }
 
     // Resolve Discrete Element (DEM) Contact & Collisions on GPU

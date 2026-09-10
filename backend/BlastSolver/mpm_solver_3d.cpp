@@ -1149,6 +1149,7 @@ void MPMSolver3D::updateGridKinematics(float dt) {
     if (!m_particles.empty()) avg_p_mass = m_particles[0].m;
     float m_eff_floor = 0.25f * avg_p_mass;
 
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < m_nx; ++i) {
         for (int j = 0; j < m_ny; ++j) {
             for (int k = 0; k < m_nz; ++k) {
@@ -1193,9 +1194,12 @@ void MPMSolver3D::updateGridKinematics(float dt) {
 
 void MPMSolver3D::gridToParticle(float dt) {
     float max_B = 25000.0f / std::min({m_dx, m_dy, m_dz});
-    m_last_v_max = 0.0f;
+    float v_max_global = 0.0f;
+    const size_t num_particles = m_particles.size();
 
-    for (auto& p : m_particles) {
+    #pragma omp parallel for reduction(max:v_max_global) schedule(dynamic, 64)
+    for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
+        auto& p = m_particles[p_idx];
         float px = p.x[0] - m_xmin;
         float py = p.x[1] - m_ymin;
         float pz = p.x[2] - m_zmin;
@@ -1664,7 +1668,7 @@ void MPMSolver3D::gridToParticle(float dt) {
         p.v[2] = std::clamp(target_vz, -25000.0f, 25000.0f);
 
         float p_speed = std::sqrt(p.v[0]*p.v[0] + p.v[1]*p.v[1] + p.v[2]*p.v[2]);
-        if (p_speed > m_last_v_max) m_last_v_max = p_speed;
+        if (p_speed > v_max_global) v_max_global = p_speed;
 
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
@@ -1707,10 +1711,14 @@ void MPMSolver3D::gridToParticle(float dt) {
             if (p.v[2] > 0.0f) { p.v[2] = 0.0f; }
         }
     }
+    m_last_v_max = v_max_global;
 }
 
 void MPMSolver3D::updateStressState(float dt) {
-    for (auto& p : m_particles) {
+    const size_t num_particles = m_particles.size();
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
+        auto& p = m_particles[p_idx];
         const auto& mat = getMaterialTable(p.object_id);
 
         // Fully failed particles: erase stress and APIC affine matrix.
@@ -2402,7 +2410,11 @@ void MPMSolver3D::updateStressState(float dt) {
 float MPMSolver3D::computeStepSize(float cfl) const {
     if (m_particles.empty()) return 1.0e-6f;
     float max_speed = 100.0f;
-    for (const auto& p : m_particles) {
+    const size_t num_particles = m_particles.size();
+
+    #pragma omp parallel for reduction(max:max_speed) schedule(static)
+    for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
+        const auto& p = m_particles[p_idx];
         if (std::isnan(p.v[0]) || std::isnan(p.v[1]) || std::isnan(p.v[2])) continue;
         const auto& mat = getMaterialTable(p.object_id);
         float E = mat.youngs_modulus;
