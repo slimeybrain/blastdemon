@@ -100,7 +100,38 @@ struct MPMParticle2D {
     // Dynamic State Variables
     float e_int{0.0f};           // Specific internal energy (J/kg)
     float temperature{293.0f};   // Current temperature (K)
-    float sigma[2][2];           // Cauchy stress tensor
+    // Cauchy stress tensor stored compactly in symmetric Voigt format: data[0]=xx, data[1]=yy, data[2]=xy
+    struct SymmetricTensor2D {
+        float data[3]{0.0f, 0.0f, 0.0f};
+
+        struct RowProxy {
+            float* ptr;
+            int r;
+            inline float& operator[](int c) {
+                if (r == 0 && c == 0) return ptr[0];
+                if (r == 1 && c == 1) return ptr[1];
+                return ptr[2]; // (0,1) or (1,0) -> xy
+            }
+            inline float operator[](int c) const {
+                if (r == 0 && c == 0) return ptr[0];
+                if (r == 1 && c == 1) return ptr[1];
+                return ptr[2];
+            }
+        };
+
+        struct ConstRowProxy {
+            const float* ptr;
+            int r;
+            inline float operator[](int c) const {
+                if (r == 0 && c == 0) return ptr[0];
+                if (r == 1 && c == 1) return ptr[1];
+                return ptr[2];
+            }
+        };
+
+        inline RowProxy operator[](int r) { return RowProxy{data, r}; }
+        inline ConstRowProxy operator[](int r) const { return ConstRowProxy{data, r}; }
+    } sigma;
     float ep_bar{0.0f};          // Equivalent plastic strain
     float damage{0.0f};          // Scalar damage D in [0, 1]
     bool has_failed{false};      // Total failure status flag

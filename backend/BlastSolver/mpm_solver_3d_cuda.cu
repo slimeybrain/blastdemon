@@ -187,10 +187,11 @@ __global__ void kernel_clear_active_nodes_3d(MPMGridNode3D* grid, const int* act
 }
 
 // SoA Pack/Unpack Kernels
-__global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSoA soa, int num_particles) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_particles) return;
-    const MPMParticle3D& p = aos[idx];
+__global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSoA soa, int chunk_size, int offset = 0) {
+    int local_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local_idx >= chunk_size) return;
+    int idx = offset + local_idx;
+    const MPMParticle3D& p = aos[local_idx];
 
     soa.x[0][idx] = p.x[0]; soa.x[1][idx] = p.x[1]; soa.x[2][idx] = p.x[2];
     soa.v[0][idx] = p.v[0]; soa.v[1][idx] = p.v[1]; soa.v[2][idx] = p.v[2];
@@ -238,10 +239,11 @@ __global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSo
     if (soa.cluster_id) soa.cluster_id[idx] = p.cluster_id;
 }
 
-__global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA soa, int num_particles) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_particles) return;
-    MPMParticle3D& p = aos[idx];
+__global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA soa, int chunk_size, int offset = 0) {
+    int local_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local_idx >= chunk_size) return;
+    int idx = offset + local_idx;
+    MPMParticle3D& p = aos[local_idx];
 
     p.x[0] = soa.x[0][idx]; p.x[1] = soa.x[1][idx]; p.x[2] = soa.x[2][idx];
     p.v[0] = soa.v[0][idx]; p.v[1] = soa.v[1][idx]; p.v[2] = soa.v[2][idx];
@@ -634,31 +636,54 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
         }
     } else {
         float Sx_arr[4], dSx_arr[4], Sy_arr[4], dSy_arr[4], Sz_arr[4], dSz_arr[4];
-        for (int offset = -1; offset <= 2; ++offset) {
-            int idx = offset + 1;
-            float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * dx;
-            Sx_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_S_dev(px, nx_val, dx, lp_x) :
-                          ((eff_transfer_scheme == 2) ? evalBSpline_S_dev(px, nx_val, dx) :
-                          fmaxf(0.0f, 1.0f - fabsf(px - nx_val) / dx));
-            dSx_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_dS_dev(px, nx_val, dx, lp_x) :
-                           ((eff_transfer_scheme == 2) ? evalBSpline_dS_dev(px, nx_val, dx) :
-                           (px >= nx_val ? -1.0f / dx : 1.0f / dx));
+        if (eff_transfer_scheme == 1) {
+            #pragma unroll
+            for (int offset = -1; offset <= 2; ++offset) {
+                int idx = offset + 1;
+                float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * dx;
+                Sx_arr[idx] = evalGIMP_S_dev(px, nx_val, dx, lp_x);
+                dSx_arr[idx] = evalGIMP_dS_dev(px, nx_val, dx, lp_x);
 
-            float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
-            Sy_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_S_dev(py, ny_val, dy, lp_y) :
-                          ((eff_transfer_scheme == 2) ? evalBSpline_S_dev(py, ny_val, dy) :
-                          fmaxf(0.0f, 1.0f - fabsf(py - ny_val) / dy));
-            dSy_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_dS_dev(py, ny_val, dy, lp_y) :
-                           ((eff_transfer_scheme == 2) ? evalBSpline_dS_dev(py, ny_val, dy) :
-                           (py >= ny_val ? -1.0f / dy : 1.0f / dy));
+                float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
+                Sy_arr[idx] = evalGIMP_S_dev(py, ny_val, dy, lp_y);
+                dSy_arr[idx] = evalGIMP_dS_dev(py, ny_val, dy, lp_y);
 
-            float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
-            Sz_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_S_dev(pz, nz_val, dz, lp_z) :
-                          ((eff_transfer_scheme == 2) ? evalBSpline_S_dev(pz, nz_val, dz) :
-                          fmaxf(0.0f, 1.0f - fabsf(pz - nz_val) / dz));
-            dSz_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_dS_dev(pz, nz_val, dz, lp_z) :
-                           ((eff_transfer_scheme == 2) ? evalBSpline_dS_dev(pz, nz_val, dz) :
-                           (pz >= nz_val ? -1.0f / dz : 1.0f / dz));
+                float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
+                Sz_arr[idx] = evalGIMP_S_dev(pz, nz_val, dz, lp_z);
+                dSz_arr[idx] = evalGIMP_dS_dev(pz, nz_val, dz, lp_z);
+            }
+        } else if (eff_transfer_scheme == 2) {
+            #pragma unroll
+            for (int offset = -1; offset <= 2; ++offset) {
+                int idx = offset + 1;
+                float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * dx;
+                Sx_arr[idx] = evalBSpline_S_dev(px, nx_val, dx);
+                dSx_arr[idx] = evalBSpline_dS_dev(px, nx_val, dx);
+
+                float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
+                Sy_arr[idx] = evalBSpline_S_dev(py, ny_val, dy);
+                dSy_arr[idx] = evalBSpline_dS_dev(py, ny_val, dy);
+
+                float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
+                Sz_arr[idx] = evalBSpline_S_dev(pz, nz_val, dz);
+                dSz_arr[idx] = evalBSpline_dS_dev(pz, nz_val, dz);
+            }
+        } else {
+            #pragma unroll
+            for (int offset = -1; offset <= 2; ++offset) {
+                int idx = offset + 1;
+                float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * dx;
+                Sx_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(px - nx_val) / dx);
+                dSx_arr[idx] = (px >= nx_val ? -1.0f / dx : 1.0f / dx);
+
+                float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
+                Sy_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(py - ny_val) / dy);
+                dSy_arr[idx] = (py >= ny_val ? -1.0f / dy : 1.0f / dy);
+
+                float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
+                Sz_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(pz - nz_val) / dz);
+                dSz_arr[idx] = (pz >= nz_val ? -1.0f / dz : 1.0f / dz);
+            }
         }
 
         for (int offset_i = -1; offset_i <= 2; ++offset_i) {
@@ -1182,31 +1207,54 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
         float D_inv_z = d_scale / (dz * dz);
 
         float Sx_arr[4], dSx_arr[4], Sy_arr[4], dSy_arr[4], Sz_arr[4], dSz_arr[4];
-        for (int offset = -1; offset <= 2; ++offset) {
-            int idx = offset + 1;
-            float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * dx;
-            Sx_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_S_dev(px, nx_val, dx, lp_0) :
-                          ((eff_transfer_scheme == 2) ? evalBSpline_S_dev(px, nx_val, dx) :
-                          fmaxf(0.0f, 1.0f - fabsf(px - nx_val) / dx));
-            dSx_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_dS_dev(px, nx_val, dx, lp_0) :
-                           ((eff_transfer_scheme == 2) ? evalBSpline_dS_dev(px, nx_val, dx) :
-                           (px >= nx_val ? -1.0f / dx : 1.0f / dx));
+        if (eff_transfer_scheme == 1) {
+            #pragma unroll
+            for (int offset = -1; offset <= 2; ++offset) {
+                int idx = offset + 1;
+                float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * dx;
+                Sx_arr[idx] = evalGIMP_S_dev(px, nx_val, dx, lp_0);
+                dSx_arr[idx] = evalGIMP_dS_dev(px, nx_val, dx, lp_0);
 
-            float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
-            Sy_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_S_dev(py, ny_val, dy, lp_1) :
-                          ((eff_transfer_scheme == 2) ? evalBSpline_S_dev(py, ny_val, dy) :
-                          fmaxf(0.0f, 1.0f - fabsf(py - ny_val) / dy));
-            dSy_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_dS_dev(py, ny_val, dy, lp_1) :
-                           ((eff_transfer_scheme == 2) ? evalBSpline_dS_dev(py, ny_val, dy) :
-                           (py >= ny_val ? -1.0f / dy : 1.0f / dy));
+                float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
+                Sy_arr[idx] = evalGIMP_S_dev(py, ny_val, dy, lp_1);
+                dSy_arr[idx] = evalGIMP_dS_dev(py, ny_val, dy, lp_1);
 
-            float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
-            Sz_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_S_dev(pz, nz_val, dz, lp_2) :
-                          ((eff_transfer_scheme == 2) ? evalBSpline_S_dev(pz, nz_val, dz) :
-                          fmaxf(0.0f, 1.0f - fabsf(pz - nz_val) / dz));
-            dSz_arr[idx] = (eff_transfer_scheme == 1) ? evalGIMP_dS_dev(pz, nz_val, dz, lp_2) :
-                           ((eff_transfer_scheme == 2) ? evalBSpline_dS_dev(pz, nz_val, dz) :
-                           (pz >= nz_val ? -1.0f / dz : 1.0f / dz));
+                float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
+                Sz_arr[idx] = evalGIMP_S_dev(pz, nz_val, dz, lp_2);
+                dSz_arr[idx] = evalGIMP_dS_dev(pz, nz_val, dz, lp_2);
+            }
+        } else if (eff_transfer_scheme == 2) {
+            #pragma unroll
+            for (int offset = -1; offset <= 2; ++offset) {
+                int idx = offset + 1;
+                float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * dx;
+                Sx_arr[idx] = evalBSpline_S_dev(px, nx_val, dx);
+                dSx_arr[idx] = evalBSpline_dS_dev(px, nx_val, dx);
+
+                float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
+                Sy_arr[idx] = evalBSpline_S_dev(py, ny_val, dy);
+                dSy_arr[idx] = evalBSpline_dS_dev(py, ny_val, dy);
+
+                float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
+                Sz_arr[idx] = evalBSpline_S_dev(pz, nz_val, dz);
+                dSz_arr[idx] = evalBSpline_dS_dev(pz, nz_val, dz);
+            }
+        } else {
+            #pragma unroll
+            for (int offset = -1; offset <= 2; ++offset) {
+                int idx = offset + 1;
+                float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * dx;
+                Sx_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(px - nx_val) / dx);
+                dSx_arr[idx] = (px >= nx_val ? -1.0f / dx : 1.0f / dx);
+
+                float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
+                Sy_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(py - ny_val) / dy);
+                dSy_arr[idx] = (py >= ny_val ? -1.0f / dy : 1.0f / dy);
+
+                float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
+                Sz_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(pz - nz_val) / dz);
+                dSz_arr[idx] = (pz >= nz_val ? -1.0f / dz : 1.0f / dz);
+            }
         }
 
         for (int offset_i = -1; offset_i <= 2; ++offset_i) {
@@ -2260,16 +2308,23 @@ void MPMSolver3DCUDA::uploadAoS2SoA() {
     if (count == 0) return;
     allocateDeviceMemory();
 
-    if (!d_temp_aos_particles || m_allocated_temp_aos_particles < count) {
+    // Bound staging buffer to 65536 particles (~14 MB max) to prevent unbounded GPU memory allocations
+    constexpr size_t MAX_AOS_CHUNK_SIZE = 65536;
+    size_t chunk_capacity = std::min(count, MAX_AOS_CHUNK_SIZE);
+
+    if (!d_temp_aos_particles || m_allocated_temp_aos_particles < chunk_capacity) {
         if (d_temp_aos_particles) cudaFree(d_temp_aos_particles);
-        cudaMalloc(&d_temp_aos_particles, count * sizeof(MPMParticle3D));
-        m_allocated_temp_aos_particles = count;
+        cudaMalloc(&d_temp_aos_particles, chunk_capacity * sizeof(MPMParticle3D));
+        m_allocated_temp_aos_particles = chunk_capacity;
     }
-    cudaMemcpy(d_temp_aos_particles, m_host_particles.data(), count * sizeof(MPMParticle3D), cudaMemcpyHostToDevice);
 
     int threads = 256;
-    int blocks = (static_cast<int>(count) + threads - 1) / threads;
-    kernel_pack_aos_to_soa<<<blocks, threads>>>(d_temp_aos_particles, d_soa, static_cast<int>(count));
+    for (size_t offset = 0; offset < count; offset += chunk_capacity) {
+        size_t cur_chunk = std::min(chunk_capacity, count - offset);
+        cudaMemcpy(d_temp_aos_particles, m_host_particles.data() + offset, cur_chunk * sizeof(MPMParticle3D), cudaMemcpyHostToDevice);
+        int blocks = (static_cast<int>(cur_chunk) + threads - 1) / threads;
+        kernel_pack_aos_to_soa<<<blocks, threads>>>(d_temp_aos_particles, d_soa, static_cast<int>(cur_chunk), static_cast<int>(offset));
+    }
     cudaDeviceSynchronize();
 }
 
@@ -2278,17 +2333,24 @@ void MPMSolver3DCUDA::downloadSoA2AoS() {
     size_t count = m_host_particles.size();
     if (count == 0 || !d_soa_buffer) return;
 
-    if (!d_temp_aos_particles || m_allocated_temp_aos_particles < count) {
+    // Bound staging buffer to 65536 particles (~14 MB max) to prevent unbounded GPU memory allocations
+    constexpr size_t MAX_AOS_CHUNK_SIZE = 65536;
+    size_t chunk_capacity = std::min(count, MAX_AOS_CHUNK_SIZE);
+
+    if (!d_temp_aos_particles || m_allocated_temp_aos_particles < chunk_capacity) {
         if (d_temp_aos_particles) cudaFree(d_temp_aos_particles);
-        cudaMalloc(&d_temp_aos_particles, count * sizeof(MPMParticle3D));
-        m_allocated_temp_aos_particles = count;
+        cudaMalloc(&d_temp_aos_particles, chunk_capacity * sizeof(MPMParticle3D));
+        m_allocated_temp_aos_particles = chunk_capacity;
     }
 
     int threads = 256;
-    int blocks = (static_cast<int>(count) + threads - 1) / threads;
-    kernel_unpack_soa_to_aos<<<blocks, threads>>>(d_temp_aos_particles, d_soa, static_cast<int>(count));
-    cudaDeviceSynchronize();
-    cudaMemcpy(m_host_particles.data(), d_temp_aos_particles, count * sizeof(MPMParticle3D), cudaMemcpyDeviceToHost);
+    for (size_t offset = 0; offset < count; offset += chunk_capacity) {
+        size_t cur_chunk = std::min(chunk_capacity, count - offset);
+        int blocks = (static_cast<int>(cur_chunk) + threads - 1) / threads;
+        kernel_unpack_soa_to_aos<<<blocks, threads>>>(d_temp_aos_particles, d_soa, static_cast<int>(cur_chunk), static_cast<int>(offset));
+        cudaDeviceSynchronize();
+        cudaMemcpy(m_host_particles.data() + offset, d_temp_aos_particles, cur_chunk * sizeof(MPMParticle3D), cudaMemcpyDeviceToHost);
+    }
 }
 
 void MPMSolver3DCUDA::allocateDeviceMemory() {

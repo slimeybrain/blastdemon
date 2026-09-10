@@ -428,49 +428,70 @@ void MPMSolver2D::particleToGrid() {
             }
         } else {
             // Standard / GIMP / BSpline / CubicBSpline
+            float Sx_arr[4], dSx_arr[4], Sy_arr[4], dSy_arr[4];
+            if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
+                for (int offset = -1; offset <= 2; ++offset) {
+                    int idx = offset + 1;
+                    float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
+                    Sx_arr[idx] = evalGIMP_S(p.x[0], nx_val, m_dx, p.lp[0]);
+                    dSx_arr[idx] = evalGIMP_dS(p.x[0], nx_val, m_dx, p.lp[0]);
+
+                    float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
+                    Sy_arr[idx] = evalGIMP_S(p.x[1], ny_val, m_dy, p.lp[1]);
+                    dSy_arr[idx] = evalGIMP_dS(p.x[1], ny_val, m_dy, p.lp[1]);
+                }
+            } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
+                for (int offset = -1; offset <= 2; ++offset) {
+                    int idx = offset + 1;
+                    float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
+                    Sx_arr[idx] = evalBSpline_S(p.x[0], nx_val, m_dx);
+                    dSx_arr[idx] = evalBSpline_dS(p.x[0], nx_val, m_dx);
+
+                    float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
+                    Sy_arr[idx] = evalBSpline_S(p.x[1], ny_val, m_dy);
+                    dSy_arr[idx] = evalBSpline_dS(p.x[1], ny_val, m_dy);
+                }
+            } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
+                for (int offset = -1; offset <= 2; ++offset) {
+                    int idx = offset + 1;
+                    float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
+                    Sx_arr[idx] = evalCubicBSpline_S(p.x[0], nx_val, m_dx);
+                    dSx_arr[idx] = evalCubicBSpline_dS(p.x[0], nx_val, m_dx);
+
+                    float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
+                    Sy_arr[idx] = evalCubicBSpline_S(p.x[1], ny_val, m_dy);
+                    dSy_arr[idx] = evalCubicBSpline_dS(p.x[1], ny_val, m_dy);
+                }
+            } else {
+                for (int offset = -1; offset <= 2; ++offset) {
+                    int idx = offset + 1;
+                    float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
+                    Sx_arr[idx] = std::max(0.0f, 1.0f - std::abs(p.x[0] - nx_val) / m_dx);
+                    dSx_arr[idx] = (p.x[0] >= nx_val ? -1.0f / m_dx : 1.0f / m_dx);
+
+                    float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
+                    Sy_arr[idx] = std::max(0.0f, 1.0f - std::abs(p.x[1] - ny_val) / m_dy);
+                    dSy_arr[idx] = (p.x[1] >= ny_val ? -1.0f / m_dy : 1.0f / m_dy);
+                }
+            }
+
             for (int offset_i = -1; offset_i <= 2; ++offset_i) {
                 int i = base_i + offset_i;
                 if (i < 0 || i >= m_nx) continue;
-                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
-
-                float Sx = 0.0f, dSx = 0.0f;
-                if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
-                    Sx = evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]);
-                    dSx = evalGIMP_dS(p.x[0], node_x, m_dx, p.lp[0]);
-                } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
-                    Sx = evalBSpline_S(p.x[0], node_x, m_dx);
-                    dSx = evalBSpline_dS(p.x[0], node_x, m_dx);
-                } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
-                    Sx = evalCubicBSpline_S(p.x[0], node_x, m_dx);
-                    dSx = evalCubicBSpline_dS(p.x[0], node_x, m_dx);
-                } else {
-                    Sx = std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx);
-                    dSx = (p.x[0] >= node_x ? -1.0f / m_dx : 1.0f / m_dx);
-                }
-
+                int i_idx = offset_i + 1;
+                float Sx = Sx_arr[i_idx];
                 if (std::abs(Sx) < 1.0e-7f) continue;
+                float dSx = dSx_arr[i_idx];
+                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
 
                 for (int offset_j = -1; offset_j <= 2; ++offset_j) {
                     int j = base_j + offset_j;
                     if (j < 0 || j >= m_ny) continue;
-                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
-
-                    float Sy = 0.0f, dSy = 0.0f;
-                    if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
-                        Sy = evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]);
-                        dSy = evalGIMP_dS(p.x[1], node_y, m_dy, p.lp[1]);
-                    } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
-                        Sy = evalBSpline_S(p.x[1], node_y, m_dy);
-                        dSy = evalBSpline_dS(p.x[1], node_y, m_dy);
-                    } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
-                        Sy = evalCubicBSpline_S(p.x[1], node_y, m_dy);
-                        dSy = evalCubicBSpline_dS(p.x[1], node_y, m_dy);
-                    } else {
-                        Sy = std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy);
-                        dSy = (p.x[1] >= node_y ? -1.0f / m_dy : 1.0f / m_dy);
-                    }
-
+                    int j_idx = offset_j + 1;
+                    float Sy = Sy_arr[j_idx];
                     if (std::abs(Sy) < 1.0e-7f) continue;
+                    float dSy = dSy_arr[j_idx];
+                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
 
                     float weight = Sx * Sy;
                     float dN_dx = dSx * Sy;
@@ -750,49 +771,70 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
             float D_inv_x = d_scale / (m_dx * m_dx);
             float D_inv_y = d_scale / (m_dy * m_dy);
 
+            float Sx_arr[4], dSx_arr[4], Sy_arr[4], dSy_arr[4];
+            if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
+                for (int offset = -1; offset <= 2; ++offset) {
+                    int idx = offset + 1;
+                    float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
+                    Sx_arr[idx] = evalGIMP_S(p.x[0], nx_val, m_dx, p.lp[0]);
+                    dSx_arr[idx] = evalGIMP_dS(p.x[0], nx_val, m_dx, p.lp[0]);
+
+                    float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
+                    Sy_arr[idx] = evalGIMP_S(p.x[1], ny_val, m_dy, p.lp[1]);
+                    dSy_arr[idx] = evalGIMP_dS(p.x[1], ny_val, m_dy, p.lp[1]);
+                }
+            } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
+                for (int offset = -1; offset <= 2; ++offset) {
+                    int idx = offset + 1;
+                    float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
+                    Sx_arr[idx] = evalBSpline_S(p.x[0], nx_val, m_dx);
+                    dSx_arr[idx] = evalBSpline_dS(p.x[0], nx_val, m_dx);
+
+                    float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
+                    Sy_arr[idx] = evalBSpline_S(p.x[1], ny_val, m_dy);
+                    dSy_arr[idx] = evalBSpline_dS(p.x[1], ny_val, m_dy);
+                }
+            } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
+                for (int offset = -1; offset <= 2; ++offset) {
+                    int idx = offset + 1;
+                    float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
+                    Sx_arr[idx] = evalCubicBSpline_S(p.x[0], nx_val, m_dx);
+                    dSx_arr[idx] = evalCubicBSpline_dS(p.x[0], nx_val, m_dx);
+
+                    float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
+                    Sy_arr[idx] = evalCubicBSpline_S(p.x[1], ny_val, m_dy);
+                    dSy_arr[idx] = evalCubicBSpline_dS(p.x[1], ny_val, m_dy);
+                }
+            } else {
+                for (int offset = -1; offset <= 2; ++offset) {
+                    int idx = offset + 1;
+                    float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
+                    Sx_arr[idx] = std::max(0.0f, 1.0f - std::abs(p.x[0] - nx_val) / m_dx);
+                    dSx_arr[idx] = (p.x[0] >= nx_val ? -1.0f / m_dx : 1.0f / m_dx);
+
+                    float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
+                    Sy_arr[idx] = std::max(0.0f, 1.0f - std::abs(p.x[1] - ny_val) / m_dy);
+                    dSy_arr[idx] = (p.x[1] >= ny_val ? -1.0f / m_dy : 1.0f / m_dy);
+                }
+            }
+
             for (int offset_i = -1; offset_i <= 2; ++offset_i) {
                 int i = base_i + offset_i;
                 if (i < 0 || i >= m_nx) continue;
-                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
-
-                float Sx = 0.0f, dSx = 0.0f;
-                if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
-                    Sx = evalGIMP_S(p.x[0], node_x, m_dx, p.lp[0]);
-                    dSx = evalGIMP_dS(p.x[0], node_x, m_dx, p.lp[0]);
-                } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
-                    Sx = evalBSpline_S(p.x[0], node_x, m_dx);
-                    dSx = evalBSpline_dS(p.x[0], node_x, m_dx);
-                } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
-                    Sx = evalCubicBSpline_S(p.x[0], node_x, m_dx);
-                    dSx = evalCubicBSpline_dS(p.x[0], node_x, m_dx);
-                } else {
-                    Sx = std::max(0.0f, 1.0f - std::abs(p.x[0] - node_x) / m_dx);
-                    dSx = (p.x[0] >= node_x ? -1.0f / m_dx : 1.0f / m_dx);
-                }
-
+                int i_idx = offset_i + 1;
+                float Sx = Sx_arr[i_idx];
                 if (std::abs(Sx) < 1.0e-7f) continue;
+                float dSx = dSx_arr[i_idx];
+                float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
 
                 for (int offset_j = -1; offset_j <= 2; ++offset_j) {
                     int j = base_j + offset_j;
                     if (j < 0 || j >= m_ny) continue;
-                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
-
-                    float Sy = 0.0f, dSy = 0.0f;
-                    if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
-                        Sy = evalGIMP_S(p.x[1], node_y, m_dy, p.lp[1]);
-                        dSy = evalGIMP_dS(p.x[1], node_y, m_dy, p.lp[1]);
-                    } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
-                        Sy = evalBSpline_S(p.x[1], node_y, m_dy);
-                        dSy = evalBSpline_dS(p.x[1], node_y, m_dy);
-                    } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
-                        Sy = evalCubicBSpline_S(p.x[1], node_y, m_dy);
-                        dSy = evalCubicBSpline_dS(p.x[1], node_y, m_dy);
-                    } else {
-                        Sy = std::max(0.0f, 1.0f - std::abs(p.x[1] - node_y) / m_dy);
-                        dSy = (p.x[1] >= node_y ? -1.0f / m_dy : 1.0f / m_dy);
-                    }
-
+                    int j_idx = offset_j + 1;
+                    float Sy = Sy_arr[j_idx];
                     if (std::abs(Sy) < 1.0e-7f) continue;
+                    float dSy = dSy_arr[j_idx];
+                    float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
 
                     float weight = Sx * Sy;
                     float dN_dx = dSx * Sy;
@@ -1119,7 +1161,6 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
                 p.sigma[0][0] *= soft_factor;
                 p.sigma[1][1] *= soft_factor;
                 p.sigma[0][1] *= soft_factor;
-                p.sigma[1][0] *= soft_factor;
             }
 
             return;
@@ -1236,7 +1277,6 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
         p.sigma[0][0] *= soft_factor;
         p.sigma[1][1] *= soft_factor;
         p.sigma[0][1] *= soft_factor;
-        p.sigma[1][0] *= soft_factor;
 
         // Update Volume incrementally using det(F) = 1 + tr(deps)
         p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
