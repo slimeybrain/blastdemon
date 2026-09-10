@@ -216,11 +216,7 @@ void MPMSolver3D::addBoxObject(int obj_id, float pos_x, float pos_y, float pos_z
                 p.damage = 0.0f;
                 p.has_failed = false;
 
-                for (int i = 0; i < 3; ++i) {
-                    for (int j = 0; j < 3; ++j) {
-                        p.sigma[i][j] = 0.0f;
-                    }
-                }
+                p.sigma.zero();
 
                 p.ep_bar = 0.0f;
                 p.object_id = obj_id;
@@ -358,11 +354,7 @@ void MPMSolver3D::addSphereObject(int obj_id, float pos_x, float pos_y, float po
                 p.damage = 0.0f;
                 p.has_failed = false;
 
-                for (int i = 0; i < 3; ++i) {
-                    for (int j = 0; j < 3; ++j) {
-                        p.sigma[i][j] = 0.0f;
-                    }
-                }
+                p.sigma.zero();
 
                 p.ep_bar = 0.0f;
                 p.object_id = obj_id;
@@ -505,11 +497,7 @@ void MPMSolver3D::addCylinderObject(int obj_id, float pos_x, float pos_y, float 
                 p.damage = 0.0f;
                 p.has_failed = false;
 
-                for (int i = 0; i < 3; ++i) {
-                    for (int j = 0; j < 3; ++j) {
-                        p.sigma[i][j] = 0.0f;
-                    }
-                }
+                p.sigma.zero();
 
                 p.ep_bar = 0.0f;
                 p.object_id = obj_id;
@@ -697,11 +685,7 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
                     p.damage = 0.0f;
                     p.has_failed = false;
 
-                    for (int i = 0; i < 3; ++i) {
-                        for (int j = 0; j < 3; ++j) {
-                            p.sigma[i][j] = 0.0f;
-                        }
-                    }
+                    p.sigma.zero();
 
                     p.ep_bar = 0.0f;
                     p.object_id = obj_id;
@@ -1812,9 +1796,7 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             const float q_max = M_friction * p_comp;
 
             if (q_max <= 0.0f) {
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c)
-                        p.sigma[r][c] = (r == c) ? -p_comp : 0.0f;
+                p.sigma.setIsotropic(p_comp);
                 return;
             }
 
@@ -1848,15 +1830,12 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
                 float scale = q_max / q_trial;
                 for (int r = 0; r < 3; ++r)
                     for (int c = 0; c < 3; ++c)
-                        p.sigma[r][c] = scale * s_trial[r][c];
-            } else {
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c)
-                        p.sigma[r][c] = s_trial[r][c];
+                        s_trial[r][c] *= scale;
             }
 
             for (int r = 0; r < 3; ++r)
-                p.sigma[r][r] -= p_comp;
+                s_trial[r][r] -= p_comp;
+            p.sigma = s_trial;
 
             return;
         }
@@ -1904,8 +1883,8 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             // Hydrostatic elastic pressure
             float p_hydro = K_bulk * (1.0f - J) / std::max(0.01f, J);
             for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    p.sigma[r][c] = s_trial[r][c] - (r == c ? p_hydro : 0.0f);
+                s_trial[r][r] -= p_hydro;
+            p.sigma = s_trial;
 
             return;
         }
@@ -2003,8 +1982,8 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             }
 
             for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    p.sigma[r][c] = s_trial[r][c] - (r == c ? p_mix : 0.0f);
+                s_trial[r][r] -= p_mix;
+            p.sigma = s_trial;
 
             return;
         }
@@ -2117,18 +2096,13 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
                 delta_ep = (q_trial - jc_yield) / (3.0f * mu_shear + H_jc);
                 float scale = (q_trial > 1e-12f) ? (jc_yield / q_trial) : 0.0f;
                 for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c) {
-                        p.sigma[r][c] = scale * s_trial[r][c];
-                        if (r == c) p.sigma[r][c] -= p_hydro;
-                    }
+                    for (int c = 0; c < 3; ++c)
+                        s_trial[r][c] *= scale;
                 p.ep_bar += delta_ep;
-            } else {
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c) {
-                        p.sigma[r][c] = s_trial[r][c];
-                        if (r == c) p.sigma[r][c] -= p_hydro;
-                    }
             }
+            for (int r = 0; r < 3; ++r)
+                s_trial[r][r] -= p_hydro;
+            p.sigma = s_trial;
 
             if (delta_ep > 0.0f && mat.density > 0.0f && mat.Cp > 0.0f) {
                 float dw_p = jc_yield * delta_ep;
@@ -2170,25 +2144,22 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
 
                 // Relax failed particles: zero shear/tensile stress, retain compressive hydrostatic pressure from parent EOS
                 float p_comp = 0.0f;
-                    if (J < 1.0f) {
-                        if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen && mat.mg_c0 > 0.0f) {
-                            const float mu_vol = (1.0f - J) / std::max(0.01f, J);
-                            const float denom = std::max(0.1f, 1.0f - (mat.mg_s - 1.0f) * mu_vol);
-                            const float p_hugoniot = (mat.density * mat.mg_c0 * mat.mg_c0 * mu_vol * (1.0f + (1.0f - 0.5f * mat.mg_gamma0) * mu_vol)) / (denom * denom);
-                            p_comp = std::max(0.0f, p_hugoniot + mat.mg_gamma0 * mat.density * p.e_int);
-                        } else {
-                            const float E_mod_d  = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
-                            const float nu_d     = std::clamp(mat.poissons_ratio, 0.01f, 0.49f);
-                            const float K_parent = E_mod_d / (3.0f * (1.0f - 2.0f * nu_d));
-                            p_comp = K_parent * (1.0f - J) / std::max(0.01f, J);
-                        }
+                if (J < 1.0f) {
+                    if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen && mat.mg_c0 > 0.0f) {
+                        const float mu_vol = (1.0f - J) / std::max(0.01f, J);
+                        const float denom = std::max(0.1f, 1.0f - (mat.mg_s - 1.0f) * mu_vol);
+                        const float p_hugoniot = (mat.density * mat.mg_c0 * mat.mg_c0 * mu_vol * (1.0f + (1.0f - 0.5f * mat.mg_gamma0) * mu_vol)) / (denom * denom);
+                        p_comp = std::max(0.0f, p_hugoniot + mat.mg_gamma0 * mat.density * p.e_int);
+                    } else {
+                        const float E_mod_d  = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
+                        const float nu_d     = std::clamp(mat.poissons_ratio, 0.01f, 0.49f);
+                        const float K_parent = E_mod_d / (3.0f * (1.0f - 2.0f * nu_d));
+                        p_comp = K_parent * (1.0f - J) / std::max(0.01f, J);
                     }
-                    for (int r = 0; r < 3; ++r)
-                        for (int c = 0; c < 3; ++c)
-                            p.sigma[r][c] = (r == c) ? -p_comp : 0.0f;
-
-                    return;
                 }
+                p.sigma.setIsotropic(p_comp);
+                return;
+            }
 
             return;
         }
@@ -2266,10 +2237,8 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             press = rht_state.p_hydro;
 
             for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) {
-                    p.sigma[r][c] = s[r][c];
-                    if (r == c) p.sigma[r][c] -= press;
-                }
+                s[r][r] -= press;
+            p.sigma = s;
         } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
             Blast::ConcreteModels::KCStateVariables<float> kc_state;
             kc_state.damage = p.damage;
@@ -2296,10 +2265,8 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             press = kc_state.p_hydro;
 
             for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) {
-                    p.sigma[r][c] = s[r][c];
-                    if (r == c) p.sigma[r][c] -= press;
-                }
+                s[r][r] -= press;
+            p.sigma = s;
         } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
             Blast::ConcreteModels::CSCMStateVariables<float> cscm_state;
             cscm_state.damage = p.damage;
@@ -2324,10 +2291,8 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             p.ep_bar = cscm_state.ep_bar;
             press = cscm_state.p_hydro;
             for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) {
-                    p.sigma[r][c] = s[r][c];
-                    if (r == c) p.sigma[r][c] -= press;
-                }
+                s[r][r] -= press;
+            p.sigma = s;
         } else {
             // Default Hypoelastic J2 Elastoplasticity with Weibull flaw scatter & plastic damage softening
             float w_factor = (mat.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
@@ -2363,15 +2328,14 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
                 float scale = 1.0f - (3.0f * mu * delta_ep) / q_trial_hypo;
                 if (scale < 0.0f) scale = 0.0f;
                 for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c) {
-                        p.sigma[r][c] = scale * s[r][c];
-                        if (r == c) p.sigma[r][c] -= press;
-                    }
+                    for (int c = 0; c < 3; ++c)
+                        s[r][c] *= scale;
+                for (int r = 0; r < 3; ++r)
+                    s[r][r] -= press;
+                p.sigma = s;
                 p.ep_bar += delta_ep;
             } else {
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c)
-                        p.sigma[r][c] = sig_trial[r][c];
+                p.sigma = sig_trial;
             }
 
             float d_plastic = 0.0f;
@@ -2421,10 +2385,7 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
                 }
             }
 
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    p.sigma[r][c] = (r == c) ? -p_comp : 0.0f;
-
+            p.sigma.setIsotropic(p_comp);
             return;
         }
 

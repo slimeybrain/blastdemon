@@ -109,68 +109,35 @@ __device__ inline float evalWendland_C2_dev(float r, float R_supp) {
     return (term * term * term * term) * (1.0f + 4.0f * q);
 }
 
-// Sparse Tile Table Marking Kernel
-__global__ void kernel_mark_active_tiles(MPMParticle3DSoA soa, int num_particles,
-                                        int* d_tile_table, int* d_num_active_tiles,
-                                        int ntx, int nty, int ntz,
-                                        float dx, float dy, float dz,
-                                        float xmin, float ymin, float zmin) {
-    int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (p_idx >= num_particles) return;
-
-    float px = soa.x[0][p_idx] - xmin;
-    float py = soa.x[1][p_idx] - ymin;
-    float pz = soa.x[2][p_idx] - zmin;
-
-    int base_i = static_cast<int>(floorf(px / dx));
-    int base_j = static_cast<int>(floorf(py / dy));
-    int base_k = static_cast<int>(floorf(pz / dz));
-
-    for (int offset_i = -1; offset_i <= 2; ++offset_i) {
-        int i = base_i + offset_i;
-        if (i < 0) continue;
-        int tx = i >> 3;
-        if (tx >= ntx) continue;
-
-        for (int offset_j = -1; offset_j <= 2; ++offset_j) {
-            int j = base_j + offset_j;
-            if (j < 0) continue;
-            int ty = j >> 3;
-            if (ty >= nty) continue;
-
-            for (int offset_k = -1; offset_k <= 2; ++offset_k) {
-                int k = base_k + offset_k;
-                if (k < 0) continue;
-                int tz = k >> 3;
-                if (tz >= ntz) continue;
-
-                int tile_idx = (tx * nty + ty) * ntz + tz;
-                if (atomicCAS(&d_tile_table[tile_idx], -1, -2) == -1) {
-                    int slot = atomicAdd(d_num_active_tiles, 1);
-                    d_tile_table[tile_idx] = slot;
-                }
-            }
-        }
-    }
+// Direct 6-component Voigt stress memory accessors (xx, yy, zz, xy, yz, zx)
+__device__ __forceinline__ void load_particle_stress_matrix(const MPMParticle3DSoA& soa, int p_idx, float sigma[3][3]) {
+    float s0 = soa.sigma_voigt[0][p_idx]; // xx
+    float s1 = soa.sigma_voigt[1][p_idx]; // yy
+    float s2 = soa.sigma_voigt[2][p_idx]; // zz
+    float s3 = soa.sigma_voigt[3][p_idx]; // xy
+    float s4 = soa.sigma_voigt[4][p_idx]; // yz
+    float s5 = soa.sigma_voigt[5][p_idx]; // zx
+    sigma[0][0] = s0; sigma[0][1] = s3; sigma[0][2] = s5;
+    sigma[1][0] = s3; sigma[1][1] = s1; sigma[1][2] = s4;
+    sigma[2][0] = s5; sigma[2][1] = s4; sigma[2][2] = s2;
 }
 
-__device__ __forceinline__ MPMGridNode3D* get_sparse_node(
-    MPMGridNode3D* grid_pool, const int* tile_table,
-    int ntx, int nty, int ntz,
-    int gx, int gy, int gz) {
-    if (gx < 0 || gy < 0 || gz < 0) return nullptr;
-    int tx = gx >> 3;
-    int ty = gy >> 3;
-    int tz = gz >> 3;
-    if (tx >= ntx || ty >= nty || tz >= ntz) return nullptr;
-    int tile_idx = (tx * nty + ty) * ntz + tz;
-    int slot = tile_table[tile_idx];
-    if (slot < 0) return nullptr;
-    int lx = gx & 7;
-    int ly = gy & 7;
-    int lz = gz & 7;
-    int cell_idx = (lx * 8 + ly) * 8 + lz;
-    return &grid_pool[slot * 512 + cell_idx];
+__device__ __forceinline__ void store_particle_stress_matrix(MPMParticle3DSoA& soa, int p_idx, const float sigma[3][3]) {
+    soa.sigma_voigt[0][p_idx] = sigma[0][0];
+    soa.sigma_voigt[1][p_idx] = sigma[1][1];
+    soa.sigma_voigt[2][p_idx] = sigma[2][2];
+    soa.sigma_voigt[3][p_idx] = 0.5f * (sigma[0][1] + sigma[1][0]);
+    soa.sigma_voigt[4][p_idx] = 0.5f * (sigma[1][2] + sigma[2][1]);
+    soa.sigma_voigt[5][p_idx] = 0.5f * (sigma[2][0] + sigma[0][2]);
+}
+
+__device__ __forceinline__ void store_particle_stress_isotropic(MPMParticle3DSoA& soa, int p_idx, float p_hydro) {
+    soa.sigma_voigt[0][p_idx] = -p_hydro;
+    soa.sigma_voigt[1][p_idx] = -p_hydro;
+    soa.sigma_voigt[2][p_idx] = -p_hydro;
+    soa.sigma_voigt[3][p_idx] = 0.0f;
+    soa.sigma_voigt[4][p_idx] = 0.0f;
+    soa.sigma_voigt[5][p_idx] = 0.0f;
 }
 
 // Clear previously active grid nodes kernel
@@ -351,8 +318,8 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
     float lp_x = soa.lp[0][p_idx], lp_y = soa.lp[1][p_idx], lp_z = soa.lp[2][p_idx];
     float v_x = soa.v[0][p_idx], v_y = soa.v[1][p_idx], v_z = soa.v[2][p_idx];
 
-    float s_xx = soa.sigma[0][0][p_idx]; float s_yy = soa.sigma[1][1][p_idx]; float s_zz = soa.sigma[2][2][p_idx];
-    float s_xy = soa.sigma[0][1][p_idx]; float s_yz = soa.sigma[1][2][p_idx]; float s_zx = soa.sigma[2][0][p_idx];
+    float s_xx = soa.sigma_voigt[0][p_idx]; float s_yy = soa.sigma_voigt[1][p_idx]; float s_zz = soa.sigma_voigt[2][p_idx];
+    float s_xy = soa.sigma_voigt[3][p_idx]; float s_yz = soa.sigma_voigt[4][p_idx]; float s_zx = soa.sigma_voigt[5][p_idx];
 
     float B_00 = soa.B[0][0][p_idx], B_01 = soa.B[0][1][p_idx], B_02 = soa.B[0][2][p_idx];
     float B_10 = soa.B[1][0][p_idx], B_11 = soa.B[1][1][p_idx], B_12 = soa.B[1][2][p_idx];
@@ -1457,9 +1424,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
     soa.lp[0][p_idx] = lp_val; soa.lp[1][p_idx] = lp_val; soa.lp[2][p_idx] = lp_val;
 
     float sigma_p[3][3];
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c)
-            sigma_p[r][c] = soa.sigma[r][c][p_idx];
+    load_particle_stress_matrix(soa, p_idx, sigma_p);
 
     bool has_failed_p = (soa.has_failed[p_idx] != 0);
     float damage_p = soa.damage[p_idx];
@@ -1508,9 +1473,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         const float q_max = M_friction * p_comp;
 
         if (q_max <= 0.0f) {
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    soa.sigma[r][c][p_idx] = (r == c) ? -p_comp : 0.0f;
+            store_particle_stress_isotropic(soa, p_idx, p_comp);
             return;
         }
 
@@ -1544,15 +1507,12 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
             float scale = q_max / q_trial;
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c)
-                    soa.sigma[r][c][p_idx] = scale * s_trial[r][c];
-        } else {
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    soa.sigma[r][c][p_idx] = s_trial[r][c];
+                    s_trial[r][c] *= scale;
         }
 
         for (int r = 0; r < 3; ++r)
-            soa.sigma[r][r][p_idx] -= p_comp;
+            s_trial[r][r] -= p_comp;
+        store_particle_stress_matrix(soa, p_idx, s_trial);
 
         return;
     }
@@ -1597,8 +1557,8 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
 
         float p_hydro = K_bulk * (1.0f - J) / fmaxf(0.01f, J);
         for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                soa.sigma[r][c][p_idx] = s_trial[r][c] - (r == c ? p_hydro : 0.0f);
+            s_trial[r][r] -= p_hydro;
+        store_particle_stress_matrix(soa, p_idx, s_trial);
 
         return;
     }
@@ -1704,8 +1664,8 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         }
 
         for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                soa.sigma[r][c][p_idx] = s_trial[r][c] - (r == c ? p_mix : 0.0f);
+            s_trial[r][r] -= p_mix;
+        store_particle_stress_matrix(soa, p_idx, s_trial);
 
         return;
     }
@@ -1792,11 +1752,10 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         float jc_yield = term_strain * term_rate * term_temp * soft_damage * aniso_factor * w_factor;
         if (T_star >= 1.0f) {
             // Melted metal behaves hydrodynamically: zero deviatoric shear stress and zero affine B
+            store_particle_stress_isotropic(soa, p_idx, p_hydro);
             for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) {
-                    soa.sigma[r][c][p_idx] = (r == c) ? -p_hydro : 0.0f;
+                for (int c = 0; c < 3; ++c)
                     soa.B[r][c][p_idx] = 0.0f;
-                }
             return;
         }
 
@@ -1808,19 +1767,14 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
             delta_ep = (q_trial - jc_yield) / (3.0f * mu_shear + H_jc);
             float scale = (q_trial > 1e-12f) ? (jc_yield / q_trial) : 0.0f;
             for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) {
-                    soa.sigma[r][c][p_idx] = scale * s_trial[r][c];
-                    if (r == c) soa.sigma[r][c][p_idx] -= p_hydro;
-                }
+                for (int c = 0; c < 3; ++c)
+                    s_trial[r][c] *= scale;
             ep_bar_p += delta_ep;
             soa.ep_bar[p_idx] = ep_bar_p;
-        } else {
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) {
-                    soa.sigma[r][c][p_idx] = s_trial[r][c];
-                    if (r == c) soa.sigma[r][c][p_idx] -= p_hydro;
-                }
         }
+        for (int r = 0; r < 3; ++r)
+            s_trial[r][r] -= p_hydro;
+        store_particle_stress_matrix(soa, p_idx, s_trial);
 
         if (delta_ep > 0.0f && mat.density > 0.0f && mat.Cp > 0.0f) {
             float dw_p = jc_yield * delta_ep;
@@ -1870,9 +1824,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
                         p_comp = K_parent * (1.0f - J) / fmaxf(0.01f, J);
                     }
                 }
-                for (int r = 0; r < 3; ++r)
-                    for (int c = 0; c < 3; ++c)
-                        soa.sigma[r][c][p_idx] = (r == c) ? -p_comp : 0.0f;
+                store_particle_stress_isotropic(soa, p_idx, p_comp);
                 return;
             }
 
@@ -1948,10 +1900,8 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         soa.damage[p_idx] = damage_p;
         soa.ep_bar[p_idx] = ep_bar_p;
         for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) {
-                soa.sigma[r][c][p_idx] = s[r][c];
-                if (r == c) soa.sigma[r][c][p_idx] -= press;
-            }
+            s[r][r] -= press;
+        store_particle_stress_matrix(soa, p_idx, s);
     } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
         KCStateVariables<float> kc_state;
         kc_state.damage = damage_p;
@@ -1978,10 +1928,8 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         if (soa.lambda) soa.lambda[p_idx] = lambda_p;
         soa.ep_bar[p_idx] = ep_bar_p;
         for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) {
-                soa.sigma[r][c][p_idx] = s[r][c];
-                if (r == c) soa.sigma[r][c][p_idx] -= press;
-            }
+            s[r][r] -= press;
+        store_particle_stress_matrix(soa, p_idx, s);
     } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
         CSCMStateVariables<float> cscm_state;
         cscm_state.damage = damage_p;
@@ -2008,10 +1956,8 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         if (soa.lambda) soa.lambda[p_idx] = lambda_p;
         soa.ep_bar[p_idx] = ep_bar_p;
         for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) {
-                soa.sigma[r][c][p_idx] = s[r][c];
-                if (r == c) soa.sigma[r][c][p_idx] -= press;
-            }
+            s[r][r] -= press;
+        store_particle_stress_matrix(soa, p_idx, s);
     } else {
         // Default Hypoelastic J2 Elastoplasticity with Weibull flaw scatter & plastic damage softening
         float w_factor = (mat.enable_heterogeneity && soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
@@ -2047,16 +1993,15 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
             float scale = 1.0f - (3.0f * mu * delta_ep) / q_trial;
             if (scale < 0.0f) scale = 0.0f;
             for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c) {
-                    soa.sigma[r][c][p_idx] = scale * s[r][c];
-                    if (r == c) soa.sigma[r][c][p_idx] -= press;
-                }
+                for (int c = 0; c < 3; ++c)
+                    s[r][c] *= scale;
+            for (int r = 0; r < 3; ++r)
+                s[r][r] -= press;
+            store_particle_stress_matrix(soa, p_idx, s);
             ep_bar_p += delta_ep;
             soa.ep_bar[p_idx] = ep_bar_p;
         } else {
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    soa.sigma[r][c][p_idx] = sig_trial[r][c];
+            store_particle_stress_matrix(soa, p_idx, sig_trial);
         }
         float d_plastic = 0.0f;
         if (mat.enable_strain_erosion && fail_strain_base > 0.0f) {
@@ -2066,7 +2011,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         float d_tensile = 0.0f;
         if (mat.enable_stress_erosion) {
             float fail_stress = ((mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor * aniso_factor;
-            float s00 = soa.sigma[0][0][p_idx], s11 = soa.sigma[1][1][p_idx], s22 = soa.sigma[2][2][p_idx];
+            float s00 = soa.sigma_voigt[0][p_idx], s11 = soa.sigma_voigt[1][p_idx], s22 = soa.sigma_voigt[2][p_idx];
             const float curr_press    = -(s00 + s11 + s22) / 3.0f;
             const float tensile_stress = -curr_press;
             if (tensile_stress > 0.0f && fail_stress > 0.0f) {
@@ -2101,10 +2046,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
             }
         }
 
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                soa.sigma[r][c][p_idx] = (r == c) ? -p_comp : 0.0f;
-
+        store_particle_stress_isotropic(soa, p_idx, p_comp);
         return;
     }
 }
@@ -2318,19 +2260,6 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
     size_t num_particles = m_host_particles.size();
     size_t num_materials = m_material_tables.size();
 
-    int ntx = (m_nx + 7) / 8;
-    int nty = (m_ny + 7) / 8;
-    int ntz = (m_nz + 7) / 8;
-    size_t total_tiles = static_cast<size_t>(ntx) * nty * ntz;
-
-    if (total_tiles > m_allocated_tile_table) {
-        if (d_tile_table) cudaFree(d_tile_table);
-        if (d_num_active_tiles) cudaFree(d_num_active_tiles);
-        cudaMalloc(&d_tile_table, total_tiles * sizeof(int));
-        cudaMalloc(&d_num_active_tiles, sizeof(int));
-        m_allocated_tile_table = total_tiles;
-    }
-
     if (num_grid_nodes > m_allocated_grid_nodes) {
         if (d_grid) cudaFree(d_grid);
         if (d_grid_n) cudaFree(d_grid_n);
@@ -2370,7 +2299,6 @@ size_t MPMSolver3DCUDA::getAllocatedVRAM() const {
     size_t total = 0;
     total += m_allocated_grid_nodes * sizeof(MPMGridNode3D); // d_grid
     total += m_allocated_grid_nodes * sizeof(float);          // d_grid_n (helper)
-    total += m_allocated_tile_table * sizeof(int);              // d_tile_table
     total += m_allocated_soa_bytes;                            // d_soa_buffer (SoA)
     total += m_allocated_material_tables * sizeof(MaterialTable3D); // d_material_tables
     total += m_allocated_active_nodes * sizeof(int);           // d_active_nodes
@@ -2379,7 +2307,6 @@ size_t MPMSolver3DCUDA::getAllocatedVRAM() const {
     total += m_allocated_slice_buf;                             // d_telemetry_slice_buf
     if (d_max_v_buf) total += sizeof(float);
     if (d_num_active_nodes) total += sizeof(int);
-    if (d_num_active_tiles) total += sizeof(int);
     return total;
 }
 
@@ -2865,18 +2792,6 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
         // --- 2nd-Order Midpoint RK2 ---
         // 1. Predictor Stage (Half-step dt/2)
         if (run_p2g) {
-            int ntx = (m_nx + 7) / 8;
-            int nty = (m_ny + 7) / 8;
-            int ntz = (m_nz + 7) / 8;
-            size_t total_tiles = static_cast<size_t>(ntx) * nty * ntz;
-            if (d_tile_table && d_num_active_tiles) {
-                cudaMemset(d_tile_table, -1, total_tiles * sizeof(int));
-                cudaMemset(d_num_active_tiles, 0, sizeof(int));
-                kernel_mark_active_tiles<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles),
-                                                                                 d_tile_table, d_num_active_tiles,
-                                                                                 ntx, nty, ntz, m_dx, m_dy, m_dz,
-                                                                                 m_xmin, m_ymin, m_zmin);
-            }
             clearGridDevice();
             kernel_p2g_3d<<<blocks_particles, threads_per_block>>>(d_soa, static_cast<int>(num_particles),
                                                                    d_grid, m_nx, m_ny, m_nz,

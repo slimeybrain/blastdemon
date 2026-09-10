@@ -104,6 +104,30 @@ struct MPMParticle2D {
     struct SymmetricTensor2D {
         float data[3]{0.0f, 0.0f, 0.0f};
 
+        inline SymmetricTensor2D() = default;
+        inline SymmetricTensor2D(float xx, float yy, float xy) : data{xx, yy, xy} {}
+        inline SymmetricTensor2D(const float s[2][2]) : data{s[0][0], s[1][1], s[0][1]} {}
+
+        inline void zero() { data[0] = data[1] = data[2] = 0.0f; }
+
+        inline SymmetricTensor2D& operator=(const float s[2][2]) {
+            data[0] = s[0][0]; data[1] = s[1][1]; data[2] = s[0][1];
+            return *this;
+        }
+
+        inline void set(float xx, float yy, float xy) {
+            data[0] = xx; data[1] = yy; data[2] = xy;
+        }
+
+        inline void setIsotropic(float p_hydro) {
+            data[0] = -p_hydro; data[1] = -p_hydro; data[2] = 0.0f;
+        }
+
+        inline SymmetricTensor2D& operator*=(float s) {
+            data[0] *= s; data[1] *= s; data[2] *= s;
+            return *this;
+        }
+
         struct RowProxy {
             float* ptr;
             int r;

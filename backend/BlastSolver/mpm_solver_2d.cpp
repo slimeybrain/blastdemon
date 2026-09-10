@@ -152,8 +152,7 @@ void MPMSolver2D::addRectangleObject(int obj_id, float pos_x, float pos_y, float
             p.damage = 0.0f;
             p.has_failed = false;
 
-            p.sigma[0][0] = 0.0f; p.sigma[0][1] = 0.0f;
-            p.sigma[1][0] = 0.0f; p.sigma[1][1] = 0.0f;
+            p.sigma.zero();
 
             p.ep_bar = 0.0f;
             p.object_id = obj_id;
@@ -254,8 +253,7 @@ void MPMSolver2D::addCircleObject(int obj_id, float pos_x, float pos_y, float ra
             p.damage = 0.0f;
             p.has_failed = false;
 
-            p.sigma[0][0] = 0.0f; p.sigma[0][1] = 0.0f;
-            p.sigma[1][0] = 0.0f; p.sigma[1][1] = 0.0f;
+            p.sigma.zero();
 
             p.ep_bar = 0.0f;
             p.object_id = obj_id;
@@ -956,10 +954,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             const float q_max = M_friction * p_comp;
 
             if (q_max <= 0.0f) {
-                p.sigma[0][0] = -p_comp;
-                p.sigma[1][1] = -p_comp;
-                p.sigma[0][1] = 0.0f;
-                p.sigma[1][0] = 0.0f;
+                p.sigma.setIsotropic(-p_comp);
                 return;
             }
 
@@ -979,15 +974,9 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
 
             if (q_trial > q_max && q_trial > 1.0e-7f) {
                 float scale = q_max / q_trial;
-                p.sigma[0][0] = scale * s_xx_trial - p_comp;
-                p.sigma[1][1] = scale * s_yy_trial - p_comp;
-                p.sigma[0][1] = scale * s_xy_trial;
-                p.sigma[1][0] = p.sigma[0][1];
+                p.sigma.set(scale * s_xx_trial - p_comp, scale * s_yy_trial - p_comp, scale * s_xy_trial);
             } else {
-                p.sigma[0][0] = s_xx_trial - p_comp;
-                p.sigma[1][1] = s_yy_trial - p_comp;
-                p.sigma[0][1] = s_xy_trial;
-                p.sigma[1][0] = p.sigma[0][1];
+                p.sigma.set(s_xx_trial - p_comp, s_yy_trial - p_comp, s_xy_trial);
             }
 
             return;
@@ -1031,21 +1020,23 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             float nu = p.poissons_ratio;
             float mu_shear = E / (2.0f * (1.0f + nu));
 
-            float s_xx_trial = sig_xx_base + 2.0f * mu_shear * (deps_xx - 0.5f * tr_deps);
-            float s_yy_trial = sig_yy_base + 2.0f * mu_shear * (deps_yy - 0.5f * tr_deps);
-            float s_xy_trial = sig_xy_base + 2.0f * mu_shear * deps_xy;
+            float deps_xx_dev = deps_xx - 0.5f * tr_deps;
+            float deps_yy_dev = deps_yy - 0.5f * tr_deps;
+            float deps_xy_dev = deps_xy;
 
-            float press_s = -0.5f * (s_xx_trial + s_yy_trial);
-            s_xx_trial += press_s;
-            s_yy_trial += press_s;
+            float s_xx_trial = sig_xx_base + 2.0f * mu_shear * deps_xx_dev;
+            float s_yy_trial = sig_yy_base + 2.0f * mu_shear * deps_yy_dev;
+            float s_xy_trial = sig_xy_base + 2.0f * mu_shear * deps_xy_dev;
 
-            float q_trial = std::sqrt(s_xx_trial * s_xx_trial + s_yy_trial * s_yy_trial + 2.0f * s_xy_trial * s_xy_trial);
+            float p_s = -0.5f * (s_xx_trial + s_yy_trial);
+            s_xx_trial += p_s;
+            s_yy_trial += p_s;
+
+            float s_s = s_xx_trial * s_xx_trial + s_yy_trial * s_yy_trial + 2.0f * s_xy_trial * s_xy_trial;
+            const float q_trial = std::sqrt(1.5f * s_s);
 
             // 3. Johnson-Cook Yield Stress with Weibull Flaw Scatter
-            float dev_xx = deps_xx - 0.5f * tr_deps;
-            float dev_yy = deps_yy - 0.5f * tr_deps;
-            float dev_xy = deps_xy;
-            float deps_eq = std::sqrt(dev_xx * dev_xx + dev_yy * dev_yy + 2.0f * dev_xy * dev_xy);
+            float deps_eq = std::sqrt((2.0f / 3.0f) * (deps_xx_dev * deps_xx_dev + deps_yy_dev * deps_yy_dev + 2.0f * deps_xy_dev * deps_xy_dev));
             float ep_dot_star = std::max(1.0f, deps_eq / (dt > 1e-12f ? dt : 1e-12f));
             float T_star = std::clamp((p.temperature - p.T_room) / (p.T_melt > p.T_room ? p.T_melt - p.T_room : 1.0f), 0.0f, 1.0f);
 
@@ -1057,10 +1048,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             float jc_yield = term_strain * term_rate * term_temp;
             if (T_star >= 1.0f) {
                 // Liquid / melted state behaves hydrodynamically: zero deviatoric shear and zero affine B
-                p.sigma[0][0] = -p_hydro;
-                p.sigma[1][1] = -p_hydro;
-                p.sigma[0][1] = 0.0f;
-                p.sigma[1][0] = 0.0f;
+                p.sigma.setIsotropic(-p_hydro);
                 p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
                 p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
                 return;
@@ -1071,16 +1059,10 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             if (q_trial > 1.0e-5f && q_trial > jc_yield) {
                 delta_ep = (q_trial - jc_yield) / (2.0f * mu_shear + p.hardening_modulus);
                 float scale = (q_trial > 1e-12f) ? (jc_yield / q_trial) : 0.0f;
-                p.sigma[0][0] = scale * s_xx_trial - p_hydro;
-                p.sigma[1][1] = scale * s_yy_trial - p_hydro;
-                p.sigma[0][1] = scale * s_xy_trial;
-                p.sigma[1][0] = p.sigma[0][1];
+                p.sigma.set(scale * s_xx_trial - p_hydro, scale * s_yy_trial - p_hydro, scale * s_xy_trial);
                 p.ep_bar += delta_ep;
             } else {
-                p.sigma[0][0] = s_xx_trial - p_hydro;
-                p.sigma[1][1] = s_yy_trial - p_hydro;
-                p.sigma[0][1] = s_xy_trial;
-                p.sigma[1][0] = p.sigma[0][1];
+                p.sigma.set(s_xx_trial - p_hydro, s_yy_trial - p_hydro, s_xy_trial);
             }
 
             if (delta_ep > 0.0f && p.density > 0.0f && p.Cp > 0.0f) {
@@ -1117,10 +1099,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
                         p_comp = K_debris * (1.0f - J) / J;
                     }
 
-                    p.sigma[0][0] = -p_comp;
-                    p.sigma[1][1] = -p_comp;
-                    p.sigma[0][1] = 0.0f;
-                    p.sigma[1][0] = 0.0f;
+                    p.sigma.setIsotropic(-p_comp);
 
                     return;
                 }
@@ -1128,9 +1107,9 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
 
             if (p.damage > 0.0f) {
                 float soft_factor = std::clamp(1.0f - p.damage, 0.0f, 1.0f);
-                p.sigma[0][0] *= soft_factor;
-                p.sigma[1][1] *= soft_factor;
-                p.sigma[0][1] *= soft_factor;
+                p.sigma.data[0] *= soft_factor;
+                p.sigma.data[1] *= soft_factor;
+                p.sigma.data[2] *= soft_factor;
             }
 
             return;
@@ -1191,17 +1170,11 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             float scale = 1.0f - (2.0f * mu * delta_ep) / q_trial;
             if (scale < 0.0f) scale = 0.0f;
 
-            p.sigma[0][0] = scale * s_xx - press;
-            p.sigma[1][1] = scale * s_yy - press;
-            p.sigma[0][1] = scale * s_xy;
-            p.sigma[1][0] = p.sigma[0][1];
+            p.sigma.set(scale * s_xx - press, scale * s_yy - press, scale * s_xy);
 
             p.ep_bar += delta_ep;
         } else {
-            p.sigma[0][0] = sig_xx_trial;
-            p.sigma[1][1] = sig_yy_trial;
-            p.sigma[0][1] = sig_xy_trial;
-            p.sigma[1][0] = sig_xy_trial;
+            p.sigma.set(sig_xx_trial, sig_yy_trial, sig_xy_trial);
         }
 
         // Evaluate Material Damage & Failure Criteria with Weibull Scatter
@@ -1232,10 +1205,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
                 p_comp = K_debris * (1.0f - J) / J;
             }
 
-            p.sigma[0][0] = -p_comp;
-            p.sigma[1][1] = -p_comp;
-            p.sigma[0][1] = 0.0f;
-            p.sigma[1][0] = 0.0f;
+            p.sigma.setIsotropic(p_comp);
 
             return;
         }
@@ -1244,9 +1214,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
         float soft_factor = std::clamp(1.0f - p.damage, 0.0f, 1.0f);
         if (soft_factor < 0.0f) soft_factor = 0.0f;
 
-        p.sigma[0][0] *= soft_factor;
-        p.sigma[1][1] *= soft_factor;
-        p.sigma[0][1] *= soft_factor;
+        p.sigma *= soft_factor;
 
         // Update Volume incrementally using det(F) = 1 + tr(deps)
         p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);

@@ -176,6 +176,28 @@ struct SymmetricTensor3D {
         data[0] = data[1] = data[2] = data[3] = data[4] = data[5] = 0.0f;
     }
 
+    HD_MPM_FUNC inline SymmetricTensor3D& operator=(const float s[3][3]) {
+        data[0] = s[0][0]; data[1] = s[1][1]; data[2] = s[2][2];
+        data[3] = s[0][1]; data[4] = s[1][2]; data[5] = s[2][0];
+        return *this;
+    }
+
+    HD_MPM_FUNC inline void set(float xx, float yy, float zz, float xy, float yz, float zx) {
+        data[0] = xx; data[1] = yy; data[2] = zz;
+        data[3] = xy; data[4] = yz; data[5] = zx;
+    }
+
+    HD_MPM_FUNC inline void setIsotropic(float p_hydro) {
+        data[0] = -p_hydro; data[1] = -p_hydro; data[2] = -p_hydro;
+        data[3] = 0.0f; data[4] = 0.0f; data[5] = 0.0f;
+    }
+
+    HD_MPM_FUNC inline SymmetricTensor3D& operator*=(float s) {
+        data[0] *= s; data[1] *= s; data[2] *= s;
+        data[3] *= s; data[4] *= s; data[5] *= s;
+        return *this;
+    }
+
     struct RowProxy {
         float* ptr;
         int r;

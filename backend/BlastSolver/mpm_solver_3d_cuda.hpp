@@ -177,8 +177,8 @@ public:
     MPMGridNode3D* getDeviceGrid() { return d_grid; }
     int* getDeviceActiveNodes() { return d_active_nodes; }
     int getNumActiveNodes() const { return m_num_active_nodes; }
-    MPMTile3D** getDeviceTilePtrs() { return d_tile_ptrs; }
-    int* getDeviceTileTable() { return d_tile_table; }
+    MPMTile3D** getDeviceTilePtrs() { return nullptr; }
+    int* getDeviceTileTable() { return nullptr; }
     MaterialTable3D* getDeviceMaterialTables() { return d_material_tables; }
     // Extract 2D slice directly on GPU to host vector (eliminates 512 MB PCIe downloads)
     void extractSliceToHost(std::vector<float>& out_slice, const std::string& axis, float offset, const std::string& req_qty = "plastic_strain");
@@ -221,13 +221,6 @@ private:
 
     MPMGridNode3D* d_grid{nullptr};
     float* d_grid_n{nullptr};
-    MPMTile3D** d_tile_ptrs{nullptr};
-    MPMTile3D* d_tile_pool{nullptr};
-    int* d_tile_table{nullptr};
-    int* d_num_active_tiles{nullptr};
-    size_t m_allocated_tile_table{0};
-    size_t m_allocated_tile_ptrs{0};
-    size_t m_allocated_tile_pool{0};
     MPMParticle3D* d_particles{nullptr};
     MPMParticle3DSoA d_soa{};
     void* d_soa_buffer{nullptr};
