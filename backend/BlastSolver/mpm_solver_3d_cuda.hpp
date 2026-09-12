@@ -95,7 +95,10 @@ public:
                       float yield_stress, float hardening, float failure_strain = 0.25f,
                       float tensile_failure_stress = 600.0e6f, int ppc = 8,
                       MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
-                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
+                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
+                      const std::string& voxelization_method = "watertight_raycast",
+                      float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f,
+                      const std::string& origin_mode = "Center");
 
     void initMaterialHeterogeneity(int obj_id);
     void seedMottGradyFragments(int obj_id);
@@ -183,8 +186,11 @@ public:
     // Extract 2D slice directly on GPU to host vector (eliminates 512 MB PCIe downloads)
     void extractSliceToHost(std::vector<float>& out_slice, const std::string& axis, float offset, const std::string& req_qty = "plastic_strain");
 
-    size_t getParticleCount() const { return m_host_particles.size(); }
+    size_t getParticleCount() const { return m_num_active_particles > 0 ? m_num_active_particles : m_host_particles.size(); }
+    size_t getActiveParticleCount() const { return m_num_active_particles; }
     size_t getAllocatedVRAM() const;
+
+    int compactTerminatedParticlesDevice();
 
     void uploadAoS2SoA();
     void downloadSoA2AoS();
@@ -247,6 +253,12 @@ private:
 
     size_t m_allocated_grid_nodes{0};
     size_t m_allocated_particles{0};
+    size_t m_num_active_particles{0};
+
+    int* d_compaction_counters{nullptr};
+    int* d_active_count{nullptr};
+    int* d_compaction_indices{nullptr};
+    size_t m_allocated_compaction_indices{0};
 
     float m_last_dt{0.0f};
     float m_last_cfl{0.3f};

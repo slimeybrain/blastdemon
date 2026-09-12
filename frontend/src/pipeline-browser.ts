@@ -37,10 +37,10 @@ const CATEGORIES: EntityCategory[] = [
     },
     {
         id: 'charges',
-        label: 'Charges & Detonators',
+        label: 'Charges & Triggers',
         icon: '💥',
         color: '#ff8a65',
-        types: ['Charge1D', 'Charge2D', 'Charge3D', 'DetonatorLocation', 'DetonatorLocation3D']
+        types: ['Charge1D', 'Charge2D', 'Charge3D', 'TriggerLocation', 'TriggerLocation3D', 'DetonatorLocation', 'DetonatorLocation3D']
     },
     {
         id: 'solvers',
@@ -2955,15 +2955,17 @@ export class PipelineBrowser {
                 }
                 return preset || matModel || 'Material';
             }
+            case 'TriggerLocation3D':
             case 'DetonatorLocation3D': {
-                const x = Number(node.parameters.detonator_x ?? 0.5);
-                const y = Number(node.parameters.detonator_y ?? 0.5);
-                const z = Number(node.parameters.detonator_z ?? 0.5);
+                const x = Number(node.parameters.trigger_x ?? node.parameters.detonator_x ?? 0.5);
+                const y = Number(node.parameters.trigger_y ?? node.parameters.detonator_y ?? 0.5);
+                const z = Number(node.parameters.trigger_z ?? node.parameters.detonator_z ?? 0.5);
                 return `xyz=(${x}, ${y}, ${z})`;
             }
+            case 'TriggerLocation':
             case 'DetonatorLocation': {
-                const r = Number(node.parameters.detonator_r ?? 0.0);
-                const z = Number(node.parameters.detonator_z ?? 0.1);
+                const r = Number(node.parameters.trigger_r ?? node.parameters.detonator_r ?? 0.0);
+                const z = Number(node.parameters.trigger_z ?? node.parameters.detonator_z ?? 0.1);
                 return `rz=(${r}, ${z})`;
             }
             case 'Charge3D':
@@ -3005,19 +3007,20 @@ export class PipelineBrowser {
         const chip = document.createElement('span');
         chip.className = 'pipeline-conn-chip';
 
-        // Detonator nodes
-        if (node.type === 'DetonatorLocation3D' || node.type === 'DetonatorLocation') {
-            const conn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'detonator' || c.toPort === 'detonators'));
+        // Trigger / Detonator nodes
+        if (node.type === 'TriggerLocation3D' || node.type === 'TriggerLocation' || node.type === 'DetonatorLocation3D' || node.type === 'DetonatorLocation') {
+            const isTrigger = node.type.startsWith('Trigger');
+            const conn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'trigger' || c.toPort === 'detonator' || c.toPort === 'detonators'));
             if (conn) {
                 const target = model.nodes.find(n => n.id === conn.toNode);
                 const targetName = target?.parameters?.name || target?.type || 'Solver';
                 chip.classList.add('connected');
                 chip.textContent = `🔗 ${targetName}`;
-                chip.title = `Detonator is wired to ${targetName}. Click to modify connections.`;
+                chip.title = `${isTrigger ? 'Trigger' : 'Detonator'} is wired to ${targetName}. Click to modify connections.`;
             } else {
                 chip.classList.add('unconnected');
                 chip.textContent = '⚠️ Unwired';
-                chip.title = 'Detonator is not connected to any solver domain! Click to connect.';
+                chip.title = `${isTrigger ? 'Trigger' : 'Detonator'} is not connected to any solver domain! Click to connect.`;
             }
             chip.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -3350,6 +3353,8 @@ export class PipelineBrowser {
             case 'Charge1D': return 'Charge 1D';
             case 'Charge2D': return 'Charge 2D';
             case 'Charge3D': return 'Charge 3D';
+            case 'TriggerLocation': return 'Trigger Location (1D/2D)';
+            case 'TriggerLocation3D': return 'Trigger Location 3D';
             case 'DetonatorLocation': return 'Detonator Location (1D/2D)';
             case 'DetonatorLocation3D': return 'Detonator Location 3D';
             case 'CFDSolver': return 'CFD Solver (1D)';
@@ -3705,12 +3710,14 @@ export class PipelineBrowser {
         // Context Connection Shortcuts
         const state = this.stateManager.getCurrentState();
         if (state) {
-            // Detonator nodes
-            if (node.type === 'DetonatorLocation3D' || node.type === 'DetonatorLocation') {
+            // Trigger / Detonator nodes
+            if (node.type === 'TriggerLocation3D' || node.type === 'TriggerLocation' || node.type === 'DetonatorLocation3D' || node.type === 'DetonatorLocation') {
+                const isTrigger = node.type.startsWith('Trigger');
+                const portName = isTrigger ? 'trigger' : 'detonator';
                 const solverNodes = model.nodes.filter(n => ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MPMDomain2D', 'CFDSolver2D'].includes(n.type));
                 for (const solver of solverNodes) {
                     const solverName = solver.parameters?.name || solver.type;
-                    const isConnected = state.connections.some(c => c.fromNode === node.id && c.toNode === solver.id && (c.toPort === 'detonator' || c.toPort === 'detonators'));
+                    const isConnected = state.connections.some(c => c.fromNode === node.id && c.toNode === solver.id && (c.toPort === 'trigger' || c.toPort === 'detonator' || c.toPort === 'detonators'));
                     const connItem = document.createElement('div');
                     connItem.className = 'context-menu-item';
                     if (!isConnected) {
@@ -3720,9 +3727,9 @@ export class PipelineBrowser {
                             menu.remove();
                             state.connections.push({
                                 fromNode: node.id,
-                                fromPort: 'detonator',
+                                fromPort: portName,
                                 toNode: solver.id,
-                                toPort: 'detonator'
+                                toPort: portName
                             });
                             this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
                             this.stateManager.pushState(state);
@@ -3768,23 +3775,25 @@ export class PipelineBrowser {
                     }
                 }
 
-                // Detonator options for this solver
-                const detonators = model.nodes.filter(n => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
+                // Trigger / Detonator options for this solver
+                const detonators = model.nodes.filter(n => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
                 for (const det of detonators) {
+                    const isTrigger = det.type.startsWith('Trigger');
+                    const portName = isTrigger ? 'trigger' : 'detonator';
                     const detName = det.parameters?.name || det.type;
-                    const isConnected = state.connections.some(c => c.fromNode === det.id && c.toNode === node.id && (c.toPort === 'detonator' || c.toPort === 'detonators'));
+                    const isConnected = state.connections.some(c => c.fromNode === det.id && c.toNode === node.id && (c.toPort === 'trigger' || c.toPort === 'detonator' || c.toPort === 'detonators'));
                     const detItem = document.createElement('div');
                     detItem.className = 'context-menu-item';
                     if (!isConnected) {
                         detItem.style.color = '#fb923c';
-                        detItem.textContent = `💥 Connect Detonator [${detName}]`;
+                        detItem.textContent = `💥 Connect ${isTrigger ? 'Trigger' : 'Detonator'} [${detName}]`;
                         detItem.addEventListener('click', () => {
                             menu.remove();
                             state.connections.push({
                                 fromNode: det.id,
-                                fromPort: 'detonator',
+                                fromPort: portName,
                                 toNode: node.id,
-                                toPort: 'detonator'
+                                toPort: portName
                             });
                             this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
                             this.stateManager.pushState(state);
@@ -3792,7 +3801,7 @@ export class PipelineBrowser {
                         });
                     } else {
                         detItem.style.color = '#f87171';
-                        detItem.textContent = `❌ Disconnect Detonator [${detName}]`;
+                        detItem.textContent = `❌ Disconnect ${isTrigger ? 'Trigger' : 'Detonator'} [${detName}]`;
                         detItem.addEventListener('click', () => {
                             menu.remove();
                             state.connections = state.connections.filter(c => !(c.fromNode === det.id && c.toNode === node.id));

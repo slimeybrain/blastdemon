@@ -197,8 +197,13 @@ function getTransportOptions(container?: HTMLElement): TransportControllerOption
         onSliceToggle: (plane, enabled, offset) => {
             if (layoutManager) {
                 layoutManager.components.forEach(comp => {
-                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setSlice(plane, enabled, offset);
-                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.updateSlicePlane?.(plane, enabled, offset);
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE' || comp.type === 'TELEMETRY_3D') && comp.instance) {
+                        if (typeof comp.instance.setSlice === 'function') {
+                            comp.instance.setSlice(plane, enabled, offset);
+                        } else if (typeof comp.instance.updateSlicePlane === 'function') {
+                            comp.instance.updateSlicePlane(plane, enabled, offset);
+                        }
+                    }
                 });
             }
         },
@@ -1589,8 +1594,9 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
         const status = stateManager.getModelStatus(targetModelId);
         const cfl = getCflFromSolver(targetModelId);
         const endtime = getEndTimeFromSolver(targetModelId);
+        const currentStep = stateManager.getModelStep(targetModelId);
 
-        if (status === 'UNINITIALIZED' || status === 'TERMINATED' || status === 'ERROR') {
+        if (status === 'UNINITIALIZED' || status === 'TERMINATED' || status === 'ERROR' || (status === 'PAUSED' && currentStep === 0)) {
             if (hasFEMFSI3D) {
                 const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
@@ -1760,8 +1766,9 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
         const status = stateManager.getModelStatus(targetModelId);
         const cfl = getCflFromSolver(targetModelId);
         const endtime = getEndTimeFromSolver(targetModelId);
+        const currentStep = stateManager.getModelStep(targetModelId);
 
-        if (status === 'UNINITIALIZED' || status === 'TERMINATED' || status === 'ERROR') {
+        if (status === 'UNINITIALIZED' || status === 'TERMINATED' || status === 'ERROR' || (status === 'PAUSED' && currentStep === 0)) {
             if (hasFEMFSI3D) {
                 const state = stateManager.getSimulationState(targetModelId);
                 if (state) {

@@ -89,6 +89,7 @@ add_library(BlastSolverCore STATIC
 
 target_include_directories(BlastSolverCore PUBLIC
     backend/BlastSolver/include
+    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 
 set_target_properties(BlastSolverCore PROPERTIES
@@ -102,12 +103,13 @@ target_compile_options(BlastSolverCore PRIVATE
 if(OpenMP_CXX_FOUND)
     target_link_libraries(BlastSolverCore PUBLIC OpenMP::OpenMP_CXX)
     target_compile_options(BlastSolverCore PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${OpenMP_CXX_FLAGS}>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>
     )
     message(STATUS "OpenMP found and enabled for BlastSolverCore.")
 endif()
 
-target_link_libraries(BlastSolverCore PUBLIC ${CMAKE_DL_LIBS} ZLIB::ZLIB)
+target_link_libraries(BlastSolverCore PUBLIC ${CMAKE_DL_LIBS} ZLIB::ZLIB cudart)
 
 if(HDF5_FOUND)
     target_include_directories(BlastSolverCore PUBLIC ${HDF5_INCLUDE_DIRS})
@@ -155,6 +157,7 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_3d_cpu_gpu_equivalence backend/BlastSolver/test_3d_cpu_gpu_equivalence.cu)
     add_test_executable_if_exists(test_mpm_plasticity backend/BlastSolver/test_mpm_plasticity.cpp)
     add_test_executable_if_exists(test_cylinder_impact backend/BlastSolver/test_cylinder_impact.cpp)
+    add_test_executable_if_exists(test_mpm_particle_termination backend/BlastSolver/test_mpm_particle_termination.cpp)
     add_test_executable_if_exists(test_fsi_3d backend/BlastSolver/test_fsi_3d.cu)
     add_test_executable_if_exists(test_fem_3d_element_math backend/BlastSolver/test_fem_3d_element_math.cpp)
     add_test_executable_if_exists(test_fem_3d_hourglass backend/BlastSolver/test_fem_3d_hourglass.cpp)
@@ -180,6 +183,7 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_fem_3d_mpm_debris_blast_accel backend/BlastSolver/test_fem_3d_mpm_debris_blast_accel.cu)
     add_test_executable_if_exists(test_crest_davis_mpm backend/BlastSolver/test_crest_davis_mpm.cpp)
     add_test_executable_if_exists(test_user_taylor_anvil backend/BlastSolver/test_user_taylor_anvil.cpp)
+    add_test_executable_if_exists(test_user_sc3 backend/BlastSolver/test_user_sc3.cpp)
     add_test_executable_if_exists(test_radial_mls_motion backend/BlastSolver/test_radial_mls_motion.cpp)
     add_test_executable_if_exists(test_memory_guard backend/BlastSolver/test_memory_guard.cpp)
     add_test_executable_if_exists(test_thin_shell_stability backend/BlastSolver/test_thin_shell_stability.cu)

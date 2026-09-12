@@ -139,7 +139,7 @@ struct MaterialTable3D {
     bool enable_heterogeneity{false};     // Enable spatial Weibull flaw scatter (false = homogeneous)
     float weibull_modulus{0.0f};          // Weibull flaw distribution shape parameter m (0.0 = homogeneous/disabled)
     float weibull_scale{1.0f};            // Weibull flaw distribution scale factor
-    float fracture_toughness{0.0f};       // Critical stress intensity factor K_IC (Pa m^0.5) for Grady spallation
+    float weibull_ref_volume{1.0e-6f};    // Reference flaw volume V_ref (m^3) for Weibull size effect scaling
 
     // Directional Material Anisotropy & Orientation
     bool enable_anisotropy{false};        // Enable directional material anisotropy (false = isotropic)
@@ -150,7 +150,6 @@ struct MaterialTable3D {
     float jc_d3{-2.12f};                  // Johnson-Cook damage parameter D3
     float jc_d4{0.002f};                  // Johnson-Cook damage parameter D4
     float jc_d5{0.61f};                   // Johnson-Cook damage parameter D5
-    float debris_bulk_factor{0.10f};      // Residual post-failure debris bulk modulus factor (0.10 * K_intact)
 };
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
@@ -286,6 +285,7 @@ public:
 
     // Initialization & Grid Setup
     void initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f);
+    void setDomainGeometry(float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f);
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
     void setTimeScheme(MPMTimeIntegrationScheme scheme) { m_time_scheme = scheme; }
@@ -339,7 +339,10 @@ public:
                       float yield_stress, float hardening, float failure_strain = 0.25f,
                       float tensile_failure_stress = 600.0e6f, int ppc = 8,
                       MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
-                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
+                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
+                      const std::string& voxelization_method = "watertight_raycast",
+                      float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f,
+                      const std::string& origin_mode = "Center");
 
     void addParticleDirect(const MPMParticle3D& particle) {
         m_particles.push_back(particle);

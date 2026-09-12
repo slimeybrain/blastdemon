@@ -1,4 +1,4 @@
-import { Node, PanelType } from './types.js';
+import { STAGE_THEMES, type Node, type PanelType, type StageThemeId } from './types.js';
 import { StateManager, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, resolveResourcePath, getSliceAxisLabel } from './state-manager.js';
 
 function getFocusedQuantityAndRange(vpNode: any): { quantity: string, min: number, max: number } {
@@ -29,6 +29,8 @@ export class Telemetry3DViewport {
     private hasTelemetryGrid = false;
     private overlayCanvas: HTMLCanvasElement | null = null;
     private latestFrameData: any = null;
+    private activeThemeId: StageThemeId = 'studio-slate';
+    private themeChangeListener: ((e: any) => void) | null = null;
 
     // Overlay Elements
     private controlsOverlay: HTMLElement | null = null;
@@ -205,12 +207,12 @@ export class Telemetry3DViewport {
                 if (p.charge_color !== undefined) workerData.chargeColor = p.charge_color;
                 if (p.chargeColor !== undefined) workerData.chargeColor = p.chargeColor;
 
-                if (p.show_detonators !== undefined || p.show_detonator !== undefined) workerData.showDetonators = (p.show_detonators ?? p.show_detonator) !== false;
-                if (p.detonatorSolid !== undefined || p.detonator_solid !== undefined) workerData.detonatorSolid = (p.detonatorSolid ?? p.detonator_solid) !== false;
-                if (p.detonatorWireframe !== undefined || p.detonator_wireframe !== undefined) workerData.detonatorWireframe = (p.detonatorWireframe ?? p.detonator_wireframe) !== false;
-                if (p.detonatorLighting !== undefined || p.detonator_lighting !== undefined) workerData.detonatorLighting = (p.detonatorLighting ?? p.detonator_lighting) !== false;
-                if (p.detonatorSize !== undefined || p.detonator_size !== undefined) workerData.detonatorSize = Number(p.detonatorSize ?? p.detonator_size);
-                if (p.detonatorOpacity !== undefined || p.detonator_opacity !== undefined) workerData.detonatorOpacity = Number(p.detonatorOpacity ?? p.detonator_opacity);
+                if (p.show_triggers !== undefined || p.show_trigger !== undefined || p.show_detonators !== undefined || p.show_detonator !== undefined) workerData.showDetonators = (p.show_triggers ?? p.show_trigger ?? p.show_detonators ?? p.show_detonator) !== false;
+                if (p.triggerSolid !== undefined || p.trigger_solid !== undefined || p.detonatorSolid !== undefined || p.detonator_solid !== undefined) workerData.detonatorSolid = (p.triggerSolid ?? p.trigger_solid ?? p.detonatorSolid ?? p.detonator_solid) !== false;
+                if (p.triggerWireframe !== undefined || p.trigger_wireframe !== undefined || p.detonatorWireframe !== undefined || p.detonator_wireframe !== undefined) workerData.detonatorWireframe = (p.triggerWireframe ?? p.trigger_wireframe ?? p.detonatorWireframe ?? p.detonator_wireframe) !== false;
+                if (p.triggerLighting !== undefined || p.trigger_lighting !== undefined || p.detonatorLighting !== undefined || p.detonator_lighting !== undefined) workerData.detonatorLighting = (p.triggerLighting ?? p.trigger_lighting ?? p.detonatorLighting ?? p.detonator_lighting) !== false;
+                if (p.triggerSize !== undefined || p.trigger_size !== undefined || p.triggers_size !== undefined || p.detonatorSize !== undefined || p.detonator_size !== undefined || p.detonators_size !== undefined) workerData.detonatorSize = Number(p.triggerSize ?? p.trigger_size ?? p.triggers_size ?? p.detonatorSize ?? p.detonator_size ?? p.detonators_size);
+                if (p.triggerOpacity !== undefined || p.trigger_opacity !== undefined || p.triggers_opacity !== undefined || p.detonatorOpacity !== undefined || p.detonator_opacity !== undefined || p.detonators_opacity !== undefined) workerData.detonatorOpacity = Number(p.triggerOpacity ?? p.trigger_opacity ?? p.triggers_opacity ?? p.detonatorOpacity ?? p.detonator_opacity ?? p.detonators_opacity);
 
                 if (p.show_grid !== undefined) workerData.showGrid = p.show_grid;
                 if (p.showGrid !== undefined) workerData.showGrid = p.showGrid;
@@ -234,6 +236,7 @@ export class Telemetry3DViewport {
                 if (p.aoBias !== undefined) workerData.aoBias = Number(p.aoBias);
                 if (p.aoSphereImpostor !== undefined) workerData.aoSphereImpostor = p.aoSphereImpostor;
 
+                if (p.mpmParticleRenderMode !== undefined) workerData.mpmParticleRenderMode = p.mpmParticleRenderMode;
                 if (p.mpmParticleDiameter !== undefined) workerData.mpmParticleDiameter = Number(p.mpmParticleDiameter);
                 if (p.mpmParticleSize !== undefined) workerData.mpmParticleSize = Number(p.mpmParticleSize);
                 if (p.mpmParticleOpacity !== undefined) workerData.mpmParticleOpacity = Number(p.mpmParticleOpacity);
@@ -279,18 +282,29 @@ export class Telemetry3DViewport {
                     } else if (['MPMObject3D'].includes(changedNode.type)) {
                         const mpmNodes = targetModel?.nodes.filter((n: any) => n.type === 'MPMObject3D') || [];
                         workerData.mpmObjects = mpmNodes.map((n: any) => ({
+                            id: n.id,
+                            shape: n.parameters.shape_type || 'Box',
                             shape_type: n.parameters.shape_type || 'Box',
                             pos_x: Number(n.parameters.pos_x ?? 0.0),
                             pos_y: Number(n.parameters.pos_y ?? 0.0),
                             pos_z: Number(n.parameters.pos_z ?? 0.0),
+                            x: Number(n.parameters.pos_x ?? 0.0),
+                            y: Number(n.parameters.pos_y ?? 0.0),
+                            z: Number(n.parameters.pos_z ?? 0.0),
+                            rot_x: Number(n.parameters.rot_x ?? 0.0),
+                            rot_y: Number(n.parameters.rot_y ?? 0.0),
+                            rot_z: Number(n.parameters.rot_z ?? 0.0),
+                            origin_mode: n.parameters.origin_mode || 'CAD Origin',
                             size_x: Number(n.parameters.size_x ?? 0.2),
                             size_y: Number(n.parameters.size_y ?? 0.2),
                             size_z: Number(n.parameters.size_z ?? 0.2),
                             radius: Number(n.parameters.radius ?? 0.1),
                             inner_radius: Number(n.parameters.inner_radius ?? 0.0),
+                            height: Number(n.parameters.height ?? 0.2),
                             scale_x: Number(n.parameters.scale_x ?? 1.0),
                             scale_y: Number(n.parameters.scale_y ?? 1.0),
-                            scale_z: Number(n.parameters.scale_z ?? 1.0)
+                            scale_z: Number(n.parameters.scale_z ?? 1.0),
+                            stl_file: n.parameters.stl_file || ''
                         }));
                     }
                 }
@@ -651,6 +665,32 @@ export class Telemetry3DViewport {
             }
         }, transferList);
 
+        const storedThemeId = localStorage.getItem('blastdemon_stage_theme') as StageThemeId | null;
+        if (storedThemeId && STAGE_THEMES.some(t => t.id === storedThemeId)) {
+            this.activeThemeId = storedThemeId;
+        }
+        const initialTheme = STAGE_THEMES.find(t => t.id === this.activeThemeId) || STAGE_THEMES[0];
+        this.setBackgroundColor(initialTheme.clearColor.r, initialTheme.clearColor.g, initialTheme.clearColor.b);
+
+        this.themeChangeListener = (e: any) => {
+            if (e?.detail?.themeId && STAGE_THEMES.some(t => t.id === e.detail.themeId)) {
+                this.activeThemeId = e.detail.themeId as StageThemeId;
+                const theme = STAGE_THEMES.find(t => t.id === this.activeThemeId);
+                if (theme) {
+                    this.setBackgroundColor(theme.clearColor.r, theme.clearColor.g, theme.clearColor.b);
+                }
+                const dockBgSel = document.getElementById(this.getElId('viewport-dock-bg-sel')) as HTMLSelectElement | null;
+                if (dockBgSel && dockBgSel.value !== this.activeThemeId) {
+                    dockBgSel.value = this.activeThemeId;
+                }
+                const cardBgSel = document.getElementById(this.getElId('viewport-card-bg-sel')) as HTMLSelectElement | null;
+                if (cardBgSel && cardBgSel.value !== this.activeThemeId) {
+                    cardBgSel.value = this.activeThemeId;
+                }
+            }
+        };
+        window.addEventListener('blastdemon-theme-change', this.themeChangeListener);
+
         // Diagnostic Overlay for STL Loading
         this.debugOverlay = document.createElement('div');
         this.debugOverlay.id = `viewport-debug-stl-${this.panelId}`;
@@ -669,6 +709,7 @@ export class Telemetry3DViewport {
         this.debugOverlay.style.pointerEvents = 'none';
         this.debugOverlay.style.zIndex = '100';
         this.debugOverlay.style.whiteSpace = 'nowrap';
+        this.debugOverlay.style.display = 'none';
         this.debugOverlay.innerHTML = 'STL Status: Initializing...';
         this.container.appendChild(this.debugOverlay);
 
@@ -717,9 +758,22 @@ export class Telemetry3DViewport {
                                 }
                                 const verts = new Float32Array(msg.vertices);
                                 const flags = msg.subtractive_flags ? new Float32Array(msg.subtractive_flags) : null;
+                                const geomNode = this.getGeometryNode();
+                                const stlTransform = geomNode ? {
+                                    origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
+                                    scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
+                                    scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
+                                    scale_z: Number(geomNode.parameters.scale_z ?? 1.0),
+                                    pos_x: Number(geomNode.parameters.pos_x ?? 0.0),
+                                    pos_y: Number(geomNode.parameters.pos_y ?? 0.0),
+                                    pos_z: Number(geomNode.parameters.pos_z ?? 0.0),
+                                    rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
+                                    rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
+                                    rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
+                                } : undefined;
                                 this.worker.postMessage({
                                     type: 'setSTLGeometry',
-                                    data: { vertices: verts, subtractive_flags: flags }
+                                    data: { vertices: verts, subtractive_flags: flags, stlTransform }
                                 });
                             } else {
                                 if (this.debugOverlay) {
@@ -1038,9 +1092,9 @@ export class Telemetry3DViewport {
                         } else if (objectType === 'Charge3D') {
                             matchedNode = targetModel.nodes.find((n: any) => n.id === objectId) ||
                                           targetModel.nodes.find((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'ExplosiveMaterial') || null;
-                        } else if (objectType === 'DetonatorLocation3D') {
+                        } else if (objectType === 'DetonatorLocation3D' || objectType === 'TriggerLocation3D' || objectType === 'TriggerLocation') {
                             matchedNode = targetModel.nodes.find((n: any) => n.id === objectId) ||
-                                          targetModel.nodes.find((n: any) => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || null;
+                                          targetModel.nodes.find((n: any) => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || null;
                         } else if (objectType === 'FEMObject3D') {
                             const femObjNodes = targetModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D');
                             matchedNode = targetModel.nodes.find((n: any) => n.id === objectId) ||
@@ -1152,7 +1206,7 @@ export class Telemetry3DViewport {
                 if (objectType === 'Slice') matchedNode = this.getSlicesCarrierNode() || this.getViewportNode();
                 else if (objectType === 'VirtualGauges3D') matchedNode = targetModel.nodes.find((n: any) => n.type === 'VirtualGauges3D') || null;
                 else if (objectType === 'Charge3D') matchedNode = targetModel.nodes.find((n: any) => n.type === 'Charge3D') || null;
-                else if (objectType === 'DetonatorLocation3D') matchedNode = targetModel.nodes.find((n: any) => n.type === 'DetonatorLocation3D') || null;
+                else if (objectType === 'DetonatorLocation3D' || objectType === 'TriggerLocation3D' || objectType === 'TriggerLocation') matchedNode = targetModel.nodes.find((n: any) => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || null;
                 else if (objectType === 'FEMObject3D') {
                     const femObjNodes = targetModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D');
                     matchedNode = targetModel.nodes.find((n: any) => n.id === objectId) ||
@@ -2357,6 +2411,52 @@ export class Telemetry3DViewport {
             sphereRow.appendChild(sphereLabel);
             sphereRow.appendChild(sphereCb);
             popover.appendChild(sphereRow);
+
+            // MPM Particle Render Mode Dropdown
+            const curRenderMode = p.mpmParticleRenderMode || 'auto';
+            const modeRow = document.createElement('div');
+            modeRow.style.display = 'flex';
+            modeRow.style.flexDirection = 'column';
+            modeRow.style.gap = '3px';
+            modeRow.style.marginTop = '6px';
+
+            const modeLabel = document.createElement('span');
+            modeLabel.textContent = 'MPM Render Mode:';
+            modeLabel.style.fontSize = '9px';
+            modeLabel.style.color = '#ccc';
+
+            const modeSelect = document.createElement('select');
+            modeSelect.style.width = '100%';
+            modeSelect.style.background = '#181818';
+            modeSelect.style.color = '#fff';
+            modeSelect.style.border = '1px solid #444';
+            modeSelect.style.borderRadius = '3px';
+            modeSelect.style.padding = '3px 6px';
+            modeSelect.style.fontSize = '9px';
+
+            [
+                { value: 'auto', label: 'Auto (Hardware Points >100k / Spheres)' },
+                { value: 'points', label: 'Fast Hardware Points (10M+)' },
+                { value: 'spheres', label: 'Billboard Spheres' }
+            ].forEach(opt => {
+                const o = document.createElement('option');
+                o.value = opt.value;
+                o.textContent = opt.label;
+                o.selected = opt.value === curRenderMode;
+                modeSelect.appendChild(o);
+            });
+
+            modeSelect.onchange = () => {
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleRenderMode: modeSelect.value });
+                    this.worker.postMessage({ type: 'setConfig', data: { mpmParticleRenderMode: modeSelect.value } });
+                    this.syncControls(true);
+                }
+            };
+
+            modeRow.appendChild(modeLabel);
+            modeRow.appendChild(modeSelect);
+            popover.appendChild(modeRow);
 
             // MPM Particle Diameter Controls (SI Units: meters)
             const autoDiam = this.getAutoParticleDiameter();
@@ -3841,7 +3941,7 @@ export class Telemetry3DViewport {
 
         const tdLayer = document.createElement('td');
         tdLayer.style.padding = '3px 4px';
-        tdLayer.innerHTML = '🎯 <b>Detonators</b>';
+        tdLayer.innerHTML = '🎯 <b>Triggers / Detonators</b>';
         tr.appendChild(tdLayer);
 
         const appendToggleCol = (text: string, id: string, init: boolean, onChange: (v: boolean) => void) => {
@@ -5313,7 +5413,9 @@ export class Telemetry3DViewport {
         }
 
         // 4. MPM Particles
-        if (params.mpmParticleShowColorbar === true && params.showMPMParticles !== false) {
+        const targetModel = this.getTargetModel();
+        const hasMPM = Boolean(targetModel?.nodes?.some((n: any) => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D') || this.latestMPMRange);
+        if ((params.mpmParticleShowColorbar === true || (params.mpmParticleShowColorbar !== false && hasMPM)) && params.showMPMParticles !== false) {
             const rawQty = params.mpmParticleQuantity || 'vonMises';
             const qty = canonicalizeQuantity(rawQty);
             const mpmIsLocked = (params.lock_quantity_ranges !== false) && (params.mpm_lock_quantity_range !== false);
@@ -7072,11 +7174,12 @@ export class Telemetry3DViewport {
         const midY = (ymin + ymax) * 0.5;
         const midZ = (zmin + zmax) * 0.5;
 
-        const shape = p.shape_type || p.shape || p.mesh_source || p.charge_shape || 'Box';
-        const posX = Number(p.pos_x ?? p.x ?? p.charge_x ?? p.det_x ?? midX);
-        const posY = Number(p.pos_y ?? p.y ?? p.charge_y ?? p.det_y ?? midY);
-        const posZ = Number(p.pos_z ?? p.z ?? p.charge_z ?? p.det_z ?? midZ);
-        const radius = Number(p.radius ?? p.charge_radius ?? 0.1);
+        const isDetonator = (node.type === 'DetonatorLocation3D' || node.type === 'DetonatorLocation' || node.type === 'TriggerLocation3D' || node.type === 'TriggerLocation');
+        const shape = p.shape_type || p.shape || p.mesh_source || p.charge_shape || (isDetonator ? 'Sphere' : 'Box');
+        const posX = Number(p.detonator_x ?? p.trigger_x ?? p.pos_x ?? p.x ?? p.charge_x ?? p.det_x ?? midX);
+        const posY = Number(p.detonator_y ?? p.trigger_y ?? p.pos_y ?? p.y ?? p.charge_y ?? p.det_y ?? midY);
+        const posZ = Number(p.detonator_z ?? p.trigger_z ?? p.pos_z ?? p.z ?? p.charge_z ?? p.det_z ?? midZ);
+        const radius = Number(p.detonator_radius ?? p.trigger_radius ?? p.radius ?? p.det_radius ?? p.charge_radius ?? (isDetonator ? 0.05 : 0.1));
         const innerRadius = Number(p.inner_radius ?? 0.0);
         const height = Number(p.height ?? p.charge_height ?? 0.2);
         const sizeX = Number(p.size_x ?? p.lx ?? p.charge_lx ?? 0.2);
@@ -7098,6 +7201,18 @@ export class Telemetry3DViewport {
             x: posX,
             y: posY,
             z: posZ,
+            detonator_x: posX,
+            detonator_y: posY,
+            detonator_z: posZ,
+            detonator_radius: radius,
+            trigger_x: posX,
+            trigger_y: posY,
+            trigger_z: posZ,
+            trigger_radius: radius,
+            det_x: posX,
+            det_y: posY,
+            det_z: posZ,
+            det_radius: radius,
             radius: radius,
             inner_radius: innerRadius,
             height: height,
@@ -7110,9 +7225,11 @@ export class Telemetry3DViewport {
             rot_x: rotX,
             rot_y: rotY,
             rot_z: rotZ,
+            origin_mode: p.origin_mode || 'CAD Origin',
             scale_x: Number(p.scale_x ?? p.scale_factor ?? 1.0),
             scale_y: Number(p.scale_y ?? p.scale_factor ?? 1.0),
-            scale_z: Number(p.scale_z ?? p.scale_factor ?? 1.0)
+            scale_z: Number(p.scale_z ?? p.scale_factor ?? 1.0),
+            stl_file: p.stl_file || ''
         };
     }
 
@@ -7335,6 +7452,7 @@ export class Telemetry3DViewport {
 
     private syncControls(postToWorker: boolean = true) {
         const vpNode = this.getViewportNode();
+        const geomNode = this.getGeometryNode();
         this.syncColorbarOverlay(vpNode || { parameters: {} });
         if (!vpNode) return;
 
@@ -7575,49 +7693,57 @@ export class Telemetry3DViewport {
                     rot_x: rot_x, rot_y: rot_y, rot_z: rot_z
                 };
 
-                const detConn = (solverNode3D && modelState) ? modelState.connections.find((c: any) => c.toNode === solverNode3D.id && c.toPort === 'detonator') : null;
+                const detConn = (solverNode3D && modelState) ? modelState.connections.find((c: any) => c.toNode === solverNode3D.id && (c.toPort === 'trigger' || c.toPort === 'detonator')) : null;
                 const detNode = detConn
                     ? modelState?.nodes.find((n: any) => n.id === detConn.fromNode)
-                    : (modelState?.nodes.find((n: any) => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || null);
+                    : (modelState?.nodes.find((n: any) => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || null);
                 if (detNode) {
-                    chargeParams.det_x = Number(detNode.parameters.det_x ?? detNode.parameters.x ?? cx);
-                    chargeParams.det_y = Number(detNode.parameters.det_y ?? detNode.parameters.y ?? cy);
-                    chargeParams.det_z = Number(detNode.parameters.det_z ?? detNode.parameters.z ?? cz);
+                    chargeParams.det_x = Number(detNode.parameters.trigger_x ?? detNode.parameters.detonator_x ?? detNode.parameters.det_x ?? detNode.parameters.x ?? cx);
+                    chargeParams.det_y = Number(detNode.parameters.trigger_y ?? detNode.parameters.detonator_y ?? detNode.parameters.det_y ?? detNode.parameters.y ?? cy);
+                    chargeParams.det_z = Number(detNode.parameters.trigger_z ?? detNode.parameters.detonator_z ?? detNode.parameters.det_z ?? detNode.parameters.z ?? cz);
                 }
             }
 
             const mpmObjectNodes = modelState?.nodes.filter((n: any) => n.type === 'MPMObject3D') || [];
             const mpmObjects = mpmObjectNodes.map((n: any) => {
                 const geom = this.extractObjectGeometryData(n);
+                const isSTL = (geom?.shape_type === 'STL' || n.parameters?.shape_type === 'STL');
+                const isCADOrigin = (geom?.origin_mode === 'CAD Origin' || n.parameters?.origin_mode === 'CAD Origin' || !n.parameters?.origin_mode);
+                const defPos = (isSTL && isCADOrigin) ? 0.0 : 0.5;
                 return {
                     id: n.id,
-                    shape: geom?.shape || 'Box',
-                    shape_type: geom?.shape_type || 'Box',
-                    x: geom?.x ?? 0.5,
-                    y: geom?.y ?? 0.5,
-                    z: geom?.z ?? 0.5,
-                    pos_x: geom?.pos_x ?? 0.5,
-                    pos_y: geom?.pos_y ?? 0.5,
-                    pos_z: geom?.pos_z ?? 0.5,
+                    shape: geom?.shape || (isSTL ? 'STL' : 'Box'),
+                    shape_type: geom?.shape_type || (isSTL ? 'STL' : 'Box'),
+                    x: geom?.x ?? defPos,
+                    y: geom?.y ?? defPos,
+                    z: geom?.z ?? defPos,
+                    pos_x: geom?.pos_x ?? defPos,
+                    pos_y: geom?.pos_y ?? defPos,
+                    pos_z: geom?.pos_z ?? defPos,
                     size_x: geom?.size_x ?? 0.2,
                     size_y: geom?.size_y ?? 0.2,
                     size_z: geom?.size_z ?? 0.2,
                     radius: geom?.radius ?? 0.1,
                     inner_radius: geom?.inner_radius ?? 0.0,
                     height: geom?.height ?? 0.2,
+                    scale_x: geom?.scale_x ?? 1.0,
+                    scale_y: geom?.scale_y ?? 1.0,
+                    scale_z: geom?.scale_z ?? 1.0,
                     rot_x: geom?.rot_x ?? 0.0,
                     rot_y: geom?.rot_y ?? 0.0,
-                    rot_z: geom?.rot_z ?? 0.0
+                    rot_z: geom?.rot_z ?? 0.0,
+                    origin_mode: geom?.origin_mode || n.parameters?.origin_mode || 'CAD Origin',
+                    stl_file: geom?.stl_file || n.parameters?.stl_file || ''
                 };
             });
 
-            const detonatorNodes = modelState?.nodes.filter((n: any) => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || [];
+            const detonatorNodes = modelState?.nodes.filter((n: any) => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || [];
             let detonatorsList = detonatorNodes.map((n: any) => ({
                 id: n.id,
-                x: Number(n.parameters?.detonator_x ?? n.parameters?.x ?? 0),
-                y: Number(n.parameters?.detonator_y ?? n.parameters?.y ?? 0),
-                z: Number(n.parameters?.detonator_z ?? n.parameters?.z ?? 0),
-                radius: Number(n.parameters?.detonator_radius ?? n.parameters?.radius ?? 0.01)
+                x: Number(n.parameters?.detonator_x ?? n.parameters?.trigger_x ?? n.parameters?.det_x ?? n.parameters?.pos_x ?? n.parameters?.x ?? 0),
+                y: Number(n.parameters?.detonator_y ?? n.parameters?.trigger_y ?? n.parameters?.det_y ?? n.parameters?.pos_y ?? n.parameters?.y ?? 0),
+                z: Number(n.parameters?.detonator_z ?? n.parameters?.trigger_z ?? n.parameters?.det_z ?? n.parameters?.pos_z ?? n.parameters?.z ?? 0),
+                radius: Number(n.parameters?.detonator_radius ?? n.parameters?.trigger_radius ?? n.parameters?.det_radius ?? n.parameters?.radius ?? 0.01)
             }));
             if (detonatorsList.length === 0 && chargeParams && (chargeParams.det_x !== undefined || chargeParams.det_y !== undefined || chargeParams.det_z !== undefined)) {
                 detonatorsList = [{
@@ -7679,6 +7805,18 @@ export class Telemetry3DViewport {
                     detonatorOpacity: vpNode.parameters.detonators_opacity ?? vpNode.parameters.detonator_opacity ?? 1.0,
                     detonators: detonatorsList,
                     mpmObjects: mpmObjects,
+                    stlTransform: geomNode ? {
+                        origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
+                        scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
+                        scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
+                        scale_z: Number(geomNode.parameters.scale_z ?? 1.0),
+                        pos_x: Number(geomNode.parameters.pos_x ?? 0.0),
+                        pos_y: Number(geomNode.parameters.pos_y ?? 0.0),
+                        pos_z: Number(geomNode.parameters.pos_z ?? 0.0),
+                        rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
+                        rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
+                        rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
+                    } : undefined,
                     submeshes: submeshes,
                     ppc: Number(modelState?.nodes.find((n: any) => n.type === 'MPMObject3D')?.parameters['ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D')?.parameters['ppc'] ?? 8),
                     showMPMParticles: vpNode.parameters.showMPMParticles !== false,
@@ -7742,10 +7880,9 @@ export class Telemetry3DViewport {
             }
         }
 
-        const geomNode = this.getGeometryNode();
         let geomHash = '';
         if (geomNode) {
-            if (geomNode.type === 'STLGeometry') {
+            if (geomNode.type === 'STLGeometry' || geomNode.type === 'MPMObject3D') {
                 geomHash = (geomNode.parameters.stl_file || '') + '_' + (geomNode.parameters.geometry_hash || '');
             } else if (geomNode.type === 'PrimitiveGeometry3D') {
                 const primsStr = JSON.stringify(geomNode.parameters.primitives || []) + '_' + (geomNode.parameters.voxelization_method || 'watertight_floodfill');
@@ -7764,7 +7901,7 @@ export class Telemetry3DViewport {
                 if (net && net.isConnected()) {
                     // Only stamp hash AFTER successfully dispatching the request
                     this.currentGeometryHash = geomHash;
-                    if (geomNode.type === 'STLGeometry') {
+                    if (geomNode.type === 'STLGeometry' || geomNode.type === 'MPMObject3D') {
                         const curModel = this.stateManager.getAllModels().find(m => m.id === this.getCurrentModelId());
                         const resolvedPath = resolveResourcePath(geomNode.parameters.stl_file || '', curModel?.filename);
                         net.send({ command: "LOAD_STL_GEOMETRY", filePath: resolvedPath, modelId: this.getCurrentModelId() });
@@ -8851,7 +8988,7 @@ export class Telemetry3DViewport {
             for (const conn of inConns) {
                 const parent = targetModel.nodes.find((n: any) => n.id === conn.fromNode);
                 if (parent) {
-                    if (parent.type === 'STLGeometry' || parent.type === 'PrimitiveGeometry3D') {
+                    if (parent.type === 'STLGeometry' || parent.type === 'PrimitiveGeometry3D' || (parent.type === 'MPMObject3D' && parent.parameters?.shape_type === 'STL' && parent.parameters?.stl_file)) {
                         return parent;
                     }
                     const found = findUpstreamGeom(parent.id, visited);
@@ -8866,7 +9003,7 @@ export class Telemetry3DViewport {
             if (found) return found;
         }
 
-        const geomNode = targetModel.nodes.find((n: any) => n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D');
+        const geomNode = targetModel.nodes.find((n: any) => n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D' || (n.type === 'MPMObject3D' && n.parameters?.shape_type === 'STL' && n.parameters?.stl_file));
         if (geomNode) return geomNode;
 
         return null;
@@ -8985,9 +9122,22 @@ export class Telemetry3DViewport {
         if (this.debugOverlay) {
             this.debugOverlay.innerHTML = `Load STL: OK (${(vertices ? vertices.length / 3 : 0).toFixed(0)} verts, mesh: ${meshId})`;
         }
+        const geomNode = this.getGeometryNode();
+        const stlTransform = geomNode ? {
+            origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
+            scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
+            scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
+            scale_z: Number(geomNode.parameters.scale_z ?? 1.0),
+            pos_x: Number(geomNode.parameters.pos_x ?? 0.0),
+            pos_y: Number(geomNode.parameters.pos_y ?? 0.0),
+            pos_z: Number(geomNode.parameters.pos_z ?? 0.0),
+            rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
+            rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
+            rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
+        } : undefined;
         this.worker.postMessage({
             type: 'setSTLGeometry',
-            data: { vertices, meshId }
+            data: { vertices, meshId, stlTransform }
         });
     }
 
@@ -9005,6 +9155,10 @@ export class Telemetry3DViewport {
 
 
     public destroy() {
+        if (this.themeChangeListener) {
+            window.removeEventListener('blastdemon-theme-change', this.themeChangeListener);
+            this.themeChangeListener = null;
+        }
         if (this.windowResizeHandler) {
             window.removeEventListener('resize', this.windowResizeHandler);
             this.windowResizeHandler = null;
@@ -9343,6 +9497,49 @@ export class Telemetry3DViewport {
         });
         qtyGroup.appendChild(cmapSel);
 
+        const bgLabel = document.createElement('span');
+        bgLabel.innerHTML = 'Bg:';
+        bgLabel.style.color = '#aaa';
+        bgLabel.style.marginLeft = '2px';
+        qtyGroup.appendChild(bgLabel);
+
+        const bgSel = document.createElement('select');
+        bgSel.id = this.getElId('viewport-dock-bg-sel');
+        this.applySelectStyle(bgSel);
+        bgSel.style.width = '125px';
+        bgSel.title = 'Change 3D Viewport Background Theme (Light / Dark Modes)';
+
+        const lightThemes = STAGE_THEMES.filter(t => t.group === 'light');
+        const darkThemes = STAGE_THEMES.filter(t => t.group === 'dark');
+
+        const dockLightGroup = document.createElement('optgroup');
+        dockLightGroup.label = 'Light Themes (Particle Contrast)';
+        lightThemes.forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t.id;
+            opt.textContent = `${t.icon} ${t.label}`;
+            if (t.id === this.activeThemeId) opt.selected = true;
+            dockLightGroup.appendChild(opt);
+        });
+        bgSel.appendChild(dockLightGroup);
+
+        const dockDarkGroup = document.createElement('optgroup');
+        dockDarkGroup.label = 'Dark Studio Themes';
+        darkThemes.forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t.id;
+            opt.textContent = `${t.icon} ${t.label}`;
+            if (t.id === this.activeThemeId) opt.selected = true;
+            dockDarkGroup.appendChild(opt);
+        });
+        bgSel.appendChild(dockDarkGroup);
+
+        this.bindEditingEvents(bgSel, () => {
+            const themeId = bgSel.value as StageThemeId;
+            this.setViewportTheme(themeId);
+        });
+        qtyGroup.appendChild(bgSel);
+
         this.bottomViewDock.appendChild(qtyGroup);
 
         // Separator
@@ -9458,6 +9655,51 @@ export class Telemetry3DViewport {
         projRow.appendChild(projBtn);
         body.appendChild(projRow);
 
+        // 2. Background Theme Selector Row
+        const bgRow = document.createElement('div');
+        bgRow.style.display = 'flex';
+        bgRow.style.justifyContent = 'space-between';
+        bgRow.style.alignItems = 'center';
+        bgRow.style.marginTop = '6px';
+        bgRow.innerHTML = '<span style="font-size:11px;color:#aaa">Background</span>';
+
+        const cardBgSel = document.createElement('select');
+        cardBgSel.id = this.getElId('viewport-card-bg-sel');
+        this.applySelectStyle(cardBgSel);
+        cardBgSel.style.width = '140px';
+
+        const cardLightThemes = STAGE_THEMES.filter(t => t.group === 'light');
+        const cardDarkThemes = STAGE_THEMES.filter(t => t.group === 'dark');
+
+        const cardLightGroup = document.createElement('optgroup');
+        cardLightGroup.label = 'Light Themes (Particle Contrast)';
+        cardLightThemes.forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t.id;
+            opt.textContent = `${t.icon} ${t.label}`;
+            if (t.id === this.activeThemeId) opt.selected = true;
+            cardLightGroup.appendChild(opt);
+        });
+        cardBgSel.appendChild(cardLightGroup);
+
+        const cardDarkGroup = document.createElement('optgroup');
+        cardDarkGroup.label = 'Dark Studio Themes';
+        cardDarkThemes.forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t.id;
+            opt.textContent = `${t.icon} ${t.label}`;
+            if (t.id === this.activeThemeId) opt.selected = true;
+            cardDarkGroup.appendChild(opt);
+        });
+        cardBgSel.appendChild(cardDarkGroup);
+
+        this.bindEditingEvents(cardBgSel, () => {
+            const themeId = cardBgSel.value as StageThemeId;
+            this.setViewportTheme(themeId);
+        });
+        bgRow.appendChild(cardBgSel);
+        body.appendChild(bgRow);
+
         // 2. Standard Views Align Row
         const alignRow = document.createElement('div');
         alignRow.style.display = 'flex';
@@ -9539,6 +9781,19 @@ export class Telemetry3DViewport {
         }
     }
 
+    public setViewportTheme(themeId: StageThemeId): void {
+        const theme = STAGE_THEMES.find(t => t.id === themeId);
+        if (!theme) return;
+        this.activeThemeId = themeId;
+        this.setBackgroundColor(theme.clearColor.r, theme.clearColor.g, theme.clearColor.b);
+        localStorage.setItem('blastdemon_stage_theme', themeId);
+        window.dispatchEvent(new CustomEvent('blastdemon-theme-change', { detail: { themeId } }));
+    }
+
+    public getViewportTheme(): StageThemeId {
+        return this.activeThemeId;
+    }
+
     public setGridVisible(visible: boolean): void {
         this.setLayerVisibility('grid', visible);
     }
@@ -9554,6 +9809,10 @@ export class Telemetry3DViewport {
             type: 'setConfig',
             data: { usePerspective: perspective }
         });
+    }
+
+    public setSlice(plane: 'xy' | 'xz' | 'yz' | string, enabled: boolean, offset: number): void {
+        this.updateSlicePlane(plane as any, enabled, offset);
     }
 
     public updateSlicePlane(plane: 'xy' | 'xz' | 'yz', enabled: boolean, offset: number): void {
@@ -9783,9 +10042,9 @@ export class Telemetry3DViewport {
         const vp = this.getViewportNode();
         if (vp) {
             this.stateManager.updateNodeParametersInPlace(vp.id, filter);
-            this.worker.postMessage({ type: 'setConfig', data: filter });
-            this.syncControls(true);
         }
+        this.worker.postMessage({ type: 'setConfig', data: filter });
+        this.syncControls(true);
     }
 }
 

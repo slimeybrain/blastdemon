@@ -163,7 +163,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         }
     } else {
         const materialKeys = [
-            'transfer_scheme', 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+            'transfer_scheme', 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
             'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress',
@@ -188,8 +188,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
     if (parameters['enable_heterogeneity'] === undefined) parameters['enable_heterogeneity'] = false;
     if (parameters['weibull_modulus'] === undefined) parameters['weibull_modulus'] = 0.0;
     if (parameters['weibull_scale'] === undefined) parameters['weibull_scale'] = 1.0;
-    if (parameters['fracture_toughness'] === undefined) parameters['fracture_toughness'] = 0.0;
-    if (parameters['debris_bulk_factor'] === undefined) parameters['debris_bulk_factor'] = 0.1;
+    if (parameters['weibull_ref_volume'] === undefined) parameters['weibull_ref_volume'] = 1.0e-6;
     if (parameters['jc_d1'] === undefined) parameters['jc_d1'] = 0.0;
     if (parameters['jc_d2'] === undefined) parameters['jc_d2'] = 0.0;
     if (parameters['jc_d3'] === undefined) parameters['jc_d3'] = 0.0;
@@ -352,7 +351,7 @@ export const DISPLAY_ONLY_KEYS = new Set([
     'stl_log_scale', 'stl_show_colorbar', 'stl_min_val', 'stl_max_val',
 
     // MPM Display
-    'showMPMParticles', 'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleQuantity', 'mpmParticleColormap',
+    'showMPMParticles', 'mpmParticleRenderMode', 'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleQuantity', 'mpmParticleColormap',
     'mpmParticleAutoScale', 'mpmParticleLogScale', 'mpmParticleShowColorbar',
     'mpmParticleOpacity', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleWireframe',
 
@@ -584,8 +583,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         enable_heterogeneity: false,
         weibull_modulus: 0.0,
         weibull_scale: 1.0,
-        fracture_toughness: 0.0,
-        debris_bulk_factor: 0.10,
+        weibull_ref_volume: 1.0e-6,
         enable_anisotropy: false,
         anisotropy_ratio: 1.0,
         anisotropy_axis: 'X',
@@ -777,16 +775,37 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         detonator_z: 0.1,
         detonator_radius: 0.001
     },
+    'TriggerLocation': {
+        trigger_r: 0.0,
+        trigger_z: 0.1,
+        trigger_radius: 0.001
+    },
     'DetonatorLocation3D': {
         detonator_x: 0.5,
         detonator_y: 0.5,
         detonator_z: 0.5,
         detonator_radius: 0.01
     },
+    'TriggerLocation3D': {
+        trigger_x: 0.5,
+        trigger_y: 0.5,
+        trigger_z: 0.5,
+        trigger_radius: 0.01
+    },
     'STLGeometry': {
         stl_file: '',
         geometry_hash: '',
-        voxelization_method: 'watertight_floodfill'
+        voxelization_method: 'watertight_floodfill',
+        origin_mode: 'CAD Origin',
+        scale_x: 1.0,
+        scale_y: 1.0,
+        scale_z: 1.0,
+        pos_x: 0.0,
+        pos_y: 0.0,
+        pos_z: 0.0,
+        rot_x: 0.0,
+        rot_y: 0.0,
+        rot_z: 0.0
     },
     'PrimitiveGeometry3D': {
         primitives: [],
@@ -1019,6 +1038,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         aoSphereImpostor: true,
         // MPM Particles Defaults
         showMPMParticles: true,
+        mpmParticleRenderMode: 'auto',
         mpmParticleDiameter: 0,
         mpmParticleSize: 4.0,
         mpmParticleQuantity: 'vonMises',
@@ -1147,10 +1167,14 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         shape_type: 'Box',
         particle_distribution: 'Cartesian',
         boundary_filling: 'Stairstepped',
-        pos_x: 0.5, pos_y: 0.5, pos_z: 0.5,
+        pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
         size_x: 0.2, size_y: 0.2, size_z: 0.2,
         radius: 0.1, inner_radius: 0.0, height: 0.2,
         stl_file: '', scale_x: 1.0, scale_y: 1.0, scale_z: 1.0,
+        rot_x: 0.0, rot_y: 0.0, rot_z: 0.0,
+        origin_mode: 'CAD Origin',
+        voxelization_method: 'watertight_raycast',
+        vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
         angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
     },
     'FSICoupler2D': {
@@ -1512,9 +1536,6 @@ export class StateManager {
         if (modelId && this.modelSteps.has(modelId)) {
             return this.modelSteps.get(modelId)!;
         }
-        for (const val of this.modelSteps.values()) {
-            if (val > 0) return val;
-        }
         return 0;
     }
 
@@ -1537,9 +1558,6 @@ export class StateManager {
         }
         if (modelId && this.modelDts.has(modelId)) {
             return this.modelDts.get(modelId)!;
-        }
-        for (const val of this.modelDts.values()) {
-            if (val > 0) return val;
         }
         return 0;
     }
@@ -1990,7 +2008,9 @@ export class StateManager {
             'TelemetryGraph': 'node-chart',
             'DomainMesh2D': 'node-mesh2d',
             'DetonatorLocation': 'node-detonator',
+            'TriggerLocation': 'node-detonator',
             'DetonatorLocation3D': 'node-detonator',
+            'TriggerLocation3D': 'node-detonator',
             'RemapNode': 'node-remap',
             'Remap1DTo2DNode': 'node-remap',
             'Remap1DTo3DNode': 'node-remap',
@@ -2640,6 +2660,8 @@ export class StateManager {
     setSelectedNode(nodeId: string | null): void {
         if (this.selectedNodeId !== nodeId) {
             this.selectedNodeId = nodeId;
+            this.setSelectedSliceIndex(null);
+            this.setSelectedGaugeIndex(null);
             if (nodeId) {
                 const allModels = this.getWorkspaceModels();
                 const owningModel = allModels.find(m => m.nodes.some(n => n.id === nodeId));
@@ -2649,9 +2671,6 @@ export class StateManager {
                 }
             }
             this.selectionListeners.forEach(l => l(nodeId));
-            if (nodeId !== this.selectedNodeId) {
-                this.selectedGaugeIndex = null;
-            }
         }
     }
 
@@ -3718,14 +3737,14 @@ export class StateManager {
             }
         }
 
-        // 6. Auto-heal Detonator connections
-        const detNodes = model.nodes.filter(n => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
+        // 6. Auto-heal Trigger / Detonator connections
+        const detNodes = model.nodes.filter(n => ['DetonatorLocation3D', 'DetonatorLocation', 'TriggerLocation3D', 'TriggerLocation'].includes(n.type));
         const solverNodes = model.nodes.filter(n => ['MPMDomain3D', 'CFDSolver3D', 'MPMDomain2D', 'CFDSolver2D'].includes(n.type));
         for (const det of detNodes) {
-            const isDet3D = det.type === 'DetonatorLocation3D';
+            const isDet3D = det.type === 'DetonatorLocation3D' || det.type === 'TriggerLocation3D';
             const compatibleSolvers = solverNodes.filter(s => isDet3D ? (s.type === 'MPMDomain3D' || s.type === 'CFDSolver3D') : (s.type === 'MPMDomain2D' || s.type === 'CFDSolver2D'));
             if (compatibleSolvers.length > 0) {
-                const isConnected = model.connections.some(c => c.fromNode === det.id && c.toPort === 'detonator');
+                const isConnected = model.connections.some(c => c.fromNode === det.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
                 if (!isConnected) {
                     const targetSolver = compatibleSolvers.find(s => s.type === 'MPMDomain3D' || s.type === 'MPMDomain2D') || compatibleSolvers[0];
                     model.connections.push({
@@ -3779,15 +3798,81 @@ export class StateManager {
             }
             const matConn = model.connections.find(c => (c.toNode === obj.id || c.fromNode === obj.id) && (c.toPort === 'material' || c.fromPort === 'material'));
             if (!matConn) {
-                const isObjExplosive = (obj.id + ' ' + (obj.parameters?.name || '')).toLowerCase().includes('explosive');
                 const matNodes = model.nodes.filter(n => n.type === 'Material');
                 let targetMat = null;
-                if (isObjExplosive) {
-                    targetMat = matNodes.find(m => (m.id + ' ' + (m.parameters?.name || '')).toLowerCase().includes('explosive') || m.parameters?.material_model === 'CREST Reactive Burn' || m.parameters?.material_model === 'JWL Detonation Gas');
+
+                // 1. Check if object already specifies a valid material parameter.
+                //    If the object is explosive, validate that the stored material is also explosive
+                //    before trusting it — a stale pointer to a non-explosive material (e.g. Copper)
+                //    left by the old buggy auto-heal must NOT take precedence.
+                const _objNameStr1 = ((obj as any).name || obj.parameters?.name || obj.parameters?.stl_file || obj.id).toLowerCase();
+                const _isObjExplosive1 = _objNameStr1.includes('explosive') || _objNameStr1.includes('charge') ||
+                    _objNameStr1.includes('c4') || _objNameStr1.includes('c-4') ||
+                    _objNameStr1.includes('lx14') || _objNameStr1.includes('lx-14') ||
+                    _objNameStr1.includes('comp b') || _objNameStr1.includes('tnt') ||
+                    _objNameStr1.includes('rdx') || _objNameStr1.includes('petn');
+
+                if (obj.parameters?.material) {
+                    const candidateMat = matNodes.find(m => m.id === obj.parameters.material) || null;
+                    if (candidateMat) {
+                        if (_isObjExplosive1) {
+                            // Only trust it if it's actually an explosive material
+                            const matNameStr1 = ((candidateMat as any).name || candidateMat.parameters?.name || candidateMat.parameters?.preset || candidateMat.id).toLowerCase();
+                            const isCandidateExplosive = matNameStr1.includes('explosive') || matNameStr1.includes('lx-14') ||
+                                matNameStr1.includes('c-4') || candidateMat.parameters?.material_model === 'CREST Reactive Burn' ||
+                                isExplosiveMaterialNode(candidateMat);
+                            if (isCandidateExplosive) {
+                                targetMat = candidateMat;
+                            }
+                            // else: stale/wrong material — fall through to explosive heuristic cascade below
+                        } else {
+                            targetMat = candidateMat;
+                        }
+                    }
                 }
+
+                // 2. If not found, inspect object name, id, and stl_file for explosive indicators
                 if (!targetMat) {
-                    targetMat = matNodes.find(m => m.parameters?.material_model !== 'Ideal Gas');
+                    const objNameStr = ((obj as any).name || obj.parameters?.name || obj.parameters?.stl_file || obj.id).toLowerCase();
+                    const isObjExplosive = objNameStr.includes('explosive') ||
+                                           objNameStr.includes('charge') ||
+                                           objNameStr.includes('c4') ||
+                                           objNameStr.includes('c-4') ||
+                                           objNameStr.includes('lx14') ||
+                                           objNameStr.includes('lx-14') ||
+                                           objNameStr.includes('comp b') ||
+                                           objNameStr.includes('tnt') ||
+                                           objNameStr.includes('rdx') ||
+                                           objNameStr.includes('petn');
+                    if (isObjExplosive) {
+                        targetMat = matNodes.find(m => {
+                            const matNameStr = ((m as any).name || m.parameters?.name || m.parameters?.preset || m.id).toLowerCase();
+                            return matNameStr.includes('explosive') || matNameStr.includes('lx-14') || matNameStr.includes('c-4') ||
+                                   m.parameters?.material_model === 'CREST Reactive Burn' || m.parameters?.material_model === 'JWL Detonation Gas';
+                        }) || null;
+                    }
                 }
+
+                // 3. Match by name if possible (e.g. Casing -> Casing Material, Projectile -> Projectile Material)
+                if (!targetMat) {
+                    const objBaseName = ((obj as any).name || obj.parameters?.name || '').toLowerCase().trim();
+                    if (objBaseName) {
+                        targetMat = matNodes.find(m => {
+                            const matBaseName = ((m as any).name || m.parameters?.name || m.parameters?.preset || '').toLowerCase().trim();
+                            return matBaseName.includes(objBaseName) || objBaseName.includes(matBaseName);
+                        }) || null;
+                    }
+                }
+
+                // 4. Fallback: only pick non-ideal-gas material if object is not explosive
+                if (!targetMat) {
+                    const objNameStr = ((obj as any).name || obj.parameters?.name || obj.parameters?.stl_file || obj.id).toLowerCase();
+                    const isObjExplosive = objNameStr.includes('explosive') || objNameStr.includes('charge');
+                    if (!isObjExplosive) {
+                        targetMat = matNodes.find(m => m.parameters?.material_model !== 'Ideal Gas') || null;
+                    }
+                }
+
                 if (targetMat) {
                     model.connections.push({
                         fromNode: targetMat.id,
@@ -4089,6 +4174,28 @@ export class StateManager {
                     }
                 });
             }
+            if (node.type === 'STLGeometry') {
+                if (node.parameters['origin_mode'] === undefined) {
+                    node.parameters['origin_mode'] = 'CAD Origin';
+                }
+                if (node.parameters['scale_x'] === undefined) node.parameters['scale_x'] = 1.0;
+                if (node.parameters['scale_y'] === undefined) node.parameters['scale_y'] = 1.0;
+                if (node.parameters['scale_z'] === undefined) node.parameters['scale_z'] = 1.0;
+                if (node.parameters['pos_x'] === undefined) node.parameters['pos_x'] = 0.0;
+                if (node.parameters['pos_y'] === undefined) node.parameters['pos_y'] = 0.0;
+                if (node.parameters['pos_z'] === undefined) node.parameters['pos_z'] = 0.0;
+                if (node.parameters['rot_x'] === undefined) node.parameters['rot_x'] = 0.0;
+                if (node.parameters['rot_y'] === undefined) node.parameters['rot_y'] = 0.0;
+                if (node.parameters['rot_z'] === undefined) node.parameters['rot_z'] = 0.0;
+            }
+            if (node.type === 'MPMObject3D') {
+                if (node.parameters['origin_mode'] === undefined) {
+                    node.parameters['origin_mode'] = 'CAD Origin';
+                }
+                if (node.parameters['rot_x'] === undefined) node.parameters['rot_x'] = 0.0;
+                if (node.parameters['rot_y'] === undefined) node.parameters['rot_y'] = 0.0;
+                if (node.parameters['rot_z'] === undefined) node.parameters['rot_z'] = 0.0;
+            }
             if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
                 delete node.parameters['time_step'];
             }
@@ -4359,7 +4466,9 @@ export class StateManager {
             case 'CFDSolver': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'DomainMesh2D': return [{ id: 'mesh', label: 'Mesh Spec' }];
             case 'DetonatorLocation':
-            case 'DetonatorLocation3D': return [{ id: 'detonator', label: 'Detonator Spec' }];
+            case 'DetonatorLocation3D':
+            case 'TriggerLocation':
+            case 'TriggerLocation3D': return [{ id: 'detonator', label: 'Trigger Spec' }];
             case 'RemapNode':
             case 'Remap1DTo2DNode':
             case 'Remap1DTo3DNode':
@@ -5715,9 +5824,18 @@ export function resolveGeometryCounts(node: Node, _state?: SimulationState) {
     if (node.type === 'STLGeometry') {
         const stlFile = String(node.parameters['stl_file'] || '');
         const meta = getSTLGeometryMeta(stlFile);
+        const sx = Math.abs(Number(node.parameters['scale_x'] ?? 1.0)) || 1.0;
+        const sy = Math.abs(Number(node.parameters['scale_y'] ?? 1.0)) || 1.0;
+        const sz = Math.abs(Number(node.parameters['scale_z'] ?? 1.0)) || 1.0;
         const triangleCount = meta ? meta.triangleCount : 0;
-        const volume = meta ? meta.volume : 0.001;
-        const bounds = meta ? meta.bounds : [-0.05, 0.05, -0.05, 0.05, -0.05, 0.05];
+        const rawVolume = meta ? meta.volume : 0.001;
+        const volume = rawVolume * sx * sy * sz;
+        const rawBounds = meta ? meta.bounds : [-0.05, 0.05, -0.05, 0.05, -0.05, 0.05];
+        const bounds: [number, number, number, number, number, number] = [
+            rawBounds[0] * sx, rawBounds[1] * sx,
+            rawBounds[2] * sy, rawBounds[3] * sy,
+            rawBounds[4] * sz, rawBounds[5] * sz
+        ];
         return { stlFile, triangleCount, volume, bounds };
     } else if (node.type === 'PrimitiveGeometry3D') {
         const primitives = Array.isArray(node.parameters['primitives']) ? node.parameters['primitives'] : [];

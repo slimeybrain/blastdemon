@@ -170,10 +170,10 @@ export class PipelineConnectionModal {
             container.appendChild(sec);
         }
 
-        // 2. Charges & Detonators
-        const detonators = modelNodes.filter(n => ['DetonatorLocation3D', 'DetonatorLocation', 'Charge3D', 'Charge2D', 'Charge1D'].includes(n.type));
+        // 2. Charges & Detonators / Triggers
+        const detonators = modelNodes.filter(n => ['TriggerLocation3D', 'TriggerLocation', 'DetonatorLocation3D', 'DetonatorLocation', 'Charge3D', 'Charge2D', 'Charge1D'].includes(n.type));
         if (detonators.length > 0) {
-            const sec = this.createSection('💥 Charges & Point Detonators', '#ff8a65');
+            const sec = this.createSection('💥 Charges, Triggers & Detonators', '#ff8a65');
             for (const det of detonators) {
                 sec.appendChild(this.createDetonatorCard(det, conns, modelNodes));
             }
@@ -242,18 +242,21 @@ export class PipelineConnectionModal {
         );
         card.appendChild(meshRow);
 
-        // 2. Detonator Connection
+        // 2. Trigger / Detonator Connection
         if (solver.type === 'MPMDomain3D' || solver.type === 'CFDSolver3D' || solver.type === 'MPMDomain2D' || solver.type === 'CFDSolver2D') {
-            const detNodes = allNodes.filter(n => is3D ? n.type === 'DetonatorLocation3D' : n.type === 'DetonatorLocation');
-            const currentDetConn = conns.find(c => c.toNode === solver.id && c.toPort === 'detonator');
+            const detNodes = allNodes.filter(n => is3D ? (n.type === 'TriggerLocation3D' || n.type === 'DetonatorLocation3D') : (n.type === 'TriggerLocation' || n.type === 'DetonatorLocation'));
+            const currentDetConn = conns.find(c => c.toNode === solver.id && (c.toPort === 'trigger' || c.toPort === 'detonator'));
             const detRow = this.createConnectionSelectRow(
-                'Point Detonator (detonator)',
+                'Initiation Trigger / Detonator',
                 detNodes,
                 currentDetConn ? currentDetConn.fromNode : '',
                 (newDetId) => {
-                    let updated = conns.filter(c => !(c.toNode === solver.id && c.toPort === 'detonator'));
+                    let updated = conns.filter(c => !(c.toNode === solver.id && (c.toPort === 'trigger' || c.toPort === 'detonator')));
                     if (newDetId) {
-                        updated.push({ fromNode: newDetId, fromPort: 'detonator', toNode: solver.id, toPort: 'detonator' });
+                        const chosenNode = allNodes.find(n => n.id === newDetId);
+                        const isTrigger = chosenNode ? chosenNode.type.startsWith('Trigger') : false;
+                        const portName = isTrigger ? 'trigger' : 'detonator';
+                        updated.push({ fromNode: newDetId, fromPort: portName, toNode: solver.id, toPort: portName });
                     }
                     this.saveConnections(updated);
                 }
@@ -289,28 +292,32 @@ export class PipelineConnectionModal {
 
         const header = document.createElement('div');
         header.className = 'pcm-card-header';
-        const coords = det.type === 'DetonatorLocation3D' 
-            ? `(${det.parameters?.detonator_x ?? 0.5}, ${det.parameters?.detonator_y ?? 0.5}, ${det.parameters?.detonator_z ?? 0.5})`
-            : `(${det.parameters?.charge_mass || '0.85'} kg)`;
+        const coords = (det.type === 'DetonatorLocation3D' || det.type === 'TriggerLocation3D')
+            ? `(${det.parameters?.trigger_x ?? det.parameters?.detonator_x ?? 0.5}, ${det.parameters?.trigger_y ?? det.parameters?.detonator_y ?? 0.5}, ${det.parameters?.trigger_z ?? det.parameters?.detonator_z ?? 0.5})`
+            : (det.type === 'DetonatorLocation' || det.type === 'TriggerLocation')
+                ? `(r: ${det.parameters?.trigger_r ?? det.parameters?.detonator_r ?? 0.0}, z: ${det.parameters?.trigger_z ?? det.parameters?.detonator_z ?? 0.1})`
+                : `(${det.parameters?.charge_mass || '0.85'} kg)`;
         header.innerHTML = `<strong>${det.parameters?.name || det.id}</strong> <span class="pcm-badge">${det.type}</span> <span class="pcm-meta">${coords}</span>`;
         card.appendChild(header);
 
-        const is3D = det.type === 'DetonatorLocation3D' || det.type === 'Charge3D';
+        const is3D = det.type === 'TriggerLocation3D' || det.type === 'DetonatorLocation3D' || det.type === 'Charge3D';
         const solverNodes = allNodes.filter(n => is3D 
             ? ['MPMDomain3D', 'CFDSolver3D'].includes(n.type) 
             : ['MPMDomain2D', 'CFDSolver2D'].includes(n.type));
 
-        const targetPort = det.type.startsWith('Detonator') ? 'detonator' : 'charge';
-        const currentConn = conns.find(c => c.fromNode === det.id && c.toPort === targetPort);
+        const isTrigger = det.type.startsWith('Trigger');
+        const isDet = det.type.startsWith('Detonator');
+        const targetPort = isTrigger ? 'trigger' : (isDet ? 'detonator' : 'charge');
+        const currentConn = conns.find(c => c.fromNode === det.id && (c.toPort === targetPort || c.toPort === 'trigger' || c.toPort === 'detonator'));
 
         const row = this.createConnectionSelectRow(
             `Target Solver (${targetPort})`,
             solverNodes,
             currentConn ? currentConn.toNode : '',
             (newSolverId) => {
-                let updated = conns.filter(c => !(c.fromNode === det.id && c.toPort === targetPort));
+                let updated = conns.filter(c => !(c.fromNode === det.id && (c.toPort === 'trigger' || c.toPort === 'detonator' || c.toPort === 'charge')));
                 if (newSolverId) {
-                    updated.push({ fromNode: det.id, fromPort: targetPort === 'detonator' ? 'detonator' : 'out', toNode: newSolverId, toPort: targetPort });
+                    updated.push({ fromNode: det.id, fromPort: targetPort === 'charge' ? 'out' : targetPort, toNode: newSolverId, toPort: targetPort });
                 }
                 this.saveConnections(updated);
             }

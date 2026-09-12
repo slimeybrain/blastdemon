@@ -58,24 +58,27 @@ const NUMERIC_KEYS = new Set([
     'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
     'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
     'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+    'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
     'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
     'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
     'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
     'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
-    'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+    'detonator_x', 'detonator_y', 'detonator_z', 'trigger_x', 'trigger_y', 'trigger_z', 'xmin', 'ymin', 'zmin',
     'scale_factor',
     'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-    'charge_opacity',
+    'charge_opacity', 'detonators_size', 'detonator_size', 'detonators_opacity', 'detonator_opacity', 'triggers_size', 'trigger_size', 'triggers_opacity', 'trigger_opacity',
     'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
     'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length',
     'offset', 'stride',
     'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'radius', 'inner_radius',
     'scale_x', 'scale_y', 'scale_z',
+    'rot_x', 'rot_y', 'rot_z',
+    'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
     'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
     'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
     'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
     'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
-    'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+    'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
     'mg_gamma0', 'mg_c0', 'mg_s',
     'ppc',
     'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
@@ -343,8 +346,20 @@ export class PropertyGrid {
             idBadge.textContent = `Slice #${selectedSliceIdx}`;
             idBadge.title = `Index ${selectedSliceIdx} on ${node.id}`;
 
+            const closeSliceBtn = document.createElement('button');
+            closeSliceBtn.className = 'header-info-btn';
+            closeSliceBtn.textContent = '✕';
+            closeSliceBtn.title = 'Close Slice Inspector and return to Node Properties';
+            closeSliceBtn.style.color = '#ff6666';
+            closeSliceBtn.style.marginLeft = '6px';
+            closeSliceBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.stateManager.setSelectedSliceIndex(null);
+            });
+
             topRow.appendChild(titleBox);
             topRow.appendChild(idBadge);
+            topRow.appendChild(closeSliceBtn);
 
             const nameRow = document.createElement('div');
             nameRow.className = 'header-name-row';
@@ -1169,7 +1184,7 @@ export class PropertyGrid {
 
         // Standoff Physics
         const chargeNode = targetModel?.nodes.find((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'Charge1D');
-        const detNode = targetModel?.nodes.find((n: any) => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
+        const detNode = targetModel?.nodes.find((n: any) => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
         let chargeCenter: { x: number; y: number; z: number } | null = null;
         let chargeMass: number | null = null;
         if (chargeNode) {
@@ -1183,9 +1198,9 @@ export class PropertyGrid {
         } else if (detNode) {
             const p = detNode.parameters;
             chargeCenter = {
-                x: Number(p.det_x ?? p.x ?? 0.0),
-                y: Number(p.det_y ?? p.y ?? 0.0),
-                z: Number(p.det_z ?? p.z ?? 0.0)
+                x: Number(p.trigger_x ?? p.detonator_x ?? p.det_x ?? p.x ?? 0.0),
+                y: Number(p.trigger_y ?? p.detonator_y ?? p.det_y ?? p.y ?? 0.0),
+                z: Number(p.trigger_z ?? p.detonator_z ?? p.det_z ?? p.z ?? p.trigger_r ?? p.detonator_r ?? 0.0)
             };
         }
 
@@ -1779,7 +1794,7 @@ export class PropertyGrid {
 
     private renderDisplayTab(container: HTMLElement, node: Node): void {
         const selectedSliceIdx = this.stateManager.getSelectedSliceIndex();
-        if (selectedSliceIdx !== null && (node.type === 'Telemetry3DViewport' || node.type === 'DomainMesh3D' || node.type === 'DomainMesh' || node.type === 'CFDSolver3D')) {
+        if (selectedSliceIdx !== null && (node.type === 'Telemetry3DViewport' || node.type === 'DomainMesh3D' || node.type === 'DomainMesh')) {
             this.renderSingleSliceDisplay(container, node, selectedSliceIdx);
             return;
         }
@@ -1798,7 +1813,7 @@ export class PropertyGrid {
             this.renderSTLDisplay(container, node);
         } else if (node.type === 'Obstacle3D' || node.type === 'Obstacle' || node.type === 'PrimitiveGeometry3D') {
             this.renderObstacleDisplay(container, node);
-        } else if (['Charge1D', 'Charge2D', 'Charge3D', 'ExplosiveMaterial', 'DetonatorLocation3D', 'DetonationPoint'].includes(node.type)) {
+        } else if (['Charge1D', 'Charge2D', 'Charge3D', 'ExplosiveMaterial', 'DetonatorLocation3D', 'DetonationPoint', 'TriggerLocation3D', 'TriggerLocation'].includes(node.type)) {
             this.renderChargeDisplay(container, node);
         } else if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
             this.renderDomainMeshDisplay(container, node);
@@ -2402,33 +2417,41 @@ export class PropertyGrid {
         }
         container.appendChild(visAcc);
 
-        const { accordion: detAcc, content: detContent } = this.buildAccordion(`det_vis_${node.id}`, 'Detonation Points & Probes');
+        const { accordion: detAcc, content: detContent } = this.buildAccordion(`det_vis_${node.id}`, 'Trigger & Detonation Points');
         if (detContent) {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const isVisible = (p.show_detonators !== false && p.show_detonator !== false && p.showDetonators !== false);
+            const isVisible = (p.show_detonators !== false && p.show_detonator !== false && p.showDetonators !== false && p.show_triggers !== false && p.show_trigger !== false && p.showTriggers !== false);
             table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
                 this.updateDisplayParam(node, 'show_detonators', val);
                 this.updateDisplayParam(node, 'show_detonator', val);
+                this.updateDisplayParam(node, 'show_triggers', val);
+                this.updateDisplayParam(node, 'show_trigger', val);
             })));
 
-            const solid = (p.detonatorSolid !== false && p.detonators_solid !== false && p.detonator_solid !== false);
+            const solid = (p.detonatorSolid !== false && p.detonators_solid !== false && p.detonator_solid !== false && p.triggerSolid !== false && p.triggers_solid !== false && p.trigger_solid !== false);
             table.appendChild(this.createTableRow('Solid Sphere Markers', this.createCheckbox(solid, (val) => {
                 this.updateDisplayParam(node, 'detonatorSolid', val);
                 this.updateDisplayParam(node, 'detonator_solid', val);
+                this.updateDisplayParam(node, 'triggerSolid', val);
+                this.updateDisplayParam(node, 'trigger_solid', val);
             })));
 
-            const wireframe = (p.detonatorWireframe !== false && p.detonators_wireframe !== false && p.detonator_wireframe !== false);
+            const wireframe = (p.detonatorWireframe !== false && p.detonators_wireframe !== false && p.detonator_wireframe !== false && p.triggerWireframe !== false && p.triggers_wireframe !== false && p.trigger_wireframe !== false);
             table.appendChild(this.createTableRow('Wireframe Outline', this.createCheckbox(wireframe, (val) => {
                 this.updateDisplayParam(node, 'detonatorWireframe', val);
                 this.updateDisplayParam(node, 'detonator_wireframe', val);
+                this.updateDisplayParam(node, 'triggerWireframe', val);
+                this.updateDisplayParam(node, 'trigger_wireframe', val);
             })));
 
-            const sz = Number(p.detonatorSize ?? p.detonators_size ?? p.detonator_size ?? 1.0);
+            const sz = Number(p.triggerSize ?? p.triggers_size ?? p.trigger_size ?? p.detonatorSize ?? p.detonators_size ?? p.detonator_size ?? 1.0);
             table.appendChild(this.createTableRow('Marker Size', this.createSlider(0.1, 5.0, 0.1, sz, (val) => {
                 this.updateDisplayParam(node, 'detonatorSize', val);
                 this.updateDisplayParam(node, 'detonators_size', val);
+                this.updateDisplayParam(node, 'triggerSize', val);
+                this.updateDisplayParam(node, 'triggers_size', val);
             })));
 
             detContent.appendChild(table);
@@ -2887,7 +2910,8 @@ export class PropertyGrid {
             'refresh_rate': ['0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0', '2.0', '5.0', '10.0', '20.0', '50.0', '100.0', '1000.0'],
             'ascii_delimiter': ['Comma', 'Tab', 'Space'],
             'vtk_format': ['ASCII', 'Binary', 'Compressed Binary'],
-            'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
+            'voxelization_method': node.type === 'MPMObject3D' ? ['watertight_raycast', 'winding_number'] : ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
+            'origin_mode': ['CAD Origin', 'Center'],
             'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
             'transfer_scheme': (node.type === 'Material') ? 
                 ['Default', 'BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'] : 
@@ -2952,6 +2976,54 @@ export class PropertyGrid {
             input.addEventListener('input', commit);
             input.addEventListener('change', commit);
             input.addEventListener('blur', commit);
+
+            if (key === 'scale_x' && (node.type === 'STLGeometry' || (node.type === 'MPMObject3D' && node.parameters?.shape_type === 'STL'))) {
+                const wrapper = document.createElement('div');
+                wrapper.style.display = 'flex';
+                wrapper.style.flexDirection = 'column';
+                wrapper.style.gap = '4px';
+                wrapper.style.width = '100%';
+                wrapper.appendChild(input);
+
+                const presetRow = document.createElement('div');
+                presetRow.style.display = 'flex';
+                presetRow.style.gap = '4px';
+                presetRow.style.flexWrap = 'wrap';
+                presetRow.style.marginTop = '2px';
+
+                const presets = [
+                    { label: 'mm → m', scale: 0.001 },
+                    { label: 'cm → m', scale: 0.01 },
+                    { label: 'in → m', scale: 0.0254 },
+                    { label: '1:1 (m)', scale: 1.0 }
+                ];
+
+                presets.forEach(p => {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.textContent = p.label;
+                    btn.title = `Scale XYZ uniformly by ${p.scale}`;
+                    btn.style.padding = '2px 5px';
+                    btn.style.fontSize = '10px';
+                    btn.style.background = '#2a2d2e';
+                    btn.style.color = '#38bdf8';
+                    btn.style.border = '1px solid #444';
+                    btn.style.borderRadius = '3px';
+                    btn.style.cursor = 'pointer';
+                    btn.onclick = (e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        this.updateNodeParam(node, 'scale_x', p.scale);
+                        this.updateNodeParam(node, 'scale_y', p.scale);
+                        this.updateNodeParam(node, 'scale_z', p.scale);
+                        this.render(true);
+                    };
+                    presetRow.appendChild(btn);
+                });
+                wrapper.appendChild(presetRow);
+                return wrapper;
+            }
+
             return input;
         }
 
@@ -3475,6 +3547,8 @@ export class PropertyGrid {
                 'charge_color', 'chargeColor',
                 'show_detonators', 'show_detonator', 'detonatorSolid', 'detonatorWireframe', 'detonatorLighting',
                 'detonatorSize', 'detonatorOpacity', 'detonators_size', 'detonators_opacity',
+                'show_triggers', 'show_trigger', 'triggerSolid', 'triggerWireframe', 'triggerLighting',
+                'triggerSize', 'triggerOpacity', 'triggers_size', 'triggers_opacity',
                 'show_grid', 'show_grid_box', 'grid_meshlines', 'grid_opacity', 'cell_edges',
                 'show_gauges', 'gauge_solid', 'gauge_size', 'gauge_opacity', 'gauge_quantity',
                 'lightingEnabled', 'aoEnabled', 'aoRadius', 'aoIntensity', 'aoSphereImpostor',
@@ -3502,6 +3576,8 @@ export class PropertyGrid {
                     show_charge: 'charge',
                     show_detonators: 'detonator',
                     show_detonator: 'detonator',
+                    show_triggers: 'detonator',
+                    show_trigger: 'detonator',
                     show_grid: 'grid',
                     show_grid_box: 'gridBox',
                     show_gauges: 'gauges',
@@ -3615,6 +3691,11 @@ export class PropertyGrid {
                     updates['material_type'] = 'Ideal Gas Charge';
                     updates['material_model'] = 'Ideal Gas Charge';
                     if (presetData.composition) updates['composition'] = presetData.composition;
+                } else if (presetData.category === 'Energetic Solids & Unreacted Explosives' ||
+                           presetData.category === 'CREST Reactive Burn Presets') {
+                    // Energetic solid presets must activate the CREST reactive burn model
+                    // so the backend detonation hotspot logic is triggered on INIT_MPM_3D
+                    updates['material_model'] = 'CREST Reactive Burn';
                 }
             }
         } else if (node.type === 'Material' && key === 'material_model') {
@@ -3692,7 +3773,16 @@ export class PropertyGrid {
                 updates['spatial_order'] = s_order;
                 updates['temporal_order'] = t_order;
             }
-        } else if (node.type === 'STLGeometry' && key === 'voxelization_method') {
+        } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && value === 'STL') || (key === 'origin_mode' && value === 'CAD Origin'))) {
+            if (key === 'shape_type' && value === 'STL') {
+                updates['origin_mode'] = node.parameters['origin_mode'] || 'CAD Origin';
+            }
+            if (Number(node.parameters['pos_x']) === 0.5 && Number(node.parameters['pos_y']) === 0.5 && Number(node.parameters['pos_z']) === 0.5) {
+                updates['pos_x'] = 0.0;
+                updates['pos_y'] = 0.0;
+                updates['pos_z'] = 0.0;
+            }
+        } else if (node.type === 'STLGeometry' && ['origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'voxelization_method'].includes(key)) {
             updates['geometry_hash'] = 'stl_' + Math.floor(Math.random() * 1000000).toString(36);
         } else if (key === 'stl_file') {
             updates['geometry_hash'] = 'stl_' + Math.floor(Math.random() * 1000000).toString(36);
@@ -3804,7 +3894,7 @@ export class PropertyGrid {
                     'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'tensile_failure_stress',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'Johnson-Cook + Mie-Grüneisen' || matModel === 'Johnson-Cook') {
@@ -3819,7 +3909,7 @@ export class PropertyGrid {
                     'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
                     'T_melt', 'T_room', 'Cp',
                     'mg_gamma0', 'mg_c0', 'mg_s',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'CREST Reactive Burn') {
@@ -3831,7 +3921,7 @@ export class PropertyGrid {
                     'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
                     'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
                     'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'Davis Reactive Burn') {
@@ -3841,7 +3931,7 @@ export class PropertyGrid {
                     'yield_stress', 'hardening_modulus',
                     'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
                     'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'RHT Concrete') {
@@ -3856,7 +3946,7 @@ export class PropertyGrid {
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
                     'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'K&C Concrete') {
@@ -3870,7 +3960,7 @@ export class PropertyGrid {
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'CSCM Concrete') {
@@ -3884,7 +3974,7 @@ export class PropertyGrid {
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
                     'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'Ideal Gas') {
@@ -3905,7 +3995,7 @@ export class PropertyGrid {
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'yield_stress', 'hardening_modulus',
                     'failure_strain', 'tensile_failure_stress',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
             } else if (matModel === 'Drucker-Prager') {
@@ -3955,7 +4045,7 @@ export class PropertyGrid {
             } else if (shape === 'Cylinder') {
                 return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'pos_z', 'radius', 'inner_radius', 'height', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material');
             } else if (shape === 'STL') {
-                return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material');
+                return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'voxelization_method', 'stl_file', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material' || k === 'origin_mode');
             }
         }
 
@@ -4006,8 +4096,8 @@ export class PropertyGrid {
             ].filter(k => k in node.parameters || k === 'space_time_scheme');
         }
 
-        if (node.type === 'DetonatorLocation' || node.type === 'DetonatorLocation3D') {
-            return ['detonator_x', 'detonator_y', 'detonator_z', 'detonator_r', 'detonator_radius', 'detonator_time'].filter(k => k in node.parameters);
+        if (node.type === 'DetonatorLocation' || node.type === 'DetonatorLocation3D' || node.type === 'TriggerLocation' || node.type === 'TriggerLocation3D') {
+            return ['trigger_x', 'trigger_y', 'trigger_z', 'trigger_r', 'trigger_radius', 'trigger_time', 'detonator_x', 'detonator_y', 'detonator_z', 'detonator_r', 'detonator_radius', 'detonator_time'].filter(k => k in node.parameters);
         }
 
         if (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode') {
@@ -4113,6 +4203,10 @@ export class PropertyGrid {
             }
         }
 
+        if (node.type === 'STLGeometry') {
+            return ['stl_file', 'geometry_hash', 'voxelization_method', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z'].filter(k => k in node.parameters || k === 'origin_mode');
+        }
+
         return Object.keys(node.parameters).filter(k => k !== 'slices' && k !== 'gauges' && k !== 'visible' && k !== 'hidden');
     }
 
@@ -4148,7 +4242,7 @@ export class PropertyGrid {
         const assignedKeys = new Set<string>();
 
         const addGroup = (id: string, title: string, keys: string[]) => {
-            const valid = keys.filter(k => visibleKeys.includes(k) && !assignedKeys.has(k) && (node.parameters[k] !== undefined || k === 'space_time_scheme'));
+            const valid = keys.filter(k => visibleKeys.includes(k) && !assignedKeys.has(k) && (node.parameters[k] !== undefined || k === 'space_time_scheme' || k === 'origin_mode'));
             if (valid.length > 0) {
                 valid.forEach(k => assignedKeys.add(k));
                 groups.push({
@@ -4156,6 +4250,9 @@ export class PropertyGrid {
                     title,
                     params: valid.map(k => {
                         let val = node.parameters[k];
+                        if (k === 'origin_mode' && val === undefined) {
+                            val = 'CAD Origin';
+                        }
                         if (k === 'space_time_scheme' && (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D')) {
                             if (!val) {
                                 const so = Number(node.parameters['spatial_order'] ?? 2);
@@ -4218,7 +4315,7 @@ export class PropertyGrid {
                 addGroup('mat_failure', 'Constitutive Failure & Erosion', failureKeys);
 
                 const flawsKeys = visibleKeys.filter(k => 
-                    k === 'enable_heterogeneity' || k.startsWith('weibull_') || k === 'fracture_toughness' || k === 'debris_bulk_factor'
+                    k === 'enable_heterogeneity' || k.startsWith('weibull_')
                 );
                 addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', flawsKeys);
 
@@ -4245,7 +4342,7 @@ export class PropertyGrid {
         if (node.type === 'MPMObject2D' || node.type === 'MPMObject3D') {
             addGroup('obj_mat', 'Constitutive Material & EOS', ['material']);
             addGroup('mpm_seeding', 'Particle Seeding & Discretization', ['particle_distribution', 'boundary_filling', 'ppc']);
-            addGroup('mpm_geom', 'Geometry, Mesh & Domain Bounds', ['shape_type', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z']);
+            addGroup('mpm_geom', 'Geometry, Mesh & Domain Bounds', ['shape_type', 'origin_mode', 'stl_file', 'voxelization_method', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height']);
             addGroup('mpm_kinematics', 'Boundary Conditions & Kinematics', ['vel_x', 'vel_y', 'vel_z', 'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
@@ -4335,15 +4432,15 @@ export class PropertyGrid {
             addGroup('obj_mat', 'Constitutive Material & EOS', ['material']);
             addGroup('obj_geom', 'Geometry & Placement', ['shape_type', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'scale_x', 'scale_y', 'scale_z', 'stl_file', 'k_file']);
             addGroup('obj_kinematics', 'Initial Kinematics & Velocity', ['vel_x', 'vel_y', 'vel_z', 'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z']);
-            addGroup('obj_sampling', 'Particle Distribution & Boundary', ['particle_distribution', 'boundary_filling']);
+            addGroup('obj_sampling', 'Particle Distribution & Boundary', ['particle_distribution', 'boundary_filling', 'voxelization_method']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
             return groups;
         }
 
-        if (node.type === 'DetonatorLocation' || node.type === 'DetonatorLocation3D') {
-            addGroup('det_geom', 'Detonator Geometry & Position', ['detonator_x', 'detonator_y', 'detonator_z', 'detonator_r', 'detonator_radius']);
-            addGroup('det_timing', 'Initiation Timing', ['detonator_time']);
+        if (node.type === 'DetonatorLocation' || node.type === 'DetonatorLocation3D' || node.type === 'TriggerLocation' || node.type === 'TriggerLocation3D') {
+            addGroup('det_geom', 'Trigger / Detonator Geometry & Position', ['trigger_x', 'trigger_y', 'trigger_z', 'trigger_r', 'trigger_radius', 'detonator_x', 'detonator_y', 'detonator_z', 'detonator_r', 'detonator_radius']);
+            addGroup('det_timing', 'Initiation Timing', ['trigger_time', 'detonator_time']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
             return groups;
@@ -4393,7 +4490,8 @@ export class PropertyGrid {
         }
 
         if (node.type === 'STLGeometry') {
-            addGroup('stl_import', 'CAD Geometry & Voxelization', ['stl_file', 'geometry_hash', 'voxelization_method']);
+            addGroup('stl_import', 'CAD Geometry & Voxelization', ['stl_file', 'geometry_hash', 'voxelization_method', 'origin_mode']);
+            addGroup('stl_transform', 'Scale, Position & Rotation', ['scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
             return groups;

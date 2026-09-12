@@ -69,34 +69,47 @@ export class PlaybackRingBuffer {
 
         if (this.lastRecordedFrame && this.frames.length > 0 && sameModel && (sameStep || withinBatch)) {
             let updated = false;
+            let diff = 0;
             if (isMPM) {
-                const cloned = rawBuffer.slice(0);
                 const prevSize = this.lastRecordedFrame.mpmBuffer ? this.lastRecordedFrame.mpmBuffer.byteLength : 0;
+                diff = rawBuffer.byteLength - prevSize;
+                while (diff > 0 && this.frames.length > 1 && this.currentMemoryBytes + diff > this.maxMemoryBytes) {
+                    const evicted = this.frames.shift();
+                    if (evicted) this.currentMemoryBytes -= evicted.byteSize;
+                }
+                const cloned = rawBuffer.slice(0);
                 this.lastRecordedFrame.mpmBuffer = cloned;
                 if (!this.lastRecordedFrame.buffer || this.lastRecordedFrame.buffer.byteLength === 0) {
                     this.lastRecordedFrame.buffer = cloned;
                 }
-                const diff = cloned.byteLength - prevSize;
                 this.lastRecordedFrame.byteSize += diff;
                 this.currentMemoryBytes += diff;
                 updated = true;
             } else if (isFEM) {
-                const cloned = rawBuffer.slice(0);
                 const prevSize = this.lastRecordedFrame.femBuffer ? this.lastRecordedFrame.femBuffer.byteLength : 0;
+                diff = rawBuffer.byteLength - prevSize;
+                while (diff > 0 && this.frames.length > 1 && this.currentMemoryBytes + diff > this.maxMemoryBytes) {
+                    const evicted = this.frames.shift();
+                    if (evicted) this.currentMemoryBytes -= evicted.byteSize;
+                }
+                const cloned = rawBuffer.slice(0);
                 this.lastRecordedFrame.femBuffer = cloned;
                 if (!this.lastRecordedFrame.buffer || this.lastRecordedFrame.buffer.byteLength === 0) {
                     this.lastRecordedFrame.buffer = cloned;
                 }
-                const diff = cloned.byteLength - prevSize;
                 this.lastRecordedFrame.byteSize += diff;
                 this.currentMemoryBytes += diff;
                 updated = true;
             } else if (isSlice) {
-                const cloned = rawBuffer.slice(0);
                 const prevSize = this.lastRecordedFrame.sliceBuffer ? this.lastRecordedFrame.sliceBuffer.byteLength : 0;
+                diff = rawBuffer.byteLength - prevSize;
+                while (diff > 0 && this.frames.length > 1 && this.currentMemoryBytes + diff > this.maxMemoryBytes) {
+                    const evicted = this.frames.shift();
+                    if (evicted) this.currentMemoryBytes -= evicted.byteSize;
+                }
+                const cloned = rawBuffer.slice(0);
                 this.lastRecordedFrame.sliceBuffer = cloned;
                 this.lastRecordedFrame.buffer = cloned;
-                const diff = cloned.byteLength - prevSize;
                 this.lastRecordedFrame.byteSize += diff;
                 this.currentMemoryBytes += diff;
                 updated = true;
@@ -127,6 +140,18 @@ export class PlaybackRingBuffer {
         }
 
         this.lastRecordedTimestamp = now;
+
+        const rawByteSize = rawBuffer.byteLength;
+        // Pre-evict old frames before allocating clone to respect memory bounds and protect JS heap
+        while (
+            this.frames.length >= this.maxFrames ||
+            (this.frames.length > 1 && this.currentMemoryBytes + rawByteSize > this.maxMemoryBytes)
+        ) {
+            const evicted = this.frames.shift();
+            if (evicted) {
+                this.currentMemoryBytes -= evicted.byteSize;
+            }
+        }
 
         // Clone buffer to retain independent memory
         const clonedBuffer = rawBuffer.slice(0);

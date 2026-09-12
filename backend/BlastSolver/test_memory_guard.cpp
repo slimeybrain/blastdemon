@@ -33,9 +33,35 @@ int main() {
         caught_extreme = true;
         std::cout << "[PASS] Test 2: Extreme allocation caught as expected -> " << e.what() << std::endl;
     }
+    assert(caught_extreme);
 
-    if (!caught_extreme) {
-        std::cerr << "[FAIL] Test 2: Extreme allocation was not caught!" << std::endl;
+    // Test 3: Realistic 100x100x100 MPM 3D on CUDA (500k particles)
+    try {
+        auto mpm_est = Blast::estimateMPM3DMemory(100, 100, 100, 500000, true);
+        std::cout << "[INFO] Test 3 MPM 3D CUDA (100^3 grid, 500k particles): Host RAM = "
+                  << (mpm_est.ram_bytes / (1024.0 * 1024.0)) << " MB, GPU VRAM = "
+                  << (mpm_est.vram_bytes / (1024.0 * 1024.0)) << " MB" << std::endl;
+        assert(mpm_est.ram_bytes < 1ULL * 1024ULL * 1024ULL * 1024ULL); // Must NOT require hundreds of GB!
+        assert(mpm_est.vram_bytes < 1ULL * 1024ULL * 1024ULL * 1024ULL); // ~250 MB
+        Blast::validateMemoryBudget(mpm_est.ram_bytes, mpm_est.vram_bytes, true, "Test 3 MPM 3D");
+        std::cout << "[PASS] Test 3: Realistic MPM 3D model approved without false-positive rejection." << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[FAIL] Test 3 unexpected exception: " << e.what() << std::endl;
+        return 1;
+    }
+
+    // Test 4: Runaway MPM model (5000x5000x5000 grid = 125B nodes) - must throw exception!
+    bool caught_runaway_mpm = false;
+    try {
+        auto runaway_est = Blast::estimateMPM3DMemory(5000, 5000, 5000, 10000000, true);
+        Blast::validateMemoryBudget(runaway_est.ram_bytes, runaway_est.vram_bytes, true, "Test Runaway MPM");
+    } catch (const std::exception& e) {
+        caught_runaway_mpm = true;
+        std::cout << "[PASS] Test 4: Runaway MPM model caught as expected -> " << e.what() << std::endl;
+    }
+
+    if (!caught_runaway_mpm) {
+        std::cerr << "[FAIL] Test 4: Runaway MPM model was not caught!" << std::endl;
         return 1;
     }
 

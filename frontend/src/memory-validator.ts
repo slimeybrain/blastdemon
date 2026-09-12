@@ -21,16 +21,16 @@ export function formatBytes(bytes: number): string {
 
 export function categorizeRisk(ramBytes: number, vramBytes: number): 'OK' | 'WARNING' | 'CRITICAL' {
     const GIGABYTE = 1024 * 1024 * 1024;
-    if (ramBytes > 16 * GIGABYTE || vramBytes > 8 * GIGABYTE) {
+    if (ramBytes > 24 * GIGABYTE || vramBytes > 14 * GIGABYTE) {
         return 'CRITICAL';
     }
-    if (ramBytes > 4 * GIGABYTE || vramBytes > 3 * GIGABYTE) {
+    if (ramBytes > 12 * GIGABYTE || vramBytes > 6 * GIGABYTE) {
         return 'WARNING';
     }
     return 'OK';
 }
 
-export function estimateNodeMemory(node: Node): MemoryEstimateResult {
+export function estimateNodeMemory(node: Node, state?: SimulationState): MemoryEstimateResult {
     if (!node || !node.parameters) {
         return { ramBytes: 0, vramBytes: 0, riskLevel: 'OK', summaryText: 'No data', ramText: '0 MB', vramText: '0 MB' };
     }
@@ -42,14 +42,30 @@ export function estimateNodeMemory(node: Node): MemoryEstimateResult {
     const device = String(params.device || 'cpu').toLowerCase();
     const isCuda = device === 'cuda' || device === 'gpu' || device.includes('cuda');
 
-    if (type === 'CFDSolver3D' || type === 'CFDSolver2D' || type === 'CFDSolver' || type === 'DomainMesh3D' || type === 'DomainMesh2D' || type === 'DomainMesh') {
-        const cfdMem = calculateCFDMemory(node);
+    if (type === 'CFDSolver3D' || type === 'CFDSolver2D' || type === 'CFDSolver') {
+        const cfdMem = calculateCFDMemory(node, state);
         if (cfdMem.isCpu) {
             ramBytes = cfdMem.totalBytes;
             vramBytes = 0;
         } else {
             vramBytes = cfdMem.totalBytes;
             ramBytes = cfdMem.totalBytes * 0.2; // host staging buffer
+        }
+    } else if (type === 'DomainMesh3D' || type === 'DomainMesh2D' || type === 'DomainMesh') {
+        const hasCfdSolver = state ? state.nodes.some(n => ['CFDSolver3D', 'CFDSolver2D', 'CFDSolver', 'FSICoupler3D', 'FEMFSICoupler3D', 'FSICoupler2D'].includes(n.type)) : true;
+        if (hasCfdSolver) {
+            const cfdMem = calculateCFDMemory(node, state);
+            if (cfdMem.isCpu) {
+                ramBytes = cfdMem.totalBytes;
+                vramBytes = 0;
+            } else {
+                vramBytes = cfdMem.totalBytes;
+                ramBytes = cfdMem.totalBytes * 0.2; // host staging buffer
+            }
+        } else {
+            // For pure MPM/FEM models, DomainMesh is the background grid whose memory is tracked by MPMDomain/FEMDomain
+            ramBytes = 0;
+            vramBytes = 0;
         }
     } else if (type === 'MPMDomain3D') {
         const cellSize = Number(params.cell_size) || 0.01;
@@ -66,10 +82,48 @@ export function estimateNodeMemory(node: Node): MemoryEstimateResult {
         const gridNodes = nx * ny * nz;
 
         const ppc = Number(params.ppc) || 8;
-        const estParticles = gridNodes * Math.min(ppc, 4);
+        let estParticles = 0;
+        if (state) {
+            const mpmObjects = state.nodes.filter(n => n.type === 'MPMObject3D');
+            if (mpmObjects.length > 0) {
+                const pVol = (cellSize * cellSize * cellSize) / Math.max(1, ppc);
+                const domainVol = Math.max(0.0001, (xmax - xmin) * (ymax - ymin) * (zmax - zmin));
+                let totalObjVol = 0;
+                for (const obj of mpmObjects) {
+                    const op = obj.parameters || {};
+                    const shape = String(op.shape_type || 'Box');
+                    if (shape === 'Sphere') {
+                        const r = Number(op.radius) || 0.1;
+                        totalObjVol += (4.0 / 3.0) * Math.PI * r * r * r;
+                    } else if (shape === 'Cylinder') {
+                        const r = Number(op.radius) || 0.1;
+                        const ir = Number(op.inner_radius) || 0;
+                        const h = Number(op.height) || 0.2;
+                        totalObjVol += Math.PI * (r * r - ir * ir) * h;
+                    } else if (shape === 'STL') {
+                        totalObjVol += domainVol * 0.12;
+                    } else {
+                        const sx = Number(op.size_x) || 0.2;
+                        const sy = Number(op.size_y) || 0.2;
+                        const sz = Number(op.size_z) || 0.2;
+                        totalObjVol += sx * sy * sz;
+                    }
+                }
+                totalObjVol = Math.min(totalObjVol, domainVol * 0.4);
+                estParticles = Math.max(1000, Math.ceil(totalObjVol / pVol));
+            }
+        }
+        if (estParticles === 0) {
+            estParticles = Math.min(gridNodes * Math.min(ppc, 4), 20000000);
+        }
 
-        ramBytes = (gridNodes * 128) + (estParticles * 256 * 2);
-        vramBytes = isCuda ? ramBytes : 0;
+        if (isCuda) {
+            vramBytes = (gridNodes * 104) + (estParticles * 160) + (64 * 1024 * 1024);
+            ramBytes = (estParticles * 256) + (64 * 1024 * 1024);
+        } else {
+            ramBytes = (gridNodes * 128) + (estParticles * 256 * 2);
+            vramBytes = 0;
+        }
     } else if (type === 'FEMDomain3D') {
         const nx = Number(params.nx) || 20;
         const ny = Number(params.ny) || 20;
@@ -77,8 +131,13 @@ export function estimateNodeMemory(node: Node): MemoryEstimateResult {
         const numElements = nx * ny * nz;
         const numNodes = (nx + 1) * (ny + 1) * (nz + 1);
 
-        ramBytes = (numNodes * 128) + (numElements * 256 * 2);
-        vramBytes = isCuda ? ramBytes : 0;
+        if (isCuda) {
+            vramBytes = (numNodes * 128) + (numElements * 256) + (64 * 1024 * 1024);
+            ramBytes = (numNodes * 128) + (numElements * 256) + (64 * 1024 * 1024);
+        } else {
+            ramBytes = (numNodes * 128) + (numElements * 256 * 2);
+            vramBytes = 0;
+        }
     }
 
     const riskLevel = categorizeRisk(ramBytes, vramBytes);
@@ -93,8 +152,8 @@ export function estimateGraphMemory(state: SimulationState): MemoryEstimateResul
     let totalRam = 0;
     let totalVram = 0;
 
-    for (const node of state.nodes.values()) {
-        const est = estimateNodeMemory(node);
+    for (const node of state.nodes) {
+        const est = estimateNodeMemory(node, state);
         totalRam += est.ramBytes;
         totalVram += est.vramBytes;
     }
@@ -107,8 +166,8 @@ export function estimateGraphMemory(state: SimulationState): MemoryEstimateResul
     return { ramBytes: totalRam, vramBytes: totalVram, riskLevel, summaryText, ramText, vramText };
 }
 
-export function getMemoryDisplayHTML(node: Node): string {
-    const est = estimateNodeMemory(node);
+export function getMemoryDisplayHTML(node: Node, state?: SimulationState): string {
+    const est = estimateNodeMemory(node, state);
     if (est.ramBytes === 0 && est.vramBytes === 0) return '';
 
     let badgeColor = '#10b981'; // Green (OK)

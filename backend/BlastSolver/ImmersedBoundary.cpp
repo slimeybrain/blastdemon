@@ -115,25 +115,7 @@ std::vector<Triangle> read_stl(const std::string& filepath) {
 
 
 
-inline float signed_solid_angle(const Point3D& p, const Point3D& v0, const Point3D& v1, const Point3D& v2) {
-    float ax = v0.x - p.x, ay = v0.y - p.y, az = v0.z - p.z;
-    float bx = v1.x - p.x, by = v1.y - p.y, bz = v1.z - p.z;
-    float cx = v2.x - p.x, cy = v2.y - p.y, cz = v2.z - p.z;
 
-    float al = std::sqrt(ax*ax + ay*ay + az*az);
-    float bl = std::sqrt(bx*bx + by*by + bz*bz);
-    float cl = std::sqrt(cx*cx + cy*cy + cz*cz);
-
-    if (al < 1e-9f || bl < 1e-9f || cl < 1e-9f) return 0.0f;
-
-    float det = ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx);
-    float dotAB = ax*bx + ay*by + az*bz;
-    float dotBC = bx*cx + by*cy + bz*cz;
-    float dotCA = cx*ax + cy*ay + cz*az;
-
-    float denom = al * bl * cl + dotAB * cl + dotBC * al + dotCA * bl;
-    return 2.0f * std::atan2(det, denom);
-}
 
 void voxelize_geometry(
     const std::vector<Triangle>& triangles,

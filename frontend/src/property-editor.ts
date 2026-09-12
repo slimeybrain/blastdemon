@@ -254,7 +254,7 @@ export class PropertyEditor {
 
             const memInfo = this.container.querySelector('#memory-info-display') as HTMLDivElement;
             if (memInfo) {
-                memInfo.innerHTML = getMemoryDisplayHTML(node);
+                memInfo.innerHTML = getMemoryDisplayHTML(node, state ?? undefined);
             }
 
 
@@ -562,7 +562,7 @@ export class PropertyEditor {
         }
 
         let memInfoDiv: HTMLDivElement | null = null;
-        const memHTML = getMemoryDisplayHTML(node);
+        const memHTML = getMemoryDisplayHTML(node, state ?? undefined);
         if (memHTML) {
             const info = document.createElement('div');
             info.id = 'memory-info-display';
@@ -706,6 +706,14 @@ export class PropertyEditor {
                             const prefix = isK ? 'k_' : 'stl_';
                             const simpleHash = prefix + rand.toString(36);
                             this.updateParameter('geometry_hash', simpleHash);
+                            if (!isK) {
+                                const net = (window as any).networkManager;
+                                if (net && net.isConnected()) {
+                                    const activeWs = this.stateManager.getActiveWorkspace();
+                                    const modelId = activeWs?.activeModelId || 'default';
+                                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: path, modelId });
+                                }
+                            }
                         }
                     });
                     browser.open(startPath);
@@ -718,6 +726,52 @@ export class PropertyEditor {
                 row.appendChild(input);
             }
             form.appendChild(row);
+
+            if (key === 'scale_z' && (node.type === 'STLGeometry' || (node.type === 'MPMObject3D' && node.parameters?.shape_type === 'STL'))) {
+                const presetRow = document.createElement('div');
+                presetRow.style.margin = '4px 0 10px 0';
+                presetRow.style.display = 'flex';
+                presetRow.style.alignItems = 'center';
+                presetRow.style.gap = '6px';
+                presetRow.style.flexWrap = 'wrap';
+
+                const presetLabel = document.createElement('span');
+                presetLabel.textContent = 'Scale Presets:';
+                presetLabel.style.fontSize = '11px';
+                presetLabel.style.color = '#888';
+                presetRow.appendChild(presetLabel);
+
+                const presets = [
+                    { label: 'mm → m (0.001)', scale: 0.001 },
+                    { label: 'cm → m (0.01)', scale: 0.01 },
+                    { label: 'in → m (0.0254)', scale: 0.0254 },
+                    { label: '1:1 (m)', scale: 1.0 }
+                ];
+
+                presets.forEach(p => {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.textContent = p.label;
+                    btn.style.padding = '2px 6px';
+                    btn.style.fontSize = '10px';
+                    btn.style.background = '#2a2d2e';
+                    btn.style.color = '#38bdf8';
+                    btn.style.border = '1px solid #444';
+                    btn.style.borderRadius = '3px';
+                    btn.style.cursor = 'pointer';
+                    btn.onclick = () => {
+                        this.updateParameter('scale_x', p.scale);
+                        this.updateParameter('scale_y', p.scale);
+                        this.updateParameter('scale_z', p.scale);
+                        ['scale_x', 'scale_y', 'scale_z'].forEach(k => {
+                            const inp = form.querySelector(`[data-key="${k}"]`) as HTMLInputElement;
+                            if (inp) inp.value = String(p.scale);
+                        });
+                    };
+                    presetRow.appendChild(btn);
+                });
+                form.appendChild(presetRow);
+            }
         }
         if (gridInfoDiv) {
             form.appendChild(gridInfoDiv);
@@ -1487,6 +1541,31 @@ export class PropertyEditor {
             const mpmCmapEl = this.createInputElement(node, 'mpmParticleColormap', node.parameters['mpmParticleColormap'] ?? 'rainbow');
             addRowToPanel('mpmParticleColormap', 'MPM PARTICLE COLORMAP', mpmCmapEl, 0);
 
+            const renderModeSelect = document.createElement('select');
+            renderModeSelect.style.width = '100%';
+            renderModeSelect.style.background = '#252526';
+            renderModeSelect.style.color = '#ccc';
+            renderModeSelect.style.border = '1px solid #444';
+            renderModeSelect.style.padding = '4px';
+            renderModeSelect.style.borderRadius = '3px';
+            renderModeSelect.style.fontSize = '11px';
+            const curMode = node.parameters['mpmParticleRenderMode'] || 'auto';
+            [
+                { value: 'auto', label: 'Auto (Hardware Points >100k / Spheres)' },
+                { value: 'points', label: 'Fast Hardware Points (10M+)' },
+                { value: 'spheres', label: 'Billboard Spheres' }
+            ].forEach(opt => {
+                const o = document.createElement('option');
+                o.value = opt.value;
+                o.textContent = opt.label;
+                o.selected = opt.value === curMode;
+                renderModeSelect.appendChild(o);
+            });
+            renderModeSelect.onchange = () => {
+                this.stateManager.updateNodeParametersInPlace(node.id, { mpmParticleRenderMode: renderModeSelect.value });
+            };
+            addRowToPanel('mpmParticleRenderMode', 'MPM RENDER MODE', renderModeSelect, 0);
+
             const mpmDiamWrap = document.createElement('div');
             mpmDiamWrap.style.display = 'flex';
             mpmDiamWrap.style.gap = '4px';
@@ -1906,26 +1985,29 @@ export class PropertyEditor {
             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+            'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
             // 3D CFD keys
             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
             'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
-            'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+            'detonator_x', 'detonator_y', 'detonator_z', 'trigger_x', 'trigger_y', 'trigger_z', 'xmin', 'ymin', 'zmin',
             'scale_factor',
             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'aoRadius', 'aoIntensity', 'aoBias', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-            'charge_opacity', 'detonators_size', 'detonator_size', 'detonators_opacity', 'detonator_opacity',
+            'charge_opacity', 'detonators_size', 'detonator_size', 'detonators_opacity', 'detonator_opacity', 'triggers_size', 'trigger_size', 'triggers_opacity', 'trigger_opacity',
             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length',
             'offset', 'stride',
             // MPM keys
             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'initial_velocity_x', 'initial_velocity_y', 'initial_velocity_z', 'initial_velocity_r', 'radius', 'inner_radius',
             'scale_x', 'scale_y', 'scale_z',
+            'rot_x', 'rot_y', 'rot_z',
+            'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
-            'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+            'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
             'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
@@ -2034,7 +2116,7 @@ export class PropertyEditor {
             'refresh_rate': ['0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0', '2.0', '5.0', '10.0', '20.0', '50.0', '100.0', '1000.0'],
             'ascii_delimiter': ['Comma', 'Tab', 'Space'],
             'vtk_format': ['ASCII', 'Binary', 'Compressed Binary'],
-            'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
+            'voxelization_method': node.type === 'MPMObject3D' ? ['watertight_raycast', 'winding_number'] : ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
             'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
             'transfer_scheme': (node.type === 'Material') ? 
                 ['Default', 'BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'] : 
@@ -2045,6 +2127,7 @@ export class PropertyEditor {
             'smooth_plastic_strain': ['Enabled', 'Disabled'],
             'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
             'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
+            'origin_mode': ['CAD Origin', 'Center'],
             'anisotropy_axis': ['X', 'Y', 'Z', 'Custom'],
             'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
                 ['Leapfrog', 'RK2', 'USL', 'USF'] : 
@@ -2097,7 +2180,7 @@ export class PropertyEditor {
             return select;
         }
 
-        if (key === 'target_domain' && (node.type === 'DetonatorLocation3D' || node.type === 'DetonatorLocation')) {
+        if (key === 'target_domain' && (node.type === 'DetonatorLocation3D' || node.type === 'DetonatorLocation' || node.type === 'TriggerLocation3D' || node.type === 'TriggerLocation')) {
             const select = document.createElement('select');
             select.style.width = '100%';
             select.style.background = '#252526';
@@ -2113,14 +2196,14 @@ export class PropertyEditor {
             const state = this.stateManager.getCurrentState();
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
             const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
-            const is3D = node.type === 'DetonatorLocation3D';
+            const is3D = node.type === 'DetonatorLocation3D' || node.type === 'TriggerLocation3D';
             const solverNodes = candidateNodes.filter(n => is3D 
                 ? (n.type === 'MPMDomain3D' || n.type === 'CFDSolver3D') 
                 : (n.type === 'MPMDomain2D' || n.type === 'CFDSolver2D'));
 
             let currentSolverId = '';
             if (state) {
-                const conn = state.connections.find(c => c.fromNode === node.id && c.toPort === 'detonator');
+                const conn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
                 if (conn) currentSolverId = conn.toNode;
             }
 
@@ -2227,11 +2310,13 @@ export class PropertyEditor {
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
             const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
             const is3D = node.type === 'MPMDomain3D' || node.type === 'CFDSolver3D';
-            const detNodes = candidateNodes.filter(n => is3D ? n.type === 'DetonatorLocation3D' : n.type === 'DetonatorLocation');
+            const detNodes = candidateNodes.filter(n => is3D 
+                ? (n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D') 
+                : (n.type === 'DetonatorLocation' || n.type === 'TriggerLocation'));
 
             let currentDetId = '';
             if (state) {
-                const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'detonator');
+                const conn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
                 if (conn) currentDetId = conn.fromNode;
             }
 
@@ -2246,7 +2331,7 @@ export class PropertyEditor {
             select.addEventListener('change', () => {
                 const newDetId = select.value;
                 if (state) {
-                    state.connections = state.connections.filter(c => !(c.toNode === node.id && c.toPort === 'detonator'));
+                    state.connections = state.connections.filter(c => !(c.toNode === node.id && (c.toPort === 'detonator' || c.toPort === 'trigger')));
                     if (newDetId) {
                         state.connections.push({
                             fromNode: newDetId,
@@ -3638,6 +3723,11 @@ export class PropertyEditor {
                     updates['material_type'] = 'Ideal Gas Charge';
                     updates['material_model'] = 'Ideal Gas Charge';
                     if (presetData.composition) updates['composition'] = presetData.composition;
+                } else if (presetData.category === 'Energetic Solids & Unreacted Explosives' ||
+                           presetData.category === 'CREST Reactive Burn Presets') {
+                    // Energetic solid presets must activate the CREST reactive burn model
+                    // so the backend detonation hotspot logic is triggered on INIT_MPM_3D
+                    updates['material_model'] = 'CREST Reactive Burn';
                 }
             }
         } else if (node.type === 'Material' && key === 'material_model') {
@@ -3683,6 +3773,15 @@ export class PropertyEditor {
                         Object.assign(updates, presetData);
                     }
                 }
+            }
+        } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && value === 'STL') || (key === 'origin_mode' && value === 'CAD Origin'))) {
+            if (key === 'shape_type' && value === 'STL') {
+                updates['origin_mode'] = node.parameters['origin_mode'] || 'CAD Origin';
+            }
+            if (Number(node.parameters['pos_x']) === 0.5 && Number(node.parameters['pos_y']) === 0.5 && Number(node.parameters['pos_z']) === 0.5) {
+                updates['pos_x'] = 0.0;
+                updates['pos_y'] = 0.0;
+                updates['pos_z'] = 0.0;
             }
         } else if (node.type === 'Material' && (key === 'atm_pressure' || key === 'atm_temperature')) {
             const p = Number(key === 'atm_pressure' ? value : (node.parameters['atm_pressure'] ?? 101325.0));

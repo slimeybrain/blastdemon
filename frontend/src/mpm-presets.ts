@@ -25,8 +25,7 @@ export interface MPMMaterialParams {
     transfer_scheme?: string;
     weibull_modulus?: number;
     weibull_scale?: number;
-    fracture_toughness?: number;
-    debris_bulk_factor?: number;
+    weibull_ref_volume?: number;
     T_melt: number;
     T_room: number;
     Cp: number;
@@ -261,23 +260,14 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         solverScope: 'MPM',
         tooltip: 'Dimensionless Weibull scale parameter adjusting the mean initial flaw strength distribution across MPM particles.'
     },
-    'fracture_toughness': {
-        key: 'fracture_toughness',
-        label: 'Dynamic Fracture Toughness (K_IC)',
-        shortDesc: 'Grady spallation toughness [MPM ONLY]',
-        unit: 'Pa·m^0.5',
+    'weibull_ref_volume': {
+        key: 'weibull_ref_volume',
+        label: 'Weibull Reference Volume (V_ref)',
+        shortDesc: 'Reference sample volume V_ref for flaw scaling [MPM ONLY]',
+        unit: 'm³',
         section: 'failure',
         solverScope: 'MPM',
-        tooltip: 'Dynamic Mode-I fracture toughness K_IC (Pa·m^0.5) used in Grady dynamic spallation model: sig_spall = (3*rho*c0*K_IC^2 * eps_dot)^(1/3).'
-    },
-    'debris_bulk_factor': {
-        key: 'debris_bulk_factor',
-        label: 'Post-Failure Bulk Modulus Factor',
-        shortDesc: 'Parent post-failure bulk stiffness ratio',
-        unit: 'dim',
-        section: 'failure',
-        solverScope: 'MPM',
-        tooltip: 'Fraction (0.0 to 1.0) of intact bulk modulus retained by failed/fragmented parent material under compressive re-compaction.'
+        tooltip: 'Reference sample volume V_ref (m³) at which Weibull flaw scale is calibrated. Scales local mean particle strength by (V_ref / V0)^(1 / m_w) to guarantee mesh-resolution independence.'
     },
     'enable_strain_erosion': {
         key: 'enable_strain_erosion',
@@ -1322,126 +1312,126 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Structural Steel (A36)': {
         density: 7850.0, youngs_modulus: 200.0e9, poissons_ratio: 0.26, yield_stress: 250.0e6, hardening_modulus: 1.0e9, failure_strain: 0.20, tensile_failure_stress: 400.0e6,
         jc_A: 250.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1793.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'ASTM A36 Standard / LLNL Explosives Handbook'
     },
     'Steel S275': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 275.0e6, hardening_modulus: 900.0e6, failure_strain: 0.23, tensile_failure_stress: 430.0e6,
         jc_A: 275.0e6, jc_B: 450.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'BS EN 10025-2 Standard Structural Steel'
     },
     'Steel S355': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 355.0e6, hardening_modulus: 1.0e9, failure_strain: 0.22, tensile_failure_stress: 510.0e6,
         jc_A: 355.0e6, jc_B: 480.0e6, jc_n: 0.27, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'EN 10025-2 European Standard Structural Steel'
     },
     'Steel S460': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 460.0e6, hardening_modulus: 1.1e9, failure_strain: 0.19, tensile_failure_stress: 600.0e6,
         jc_A: 460.0e6, jc_B: 520.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'EN 10025-3 High Yield Structural Steel'
     },
     'Steel 1006': {
         density: 7890.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 350.0e6, hardening_modulus: 800.0e6, failure_strain: 0.30, tensile_failure_stress: 450.0e6,
         jc_A: 350.0e6, jc_B: 275.0e6, jc_n: 0.36, jc_C: 0.022, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1811.0, T_room: 293.0, Cp: 452.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Bane & Johnson, J. Appl. Mech. (1985)'
     },
     'Steel 1020': {
         density: 7870.0, youngs_modulus: 200.0e9, poissons_ratio: 0.29, yield_stress: 330.0e6, hardening_modulus: 900.0e6, failure_strain: 0.28, tensile_failure_stress: 420.0e6,
         jc_A: 330.0e6, jc_B: 410.0e6, jc_n: 0.32, jc_C: 0.019, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1790.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'ASM Metals Handbook Vol. 1'
     },
     'Steel 4340': {
         density: 7830.0, youngs_modulus: 207.0e9, poissons_ratio: 0.29, yield_stress: 792.0e6, hardening_modulus: 1.2e9, failure_strain: 0.25, tensile_failure_stress: 1000.0e6,
         jc_A: 792.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 50.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics'
     },
     'Q1N (HY-80 Naval Steel)': {
         density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 550.0e6, hardening_modulus: 1.1e9, failure_strain: 0.22, tensile_failure_stress: 700.0e6,
         jc_A: 550.0e6, jc_B: 600.0e6, jc_n: 0.30, jc_C: 0.015, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 65.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'MIL-S-16216 Naval Submarine Armor Steel'
     },
     'HY-100 Steel': {
         density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 690.0e6, hardening_modulus: 1.2e9, failure_strain: 0.20, tensile_failure_stress: 820.0e6,
         jc_A: 690.0e6, jc_B: 650.0e6, jc_n: 0.28, jc_C: 0.015, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 75.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'MIL-S-16216 Submarine Pressure Hull Armor'
     },
     'RHA (Rolled Homogeneous Armor)': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 950.0e6, hardening_modulus: 1.3e9, failure_strain: 0.18, tensile_failure_stress: 1100.0e6,
         jc_A: 950.0e6, jc_B: 720.0e6, jc_n: 0.25, jc_C: 0.012, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 10.0, weibull_scale: 1.0, fracture_toughness: 90.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 10.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'MIL-A-12560 Armor Plate Benchmark'
     },
     'Armox 500T': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 1250.0e6, hardening_modulus: 1.5e9, failure_strain: 0.15, tensile_failure_stress: 1600.0e6,
         jc_A: 1250.0e6, jc_B: 840.0e6, jc_n: 0.26, jc_C: 0.005, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.0, weibull_scale: 1.0, fracture_toughness: 80.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Borvik et al., Int. J. Impact Eng. (2009)'
     },
     'Armox 600T': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 1650.0e6, hardening_modulus: 1.8e9, failure_strain: 0.10, tensile_failure_stress: 2000.0e6,
         jc_A: 1650.0e6, jc_B: 950.0e6, jc_n: 0.20, jc_C: 0.005, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 8.5, weibull_scale: 1.0, fracture_toughness: 70.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 8.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'SSAB Armox Ultra-High Hardness Armor'
     },
     'Weldox 700E': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 700.0e6, hardening_modulus: 1.2e9, failure_strain: 0.16, tensile_failure_stress: 800.0e6,
         jc_A: 700.0e6, jc_B: 560.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 60.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Borvik et al., Eur. J. Mech. A (2001)'
     },
     'Weldox 900E': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 900.0e6, hardening_modulus: 1.4e9, failure_strain: 0.14, tensile_failure_stress: 1000.0e6,
         jc_A: 900.0e6, jc_B: 620.0e6, jc_n: 0.24, jc_C: 0.012, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
-        weibull_modulus: 9.5, weibull_scale: 1.0, fracture_toughness: 55.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Dey et al., Int. J. Solids Struct. (2004)'
     },
     'Stainless Steel 304': {
         density: 7900.0, youngs_modulus: 193.0e9, poissons_ratio: 0.29, yield_stress: 310.0e6, hardening_modulus: 1.0e9, failure_strain: 0.40, tensile_failure_stress: 620.0e6,
         jc_A: 310.0e6, jc_B: 1000.0e6, jc_n: 0.65, jc_C: 0.070, jc_m: 1.00, jc_d1: 0.10, jc_d2: 2.00, jc_d3: -1.50, jc_d4: 0.005, jc_d5: 1.00,
-        weibull_modulus: 11.0, weibull_scale: 1.0, fracture_toughness: 100.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 11.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1673.0, T_room: 293.0, Cp: 500.0, mg_gamma0: 1.93, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Lee et al., J. Mater. Process. Technol. (2002)'
     },
     'Stainless Steel 316L': {
         density: 7980.0, youngs_modulus: 193.0e9, poissons_ratio: 0.30, yield_stress: 290.0e6, hardening_modulus: 950.0e6, failure_strain: 0.45, tensile_failure_stress: 580.0e6,
         jc_A: 290.0e6, jc_B: 940.0e6, jc_n: 0.61, jc_C: 0.065, jc_m: 1.00, jc_d1: 0.10, jc_d2: 2.00, jc_d3: -1.50, jc_d4: 0.005, jc_d5: 1.00,
-        weibull_modulus: 11.0, weibull_scale: 1.0, fracture_toughness: 110.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 11.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1650.0, T_room: 293.0, Cp: 500.0, mg_gamma0: 1.93, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'Follansbee & Kocks, Acta Metall. (1988)'
     },
     'Tool Steel D2': {
         density: 7700.0, youngs_modulus: 210.0e9, poissons_ratio: 0.28, yield_stress: 1600.0e6, hardening_modulus: 2.0e9, failure_strain: 0.10, tensile_failure_stress: 1900.0e6,
         jc_A: 1600.0e6, jc_B: 900.0e6, jc_n: 0.20, jc_C: 0.010, jc_m: 1.00, jc_d1: 0.02, jc_d2: 1.50, jc_d3: -1.00, jc_d4: 0.001, jc_d5: 0.50,
-        weibull_modulus: 7.0, weibull_scale: 1.0, fracture_toughness: 25.0e6, debris_bulk_factor: 0.15, transfer_scheme: 'BSpline',
+        weibull_modulus: 7.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1690.0, T_room: 293.0, Cp: 460.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'ASM Specialty Handbook: Tool Materials'
     },
     'Aluminum 6061-T6': {
         density: 2700.0, youngs_modulus: 68.9e9, poissons_ratio: 0.33, yield_stress: 324.0e6, hardening_modulus: 400.0e6, failure_strain: 0.17, tensile_failure_stress: 310.0e6,
         jc_A: 324.0e6, jc_B: 114.0e6, jc_n: 0.42, jc_C: 0.002, jc_m: 1.34, jc_d1: 0.07, jc_d2: 1.25, jc_d3: -1.50, jc_d4: 0.005, jc_d5: 1.60,
-        weibull_modulus: 8.0, weibull_scale: 1.0, fracture_toughness: 29.0e6, debris_bulk_factor: 0.12, transfer_scheme: 'BSpline',
+        weibull_modulus: 8.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 925.0, T_room: 293.0, Cp: 896.0, mg_gamma0: 1.97, mg_c0: 5240.0, mg_s: 1.40,
         category: 'Light Alloys & Refractory Metals', reference: 'Lesuer, LLNL Report UCRL-ID-138054 (2000)'
     },

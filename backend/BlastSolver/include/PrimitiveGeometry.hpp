@@ -287,4 +287,101 @@ inline std::vector<Triangle> generate_primitives_triangles(const nlohmann::json&
     return triangles;
 }
 
+inline Point3D rotate_point_euler(float u, float v, float w, float ax_deg, float ay_deg, float az_deg) {
+    if (ax_deg == 0.0f && ay_deg == 0.0f && az_deg == 0.0f) {
+        return { u, v, w };
+    }
+    constexpr float deg_to_rad = 3.14159265358979323846f / 180.0f;
+    float ax = ax_deg * deg_to_rad;
+    float ay = ay_deg * deg_to_rad;
+    float az = az_deg * deg_to_rad;
+
+    float cx = std::cos(ax), sx = std::sin(ax);
+    float cy = std::cos(ay), sy = std::sin(ay);
+    float cz = std::cos(az), sz = std::sin(az);
+
+    // Step 1: Rotate by +ax around X
+    float u1 = u;
+    float v1 = cx * v - sx * w;
+    float w1 = sx * v + cx * w;
+
+    // Step 2: Rotate by +ay around Y
+    float u2 = cy * u1 + sy * w1;
+    float v2 = v1;
+    float w2 = -sy * u1 + cy * w1;
+
+    // Step 3: Rotate by +az around Z
+    float u_rot = cz * u2 - sz * v2;
+    float v_rot = sz * u2 + cz * v2;
+    float w_rot = w2;
+
+    return { u_rot, v_rot, w_rot };
+}
+
+inline std::vector<Triangle> transform_triangles(
+    const std::vector<Triangle>& raw_triangles,
+    float scale_x, float scale_y, float scale_z,
+    float pos_x, float pos_y, float pos_z,
+    float rot_x, float rot_y, float rot_z,
+    const std::string& origin_mode)
+{
+    if (raw_triangles.empty()) return {};
+
+    if (scale_x == 0.0f) scale_x = 1.0f;
+    if (scale_y == 0.0f) scale_y = 1.0f;
+    if (scale_z == 0.0f) scale_z = 1.0f;
+
+    float anchor_x = 0.0f, anchor_y = 0.0f, anchor_z = 0.0f;
+    if (origin_mode == "Center") {
+        float raw_min_x = 1.0e30f, raw_max_x = -1.0e30f;
+        float raw_min_y = 1.0e30f, raw_max_y = -1.0e30f;
+        float raw_min_z = 1.0e30f, raw_max_z = -1.0e30f;
+        for (const auto& tri : raw_triangles) {
+            raw_min_x = std::min({raw_min_x, tri.v0.x, tri.v1.x, tri.v2.x});
+            raw_max_x = std::max({raw_max_x, tri.v0.x, tri.v1.x, tri.v2.x});
+            raw_min_y = std::min({raw_min_y, tri.v0.y, tri.v1.y, tri.v2.y});
+            raw_max_y = std::max({raw_max_y, tri.v0.y, tri.v1.y, tri.v2.y});
+            raw_min_z = std::min({raw_min_z, tri.v0.z, tri.v1.z, tri.v2.z});
+            raw_max_z = std::max({raw_max_z, tri.v0.z, tri.v1.z, tri.v2.z});
+        }
+        anchor_x = 0.5f * (raw_min_x + raw_max_x);
+        anchor_y = 0.5f * (raw_min_y + raw_max_y);
+        anchor_z = 0.5f * (raw_min_z + raw_max_z);
+    }
+
+    std::vector<Triangle> result;
+    result.reserve(raw_triangles.size());
+
+    auto transform_pt = [&](const Point3D& pt) -> Point3D {
+        float vx = (pt.x - anchor_x) * scale_x;
+        float vy = (pt.y - anchor_y) * scale_y;
+        float vz = (pt.z - anchor_z) * scale_z;
+        Point3D r = rotate_point_euler(vx, vy, vz, rot_x, rot_y, rot_z);
+        return { r.x + pos_x, r.y + pos_y, r.z + pos_z };
+    };
+
+    for (const auto& tri : raw_triangles) {
+        Triangle t;
+        t.v0 = transform_pt(tri.v0);
+        t.v1 = transform_pt(tri.v1);
+        t.v2 = transform_pt(tri.v2);
+
+        Point3D e1 = { t.v1.x - t.v0.x, t.v1.y - t.v0.y, t.v1.z - t.v0.z };
+        Point3D e2 = { t.v2.x - t.v0.x, t.v2.y - t.v0.y, t.v2.z - t.v0.z };
+        Point3D n = {
+            e1.y * e2.z - e1.z * e2.y,
+            e1.z * e2.x - e1.x * e2.z,
+            e1.x * e2.y - e1.y * e2.x
+        };
+        float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (len > 1.0e-12f) {
+            t.normal = { n.x / len, n.y / len, n.z / len };
+        } else {
+            t.normal = tri.normal;
+        }
+        result.push_back(t);
+    }
+    return result;
+}
+
 #endif // PRIMITIVE_GEOMETRY_HPP

@@ -340,6 +340,7 @@ export class TransportController {
                 case 'stl': updates.show_stl = nextActive; break;
                 case 'obstacles': updates.show_obstacles = nextActive; break;
                 case 'gauges': updates.show_gauges = nextActive; break;
+                case 'lighting': updates.lightingEnabled = nextActive; break;
             }
             if (Object.keys(updates).length > 0) {
                 this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
@@ -1258,6 +1259,7 @@ export class TransportController {
             const p = parseFloat(sliceSlider.value);
             this.sliceOffsetPercent = Math.round(p * 100);
             numBox.value = p.toFixed(quickDecimals);
+            this.activeSlicePlane = activeAxis as ('xy' | 'xz' | 'yz');
             this.onSliceToggle?.(this.activeSlicePlane, this.sliceEnabled, p);
         });
 
@@ -1266,6 +1268,7 @@ export class TransportController {
             if (!isNaN(p)) {
                 sliceSlider.value = String(p);
                 this.sliceOffsetPercent = Math.round(p * 100);
+                this.activeSlicePlane = activeAxis as ('xy' | 'xz' | 'yz');
                 this.onSliceToggle?.(this.activeSlicePlane, this.sliceEnabled, p);
             }
         };
@@ -2471,7 +2474,7 @@ export class TransportController {
         }
 
         // 7. Check if Charge
-        if (['Charge3D', 'Charge2D', 'Charge1D', 'ExplosiveMaterial', 'DetonatorLocation3D'].includes(objType)) {
+        if (['Charge3D', 'Charge2D', 'Charge1D', 'ExplosiveMaterial', 'DetonatorLocation3D', 'DetonatorLocation', 'TriggerLocation3D', 'TriggerLocation'].includes(objType)) {
             return {
                 targetType: 'charge',
                 targetLabel: selectedNode?.parameters?.name || this.selectedObject?.label || 'Charge',
@@ -4211,7 +4214,7 @@ export class TransportController {
                             nodeId: node.id,
                             label: node.parameters?.name || 'Virtual Gauges'
                         };
-                    } else if (['Charge3D', 'Charge2D', 'ExplosiveMaterial', 'DetonatorLocation3D'].includes(node.type)) {
+                    } else if (['Charge3D', 'Charge2D', 'ExplosiveMaterial', 'DetonatorLocation3D', 'DetonatorLocation', 'TriggerLocation3D', 'TriggerLocation'].includes(node.type)) {
                         this.selectedObject = {
                             objectType: 'Charge3D',
                             nodeId: node.id,

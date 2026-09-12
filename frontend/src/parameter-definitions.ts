@@ -633,6 +633,46 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Cartesian Y coordinate of detonation point',
         detailedDesc: 'Y-coordinate (m) of detonation point source in 3D Cartesian space.'
     },
+    'trigger_r': {
+        key: 'trigger_r',
+        label: 'Trigger R Position',
+        unit: 'm',
+        category: 'Trigger',
+        shortDesc: 'Radial coordinate of trigger initiation',
+        detailedDesc: 'Radial position (m) in 2D r-z space where high-explosive ignition kernel is seeded.'
+    },
+    'trigger_z': {
+        key: 'trigger_z',
+        label: 'Trigger Z Position',
+        unit: 'm',
+        category: 'Trigger',
+        shortDesc: 'Axial / Cartesian Z coordinate of trigger initiation',
+        detailedDesc: 'Z coordinate (m) where high-explosive ignition kernel is seeded.'
+    },
+    'trigger_radius': {
+        key: 'trigger_radius',
+        label: 'Trigger Kernel Radius',
+        unit: 'm',
+        category: 'Trigger',
+        shortDesc: 'Radius of initial trigger hotspot',
+        detailedDesc: 'Initial hot-spot ignition radius (m). Establishes a compact fully initiated core (lambda = 1.0, s_shock = 1.5 * s_threshold) that launches a sharp shock wave into unreacted material.'
+    },
+    'trigger_x': {
+        key: 'trigger_x',
+        label: 'Trigger X Position',
+        unit: 'm',
+        category: 'Trigger',
+        shortDesc: 'Cartesian X coordinate of trigger point',
+        detailedDesc: 'X coordinate (m) of trigger point source in 3D Cartesian space.'
+    },
+    'trigger_y': {
+        key: 'trigger_y',
+        label: 'Trigger Y Position',
+        unit: 'm',
+        category: 'Trigger',
+        shortDesc: 'Cartesian Y coordinate of trigger point',
+        detailedDesc: 'Y coordinate (m) of trigger point source in 3D Cartesian space.'
+    },
     'target_domain': {
         key: 'target_domain',
         label: 'Target Domain / Solver',
@@ -733,8 +773,63 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         key: 'voxelization_method',
         label: 'Voxelization Algorithm',
         category: 'Boundary Geometry',
-        shortDesc: 'Algorithm for rasterizing 3D solid triangles into grid',
-        detailedDesc: 'watertight_floodfill (fastest, seed-point raycast + 3D flood fill for closed manifolds), watertight_raycast (3-axis Jordan parity raycasting), thin_shell (surface shell triangles only without interior fill), or winding_number (hierarchical solid angle evaluation for open/dirty CAD meshes).'
+        shortDesc: 'Algorithm for rasterizing 3D solid triangles into grid or MPM particles',
+        detailedDesc: 'watertight_floodfill (fastest, seed-point raycast + 3D flood fill for closed manifolds), watertight_raycast (hardened Jordan parity raycasting with edge deduplication & leak clamping), thin_shell (surface shell triangles only without interior fill), or winding_number (hierarchical solid angle evaluation for open/dirty CAD meshes; available for both Eulerian CFD and MPM solid particles).'
+    },
+    'origin_mode': {
+        key: 'origin_mode',
+        label: 'Transform Origin Reference',
+        category: 'Boundary Geometry',
+        shortDesc: 'Coordinate origin anchor point for scaling, rotation, and assembly alignment',
+        detailedDesc: 'Specifies the spatial coordinate reference point for geometry scaling, rotation, and positioning: "CAD Origin" (default & recommended for assemblies) anchors transforms at the imported CAD (0, 0, 0) file coordinates, scaling and rotating about that origin so multiple STLs exported from a shared assembly maintain perfect relative positioning and scale uniformly into the model domain; "Center" shifts the geometry anchor to its local bounding box centroid before scaling and rotation, placing its centroid at (pos_x, pos_y, pos_z).'
+    },
+    'scale_x': {
+        key: 'scale_x',
+        label: 'Scale Factor X (S_x)',
+        unit: '×',
+        category: 'Boundary Geometry',
+        shortDesc: 'Geometric scaling factor along X-axis',
+        detailedDesc: 'Dimensionless scaling multiplier applied to the geometry coordinates along the Cartesian X-axis (e.g. 0.001 to convert millimeters to meters, 0.0254 for inches to meters).'
+    },
+    'scale_y': {
+        key: 'scale_y',
+        label: 'Scale Factor Y (S_y)',
+        unit: '×',
+        category: 'Boundary Geometry',
+        shortDesc: 'Geometric scaling factor along Y-axis',
+        detailedDesc: 'Dimensionless scaling multiplier applied to the geometry coordinates along the Cartesian Y-axis.'
+    },
+    'scale_z': {
+        key: 'scale_z',
+        label: 'Scale Factor Z (S_z)',
+        unit: '×',
+        category: 'Boundary Geometry',
+        shortDesc: 'Geometric scaling factor along Z-axis',
+        detailedDesc: 'Dimensionless scaling multiplier applied to the geometry coordinates along the Cartesian Z-axis.'
+    },
+    'rot_x': {
+        key: 'rot_x',
+        label: 'Rotation X (Euler Roll)',
+        unit: 'deg',
+        category: 'Boundary Geometry',
+        shortDesc: 'Euler rotation angle around X-axis',
+        detailedDesc: 'Counter-clockwise rotation angle in degrees around the local X-axis.'
+    },
+    'rot_y': {
+        key: 'rot_y',
+        label: 'Rotation Y (Euler Pitch)',
+        unit: 'deg',
+        category: 'Boundary Geometry',
+        shortDesc: 'Euler rotation angle around Y-axis',
+        detailedDesc: 'Counter-clockwise rotation angle in degrees around the local Y-axis.'
+    },
+    'rot_z': {
+        key: 'rot_z',
+        label: 'Rotation Z (Euler Yaw)',
+        unit: 'deg',
+        category: 'Boundary Geometry',
+        shortDesc: 'Euler rotation angle around Z-axis',
+        detailedDesc: 'Counter-clockwise rotation angle in degrees around the local Z-axis.'
     },
 
     // --- MPM Continuum Particle Dynamics ---
@@ -1208,21 +1303,13 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Flaw scale eta_w (Recommended: 0.8-1.2, Default: 1.0)',
         detailedDesc: 'Dimensionless Weibull scale parameter eta_w adjusting the mean initial flaw strength distribution across MPM particles. Recommended value: 1.0 (baseline characteristic material strength).'
     },
-    'fracture_toughness': {
-        key: 'fracture_toughness',
-        label: 'Dynamic Fracture Toughness (K_IC)',
-        unit: 'Pa·m^0.5',
+    'weibull_ref_volume': {
+        key: 'weibull_ref_volume',
+        label: 'Weibull Reference Volume (V_ref)',
+        unit: 'm³',
         category: 'Material Heterogeneity & Fragmentation',
-        shortDesc: 'Mode-I toughness K_IC (Recommended: 3e6-140e6 Pa·√m)',
-        detailedDesc: 'Dynamic Mode-I fracture toughness K_IC (Pa·m^0.5). Used in Grady dynamic spallation model: sig_spall = (3*rho*c0*K_IC^2 * eps_dot)^(1/3). Recommended values: 3.0e6 Pa·m^0.5 for concrete/rock, 25.0e6 to 35.0e6 Pa·m^0.5 for aluminum alloys, 50.0e6 to 140.0e6 Pa·m^0.5 for armor steels. Set to 0.0 to disable Grady spallation.'
-    },
-    'debris_bulk_factor': {
-        key: 'debris_bulk_factor',
-        label: 'Post-Failure Bulk Modulus Factor',
-        unit: 'dim',
-        category: 'Material Heterogeneity & Fragmentation',
-        shortDesc: 'Parent material post-failure bulk stiffness ratio (Default: 0.10)',
-        detailedDesc: 'Dimensionless fraction (0.0 to 1.0) of intact bulk modulus retained by completely failed/fragmented parent material when subjected to hydrostatic re-compression (J < 1.0). In the unified parent material framework, particles preserve their parent EOS, density, and shock impedance while using this factor for crushed aggregate re-compaction.'
+        shortDesc: 'Reference sample volume V_ref (Recommended: 1.0e-6 m³)',
+        detailedDesc: 'Reference sample volume V_ref (m³) at which the characteristic Weibull scale parameter eta_w is calibrated. In statistical weakest-link theory, larger material volumes have a higher probability of containing fatal flaws, causing local characteristic strength to scale as (V_ref / V_p)^(1 / m_w). Accounting for local particle initial volume V_p ensures mesh-resolution independence under spatial refinement (dx and PPC).'
     },
     'T_melt': {
         key: 'T_melt',
@@ -1874,6 +1961,13 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Raytraced 3D particle sphere shading and self-shadowing',
         detailedDesc: 'Renders MPM particle billboards with raytraced spherical normals, view-space depth displacement, and curvature-based self-ambient occlusion.'
     },
+    'mpmParticleRenderMode': {
+        key: 'mpmParticleRenderMode',
+        label: 'MPM Particle Render Mode',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Rendering strategy for Material Point Method particles',
+        detailedDesc: 'Selects the visual representation for MPM particles in the 3D viewport. Auto automatically chooses fast hardware point-lists when particle counts exceed 100,000 or when viewed from axial camera angles to prevent quad billboard overdraw bottlenecks, and uses raytraced spherical billboards for smaller counts or oblique angles. Points renders ultra-fast single-pixel hardware point primitives for maximum performance up to millions of particles. Spheres forces instanced billboard spheres with curvature depth testing and raytraced lighting.'
+    },
     'mpmParticleDiameter': {
         key: 'mpmParticleDiameter',
         label: 'MPM Particle Diameter',
@@ -2233,14 +2327,14 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'Show Detonator Points',
         category: '3D Viewport Rendering',
         shortDesc: 'Toggles visibility of point ignition / detonator locations',
-        detailedDesc: 'Controls rendering of 3D diamond octahedron detonator markers across the computational domain.'
+        detailedDesc: 'Controls rendering of 3D spherical detonator markers across the computational domain.'
     },
     'detonators_solid': {
         key: 'detonators_solid',
         label: 'Detonator Solid Core',
         category: '3D Viewport Rendering',
         shortDesc: 'Renders solid shaded core for detonator locations',
-        detailedDesc: 'Enables solid diamond faceted marker rendering for detonator initiation points.'
+        detailedDesc: 'Enables solid spherical marker rendering for detonator initiation points.'
     },
     'detonators_wireframe': {
         key: 'detonators_wireframe',
@@ -2731,6 +2825,56 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         `
     },
 
+    'TriggerLocation': {
+        type: 'TriggerLocation',
+        title: '2D Trigger Point Location',
+        category: '2D Axisymmetric CFD',
+        shortDesc: 'Specifies spatial point source coordinates and hotspot radius for 2D trigger initiation.',
+        fullDescHtml: `
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Overview & Role</div>
+                <p>The <strong>TriggerLocation</strong> node establishes the initiation point in 2D space (r, z) where detonation begins. Seeds the initial compact hot-spot radius to trigger self-sustaining Chapman-Jouguet detonation wave expansion.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <p>Standalone spatial trigger node requiring no upstream connections.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Downstream Connections</div>
+                <ul>
+                    <li><strong>Trigger Spec (trigger):</strong> Connects to <code>CFDSolver2D</code> or <code>MPMDomain2D</code> to supply trigger coordinates.</li>
+                </ul>
+            </div>
+        `
+    },
+
+    'TriggerLocation3D': {
+        type: 'TriggerLocation3D',
+        title: '3D Trigger Point Location',
+        category: 'Point Detonator & Ignition',
+        shortDesc: 'Specifies 3D Cartesian coordinates (x,y,z) and compact hotspot radius for explosive initiation in CFD and MPM solvers.',
+        fullDescHtml: `
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Overview & Role</div>
+                <p>The <strong>TriggerLocation3D</strong> node defines the exact 3D Cartesian point (x, y, z) and initiation radius for point-source explosive initiation across both Eulerian CFD and Lagrangian MPM simulation pipelines:</p>
+                <ul>
+                    <li><strong>3D CFD Solvers (Eulerian):</strong> Seeds initial high-temperature, high-pressure CJ detonation gas kernels in multi-material JWL or ideal gas blast hydrodynamics.</li>
+                    <li><strong>3D MPM Solvers (Lagrangian):</strong> Provides compact hot-spot point ignition for energetic solid materials configured with the <strong>CREST Reactive Burn + Davis EOS</strong> constitutive model. Particles within the trigger core (dist &le; trigger_radius) receive shock entropy seeding (s_shock &ge; 1.5 &times; s_threshold), full reaction progress (&lambda; = 1.0), and specific internal energy (e_int = q_det), launching a high-pressure compression wave into adjacent unreacted explosive material to drive sustained shock-to-detonation transition (SDT).</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <p>This node is a standalone spatial source node and does not require upstream inputs.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Downstream Connections</div>
+                <ul>
+                    <li><strong>Trigger Spec (trigger):</strong> Connects to the <code>detonator</code> / <code>trigger</code> input port of <code>CFDSolver3D</code> or <code>MPMDomain3D</code>.</li>
+                </ul>
+            </div>
+        `
+    },
+
     'RemapNode': {
         type: 'RemapNode',
         title: 'Solution Remapper (1D → 2D)',
@@ -3149,7 +3293,8 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
     if (nodeType === 'CFDSolver' || nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver3D' || 
         nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || nodeType === 'DomainMesh3D' || 
         nodeType === 'Charge1D' || nodeType === 'Charge2D' || nodeType === 'Charge3D' || 
-        nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D') {
+        nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D' ||
+        nodeType === 'TriggerLocation' || nodeType === 'TriggerLocation3D') {
         return 'FV';
     }
     if (nodeType === 'FSICoupler2D' || nodeType === 'FSICoupler3D') {
@@ -3161,7 +3306,7 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
 
     // Material parameters key-based mapping
     const mpmOnlyKeys = [
-        'transfer_scheme', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor'
+        'transfer_scheme', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume'
     ];
     if (mpmOnlyKeys.includes(key)) return 'MPM';
 
@@ -3480,7 +3625,7 @@ export function getParamKeysForNode(
                 'material_model', 'preset', 'transfer_scheme',
                 'density', 'youngs_modulus', 'poissons_ratio',
                 'tensile_failure_stress',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
@@ -3495,7 +3640,7 @@ export function getParamKeysForNode(
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else if (matModel === 'CREST Reactive Burn') {
@@ -3507,7 +3652,7 @@ export function getParamKeysForNode(
                 'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
                 'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
                 'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else if (matModel === 'RHT Concrete') {
@@ -3522,7 +3667,7 @@ export function getParamKeysForNode(
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case') {
@@ -3536,7 +3681,7 @@ export function getParamKeysForNode(
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else if (matModel === 'CSCM Concrete') {
@@ -3550,7 +3695,7 @@ export function getParamKeysForNode(
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else {
@@ -3564,7 +3709,7 @@ export function getParamKeysForNode(
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         }
@@ -3585,8 +3730,12 @@ export function getParamKeysForNode(
         keys = ['material', 'charge_mass', 'charge_shape', 'charge_x', 'charge_y', 'charge_z', 'charge_radius', 'charge_height', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z'];
     } else if (nodeType === 'DetonatorLocation') {
         keys = ['target_domain', 'detonator_r', 'detonator_z', 'detonator_radius'];
+    } else if (nodeType === 'TriggerLocation') {
+        keys = ['target_domain', 'trigger_r', 'trigger_z', 'trigger_radius'];
     } else if (nodeType === 'DetonatorLocation3D') {
         keys = ['target_domain', 'detonator_x', 'detonator_y', 'detonator_z', 'detonator_radius'];
+    } else if (nodeType === 'TriggerLocation3D') {
+        keys = ['target_domain', 'trigger_x', 'trigger_y', 'trigger_z', 'trigger_radius'];
     } else if (nodeType === 'CFDSolver3D') {
         keys = ['device', 'precision', 'connected_detonators', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
     } else if (nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver') {
@@ -3598,7 +3747,7 @@ export function getParamKeysForNode(
     } else if (nodeType === 'MPMObject2D') {
         keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'];
     } else if (nodeType === 'MPMObject3D') {
-        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
+        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'voxelization_method', 'stl_file', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
     } else if (nodeType === 'FEMDomain3D') {
         keys = [
             'device', 'precision', 'cfl', 'endtime',
@@ -3631,7 +3780,7 @@ export function getParamKeysForNode(
             'roi_enabled', 'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
         ];
     } else if (nodeType === 'STLGeometry') {
-        keys = ['stl_file', 'scale_x', 'scale_y', 'scale_z', 'center_x', 'center_y', 'center_z', 'voxelization_method'];
+        keys = ['stl_file', 'voxelization_method', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z'];
     } else if (nodeType === 'LSDynaImporter3D') {
         keys = ['k_file', 'scale_factor'];
     } else if (nodeType === 'RemapNode' || nodeType === 'Remap1DTo2DNode' || nodeType === 'Remap1DTo3DNode' || nodeType === 'Remap2DTo3DNode') {
@@ -3673,7 +3822,7 @@ export function shouldSkipNodeParameter(
         if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
         if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
         if (key === 'nonlocal_radius' && !parameters['directional_crack_band']) return true;
-        if ((key === 'weibull_modulus' || key === 'weibull_scale' || key === 'fracture_toughness' || key === 'debris_bulk_factor') && !parameters['enable_heterogeneity']) return true;
+        if ((key === 'weibull_modulus' || key === 'weibull_scale' || key === 'weibull_ref_volume') && !parameters['enable_heterogeneity']) return true;
         if ((key === 'anisotropy_ratio' || key === 'anisotropy_axis' || key === 'anisotropy_dir_x' || key === 'anisotropy_dir_y' || key === 'anisotropy_dir_z') && !parameters['enable_anisotropy']) return true;
         if ((key === 'anisotropy_dir_x' || key === 'anisotropy_dir_y' || key === 'anisotropy_dir_z') && parameters['anisotropy_axis'] !== 'Custom') return true;
         if (['kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'].includes(key) && parameters['kc_auto_generate'] !== false) return true;
@@ -3698,11 +3847,11 @@ export function shouldSkipNodeParameter(
     } else if (nodeType === 'MPMObject3D') {
         const shape = parameters['shape_type'] || 'Box';
         if (shape === 'Box') {
-            if (['radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
+            if (['radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'origin_mode', 'voxelization_method'].includes(key)) return true;
         } else if (shape === 'Sphere') {
-            if (['size_x', 'size_y', 'size_z', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
+            if (['size_x', 'size_y', 'size_z', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'origin_mode', 'rot_x', 'rot_y', 'rot_z', 'voxelization_method'].includes(key)) return true;
         } else if (shape === 'Cylinder') {
-            if (['size_x', 'size_y', 'size_z', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
+            if (['size_x', 'size_y', 'size_z', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'origin_mode', 'voxelization_method'].includes(key)) return true;
         } else if (shape === 'STL') {
             if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height'].includes(key)) return true;
         }
@@ -3788,6 +3937,9 @@ export function getNodeSectionInfo(
     } else if (nodeType === 'MPMObject2D' || nodeType === 'MPMObject3D') {
         if (key === 'pos_x' || key === 'size_x' || key === 'radius' || key === 'stl_file') return { title: 'SPATIAL EXTENT & GEOMETRY', color: '#c084fc', defaultCollapsed: false };
         if (key === 'vel_x') return { title: 'INITIAL VELOCITY & MOTION', color: '#c084fc', defaultCollapsed: true };
+    } else if (nodeType === 'STLGeometry') {
+        if (key === 'stl_file') return { title: 'CAD FILE & VOXELIZATION', color: '#569cd6', defaultCollapsed: false };
+        if (key === 'origin_mode') return { title: 'TRANSFORM & ORIENTATION', color: '#c084fc', defaultCollapsed: false };
     } else if (nodeType === 'FEMDomain3D') {
         if (key === 'integration_scheme') return { title: 'ELEMENT FORMULATION', color: '#38bdf8', defaultCollapsed: false };
         if (key === 'enable_directional_crack_band') return { title: 'DAMAGE REGULARIZATION', color: '#38bdf8', defaultCollapsed: true };

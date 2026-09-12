@@ -79,7 +79,7 @@ export class GaugeManagerModal {
 
     private detectChargeLocation(): void {
         const chargeNode = this.model.nodes.find(n => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'Charge1D');
-        const detNode = this.model.nodes.find(n => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
+        const detNode = this.model.nodes.find(n => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
 
         if (chargeNode) {
             const p = chargeNode.parameters;
@@ -92,9 +92,9 @@ export class GaugeManagerModal {
             }
         } else if (detNode) {
             const p = detNode.parameters;
-            const cx = Number(p.det_x ?? p.x ?? 0.0);
-            const cy = Number(p.det_y ?? p.y ?? 0.0);
-            const cz = Number(p.det_z ?? p.z ?? 0.0);
+            const cx = Number(p.trigger_x ?? p.detonator_x ?? p.det_x ?? p.x ?? 0.0);
+            const cy = Number(p.trigger_y ?? p.detonator_y ?? p.det_y ?? p.y ?? 0.0);
+            const cz = Number(p.trigger_z ?? p.detonator_z ?? p.det_z ?? p.z ?? p.trigger_r ?? p.detonator_r ?? 0.0);
             this.chargeCenter = { x: cx, y: cy, z: cz };
         }
     }

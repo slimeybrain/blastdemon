@@ -9,7 +9,7 @@ static inline uint32_t floatToBits(float f) {
     return u;
 }
 
-static inline float computeWeibullFactor(float x, float y, float z, float weibull_modulus, float weibull_scale) {
+static inline float computeWeibullFactor(float x, float y, float z, float V0, float weibull_modulus, float weibull_scale, float weibull_ref_volume = 1.0e-6f) {
     if (weibull_modulus <= 0.001f) return 1.0f;
     uint32_t ix = floatToBits(x);
     uint32_t iy = floatToBits(y);
@@ -24,7 +24,13 @@ static inline float computeWeibullFactor(float x, float y, float z, float weibul
     float m_w = weibull_modulus;
     float eta_w = (weibull_scale > 0.001f) ? weibull_scale : 1.0f;
     float gamma_mean = std::tgamma(1.0f + 1.0f / m_w);
-    float w = (std::pow(-std::log(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w;
+
+    // Physically-consistent Weibull volume scaling: (V_ref / V0)^(1 / m_w)
+    float v_ref = (weibull_ref_volume > 1.0e-18f) ? weibull_ref_volume : 1.0e-6f;
+    float v_eff = (V0 > 1.0e-18f) ? V0 : v_ref;
+    float size_scale = std::pow(v_ref / v_eff, 1.0f / m_w);
+
+    float w = (std::pow(-std::log(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w * size_scale;
     return std::clamp(w, 0.10f, 3.0f);
 }
 
@@ -43,6 +49,16 @@ void MPMSolver3D::initializeGrid(int nx, int ny, int nz, float dx, float dy, flo
     m_zmin = zmin;
 
     m_grid.resize(static_cast<size_t>(m_nx) * m_ny * m_nz);
+    m_particles.clear();
+}
+
+void MPMSolver3D::setDomainGeometry(float dx, float dy, float dz, float xmin, float ymin, float zmin) {
+    m_dx = dx;
+    m_dy = dy;
+    m_dz = dz;
+    m_xmin = xmin;
+    m_ymin = ymin;
+    m_zmin = zmin;
     m_particles.clear();
 }
 
@@ -222,7 +238,7 @@ void MPMSolver3D::addBoxObject(int obj_id, float pos_x, float pos_y, float pos_z
                 p.object_id = obj_id;
                 p.transfer_scheme = mat.transfer_scheme;
                 if (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f) {
-                    p.weibull_factor = computeWeibullFactor(x, y, z, mat.weibull_modulus, mat.weibull_scale);
+                    p.weibull_factor = computeWeibullFactor(x, y, z, p.V0, mat.weibull_modulus, mat.weibull_scale, mat.weibull_ref_volume);
                 } else {
                     p.weibull_factor = 1.0f;
                 }
@@ -360,7 +376,7 @@ void MPMSolver3D::addSphereObject(int obj_id, float pos_x, float pos_y, float po
                 p.object_id = obj_id;
                 p.transfer_scheme = mat.transfer_scheme;
                 if (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f) {
-                    p.weibull_factor = computeWeibullFactor(final_x, final_y, final_z, mat.weibull_modulus, mat.weibull_scale);
+                    p.weibull_factor = computeWeibullFactor(final_x, final_y, final_z, p.V0, mat.weibull_modulus, mat.weibull_scale, mat.weibull_ref_volume);
                 } else {
                     p.weibull_factor = 1.0f;
                 }
@@ -503,7 +519,7 @@ void MPMSolver3D::addCylinderObject(int obj_id, float pos_x, float pos_y, float 
                 p.object_id = obj_id;
                 p.transfer_scheme = mat.transfer_scheme;
                 if (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f) {
-                    p.weibull_factor = computeWeibullFactor(final_x, final_y, final_z, mat.weibull_modulus, mat.weibull_scale);
+                    p.weibull_factor = computeWeibullFactor(final_x, final_y, final_z, p.V0, mat.weibull_modulus, mat.weibull_scale, mat.weibull_ref_volume);
                 } else {
                     p.weibull_factor = 1.0f;
                 }
@@ -524,7 +540,10 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
                               float yield_stress, float hardening, float failure_strain,
                               float tensile_failure_stress, int ppc,
                               MPMParticleDistribution particle_dist,
-                              MPMBoundaryFilling boundary_fill) {
+                              MPMBoundaryFilling boundary_fill,
+                              const std::string& voxelization_method,
+                              float rot_x, float rot_y, float rot_z,
+                              const std::string& origin_mode) {
     (void)boundary_fill;
     if (stl_filepath.empty()) return;
     std::vector<Triangle> raw_triangles;
@@ -540,24 +559,18 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
     if (scale_y <= 0.0f) scale_y = 1.0f;
     if (scale_z <= 0.0f) scale_z = 1.0f;
 
-    std::vector<Triangle> triangles = raw_triangles;
+    std::vector<Triangle> triangles = transform_triangles(
+        raw_triangles, scale_x, scale_y, scale_z,
+        pos_x, pos_y, pos_z,
+        rot_x, rot_y, rot_z,
+        origin_mode
+    );
+
     float min_x = 1.0e30f, max_x = -1.0e30f;
     float min_y = 1.0e30f, max_y = -1.0e30f;
     float min_z = 1.0e30f, max_z = -1.0e30f;
 
     for (auto& tri : triangles) {
-        tri.v0.x = tri.v0.x * scale_x + pos_x;
-        tri.v0.y = tri.v0.y * scale_y + pos_y;
-        tri.v0.z = tri.v0.z * scale_z + pos_z;
-
-        tri.v1.x = tri.v1.x * scale_x + pos_x;
-        tri.v1.y = tri.v1.y * scale_y + pos_y;
-        tri.v1.z = tri.v1.z * scale_z + pos_z;
-
-        tri.v2.x = tri.v2.x * scale_x + pos_x;
-        tri.v2.y = tri.v2.y * scale_y + pos_y;
-        tri.v2.z = tri.v2.z * scale_z + pos_z;
-
         min_x = std::min({min_x, tri.v0.x, tri.v1.x, tri.v2.x});
         max_x = std::max({max_x, tri.v0.x, tri.v1.x, tri.v2.x});
         min_y = std::min({min_y, tri.v0.y, tri.v1.y, tri.v2.y});
@@ -565,6 +578,10 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
         min_z = std::min({min_z, tri.v0.z, tri.v1.z, tri.v2.z});
         max_z = std::max({max_z, tri.v0.z, tri.v1.z, tri.v2.z});
     }
+
+    float final_center_x = 0.5f * (min_x + max_x);
+    float final_center_y = 0.5f * (min_y + max_y);
+    float final_center_z = 0.5f * (min_z + max_z);
 
     int particles_per_dim = static_cast<int>(std::round(std::cbrt(static_cast<float>(ppc))));
     if (particles_per_dim < 1) particles_per_dim = 2;
@@ -576,29 +593,6 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
 
     float p_vol = (particle_dist == MPMParticleDistribution::Hexagonal) ? ((p_spacing * p_spacing * p_spacing) / std::sqrt(2.0f)) : (p_dx * p_dy * p_dz);
     float p_mass = p_vol * density;
-
-    int ny_bins = std::max(1, static_cast<int>(std::ceil((max_y - min_y) / p_dy)));
-    int nz_bins = std::max(1, static_cast<int>(std::ceil((max_z - min_z) / p_dz)));
-    std::vector<std::vector<int>> yz_bins(ny_bins * nz_bins);
-
-    for (int i = 0; i < static_cast<int>(triangles.size()); ++i) {
-        const auto& tri = triangles[i];
-        float t_min_y = std::min({tri.v0.y, tri.v1.y, tri.v2.y});
-        float t_max_y = std::max({tri.v0.y, tri.v1.y, tri.v2.y});
-        float t_min_z = std::min({tri.v0.z, tri.v1.z, tri.v2.z});
-        float t_max_z = std::max({tri.v0.z, tri.v1.z, tri.v2.z});
-
-        int by0 = std::clamp(static_cast<int>(std::floor((t_min_y - min_y) / p_dy)), 0, ny_bins - 1);
-        int by1 = std::clamp(static_cast<int>(std::floor((t_max_y - min_y) / p_dy)), 0, ny_bins - 1);
-        int bz0 = std::clamp(static_cast<int>(std::floor((t_min_z - min_z) / p_dz)), 0, nz_bins - 1);
-        int bz1 = std::clamp(static_cast<int>(std::floor((t_max_z - min_z) / p_dz)), 0, nz_bins - 1);
-
-        for (int bz = bz0; bz <= bz1; ++bz) {
-            for (int by = by0; by <= by1; ++by) {
-                yz_bins[by + bz * ny_bins].push_back(i);
-            }
-        }
-    }
 
     if (obj_id >= static_cast<int>(m_material_tables.size())) {
         m_material_tables.resize(obj_id + 1);
@@ -616,91 +610,235 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
         mat.erosion_strain = failure_strain;
     }
 
-    std::cout << "[INFO] MPMSolver3D::addSTLObject loaded " << triangles.size() << " triangles. Sampling interior particles..." << std::endl;
+    std::cout << "[INFO] MPMSolver3D::addSTLObject loaded " << triangles.size() << " triangles. Sampling interior particles using method: "
+              << voxelization_method << "..." << std::endl;
     size_t particle_count_before = m_particles.size();
 
-    int layer_k = 0;
-    for (float z = min_z + 0.5f * p_dz; z < max_z; z += p_dz, ++layer_k) {
-        bool is_layer_b = (particle_dist == MPMParticleDistribution::Hexagonal && (layer_k % 2 == 1));
-        float y_layer_offset = is_layer_b ? (p_spacing / (2.0f * std::sqrt(3.0f))) : 0.0f;
-        int row_j = 0;
-        for (float y = min_y + 0.5f * p_dy + y_layer_offset; y < max_y; y += p_dy, ++row_j) {
-            float x_offset = 0.0f;
-            if (particle_dist == MPMParticleDistribution::Hexagonal) {
-                x_offset = ((row_j + (is_layer_b ? 1 : 0)) % 2 == 1) ? (0.5f * p_spacing) : 0.0f;
-            }
-            int by = std::clamp(static_cast<int>(std::floor((y - min_y) / p_dy)), 0, ny_bins - 1);
-            int bz = std::clamp(static_cast<int>(std::floor((z - min_z) / p_dz)), 0, nz_bins - 1);
-            const auto& candidate_indices = yz_bins[by + bz * ny_bins];
-            if (candidate_indices.empty()) continue;
+    auto createParticle = [&](float x, float y, float z) -> MPMParticle3D {
+        MPMParticle3D p{};
+        p.x[0] = x; p.x[1] = y; p.x[2] = z;
 
-            float y_ray = y + 1.234e-4f * p_dy;
-            float z_ray = z + 5.678e-4f * p_dz;
+        float rx = x - final_center_x;
+        float ry = y - final_center_y;
+        float rz = z - final_center_z;
 
-            Point3D O = { min_x - 1.0f * p_dx, y_ray, z_ray };
-            Point3D D = { 1.0f, 0.0f, 0.0f };
-            std::vector<float> intersects;
+        p.v[0] = vel_x + (angular_vel_y * rz - angular_vel_z * ry);
+        p.v[1] = vel_y + (angular_vel_z * rx - angular_vel_x * rz);
+        p.v[2] = vel_z + (angular_vel_x * ry - angular_vel_y * rx);
 
-            for (int idx : candidate_indices) {
-                const auto& tri = triangles[idx];
-                float t;
-                if (ray_triangle_intersect(O, D, tri.v0, tri.v1, tri.v2, t)) {
-                    intersects.push_back(O.x + t);
-                }
-            }
+        p.B[0][0] = 0.0f;             p.B[0][1] = -angular_vel_z; p.B[0][2] =  angular_vel_y;
+        p.B[1][0] =  angular_vel_z;   p.B[1][1] = 0.0f;           p.B[1][2] = -angular_vel_x;
+        p.B[2][0] = -angular_vel_y;   p.B[2][1] =  angular_vel_x; p.B[2][2] = 0.0f;
 
-            if (intersects.empty()) continue;
-            std::sort(intersects.begin(), intersects.end());
+        p.lp[0] = 0.5f * p_dx;
+        p.lp[1] = 0.5f * p_dy;
+        p.lp[2] = 0.5f * p_dz;
 
-            for (float x = min_x + 0.5f * p_dx + x_offset; x < max_x; x += p_dx) {
-                int count = 0;
-                for (float xi : intersects) {
-                    if (xi < x) count++;
-                    else break;
-                }
-                if (count % 2 == 1) {
-                    MPMParticle3D p{};
-                    p.x[0] = x; p.x[1] = y; p.x[2] = z;
+        p.m = p_mass;
+        p.V0 = p_vol;
+        p.V = p_vol;
 
-                    float rx = x - pos_x;
-                    float ry = y - pos_y;
-                    float rz = z - pos_z;
+        p.damage = 0.0f;
+        p.has_failed = false;
 
-                    p.v[0] = vel_x + (angular_vel_y * rz - angular_vel_z * ry);
-                    p.v[1] = vel_y + (angular_vel_z * rx - angular_vel_x * rz);
-                    p.v[2] = vel_z + (angular_vel_x * ry - angular_vel_y * rx);
+        p.sigma.zero();
 
-                    p.B[0][0] = 0.0f;             p.B[0][1] = -angular_vel_z; p.B[0][2] =  angular_vel_y;
-                    p.B[1][0] =  angular_vel_z;   p.B[1][1] = 0.0f;           p.B[1][2] = -angular_vel_x;
-                    p.B[2][0] = -angular_vel_y;   p.B[2][1] =  angular_vel_x; p.B[2][2] = 0.0f;
+        p.ep_bar = 0.0f;
+        p.object_id = obj_id;
+        const auto& mat_tbl = getMaterialTable(obj_id);
+        p.transfer_scheme = mat_tbl.transfer_scheme;
+        if (mat_tbl.enable_heterogeneity && mat_tbl.weibull_modulus > 0.001f) {
+            p.weibull_factor = computeWeibullFactor(x, y, z, p.V0, mat_tbl.weibull_modulus, mat_tbl.weibull_scale, mat_tbl.weibull_ref_volume);
+        } else {
+            p.weibull_factor = 1.0f;
+        }
+        return p;
+    };
 
-                    p.lp[0] = 0.5f * p_dx;
-                    p.lp[1] = 0.5f * p_dy;
-                    p.lp[2] = 0.5f * p_dz;
+    if (voxelization_method == "winding_number") {
+        int nz_steps = std::max(1, static_cast<int>(std::ceil((max_z - min_z) / p_dz)));
+        int ny_steps = std::max(1, static_cast<int>(std::ceil((max_y - min_y) / p_dy)));
 
-                    p.m = p_mass;
-                    p.V0 = p_vol;
-                    p.V = p_vol;
+        std::vector<MPMParticle3D> new_particles;
+        #pragma omp parallel
+        {
+            std::vector<MPMParticle3D> local_particles;
+            #pragma omp for schedule(dynamic)
+            for (int layer_k = 0; layer_k < nz_steps; ++layer_k) {
+                float z = min_z + (layer_k + 0.5f) * p_dz;
+                if (z >= max_z) continue;
+                bool is_layer_b = (particle_dist == MPMParticleDistribution::Hexagonal && (layer_k % 2 == 1));
+                float y_layer_offset = is_layer_b ? (p_spacing / (2.0f * std::sqrt(3.0f))) : 0.0f;
 
-                    p.damage = 0.0f;
-                    p.has_failed = false;
-
-                    p.sigma.zero();
-
-                    p.ep_bar = 0.0f;
-                    p.object_id = obj_id;
-                    const auto& mat = getMaterialTable(obj_id);
-                    p.transfer_scheme = mat.transfer_scheme;
-                    if (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f) {
-                        p.weibull_factor = computeWeibullFactor(x, y, z, mat.weibull_modulus, mat.weibull_scale);
-                    } else {
-                        p.weibull_factor = 1.0f;
+                for (int row_j = 0; row_j < ny_steps; ++row_j) {
+                    float y = min_y + (row_j + 0.5f) * p_dy + y_layer_offset;
+                    if (y >= max_y) continue;
+                    float x_offset = 0.0f;
+                    if (particle_dist == MPMParticleDistribution::Hexagonal) {
+                        x_offset = ((row_j + (is_layer_b ? 1 : 0)) % 2 == 1) ? (0.5f * p_spacing) : 0.0f;
                     }
 
-                    m_particles.push_back(p);
+                    for (float x = min_x + 0.5f * p_dx + x_offset; x < max_x; x += p_dx) {
+                        Point3D P = { x, y, z };
+                        float sum_solid_angle = 0.0f;
+                        for (const auto& tri : triangles) {
+                            sum_solid_angle += signed_solid_angle(P, tri.v0, tri.v1, tri.v2);
+                        }
+                        float w = sum_solid_angle / (4.0f * static_cast<float>(M_PI));
+                        if (std::abs(w) > 0.5f) {
+                            local_particles.push_back(createParticle(x, y, z));
+                        }
+                    }
+                }
+            }
+            #pragma omp critical
+            {
+                new_particles.insert(new_particles.end(), local_particles.begin(), local_particles.end());
+            }
+        }
+        m_particles.insert(m_particles.end(), new_particles.begin(), new_particles.end());
+    } else {
+        // Hardened 1D Ray-Casting: 3x3 halo candidate lookup, epsilon clustering, secondary perturbed ray fallback, and paired interval clamping
+        int ny_bins = std::max(1, static_cast<int>(std::ceil((max_y - min_y) / p_dy)));
+        int nz_bins = std::max(1, static_cast<int>(std::ceil((max_z - min_z) / p_dz)));
+        std::vector<std::vector<int>> yz_bins(ny_bins * nz_bins);
+
+        for (int i = 0; i < static_cast<int>(triangles.size()); ++i) {
+            const auto& tri = triangles[i];
+            float t_min_y = std::min({tri.v0.y, tri.v1.y, tri.v2.y});
+            float t_max_y = std::max({tri.v0.y, tri.v1.y, tri.v2.y});
+            float t_min_z = std::min({tri.v0.z, tri.v1.z, tri.v2.z});
+            float t_max_z = std::max({tri.v0.z, tri.v1.z, tri.v2.z});
+
+            int by0 = std::clamp(static_cast<int>(std::floor((t_min_y - min_y) / p_dy)), 0, ny_bins - 1);
+            int by1 = std::clamp(static_cast<int>(std::floor((t_max_y - min_y) / p_dy)), 0, ny_bins - 1);
+            int bz0 = std::clamp(static_cast<int>(std::floor((t_min_z - min_z) / p_dz)), 0, nz_bins - 1);
+            int bz1 = std::clamp(static_cast<int>(std::floor((t_max_z - min_z) / p_dz)), 0, nz_bins - 1);
+
+            for (int bz = bz0; bz <= bz1; ++bz) {
+                for (int by = by0; by <= by1; ++by) {
+                    yz_bins[by + bz * ny_bins].push_back(i);
                 }
             }
         }
+
+        int nz_steps = std::max(1, static_cast<int>(std::ceil((max_z - min_z) / p_dz)));
+        int ny_steps = std::max(1, static_cast<int>(std::ceil((max_y - min_y) / p_dy)));
+
+        std::vector<MPMParticle3D> new_particles;
+        #pragma omp parallel
+        {
+            std::vector<MPMParticle3D> local_particles;
+            #pragma omp for schedule(dynamic)
+            for (int layer_k = 0; layer_k < nz_steps; ++layer_k) {
+                float z = min_z + (layer_k + 0.5f) * p_dz;
+                if (z >= max_z) continue;
+                bool is_layer_b = (particle_dist == MPMParticleDistribution::Hexagonal && (layer_k % 2 == 1));
+                float y_layer_offset = is_layer_b ? (p_spacing / (2.0f * std::sqrt(3.0f))) : 0.0f;
+
+                for (int row_j = 0; row_j < ny_steps; ++row_j) {
+                    float y = min_y + (row_j + 0.5f) * p_dy + y_layer_offset;
+                    if (y >= max_y) continue;
+                    float x_offset = 0.0f;
+                    if (particle_dist == MPMParticleDistribution::Hexagonal) {
+                        x_offset = ((row_j + (is_layer_b ? 1 : 0)) % 2 == 1) ? (0.5f * p_spacing) : 0.0f;
+                    }
+
+                    int by = std::clamp(static_cast<int>(std::floor((y - min_y) / p_dy)), 0, ny_bins - 1);
+                    int bz = std::clamp(static_cast<int>(std::floor((z - min_z) / p_dz)), 0, nz_bins - 1);
+
+                    // Collect candidates from a 3x3 halo neighborhood around (by, bz) to prevent missing boundary triangles
+                    std::vector<int> candidate_indices;
+                    int by_start = std::max(0, by - 1);
+                    int by_end = std::min(ny_bins - 1, by + 1);
+                    int bz_start = std::max(0, bz - 1);
+                    int bz_end = std::min(nz_bins - 1, bz + 1);
+
+                    for (int cbz = bz_start; cbz <= bz_end; ++cbz) {
+                        for (int cby = by_start; cby <= by_end; ++cby) {
+                            const auto& bin_tris = yz_bins[cby + cbz * ny_bins];
+                            candidate_indices.insert(candidate_indices.end(), bin_tris.begin(), bin_tris.end());
+                        }
+                    }
+
+                    if (candidate_indices.empty()) continue;
+                    std::sort(candidate_indices.begin(), candidate_indices.end());
+                    candidate_indices.erase(std::unique(candidate_indices.begin(), candidate_indices.end()), candidate_indices.end());
+
+                    auto traceRay = [&](float y_pos, float z_pos, std::vector<float>& out_intersects) {
+                        out_intersects.clear();
+                        Point3D O = { min_x - 1.0f * p_dx, y_pos, z_pos };
+                        Point3D D = { 1.0f, 0.0f, 0.0f };
+                        for (int idx : candidate_indices) {
+                            const auto& tri = triangles[idx];
+                            float t;
+                            if (ray_triangle_intersect(O, D, tri.v0, tri.v1, tri.v2, t)) {
+                                if (t >= 0.0f) {
+                                    out_intersects.push_back(O.x + t);
+                                }
+                            }
+                        }
+                        if (out_intersects.empty()) return;
+                        std::sort(out_intersects.begin(), out_intersects.end());
+
+                        // Epsilon clustering to merge near-duplicate hits from shared edges and vertices
+                        std::vector<float> clustered;
+                        const float eps_merge = 1e-4f * p_dx;
+                        for (float xi : out_intersects) {
+                            if (clustered.empty() || (xi - clustered.back() > eps_merge)) {
+                                clustered.push_back(xi);
+                            }
+                        }
+                        out_intersects = std::move(clustered);
+                    };
+
+                    float y_ray = y + 1.234e-4f * p_dy;
+                    float z_ray = z + 5.678e-4f * p_dz;
+                    std::vector<float> intersects;
+                    traceRay(y_ray, z_ray, intersects);
+
+                    // If parity is odd (leaking ray), try secondary perturbed rays to resolve edge/vertex degeneracy
+                    if (intersects.size() % 2 != 0) {
+                        std::vector<float> alt_intersects;
+                        traceRay(y - 1.234e-4f * p_dy, z - 5.678e-4f * p_dz, alt_intersects);
+                        if (alt_intersects.size() % 2 == 0) {
+                            intersects = std::move(alt_intersects);
+                        } else {
+                            traceRay(y + 3.456e-3f * p_dy, z + 7.891e-3f * p_dz, alt_intersects);
+                            if (alt_intersects.size() % 2 == 0) {
+                                intersects = std::move(alt_intersects);
+                            }
+                        }
+                    }
+
+                    if (intersects.empty()) continue;
+
+                    // Paired interval evaluation: strictly tests inside intervals [x_2k, x_{2k+1}].
+                    // Any trailing unpaired intersection from non-watertight openings is clamped out,
+                    // guaranteeing particles NEVER leak beyond the outermost surface intersection (zero streams).
+                    size_t num_pairs = intersects.size() / 2;
+                    for (float x = min_x + 0.5f * p_dx + x_offset; x < max_x; x += p_dx) {
+                        bool inside = false;
+                        for (size_t p_idx = 0; p_idx < num_pairs; ++p_idx) {
+                            float x_entry = intersects[2 * p_idx];
+                            float x_exit  = intersects[2 * p_idx + 1];
+                            if (x >= x_entry && x <= x_exit) {
+                                inside = true;
+                                break;
+                            }
+                        }
+                        if (inside) {
+                            local_particles.push_back(createParticle(x, y, z));
+                        }
+                    }
+                }
+            }
+            #pragma omp critical
+            {
+                new_particles.insert(new_particles.end(), local_particles.begin(), local_particles.end());
+            }
+        }
+        m_particles.insert(m_particles.end(), new_particles.begin(), new_particles.end());
     }
     seedMottGradyFragments(obj_id);
     std::cout << "[INFO] Generated " << (m_particles.size() - particle_count_before) << " MPM particles for STL object " << obj_id << std::endl;
@@ -718,6 +856,7 @@ void MPMSolver3D::particleToGrid() {
 
     // P2G Scatter in 3D
     for (const auto& p : m_particles) {
+        if (p.state == 2 || p.m <= 0.0f) continue;
         float px = p.x[0] - m_xmin;
         float py = p.x[1] - m_ymin;
         float pz = p.x[2] - m_zmin;
@@ -1197,6 +1336,7 @@ void MPMSolver3D::gridToParticleInternal(float dt) {
     #pragma omp parallel for reduction(max:v_max_global) schedule(dynamic, 64)
     for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
         auto& p = m_particles[p_idx];
+        if (p.state == 2 || p.m <= 0.0f) continue;
         float px = p.x[0] - m_xmin;
         float py = p.x[1] - m_ymin;
         float pz = p.x[2] - m_zmin;
@@ -1700,28 +1840,50 @@ void MPMSolver3D::gridToParticleInternal(float dt) {
         float phys_min_y = m_ymin + 3.0f * m_dy; float phys_max_y = m_ymin + (static_cast<float>(m_ny - 4)) * m_dy;
         float phys_min_z = m_zmin + 3.0f * m_dz; float phys_max_z = m_zmin + (static_cast<float>(m_nz - 4)) * m_dz;
 
-        if (p.x[0] < phys_min_x && m_bc_x_min != MPMBoundaryCondition3D::Terminate) {
-            p.x[0] = phys_min_x;
-            if (p.v[0] < 0.0f) { p.v[0] = 0.0f; }
-        } else if (p.x[0] > phys_max_x && m_bc_x_max != MPMBoundaryCondition3D::Terminate) {
-            p.x[0] = phys_max_x;
-            if (p.v[0] > 0.0f) { p.v[0] = 0.0f; }
+        bool terminated = false;
+        if (p.x[0] < phys_min_x) {
+            if (m_bc_x_min == MPMBoundaryCondition3D::Terminate) terminated = true;
+            else { p.x[0] = phys_min_x; if (p.v[0] < 0.0f) { p.v[0] = 0.0f; } }
+        } else if (p.x[0] > phys_max_x) {
+            if (m_bc_x_max == MPMBoundaryCondition3D::Terminate) terminated = true;
+            else { p.x[0] = phys_max_x; if (p.v[0] > 0.0f) { p.v[0] = 0.0f; } }
         }
 
-        if (p.x[1] < phys_min_y && m_bc_y_min != MPMBoundaryCondition3D::Terminate) {
-            p.x[1] = phys_min_y;
-            if (p.v[1] < 0.0f) { p.v[1] = 0.0f; }
-        } else if (p.x[1] > phys_max_y && m_bc_y_max != MPMBoundaryCondition3D::Terminate) {
-            p.x[1] = phys_max_y;
-            if (p.v[1] > 0.0f) { p.v[1] = 0.0f; }
+        if (p.x[1] < phys_min_y) {
+            if (m_bc_y_min == MPMBoundaryCondition3D::Terminate) terminated = true;
+            else { p.x[1] = phys_min_y; if (p.v[1] < 0.0f) { p.v[1] = 0.0f; } }
+        } else if (p.x[1] > phys_max_y) {
+            if (m_bc_y_max == MPMBoundaryCondition3D::Terminate) terminated = true;
+            else { p.x[1] = phys_max_y; if (p.v[1] > 0.0f) { p.v[1] = 0.0f; } }
         }
 
-        if (p.x[2] < phys_min_z && m_bc_z_min != MPMBoundaryCondition3D::Terminate) {
-            p.x[2] = phys_min_z;
-            if (p.v[2] < 0.0f) { p.v[2] = 0.0f; }
-        } else if (p.x[2] > phys_max_z && m_bc_z_max != MPMBoundaryCondition3D::Terminate) {
-            p.x[2] = phys_max_z;
-            if (p.v[2] > 0.0f) { p.v[2] = 0.0f; }
+        if (p.x[2] < phys_min_z) {
+            if (m_bc_z_min == MPMBoundaryCondition3D::Terminate) terminated = true;
+            else { p.x[2] = phys_min_z; if (p.v[2] < 0.0f) { p.v[2] = 0.0f; } }
+        } else if (p.x[2] > phys_max_z) {
+            if (m_bc_z_max == MPMBoundaryCondition3D::Terminate) terminated = true;
+            else { p.x[2] = phys_max_z; if (p.v[2] > 0.0f) { p.v[2] = 0.0f; } }
+        }
+
+        // Global domain escape check
+        if (p.x[0] < m_xmin || p.x[0] >= m_xmin + m_nx * m_dx ||
+            p.x[1] < m_ymin || p.x[1] >= m_ymin + m_ny * m_dy ||
+            p.x[2] < m_zmin || p.x[2] >= m_zmin + m_nz * m_dz) {
+            terminated = true;
+        }
+
+        if (terminated) {
+            p.state = 2; // Inactive / Terminated
+            p.m = 0.0f;
+            p.v[0] = 0.0f; p.v[1] = 0.0f; p.v[2] = 0.0f;
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    p.B[r][c] = 0.0f;
+                    p.L_grad[r][c] = 0.0f;
+                    p.sigma[r][c] = 0.0f;
+                }
+            }
+            continue;
         }
 
         if constexpr (FUSE_STRESS) {
@@ -1729,6 +1891,14 @@ void MPMSolver3D::gridToParticleInternal(float dt) {
         }
     }
     m_last_v_max = v_max_global;
+
+    // In-place zero-allocation compaction of terminated particles
+    auto it = std::remove_if(m_particles.begin(), m_particles.end(), [](const MPMParticle3D& pt) {
+        return pt.state == 2 || pt.m <= 0.0f;
+    });
+    if (it != m_particles.end()) {
+        m_particles.erase(it, m_particles.end());
+    }
 }
 
 void MPMSolver3D::gridToParticle(float dt) {
@@ -2297,7 +2467,7 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             // Default Hypoelastic J2 Elastoplasticity with Weibull flaw scatter & plastic damage softening
             float w_factor = (mat.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
             if (mat.enable_heterogeneity && w_factor <= 0.001f && mat.weibull_modulus > 0.001f) {
-                w_factor = computeWeibullFactor(p.x[0], p.x[1], p.x[2], mat.weibull_modulus, mat.weibull_scale);
+                w_factor = computeWeibullFactor(p.x[0], p.x[1], p.x[2], p.V0, mat.weibull_modulus, mat.weibull_scale, mat.weibull_ref_volume);
             }
 
             float s_s = 0.0f;
@@ -2415,6 +2585,7 @@ float MPMSolver3D::computeStepSize(float cfl) const {
     #pragma omp parallel for reduction(max:max_speed) schedule(static)
     for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
         const auto& p = m_particles[p_idx];
+        if (p.state == 2 || p.m <= 0.0f) continue;
         if (std::isnan(p.v[0]) || std::isnan(p.v[1]) || std::isnan(p.v[2])) continue;
         const auto& mat = getMaterialTable(p.object_id);
         float E = mat.youngs_modulus;
@@ -2572,7 +2743,7 @@ void MPMSolver3D::initMaterialHeterogeneity(int obj_id) {
     for (auto& p : m_particles) {
         if (p.object_id == obj_id) {
             if (mat.enable_heterogeneity && mat.weibull_modulus > 0.001f) {
-                p.weibull_factor = computeWeibullFactor(p.x[0], p.x[1], p.x[2], mat.weibull_modulus, mat.weibull_scale);
+                p.weibull_factor = computeWeibullFactor(p.x[0], p.x[1], p.x[2], p.V0, mat.weibull_modulus, mat.weibull_scale, mat.weibull_ref_volume);
             } else {
                 p.weibull_factor = 1.0f;
             }

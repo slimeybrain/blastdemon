@@ -641,3 +641,175 @@ p_inc(t) = P_max · exp(-(t - t_0) / θ)     for t_0 ≤ t ≤ t_0 + θ
 | `cavitation_cutoff_pa` | Cavitation Cut-Off Pressure | Number / Float (`2300.0 Pa`) | Vapor pressure threshold for fluid tensile release. |
 | `shell_integration_points`| Shell Thickness Points | Integer (`5`) | Number of through-thickness Lobatto integration points for elastoplasticity. |
 
+---
+
+## 7. Direct Particle-to-Particle & Particle-to-Continuum DEM Contact for Sparse and Failed MPM Particles
+
+### 7.1 Problem Statement & Background
+
+In high-velocity blast, fragmentation, and terminal ballistic simulations, fractured debris and sparse material points frequently exhibit unphysical numerical artifacts when interacting with dense continuum regions:
+
+1. **Kinematic Ghosting & Interpenetration (Tunneling):**
+   When high-speed sparse or failed particles (e.g. spalled concrete fragments, casing shrapnel, shattered aggregate) strike intact solid structures or dense particle beds, they frequently pass directly through without decelerating.
+2. **The Single-Velocity-Field Grid Trap:**
+   In standard MPM ([mpm_solver_3d.cpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/mpm_solver_3d.cpp#L847-L1233)), all material points interpolate mass and momentum onto a single background Eulerian grid. When a solitary particle of mass `m_sparse` enters a cell dominated by an intact dense body of mass `M_dense ≫ m_sparse`, the resulting nodal velocity is dominated by the dense body:
+   ```text
+   v_node = (M_dense · v_dense + m_sparse · v_sparse) / (M_dense + m_sparse) ≈ v_dense
+   ```
+3. **FLIP Velocity Update Acceleration Failure:**
+   Failed, fragmented, and fluid-like particles update their velocities via the FLIP acceleration increment ([mpm_solver_3d.cpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/mpm_solver_3d.cpp#L1801-L1817)):
+   ```text
+   v_p^(n+1) = v_p^n + Δv_grid
+   where Δv_grid = Δt · (f_ext + f_int) / M_node
+   ```
+   Because `M_node` is dominated by the dense body, `Δv_grid ≈ 0`. The sparse particle experiences zero deceleration and passes through the dense body at its original velocity.
+4. **Volume Scaling in Stress Divergence:**
+   In continuum MPM, repulsive forces on grid nodes are weighted by particle volume:
+   ```text
+   f_int = - ∑_p V_p · σ_p · ∇N_i(x_p)
+   ```
+   A solitary or sparse particle has a minuscule volume `V_p`. Even under extreme contact stress, it cannot deposit sufficient nodal force to resist penetration or deform the incoming continuum body. Furthermore, a single point cannot form a continuous spatial gradient (`∇·v`) across the grid stencil.
+
+---
+
+### 7.2 Proposed Architecture: Dual-Regime MPM-DEM Hybrid
+
+To eliminate interpenetration while preserving continuum accuracy in intact materials, BlastDemon will introduce a **hybrid MPM-DEM (Material Point Method + Discrete Element Method)** contact architecture:
+
+```text
++----------------------------------------------------------------------------------------------------+
+|                                    MPM-DEM HYBRID CONTACT ARCHITECTURE                             |
++----------------------------------------------------------------------------------------------------+
+                                                   |
+                                                   v
++----------------------------------------------------------------------------------------------------+
+| 1. Particle Classification & Regime Partitioning                                                   |
+|    - Intact Continuum Particles: Evaluated via standard MPM P2G -> Grid Dynamics -> G2P            |
+|    - Sparse / Failed / Debris Particles: Flagged as active Discrete Elements (DEM) with radius R_p |
++----------------------------------------------------------------------------------------------------+
+                                                   |
+                                                   v
++----------------------------------------------------------------------------------------------------+
+| 2. Zero-Allocation Spatial Hashing (GPU & CPU)                                                     |
+|    - Uniform 3D hash bins with cell size h_bin ≈ 2 · R_max                                         |
+|    - Pre-allocated compact neighbor lists (zero dynamic std::vector / malloc in solver loops)      |
++----------------------------------------------------------------------------------------------------+
+                                                   |
+                                                   v
++----------------------------------------------------------------------------------------------------+
+| 3. Dual-Level Pairwise & Interface Contact Resolution                                              |
+|    - Mode A (DEM-to-DEM): Soft-sphere Hertzian / linear spring-dashpot repulsive contact          |
+|    - Mode B (DEM-to-Continuum): Particle-to-reconstructed-surface or particle-to-FEM penalty walls |
+|    - Mode C (Sub-Cycling): High-frequency DEM contact sub-cycling within MPM/CFD macro-steps       |
++----------------------------------------------------------------------------------------------------+
+```
+
+---
+
+### 7.3 Technical Formulations & Physics Models
+
+#### A. Particle Characteristic Collision Radius
+Each active DEM particle is assigned an effective geometric collision radius `R_p` derived from its initial reference volume `V_0` and deformation state:
+```text
+R_p = (3 · V_p / (4 · π))^(1/3)
+```
+For cubical initial particle layouts with grid cell size `Δx` and `PPC` particles per cell:
+```text
+R_p = 0.5 · Δx / (PPC^(1/3))
+```
+
+#### B. Normal Contact Force (Linear Spring-Dashpot / Hertzian Contact)
+When the distance between two particle centroids `r_ij = ||x_i - x_j||` is less than `R_i + R_j`, a normal contact overlap `δ_n` develops:
+```text
+δ_n = max(0.0, (R_i + R_j) - r_ij)
+```
+The normal contact force exerted on particle `i` by particle `j` is:
+```text
+F_n = (k_n · δ_n - γ_n · (v_rel · n_ij)) · n_ij
+```
+where:
+* `n_ij = (x_i - x_j) / r_ij` is the unit normal pointing from `j` to `i`.
+* `v_rel = v_i - v_j` is the relative velocity vector.
+* `k_n` is the normal contact stiffness:
+  ```text
+  k_n = (4/3) · E_eff · √(R_eff · δ_n)     (Hertzian non-linear)
+  or
+  k_n = (E_eff · A_contact) / (R_i + R_j)   (Linearized penalty)
+  ```
+  with effective modulus `E_eff = E / (2 · (1 - ν²))` and effective radius `R_eff = (R_i · R_j) / (R_i + R_j)`.
+* `γ_n` is the normal damping coefficient calibrated to the desired coefficient of restitution `e_rest`:
+  ```text
+  γ_n = 2 · ln(1 / e_rest) · √(m_eff · k_n) / √(π² + (ln(e_rest))²)
+  ```
+  with effective mass `m_eff = (m_i · m_j) / (m_i + m_j)`.
+
+#### C. Tangential Friction & Coulomb Slip
+The tangential relative displacement increment `Δδ_t` during contact is:
+```text
+v_t = v_rel - (v_rel · n_ij) · n_ij
+Δδ_t = v_t · Δt
+```
+The trial tangential shear force with viscous damping is:
+```text
+F_t_trial = - (k_t · δ_t + γ_t · v_t)
+```
+Applying the Coulomb friction envelope with static/dynamic friction coefficient `μ`:
+```text
+F_t = F_t_trial · min(1.0, (μ · ||F_n||) / ||F_t_trial||)
+```
+When `||F_t_trial|| > μ · ||F_n||`, slip occurs, and the accumulated tangential displacement is clipped to the Coulomb yield limit to ensure energy consistency.
+
+#### D. Sparse Particle to Continuum Body Interaction (DEM-to-MPM Interface)
+To prevent sparse debris from passing through intact MPM continuum regions:
+1. **Continuum Surface Identification:**
+   Intact continuum nodes on the Eulerian grid detect surface boundaries using the gradient of the grid mass or volume fraction:
+   ```text
+   n_surface = - ∇m_grid / ||∇m_grid||
+   ```
+2. **Repulsive Surface Penalty:**
+   When a sparse DEM particle enters the compact support domain of an intact surface node, a normal penalty repulsive force `F_penalty = k_penalty · δ_pen · n_surface` is applied:
+   - `+F_penalty` is applied directly to the sparse DEM particle to deflect it.
+   - `-F_penalty` is deposited into the background grid node internal force accumulator `f_int` to conserve global momentum.
+
+#### E. Sub-Cycling & Stability Criteria
+Because DEM contact stiffness `k_n` produces high-frequency grain oscillations, the contact time step must satisfy the Rayleigh wave limit:
+```text
+Δt_dem ≤ 0.2 · π · √(m_eff / k_n)
+```
+When `Δt_dem < Δt_mpm`, the DEM contact phase sub-cycles `N_sub = ceil(Δt_mpm / Δt_dem)` iterations using 2nd-order symplectic Velocity Verlet integration:
+```text
+x_p^(k+1/2) = x_p^k + 0.5 · Δt_sub · v_p^k
+v_p^(k+1)   = v_p^k + Δt_sub · (F_contact / m_p)
+x_p^(k+1)   = x_p^(k+1/2) + 0.5 · Δt_sub · v_p^(k+1)
+```
+
+---
+
+### 7.4 Zero-Allocation GPU & CPU Implementation Strategy
+
+In strict adherence to BlastDemon Master Directives (zero dynamic memory allocation in solver loops, zero third-party dependencies):
+1. **Pre-Allocated Spatial Bin Buffers:**
+   A structured spatial hash grid (`hash_cell_heads` and `particle_next` arrays) is pre-allocated on device and host memory during initialization based on domain geometry and maximum particle capacity.
+2. **Coalesced GPU Execution:**
+   The DEM contact kernel evaluates pairwise interactions using shared memory tile caching per warp/thread-block, ensuring contiguous memory reads and zero register spilling.
+3. **Activation Criteria:**
+   Contact evaluation is activated strictly for:
+   - Particles with `has_failed == true` or `damage >= 1.0`.
+   - Particles in user-specified granular debris objects.
+   - Isolated material points whose local particle count per cell drops below `PPC_sparse_threshold` (e.g. `< 2` particles in its 27-cell neighborhood).
+
+---
+
+### 7.5 Planned UI & Parameter Integration
+
+The following configuration parameters are planned for integration into `MPMDomain3D` and `FEMDomain3D`:
+
+| Parameter Key | UI Label | Type / Default | Engineering Purpose |
+| :--- | :--- | :--- | :--- |
+| `enable_dem_contact` | Particle DEM Contact | Boolean (`true`) | Enables direct pairwise DEM contact forces for sparse and failed MPM particles. |
+| `dem_contact_mode` | DEM Contact Formulation | Enum (`LinearSpringDashpot`, `HertzianMindlin`, `PenaltyRigid`) | Selects normal and shear constitutive contact force models. |
+| `dem_sparse_ppc_threshold` | Sparse Threshold (PPC) | Integer (`2`) | Threshold below which intact continuum particles transition to DEM contact evaluation. |
+| `dem_normal_stiffness_scale`| DEM Contact Stiffness Scale | Number / Float (`1.0`) | Multiplier for particle-particle contact stiffness relative to material bulk modulus. |
+| `dem_restitution_coeff` | Debris Restitution Coefficient | Number / Float [0.0, 1.0] (`0.30`) | Controls kinetic energy dissipation during grain collisions. |
+| `dem_friction_coeff` | Inter-Particle Friction (μ) | Number / Float [0.0, 1.0] (`0.55`) | Coulomb friction coefficient between interacting debris grains. |
+| `dem_subcycling_max` | Maximum DEM Sub-Cycles | Integer (`10`) | Maximum sub-cycling iterations per MPM macro-step for stiff collision contacts. |

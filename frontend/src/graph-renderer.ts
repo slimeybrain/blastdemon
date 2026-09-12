@@ -865,7 +865,7 @@ export class GraphRenderer {
                 if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
                 if (toPortId === 'air') return fromType === 'Material';
                 if (toPortId === 'charge') return fromType === 'Charge3D';
-                if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';
+                if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation3D' || fromType === 'TriggerLocation3D';
                 if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D';
                 if (toPortId === 'gauges') return fromType === 'VirtualGauges';
                 if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo3DNode' || fromType === 'Remap2DTo3DNode';
@@ -889,7 +889,7 @@ export class GraphRenderer {
                 return false;
             case 'CFDSolver2D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
-                if (toPortId === 'detonator') return fromType === 'DetonatorLocation';
+                if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation' || fromType === 'TriggerLocation';
                 if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo2DNode';
                 if (toPortId === 'hardware') return fromType === 'HardwareConfig';
                 if (toPortId === 'air') return fromType === 'Material';
@@ -917,12 +917,12 @@ export class GraphRenderer {
             case 'MPMDomain2D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
                 if (toPortId === 'objects') return fromType === 'MPMObject2D';
-                if (toPortId === 'detonator') return fromType === 'DetonatorLocation';
+                if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation' || fromType === 'TriggerLocation';
                 return false;
             case 'MPMDomain3D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
                 if (toPortId === 'objects') return fromType === 'MPMObject3D';
-                if (toPortId === 'detonator') return fromType === 'DetonatorLocation3D';
+                if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation3D' || fromType === 'TriggerLocation3D';
                 return false;
             case 'MPMObject2D':
                 if (toPortId === 'material') return fromType === 'Material';
@@ -1396,6 +1396,7 @@ export class GraphRenderer {
                 name: '2D Simulation',
                 items: [
                     { label: 'Domain Mesh 2D', type: 'DomainMesh2D' },
+                    { label: 'Trigger Location', type: 'TriggerLocation' },
                     { label: 'Detonator Location', type: 'DetonatorLocation' },
                     { label: 'Remapper (1D -> 2D)', type: 'Remap1DTo2DNode' },
                     { label: '2D Charge', type: 'Charge2D' },
@@ -1406,6 +1407,7 @@ export class GraphRenderer {
                 name: '3D Simulation',
                 items: [
                     { label: 'Domain Mesh 3D', type: 'DomainMesh3D' },
+                    { label: 'Trigger Location 3D', type: 'TriggerLocation3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: 'Remapper (1D -> 3D)', type: 'Remap1DTo3DNode' },
                     { label: 'Remapper (2D -> 3D)', type: 'Remap2DTo3DNode' },
@@ -1424,6 +1426,7 @@ export class GraphRenderer {
                 name: 'MPM Simulation (2D)',
                 items: [
                     { label: 'MPM Domain 2D', type: 'MPMDomain2D' },
+                    { label: 'Trigger Location', type: 'TriggerLocation' },
                     { label: 'Detonator Location', type: 'DetonatorLocation' },
                     { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' }
                 ]
@@ -1432,6 +1435,7 @@ export class GraphRenderer {
                 name: 'MPM Simulation (3D)',
                 items: [
                     { label: 'MPM Domain 3D', type: 'MPMDomain3D' },
+                    { label: 'Trigger Location 3D', type: 'TriggerLocation3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: 'MPM Object 3D (Box)', type: 'MPMObject3D', defaultParams: { shape_type: 'Box' } },
                     { label: 'MPM Object 3D (Sphere)', type: 'MPMObject3D', defaultParams: { shape_type: 'Sphere' } },
@@ -1759,7 +1763,9 @@ export class GraphRenderer {
             case 'TelemetryGraph':  return 'CHART';
             case 'DomainMesh2D':    return 'MESH2D';
             case 'DetonatorLocation':
-            case 'DetonatorLocation3D': return 'DETONATOR';
+            case 'DetonatorLocation3D':
+            case 'TriggerLocation':
+            case 'TriggerLocation3D': return 'TRIGGER';
             case 'RemapNode':
             case 'Remap1DTo2DNode': return 'REMAP 1D->2D';
             case 'Remap1DTo3DNode': return 'REMAP 1D->3D';
@@ -1803,6 +1809,8 @@ export class GraphRenderer {
             case 'DomainMesh2D':      return 'Domain Mesh 2D';
             case 'DetonatorLocation': return 'Detonator Location';
             case 'DetonatorLocation3D': return 'Detonator Location 3D';
+            case 'TriggerLocation':   return 'Trigger Location';
+            case 'TriggerLocation3D': return 'Trigger Location 3D';
             case 'RemapNode':
             case 'Remap1DTo2DNode':   return 'Remapper (1D -> 2D)';
             case 'Remap1DTo3DNode':   return 'Remapper (1D -> 3D)';
@@ -2829,7 +2837,7 @@ export class GraphRenderer {
         if (nodeType === 'STLGeometry' || portId === 'stl') return 'domain';
         if (nodeType === 'Charge1D' || nodeType === 'Charge2D' || portId === 'explosive') return 'explosive';
         if (portId === 'ideal_gas') return 'material';
-        if (nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D' || portId === 'detonator') return 'detonator';
+        if (nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D' || nodeType === 'TriggerLocation' || nodeType === 'TriggerLocation3D' || portId === 'detonator' || portId === 'trigger') return 'detonator';
         if (nodeType === 'RemapNode' || nodeType === 'Remap1DTo2DNode' || nodeType === 'Remap1DTo3DNode' || nodeType === 'Remap2DTo3DNode' || portId === 'remap') return 'remap';
         if (nodeType === 'HardwareConfig' || portId === 'hardware') return 'hardware';
         if (portId === 'telemetry' || portId === 'mpm_in' || portId === 'in_2' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph' || nodeType === 'TelemetryContour' || nodeType === 'Telemetry3DViewport'))) return 'telemetry';
@@ -3416,13 +3424,13 @@ export class GraphRenderer {
                         }
                     }
 
-                    const detConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'detonator');
-                    const detNode = detConn ? state.nodes.find(n => n.id === detConn.fromNode && n.type === 'DetonatorLocation') : null;
+                    const detConn = state.connections.find(c => c.toNode === solverNode.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
+                    const detNode = detConn ? state.nodes.find(n => n.id === detConn.fromNode && (n.type === 'DetonatorLocation' || n.type === 'TriggerLocation')) : null;
                     if (detNode) {
                         detonatorInfo = {
-                            r: Number(detNode.parameters?.detonator_r ?? 0.0),
-                            z: Number(detNode.parameters?.detonator_z ?? 0.0),
-                            radius: Number(detNode.parameters?.detonator_radius ?? 0.001),
+                            r: Number(detNode.parameters?.trigger_r ?? detNode.parameters?.detonator_r ?? 0.0),
+                            z: Number(detNode.parameters?.trigger_z ?? detNode.parameters?.detonator_z ?? 0.0),
+                            radius: Number(detNode.parameters?.trigger_radius ?? detNode.parameters?.detonator_radius ?? 0.001),
                             max_r: max_r,
                             max_z: max_z
                         };
@@ -4649,6 +4657,7 @@ export class GraphRenderer {
             row.appendChild(label);
 
             const dropdowns: Record<string, string[]> = {
+                'mpmParticleRenderMode': ['auto', 'points', 'spheres'],
                 'font_size': ['8', '9', '10', '11', '12', '13', '14', '15', '16', '18', '20', '22'],
                 'stream_layout': ['Live Page (In-Place)', 'Multi-Line Cards', 'Dual-Deck (Page + Log)', 'Columnar (Fixed-Width)', 'Ultra-Compact', 'Standard Log'],
                 'filter_level': ['All', 'Metrics Only', 'Logs Only'],
@@ -4703,7 +4712,7 @@ export class GraphRenderer {
                 auto_scale: ['true', 'false'],
                 log_scale: ['true', 'false'],
                 show_grid: ['true', 'false'],
-                'voxelization_method': ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
+                'voxelization_method': node.type === 'MPMObject3D' ? ['watertight_raycast', 'winding_number'] : ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
                 'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
                 'transfer_scheme': (node.type === 'Material') ? 
                     ['Default', 'BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'] : 
@@ -4714,6 +4723,7 @@ export class GraphRenderer {
                 'smooth_plastic_strain': ['Enabled', 'Disabled'],
                 'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
                 'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
+                'origin_mode': ['CAD Origin', 'Center'],
                 'anisotropy_axis': ['X', 'Y', 'Z', 'Custom'],
                 'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
                 'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
@@ -4868,26 +4878,29 @@ export class GraphRenderer {
                             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
                             'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
                             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+                            'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
                             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
                             // 3D CFD keys
                             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
                             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
                             'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
-                            'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+                            'detonator_x', 'detonator_y', 'detonator_z', 'trigger_x', 'trigger_y', 'trigger_z', 'xmin', 'ymin', 'zmin',
                             'scale_factor',
                             'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'aoRadius', 'aoIntensity', 'aoBias', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-                            'charge_opacity', 'detonators_size', 'detonator_size', 'detonators_opacity', 'detonator_opacity',
+                            'charge_opacity', 'detonators_size', 'detonator_size', 'detonators_opacity', 'detonator_opacity', 'triggers_size', 'trigger_size', 'triggers_opacity', 'trigger_opacity',
                             'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
                             'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length',
                             'offset', 'stride',
                             // MPM keys
                             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'initial_velocity_x', 'initial_velocity_y', 'initial_velocity_z', 'initial_velocity_r', 'radius', 'inner_radius',
                             'scale_x', 'scale_y', 'scale_z',
+                            'rot_x', 'rot_y', 'rot_z',
+                            'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
                             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
                             'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
                             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
-                            'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+                            'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                             'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
                             'mg_gamma0', 'mg_c0', 'mg_s',
                             'ppc',
@@ -5298,6 +5311,11 @@ export class GraphRenderer {
                                     updates['material_type'] = 'Ideal Gas Charge';
                                     updates['material_model'] = 'Ideal Gas Charge';
                                     if (presetData.composition) updates['composition'] = presetData.composition;
+                                } else if (presetData.category === 'Energetic Solids & Unreacted Explosives' ||
+                                           presetData.category === 'CREST Reactive Burn Presets') {
+                                    // Energetic solid presets must activate the CREST reactive burn model
+                                    // so the backend detonation hotspot logic is triggered on INIT_MPM_3D
+                                    updates['material_model'] = 'CREST Reactive Burn';
                                 }
                             }
                         } else if (node.type === 'Material' && key === 'material_model') {
@@ -5346,6 +5364,15 @@ export class GraphRenderer {
                             }
                         } else if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma', 'atm_pressure', 'atm_temperature', 'gamma', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus'].includes(key)) {
                             updates['preset'] = 'Custom';
+                        } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && newVal === 'STL') || (key === 'origin_mode' && newVal === 'CAD Origin'))) {
+                            if (key === 'shape_type' && newVal === 'STL') {
+                                updates['origin_mode'] = node.parameters['origin_mode'] || 'CAD Origin';
+                            }
+                            if (Number(node.parameters['pos_x']) === 0.5 && Number(node.parameters['pos_y']) === 0.5 && Number(node.parameters['pos_z']) === 0.5) {
+                                updates['pos_x'] = 0.0;
+                                updates['pos_y'] = 0.0;
+                                updates['pos_z'] = 0.0;
+                            }
                         }
                         if (node.type === 'STLGeometry' && key === 'voxelization_method') {
                             const rand = Math.floor(Math.random() * 1000000);

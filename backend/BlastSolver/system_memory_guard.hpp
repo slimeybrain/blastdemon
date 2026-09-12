@@ -13,10 +13,21 @@ namespace Blast {
 size_t getAvailableHostMemoryBytes();
 
 /**
+ * Returns total physical host RAM in bytes.
+ */
+size_t getTotalHostMemoryBytes();
+
+/**
  * Returns available CUDA GPU VRAM in bytes.
  * Uses cudaMemGetInfo if CUDA is available, otherwise returns 0.
  */
 size_t getAvailableCUDAMemoryBytes();
+
+/**
+ * Returns total physical CUDA GPU VRAM in bytes.
+ * Uses cudaMemGetInfo if CUDA is available, otherwise returns 0.
+ */
+size_t getTotalCUDAMemoryBytes();
 
 /**
  * Memory footprint estimation helpers (returns estimated bytes required for RAM & VRAM).

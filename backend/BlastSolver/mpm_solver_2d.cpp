@@ -280,6 +280,7 @@ void MPMSolver2D::particleToGrid() {
 
     // P2G Scatter
     for (const auto& p : m_particles) {
+        if (p.m <= 0.0f) continue;
         int base_i = static_cast<int>(std::floor((p.x[0]) / m_dx));
         int base_j = static_cast<int>(std::floor((p.x[1]) / m_dy));
 
@@ -606,6 +607,7 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
     #pragma omp parallel for schedule(dynamic, 64)
     for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
         auto& p = m_particles[p_idx];
+        if (p.m <= 0.0f) continue;
         int base_i = static_cast<int>(std::floor((p.x[0]) / m_dx));
         int base_j = static_cast<int>(std::floor((p.x[1]) / m_dy));
 
@@ -899,9 +901,27 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
             p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
         }
 
+        // Domain Boundary Escape Check
+        if (p.x[0] < 0.0f || p.x[0] >= static_cast<float>(m_nx) * m_dx ||
+            p.x[1] < 0.0f || p.x[1] >= static_cast<float>(m_ny) * m_dy) {
+            p.m = 0.0f;
+            p.v[0] = 0.0f; p.v[1] = 0.0f;
+            p.B[0][0] = 0.0f; p.B[0][1] = 0.0f; p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
+            p.L_grad[0][0] = 0.0f; p.L_grad[0][1] = 0.0f; p.L_grad[1][0] = 0.0f; p.L_grad[1][1] = 0.0f;
+            continue;
+        }
+
         if constexpr (FUSE_STRESS) {
             updateParticleStress(p, dt, p.L_grad);
         }
+    }
+
+    // In-place zero-allocation compaction of terminated particles
+    auto it = std::remove_if(m_particles.begin(), m_particles.end(), [](const MPMParticle2D& pt) {
+        return pt.m <= 0.0f;
+    });
+    if (it != m_particles.end()) {
+        m_particles.erase(it, m_particles.end());
     }
 }
 
@@ -986,7 +1006,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
         if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
             float w_factor = (p.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
             if (p.enable_heterogeneity && w_factor <= 0.001f && p.weibull_modulus > 0.001f) {
-                p.weibull_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.weibull_modulus, p.weibull_scale);
+                p.weibull_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.V0, p.weibull_modulus, p.weibull_scale, p.weibull_ref_volume);
                 w_factor = p.weibull_factor;
             }
 
@@ -1130,7 +1150,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
 
         float w_factor = (p.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
         if (p.enable_heterogeneity && w_factor <= 0.001f && p.weibull_modulus > 0.001f) {
-            p.weibull_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.weibull_modulus, p.weibull_scale);
+            p.weibull_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.V0, p.weibull_modulus, p.weibull_scale, p.weibull_ref_volume);
             w_factor = p.weibull_factor;
         }
 
@@ -1243,6 +1263,7 @@ float MPMSolver2D::computeStepSize(float cfl) const {
     #pragma omp parallel for reduction(max:max_speed, max_v) schedule(static)
     for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
         const auto& p = m_particles[p_idx];
+        if (p.m <= 0.0f) continue;
         if (std::isnan(p.v[0]) || std::isnan(p.v[1]) || std::isinf(p.v[0]) || std::isinf(p.v[1])) continue;
         float E = p.youngs_modulus;
         float rho = std::max(10.0f, p.density);

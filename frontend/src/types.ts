@@ -1,4 +1,4 @@
-export type NodeType = 'DomainMesh' | 'Material' | 'Charge1D' | 'Charge2D' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph' | 'DomainMesh2D' | 'DetonatorLocation' | 'RemapNode' | 'Remap1DTo2DNode' | 'Remap1DTo3DNode' | 'Remap2DTo3DNode' | 'CFDSolver2D' | 'TelemetryContour' | 'VTKOutput' | 'HardwareConfig' | 'VirtualGauges' | 'DomainMesh3D' | 'Charge3D' | 'CFDSolver3D' | 'Telemetry3DViewport' | 'DetonatorLocation3D' | 'STLGeometry' | 'PrimitiveGeometry3D' | 'Obstacle3D' | 'Obstacle' | 'MPMDomain2D' | 'MPMObject2D' | 'FSICoupler2D' | 'RefinementMesh3D' | 'MPMDomain3D' | 'MPMObject3D' | 'FSICoupler3D' | 'FEMDomain3D' | 'FEMObject3D' | 'FEMBeam3D' | 'FEMRebar3D' | 'LSDynaImporter3D' | 'FEMFSICoupler3D';
+export type NodeType = 'DomainMesh' | 'Material' | 'Charge1D' | 'Charge2D' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph' | 'DomainMesh2D' | 'DetonatorLocation' | 'TriggerLocation' | 'RemapNode' | 'Remap1DTo2DNode' | 'Remap1DTo3DNode' | 'Remap2DTo3DNode' | 'CFDSolver2D' | 'TelemetryContour' | 'VTKOutput' | 'HardwareConfig' | 'VirtualGauges' | 'DomainMesh3D' | 'Charge3D' | 'CFDSolver3D' | 'Telemetry3DViewport' | 'DetonatorLocation3D' | 'TriggerLocation3D' | 'STLGeometry' | 'PrimitiveGeometry3D' | 'Obstacle3D' | 'Obstacle' | 'MPMDomain2D' | 'MPMObject2D' | 'FSICoupler2D' | 'RefinementMesh3D' | 'MPMDomain3D' | 'MPMObject3D' | 'FSICoupler3D' | 'FEMDomain3D' | 'FEMObject3D' | 'FEMBeam3D' | 'FEMRebar3D' | 'LSDynaImporter3D' | 'FEMFSICoupler3D';
 
 
 export interface Port {
@@ -104,10 +104,46 @@ export interface ViewportPaneOption {
 }
 export type MultiViewStagePaneOption = ViewportPaneOption;
 
+export type StageThemeId =
+    | 'lab-white'
+    | 'engineering-silver'
+    | 'cad-bone'
+    | 'ice-fog'
+    | 'neutral-gray'
+    | 'studio-slate'
+    | 'midnight-navy'
+    | 'technical-blueprint'
+    | 'graphite-studio'
+    | 'obsidian-dark';
+
+export interface StageThemeConfig {
+    id: StageThemeId;
+    label: string;
+    icon: string;
+    group: 'light' | 'dark';
+    clearColor: { r: number; g: number; b: number };
+}
+
+export const STAGE_THEMES: StageThemeConfig[] = [
+    // --- Lighter Background Themes (High contrast for particles, stress fields & meshes) ---
+    { id: 'lab-white', label: 'Lab Pure White', icon: '🔬', group: 'light', clearColor: { r: 0.985, g: 0.985, b: 0.99 } },
+    { id: 'engineering-silver', label: 'Engineering Silver', icon: '⚙️', group: 'light', clearColor: { r: 0.885, g: 0.90, b: 0.93 } },
+    { id: 'cad-bone', label: 'CAD Drafting Bone', icon: '📜', group: 'light', clearColor: { r: 0.93, g: 0.915, b: 0.875 } },
+    { id: 'ice-fog', label: 'Polar Ice Fog', icon: '❄️', group: 'light', clearColor: { r: 0.88, g: 0.925, b: 0.965 } },
+    { id: 'neutral-gray', label: 'Neutral Gray (Mid)', icon: '🌫️', group: 'light', clearColor: { r: 0.48, g: 0.52, b: 0.57 } },
+
+    // --- Dark Studio Themes ---
+    { id: 'studio-slate', label: 'Studio Slate', icon: '🎨', group: 'dark', clearColor: { r: 0.082, g: 0.098, b: 0.133 } },
+    { id: 'midnight-navy', label: 'Midnight Navy', icon: '🌌', group: 'dark', clearColor: { r: 0.055, g: 0.082, b: 0.137 } },
+    { id: 'technical-blueprint', label: 'Technical Blueprint', icon: '📐', group: 'dark', clearColor: { r: 0.043, g: 0.094, b: 0.141 } },
+    { id: 'graphite-studio', label: 'Graphite Studio', icon: '🌑', group: 'dark', clearColor: { r: 0.094, g: 0.102, b: 0.114 } },
+    { id: 'obsidian-dark', label: 'Obsidian Minimal', icon: '⬛', group: 'dark', clearColor: { r: 0.045, g: 0.048, b: 0.055 } },
+];
+
 export interface ViewportOptions {
     preset?: '1x1' | '1x2' | '2x1' | '2x2';
     panes?: ViewportPaneOption[];
-    backgroundTheme?: 'studio-slate' | 'midnight-navy' | 'technical-blueprint' | 'graphite-studio' | 'obsidian-dark';
+    backgroundTheme?: StageThemeId;
     showStudioGrid?: boolean;
 }
 export type MultiViewStageOptions = ViewportOptions;

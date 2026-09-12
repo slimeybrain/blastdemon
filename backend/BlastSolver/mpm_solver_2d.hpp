@@ -17,7 +17,7 @@ static inline uint32_t floatToBits2D(float f) {
     return u;
 }
 
-inline float computeWeibullFactor2D(float x, float y, float weibull_modulus, float weibull_scale) {
+inline float computeWeibullFactor2D(float x, float y, float V0, float weibull_modulus, float weibull_scale, float weibull_ref_volume = 1.0e-4f) {
     if (weibull_modulus <= 0.001f) return 1.0f;
     uint32_t ix = floatToBits2D(x);
     uint32_t iy = floatToBits2D(y);
@@ -31,7 +31,13 @@ inline float computeWeibullFactor2D(float x, float y, float weibull_modulus, flo
     float m_w = weibull_modulus;
     float eta_w = (weibull_scale > 0.001f) ? weibull_scale : 1.0f;
     float gamma_mean = std::tgamma(1.0f + 1.0f / m_w);
-    float w = (std::pow(-std::log(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w;
+
+    // Physically-consistent 2D Weibull area/volume scaling: (V_ref / V0)^(1 / m_w)
+    float v_ref = (weibull_ref_volume > 1.0e-18f) ? weibull_ref_volume : 1.0e-4f;
+    float v_eff = (V0 > 1.0e-18f) ? V0 : v_ref;
+    float size_scale = std::pow(v_ref / v_eff, 1.0f / m_w);
+
+    float w = (std::pow(-std::log(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w * size_scale;
     return std::clamp(w, 0.10f, 3.0f);
 }
 
@@ -90,6 +96,7 @@ struct MPMParticle2D {
     bool enable_heterogeneity{false}; // Enable spatial Weibull flaw scatter (false = homogeneous)
     float weibull_modulus{0.0f}; // Weibull modulus m_w (0.0 = homogeneous)
     float weibull_scale{1.0f};   // Weibull scale eta_w (1.0 = baseline)
+    float weibull_ref_volume{1.0e-4f}; // Reference flaw area/volume V_ref (m^2) for Weibull size effect
     float weibull_factor{1.0f};  // Pre-computed spatial Weibull strength multiplier (mean-normalized)
 
     // Directional Material Anisotropy & Orientation

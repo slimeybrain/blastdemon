@@ -1755,6 +1755,8 @@ let gpuMPMParticlesBuffer: any = null;
 let gpuMPMParticlesBufferSize: number = 0;
 let cachedMPMVertexData: Float32Array | null = null;
 let gpuUniformBufferMPM: any = null;
+let gpuMPMBindGroup: any = null;
+let lastMPMTextureView: any = null;
 let gpuSampler: any = null;
 let gpuSamplerLinear: any = null;
 let gpuSamplerNearest: any = null;
@@ -1899,10 +1901,22 @@ let cachedMpmAABB: { minX: number, maxX: number, minY: number, maxY: number, min
 // WebGL Cached Uniform Locations
 let glUniforms: Record<string, WebGLUniformLocation | null> = {};
 
-// STL Geometry Buffers & Settings
 let rawSTLVertices: Float32Array | null = null;
 let rawSTLSubtractiveFlags: Float32Array | null = null;
 let transformedSTLVertices: Float32Array | null = null;
+let transformedRawSTLVertices: Float32Array | null = null;
+let stlTransform = {
+    origin_mode: 'CAD Origin',
+    scale_x: 1.0,
+    scale_y: 1.0,
+    scale_z: 1.0,
+    pos_x: 0.0,
+    pos_y: 0.0,
+    pos_z: 0.0,
+    rot_x: 0.0,
+    rot_y: 0.0,
+    rot_z: 0.0
+};
 let gpuSTLBuffer: any = null;
 let gpuSTLIndexBuffer: any = null;
 let stlBuffer: WebGLBuffer | null = null;
@@ -2329,6 +2343,7 @@ function updateAxesGeometry() {
 function updateSTLGeometry() {
     if (!rawSTLVertices || rawSTLVertices.length === 0) {
         transformedSTLVertices = null;
+        transformedRawSTLVertices = null;
         cachedStlAABB = null;
         stlBVH = null;
         if (gpuSTLBuffer) {
@@ -2354,27 +2369,73 @@ function updateSTLGeometry() {
     }
 
     const count = rawSTLVertices.length / 3;
+
+    // Compute raw bounding box to determine centroid
+    let rawMinX = Infinity, rawMinY = Infinity, rawMinZ = Infinity;
+    let rawMaxX = -Infinity, rawMaxY = -Infinity, rawMaxZ = -Infinity;
+    for (let i = 0; i < count; i++) {
+        const x = rawSTLVertices[i * 3 + 0];
+        const y = rawSTLVertices[i * 3 + 1];
+        const z = rawSTLVertices[i * 3 + 2];
+        if (x < rawMinX) rawMinX = x; if (x > rawMaxX) rawMaxX = x;
+        if (y < rawMinY) rawMinY = y; if (y > rawMaxY) rawMaxY = y;
+        if (z < rawMinZ) rawMinZ = z; if (z > rawMaxZ) rawMaxZ = z;
+    }
+    const rawCenterX = (rawMinX + rawMaxX) * 0.5;
+    const rawCenterY = (rawMinY + rawMaxY) * 0.5;
+    const rawCenterZ = (rawMinZ + rawMaxZ) * 0.5;
+
+    const isCentered = (stlTransform.origin_mode || 'CAD Origin') === 'Center';
+    const anchorX = isCentered ? rawCenterX : 0.0;
+    const anchorY = isCentered ? rawCenterY : 0.0;
+    const anchorZ = isCentered ? rawCenterZ : 0.0;
+
+    const sx = (stlTransform.scale_x !== 0.0 && !isNaN(stlTransform.scale_x)) ? stlTransform.scale_x : 1.0;
+    const sy = (stlTransform.scale_y !== 0.0 && !isNaN(stlTransform.scale_y)) ? stlTransform.scale_y : 1.0;
+    const sz = (stlTransform.scale_z !== 0.0 && !isNaN(stlTransform.scale_z)) ? stlTransform.scale_z : 1.0;
+
+    const ax = (Number(stlTransform.rot_x) || 0.0) * Math.PI / 180.0;
+    const ay = (Number(stlTransform.rot_y) || 0.0) * Math.PI / 180.0;
+    const az = (Number(stlTransform.rot_z) || 0.0) * Math.PI / 180.0;
+
+    const posX = Number(stlTransform.pos_x) || 0.0;
+    const posY = Number(stlTransform.pos_y) || 0.0;
+    const posZ = Number(stlTransform.pos_z) || 0.0;
+
     const data = new Float32Array(count * 7);
+    const rawTransformed = new Float32Array(count * 3);
 
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
     for (let i = 0; i < count; i++) {
-        const vx = rawSTLVertices[i * 3 + 0];
-        const vy = rawSTLVertices[i * 3 + 1];
-        const vz = rawSTLVertices[i * 3 + 2];
+        const vx = rawSTLVertices[i * 3 + 0] - anchorX;
+        const vy = rawSTLVertices[i * 3 + 1] - anchorY;
+        const vz = rawSTLVertices[i * 3 + 2] - anchorZ;
 
-        if (vx < minX) minX = vx; if (vx > maxX) maxX = vx;
-        if (vy < minY) minY = vy; if (vy > maxY) maxY = vy;
-        if (vz < minZ) minZ = vz; if (vz > maxZ) maxZ = vz;
+        const scaledX = vx * sx;
+        const scaledY = vy * sy;
+        const scaledZ = vz * sz;
 
-        data[i * 7 + 0] = vx;
-        data[i * 7 + 1] = vy;
-        data[i * 7 + 2] = vz;
-        
-        // Barycentric coordinates: 
-        // Vertex 0: (1, 0, 0), Vertex 1: (0, 1, 0), Vertex 2: (0, 0, 1)
-        // Stored as: texCoord = (u, v), sliceSize = (w, subtractiveFlag)
+        const [rx, ry, rz] = rotatePointEuler(scaledX, scaledY, scaledZ, ax, ay, az);
+
+        const worldX = rx + posX;
+        const worldY = ry + posY;
+        const worldZ = rz + posZ;
+
+        rawTransformed[i * 3 + 0] = worldX;
+        rawTransformed[i * 3 + 1] = worldY;
+        rawTransformed[i * 3 + 2] = worldZ;
+
+        if (worldX < minX) minX = worldX; if (worldX > maxX) maxX = worldX;
+        if (worldY < minY) minY = worldY; if (worldY > maxY) maxY = worldY;
+        if (worldZ < minZ) minZ = worldZ; if (worldZ > maxZ) maxZ = worldZ;
+
+        data[i * 7 + 0] = worldX;
+        data[i * 7 + 1] = worldY;
+        data[i * 7 + 2] = worldZ;
+
+        // Barycentric coordinates
         const triVertexIndex = i % 3;
         if (triVertexIndex === 0) {
             data[i * 7 + 3] = 1.0;
@@ -2389,13 +2450,13 @@ function updateSTLGeometry() {
             data[i * 7 + 4] = 0.0;
             data[i * 7 + 5] = 1.0;
         }
-        // Use the subtractive flag if provided
         data[i * 7 + 6] = (rawSTLSubtractiveFlags && i < rawSTLSubtractiveFlags.length) ? rawSTLSubtractiveFlags[i] : 0.0;
     }
 
     cachedStlAABB = { minX, maxX, minY, maxY, minZ, maxZ };
     transformedSTLVertices = data;
-    stlBVH = buildMeshBVH(rawSTLVertices, 9);
+    transformedRawSTLVertices = rawTransformed;
+    stlBVH = buildMeshBVH(transformedRawSTLVertices, 9);
 
     const numTriangles = count / 3;
     const indices = new Uint32Array(numTriangles * 6);
@@ -3682,6 +3743,7 @@ let latestMPMFloatsPerParticle: number = 14;
 let mpmParticlesBuffer: WebGLBuffer | null = null;
 let mpmParticlesCount: number = 0;
 let showMPMParticles: boolean = true;
+let mpmParticleRenderMode: 'auto' | 'points' | 'spheres' = 'auto';
 let mpmParticleDiameter: number = 0; // 0 = Auto based on initial mesh spacing (dx / ∛ppc)
 let ppc: number = 8;
 let latestEmpiricalSpacing: number = 0;
@@ -3693,6 +3755,8 @@ let mpmParticleLogScale: boolean = false;
 let mpmParticleOpacity: number = 1.0;
 let mpmParticleMinVal: number | undefined = undefined;
 let mpmParticleMaxVal: number | undefined = undefined;
+let mpmParticleUserStride: number = 1;
+let mpmParticleHideEroded: boolean = false;
 
 let latestFEMNodesData: Float32Array | null = null;
 let latestFEMFacetsData: Float32Array | null = null;
@@ -4397,8 +4461,19 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     let mpmMinY = Infinity, mpmMaxY = -Infinity;
     let mpmMinZ = Infinity, mpmMaxZ = -Infinity;
 
-    for (let i = 0; i < nParticles; i++) {
+    let writtenParticles = 0;
+    const userStep = Math.max(1, mpmParticleUserStride);
+
+    for (let i = 0; i < nParticles; i += userStep) {
         const base = i * stride;
+        if (mpmParticleHideEroded) {
+            const hasFailed = latestMPMParticlesData[base + 11] > 0.5;
+            const damage = latestMPMParticlesData[base + 10];
+            if (hasFailed || damage >= 1.0) {
+                continue;
+            }
+        }
+
         const px = latestMPMParticlesData[base + 0];
         const py = latestMPMParticlesData[base + 1];
         const pz = latestMPMParticlesData[base + 2];
@@ -4407,7 +4482,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         if (py < mpmMinY) mpmMinY = py; if (py > mpmMaxY) mpmMaxY = py;
         if (pz < mpmMinZ) mpmMinZ = pz; if (pz > mpmMaxZ) mpmMaxZ = pz;
 
-        const vIdx = i * 7;
+        const vIdx = writtenParticles * 7;
         vertexData[vIdx + 0] = px * sx + tx;
         vertexData[vIdx + 1] = py * sy + ty;
         vertexData[vIdx + 2] = pz * sz + tz;
@@ -4456,6 +4531,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
             sampleColormapDirect(normVal, cmap, vertexData, vIdx + 3);
         }
         vertexData[vIdx + 6] = 0.0;
+        writtenParticles++;
     }
 
     if (isFinite(mpmMinX) && isFinite(mpmMaxX)) {
@@ -4464,11 +4540,11 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         cachedMpmAABB = null;
     }
 
-    const particleBytes = nParticles * 7 * 4;
+    const particleBytes = writtenParticles * 7 * 4;
     if (gl) {
         if (!mpmParticlesBuffer) mpmParticlesBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, vertexData.subarray(0, nParticles * 7), gl.DYNAMIC_DRAW);
+        gl.bufferData(gl.ARRAY_BUFFER, vertexData.subarray(0, writtenParticles * 7), gl.DYNAMIC_DRAW);
     }
     if (isWebGPU && gpuDevice) {
         if (!gpuMPMParticlesBuffer || gpuMPMParticlesBufferSize < particleBytes) {
@@ -4483,7 +4559,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
             gpuDevice.queue.writeBuffer(gpuMPMParticlesBuffer, 0, vertexData.buffer, vertexData.byteOffset, particleBytes);
         }
     }
-    mpmParticlesCount = nParticles;
+    mpmParticlesCount = writtenParticles;
 
     // Dynamically update selection/hover highlights as particles move/deform
     if (selectedObject && (selectedObject.objectType === 'MPMObject3D' || selectedObject.objectType === 'MPMObject2D')) {
@@ -4693,78 +4769,79 @@ function updateDetonatorGeometry() {
         const py = normY(cy);
         const pz = normZ(cz);
 
-        const rPhys = Math.max(0.005, Number(item.radius ?? (minDim * 0.035))) * detonatorSize;
+        const rPhys = Math.max(0.002, Number(item.radius ?? (minDim * 0.035))) * detonatorSize;
         const rx = rPhys / dimX;
         const ry = rPhys / dimY;
         const rz = rPhys / dimZ;
 
-        // Diamond Octahedron Vertices:
-        const top = [px, py, pz + rz];
-        const btm = [px, py, pz - rz];
-        const right = [px + rx, py, pz];
-        const left = [px - rx, py, pz];
-        const front = [px, py + ry, pz];
-        const back = [px, py - ry, pz];
+        // Solid Sphere Triangles with Analytic Normals
+        const rings = 20;
+        const sectors = 28;
+        for (let ring = 0; ring < rings; ring++) {
+            const phi1 = (ring * Math.PI) / rings;
+            const phi2 = ((ring + 1) * Math.PI) / rings;
+            const sinPhi1 = Math.sin(phi1);
+            const cosPhi1 = Math.cos(phi1);
+            const sinPhi2 = Math.sin(phi2);
+            const cosPhi2 = Math.cos(phi2);
 
-        const addSolidTri = (p1: number[], p2: number[], p3: number[]) => {
-            const v1x = p2[0] - p1[0], v1y = p2[1] - p1[1], v1z = p2[2] - p1[2];
-            const v2x = p3[0] - p1[0], v2y = p3[1] - p1[1], v2z = p3[2] - p1[2];
-            let nx = v1y * v2z - v1z * v2y;
-            let ny = v1z * v2x - v1x * v2z;
-            let nz = v1x * v2y - v1y * v2x;
-            const len = Math.hypot(nx, ny, nz);
-            if (len > 1e-6) {
-                nx /= len; ny /= len; nz /= len;
-            } else {
-                nx = 0; ny = 0; nz = 1;
+            for (let s = 0; s < sectors; s++) {
+                const th1 = (s * 2 * Math.PI) / sectors;
+                const th2 = ((s + 1) * 2 * Math.PI) / sectors;
+                const sinTh1 = Math.sin(th1);
+                const cosTh1 = Math.cos(th1);
+                const sinTh2 = Math.sin(th2);
+                const cosTh2 = Math.cos(th2);
+
+                const p00 = [px + rx * sinPhi1 * cosTh1, py + ry * sinPhi1 * sinTh1, pz + rz * cosPhi1];
+                const p10 = [px + rx * sinPhi2 * cosTh1, py + ry * sinPhi2 * sinTh1, pz + rz * cosPhi2];
+                const p01 = [px + rx * sinPhi1 * cosTh2, py + ry * sinPhi1 * sinTh2, pz + rz * cosPhi1];
+                const p11 = [px + rx * sinPhi2 * cosTh2, py + ry * sinPhi2 * sinTh2, pz + rz * cosPhi2];
+
+                const n00 = [sinPhi1 * cosTh1, sinPhi1 * sinTh1, cosPhi1];
+                const n10 = [sinPhi2 * cosTh1, sinPhi2 * sinTh1, cosPhi2];
+                const n01 = [sinPhi1 * cosTh2, sinPhi1 * sinTh2, cosPhi1];
+                const n11 = [sinPhi2 * cosTh2, sinPhi2 * sinTh2, cosPhi2];
+
+                // Triangle 1
+                solidVerts.push(p00[0], p00[1], p00[2], n00[0], n00[1], n00[2], 0);
+                solidVerts.push(p10[0], p10[1], p10[2], n10[0], n10[1], n10[2], 0);
+                solidVerts.push(p01[0], p01[1], p01[2], n01[0], n01[1], n01[2], 0);
+
+                // Triangle 2
+                solidVerts.push(p01[0], p01[1], p01[2], n01[0], n01[1], n01[2], 0);
+                solidVerts.push(p10[0], p10[1], p10[2], n10[0], n10[1], n10[2], 0);
+                solidVerts.push(p11[0], p11[1], p11[2], n11[0], n11[1], n11[2], 0);
             }
-            solidVerts.push(p1[0], p1[1], p1[2], nx, ny, nz, 0);
-            solidVerts.push(p2[0], p2[1], p2[2], nx, ny, nz, 0);
-            solidVerts.push(p3[0], p3[1], p3[2], nx, ny, nz, 0);
-        };
+        }
 
-        // Top pyramid (4 faces)
-        addSolidTri(top, right, front);
-        addSolidTri(top, front, left);
-        addSolidTri(top, left, back);
-        addSolidTri(top, back, right);
-
-        // Bottom pyramid (4 faces)
-        addSolidTri(btm, front, right);
-        addSolidTri(btm, left, front);
-        addSolidTri(btm, back, left);
-        addSolidTri(btm, right, back);
-
-        // Wireframe edges:
+        // Wireframe lines
         const addWireLine = (p1: number[], p2: number[]) => {
             wireVerts.push(p1[0], p1[1], p1[2], 0, 0);
             wireVerts.push(p2[0], p2[1], p2[2], 0, 0);
         };
 
-        // Octahedron wireframe edges
-        addWireLine(top, right);
-        addWireLine(top, front);
-        addWireLine(top, left);
-        addWireLine(top, back);
-        addWireLine(btm, right);
-        addWireLine(btm, front);
-        addWireLine(btm, left);
-        addWireLine(btm, back);
-        addWireLine(right, front);
-        addWireLine(front, left);
-        addWireLine(left, back);
-        addWireLine(back, right);
+        // Wireframe rings: XY, XZ, YZ coordinate planes + latitude rings
+        const segs = 36;
+        for (let s = 0; s < segs; s++) {
+            const th1 = (s * 2 * Math.PI) / segs;
+            const th2 = ((s + 1) * 2 * Math.PI) / segs;
+            const c1 = Math.cos(th1), s1 = Math.sin(th1);
+            const c2 = Math.cos(th2), s2 = Math.sin(th2);
 
-        // Horizontal target ring for detonator
-        const ringSegments = 24;
-        const ringRx = rx * 1.35;
-        const ringRy = ry * 1.35;
-        for (let s = 0; s < ringSegments; s++) {
-            const th1 = (s * 2 * Math.PI) / ringSegments;
-            const th2 = ((s + 1) * 2 * Math.PI) / ringSegments;
-            const pt1 = [px + ringRx * Math.cos(th1), py + ringRy * Math.sin(th1), pz];
-            const pt2 = [px + ringRx * Math.cos(th2), py + ringRy * Math.sin(th2), pz];
-            addWireLine(pt1, pt2);
+            // Equator (XY plane)
+            addWireLine([px + rx * c1, py + ry * s1, pz], [px + rx * c2, py + ry * s2, pz]);
+            // Meridian 1 (XZ plane)
+            addWireLine([px + rx * c1, py, pz + rz * s1], [px + rx * c2, py, pz + rz * s2]);
+            // Meridian 2 (YZ plane)
+            addWireLine([px, py + ry * c1, pz + rz * s1], [px, py + ry * c2, pz + rz * s2]);
+
+            // Latitude +45 deg
+            const rLat = Math.SQRT1_2;
+            const zOff = rz * Math.SQRT1_2;
+            addWireLine([px + rx * rLat * c1, py + ry * rLat * s1, pz + zOff], [px + rx * rLat * c2, py + ry * rLat * s2, pz + zOff]);
+            // Latitude -45 deg
+            addWireLine([px + rx * rLat * c1, py + ry * rLat * s1, pz - zOff], [px + rx * rLat * c2, py + ry * rLat * s2, pz - zOff]);
         }
     });
 
@@ -4836,22 +4913,87 @@ function updateMPMPreviewGeometry() {
         const py = normY(cy);
         const pz = normZ(cz);
 
-        const shape = obj.shape || 'Box';
+        const shape = obj.shape || obj.shape_type || 'Box';
         if (shape === 'Box') {
             const lx = Number(obj.size_x ?? 0.2);
             const ly = Number(obj.size_y ?? 0.2);
             const lz = Number(obj.size_z ?? 0.2);
-            const wire = getRotatedBoxWireframeVertices(px, py, pz, lx, ly, lz, 0, 0, 0, dimX, dimY, dimZ);
+            const rotX = (Number(obj.rot_x) || 0.0) * Math.PI / 180.0;
+            const rotY = (Number(obj.rot_y) || 0.0) * Math.PI / 180.0;
+            const rotZ = (Number(obj.rot_z) || 0.0) * Math.PI / 180.0;
+            const wire = getRotatedBoxWireframeVertices(px, py, pz, lx, ly, lz, rotX, rotY, rotZ, dimX, dimY, dimZ);
             allVerts.push(...wire);
         } else if (shape === 'Cylinder') {
             const r = Number(obj.radius ?? 0.1);
             const h = Number(obj.height ?? 0.2);
-            const wire = getCylinderWireframeVertices(px, py, pz, r, h, 0, 0, 0, dimX, dimY, dimZ);
+            const rotX = (Number(obj.rot_x) || 0.0) * Math.PI / 180.0;
+            const rotY = (Number(obj.rot_y) || 0.0) * Math.PI / 180.0;
+            const rotZ = (Number(obj.rot_z) || 0.0) * Math.PI / 180.0;
+            const wire = getCylinderWireframeVertices(px, py, pz, r, h, rotX, rotY, rotZ, dimX, dimY, dimZ);
             allVerts.push(...wire);
         } else if (shape === 'Sphere') {
             const r = Number(obj.radius ?? 0.1);
             const wire = getSphereWireframeVertices(px, py, pz, r / dimX, r / dimY, r / dimZ);
             allVerts.push(...wire);
+        } else if (shape === 'STL') {
+            if (rawSTLVertices && rawSTLVertices.length >= 9) {
+                const count = rawSTLVertices.length / 3;
+                let rawMinX = Infinity, rawMinY = Infinity, rawMinZ = Infinity;
+                let rawMaxX = -Infinity, rawMaxY = -Infinity, rawMaxZ = -Infinity;
+                for (let i = 0; i < count; i++) {
+                    const x = rawSTLVertices[i * 3 + 0];
+                    const y = rawSTLVertices[i * 3 + 1];
+                    const z = rawSTLVertices[i * 3 + 2];
+                    if (x < rawMinX) rawMinX = x; if (x > rawMaxX) rawMaxX = x;
+                    if (y < rawMinY) rawMinY = y; if (y > rawMaxY) rawMaxY = y;
+                    if (z < rawMinZ) rawMinZ = z; if (z > rawMaxZ) rawMaxZ = z;
+                }
+                const rawCenterX = (rawMinX + rawMaxX) * 0.5;
+                const rawCenterY = (rawMinY + rawMaxY) * 0.5;
+                const rawCenterZ = (rawMinZ + rawMaxZ) * 0.5;
+
+                const isCentered = (obj.origin_mode || 'CAD Origin') === 'Center';
+                const anchorX = isCentered ? rawCenterX : 0.0;
+                const anchorY = isCentered ? rawCenterY : 0.0;
+                const anchorZ = isCentered ? rawCenterZ : 0.0;
+
+                const sx = (Number(obj.scale_x) !== 0.0 && !isNaN(Number(obj.scale_x))) ? Number(obj.scale_x) : 1.0;
+                const sy = (Number(obj.scale_y) !== 0.0 && !isNaN(Number(obj.scale_y))) ? Number(obj.scale_y) : 1.0;
+                const sz = (Number(obj.scale_z) !== 0.0 && !isNaN(Number(obj.scale_z))) ? Number(obj.scale_z) : 1.0;
+
+                const ax = (Number(obj.rot_x) || 0.0) * Math.PI / 180.0;
+                const ay = (Number(obj.rot_y) || 0.0) * Math.PI / 180.0;
+                const az = (Number(obj.rot_z) || 0.0) * Math.PI / 180.0;
+
+                const posX = Number(obj.pos_x ?? obj.x ?? 0.0);
+                const posY = Number(obj.pos_y ?? obj.y ?? 0.0);
+                const posZ = Number(obj.pos_z ?? obj.z ?? 0.0);
+
+                const numTris = Math.floor(rawSTLVertices.length / 9);
+                const stride = numTris > 1500 ? Math.ceil(numTris / 1500) : 1;
+
+                const addLineWire = (p1x: number, p1y: number, p1z: number, p2x: number, p2y: number, p2z: number) => {
+                    allVerts.push(normX(p1x), normY(p1y), normZ(p1z), 0, 0);
+                    allVerts.push(normX(p2x), normY(p2y), normZ(p2z), 0, 0);
+                };
+
+                for (let t = 0; t < numTris; t += stride) {
+                    const b = t * 9;
+                    const transformV = (vx: number, vy: number, vz: number): [number, number, number] => {
+                        const lvx = (vx - anchorX) * sx;
+                        const lvy = (vy - anchorY) * sy;
+                        const lvz = (vz - anchorZ) * sz;
+                        const [rx, ry, rz] = rotatePointEuler(lvx, lvy, lvz, ax, ay, az);
+                        return [rx + posX, ry + posY, rz + posZ];
+                    };
+                    const [v0x, v0y, v0z] = transformV(rawSTLVertices[b + 0], rawSTLVertices[b + 1], rawSTLVertices[b + 2]);
+                    const [v1x, v1y, v1z] = transformV(rawSTLVertices[b + 3], rawSTLVertices[b + 4], rawSTLVertices[b + 5]);
+                    const [v2x, v2y, v2z] = transformV(rawSTLVertices[b + 6], rawSTLVertices[b + 7], rawSTLVertices[b + 8]);
+                    addLineWire(v0x, v0y, v0z, v1x, v1y, v1z);
+                    addLineWire(v1x, v1y, v1z, v2x, v2y, v2z);
+                    addLineWire(v2x, v2y, v2z, v0x, v0y, v0z);
+                }
+            }
         }
     }
 
@@ -7089,40 +7231,32 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
             const r = Number(obj.charge_radius ?? obj.radius ?? chargeData?.radius ?? 0.1);
             addCleanSphereWireframe(center, r, 48);
         }
-    } else if (objectType === 'DetonatorLocation3D' || objectType === 'Detonator') {
-        const dxCoord = Number(obj.det_x ?? obj.pos_x ?? obj.x ?? chargeData?.det_x ?? (xmin + sizeX * 0.5));
-        const dyCoord = Number(obj.det_y ?? obj.pos_y ?? obj.y ?? chargeData?.det_y ?? (ymin + sizeY * 0.5));
-        const dzCoord = Number(obj.det_z ?? obj.pos_z ?? obj.z ?? chargeData?.det_z ?? (zmin + sizeZ * 0.5));
+    } else if (objectType === 'DetonatorLocation3D' || objectType === 'Detonator' || objectType === 'DetonatorLocation' || objectType === 'TriggerLocation3D' || objectType === 'TriggerLocation') {
+        const dxCoord = Number(obj.detonator_x ?? obj.trigger_x ?? obj.det_x ?? obj.pos_x ?? obj.x ?? chargeData?.det_x ?? (xmin + sizeX * 0.5));
+        const dyCoord = Number(obj.detonator_y ?? obj.trigger_y ?? obj.det_y ?? obj.pos_y ?? obj.y ?? chargeData?.det_y ?? (ymin + sizeY * 0.5));
+        const dzCoord = Number(obj.detonator_z ?? obj.trigger_z ?? obj.det_z ?? obj.pos_z ?? obj.z ?? chargeData?.det_z ?? (zmin + sizeZ * 0.5));
         const center = physToNorm(dxCoord, dyCoord, dzCoord);
-        const dPhys = Math.max(0.002, Math.min(sizeX, sizeY, sizeZ) * 0.035);
-        const dxNorm = dPhys / sizeX;
-        const dyNorm = dPhys / sizeY;
-        const dzNorm = dPhys / sizeZ;
+        
+        let rPhys = Number(obj.detonator_radius ?? obj.trigger_radius ?? obj.radius ?? obj.det_radius);
+        if (isNaN(rPhys) || rPhys <= 0) {
+            const matchedDet = detonatorsList?.find((d: any) => d.id === obj.objectId);
+            if (matchedDet && matchedDet.radius) {
+                rPhys = Number(matchedDet.radius);
+            }
+        }
+        if (isNaN(rPhys) || rPhys <= 0) {
+            rPhys = Math.min(sizeX, sizeY, sizeZ) * 0.035;
+        }
+        rPhys = Math.max(0.002, rPhys * (detonatorSize > 0 ? detonatorSize : 1.0));
 
-        // Clean 3D Diamond Octahedron
-        const top = [center[0], center[1], center[2] + dzNorm];
-        const bot = [center[0], center[1], center[2] - dzNorm];
-        const px = [center[0] + dxNorm, center[1], center[2]];
-        const nx = [center[0] - dxNorm, center[1], center[2]];
-        const py = [center[0], center[1] + dyNorm, center[2]];
-        const ny = [center[0], center[1] - dyNorm, center[2]];
-        addLine(top, px); addLine(top, nx); addLine(top, py); addLine(top, ny);
-        addLine(bot, px); addLine(bot, nx); addLine(bot, py); addLine(bot, ny);
-        addLine(px, py); addLine(py, nx); addLine(nx, ny); addLine(ny, px);
-
-        // Horizontal compass ring
-        addCircleRing(center, dPhys * 1.3, 2, 32);
+        // Clean 3D Sphere Wireframe
+        addCleanSphereWireframe(center, rPhys, 36);
 
         // Ground drop-line down to floor z = -0.5
         const floorPt = [center[0], center[1], -0.5];
         addLine(center, floorPt);
-        // Small ground target diamond at floor
-        const grNormX = dxNorm * 0.5;
-        const grNormY = dyNorm * 0.5;
-        addLine([floorPt[0] + grNormX, floorPt[1], -0.5], [floorPt[0], floorPt[1] + grNormY, -0.5]);
-        addLine([floorPt[0], floorPt[1] + grNormY, -0.5], [floorPt[0] - grNormX, floorPt[1], -0.5]);
-        addLine([floorPt[0] - grNormX, floorPt[1], -0.5], [floorPt[0], floorPt[1] - grNormY, -0.5]);
-        addLine([floorPt[0], floorPt[1] - grNormY, -0.5], [floorPt[0] + grNormX, floorPt[1], -0.5]);
+        // Clean floor target ring
+        addCircleRing(floorPt, rPhys * 0.7, 2, 24);
 
     } else if (objectType === 'VirtualGauges3D' || objectType === 'VirtualGauges' || objectType === 'PressureGauge' || objectType === 'VirtualGauge') {
         let gx = Number(obj.x ?? (xmin + sizeX * 0.5));
@@ -7182,15 +7316,18 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
                 addCleanCylinderWireframe(center, r, h, 2, 48, 16);
             } else if (shape === 'Sphere' || shape === 'Circle') {
                 addCleanSphereWireframe(center, r, 48);
-            } else if (shape === 'STL' && rawSTLVertices && rawSTLVertices.length >= 9) {
-                const numTris = Math.floor(rawSTLVertices.length / 9);
-                const step = numTris > 12000 ? Math.ceil(numTris / 8000) : 1;
-                for (let t = 0; t < numTris; t += step) {
-                    const b = t * 9;
-                    const p0 = physToNorm(rawSTLVertices[b + 0], rawSTLVertices[b + 1], rawSTLVertices[b + 2]);
-                    const p1 = physToNorm(rawSTLVertices[b + 3], rawSTLVertices[b + 4], rawSTLVertices[b + 5]);
-                    const p2 = physToNorm(rawSTLVertices[b + 6], rawSTLVertices[b + 7], rawSTLVertices[b + 8]);
-                    addLine(p0, p1); addLine(p1, p2); addLine(p2, p0);
+            } else if (shape === 'STL') {
+                const vertsToUse = transformedRawSTLVertices || rawSTLVertices;
+                if (vertsToUse && vertsToUse.length >= 9) {
+                    const numTris = Math.floor(vertsToUse.length / 9);
+                    const step = numTris > 12000 ? Math.ceil(numTris / 8000) : 1;
+                    for (let t = 0; t < numTris; t += step) {
+                        const b = t * 9;
+                        const p0 = physToNorm(vertsToUse[b + 0], vertsToUse[b + 1], vertsToUse[b + 2]);
+                        const p1 = physToNorm(vertsToUse[b + 3], vertsToUse[b + 4], vertsToUse[b + 5]);
+                        const p2 = physToNorm(vertsToUse[b + 6], vertsToUse[b + 7], vertsToUse[b + 8]);
+                        addLine(p0, p1); addLine(p1, p2); addLine(p2, p0);
+                    }
                 }
             } else {
                 const boxMin = [
@@ -7511,13 +7648,13 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
     }
 
     // 5. STL Solid CAD Mesh (Spatial BVH with Exact Triangle Intersection)
-    if (showSTL && rawSTLVertices && rawSTLVertices.length >= 9) {
+    if (showSTL && transformedRawSTLVertices && transformedRawSTLVertices.length >= 9) {
         if (!stlBVH) {
-            stlBVH = buildMeshBVH(rawSTLVertices, 9);
+            stlBVH = buildMeshBVH(transformedRawSTLVertices, 9);
         }
         if (stlBVH) {
             const tPhys = raycastBVH(
-                stlBVH, rawSTLVertices, 9,
+                stlBVH, transformedRawSTLVertices, 9,
                 O_phys_x, O_phys_y, O_phys_z,
                 D_phys_x, D_phys_y, D_phys_z,
                 minSolidT * maxSize
@@ -8415,29 +8552,37 @@ function render() {
             uMPM[54] = viewRadius; // particle radius in view space (0.0 for screen-space point cloud)
             gpuDevice.queue.writeBuffer(gpuUniformBufferMPM, 0, uMPM.buffer);
 
-            const mpmBindGroup = gpuDevice.createBindGroup({
-                layout: bindGroupLayout,
-                entries: [
-                    { binding: 0, resource: { buffer: gpuUniformBufferMPM } },
-                    { binding: 1, resource: gpuDummyTextureView },
-                    { binding: 2, resource: gpuSampler! },
-                    { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
-                ]
-            });
+            const targetTextureView = gpuVolume3DTextureView || gpuDummy3DTextureView;
+            if (!gpuMPMBindGroup || lastMPMTextureView !== targetTextureView) {
+                gpuMPMBindGroup = gpuDevice.createBindGroup({
+                    layout: bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: gpuUniformBufferMPM } },
+                        { binding: 1, resource: gpuDummyTextureView },
+                        { binding: 2, resource: gpuSampler! },
+                        { binding: 3, resource: targetTextureView }
+                    ]
+                });
+                lastMPMTextureView = targetTextureView;
+            }
 
-            if (gpuPointPipeline && viewRadius <= 0.0) {
+            const usePointRendering = (mpmParticleRenderMode === 'points') ||
+                (mpmParticleRenderMode === 'auto' && mpmParticlesCount > 10000000) ||
+                viewRadius <= 0.0 || !gpuParticleBillboardPipeline;
+
+            if (gpuPointPipeline && usePointRendering) {
                 passEncoder.setPipeline(gpuPointPipeline);
-                passEncoder.setBindGroup(0, mpmBindGroup);
+                passEncoder.setBindGroup(0, gpuMPMBindGroup);
                 passEncoder.setVertexBuffer(0, gpuMPMParticlesBuffer);
                 passEncoder.draw(mpmParticlesCount);
             } else if (gpuParticleBillboardPipeline) {
                 passEncoder.setPipeline(gpuParticleBillboardPipeline);
-                passEncoder.setBindGroup(0, mpmBindGroup);
+                passEncoder.setBindGroup(0, gpuMPMBindGroup);
                 passEncoder.setVertexBuffer(0, gpuMPMParticlesBuffer);
                 passEncoder.draw(6, mpmParticlesCount, 0, 0);
             } else if (gpuPointPipeline) {
                 passEncoder.setPipeline(gpuPointPipeline);
-                passEncoder.setBindGroup(0, mpmBindGroup);
+                passEncoder.setBindGroup(0, gpuMPMBindGroup);
                 passEncoder.setVertexBuffer(0, gpuMPMParticlesBuffer);
                 passEncoder.draw(mpmParticlesCount);
             }
@@ -8918,6 +9063,13 @@ function render() {
                     pEnc.setBindGroup(0, highlightSurfaceBindGroup);
                     pEnc.setVertexBuffer(0, gpuGaugesBuffer);
                     pEnc.draw(gaugesCount);
+                }
+            } else if (objectType === 'DetonatorLocation3D' || objectType === 'Detonator' || objectType === 'DetonatorLocation' || objectType === 'TriggerLocation3D' || objectType === 'TriggerLocation') {
+                if (gpuDetonatorSolidBuffer && detonatorCount > 0) {
+                    pEnc.setPipeline(pipelineToUse);
+                    pEnc.setBindGroup(0, highlightSurfaceBindGroup);
+                    pEnc.setVertexBuffer(0, gpuDetonatorSolidBuffer);
+                    pEnc.draw(detonatorCount);
                 }
             }
         }
@@ -9708,6 +9860,24 @@ function render() {
                 gl.drawArrays(gl.TRIANGLES, 0, gaugesCount);
                 gl.depthMask(true);
             }
+        } else if (objectType === 'DetonatorLocation3D' || objectType === 'Detonator' || objectType === 'DetonatorLocation' || objectType === 'TriggerLocation3D' || objectType === 'TriggerLocation') {
+            if (detonatorBuffer && detonatorCount > 0) {
+                gl.bindBuffer(gl.ARRAY_BUFFER, detonatorBuffer);
+                gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+                gl.enableVertexAttribArray(0);
+                gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+                gl.enableVertexAttribArray(1);
+                gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
+                gl.enableVertexAttribArray(2);
+
+                gl.enable(gl.BLEND);
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+                gl.depthMask(false);
+                if (uIsWF) gl.uniform1i(uIsWF, highlightMode);
+                if (uAlpha) gl.uniform1f(uAlpha, 1.0);
+                gl.drawArrays(gl.TRIANGLES, 0, detonatorCount);
+                gl.depthMask(true);
+            }
         }
     }
 
@@ -9800,13 +9970,16 @@ function drawOverlayTicks(): void {
     const depthScale = Math.max(0.5, Math.min(1.4, 2.0 / centerProj.w));
     const scale = depthScale * dpr;
 
+    const bgLum = 0.299 * (clearColor.r ?? 0.082) + 0.587 * (clearColor.g ?? 0.098) + 0.114 * (clearColor.b ?? 0.133);
+    const isLightBg = bgLum > 0.45;
+
     const fontSize = Math.round(10 * scale);
     ctx.font = `bold ${fontSize}px system-ui, -apple-system, sans-serif`;
 
     const axes = [
         {
             name: 'X',
-            color: '#ff5555',
+            color: isLightBg ? '#dc2626' : '#ff5555',
             min: xmin,
             max: xmax,
             offsetDir: [0, -1, 0],
@@ -9815,7 +9988,7 @@ function drawOverlayTicks(): void {
         },
         {
             name: 'Y',
-            color: '#55ff55',
+            color: isLightBg ? '#16a34a' : '#55ff55',
             min: ymin,
             max: ymax,
             offsetDir: [1, 0, 0],
@@ -9824,7 +9997,7 @@ function drawOverlayTicks(): void {
         },
         {
             name: 'Z',
-            color: '#55aaff',
+            color: isLightBg ? '#2563eb' : '#55aaff',
             min: zmin,
             max: zmax,
             offsetDir: [-1, 0, 0],
@@ -9910,8 +10083,6 @@ function drawOverlayTicks(): void {
             }
 
             if (!skipLabel) {
-                ctx.fillStyle = '#ffffff';
-                
                 if (ux > 0.3) ctx.textAlign = 'left';
                 else if (ux < -0.3) ctx.textAlign = 'right';
                 else ctx.textAlign = 'center';
@@ -9921,7 +10092,23 @@ function drawOverlayTicks(): void {
                 else ctx.textBaseline = 'middle';
 
                 const displayVal = formatTickValue(clampedVal, major);
-                ctx.fillText(`${displayVal}${axis.labelSuffix}`, pLabelPos.x, pLabelPos.y);
+                const textStr = `${displayVal}${axis.labelSuffix}`;
+
+                ctx.lineJoin = 'round';
+                ctx.miterLimit = 2;
+                if (isLightBg) {
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)';
+                    ctx.lineWidth = 3.0 * dpr;
+                    ctx.strokeText(textStr, pLabelPos.x, pLabelPos.y);
+                    ctx.fillStyle = '#0f172a';
+                    ctx.fillText(textStr, pLabelPos.x, pLabelPos.y);
+                } else {
+                    ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+                    ctx.lineWidth = 3.0 * dpr;
+                    ctx.strokeText(textStr, pLabelPos.x, pLabelPos.y);
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillText(textStr, pLabelPos.x, pLabelPos.y);
+                }
                 lastLabelPos = { x: pLabelPos.x, y: pLabelPos.y };
             }
 
@@ -10088,7 +10275,22 @@ self.onmessage = async (e) => {
         } else if (type === "setSTLGeometry") {
             rawSTLVertices = data.vertices;
             rawSTLSubtractiveFlags = data.subtractive_flags;
+            if (data.stlTransform) {
+                stlTransform = {
+                    origin_mode: data.stlTransform.origin_mode || 'CAD Origin',
+                    scale_x: Number(data.stlTransform.scale_x ?? 1.0),
+                    scale_y: Number(data.stlTransform.scale_y ?? 1.0),
+                    scale_z: Number(data.stlTransform.scale_z ?? 1.0),
+                    pos_x: Number(data.stlTransform.pos_x ?? 0.0),
+                    pos_y: Number(data.stlTransform.pos_y ?? 0.0),
+                    pos_z: Number(data.stlTransform.pos_z ?? 0.0),
+                    rot_x: Number(data.stlTransform.rot_x ?? 0.0),
+                    rot_y: Number(data.stlTransform.rot_y ?? 0.0),
+                    rot_z: Number(data.stlTransform.rot_z ?? 0.0)
+                };
+            }
             updateSTLGeometry();
+            updateMPMPreviewGeometry();
             requestRender();
         } else if (type === "setObstaclesGeometry") {
             rawObstacleVertices = data.vertices;
@@ -10399,7 +10601,14 @@ self.onmessage = async (e) => {
                     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(0), gl.DYNAMIC_DRAW);
                 }
             }
+            gpuMPMBindGroup = null;
+            lastMPMTextureView = null;
             requestRender();
+        } else if (type === "setParticleRenderMode") {
+            if (data.mode === 'auto' || data.mode === 'points' || data.mode === 'spheres') {
+                mpmParticleRenderMode = data.mode;
+                requestRender();
+            }
         } else if (type === "frame") {
             try {
                 handleFrame(data.buffer);
@@ -10555,6 +10764,23 @@ self.onmessage = async (e) => {
                 updateSliceAMRGridlinesGeometry();
             }
 
+            if (data.stlTransform !== undefined) {
+                stlTransform = {
+                    origin_mode: data.stlTransform.origin_mode || 'CAD Origin',
+                    scale_x: Number(data.stlTransform.scale_x ?? 1.0),
+                    scale_y: Number(data.stlTransform.scale_y ?? 1.0),
+                    scale_z: Number(data.stlTransform.scale_z ?? 1.0),
+                    pos_x: Number(data.stlTransform.pos_x ?? 0.0),
+                    pos_y: Number(data.stlTransform.pos_y ?? 0.0),
+                    pos_z: Number(data.stlTransform.pos_z ?? 0.0),
+                    rot_x: Number(data.stlTransform.rot_x ?? 0.0),
+                    rot_y: Number(data.stlTransform.rot_y ?? 0.0),
+                    rot_z: Number(data.stlTransform.rot_z ?? 0.0)
+                };
+                updateSTLGeometry();
+                updateMPMPreviewGeometry();
+            }
+
             if (data.stlColormap !== undefined) stlColormap = data.stlColormap;
             if (data.stlShowResults !== undefined) stlShowResults = data.stlShowResults;
             if (data.stlQuantity !== undefined) stlQuantity = data.stlQuantity;
@@ -10683,6 +10909,7 @@ self.onmessage = async (e) => {
             let mpmRenderNeeded = false;
             if (data.ppc !== undefined) ppc = data.ppc;
             if (data.showMPMParticles !== undefined) { showMPMParticles = data.showMPMParticles; mpmRenderNeeded = true; }
+            if (data.mpmParticleRenderMode !== undefined) { mpmParticleRenderMode = data.mpmParticleRenderMode; mpmRenderNeeded = true; }
             if (data.mpmParticleDiameter !== undefined) { mpmParticleDiameter = data.mpmParticleDiameter; mpmRenderNeeded = true; }
             if (data.mpmParticleSize !== undefined) { mpmParticleSize = data.mpmParticleSize; mpmRenderNeeded = true; }
             if (data.mpmParticleOpacity !== undefined) { mpmParticleOpacity = data.mpmParticleOpacity; mpmRenderNeeded = true; }
@@ -10711,6 +10938,18 @@ self.onmessage = async (e) => {
             }
             if (data.mpmParticleMaxVal !== undefined) {
                 mpmParticleMaxVal = data.mpmParticleMaxVal;
+                mpmChanged = true;
+            }
+            if (data.stride !== undefined) {
+                mpmParticleUserStride = Math.max(1, parseInt(data.stride, 10) || 1);
+                mpmChanged = true;
+            }
+            if (data.particleStride !== undefined) {
+                mpmParticleUserStride = Math.max(1, parseInt(data.particleStride, 10) || 1);
+                mpmChanged = true;
+            }
+            if (data.hideEroded !== undefined) {
+                mpmParticleHideEroded = Boolean(data.hideEroded);
                 mpmChanged = true;
             }
             if (data.mpmObjects !== undefined) {

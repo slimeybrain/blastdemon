@@ -48,26 +48,29 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
         'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
         'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+        'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
         'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
         // 3D CFD keys
         'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
         'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
         'charge_rot_x', 'charge_rot_y', 'charge_rot_z',
-        'detonator_x', 'detonator_y', 'detonator_z', 'xmin', 'ymin', 'zmin',
+        'detonator_x', 'detonator_y', 'detonator_z', 'trigger_x', 'trigger_y', 'trigger_z', 'xmin', 'ymin', 'zmin',
         'scale_factor',
         'min_y', 'max_y', 'min_val', 'max_val', 'stl_min_val', 'stl_max_val', 'obstacles_min_val', 'obstacles_max_val', 'ambientLevel', 'specularIntensity', 'aoRadius', 'aoIntensity', 'aoBias', 'gauge_size', 'gauge_opacity', 'stl_opacity', 'obstacles_opacity', 'grid_opacity',
-        'charge_opacity', 'detonators_size', 'detonator_size', 'detonators_opacity', 'detonator_opacity',
+        'charge_opacity', 'detonators_size', 'detonator_size', 'detonators_opacity', 'detonator_opacity', 'triggers_size', 'trigger_size', 'triggers_opacity', 'trigger_opacity',
         'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size',
         'center_x', 'center_y', 'center_z', 'size_x', 'size_y', 'size_z', 'radius', 'height', 'length',
         'offset', 'stride',
         // MPM keys
         'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'initial_velocity_x', 'initial_velocity_y', 'initial_velocity_z', 'initial_velocity_r', 'radius', 'inner_radius',
         'scale_x', 'scale_y', 'scale_z',
+        'rot_x', 'rot_y', 'rot_z',
+        'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
         'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
         'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
         'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
-        'weibull_modulus', 'weibull_scale', 'fracture_toughness', 'debris_bulk_factor',
+        'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
         'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
         'mg_gamma0', 'mg_c0', 'mg_s',
         'ppc',
@@ -295,8 +298,20 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
             if (stlNode && stlNode.type === 'STLGeometry') {
                 flattenedParams['stl_file'] = resolveResourcePath(stlNode.parameters.stl_file || '', modelFilename);
-                flattenedParams['geometry_hash'] = stlNode.parameters.geometry_hash || '';
+                const baseHash = stlNode.parameters.geometry_hash || '';
+                const transformSig = `${stlNode.parameters.origin_mode || 'CAD Origin'}_${stlNode.parameters.scale_x ?? 1}_${stlNode.parameters.scale_y ?? 1}_${stlNode.parameters.scale_z ?? 1}_${stlNode.parameters.pos_x ?? 0}_${stlNode.parameters.pos_y ?? 0}_${stlNode.parameters.pos_z ?? 0}_${stlNode.parameters.rot_x ?? 0}_${stlNode.parameters.rot_y ?? 0}_${stlNode.parameters.rot_z ?? 0}`;
+                flattenedParams['geometry_hash'] = baseHash ? `${baseHash}_${transformSig}` : transformSig;
                 flattenedParams['voxelization_method'] = stlNode.parameters.voxelization_method || 'watertight_floodfill';
+                flattenedParams['stl_origin_mode'] = stlNode.parameters.origin_mode || 'CAD Origin';
+                flattenedParams['stl_scale_x'] = Number(stlNode.parameters.scale_x ?? 1.0);
+                flattenedParams['stl_scale_y'] = Number(stlNode.parameters.scale_y ?? 1.0);
+                flattenedParams['stl_scale_z'] = Number(stlNode.parameters.scale_z ?? 1.0);
+                flattenedParams['stl_pos_x'] = Number(stlNode.parameters.pos_x ?? 0.0);
+                flattenedParams['stl_pos_y'] = Number(stlNode.parameters.pos_y ?? 0.0);
+                flattenedParams['stl_pos_z'] = Number(stlNode.parameters.pos_z ?? 0.0);
+                flattenedParams['stl_rot_x'] = Number(stlNode.parameters.rot_x ?? 0.0);
+                flattenedParams['stl_rot_y'] = Number(stlNode.parameters.rot_y ?? 0.0);
+                flattenedParams['stl_rot_z'] = Number(stlNode.parameters.rot_z ?? 0.0);
             } else if (stlNode && stlNode.type === 'PrimitiveGeometry3D') {
                 flattenedParams['primitives'] = stlNode.parameters.primitives || [];
                 const primsStr = JSON.stringify(stlNode.parameters.primitives || []) + '_' + (stlNode.parameters.voxelization_method || 'watertight_floodfill');
@@ -416,11 +431,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
         }
 
-        // Trace Detonator for CFD Solver 3D
-        const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'detonator');
+        // Trace Detonator / Trigger for CFD Solver 3D
+        const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
         if (detConn3D) {
             const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
-            if (detNode3D && detNode3D.type === 'DetonatorLocation3D') {
+            if (detNode3D && (detNode3D.type === 'DetonatorLocation3D' || detNode3D.type === 'TriggerLocation3D')) {
                 Object.entries(detNode3D.parameters).forEach(([key, value]) => {
                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 });
@@ -524,11 +539,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
         }
 
-        // Trace detonator input
-        const detConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'detonator');
+        // Trace detonator / trigger input
+        const detConn2D = state.connections.find(c => c.toNode === solverNode2D.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
         if (detConn2D) {
             const detNode2D = state.nodes.find(n => n.id === detConn2D.fromNode);
-            if (detNode2D && detNode2D.type === 'DetonatorLocation') {
+            if (detNode2D && (detNode2D.type === 'DetonatorLocation' || detNode2D.type === 'TriggerLocation')) {
                 Object.entries(detNode2D.parameters).forEach(([key, value]) => {
                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 });
@@ -679,14 +694,14 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const t = flattenedParams['atm_temperature'] || 288.0;
         flattenedParams['ambient_rho'] = p / (287.058 * t);
 
-        // Map and heal detonator locations if old naming is present
-        if (flattenedParams['detonator_r'] === undefined) {
+        // Map and heal detonator / trigger locations if old naming is present
+        if (flattenedParams['detonator_r'] === undefined && flattenedParams['trigger_r'] === undefined) {
             flattenedParams['detonator_r'] = flattenedParams['explosive_r'] !== undefined ? flattenedParams['explosive_r'] : 0.0;
         }
-        if (flattenedParams['detonator_z'] === undefined) {
+        if (flattenedParams['detonator_z'] === undefined && flattenedParams['trigger_z'] === undefined) {
             flattenedParams['detonator_z'] = flattenedParams['explosive_z'] !== undefined ? flattenedParams['explosive_z'] : 0.1;
         }
-        if (flattenedParams['detonator_radius'] === undefined) {
+        if (flattenedParams['detonator_radius'] === undefined && flattenedParams['trigger_radius'] === undefined) {
             flattenedParams['detonator_radius'] = flattenedParams['explosive_radius'] !== undefined ? flattenedParams['explosive_radius'] : 0.001;
         }
 
@@ -922,8 +937,20 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
                 if (stlNode && stlNode.type === 'STLGeometry') {
                     flattenedParams['stl_file'] = resolveResourcePath(stlNode.parameters.stl_file || '', modelFilename);
-                    flattenedParams['geometry_hash'] = stlNode.parameters.geometry_hash || '';
+                    const baseHash = stlNode.parameters.geometry_hash || '';
+                    const transformSig = `${stlNode.parameters.origin_mode || 'CAD Origin'}_${stlNode.parameters.scale_x ?? 1}_${stlNode.parameters.scale_y ?? 1}_${stlNode.parameters.scale_z ?? 1}_${stlNode.parameters.pos_x ?? 0}_${stlNode.parameters.pos_y ?? 0}_${stlNode.parameters.pos_z ?? 0}_${stlNode.parameters.rot_x ?? 0}_${stlNode.parameters.rot_y ?? 0}_${stlNode.parameters.rot_z ?? 0}`;
+                    flattenedParams['geometry_hash'] = baseHash ? `${baseHash}_${transformSig}` : transformSig;
                     flattenedParams['voxelization_method'] = stlNode.parameters.voxelization_method || 'watertight_floodfill';
+                    flattenedParams['stl_origin_mode'] = stlNode.parameters.origin_mode || 'CAD Origin';
+                    flattenedParams['stl_scale_x'] = Number(stlNode.parameters.scale_x ?? 1.0);
+                    flattenedParams['stl_scale_y'] = Number(stlNode.parameters.scale_y ?? 1.0);
+                    flattenedParams['stl_scale_z'] = Number(stlNode.parameters.scale_z ?? 1.0);
+                    flattenedParams['stl_pos_x'] = Number(stlNode.parameters.pos_x ?? 0.0);
+                    flattenedParams['stl_pos_y'] = Number(stlNode.parameters.pos_y ?? 0.0);
+                    flattenedParams['stl_pos_z'] = Number(stlNode.parameters.pos_z ?? 0.0);
+                    flattenedParams['stl_rot_x'] = Number(stlNode.parameters.rot_x ?? 0.0);
+                    flattenedParams['stl_rot_y'] = Number(stlNode.parameters.rot_y ?? 0.0);
+                    flattenedParams['stl_rot_z'] = Number(stlNode.parameters.rot_z ?? 0.0);
                 } else if (stlNode && stlNode.type === 'PrimitiveGeometry3D') {
                     flattenedParams['primitives'] = stlNode.parameters.primitives || [];
                     const primsStr = JSON.stringify(stlNode.parameters.primitives || []) + '_' + (stlNode.parameters.voxelization_method || 'watertight_floodfill');
@@ -999,10 +1026,10 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     }
                 }
             }
-            const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'detonator');
+            const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
             if (detConn3D) {
                 const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
-                if (detNode3D && detNode3D.type === 'DetonatorLocation3D') {
+                if (detNode3D && (detNode3D.type === 'DetonatorLocation3D' || detNode3D.type === 'TriggerLocation3D')) {
                     Object.entries(detNode3D.parameters).forEach(([key, value]) => {
                         flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                     });
@@ -1058,9 +1085,23 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                         if (stlNode && stlNode.type === 'STLGeometry') {
                             objParams['stl_file'] = resolveResourcePath(stlNode.parameters.stl_file || '', modelFilename);
                             objParams['shape_type'] = 'STL';
+                            if (stlNode.parameters.voxelization_method) {
+                                objParams['voxelization_method'] = stlNode.parameters.voxelization_method;
+                            }
+                            if (stlNode.parameters.origin_mode) {
+                                objParams['origin_mode'] = stlNode.parameters.origin_mode;
+                            }
+                            ['scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z'].forEach(k => {
+                                if (stlNode!.parameters[k] !== undefined) {
+                                    objParams[k] = Number(stlNode!.parameters[k]);
+                                }
+                            });
                         }
                     } else if (objParams['stl_file']) {
                         objParams['stl_file'] = resolveResourcePath(objParams['stl_file'], modelFilename);
+                    }
+                    if (objNode.parameters?.voxelization_method && !stlConn) {
+                        objParams['voxelization_method'] = objNode.parameters.voxelization_method;
                     }
                     let matNode: any = null;
                     const matConn = state.connections.find(c => (c.toNode === objNode.id || c.fromNode === objNode.id) && (c.toPort === 'material' || c.fromPort === 'material' || c.toPort === 'in' || c.fromPort === 'out'));
@@ -1077,6 +1118,27 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                         Object.entries(matNode.parameters).forEach(([k, v]) => {
                             objParams[k] = numericKeys.includes(k) ? Number(v) : v;
                         });
+                    }
+                    const nonConstitutiveKeys = [
+                        'name', 'shape', 'shape_type', 'pos_x', 'pos_y', 'pos_z',
+                        'scale_x', 'scale_y', 'scale_z', 'rot_x', 'rot_y', 'rot_z',
+                        'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height',
+                        'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
+                        'initial_velocity_x', 'initial_velocity_y', 'initial_velocity_z',
+                        'ppc', 'particle_distribution', 'boundary_filling', 'origin_mode',
+                        'voxelization_method', 'stl_file', 'stl_volume'
+                    ];
+                    Object.entries(objNode.parameters).forEach(([k, v]) => {
+                        if (nonConstitutiveKeys.includes(k) || !matNode) {
+                            objParams[k] = numericKeys.includes(k) ? Number(v) : v;
+                        }
+                    });
+                    const isSTL = (objParams['shape_type'] === 'STL' || objNode.parameters?.shape_type === 'STL');
+                    const isCADOrigin = (objParams['origin_mode'] === 'CAD Origin' || objNode.parameters?.origin_mode === 'CAD Origin' || !objParams['origin_mode']);
+                    if (isSTL && isCADOrigin) {
+                        if (objParams['pos_x'] === undefined || objParams['pos_x'] === 0.5) objParams['pos_x'] = 0.0;
+                        if (objParams['pos_y'] === undefined || objParams['pos_y'] === 0.5) objParams['pos_y'] = 0.0;
+                        if (objParams['pos_z'] === undefined || objParams['pos_z'] === 0.5) objParams['pos_z'] = 0.0;
                     }
                     if (matNode?.parameters?.['material_model']) {
                         objParams['material_model'] = matNode.parameters['material_model'];
@@ -1196,8 +1258,20 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
                 if (stlNode && stlNode.type === 'STLGeometry') {
                     flattenedParams['stl_file'] = resolveResourcePath(stlNode.parameters.stl_file || '', modelFilename);
-                    flattenedParams['geometry_hash'] = stlNode.parameters.geometry_hash || '';
+                    const baseHash = stlNode.parameters.geometry_hash || '';
+                    const transformSig = `${stlNode.parameters.origin_mode || 'CAD Origin'}_${stlNode.parameters.scale_x ?? 1}_${stlNode.parameters.scale_y ?? 1}_${stlNode.parameters.scale_z ?? 1}_${stlNode.parameters.pos_x ?? 0}_${stlNode.parameters.pos_y ?? 0}_${stlNode.parameters.pos_z ?? 0}_${stlNode.parameters.rot_x ?? 0}_${stlNode.parameters.rot_y ?? 0}_${stlNode.parameters.rot_z ?? 0}`;
+                    flattenedParams['geometry_hash'] = baseHash ? `${baseHash}_${transformSig}` : transformSig;
                     flattenedParams['voxelization_method'] = stlNode.parameters.voxelization_method || 'watertight_floodfill';
+                    flattenedParams['stl_origin_mode'] = stlNode.parameters.origin_mode || 'CAD Origin';
+                    flattenedParams['stl_scale_x'] = Number(stlNode.parameters.scale_x ?? 1.0);
+                    flattenedParams['stl_scale_y'] = Number(stlNode.parameters.scale_y ?? 1.0);
+                    flattenedParams['stl_scale_z'] = Number(stlNode.parameters.scale_z ?? 1.0);
+                    flattenedParams['stl_pos_x'] = Number(stlNode.parameters.pos_x ?? 0.0);
+                    flattenedParams['stl_pos_y'] = Number(stlNode.parameters.pos_y ?? 0.0);
+                    flattenedParams['stl_pos_z'] = Number(stlNode.parameters.pos_z ?? 0.0);
+                    flattenedParams['stl_rot_x'] = Number(stlNode.parameters.rot_x ?? 0.0);
+                    flattenedParams['stl_rot_y'] = Number(stlNode.parameters.rot_y ?? 0.0);
+                    flattenedParams['stl_rot_z'] = Number(stlNode.parameters.rot_z ?? 0.0);
                 } else if (stlNode && stlNode.type === 'PrimitiveGeometry3D') {
                     flattenedParams['primitives'] = stlNode.parameters.primitives || [];
                     const primsStr = JSON.stringify(stlNode.parameters.primitives || []) + '_' + (stlNode.parameters.voxelization_method || 'watertight_floodfill');
@@ -1273,10 +1347,10 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     }
                 }
             }
-            const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && c.toPort === 'detonator');
+            const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
             if (detConn3D) {
                 const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
-                if (detNode3D && detNode3D.type === 'DetonatorLocation3D') {
+                if (detNode3D && (detNode3D.type === 'DetonatorLocation3D' || detNode3D.type === 'TriggerLocation3D')) {
                     Object.entries(detNode3D.parameters).forEach(([key, value]) => {
                         flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                     });
@@ -1564,11 +1638,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
             }
 
-            const detConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'detonator');
+            const detConns = state.connections.filter(c => c.toNode === mpmDomain.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
             const detonators: any[] = [];
             for (const conn of detConns) {
                 const detNode = state.nodes.find(n => n.id === conn.fromNode);
-                if (detNode && detNode.type === 'DetonatorLocation') {
+                if (detNode && (detNode.type === 'DetonatorLocation' || detNode.type === 'TriggerLocation')) {
                     const detParams: any = {};
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
                         detParams[key] = numericKeys.includes(key) ? Number(value) : value;
@@ -1577,7 +1651,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
             }
             if (detonators.length === 0) {
-                const fallbackDets = state.nodes.filter(n => n.type === 'DetonatorLocation');
+                const fallbackDets = state.nodes.filter(n => n.type === 'DetonatorLocation' || n.type === 'TriggerLocation');
                 for (const detNode of fallbackDets) {
                     const detParams: any = {};
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
@@ -1588,6 +1662,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
             if (detonators.length > 0) {
                 flattenedParams['detonators'] = detonators;
+                flattenedParams['triggers'] = detonators;
                 Object.entries(detonators[0]).forEach(([key, value]) => {
                     flattenedParams[key] = value;
                 });
@@ -1671,8 +1746,22 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 if (stlNode && stlNode.type === 'STLGeometry' && (stlConn || objNode.parameters?.shape_type === 'STL')) {
                     objParams['stl_file'] = resolveResourcePath(stlNode.parameters.stl_file || '', modelFilename);
                     objParams['shape_type'] = 'STL';
+                    if (stlNode.parameters.voxelization_method) {
+                        objParams['voxelization_method'] = stlNode.parameters.voxelization_method;
+                    }
+                    if (stlNode.parameters.origin_mode) {
+                        objParams['origin_mode'] = stlNode.parameters.origin_mode;
+                    }
+                    ['scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z'].forEach(k => {
+                        if (stlNode!.parameters[k] !== undefined) {
+                            objParams[k] = Number(stlNode!.parameters[k]);
+                        }
+                    });
                 } else if (objParams['stl_file']) {
                     objParams['stl_file'] = resolveResourcePath(objParams['stl_file'], modelFilename);
+                }
+                if (objNode.parameters?.voxelization_method && !stlConn) {
+                    objParams['voxelization_method'] = objNode.parameters.voxelization_method;
                 }
                 let matNode: any = null;
                 const matConn = state.connections.find(c => (c.toNode === objNode.id || c.fromNode === objNode.id) && (c.toPort === 'material' || c.fromPort === 'material'));
@@ -1680,18 +1769,75 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     const otherId = matConn.toNode === objNode.id ? matConn.fromNode : matConn.toNode;
                     matNode = state.nodes.find(n => n.id === otherId);
                 } else if (objNode.parameters?.material) {
-                    matNode = state.nodes.find(n => n.id === objNode.parameters.material);
+                    const candidateByParam = state.nodes.find(n => n.id === objNode.parameters.material) || null;
+                    if (candidateByParam) {
+                        // Pre-compute if this object looks explosive so we can validate the stored pointer
+                        const _preIdentifiers = [
+                            objNode.id,
+                            (objNode as any).name || '',
+                            objNode.parameters?.name || '',
+                            objNode.parameters?.stl_file || '',
+                            objNode.parameters?.shape_type || ''
+                        ].join(' ').toLowerCase();
+                        const _preIsExplosive = _preIdentifiers.includes('explosive') || _preIdentifiers.includes('charge') ||
+                            _preIdentifiers.includes('c4') || _preIdentifiers.includes('c-4') ||
+                            _preIdentifiers.includes('lx14') || _preIdentifiers.includes('lx-14') ||
+                            _preIdentifiers.includes('comp b') || _preIdentifiers.includes('tnt') ||
+                            _preIdentifiers.includes('rdx') || _preIdentifiers.includes('hmx') ||
+                            _preIdentifiers.includes('petn');
+
+                        if (_preIsExplosive) {
+                            // Only trust the stored pointer if it leads to an explosive material
+                            const _cMatName = [candidateByParam.id, (candidateByParam as any).name || '', candidateByParam.parameters?.name || '', candidateByParam.parameters?.preset || ''].join(' ').toLowerCase();
+                            const _cIsExplosive = _cMatName.includes('explosive') || _cMatName.includes('lx-14') || _cMatName.includes('c-4') ||
+                                candidateByParam.parameters?.material_model === 'CREST Reactive Burn' || isJWLMaterialNode(candidateByParam);
+                            if (_cIsExplosive) {
+                                matNode = candidateByParam;
+                            }
+                            // else: stale pointer to a non-explosive material — fall through to heuristic below
+                        } else {
+                            matNode = candidateByParam;
+                        }
+                    }
                 }
                 if (!matNode) {
-                    const isObjExplosive = (objNode.id + ' ' + (objNode.parameters?.name || '') + ' ' + (objNode.parameters?.shape_type || '')).toLowerCase().includes('explosive');
+                    const objIdentifiers = [
+                        objNode.id,
+                        (objNode as any).name || '',
+                        objNode.parameters?.name || '',
+                        objNode.parameters?.stl_file || '',
+                        objNode.parameters?.shape_type || ''
+                    ].join(' ').toLowerCase();
+
+                    const isObjExplosive = objIdentifiers.includes('explosive') ||
+                                           objIdentifiers.includes('charge') ||
+                                           objIdentifiers.includes('c4') ||
+                                           objIdentifiers.includes('c-4') ||
+                                           objIdentifiers.includes('lx14') ||
+                                           objIdentifiers.includes('lx-14') ||
+                                           objIdentifiers.includes('comp b') ||
+                                           objIdentifiers.includes('tnt') ||
+                                           objIdentifiers.includes('rdx') ||
+                                           objIdentifiers.includes('hmx') ||
+                                           objIdentifiers.includes('petn');
+
                     if (isObjExplosive) {
                         matNode = state.nodes.find(n => n.type === 'Material' && (
-                            (n.id + ' ' + (n.parameters?.name || '')).toLowerCase().includes('explosive') ||
+                            [n.id, (n as any).name || '', n.parameters?.name || '', n.parameters?.preset || ''].join(' ').toLowerCase().includes('explosive') ||
                             n.parameters?.material_model === 'CREST Reactive Burn' ||
                             isJWLMaterialNode(n)
                         ));
                     }
                     if (!matNode) {
+                        // Match by name if possible (e.g. Casing -> Casing Material, Projectile -> Projectile Material)
+                        const objBaseName = ((objNode as any).name || objNode.parameters?.name || '').toLowerCase().trim();
+                        if (objBaseName) {
+                            matNode = state.nodes.find(n => n.type === 'Material' && (
+                                [(n as any).name || '', n.parameters?.name || '', n.parameters?.preset || ''].join(' ').toLowerCase().includes(objBaseName)
+                            ));
+                        }
+                    }
+                    if (!matNode && !isObjExplosive) {
                         matNode = state.nodes.find(n => n.type === 'Material' && !isJWLMaterialNode(n) && !isIdealGasMaterialNode(n)) || state.nodes.find(n => n.type === 'Material');
                     }
                 }
@@ -1702,9 +1848,38 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
 
                 // Re-apply explicit objNode parameters to ensure geometric precedence over material defaults
+                const nonConstitutiveKeys = [
+                    'name', 'shape', 'shape_type', 'pos_x', 'pos_y', 'pos_z',
+                    'scale_x', 'scale_y', 'scale_z', 'rot_x', 'rot_y', 'rot_z',
+                    'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height',
+                    'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
+                    'initial_velocity_x', 'initial_velocity_y', 'initial_velocity_z',
+                    'ppc', 'particle_distribution', 'boundary_filling', 'origin_mode',
+                    'voxelization_method', 'stl_file', 'stl_volume'
+                ];
                 Object.entries(objNode.parameters).forEach(([k, v]) => {
-                    objParams[k] = castParam(k, v);
+                    if (nonConstitutiveKeys.includes(k) || !matNode) {
+                        objParams[k] = castParam(k, v);
+                    }
                 });
+
+                // When linked to an STLGeometry node, re-apply STL transform and mesh parameters
+                // so they are not clobbered by default MPMObject3D geometric properties
+                if (stlNode && stlNode.type === 'STLGeometry' && (stlConn || objNode.parameters?.shape_type === 'STL')) {
+                    objParams['stl_file'] = resolveResourcePath(stlNode.parameters.stl_file || '', modelFilename);
+                    objParams['shape_type'] = 'STL';
+                    if (stlNode.parameters.voxelization_method) {
+                        objParams['voxelization_method'] = stlNode.parameters.voxelization_method;
+                    }
+                    if (stlNode.parameters.origin_mode) {
+                        objParams['origin_mode'] = stlNode.parameters.origin_mode;
+                    }
+                    ['scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z'].forEach(k => {
+                        if (stlNode!.parameters[k] !== undefined) {
+                            objParams[k] = Number(stlNode!.parameters[k]);
+                        }
+                    });
+                }
 
                 if (matNode?.parameters?.['material_model']) {
                     objParams['material_model'] = matNode.parameters['material_model'];
@@ -1712,10 +1887,21 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     objParams['material_model'] = objNode.parameters?.['material_model'] || 'Hypoelastic';
                 }
 
-                objParams['shape_type'] = objNode.parameters?.shape_type || objNode.parameters?.shape || 'Box';
-                objParams['pos_x'] = Number(objNode.parameters?.pos_x ?? 0.0);
-                objParams['pos_y'] = Number(objNode.parameters?.pos_y ?? 0.0);
-                objParams['pos_z'] = Number(objNode.parameters?.pos_z ?? 0.0);
+                // Only overwrite shape_type/position if NOT already set by a connected STLGeometry node
+                if (objParams['shape_type'] === undefined) {
+                    objParams['shape_type'] = objNode.parameters?.shape_type || objNode.parameters?.shape || 'Box';
+                }
+                const isSTL = (objParams['shape_type'] === 'STL' || objNode.parameters?.shape_type === 'STL');
+                const isCADOrigin = (objParams['origin_mode'] === 'CAD Origin' || objNode.parameters?.origin_mode === 'CAD Origin' || !objParams['origin_mode']);
+                if (isSTL && isCADOrigin) {
+                    if (objParams['pos_x'] === undefined || objParams['pos_x'] === 0.5) objParams['pos_x'] = 0.0;
+                    if (objParams['pos_y'] === undefined || objParams['pos_y'] === 0.5) objParams['pos_y'] = 0.0;
+                    if (objParams['pos_z'] === undefined || objParams['pos_z'] === 0.5) objParams['pos_z'] = 0.0;
+                } else {
+                    if (objParams['pos_x'] === undefined) objParams['pos_x'] = Number(objNode.parameters?.pos_x ?? 0.0);
+                    if (objParams['pos_y'] === undefined) objParams['pos_y'] = Number(objNode.parameters?.pos_y ?? 0.0);
+                    if (objParams['pos_z'] === undefined) objParams['pos_z'] = Number(objNode.parameters?.pos_z ?? 0.0);
+                }
                 objParams['radius'] = Number(objNode.parameters?.radius ?? (objNode.parameters?.size_x !== undefined ? Number(objNode.parameters.size_x) / 2.0 : 0.1));
                 objParams['inner_radius'] = Number(objNode.parameters?.inner_radius ?? 0.0);
                 objParams['height'] = Number(objNode.parameters?.height ?? objNode.parameters?.length ?? objNode.parameters?.size_z ?? 0.2);
@@ -1733,11 +1919,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 mpmObjects.push(objParams);
             }
 
-            const detConns = state.connections.filter(c => c.toNode === mpmDomain.id && c.toPort === 'detonator');
+            const detConns = state.connections.filter(c => c.toNode === mpmDomain.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
             const detonators: any[] = [];
             for (const conn of detConns) {
                 const detNode = state.nodes.find(n => n.id === conn.fromNode);
-                if (detNode && (detNode.type === 'DetonatorLocation3D' || detNode.type === 'DetonatorLocation')) {
+                if (detNode && (detNode.type === 'DetonatorLocation3D' || detNode.type === 'DetonatorLocation' || detNode.type === 'TriggerLocation3D' || detNode.type === 'TriggerLocation')) {
                     const detParams: any = {};
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
                         detParams[key] = numericKeys.includes(key) ? Number(value) : value;
@@ -1746,7 +1932,14 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
             }
             if (detonators.length === 0) {
-                const fallbackDets = state.nodes.filter(n => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation');
+                // Scope fallback detonator search to nodes connected to this MPMDomain only (avoid cross-model contamination)
+                const mpmDomainConnectedIds = new Set<string>(
+                    state.connections
+                        .filter(c => c.toNode === mpmDomain.id || c.fromNode === mpmDomain.id)
+                        .flatMap(c => [c.fromNode, c.toNode])
+                );
+                mpmDomainConnectedIds.add(mpmDomain.id);
+                const fallbackDets = state.nodes.filter(n => (n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation' || n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation') && mpmDomainConnectedIds.has(n.id));
                 for (const detNode of fallbackDets) {
                     const detParams: any = {};
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
@@ -1757,6 +1950,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
             if (detonators.length > 0) {
                 flattenedParams['detonators'] = detonators;
+                flattenedParams['triggers'] = detonators;
                 Object.entries(detonators[0]).forEach(([key, value]) => {
                     flattenedParams[key] = value;
                 });

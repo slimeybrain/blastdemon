@@ -64,11 +64,11 @@ export function isParameterRelevant(node: Node, key: string): boolean {
     } else if (node.type === 'MPMObject3D') {
         const shape = node.parameters['shape_type'] || 'Box';
         if (shape === 'Box') {
-            if (['radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'geometry_hash'].includes(key)) return false;
+            if (['radius', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'geometry_hash', 'voxelization_method'].includes(key)) return false;
         } else if (shape === 'Sphere') {
-            if (['size_x', 'size_y', 'size_z', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'geometry_hash'].includes(key)) return false;
+            if (['size_x', 'size_y', 'size_z', 'inner_radius', 'height', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'geometry_hash', 'voxelization_method'].includes(key)) return false;
         } else if (shape === 'Cylinder') {
-            if (['size_x', 'size_y', 'size_z', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'geometry_hash'].includes(key)) return false;
+            if (['size_x', 'size_y', 'size_z', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'geometry_hash', 'voxelization_method'].includes(key)) return false;
         } else if (shape === 'STL') {
             if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height'].includes(key)) return false;
         }

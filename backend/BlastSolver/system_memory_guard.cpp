@@ -47,6 +47,22 @@ size_t getAvailableHostMemoryBytes() {
     return 8ULL * 1024ULL * 1024ULL * 1024ULL;
 }
 
+size_t getTotalHostMemoryBytes() {
+#if defined(__linux__)
+    struct sysinfo info;
+    if (sysinfo(&info) == 0) {
+        return static_cast<size_t>(info.totalram) * static_cast<size_t>(info.mem_unit);
+    }
+#elif defined(_WIN32)
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) {
+        return static_cast<size_t>(status.ullTotalPhys);
+    }
+#endif
+    return 16ULL * 1024ULL * 1024ULL * 1024ULL;
+}
+
 size_t getAvailableCUDAMemoryBytes() {
 #if defined(HAS_CUDA_RUNTIME)
     size_t free_bytes = 0;
@@ -54,6 +70,18 @@ size_t getAvailableCUDAMemoryBytes() {
     cudaError_t err = cudaMemGetInfo(&free_bytes, &total_bytes);
     if (err == cudaSuccess) {
         return free_bytes;
+    }
+#endif
+    return 0;
+}
+
+size_t getTotalCUDAMemoryBytes() {
+#if defined(HAS_CUDA_RUNTIME)
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    cudaError_t err = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (err == cudaSuccess) {
+        return total_bytes;
     }
 #endif
     return 0;
@@ -110,54 +138,111 @@ MemoryEstimate estimateCFD2DMemory(int nr, int nz, bool is_cuda, bool is_double,
 MemoryEstimate estimateMPM3DMemory(int nx, int ny, int nz, size_t particle_count, bool is_cuda) {
     if (nx <= 0 || ny <= 0 || nz <= 0) return {0, 0};
     size_t grid_nodes = static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz);
-    size_t node_bytes = 128; // MPMGridNode3D struct size
-    size_t particle_bytes = 256; // MPMParticle3D struct size
     
-    size_t host_bytes = (grid_nodes * node_bytes) + (particle_count * particle_bytes * 2);
-    size_t gpu_bytes = is_cuda ? (grid_nodes * node_bytes) + (particle_count * particle_bytes * 2) : 0;
-    return {host_bytes, gpu_bytes};
+    if (is_cuda) {
+        // CUDA MPM Solver accurate VRAM breakdown:
+        //   d_grid           = sizeof(MPMGridNode3D) = alignas(32) struct: 44B padded to 64B
+        //   d_grid_n         = sizeof(float)          = 4B
+        //   d_active_nodes   = sizeof(int)            = 4B
+        //                    Total per grid node      = 72B
+        //   d_soa_buffer     = 34 floats + 4 ints     = 152B  }
+        //   d_compaction_indices = 2 ints              = 8B    } per particle = 160B
+        //   Base buffers & scratch overhead = 64 MB
+        size_t gpu_bytes = (grid_nodes * 72ULL) + (particle_count * 160ULL) + (64ULL * 1024ULL * 1024ULL);
+        // Host RAM: Particle staging buffer during init + solver base overhead (~64 MB)
+        // Note: m_host_grid is lazy and not allocated during simulation execution.
+        size_t host_bytes = (particle_count * 256ULL) + (64ULL * 1024ULL * 1024ULL);
+        return {host_bytes, gpu_bytes};
+    } else {
+        // CPU MPM Solver:
+        // Host RAM: grid nodes (128B) + particle list with dynamic growth headroom (256B * 2)
+        size_t host_bytes = (grid_nodes * 128ULL) + (particle_count * 256ULL * 2);
+        return {host_bytes, 0};
+    }
 }
 
 MemoryEstimate estimateFEM3DMemory(size_t element_count, size_t node_count, bool is_cuda) {
     size_t node_bytes = 128;
     size_t elem_bytes = 256;
-    size_t host_bytes = (node_count * node_bytes) + (element_count * elem_bytes * 2);
-    size_t gpu_bytes = is_cuda ? (node_count * node_bytes) + (element_count * elem_bytes * 2) : 0;
-    return {host_bytes, gpu_bytes};
+    if (is_cuda) {
+        size_t gpu_bytes = (node_count * node_bytes) + (element_count * elem_bytes) + (64ULL * 1024ULL * 1024ULL);
+        size_t host_bytes = (node_count * node_bytes) + (element_count * elem_bytes) + (64ULL * 1024ULL * 1024ULL);
+        return {host_bytes, gpu_bytes};
+    } else {
+        size_t host_bytes = (node_count * node_bytes) + (element_count * elem_bytes * 2);
+        return {host_bytes, 0};
+    }
 }
 
 void validateMemoryBudget(size_t required_ram_bytes, size_t required_vram_bytes, bool is_cuda, const std::string& solver_name) {
     size_t free_ram = getAvailableHostMemoryBytes();
+    size_t total_ram = getTotalHostMemoryBytes();
     
-    // Require leaving at least 1.0 GB RAM for OS stability
-    size_t ram_safety_headroom = 1024ULL * 1024ULL * 1024ULL;
-    size_t max_ram_allocatable = (free_ram > ram_safety_headroom) ? (free_ram - ram_safety_headroom) : (free_ram / 2);
+    // Safety headroom for OS & system stability (leave at least 2.0 GB host RAM)
+    size_t ram_safety_headroom = 2048ULL * 1024ULL * 1024ULL;
+    size_t max_safe_total_ram = (total_ram > ram_safety_headroom) ? (total_ram - ram_safety_headroom) : (total_ram * 3 / 4);
     
-    if (required_ram_bytes > max_ram_allocatable) {
+    if (required_ram_bytes > max_safe_total_ram) {
         std::string err = "[MEMORY BUDGET EXCEEDED] " + solver_name + " requires " + formatMBorGB(required_ram_bytes) +
-                          " Host RAM, but system only has " + formatMBorGB(free_ram) +
-                          " available (" + formatMBorGB(max_ram_allocatable) + " safe allocatable limit). " +
+                          " Host RAM, exceeding safe physical system memory capacity (" + formatMBorGB(total_ram) +
+                          " total, " + formatMBorGB(max_safe_total_ram) + " safe allocatable limit). " +
                           "Allocation aborted to prevent Linux kernel swapping and system lockup.";
         std::cerr << err << std::endl;
         throw std::runtime_error(err);
     }
     
+    if (required_ram_bytes > free_ram) {
+        std::cout << "[MEMORY NOTICE] " << solver_name << " requires " << formatMBorGB(required_ram_bytes) <<
+                     " Host RAM, which temporarily exceeds currently available unbuffered RAM (" << formatMBorGB(free_ram) <<
+                     "). Proceeding against physical capacity (" << formatMBorGB(total_ram) << ")." << std::endl;
+    }
+    
     if (is_cuda) {
-        size_t free_vram = getAvailableCUDAMemoryBytes();
-        if (free_vram > 0) {
-            // Require leaving at least 512 MB VRAM for GPU driver / desktop display stability
-            size_t vram_safety_headroom = 512ULL * 1024ULL * 1024ULL;
-            size_t max_vram_allocatable = (free_vram > vram_safety_headroom) ? (free_vram - vram_safety_headroom) : free_vram;
-            
-            if (required_vram_bytes > max_vram_allocatable) {
-                std::string err = "[MEMORY BUDGET EXCEEDED] " + solver_name + " requires " + formatMBorGB(required_vram_bytes) +
-                                  " GPU VRAM, but device only has " + formatMBorGB(free_vram) +
-                                  " free VRAM (" + formatMBorGB(max_vram_allocatable) + " safe allocatable limit). " +
-                                  "Allocation aborted to prevent GPU driver crash.";
-                std::cerr << err << std::endl;
-                throw std::runtime_error(err);
+#if defined(HAS_CUDA_RUNTIME)
+        size_t free_vram = 0;
+        size_t total_vram = 0;
+        cudaError_t err = cudaMemGetInfo(&free_vram, &total_vram);
+        if (err == cudaSuccess && total_vram > 0) {
+            // Hard-reject only if the pre-flight estimate clearly exceeds physical capacity by a
+            // significant margin (>150% total VRAM). Memory estimates are inherently conservative;
+            // the actual cudaMalloc already throws a clean CUDA_CHECK_ALLOC exception if truly OOM.
+            size_t hard_reject_threshold = total_vram + (total_vram / 2); // 1.5x total VRAM
+            if (required_vram_bytes > hard_reject_threshold) {
+                std::string err_msg = "[MEMORY BUDGET EXCEEDED] " + solver_name + " estimated " + formatMBorGB(required_vram_bytes) +
+                                  " GPU VRAM, which is clearly impossible on this device (" + formatMBorGB(total_vram) +
+                                  " total). Allocation aborted to prevent GPU driver crash.";
+                std::cerr << err_msg << std::endl;
+                throw std::runtime_error(err_msg);
             }
+
+            // Soft-warn when estimate exceeds the conservative safe-headroom limit but is
+            // within the hard-reject threshold. The actual allocator will catch a true OOM.
+            size_t vram_safety_headroom = 1536ULL * 1024ULL * 1024ULL;
+            size_t max_vram_allocatable = (total_vram > vram_safety_headroom) ? (total_vram - vram_safety_headroom) : (total_vram * 3 / 4);
+            if (required_vram_bytes > max_vram_allocatable) {
+                std::cout << "[MEMORY WARNING] " << solver_name << " estimated " << formatMBorGB(required_vram_bytes) <<
+                             " GPU VRAM, exceeding the conservative safe limit (" << formatMBorGB(max_vram_allocatable) <<
+                             ") on a " << formatMBorGB(total_vram) << " device. Proceeding — actual allocation will"
+                             " throw a clean error if the device is truly OOM." << std::endl;
+            } else if (required_vram_bytes > free_vram) {
+                std::cout << "[MEMORY NOTICE] " << solver_name << " requires " << formatMBorGB(required_vram_bytes) <<
+                             " GPU VRAM. Device currently has " << formatMBorGB(free_vram) << " free / " <<
+                             formatMBorGB(total_vram) << " total VRAM. Proceeding with allocation." << std::endl;
+            }
+        } else if (required_vram_bytes > (96ULL * 1024ULL * 1024ULL * 1024ULL)) {
+            std::string err_msg = "[MEMORY BUDGET EXCEEDED] " + solver_name + " requires " + formatMBorGB(required_vram_bytes) +
+                              " GPU VRAM, exceeding maximum physical enterprise GPU capacity (96 GB). Allocation aborted.";
+            std::cerr << err_msg << std::endl;
+            throw std::runtime_error(err_msg);
         }
+#else
+        if (required_vram_bytes > (96ULL * 1024ULL * 1024ULL * 1024ULL)) {
+            std::string err_msg = "[MEMORY BUDGET EXCEEDED] " + solver_name + " requires " + formatMBorGB(required_vram_bytes) +
+                              " GPU VRAM, exceeding maximum physical enterprise GPU capacity (96 GB). Allocation aborted.";
+            std::cerr << err_msg << std::endl;
+            throw std::runtime_error(err_msg);
+        }
+#endif
     }
 }
 

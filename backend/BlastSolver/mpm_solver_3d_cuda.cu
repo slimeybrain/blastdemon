@@ -5,10 +5,23 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
+#include <string>
+
+#ifndef CUDA_CHECK_ALLOC
+#define CUDA_CHECK_ALLOC(call, msg) do { \
+    cudaError_t err = (call); \
+    if (err != cudaSuccess) { \
+        std::string err_str = std::string("[CUDA ALLOC FAILED] ") + (msg) + ": " + cudaGetErrorString(err); \
+        std::cerr << err_str << std::endl; \
+        throw std::runtime_error(err_str); \
+    } \
+} while (0)
+#endif
 
 namespace Blast {
 
-__device__ inline float computeWeibullFactor_dev(float x, float y, float z, float weibull_modulus, float weibull_scale) {
+__device__ inline float computeWeibullFactor_dev(float x, float y, float z, float V0, float weibull_modulus, float weibull_scale, float weibull_ref_volume = 1.0e-6f) {
     if (weibull_modulus <= 0.001f) return 1.0f;
     uint32_t ix = __float_as_uint(x);
     uint32_t iy = __float_as_uint(y);
@@ -23,7 +36,13 @@ __device__ inline float computeWeibullFactor_dev(float x, float y, float z, floa
     float m_w = weibull_modulus;
     float eta_w = (weibull_scale > 0.001f) ? weibull_scale : 1.0f;
     float gamma_mean = tgammaf(1.0f + 1.0f / m_w);
-    float w = (powf(-logf(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w;
+
+    // Physically-consistent Weibull volume scaling: (V_ref / V0)^(1 / m_w)
+    float v_ref = (weibull_ref_volume > 1.0e-18f) ? weibull_ref_volume : 1.0e-6f;
+    float v_eff = (V0 > 1.0e-18f) ? V0 : v_ref;
+    float size_scale = powf(v_ref / v_eff, 1.0f / m_w);
+
+    float w = (powf(-logf(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w * size_scale;
     return fminf(fmaxf(w, 0.10f), 3.00f);
 }
 
@@ -301,7 +320,7 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                               int* d_active_nodes, int* d_num_active_nodes,
                               const MaterialTable3D* d_mat_tables) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (p_idx >= num_particles) return;
+    if (p_idx >= num_particles || (soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
 
     int obj_id = soa.object_id[p_idx];
     const MaterialTable3D& mat = d_mat_tables[obj_id];
@@ -807,7 +826,7 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                                       int bc_z_min, int bc_z_max,
                                       const MaterialTable3D* d_mat_tables) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (p_idx >= num_particles) return;
+    if (p_idx >= num_particles || (soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
 
     int obj_id = soa.object_id[p_idx];
     const MaterialTable3D& mat = d_mat_tables[obj_id];
@@ -1339,6 +1358,33 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
     float min_x = xmin + 3.0f * dx; float max_x = xmin + (static_cast<float>(nx - 4)) * dx;
     float min_y = ymin + 3.0f * dy; float max_y = ymin + (static_cast<float>(ny - 4)) * dy;
     float min_z = zmin + 3.0f * dz; float max_z = zmin + (static_cast<float>(nz - 4)) * dz;
+
+    float grid_max_x = xmin + static_cast<float>(nx) * dx;
+    float grid_max_y = ymin + static_cast<float>(ny) * dy;
+    float grid_max_z = zmin + static_cast<float>(nz) * dz;
+
+    // Detect if particle has exited the domain under Terminate boundary or left grid entirely
+    bool is_terminated = (new_x < min_x && bc_x_min == 3) || (new_x > max_x && bc_x_max == 3) ||
+                         (new_y < min_y && bc_y_min == 3) || (new_y > max_y && bc_y_max == 3) ||
+                         (new_z < min_z && bc_z_min == 3) || (new_z > max_z && bc_z_max == 3) ||
+                         (new_x < xmin || new_x > grid_max_x ||
+                          new_y < ymin || new_y > grid_max_y ||
+                          new_z < zmin || new_z > grid_max_z);
+
+    if (is_terminated) {
+        if (soa.state) soa.state[p_idx] = 2; // STATE_TERMINATED
+        soa.m[p_idx] = 0.0f;
+        soa.v[0][p_idx] = 0.0f; soa.v[1][p_idx] = 0.0f; soa.v[2][p_idx] = 0.0f;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                soa.B[r][c][p_idx] = 0.0f;
+            }
+        }
+        for (int k = 0; k < 6; ++k) {
+            soa.sigma_voigt[k][p_idx] = 0.0f;
+        }
+        return;
+    }
 
     if (new_x < min_x && bc_x_min != 3) {
         new_x = min_x;
@@ -1962,7 +2008,8 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         // Default Hypoelastic J2 Elastoplasticity with Weibull flaw scatter & plastic damage softening
         float w_factor = (mat.enable_heterogeneity && soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
         if (mat.enable_heterogeneity && w_factor <= 0.001f && mat.weibull_modulus > 0.001f) {
-            w_factor = computeWeibullFactor_dev(soa.x[0][p_idx], soa.x[1][p_idx], soa.x[2][p_idx], mat.weibull_modulus, mat.weibull_scale);
+            float v0_val = (soa.V0) ? soa.V0[p_idx] : mat.weibull_ref_volume;
+            w_factor = computeWeibullFactor_dev(soa.x[0][p_idx], soa.x[1][p_idx], soa.x[2][p_idx], v0_val, mat.weibull_modulus, mat.weibull_scale, mat.weibull_ref_volume);
             soa.weibull_factor[p_idx] = w_factor;
         }
 
@@ -2054,7 +2101,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
 // Standalone stress update kernel (loads L_grad from SoA and invokes constitutive math)
 __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles, float dt, const MaterialTable3D* d_mat_tables) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (p_idx >= num_particles) return;
+    if (p_idx >= num_particles || (soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
 
     int obj_id = soa.object_id[p_idx];
     const MaterialTable3D& mat = d_mat_tables[obj_id];
@@ -2075,7 +2122,7 @@ __global__ void kernel_compute_max_speed(MPMParticle3DSoA soa, int num_particles
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     float local_max = 100.0f;
-    if (idx < num_particles) {
+    if (idx < num_particles && (!soa.state || soa.state[idx] != 2) && soa.m[idx] > 0.0f) {
         int obj_id = soa.object_id[idx];
         const MaterialTable3D& mat = d_mat_tables[obj_id];
         float E = mat.youngs_modulus;
@@ -2124,6 +2171,110 @@ __global__ void kernel_compute_max_speed(MPMParticle3DSoA soa, int num_particles
     }
 }
 
+// Helper to copy a particle's full state within SoA
+__device__ inline void copy_particle_soa(MPMParticle3DSoA soa, int dst, int src) {
+    if (dst == src) return;
+    for (int d = 0; d < 3; ++d) {
+        if (soa.x[d]) soa.x[d][dst] = soa.x[d][src];
+        if (soa.v[d]) soa.v[d][dst] = soa.v[d][src];
+        if (soa.lp[d]) soa.lp[d][dst] = soa.lp[d][src];
+    }
+    if (soa.sigma_voigt[0]) {
+        #pragma unroll
+        for (int k = 0; k < 6; ++k) {
+            soa.sigma_voigt[k][dst] = soa.sigma_voigt[k][src];
+        }
+    } else {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                if (soa.sigma[r][c]) soa.sigma[r][c][dst] = soa.sigma[r][c][src];
+            }
+        }
+    }
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            if (soa.B[r][c]) soa.B[r][c][dst] = soa.B[r][c][src];
+            if (soa.L_grad[r][c] && soa.L_grad[r][c] != soa.B[r][c]) {
+                soa.L_grad[r][c][dst] = soa.L_grad[r][c][src];
+            }
+        }
+    }
+    if (soa.m) soa.m[dst] = soa.m[src];
+    if (soa.V0) soa.V0[dst] = soa.V0[src];
+    if (soa.V) soa.V[dst] = soa.V[src];
+    if (soa.e_int) soa.e_int[dst] = soa.e_int[src];
+    if (soa.temperature) soa.temperature[dst] = soa.temperature[src];
+    if (soa.ep_bar) soa.ep_bar[dst] = soa.ep_bar[src];
+    if (soa.damage) soa.damage[dst] = soa.damage[src];
+    if (soa.lambda) soa.lambda[dst] = soa.lambda[src];
+    if (soa.v_min) soa.v_min[dst] = soa.v_min[src];
+    if (soa.s_shock) soa.s_shock[dst] = soa.s_shock[src];
+    if (soa.weibull_factor) soa.weibull_factor[dst] = soa.weibull_factor[src];
+    if (soa.contact_radius) soa.contact_radius[dst] = soa.contact_radius[src];
+    if (soa.has_failed) soa.has_failed[dst] = soa.has_failed[src];
+    if (soa.object_id) soa.object_id[dst] = soa.object_id[src];
+    if (soa.state) soa.state[dst] = soa.state[src];
+    if (soa.cluster_id) soa.cluster_id[dst] = soa.cluster_id[src];
+}
+
+__global__ void kernel_count_active_particles(MPMParticle3DSoA soa, int num_particles, int* d_active_count) {
+    extern __shared__ int s_count[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int local_active = 0;
+    if (idx < num_particles) {
+        bool is_active = (!soa.state || soa.state[idx] != 2) && (soa.m[idx] > 0.0f);
+        if (is_active) local_active = 1;
+    }
+    s_count[tid] = local_active;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_count[tid] += s_count[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0 && s_count[0] > 0) {
+        atomicAdd(d_active_count, s_count[0]);
+    }
+}
+
+__global__ void kernel_gather_holes_and_sources(
+    MPMParticle3DSoA soa, int num_particles, int active_target,
+    int* d_holes, int* d_sources, int* d_counters)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_particles) return;
+
+    bool is_active = (!soa.state || soa.state[idx] != 2) && (soa.m[idx] > 0.0f);
+
+    if (idx < active_target) {
+        if (!is_active) {
+            int slot = atomicAdd(&d_counters[0], 1);
+            d_holes[slot] = idx;
+        }
+    } else {
+        if (is_active) {
+            int slot = atomicAdd(&d_counters[1], 1);
+            d_sources[slot] = idx;
+        }
+    }
+}
+
+__global__ void kernel_compact_move_soa(
+    MPMParticle3DSoA soa, const int* d_holes, const int* d_sources, int num_moves)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_moves) return;
+
+    int dst = d_holes[idx];
+    int src = d_sources[idx];
+    copy_particle_soa(soa, dst, src);
+}
+
 // MPMSolver3DCUDA Implementation
 MPMSolver3DCUDA::MPMSolver3DCUDA() {}
 
@@ -2137,7 +2288,7 @@ void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
     size_t required_bytes = count * (34 * sizeof(float) + 4 * sizeof(int));
     if (required_bytes > m_allocated_soa_bytes) {
         if (d_soa_buffer) cudaFree(d_soa_buffer);
-        cudaMalloc(&d_soa_buffer, required_bytes);
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_soa_buffer, required_bytes), "Allocating d_soa_buffer (" + std::to_string(required_bytes) + " bytes)");
         m_allocated_soa_bytes = required_bytes;
     }
 
@@ -2216,7 +2367,7 @@ void MPMSolver3DCUDA::uploadAoS2SoA() {
 
     if (!d_temp_aos_particles || m_allocated_temp_aos_particles < chunk_capacity) {
         if (d_temp_aos_particles) cudaFree(d_temp_aos_particles);
-        cudaMalloc(&d_temp_aos_particles, chunk_capacity * sizeof(MPMParticle3D));
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_temp_aos_particles, chunk_capacity * sizeof(MPMParticle3D)), "Allocating d_temp_aos_particles for upload");
         m_allocated_temp_aos_particles = chunk_capacity;
     }
 
@@ -2228,12 +2379,70 @@ void MPMSolver3DCUDA::uploadAoS2SoA() {
         kernel_pack_aos_to_soa<<<blocks, threads>>>(d_temp_aos_particles, d_soa, static_cast<int>(cur_chunk), static_cast<int>(offset));
     }
     cudaDeviceSynchronize();
+    m_num_active_particles = count;
+}
+
+int MPMSolver3DCUDA::compactTerminatedParticlesDevice() {
+    size_t current_count = (m_num_active_particles > 0) ? m_num_active_particles : m_host_particles.size();
+    if (current_count == 0 || !d_soa_buffer) {
+        m_num_active_particles = 0;
+        return 0;
+    }
+
+    allocateDeviceMemory();
+
+    cudaMemsetAsync(d_active_count, 0, sizeof(int));
+    int threads = 256;
+    int blocks = (static_cast<int>(current_count) + threads - 1) / threads;
+    kernel_count_active_particles<<<blocks, threads, threads * sizeof(int)>>>(
+        d_soa, static_cast<int>(current_count), d_active_count);
+
+    int active_target = 0;
+    cudaMemcpy(&active_target, d_active_count, sizeof(int), cudaMemcpyDeviceToHost);
+
+    if (active_target >= static_cast<int>(current_count)) {
+        m_num_active_particles = active_target;
+        return active_target;
+    }
+
+    if (active_target == 0) {
+        m_num_active_particles = 0;
+        return 0;
+    }
+
+    cudaMemsetAsync(d_compaction_counters, 0, 2 * sizeof(int));
+    int* d_holes = d_compaction_indices;
+    int* d_sources = d_compaction_indices + current_count;
+
+    kernel_gather_holes_and_sources<<<blocks, threads>>>(
+        d_soa, static_cast<int>(current_count), active_target,
+        d_holes, d_sources, d_compaction_counters);
+
+    int counters[2] = {0, 0};
+    cudaMemcpy(counters, d_compaction_counters, 2 * sizeof(int), cudaMemcpyDeviceToHost);
+
+    int num_moves = std::min(counters[0], counters[1]);
+    if (num_moves > 0) {
+        int move_blocks = (num_moves + threads - 1) / threads;
+        kernel_compact_move_soa<<<move_blocks, threads>>>(d_soa, d_holes, d_sources, num_moves);
+        cudaDeviceSynchronize();
+    }
+
+    m_num_active_particles = active_target;
+    return active_target;
 }
 
 void MPMSolver3DCUDA::downloadSoA2AoS() {
     if (m_device_dirty) syncToDevice();
-    size_t count = m_host_particles.size();
+    size_t count = (m_num_active_particles > 0) ? m_num_active_particles : m_host_particles.size();
     if (count == 0 || !d_soa_buffer) return;
+
+    compactTerminatedParticlesDevice();
+    count = m_num_active_particles;
+    if (count == 0) {
+        m_host_particles.clear();
+        return;
+    }
 
     // Bound staging buffer to 65536 particles (~14 MB max) to prevent unbounded GPU memory allocations
     constexpr size_t MAX_AOS_CHUNK_SIZE = 65536;
@@ -2241,7 +2450,7 @@ void MPMSolver3DCUDA::downloadSoA2AoS() {
 
     if (!d_temp_aos_particles || m_allocated_temp_aos_particles < chunk_capacity) {
         if (d_temp_aos_particles) cudaFree(d_temp_aos_particles);
-        cudaMalloc(&d_temp_aos_particles, chunk_capacity * sizeof(MPMParticle3D));
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_temp_aos_particles, chunk_capacity * sizeof(MPMParticle3D)), "Allocating d_temp_aos_particles for download");
         m_allocated_temp_aos_particles = chunk_capacity;
     }
 
@@ -2253,6 +2462,7 @@ void MPMSolver3DCUDA::downloadSoA2AoS() {
         cudaDeviceSynchronize();
         cudaMemcpy(m_host_particles.data() + offset, d_temp_aos_particles, cur_chunk * sizeof(MPMParticle3D), cudaMemcpyDeviceToHost);
     }
+    m_host_particles.resize(count);
 }
 
 void MPMSolver3DCUDA::allocateDeviceMemory() {
@@ -2263,8 +2473,8 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
     if (num_grid_nodes > m_allocated_grid_nodes) {
         if (d_grid) cudaFree(d_grid);
         if (d_grid_n) cudaFree(d_grid_n);
-        cudaMalloc(&d_grid, num_grid_nodes * sizeof(MPMGridNode3D));
-        cudaMalloc(&d_grid_n, num_grid_nodes * sizeof(float));
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_grid, num_grid_nodes * sizeof(MPMGridNode3D)), "Allocating d_grid (" + std::to_string(num_grid_nodes) + " nodes)");
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_grid_n, num_grid_nodes * sizeof(float)), "Allocating d_grid_n (" + std::to_string(num_grid_nodes) + " floats)");
         m_allocated_grid_nodes = num_grid_nodes;
     }
 
@@ -2273,17 +2483,29 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
         m_allocated_particles = num_particles;
     }
 
+    if (num_particles * 2 > m_allocated_compaction_indices) {
+        if (d_compaction_indices) cudaFree(d_compaction_indices);
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_compaction_indices, num_particles * 2 * sizeof(int)), "Allocating d_compaction_indices");
+        m_allocated_compaction_indices = num_particles * 2;
+    }
+    if (!d_compaction_counters) {
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_compaction_counters, 2 * sizeof(int)), "Allocating d_compaction_counters");
+    }
+    if (!d_active_count) {
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_active_count, sizeof(int)), "Allocating d_active_count");
+    }
+
     if (num_materials > m_allocated_material_tables) {
         if (d_material_tables) cudaFree(d_material_tables);
-        cudaMalloc(&d_material_tables, num_materials * sizeof(MaterialTable3D));
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_material_tables, num_materials * sizeof(MaterialTable3D)), "Allocating d_material_tables");
         m_allocated_material_tables = num_materials;
     }
 
     if (!d_max_v_buf) {
-        cudaMalloc(&d_max_v_buf, sizeof(float));
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_max_v_buf, sizeof(float)), "Allocating d_max_v_buf");
     }
     if (!d_max_v_pinned) {
-        cudaHostAlloc(&d_max_v_pinned, 2 * sizeof(int), cudaHostAllocPortable);
+        CUDA_CHECK_ALLOC(cudaHostAlloc(&d_max_v_pinned, 2 * sizeof(int), cudaHostAllocPortable), "Allocating d_max_v_pinned");
         d_max_v_pinned[0] = 0;
         d_max_v_pinned[1] = 0;
     }
@@ -2302,9 +2524,12 @@ size_t MPMSolver3DCUDA::getAllocatedVRAM() const {
     total += m_allocated_soa_bytes;                            // d_soa_buffer (SoA)
     total += m_allocated_material_tables * sizeof(MaterialTable3D); // d_material_tables
     total += m_allocated_active_nodes * sizeof(int);           // d_active_nodes
+    total += m_allocated_compaction_indices * sizeof(int);     // d_compaction_indices
     total += m_allocated_f_ext_fsi * sizeof(float);             // d_f_ext_fsi
     total += m_allocated_temp_aos_particles * sizeof(MPMParticle3D); // d_temp_aos_particles
     total += m_allocated_slice_buf;                             // d_telemetry_slice_buf
+    if (d_compaction_counters) total += 2 * sizeof(int);
+    if (d_active_count) total += sizeof(int);
     if (d_max_v_buf) total += sizeof(float);
     if (d_num_active_nodes) total += sizeof(int);
     return total;
@@ -2316,8 +2541,8 @@ void MPMSolver3DCUDA::allocateActiveNodeBuffers() {
     if (num_grid_nodes > m_allocated_active_nodes) {
         if (d_active_nodes) cudaFree(d_active_nodes);
         if (d_num_active_nodes) cudaFree(d_num_active_nodes);
-        cudaMalloc(&d_active_nodes, num_grid_nodes * sizeof(int));
-        cudaMalloc(&d_num_active_nodes, sizeof(int));
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_active_nodes, num_grid_nodes * sizeof(int)), "Allocating d_active_nodes");
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_num_active_nodes, sizeof(int)), "Allocating d_num_active_nodes");
         cudaMemset(d_num_active_nodes, 0, sizeof(int));
         m_allocated_active_nodes = num_grid_nodes;
         m_num_active_nodes = 0;
@@ -2338,6 +2563,10 @@ void MPMSolver3DCUDA::freeDeviceMemory() {
     if (d_temp_aos_particles) { cudaFree(d_temp_aos_particles); d_temp_aos_particles = nullptr; }
     m_allocated_temp_aos_particles = 0;
     freeSoABuffer();
+    if (d_compaction_indices) { cudaFree(d_compaction_indices); d_compaction_indices = nullptr; }
+    if (d_compaction_counters) { cudaFree(d_compaction_counters); d_compaction_counters = nullptr; }
+    if (d_active_count) { cudaFree(d_active_count); d_active_count = nullptr; }
+    m_allocated_compaction_indices = 0;
     if (d_material_tables) { cudaFree(d_material_tables); d_material_tables = nullptr; }
     if (d_max_v_buf) { cudaFree(d_max_v_buf); d_max_v_buf = nullptr; }
     if (d_max_v_pinned) { cudaFreeHost(d_max_v_pinned); d_max_v_pinned = nullptr; }
@@ -2354,8 +2583,9 @@ void MPMSolver3DCUDA::initializeGrid(int nx, int ny, int nz, float dx, float dy,
     m_dx = dx; m_dy = dy; m_dz = dz;
     m_xmin = xmin; m_ymin = ymin; m_zmin = zmin;
 
-    m_host_grid.resize(static_cast<size_t>(m_nx) * m_ny * m_nz);
+    m_host_grid.clear(); // Lazy host grid allocation: only allocate when syncGridToHost or CPU FSI is called
     m_host_particles.clear();
+    m_num_active_particles = 0;
     allocateDeviceMemory();
 }
 
@@ -2375,11 +2605,11 @@ void MPMSolver3DCUDA::addBoxObject(int obj_id, float pos_x, float pos_y, float p
                                     float yield_stress, float hardening, float failure_strain,
                                     float tensile_failure_stress, int ppc,
                                     MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
-    if (d_soa_buffer && !m_host_particles.empty()) {
+    if (d_soa_buffer && !m_host_particles.empty() && !m_device_dirty && m_step_count > 0) {
         downloadSoA2AoS();
     }
     MPMSolver3D cpu_solver;
-    cpu_solver.initializeGrid(m_nx, m_ny, m_nz, m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
+    cpu_solver.setDomainGeometry(m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
     cpu_solver.addBoxObject(obj_id, pos_x, pos_y, pos_z, size_x, size_y, size_z,
                             vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z,
                             density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
@@ -2398,11 +2628,11 @@ void MPMSolver3DCUDA::addSphereObject(int obj_id, float pos_x, float pos_y, floa
                                        float yield_stress, float hardening, float failure_strain,
                                        float tensile_failure_stress, int ppc,
                                        MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
-    if (d_soa_buffer && !m_host_particles.empty()) {
+    if (d_soa_buffer && !m_host_particles.empty() && !m_device_dirty && m_step_count > 0) {
         downloadSoA2AoS();
     }
     MPMSolver3D cpu_solver;
-    cpu_solver.initializeGrid(m_nx, m_ny, m_nz, m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
+    cpu_solver.setDomainGeometry(m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
     cpu_solver.addSphereObject(obj_id, pos_x, pos_y, pos_z, radius,
                                vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z,
                                density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
@@ -2422,11 +2652,11 @@ void MPMSolver3DCUDA::addCylinderObject(int obj_id, float pos_x, float pos_y, fl
                                           float yield_stress, float hardening, float failure_strain,
                                           float tensile_failure_stress, int ppc,
                                           MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
-    if (d_soa_buffer && !m_host_particles.empty()) {
+    if (d_soa_buffer && !m_host_particles.empty() && !m_device_dirty && m_step_count > 0) {
         downloadSoA2AoS();
     }
     MPMSolver3D cpu_solver;
-    cpu_solver.initializeGrid(m_nx, m_ny, m_nz, m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
+    cpu_solver.setDomainGeometry(m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
     cpu_solver.addCylinderObject(obj_id, pos_x, pos_y, pos_z, radius, inner_radius, height,
                                 vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z,
                                 density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
@@ -2446,15 +2676,19 @@ void MPMSolver3DCUDA::addSTLObject(int obj_id, const std::string& stl_filepath,
                                     float density, float E, float nu,
                                     float yield_stress, float hardening, float failure_strain,
                                     float tensile_failure_stress, int ppc,
-                                    MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
-    if (d_soa_buffer && !m_host_particles.empty()) {
+                                    MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill,
+                                    const std::string& voxelization_method,
+                                    float rot_x, float rot_y, float rot_z,
+                                    const std::string& origin_mode) {
+    if (d_soa_buffer && !m_host_particles.empty() && !m_device_dirty && m_step_count > 0) {
         downloadSoA2AoS();
     }
     MPMSolver3D cpu_solver;
-    cpu_solver.initializeGrid(m_nx, m_ny, m_nz, m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
+    cpu_solver.setDomainGeometry(m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
     cpu_solver.addSTLObject(obj_id, stl_filepath, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z,
                             vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z,
-                            density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
+                            density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, voxelization_method,
+                            rot_x, rot_y, rot_z, origin_mode);
     m_host_particles.insert(m_host_particles.end(), cpu_solver.getParticles().begin(), cpu_solver.getParticles().end());
     if (obj_id >= static_cast<int>(m_material_tables.size())) {
         m_material_tables.resize(obj_id + 1);
@@ -2491,7 +2725,10 @@ void MPMSolver3DCUDA::syncParticlesToHost() {
 
 MPMVTKSnapshot3D MPMSolver3DCUDA::extractVTKSnapshot(bool has_vel, bool has_stress, bool has_strain, bool has_damage, bool has_temp) {
     MPMVTKSnapshot3D snap;
-    size_t count = m_host_particles.size();
+    if (d_soa_buffer) {
+        compactTerminatedParticlesDevice();
+    }
+    size_t count = (m_num_active_particles > 0) ? m_num_active_particles : m_host_particles.size();
     snap.num_particles = static_cast<int>(count);
     snap.has_vel = has_vel;
     snap.has_stress = has_stress;
@@ -2513,16 +2750,16 @@ MPMVTKSnapshot3D MPMSolver3DCUDA::extractVTKSnapshot(bool has_vel, bool has_stre
         float *d_pts = nullptr, *d_v = nullptr, *d_vm = nullptr, *d_p = nullptr;
         float *d_ep = nullptr, *d_dmg = nullptr, *d_tmp = nullptr, *d_obj = nullptr;
 
-        cudaMalloc(&d_pts, count * 3 * sizeof(float));
-        if (has_vel) cudaMalloc(&d_v, count * 3 * sizeof(float));
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_pts, count * 3 * sizeof(float)), "Allocating d_pts for VTK snapshot");
+        if (has_vel) CUDA_CHECK_ALLOC(cudaMalloc(&d_v, count * 3 * sizeof(float)), "Allocating d_v for VTK snapshot");
         if (has_stress) {
-            cudaMalloc(&d_vm, count * sizeof(float));
-            cudaMalloc(&d_p, count * sizeof(float));
+            CUDA_CHECK_ALLOC(cudaMalloc(&d_vm, count * sizeof(float)), "Allocating d_vm for VTK snapshot");
+            CUDA_CHECK_ALLOC(cudaMalloc(&d_p, count * sizeof(float)), "Allocating d_p for VTK snapshot");
         }
-        if (has_strain) cudaMalloc(&d_ep, count * sizeof(float));
-        if (has_damage) cudaMalloc(&d_dmg, count * sizeof(float));
-        if (has_temp) cudaMalloc(&d_tmp, count * sizeof(float));
-        cudaMalloc(&d_obj, count * sizeof(float));
+        if (has_strain) CUDA_CHECK_ALLOC(cudaMalloc(&d_ep, count * sizeof(float)), "Allocating d_ep for VTK snapshot");
+        if (has_damage) CUDA_CHECK_ALLOC(cudaMalloc(&d_dmg, count * sizeof(float)), "Allocating d_dmg for VTK snapshot");
+        if (has_temp) CUDA_CHECK_ALLOC(cudaMalloc(&d_tmp, count * sizeof(float)), "Allocating d_tmp for VTK snapshot");
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_obj, count * sizeof(float)), "Allocating d_obj for VTK snapshot");
 
         int threads = 256;
         int blocks = (static_cast<int>(count) + threads - 1) / threads;
@@ -2623,7 +2860,8 @@ void MPMSolver3DCUDA::particleToGridOnly() {
     if (m_host_particles.empty()) return;
     if (m_device_dirty) syncToDevice();
 
-    size_t num_particles = m_host_particles.size();
+    size_t num_particles = (m_num_active_particles > 0) ? m_num_active_particles : m_host_particles.size();
+    if (num_particles == 0) return;
     size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
 
     // Zero the active grid neighborhoods
@@ -2653,7 +2891,8 @@ void MPMSolver3DCUDA::particleToGridDeviceOnly() {
     if (m_host_particles.empty()) return;
     if (m_device_dirty) syncToDevice();
 
-    size_t num_particles = m_host_particles.size();
+    size_t num_particles = (m_num_active_particles > 0) ? m_num_active_particles : m_host_particles.size();
+    if (num_particles == 0) return;
 
     // Zero the active grid neighborhoods
     clearGridDevice();
@@ -2675,7 +2914,7 @@ void MPMSolver3DCUDA::particleToGridDeviceOnly() {
 }
 
 float MPMSolver3DCUDA::computeStepSize(float cfl) {
-    size_t num_particles = m_host_particles.size();
+    size_t num_particles = (m_num_active_particles > 0) ? m_num_active_particles : m_host_particles.size();
     if (num_particles == 0 || !d_soa_buffer || !d_max_v_buf) return 1.0e-6f;
 
     allocateDeviceMemory();
@@ -2755,7 +2994,7 @@ void MPMSolver3DCUDA::storeFSIForces() {
     size_t buf_size = num_nodes * 3;
     if (!d_f_ext_fsi || m_allocated_f_ext_fsi < buf_size) {
         if (d_f_ext_fsi) cudaFree(d_f_ext_fsi);
-        cudaMalloc(&d_f_ext_fsi, buf_size * sizeof(float));
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_f_ext_fsi, buf_size * sizeof(float)), "Allocating d_f_ext_fsi");
         m_allocated_f_ext_fsi = buf_size;
     }
     int threads = 256;
@@ -2777,7 +3016,8 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
     m_sim_time += static_cast<double>(dt);
     m_step_count++;
 
-    size_t num_particles = m_host_particles.size();
+    size_t num_particles = (m_num_active_particles > 0) ? m_num_active_particles : m_host_particles.size();
+    if (num_particles == 0) return;
     size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
 
     int threads_per_block = 256;
@@ -2917,6 +3157,11 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
 
     // Resolve Discrete Element (DEM) Contact & Collisions on GPU
     evaluateDEMContactDevice(dt);
+
+    // Periodically compact terminated particles on device
+    if (m_step_count % 50 == 0) {
+        compactTerminatedParticlesDevice();
+    }
 }
 
 void MPMSolver3DCUDA::evaluateDEMContactDevice(float dt) {
@@ -3007,7 +3252,7 @@ void MPMSolver3DCUDA::extractSliceToHost(std::vector<float>& out_slice, const st
 
     if (slice_elements * sizeof(float) > m_allocated_slice_buf) {
         if (d_telemetry_slice_buf) cudaFree(d_telemetry_slice_buf);
-        cudaMalloc(&d_telemetry_slice_buf, slice_elements * sizeof(float));
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_telemetry_slice_buf, slice_elements * sizeof(float)), "Allocating d_telemetry_slice_buf");
         m_allocated_slice_buf = slice_elements * sizeof(float);
     }
 
@@ -3020,7 +3265,7 @@ void MPMSolver3DCUDA::extractSliceToHost(std::vector<float>& out_slice, const st
 }
 
 void MPMSolver3DCUDA::initMaterialHeterogeneity(int obj_id) {
-    if (!m_host_particles.empty() && d_soa_buffer && !m_device_dirty) {
+    if (!m_host_particles.empty() && d_soa_buffer && !m_device_dirty && m_step_count > 0) {
         syncParticlesToHost();
     }
     Blast::MPMSolver3D cpu_temp;
@@ -3029,11 +3274,13 @@ void MPMSolver3DCUDA::initMaterialHeterogeneity(int obj_id) {
     cpu_temp.initMaterialHeterogeneity(obj_id);
     m_host_particles = std::move(cpu_temp.getParticles());
     m_device_dirty = true;
-    syncToDevice();
+    if (d_soa_buffer != nullptr && m_step_count > 0) {
+        syncToDevice();
+    }
 }
 
 void MPMSolver3DCUDA::seedMottGradyFragments(int obj_id) {
-    if (!m_host_particles.empty() && d_soa_buffer && !m_device_dirty) {
+    if (!m_host_particles.empty() && d_soa_buffer && !m_device_dirty && m_step_count > 0) {
         syncParticlesToHost();
     }
     Blast::MPMSolver3D cpu_temp;
@@ -3042,7 +3289,9 @@ void MPMSolver3DCUDA::seedMottGradyFragments(int obj_id) {
     cpu_temp.seedMottGradyFragments(obj_id);
     m_host_particles = std::move(cpu_temp.getParticles());
     m_device_dirty = true;
-    syncToDevice();
+    if (d_soa_buffer != nullptr && m_step_count > 0) {
+        syncToDevice();
+    }
 }
 
 void MPMSolver3DCUDA::step(float cfl) {

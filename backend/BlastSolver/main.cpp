@@ -1,6 +1,9 @@
 #include <poll.h>
 #include <unistd.h>
 #include <sys/resource.h>
+#if defined(__linux__)
+#include <malloc.h>
+#endif
 #include <iostream>
 #include <string>
 #include <vector>
@@ -155,6 +158,41 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     Blast::MaterialTable3D mat;
     std::string mat_model_str = obj.value("material_model", "Hypoelastic");
     mat.material_model = parseMPMMaterialModel(mat_model_str);
+    // Fail-safe: if model is still Hypoelastic but the preset/category indicates an energetic solid,
+    // auto-promote to CRESTReactiveBurn to prevent silent inert detonation failure.
+    if (mat.material_model == Blast::MPMMaterialModel::Hypoelastic) {
+        std::string preset_name = obj.value("preset", "");
+        std::string category    = obj.value("category", "");
+        auto contains_ci = [](const std::string& s, const std::string& sub) {
+            std::string sl = s, subl = sub;
+            std::transform(sl.begin(), sl.end(), sl.begin(), ::tolower);
+            std::transform(subl.begin(), subl.end(), subl.begin(), ::tolower);
+            return sl.find(subl) != std::string::npos;
+        };
+        bool is_energetic = contains_ci(category, "energetic solids") ||
+                            contains_ci(category, "crest reactive") ||
+                            contains_ci(preset_name, "crest davis") ||
+                            contains_ci(preset_name, "unreacted") ||
+                            contains_ci(preset_name, "pbx") ||
+                            contains_ci(preset_name, "rdx") ||
+                            contains_ci(preset_name, "hmx") ||
+                            contains_ci(preset_name, "tatb") ||
+                            contains_ci(preset_name, "lx-") ||
+                            contains_ci(preset_name, "c-4") ||
+                            contains_ci(preset_name, "comp b") ||
+                            contains_ci(preset_name, "composition b") ||
+                            contains_ci(preset_name, "anfo") ||
+                            contains_ci(preset_name, "petn") ||
+                            contains_ci(preset_name, "tnt") ||
+                            contains_ci(preset_name, "nitromethane");
+        if (is_energetic) {
+            mat.material_model = Blast::MPMMaterialModel::CRESTReactiveBurn;
+            std::cerr << "[BlastSolver] [WARN] material_model was 'Hypoelastic' but preset='" << preset_name
+                      << "' / category='" << category << "' indicates an energetic solid. "
+                      << "Auto-promoted to 'CREST Reactive Burn'. Please set material_model explicitly in the UI." << std::endl;
+        }
+    }
+
     mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
     mat.youngs_modulus = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
     mat.poissons_ratio = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
@@ -284,7 +322,7 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", enable_het ? 8.0 : 0.0));
     if (!enable_het) mat.weibull_modulus = 0.0f;
     mat.weibull_scale = static_cast<float>(get_json_double(obj, "weibull_scale", 1.0));
-    mat.fracture_toughness = static_cast<float>(get_json_double(obj, "fracture_toughness", 0.0));
+    mat.weibull_ref_volume = static_cast<float>(get_json_double(obj, "weibull_ref_volume", 1.0e-6));
 
     // Directional Material Anisotropy Controls
     mat.enable_anisotropy = get_json_bool(obj, "enable_anisotropy", false);
@@ -309,7 +347,6 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.jc_d3 = static_cast<float>(get_json_double(obj, "jc_d3", -2.12));
     mat.jc_d4 = static_cast<float>(get_json_double(obj, "jc_d4", 0.002));
     mat.jc_d5 = static_cast<float>(get_json_double(obj, "jc_d5", 0.61));
-    mat.debris_bulk_factor = static_cast<float>(get_json_double(obj, "debris_bulk_factor", 0.10));
 
     // Statistical Fragment Size Distribution & DEM Parameters Parsing
     return mat;
@@ -437,6 +474,7 @@ inline void populateFEMPhysicsParams(const nlohmann::json& msg, Blast::BlastPhys
 std::atomic<bool> sim2d_running{false};
 std::atomic<bool> sim2d_paused{false};
 std::atomic<int> global_telemetry_stride{1};
+std::atomic<int> global_mpm_particle_stride{1};
 std::atomic<int> global_telemetry_interval_ms{100};
 std::atomic<bool> sim2d_terminate{false};
 std::atomic<bool> solver2d_initialized{false};
@@ -1824,7 +1862,7 @@ void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated 
 void emit_telemetry_2d(double elapsed, bool is_terminated = false, int step = -1);
 void emit_telemetry_3d(double elapsed, bool is_terminated = false, int step = -1);
 void emit_telemetry_mpm_2d(double elapsed = 0.0, bool is_terminated = false, int step = -1);
-void emit_telemetry_mpm_3d(double elapsed, bool is_terminated = false, int step = -1);
+void emit_telemetry_mpm_3d(double elapsed, bool is_terminated = false, int step = -1, bool include_particles = true);
 void emit_telemetry_fem_3d(double elapsed = 0.0, bool is_terminated = false, int step = -1);
 void emit_resource_pulse();
 
@@ -2649,10 +2687,10 @@ void init_3d_thread_func(nlohmann::json msg) {
 
         local_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);
 
-        if (msg.contains("detonator_x")) {
-            double dx = msg.value("detonator_x", cp.x);
-            double dy = msg.value("detonator_y", cp.y);
-            double dz = msg.value("detonator_z", cp.z);
+        if (msg.contains("trigger_x") || msg.contains("detonator_x")) {
+            double dx = get_json_double(msg, "trigger_x", get_json_double(msg, "detonator_x", cp.x));
+            double dy = get_json_double(msg, "trigger_y", get_json_double(msg, "detonator_y", cp.y));
+            double dz = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", cp.z));
             local_solver_3d->setDetonatorLocation(dx, dy, dz);
         }
 
@@ -2708,9 +2746,32 @@ void init_3d_thread_func(nlohmann::json msg) {
         } else {
             if (!stl_file.empty()) {
                 try {
-                    global_raw_stl_triangles = read_stl(stl_file);
+                    auto raw_tris = read_stl(stl_file);
+                    std::string stl_origin_mode = msg.value("stl_origin_mode", "CAD Origin");
+                    float stl_scale_x = static_cast<float>(get_json_double(msg, "stl_scale_x", 1.0));
+                    float stl_scale_y = static_cast<float>(get_json_double(msg, "stl_scale_y", 1.0));
+                    float stl_scale_z = static_cast<float>(get_json_double(msg, "stl_scale_z", 1.0));
+                    float stl_pos_x = static_cast<float>(get_json_double(msg, "stl_pos_x", 0.0));
+                    float stl_pos_y = static_cast<float>(get_json_double(msg, "stl_pos_y", 0.0));
+                    float stl_pos_z = static_cast<float>(get_json_double(msg, "stl_pos_z", 0.0));
+                    float stl_rot_x = static_cast<float>(get_json_double(msg, "stl_rot_x", 0.0));
+                    float stl_rot_y = static_cast<float>(get_json_double(msg, "stl_rot_y", 0.0));
+                    float stl_rot_z = static_cast<float>(get_json_double(msg, "stl_rot_z", 0.0));
+
+                    global_raw_stl_triangles = transform_triangles(
+                        raw_tris,
+                        stl_scale_x, stl_scale_y, stl_scale_z,
+                        stl_pos_x, stl_pos_y, stl_pos_z,
+                        stl_rot_x, stl_rot_y, stl_rot_z,
+                        stl_origin_mode
+                    );
+                    std::cout << "[INFO] Loaded and transformed " << global_raw_stl_triangles.size()
+                              << " STL triangles (origin_mode: " << stl_origin_mode
+                              << ", scale: [" << stl_scale_x << ", " << stl_scale_y << ", " << stl_scale_z << "]"
+                              << ", pos: [" << stl_pos_x << ", " << stl_pos_y << ", " << stl_pos_z << "]"
+                              << ", rot: [" << stl_rot_x << ", " << stl_rot_y << ", " << stl_rot_z << "])" << std::endl;
                 } catch (const std::exception& e) {
-                    std::cerr << "[WARNING] Failed to load STL: " << e.what() << std::endl;
+                    std::cerr << "[WARNING] Failed to load/transform STL: " << e.what() << std::endl;
                 }
             }
             local_solver_3d->setGeometryTriangles(global_raw_stl_triangles, geometry_hash, voxel_method, &sim3d_terminate, progress_callback);
@@ -3447,6 +3508,9 @@ void worker_mpm_3d_thread_func() {
                 progress_msg["step"] = current_step;
                 progress_msg["scope"] = "mpm_3d";
                 progress_msg["dt"] = global_solver_mpm_3d_cuda->getLastDt();
+                if (!global_model_id.empty()) {
+                    progress_msg["modelId"] = global_model_id;
+                }
 
                 if (global_exec_until_end_mpm_3d.load()) {
                     if (end_time > 0.0) {
@@ -3544,6 +3608,9 @@ void worker_mpm_3d_thread_func() {
                 progress_msg["step"] = current_step;
                 progress_msg["scope"] = "mpm_3d";
                 progress_msg["dt"] = global_solver_mpm_3d->getLastDt();
+                if (!global_model_id.empty()) {
+                    progress_msg["modelId"] = global_model_id;
+                }
 
                 if (global_exec_until_end_mpm_3d.load()) {
                     if (end_time > 0.0) {
@@ -3601,6 +3668,9 @@ void worker_mpm_3d_thread_func() {
     progress_msg["scope"] = "mpm_3d";
     progress_msg["percent"] = 100;
     progress_msg["mode"] = global_exec_until_end_mpm_3d.load() ? "EXEC_ALL_MPM_3D" : "STEP_MPM_3D";
+    if (!global_model_id.empty()) {
+        progress_msg["modelId"] = global_model_id;
+    }
     {
         std::lock_guard<std::mutex> lock(cout_mutex);
         std::cout << progress_msg.dump() << std::endl;
@@ -5563,7 +5633,7 @@ void async_telemetry_thread_func() {
             }
             std::cout.flush();
 
-            if (global_solver_mpm_3d_cuda || global_solver_mpm_3d || !payload->mpm_particles.empty()) {
+            if (!payload->mpm_particles.empty()) {
                 const uint32_t magic = 0x4d504d33; // "MPM3"
                 const float time_f = static_cast<float>(payload->elapsed);
                 const uint32_t n_floats_per_particle = 14;
@@ -5624,7 +5694,7 @@ void async_telemetry_thread_func() {
 
             std::cout << envelope.dump() << std::endl;
 
-            if (global_solver_mpm_3d_cuda || global_solver_mpm_3d || !payload->mpm_particles.empty()) {
+            if (!payload->mpm_particles.empty()) {
                 const uint32_t magic = 0x4d504d33; // "MPM3"
                 const float time_f = static_cast<float>(payload->elapsed);
                 const uint32_t n_floats_per_particle = 14;
@@ -5870,10 +5940,108 @@ static inline float getMPMGridQuantity(const Blast::MPMGridNode3D& node, const s
     return node.plastic_strain;
 }
 
-void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step) {
+static size_t estimateMPMTotalParticles(const nlohmann::json& msg, float dx, float dy, float dz) {
+    if (dx <= 0.0f || dy <= 0.0f || dz <= 0.0f) return 100000;
+    size_t total_particles = 0;
+    int domain_ppc = get_json_int(msg, "ppc", 8);
+    float cell_vol = dx * dy * dz;
+    if (cell_vol <= 1e-12f) return 100000;
+
+    float xmin = static_cast<float>(get_json_double(msg, "xmin", 0.0));
+    float xmax = static_cast<float>(get_json_double(msg, "xmax", 1.0));
+    float ymin = static_cast<float>(get_json_double(msg, "ymin", 0.0));
+    float ymax = static_cast<float>(get_json_double(msg, "ymax", 1.0));
+    float zmin = static_cast<float>(get_json_double(msg, "zmin", 0.0));
+    float zmax = static_cast<float>(get_json_double(msg, "zmax", 1.0));
+    float domain_vol = std::max(0.0f, xmax - xmin) * std::max(0.0f, ymax - ymin) * std::max(0.0f, zmax - zmin);
+    size_t max_domain_particles = (domain_vol > 0.0f && cell_vol > 0.0f)
+        ? static_cast<size_t>(std::ceil((domain_vol / cell_vol) * domain_ppc))
+        : 10000000ULL;
+
+    if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array() && !msg["mpm_objects"].empty()) {
+        for (const auto& obj : msg["mpm_objects"]) {
+            std::string shape = obj.value("shape_type", "Box");
+            int ppc = get_json_int(obj, "ppc", domain_ppc);
+            if (ppc < 1) ppc = 8;
+            int particles_per_dim = static_cast<int>(std::round(std::cbrt(static_cast<float>(ppc))));
+            if (particles_per_dim < 1) particles_per_dim = 2;
+
+            float p_dx = dx / static_cast<float>(particles_per_dim);
+            float p_dy = dy / static_cast<float>(particles_per_dim);
+            float p_dz = dz / static_cast<float>(particles_per_dim);
+            float p_vol = p_dx * p_dy * p_dz;
+            if (p_vol <= 1e-15f) p_vol = cell_vol / static_cast<float>(ppc);
+
+            float obj_vol = 0.0f;
+            if (shape == "Sphere") {
+                float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+                obj_vol = (4.0f / 3.0f) * 3.14159265f * radius * radius * radius;
+            } else if (shape == "Cylinder") {
+                float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+                float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
+                float height = static_cast<float>(get_json_double(obj, "height", 0.2));
+                obj_vol = 3.14159265f * (radius * radius - inner_radius * inner_radius) * height;
+            } else if (shape == "STL") {
+                std::string stl_file = obj.contains("stl_file") ? obj["stl_file"].get<std::string>() : "";
+                float scale_x = static_cast<float>(get_json_double(obj, "scale_x", 1.0));
+                float scale_y = static_cast<float>(get_json_double(obj, "scale_y", 1.0));
+                float scale_z = static_cast<float>(get_json_double(obj, "scale_z", 1.0));
+                if (scale_x <= 0.0f) scale_x = 1.0f;
+                if (scale_y <= 0.0f) scale_y = 1.0f;
+                if (scale_z <= 0.0f) scale_z = 1.0f;
+
+                if (!stl_file.empty()) {
+                    try {
+                        auto raw_triangles = read_stl(stl_file);
+                        if (!raw_triangles.empty()) {
+                            float min_x = 1.0e30f, max_x = -1.0e30f;
+                            float min_y = 1.0e30f, max_y = -1.0e30f;
+                            float min_z = 1.0e30f, max_z = -1.0e30f;
+                            for (const auto& tri : raw_triangles) {
+                                min_x = std::min({min_x, tri.v0.x, tri.v1.x, tri.v2.x});
+                                max_x = std::max({max_x, tri.v0.x, tri.v1.x, tri.v2.x});
+                                min_y = std::min({min_y, tri.v0.y, tri.v1.y, tri.v2.y});
+                                max_y = std::max({max_y, tri.v0.y, tri.v1.y, tri.v2.y});
+                                min_z = std::min({min_z, tri.v0.z, tri.v1.z, tri.v2.z});
+                                max_z = std::max({max_z, tri.v0.z, tri.v1.z, tri.v2.z});
+                            }
+                            float bb_x = (max_x - min_x) * scale_x;
+                            float bb_y = (max_y - min_y) * scale_y;
+                            float bb_z = (max_z - min_z) * scale_z;
+                            if (bb_x > 0.0f && bb_y > 0.0f && bb_z > 0.0f) {
+                                obj_vol = bb_x * bb_y * bb_z * 0.3f;
+                            }
+                        }
+                    } catch (...) {
+                        // Fallback below
+                    }
+                }
+                if (obj_vol <= 0.0f) {
+                    // Fallback when STL is unreadable at estimation time.
+                    // Use 2% of the domain volume (conservative but physically plausible
+                    // upper bound for a solid body embedded in a large blast domain).
+                    // The old 10% inflated the estimate by ~13 GB for tall domains.
+                    obj_vol = (domain_vol > 0.0f) ? (domain_vol * 0.02f) : 0.001f;
+                }
+            } else {
+                float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
+                float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
+                float size_z = static_cast<float>(get_json_double(obj, "size_z", 0.2));
+                obj_vol = size_x * size_y * size_z;
+            }
+            if (obj_vol > 0.0f && p_vol > 0.0f) {
+                total_particles += static_cast<size_t>(std::ceil(obj_vol / p_vol));
+            }
+        }
+    }
+    total_particles = std::min(total_particles, max_domain_particles);
+    return std::max<size_t>(total_particles, 1000);
+}
+
+void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool include_particles) {
     if (!global_solver_mpm_3d && !global_solver_mpm_3d_cuda) return;
 
-    if (global_solver_mpm_3d_cuda) {
+    if (include_particles && global_solver_mpm_3d_cuda) {
         global_solver_mpm_3d_cuda->downloadSoA2AoS();
     }
 
@@ -5997,31 +6165,41 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step) {
         payload->slices.push_back(std::move(sp));
     }
 
-    const auto& particles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
-    payload->mpm_particles.reserve(particles.size() * 14);
-    for (const auto& p : particles) {
-        float s00 = p.sigma[0][0], s11 = p.sigma[1][1], s22 = p.sigma[2][2];
-        float s01 = p.sigma[0][1], s02 = p.sigma[0][2], s12 = p.sigma[1][2];
-        float press = -(s00 + s11 + s22) / 3.0f;
-        float dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
-        float vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0f * (s01 * s01 + s02 * s02 + s12 * s12);
-        float von_mises = std::sqrt(std::max(0.0f, 1.5f * vm_sq));
+    if (include_particles) {
+        const auto& particles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
+        size_t total_particles = particles.size();
+        size_t stride = 1;
+        int user_stride = global_mpm_particle_stride.load();
+        if (user_stride > 1) {
+            stride = static_cast<size_t>(user_stride);
+        }
+        size_t visual_count = (total_particles + stride - 1) / stride;
+        payload->mpm_particles.reserve(visual_count * 14);
+        for (size_t idx = 0; idx < total_particles; idx += stride) {
+            const auto& p = particles[idx];
+            float s00 = p.sigma[0][0], s11 = p.sigma[1][1], s22 = p.sigma[2][2];
+            float s01 = p.sigma[0][1], s02 = p.sigma[0][2], s12 = p.sigma[1][2];
+            float press = -(s00 + s11 + s22) / 3.0f;
+            float dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
+            float vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0f * (s01 * s01 + s02 * s02 + s12 * s12);
+            float von_mises = std::sqrt(std::max(0.0f, 1.5f * vm_sq));
 
-        float den = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTable(p.object_id).density : global_solver_mpm_3d->getMaterialTable(p.object_id).density;
-        payload->mpm_particles.push_back(p.x[0]);
-        payload->mpm_particles.push_back(p.x[1]);
-        payload->mpm_particles.push_back(p.x[2]);
-        payload->mpm_particles.push_back(p.v[0]);
-        payload->mpm_particles.push_back(p.v[1]);
-        payload->mpm_particles.push_back(p.v[2]);
-        payload->mpm_particles.push_back(von_mises);
-        payload->mpm_particles.push_back(p.ep_bar);
-        payload->mpm_particles.push_back(den);
-        payload->mpm_particles.push_back(press);
-        payload->mpm_particles.push_back(p.damage);
-        payload->mpm_particles.push_back(p.has_failed ? 1.0f : 0.0f);
-        payload->mpm_particles.push_back(static_cast<float>(p.object_id));
-        payload->mpm_particles.push_back(static_cast<float>(p.cluster_id));
+            float den = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTable(p.object_id).density : global_solver_mpm_3d->getMaterialTable(p.object_id).density;
+            payload->mpm_particles.push_back(p.x[0]);
+            payload->mpm_particles.push_back(p.x[1]);
+            payload->mpm_particles.push_back(p.x[2]);
+            payload->mpm_particles.push_back(p.v[0]);
+            payload->mpm_particles.push_back(p.v[1]);
+            payload->mpm_particles.push_back(p.v[2]);
+            payload->mpm_particles.push_back(von_mises);
+            payload->mpm_particles.push_back(p.ep_bar);
+            payload->mpm_particles.push_back(den);
+            payload->mpm_particles.push_back(press);
+            payload->mpm_particles.push_back(p.damage);
+            payload->mpm_particles.push_back(p.has_failed ? 1.0f : 0.0f);
+            payload->mpm_particles.push_back(static_cast<float>(p.object_id));
+            payload->mpm_particles.push_back(static_cast<float>(p.cluster_id));
+        }
     }
 
     global_async_telemetry.push(std::move(payload));
@@ -6509,8 +6687,16 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
         const auto& particles = (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) ?
             global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
         if (!particles.empty()) {
-            payload->mpm_particles.reserve(particles.size() * 13);
-            for (const auto& p : particles) {
+            size_t total_particles = particles.size();
+            size_t stride = 1;
+            int user_stride = global_mpm_particle_stride.load();
+            if (user_stride > 1) {
+                stride = static_cast<size_t>(user_stride);
+            }
+            size_t visual_count = (total_particles + stride - 1) / stride;
+            payload->mpm_particles.reserve(visual_count * 13);
+            for (size_t idx = 0; idx < total_particles; idx += stride) {
+                const auto& p = particles[idx];
                 float diff_xy = p.sigma[0][0] - p.sigma[1][1];
                 float diff_yz = p.sigma[1][1] - p.sigma[2][2];
                 float diff_zx = p.sigma[2][2] - p.sigma[0][0];
@@ -7250,9 +7436,9 @@ int main() {
                                                 charge2d_id = from;
                                             }
                                         }
-                                    } else if (port == "detonator") {
+                                    } else if (port == "detonator" || port == "trigger") {
                                         for (const auto& n : msg["nodes"]) {
-                                            if (n.value("id", "") == from && n.value("type", "") == "DetonatorLocation") {
+                                            if (n.value("id", "") == from && (n.value("type", "") == "DetonatorLocation" || n.value("type", "") == "TriggerLocation")) {
                                                 has_detonator = true;
                                             }
                                         }
@@ -7428,8 +7614,8 @@ int main() {
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
-                            double detonator_r = msg.value("detonator_r", 0.0);
-                            double detonator_z = msg.value("detonator_z", explosive_z);
+                            double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", 0.0));
+                            double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
                             global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z);
                             global_solver_2d_cuda->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
                         } else if (init_mode == "Multi-Material JWL" || init_mode == "JWL") {
@@ -7447,13 +7633,13 @@ int main() {
                                     double ar = msg.value("charge_aspect_ratio", 1.0);
                                     if (ar > 0.0) charge_height = 2.0 * charge_radius * ar;
                                 }
-                                double detonator_r = msg.value("detonator_r", 0.0);
-                                double detonator_z = msg.value("detonator_z", explosive_z + charge_height / 2.0);
+                                double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", 0.0));
+                                double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z + charge_height / 2.0));
                                 global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z);
                                 global_solver_2d_cuda->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p);
                             } else {
-                                double detonator_r = msg.value("detonator_r", 0.0);
-                                double detonator_z = msg.value("detonator_z", explosive_z);
+                                double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", 0.0));
+                                double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
                                 global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z);
                                 global_solver_2d_cuda->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
                             }
@@ -7493,8 +7679,8 @@ int main() {
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
-                            double detonator_r = msg.value("detonator_r", 0.0);
-                            double detonator_z = msg.value("detonator_z", explosive_z);
+                            double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", 0.0));
+                            double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
                             global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
                             global_solver_2d->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
                         } else if (init_mode == "Multi-Material JWL" || init_mode == "JWL") {
@@ -7513,13 +7699,13 @@ int main() {
                                     double ar = msg.value("charge_aspect_ratio", 1.0);
                                     if (ar > 0.0) charge_height = 2.0 * charge_radius * ar;
                                 }
-                                double detonator_r = msg.value("detonator_r", explosive_r);
-                                double detonator_z = msg.value("detonator_z", explosive_z + charge_height / 2.0);
+                                double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
+                                double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z + charge_height / 2.0));
                                 global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
                                 global_solver_2d->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p, explosive_r);
                             } else {
-                                double detonator_r = msg.value("detonator_r", explosive_r);
-                                double detonator_z = msg.value("detonator_z", explosive_z);
+                                double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
+                                double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
                                 global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
                                 global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p, explosive_r);
                             }
@@ -7667,6 +7853,7 @@ int main() {
                             float weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", 0.0));
                             if (weibull_modulus > 0.001f) enable_het = true;
                             float weibull_scale = static_cast<float>(get_json_double(obj, "weibull_scale", 1.0));
+                            float weibull_ref_volume = static_cast<float>(get_json_double(obj, "weibull_ref_volume", 1.0e-4));
 
                             bool enable_aniso = get_json_bool(obj, "enable_anisotropy", false);
                             float aniso_ratio = static_cast<float>(get_json_double(obj, "anisotropy_ratio", 1.0));
@@ -7701,8 +7888,9 @@ int main() {
                                     p.enable_heterogeneity = enable_het;
                                     p.weibull_modulus = weibull_modulus;
                                     p.weibull_scale = weibull_scale;
+                                    p.weibull_ref_volume = weibull_ref_volume;
                                     if (enable_het && weibull_modulus > 0.001f) {
-                                        p.weibull_factor = Blast::computeWeibullFactor2D(p.x[0], p.x[1], weibull_modulus, weibull_scale);
+                                        p.weibull_factor = Blast::computeWeibullFactor2D(p.x[0], p.x[1], p.V0, weibull_modulus, weibull_scale, weibull_ref_volume);
                                     } else {
                                         p.weibull_factor = 1.0f;
                                     }
@@ -7770,6 +7958,14 @@ int main() {
                     while (sim_mpm_3d_running.load()) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
+                    global_solver_mpm_3d.reset();
+                    global_solver_mpm_3d_cuda.reset();
+#if defined(HAS_CUDA_RUNTIME)
+                    cudaDeviceSynchronize();
+#endif
+#if defined(__linux__)
+                    malloc_trim(0);
+#endif
                     sim_mpm_3d_terminate = false;
                     sim_mpm_3d_paused = false;
                     global_endtime_mpm_3d = msg.value("endtime", 1.0);
@@ -7798,6 +7994,11 @@ int main() {
                     }
                     if (msg.contains("telemetry_interval_ms")) {
                         global_telemetry_interval_ms = get_json_int(msg, "telemetry_interval_ms", 100);
+                    }
+                    if (msg.contains("particle_stride")) {
+                        global_mpm_particle_stride = std::max(1, msg.value("particle_stride", 1));
+                    } else {
+                        global_mpm_particle_stride = 1;
                     }
 
                     std::string device = msg.value("device", "cpu");
@@ -7839,7 +8040,7 @@ int main() {
                     }
 
                     bool is_cuda_mpm = is_cuda_device(device);
-                    size_t est_particles = 100000; // Baseline particle estimate
+                    size_t est_particles = estimateMPMTotalParticles(msg, dx, dy, dz);
                     auto est_mpm = Blast::estimateMPM3DMemory(nx, ny, nz, est_particles, is_cuda_mpm);
                     Blast::validateMemoryBudget(est_mpm.ram_bytes, est_mpm.vram_bytes, is_cuda_mpm, "3D MPM Solver");
 
@@ -7902,13 +8103,22 @@ int main() {
                     std::string domain_b_fill_str = msg.value("boundary_filling", "Stairstepped");
 
                     if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
+                        // Phase 1: Add all object geometries to host particles
                         int obj_idx = 0;
                         for (const auto& obj : msg["mpm_objects"]) {
                             obj_idx++;
                             std::string shape = obj.value("shape_type", "Box");
-                            float pos_x = static_cast<float>(get_json_double(obj, "pos_x", 0.5));
-                            float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.5));
-                            float pos_z = static_cast<float>(get_json_double(obj, "pos_z", 0.5));
+                            std::string origin_mode = obj.value("origin_mode", "Center");
+                            float pos_fallback = (shape == "STL" && origin_mode == "CAD Origin") ? 0.0f : 0.5f;
+                            float pos_x = static_cast<float>(get_json_double(obj, "pos_x", pos_fallback));
+                            float pos_y = static_cast<float>(get_json_double(obj, "pos_y", pos_fallback));
+                            float pos_z = static_cast<float>(get_json_double(obj, "pos_z", pos_fallback));
+                            if (shape == "STL" && origin_mode == "CAD Origin" &&
+                                std::abs(pos_x - 0.5f) < 1e-4f && std::abs(pos_y - 0.5f) < 1e-4f && std::abs(pos_z - 0.5f) < 1e-4f) {
+                                pos_x = 0.0f;
+                                pos_y = 0.0f;
+                                pos_z = 0.0f;
+                            }
                             float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
                             float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
                             float vel_z = static_cast<float>(get_json_double(obj, "vel_z", 0.0));
@@ -7958,10 +8168,15 @@ int main() {
                                 float scale_x = static_cast<float>(get_json_double(obj, "scale_x", 1.0));
                                 float scale_y = static_cast<float>(get_json_double(obj, "scale_y", 1.0));
                                 float scale_z = static_cast<float>(get_json_double(obj, "scale_z", 1.0));
+                                float rot_x = static_cast<float>(get_json_double(obj, "rot_x", 0.0));
+                                float rot_y = static_cast<float>(get_json_double(obj, "rot_y", 0.0));
+                                float rot_z = static_cast<float>(get_json_double(obj, "rot_z", 0.0));
+                                std::string origin_mode = obj.value("origin_mode", "Center");
+                                std::string voxelization_method = obj.value("voxelization_method", "watertight_raycast");
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
+                                    global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, voxelization_method, rot_x, rot_y, rot_z, origin_mode);
                                 } else {
-                                    global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
+                                    global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, voxelization_method, rot_x, rot_y, rot_z, origin_mode);
                                 }
                             } else {
                                 float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
@@ -7973,7 +8188,12 @@ int main() {
                                     global_solver_mpm_3d->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 }
                             }
+                        }
 
+                        // Phase 2: Populate material tables for all objects
+                        obj_idx = 0;
+                        for (const auto& obj : msg["mpm_objects"]) {
+                            obj_idx++;
                             Blast::MaterialTable3D parsed_mat = parseMaterialTable3D(obj);
                             std::string mat_model_str = obj.value("material_model", "Hypoelastic");
                             std::cout << "[BlastSolver] Object " << obj_idx << " Constitutive Model: " << mat_model_str
@@ -7985,11 +8205,6 @@ int main() {
                                     mat_tables.resize(obj_idx + 1);
                                 }
                                 mat_tables[obj_idx] = parsed_mat;
-                                if (!mat_tables.empty()) {
-                                    mat_tables[0] = parsed_mat;
-                                }
-                                global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
-                                global_solver_mpm_3d_cuda->initMaterialHeterogeneity(obj_idx);
                             }
                             if (global_solver_mpm_3d) {
                                 auto& mat_tables = global_solver_mpm_3d->getMaterialTables();
@@ -7997,63 +8212,95 @@ int main() {
                                     mat_tables.resize(obj_idx + 1);
                                 }
                                 mat_tables[obj_idx] = parsed_mat;
-                                if (!mat_tables.empty()) {
-                                    mat_tables[0] = parsed_mat;
-                                }
+                            }
+                        }
+
+                        // Phase 3: Material heterogeneity & fragment seeding on host
+                        obj_idx = 0;
+                        for (const auto& obj : msg["mpm_objects"]) {
+                            obj_idx++;
+                            (void)obj;
+                            if (global_solver_mpm_3d_cuda) {
+                                global_solver_mpm_3d_cuda->initMaterialHeterogeneity(obj_idx);
+                            }
+                            if (global_solver_mpm_3d) {
                                 global_solver_mpm_3d->initMaterialHeterogeneity(obj_idx);
                             }
+                        }
 
-                            struct DetonatorSpec3D {
-                                float x, y, z, radius;
-                            };
-                            std::vector<DetonatorSpec3D> detonators_3d;
-                            if (msg.contains("detonators") && msg["detonators"].is_array()) {
-                                for (const auto& d : msg["detonators"]) {
-                                    float dx = static_cast<float>(get_json_double(d, "detonator_x", get_json_double(d, "x", 0.5)));
-                                    float dy = static_cast<float>(get_json_double(d, "detonator_y", get_json_double(d, "y", 0.5)));
-                                    float dz = static_cast<float>(get_json_double(d, "detonator_z", get_json_double(d, "z", 0.5)));
-                                    float dr = static_cast<float>(get_json_double(d, "detonator_radius", get_json_double(d, "initiation_radius", 0.02)));
-                                    detonators_3d.push_back({dx, dy, dz, dr});
+                        // Phase 4: Trigger / Detonator hotspot ignition and initial temperature
+                        struct TriggerSpec3D {
+                            float x, y, z, radius;
+                        };
+                        std::vector<TriggerSpec3D> global_triggers_3d;
+                        auto parse_trigger_obj = [](const nlohmann::json& d) -> TriggerSpec3D {
+                            float tx = static_cast<float>(get_json_double(d, "trigger_x", get_json_double(d, "detonator_x", get_json_double(d, "x", 0.5))));
+                            float ty = static_cast<float>(get_json_double(d, "trigger_y", get_json_double(d, "detonator_y", get_json_double(d, "y", 0.5))));
+                            float tz = static_cast<float>(get_json_double(d, "trigger_z", get_json_double(d, "detonator_z", get_json_double(d, "z", 0.5))));
+                            float tr = static_cast<float>(get_json_double(d, "trigger_radius", get_json_double(d, "detonator_radius", get_json_double(d, "initiation_radius", get_json_double(d, "radius", 0.02)))));
+                            return {tx, ty, tz, tr};
+                        };
+                        if (msg.contains("triggers") && msg["triggers"].is_array()) {
+                            for (const auto& d : msg["triggers"]) {
+                                global_triggers_3d.push_back(parse_trigger_obj(d));
+                            }
+                        } else if (msg.contains("detonators") && msg["detonators"].is_array()) {
+                            for (const auto& d : msg["detonators"]) {
+                                global_triggers_3d.push_back(parse_trigger_obj(d));
+                            }
+                        } else if (msg.contains("trigger_x") || msg.contains("detonator_x")) {
+                            global_triggers_3d.push_back(parse_trigger_obj(msg));
+                        }
+
+                        auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
+                        const auto& mat_tables = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTables() : global_solver_mpm_3d->getMaterialTables();
+
+                        obj_idx = 0;
+                        for (const auto& obj : msg["mpm_objects"]) {
+                            obj_idx++;
+                            const auto& parsed_mat = mat_tables[obj_idx];
+                            std::string mat_model_str = obj.value("material_model", "Hypoelastic");
+                            bool is_explosive = (parsed_mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn);
+
+                            std::vector<TriggerSpec3D> triggers_3d = global_triggers_3d;
+                            if (obj.contains("triggers") && obj["triggers"].is_array()) {
+                                for (const auto& d : obj["triggers"]) {
+                                    triggers_3d.push_back(parse_trigger_obj(d));
                                 }
-                            } else if (msg.contains("detonator_x")) {
-                                float dx = static_cast<float>(get_json_double(msg, "detonator_x", 0.5));
-                                float dy = static_cast<float>(get_json_double(msg, "detonator_y", 0.5));
-                                float dz = static_cast<float>(get_json_double(msg, "detonator_z", 0.5));
-                                float dr = static_cast<float>(get_json_double(msg, "detonator_radius", get_json_double(msg, "initiation_radius", 0.02)));
-                                detonators_3d.push_back({dx, dy, dz, dr});
+                            } else if (obj.contains("detonators") && obj["detonators"].is_array()) {
+                                for (const auto& d : obj["detonators"]) {
+                                    triggers_3d.push_back(parse_trigger_obj(d));
+                                }
+                            } else if (obj.contains("trigger_x") || obj.contains("detonator_x")) {
+                                triggers_3d.push_back(parse_trigger_obj(obj));
                             }
 
-                            auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
-                            bool is_explosive = (parsed_mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn);
                             int ignited_count = 0;
-
                             for (auto& p : particles_ref) {
                                 if (p.object_id == obj_idx) {
                                     p.temperature = parsed_mat.T_room;
 
-                                    if (is_explosive && !detonators_3d.empty()) {
-                                        float max_profile_factor = 0.0f;
-                                        for (const auto& det : detonators_3d) {
-                                            float d_x = p.x[0] - det.x;
-                                            float d_y = p.x[1] - det.y;
-                                            float d_z = p.x[2] - det.z;
+                                    if (is_explosive && !triggers_3d.empty()) {
+                                        bool in_trigger_core = false;
+                                        for (const auto& trig : triggers_3d) {
+                                            float d_x = p.x[0] - trig.x;
+                                            float d_y = p.x[1] - trig.y;
+                                            float d_z = p.x[2] - trig.z;
                                             float dist = std::sqrt(d_x * d_x + d_y * d_y + d_z * d_z);
-                                            float effective_init_rad = std::max(det.radius, 2.5f * dx);
-                                            if (dist <= 3.0f * effective_init_rad) {
-                                                float pf = std::exp(- (dist * dist) / (effective_init_rad * effective_init_rad));
-                                                if (pf > max_profile_factor) {
-                                                    max_profile_factor = pf;
-                                                }
+                                            float effective_init_rad = std::max(trig.radius, 2.5f * dx);
+                                            if (dist <= effective_init_rad) {
+                                                in_trigger_core = true;
+                                                break;
                                             }
                                         }
-                                        if (max_profile_factor > 1.0e-4f) {
+                                        if (in_trigger_core) {
                                             ignited_count++;
-                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold * max_profile_factor;
-                                            p.lambda = 1.0f * max_profile_factor;
-                                            p.e_int = std::max(parsed_mat.davis_q_det, static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6))) * max_profile_factor;
-                                            p.v_min = 1.0f - 0.30f * max_profile_factor;
+                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold;
+                                            p.lambda = 1.0f;
+                                            p.e_int = std::max(parsed_mat.davis_q_det, static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6)));
+                                            p.v_min = (parsed_mat.davis_vc > 0.1f) ? parsed_mat.davis_vc : 0.70f;
                                             p.V = p.v_min * p.V0;
-                                            float p_init = ((parsed_mat.davis_pc > 1.0e6f) ? parsed_mat.davis_pc : 15.0e9f) * max_profile_factor;
+                                            float p_init = ((parsed_mat.davis_pc > 1.0e6f) ? parsed_mat.davis_pc : 15.0e9f);
                                             for (int r = 0; r < 3; ++r) {
                                                 for (int c = 0; c < 3; ++c) {
                                                     p.sigma[r][c] = (r == c) ? -p_init : 0.0f;
@@ -8064,17 +8311,17 @@ int main() {
                                 }
                             }
                             if (is_explosive) {
-                                if (detonators_3d.empty()) {
+                                if (triggers_3d.empty()) {
                                     std::cerr << "[BlastSolver] [WARNING] Object " << obj_idx << " is an explosive (" << mat_model_str
-                                              << "), but NO detonators were provided or connected!" << std::endl;
-                                    emit_kernel_log("WARNING", "Object " + std::to_string(obj_idx) + " is an explosive (" + mat_model_str + "), but NO DetonatorLocation3D was connected to MPM Domain!", 0.0, "mpm_3d");
+                                              << "), but NO triggers/detonators were provided or connected!" << std::endl;
+                                    emit_kernel_log("WARNING", "Object " + std::to_string(obj_idx) + " is an explosive (" + mat_model_str + "), but NO TriggerLocation3D / DetonatorLocation3D was connected to MPM Domain!", 0.0, "mpm_3d");
                                 } else if (ignited_count == 0) {
                                     std::cerr << "[BlastSolver] [WARNING] Object " << obj_idx << " (" << mat_model_str
-                                              << "): Detonator did NOT intersect any particles! 0 particles ignited. Check detonator (x,y,z) vs object position." << std::endl;
-                                    emit_kernel_log("WARNING", "Object " + std::to_string(obj_idx) + ": Detonator did NOT intersect any particles (0 ignited). Check detonator coordinates vs explosive body.", 0.0, "mpm_3d");
+                                              << "): Trigger did NOT intersect any particles! 0 particles ignited. Check trigger (x,y,z) vs object position." << std::endl;
+                                    emit_kernel_log("WARNING", "Object " + std::to_string(obj_idx) + ": Trigger did NOT intersect any particles (0 ignited). Check trigger coordinates vs explosive body.", 0.0, "mpm_3d");
                                 } else {
                                     std::cout << "[BlastSolver] Object " << obj_idx << " (" << mat_model_str
-                                              << "): Detonator hotspot initialized on " << ignited_count << " particles." << std::endl;
+                                              << "): Trigger hotspot initialized on " << ignited_count << " particles." << std::endl;
                                     emit_kernel_log("SYSTEM", "Object " + std::to_string(obj_idx) + " (" + mat_model_str + "): Hotspot ignited " + std::to_string(ignited_count) + " particles.", 0.0, "mpm_3d");
                                 }
                             }
@@ -8088,9 +8335,10 @@ int main() {
                         }
                     }
 
+                    // Phase 5: Single synchronized upload of material tables and all particles to GPU
                     if (global_solver_mpm_3d_cuda) {
+                        global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
                         global_solver_mpm_3d_cuda->syncToDevice();
-                        global_solver_mpm_3d_cuda->syncToHost();
                     } else {
                         global_solver_mpm_3d->particleToGrid();
                     }
@@ -8221,8 +8469,8 @@ int main() {
                     double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
                     double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
 
-                    double detonator_r = msg.value("detonator_r", explosive_r);
-                    double detonator_z = msg.value("detonator_z", explosive_z);
+                    double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
+                    double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
                     global_solver_2d->setDetonatorLocation(detonator_r, detonator_z);
                     global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p, explosive_r);
                     solver2d_initialized = true;
@@ -8302,6 +8550,7 @@ int main() {
                             float weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", 0.0));
                             if (weibull_modulus > 0.001f) enable_het = true;
                             float weibull_scale = static_cast<float>(get_json_double(obj, "weibull_scale", 1.0));
+                            float weibull_ref_volume = static_cast<float>(get_json_double(obj, "weibull_ref_volume", 1.0e-4));
 
                             bool enable_aniso = get_json_bool(obj, "enable_anisotropy", false);
                             float aniso_ratio = static_cast<float>(get_json_double(obj, "anisotropy_ratio", 1.0));
@@ -8336,8 +8585,9 @@ int main() {
                                     p.enable_heterogeneity = enable_het;
                                     p.weibull_modulus = weibull_modulus;
                                     p.weibull_scale = weibull_scale;
+                                    p.weibull_ref_volume = weibull_ref_volume;
                                     if (enable_het && weibull_modulus > 0.001f) {
-                                        p.weibull_factor = Blast::computeWeibullFactor2D(p.x[0], p.x[1], weibull_modulus, weibull_scale);
+                                        p.weibull_factor = Blast::computeWeibullFactor2D(p.x[0], p.x[1], p.V0, weibull_modulus, weibull_scale, weibull_ref_volume);
                                     } else {
                                         p.weibull_factor = 1.0f;
                                     }
@@ -8455,6 +8705,11 @@ int main() {
                         s.quantities.push_back("pressure");
                         global_slices_3d.push_back(s);
                     }
+                    if (msg.contains("particle_stride")) {
+                        global_mpm_particle_stride = std::max(1, msg.value("particle_stride", 1));
+                    } else {
+                        global_mpm_particle_stride = 1;
+                    }
 
                     // 1. Initialize CFD 3D solver
                     double cellSize = get_json_double(msg, "cell_size", 0.01);
@@ -8481,6 +8736,20 @@ int main() {
                     bool is_ideal_gas_3d = (get_json_bool(msg, "is_ideal_gas", false) || init_mode == "Ideal Gas" || explosive_type == "MaterialIdealGas" || material_type == "Ideal Gas Charge");
                     bool is_multimat = !is_ideal_gas_3d;
                     std::cout << "[DEBUG] INIT_FSI_3D: device=" << device << " init_mode=" << init_mode << " explosive_type=" << explosive_type << " material_type=" << material_type << " is_ideal_gas_3d=" << is_ideal_gas_3d << " is_multimat=" << is_multimat << std::endl;
+
+                    bool is_cuda_cfd = is_cuda_device(device);
+                    bool is_double = (precision == "double");
+                    auto est_cfd = Blast::estimateCFD3DMemory(nx, ny, nz, is_cuda_cfd, is_double, is_multimat);
+
+                    float mpm_dx = static_cast<float>(cellSize);
+                    float mpm_dy = static_cast<float>(cellSize);
+                    float mpm_dz = static_cast<float>(cellSize);
+                    size_t est_mpm_particles = estimateMPMTotalParticles(msg, mpm_dx, mpm_dy, mpm_dz);
+                    auto est_mpm = Blast::estimateMPM3DMemory(nx, ny, nz, est_mpm_particles, is_cuda_cfd);
+
+                    size_t total_ram = est_cfd.ram_bytes + est_mpm.ram_bytes;
+                    size_t total_vram = est_cfd.vram_bytes + est_mpm.vram_bytes;
+                    Blast::validateMemoryBudget(total_ram, total_vram, is_cuda_cfd, "3D FSI Solver (CFD + MPM)");
 
                     select_cuda_device(device);
                     if (is_cuda_device(device)) {
@@ -8536,8 +8805,12 @@ int main() {
                     double ambient_p = get_json_double(msg, "atm_pressure", 101325.0);
                     global_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);
 
-                    if (msg.contains("detonator_x")) {
-                        global_solver_3d->setDetonatorLocation(get_json_double(msg, "detonator_x", cp.x), get_json_double(msg, "detonator_y", cp.y), get_json_double(msg, "detonator_z", cp.z));
+                    if (msg.contains("trigger_x") || msg.contains("detonator_x")) {
+                        global_solver_3d->setDetonatorLocation(
+                            get_json_double(msg, "trigger_x", get_json_double(msg, "detonator_x", cp.x)),
+                            get_json_double(msg, "trigger_y", get_json_double(msg, "detonator_y", cp.y)),
+                            get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", cp.z))
+                        );
                     }
 
                     auto map_bc_3d = [](const std::string& str) {
@@ -8610,13 +8883,22 @@ int main() {
                     std::string domain_b_fill_str = msg.value("boundary_filling", "Stairstepped");
 
                     if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
+                        // Phase 1: Add all object geometries to host particles
                         int obj_idx = 0;
                         for (const auto& obj : msg["mpm_objects"]) {
                             obj_idx++;
                             std::string shape = obj.value("shape_type", "Box");
-                            float pos_x = static_cast<float>(get_json_double(obj, "pos_x", 0.5));
-                            float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.5));
-                            float pos_z = static_cast<float>(get_json_double(obj, "pos_z", 0.5));
+                            std::string origin_mode = obj.value("origin_mode", "Center");
+                            float pos_fallback = (shape == "STL" && origin_mode == "CAD Origin") ? 0.0f : 0.5f;
+                            float pos_x = static_cast<float>(get_json_double(obj, "pos_x", pos_fallback));
+                            float pos_y = static_cast<float>(get_json_double(obj, "pos_y", pos_fallback));
+                            float pos_z = static_cast<float>(get_json_double(obj, "pos_z", pos_fallback));
+                            if (shape == "STL" && origin_mode == "CAD Origin" &&
+                                std::abs(pos_x - 0.5f) < 1e-4f && std::abs(pos_y - 0.5f) < 1e-4f && std::abs(pos_z - 0.5f) < 1e-4f) {
+                                pos_x = 0.0f;
+                                pos_y = 0.0f;
+                                pos_z = 0.0f;
+                            }
                             float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
                             float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
                             float vel_z = static_cast<float>(get_json_double(obj, "vel_z", 0.0));
@@ -8666,10 +8948,15 @@ int main() {
                                 float scale_x = static_cast<float>(get_json_double(obj, "scale_x", 1.0));
                                 float scale_y = static_cast<float>(get_json_double(obj, "scale_y", 1.0));
                                 float scale_z = static_cast<float>(get_json_double(obj, "scale_z", 1.0));
+                                float rot_x = static_cast<float>(get_json_double(obj, "rot_x", 0.0));
+                                float rot_y = static_cast<float>(get_json_double(obj, "rot_y", 0.0));
+                                float rot_z = static_cast<float>(get_json_double(obj, "rot_z", 0.0));
+                                std::string origin_mode = obj.value("origin_mode", "Center");
+                                std::string voxelization_method = obj.value("voxelization_method", "watertight_raycast");
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
+                                    global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, voxelization_method, rot_x, rot_y, rot_z, origin_mode);
                                 } else {
-                                    global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
+                                    global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, voxelization_method, rot_x, rot_y, rot_z, origin_mode);
                                 }
                             } else {
                                 float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
@@ -8681,19 +8968,23 @@ int main() {
                                     global_solver_mpm_3d->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
                                 }
                             }
+                        }
 
+                        // Phase 2: Populate material tables for all objects
+                        obj_idx = 0;
+                        for (const auto& obj : msg["mpm_objects"]) {
+                            obj_idx++;
                             Blast::MaterialTable3D parsed_mat = parseMaterialTable3D(obj);
+                            std::string mat_model_str = obj.value("material_model", "Hypoelastic");
+                            std::cout << "[BlastSolver] FSI Object " << obj_idx << " Constitutive Model: " << mat_model_str
+                                      << " -> Enum=" << static_cast<int>(parsed_mat.material_model) << std::endl;
+                            emit_kernel_log("SYSTEM", "FSI Object " + std::to_string(obj_idx) + " Material Model: " + mat_model_str + " (Enum=" + std::to_string(static_cast<int>(parsed_mat.material_model)) + ")", 0.0, "3d");
                             if (global_solver_mpm_3d_cuda) {
                                 auto& mat_tables = global_solver_mpm_3d_cuda->getMaterialTables();
                                 if (obj_idx >= static_cast<int>(mat_tables.size())) {
                                     mat_tables.resize(obj_idx + 1);
                                 }
                                 mat_tables[obj_idx] = parsed_mat;
-                                if (!mat_tables.empty()) {
-                                    mat_tables[0] = parsed_mat;
-                                }
-                                global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
-                                global_solver_mpm_3d_cuda->initMaterialHeterogeneity(obj_idx);
                             }
                             if (global_solver_mpm_3d) {
                                 auto& mat_tables = global_solver_mpm_3d->getMaterialTables();
@@ -8701,63 +8992,95 @@ int main() {
                                     mat_tables.resize(obj_idx + 1);
                                 }
                                 mat_tables[obj_idx] = parsed_mat;
-                                if (!mat_tables.empty()) {
-                                    mat_tables[0] = parsed_mat;
-                                }
+                            }
+                        }
+
+                        // Phase 3: Material heterogeneity & fragment seeding on host
+                        obj_idx = 0;
+                        for (const auto& obj : msg["mpm_objects"]) {
+                            obj_idx++;
+                            (void)obj;
+                            if (global_solver_mpm_3d_cuda) {
+                                global_solver_mpm_3d_cuda->initMaterialHeterogeneity(obj_idx);
+                            }
+                            if (global_solver_mpm_3d) {
                                 global_solver_mpm_3d->initMaterialHeterogeneity(obj_idx);
                             }
-                            struct DetonatorSpec3D_2 {
-                                float x, y, z, radius;
-                            };
-                            std::vector<DetonatorSpec3D_2> detonators_3d_2;
-                            if (msg.contains("detonators") && msg["detonators"].is_array()) {
-                                for (const auto& d : msg["detonators"]) {
-                                    float dx = static_cast<float>(get_json_double(d, "detonator_x", get_json_double(d, "x", 0.5)));
-                                    float dy = static_cast<float>(get_json_double(d, "detonator_y", get_json_double(d, "y", 0.5)));
-                                    float dz = static_cast<float>(get_json_double(d, "detonator_z", get_json_double(d, "z", 0.5)));
-                                    float dr = static_cast<float>(get_json_double(d, "detonator_radius", get_json_double(d, "initiation_radius", 0.02)));
-                                    detonators_3d_2.push_back({dx, dy, dz, dr});
-                                }
-                            } else if (msg.contains("detonator_x")) {
-                                float dx = static_cast<float>(get_json_double(msg, "detonator_x", 0.5));
-                                float dy = static_cast<float>(get_json_double(msg, "detonator_y", 0.5));
-                                float dz = static_cast<float>(get_json_double(msg, "detonator_z", 0.5));
-                                float dr = static_cast<float>(get_json_double(msg, "detonator_radius", get_json_double(msg, "initiation_radius", 0.02)));
-                                detonators_3d_2.push_back({dx, dy, dz, dr});
-                            }
+                        }
 
-                            auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
+                        // Phase 4: Detonator hotspot ignition and initial temperature
+                        struct TriggerSpec3D_2 {
+                            float x, y, z, radius;
+                        };
+                        std::vector<TriggerSpec3D_2> global_triggers_3d_2;
+                        auto parse_trigger_obj_2 = [](const nlohmann::json& d) -> TriggerSpec3D_2 {
+                            float tx = static_cast<float>(get_json_double(d, "trigger_x", get_json_double(d, "detonator_x", get_json_double(d, "x", 0.5))));
+                            float ty = static_cast<float>(get_json_double(d, "trigger_y", get_json_double(d, "detonator_y", get_json_double(d, "y", 0.5))));
+                            float tz = static_cast<float>(get_json_double(d, "trigger_z", get_json_double(d, "detonator_z", get_json_double(d, "z", 0.5))));
+                            float tr = static_cast<float>(get_json_double(d, "trigger_radius", get_json_double(d, "detonator_radius", get_json_double(d, "initiation_radius", get_json_double(d, "radius", 0.02)))));
+                            return {tx, ty, tz, tr};
+                        };
+                        if (msg.contains("triggers") && msg["triggers"].is_array()) {
+                            for (const auto& d : msg["triggers"]) {
+                                global_triggers_3d_2.push_back(parse_trigger_obj_2(d));
+                            }
+                        } else if (msg.contains("detonators") && msg["detonators"].is_array()) {
+                            for (const auto& d : msg["detonators"]) {
+                                global_triggers_3d_2.push_back(parse_trigger_obj_2(d));
+                            }
+                        } else if (msg.contains("trigger_x") || msg.contains("detonator_x")) {
+                            global_triggers_3d_2.push_back(parse_trigger_obj_2(msg));
+                        }
+
+                        auto& particles_ref = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
+                        const auto& mat_tables = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTables() : global_solver_mpm_3d->getMaterialTables();
+
+                        obj_idx = 0;
+                        for (const auto& obj : msg["mpm_objects"]) {
+                            obj_idx++;
+                            const auto& parsed_mat = mat_tables[obj_idx];
                             std::string mat_model_str = obj.value("material_model", "Hypoelastic");
                             bool is_explosive = (parsed_mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn);
-                            int ignited_count = 0;
 
+                            std::vector<TriggerSpec3D_2> triggers_3d_2 = global_triggers_3d_2;
+                            if (obj.contains("triggers") && obj["triggers"].is_array()) {
+                                for (const auto& d : obj["triggers"]) {
+                                    triggers_3d_2.push_back(parse_trigger_obj_2(d));
+                                }
+                            } else if (obj.contains("detonators") && obj["detonators"].is_array()) {
+                                for (const auto& d : obj["detonators"]) {
+                                    triggers_3d_2.push_back(parse_trigger_obj_2(d));
+                                }
+                            } else if (obj.contains("trigger_x") || obj.contains("detonator_x")) {
+                                triggers_3d_2.push_back(parse_trigger_obj_2(obj));
+                            }
+
+                            int ignited_count = 0;
                             for (auto& p : particles_ref) {
                                 if (p.object_id == obj_idx) {
                                     p.temperature = parsed_mat.T_room;
 
-                                    if (is_explosive && !detonators_3d_2.empty()) {
-                                        float max_profile_factor = 0.0f;
-                                        for (const auto& det : detonators_3d_2) {
-                                            float d_x = p.x[0] - det.x;
-                                            float d_y = p.x[1] - det.y;
-                                            float d_z = p.x[2] - det.z;
+                                    if (is_explosive && !triggers_3d_2.empty()) {
+                                        bool in_trigger_core = false;
+                                        for (const auto& trig : triggers_3d_2) {
+                                            float d_x = p.x[0] - trig.x;
+                                            float d_y = p.x[1] - trig.y;
+                                            float d_z = p.x[2] - trig.z;
                                             float dist = std::sqrt(d_x * d_x + d_y * d_y + d_z * d_z);
-                                            float effective_init_rad = std::max(det.radius, 2.5f * dx);
-                                            if (dist <= 3.0f * effective_init_rad) {
-                                                float pf = std::exp(- (dist * dist) / (effective_init_rad * effective_init_rad));
-                                                if (pf > max_profile_factor) {
-                                                    max_profile_factor = pf;
-                                                }
+                                            float effective_init_rad = std::max(trig.radius, 2.5f * dx);
+                                            if (dist <= effective_init_rad) {
+                                                in_trigger_core = true;
+                                                break;
                                             }
                                         }
-                                        if (max_profile_factor > 1.0e-4f) {
+                                        if (in_trigger_core) {
                                             ignited_count++;
-                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold * max_profile_factor;
-                                            p.lambda = 1.0f * max_profile_factor;
-                                            p.e_int = std::max(parsed_mat.davis_q_det, static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6))) * max_profile_factor;
-                                            p.v_min = 1.0f - 0.30f * max_profile_factor;
+                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold;
+                                            p.lambda = 1.0f;
+                                            p.e_int = std::max(parsed_mat.davis_q_det, static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6)));
+                                            p.v_min = (parsed_mat.davis_vc > 0.1f) ? parsed_mat.davis_vc : 0.70f;
                                             p.V = p.v_min * p.V0;
-                                            float p_init = ((parsed_mat.davis_pc > 1.0e6f) ? parsed_mat.davis_pc : 15.0e9f) * max_profile_factor;
+                                            float p_init = ((parsed_mat.davis_pc > 1.0e6f) ? parsed_mat.davis_pc : 15.0e9f);
                                             for (int r = 0; r < 3; ++r) {
                                                 for (int c = 0; c < 3; ++c) {
                                                     p.sigma[r][c] = (r == c) ? -p_init : 0.0f;
@@ -8768,17 +9091,17 @@ int main() {
                                 }
                             }
                             if (is_explosive) {
-                                if (detonators_3d_2.empty()) {
+                                if (triggers_3d_2.empty()) {
                                     std::cerr << "[BlastSolver] [WARNING] FSI Object " << obj_idx << " is an explosive (" << mat_model_str
-                                              << "), but NO detonators were provided or connected!" << std::endl;
-                                    emit_kernel_log("WARNING", "FSI Object " + std::to_string(obj_idx) + " is an explosive (" + mat_model_str + "), but NO DetonatorLocation3D was connected to MPM Domain!", 0.0, "3d");
+                                              << "), but NO triggers/detonators were provided or connected!" << std::endl;
+                                    emit_kernel_log("WARNING", "FSI Object " + std::to_string(obj_idx) + " is an explosive (" + mat_model_str + "), but NO TriggerLocation3D / DetonatorLocation3D was connected to MPM Domain!", 0.0, "3d");
                                 } else if (ignited_count == 0) {
                                     std::cerr << "[BlastSolver] [WARNING] FSI Object " << obj_idx << " (" << mat_model_str
-                                              << "): Detonator did NOT intersect any particles! 0 particles ignited. Check detonator (x,y,z) vs object position." << std::endl;
-                                    emit_kernel_log("WARNING", "FSI Object " + std::to_string(obj_idx) + ": Detonator did NOT intersect any particles (0 ignited). Check detonator coordinates vs explosive body.", 0.0, "3d");
+                                              << "): Trigger did NOT intersect any particles! 0 particles ignited. Check trigger (x,y,z) vs object position." << std::endl;
+                                    emit_kernel_log("WARNING", "FSI Object " + std::to_string(obj_idx) + ": Trigger did NOT intersect any particles (0 ignited). Check trigger coordinates vs explosive body.", 0.0, "3d");
                                 } else {
                                     std::cout << "[BlastSolver] FSI Object " << obj_idx << " (" << mat_model_str
-                                              << "): Detonator hotspot initialized on " << ignited_count << " particles." << std::endl;
+                                              << "): Trigger hotspot initialized on " << ignited_count << " particles." << std::endl;
                                     emit_kernel_log("SYSTEM", "FSI Object " + std::to_string(obj_idx) + " (" + mat_model_str + "): Hotspot ignited " + std::to_string(ignited_count) + " particles.", 0.0, "3d");
                                 }
                             }
@@ -8791,10 +9114,10 @@ int main() {
                         }
                     }
 
+                    // Phase 5: Single synchronized upload of material tables and all particles to GPU
                     if (global_solver_mpm_3d_cuda) {
-                        global_solver_mpm_3d_cuda->uploadAoS2SoA();
+                        global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
                         global_solver_mpm_3d_cuda->syncToDevice();
-                        global_solver_mpm_3d_cuda->syncToHost();
                     } else {
                         global_solver_mpm_3d->particleToGrid();
                     }
@@ -9524,8 +9847,12 @@ int main() {
                         double ambient_p = get_json_double(msg, "atm_pressure", 101325.0);
                         global_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);
 
-                        if (msg.contains("detonator_x")) {
-                            global_solver_3d->setDetonatorLocation(get_json_double(msg, "detonator_x", cp.x), get_json_double(msg, "detonator_y", cp.y), get_json_double(msg, "detonator_z", cp.z));
+                        if (msg.contains("trigger_x") || msg.contains("detonator_x")) {
+                            global_solver_3d->setDetonatorLocation(
+                                get_json_double(msg, "trigger_x", get_json_double(msg, "detonator_x", cp.x)),
+                                get_json_double(msg, "trigger_y", get_json_double(msg, "detonator_y", cp.y)),
+                                get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", cp.z))
+                            );
                         }
 
                         auto map_bc_3d = [](const std::string& str) {
@@ -10234,6 +10561,9 @@ int main() {
 
                 } else if (command == "CONTOUR_CONFIG" || command == "VIEW3D_CONFIG" || command == "REFRESH_STATE" || command == "REFRESH" || command == "POLL_STATE") {
                     global_telemetry_stride = msg.value("stride", 1);
+                    if (msg.contains("particle_stride")) {
+                        global_mpm_particle_stride = std::max(1, msg.value("particle_stride", 1));
+                    }
                     if (msg.contains("refresh_rate")) {
                         double rate = msg.value("refresh_rate", 0.0);
                         int interval = (rate > 0.0) ? static_cast<int>(rate * 1000.0) : 16;
@@ -10285,7 +10615,7 @@ int main() {
                         if (global_solver_3d) {
                             emit_telemetry_3d(global_t3d, false);
                         } else if (global_solver_mpm_3d || global_solver_mpm_3d_cuda) {
-                            emit_telemetry_mpm_3d(global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getSimTime() : global_solver_mpm_3d->getSimTime(), false);
+                            emit_telemetry_mpm_3d(global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getSimTime() : global_solver_mpm_3d->getSimTime(), false, -1, false);
                         } else if (!global_fem_solvers_cuda_float.empty() || !global_fem_solvers_cuda_double.empty() || !global_fem_solvers_float.empty() || !global_fem_solvers_double.empty()) {
                             emit_telemetry_fem_3d(0.0, false);
                         }

@@ -9,27 +9,13 @@ import { StateManager } from './state-manager.js';
 import { PlaybackRingBuffer, BufferedFrame } from './playback-buffer.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { ResourceManager } from './resource-manager.js';
-import { Model, Node, ViewportOptions, MultiViewStageOptions, ModelViewConfig } from './types.js';
+import { STAGE_THEMES, type Model, type Node, type ViewportOptions, type MultiViewStageOptions, type ModelViewConfig, type StageThemeId, type StageThemeConfig } from './types.js';
 import { CustomDialog } from './custom-dialog.js';
 
 export type GridPreset = '1x1' | '1x2' | '2x1' | '2x2';
 export type ViewportViewType = '3D_VIEWPORT' | '2D_CONTOUR' | '1D_CHART' | 'RESOURCE_MONITOR';
-export type StageThemeId = 'studio-slate' | 'midnight-navy' | 'technical-blueprint' | 'graphite-studio' | 'obsidian-dark';
-
-export interface StageThemeConfig {
-    id: StageThemeId;
-    label: string;
-    icon: string;
-    clearColor: { r: number; g: number; b: number };
-}
-
-export const STAGE_THEMES: StageThemeConfig[] = [
-    { id: 'studio-slate', label: 'Studio Slate', icon: '🎨', clearColor: { r: 0.082, g: 0.098, b: 0.133 } },
-    { id: 'midnight-navy', label: 'Midnight Navy', icon: '🌌', clearColor: { r: 0.055, g: 0.082, b: 0.137 } },
-    { id: 'technical-blueprint', label: 'Technical Blueprint', icon: '📐', clearColor: { r: 0.043, g: 0.094, b: 0.141 } },
-    { id: 'graphite-studio', label: 'Graphite Studio', icon: '🌑', clearColor: { r: 0.094, g: 0.102, b: 0.114 } },
-    { id: 'obsidian-dark', label: 'Obsidian Minimal', icon: '⬛', clearColor: { r: 0.045, g: 0.048, b: 0.055 } },
-];
+export type { StageThemeId, StageThemeConfig };
+export { STAGE_THEMES };
 
 interface ViewportPane {
     id: string;
@@ -63,6 +49,7 @@ export class WorkspaceManager {
     private showStudioGrid: boolean = true;
     private panes: ViewportPane[] = [];
     private maximizedPaneId: string | null = null;
+    private focusedPaneId: string | null = null;
     private titleElement: HTMLElement | null = null;
     private stateListener: () => void;
 
@@ -75,6 +62,7 @@ export class WorkspaceManager {
     private stlGeometries: Map<string, { vertices: Float32Array | null, meshId: string }> = new Map();
     private obstacleGeometries: Map<string, { vertices: Float32Array | null, cells: Int32Array | null, meshId: string }> = new Map();
     private windowResizeListener: (() => void) | null = null;
+    private themeListener: ((e: any) => void) | null = null;
 
     constructor(
         container: HTMLElement | string,
@@ -122,6 +110,13 @@ export class WorkspaceManager {
 
         this.windowResizeListener = () => this.triggerResize();
         window.addEventListener('resize', this.windowResizeListener);
+
+        this.themeListener = (e: any) => {
+            if (e?.detail?.themeId && e.detail.themeId !== this.activeTheme && STAGE_THEMES.some(t => t.id === e.detail.themeId)) {
+                this.setTheme(e.detail.themeId as StageThemeId, false);
+            }
+        };
+        window.addEventListener('blastdemon-theme-change', this.themeListener);
 
         // Guard: suppress saveStageOptions → updatePanelOptions mutations during
         // initial buildStage so we don't trigger a re-entrant state notification.
@@ -229,11 +224,19 @@ export class WorkspaceManager {
         this.rootElement.className = `workspace-stage-grid grid-${this.activePreset} theme-${this.activeTheme} ${this.showStudioGrid ? 'show-studio-grid' : ''}`;
     }
 
-    public setTheme(themeId: StageThemeId): void {
+    public setTheme(themeId: StageThemeId, broadcast: boolean = true): void {
+        if (!STAGE_THEMES.some(t => t.id === themeId)) return;
         this.activeTheme = themeId;
         this.updateRootClasses();
         this.syncViewportsClearColor();
         this.saveStageOptions();
+        const themeSelect = this.rootElement?.querySelector('.stage-theme-select') as HTMLSelectElement | null;
+        if (themeSelect && themeSelect.value !== themeId) {
+            themeSelect.value = themeId;
+        }
+        if (broadcast) {
+            window.dispatchEvent(new CustomEvent('blastdemon-theme-change', { detail: { themeId } }));
+        }
     }
 
     public getTheme(): StageThemeId {
@@ -312,13 +315,32 @@ export class WorkspaceManager {
         const themeSelect = document.createElement('select');
         themeSelect.className = 'stage-theme-select';
         themeSelect.title = 'Change Stage Background Studio Theme';
-        STAGE_THEMES.forEach(t => {
+
+        const lightThemes = STAGE_THEMES.filter(t => t.group === 'light');
+        const darkThemes = STAGE_THEMES.filter(t => t.group === 'dark');
+
+        const lightGroup = document.createElement('optgroup');
+        lightGroup.label = 'Light Themes (Particle Contrast)';
+        lightThemes.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t.id;
             opt.textContent = `${t.icon} ${t.label}`;
             if (t.id === this.activeTheme) opt.selected = true;
-            themeSelect.appendChild(opt);
+            lightGroup.appendChild(opt);
         });
+        themeSelect.appendChild(lightGroup);
+
+        const darkGroup = document.createElement('optgroup');
+        darkGroup.label = 'Dark Studio Themes';
+        darkThemes.forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t.id;
+            opt.textContent = `${t.icon} ${t.label}`;
+            if (t.id === this.activeTheme) opt.selected = true;
+            darkGroup.appendChild(opt);
+        });
+        themeSelect.appendChild(darkGroup);
+
         themeSelect.addEventListener('change', () => {
             this.setTheme(themeSelect.value as StageThemeId);
         });
@@ -374,7 +396,15 @@ export class WorkspaceManager {
     private createViewportPane(index: number, initialModelId: string | null, initialViewType: ViewportViewType, initialViewId?: string | null): ViewportPane {
         const paneContainer = document.createElement('div');
         paneContainer.className = 'stage-pane-container';
-        paneContainer.id = `stage-pane-${index}`;
+        const paneId = `stage-pane-${index}`;
+        paneContainer.id = paneId;
+        paneContainer.tabIndex = 0;
+        paneContainer.addEventListener('focusin', () => {
+            this.setFocusedPane(paneId);
+        });
+        paneContainer.addEventListener('mousedown', () => {
+            this.setFocusedPane(paneId);
+        });
 
         const paneHeader = document.createElement('div');
         paneHeader.className = 'stage-pane-header';
@@ -1043,11 +1073,38 @@ export class WorkspaceManager {
         });
     }
 
+    public setFocusedPane(paneId: string): void {
+        this.focusedPaneId = paneId;
+        this.panes.forEach(p => {
+            if (p.id === paneId) {
+                p.container.style.boxShadow = 'inset 0 0 0 2px #00adff';
+            } else {
+                p.container.style.boxShadow = 'none';
+            }
+        });
+    }
+
+    public getTargetPanes(): ViewportPane[] {
+        if (this.focusedPaneId) {
+            const focused = this.panes.find(p => p.id === this.focusedPaneId);
+            if (focused && focused.viewType === '3D_VIEWPORT' && focused.instance) {
+                return [focused];
+            }
+        }
+        const first3D = this.panes.find(p => p.viewType === '3D_VIEWPORT' && p.instance);
+        return first3D ? [first3D] : this.panes;
+    }
+
     /**
-     * Snap camera preset on all active 3D viewports.
+     * Snap camera preset on focused 3D viewport (or active pane).
      */
     public snapCamera(preset: string): void {
-        this.panes.forEach(pane => {
+        this.snapCameraPreset(preset);
+    }
+
+    public snapCameraPreset(preset: string): void {
+        const targets = this.getTargetPanes();
+        targets.forEach(pane => {
             if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                 pane.instance.snapCameraPreset?.(preset);
             }
@@ -1090,10 +1147,11 @@ export class WorkspaceManager {
     }
 
     /**
-     * Set projection mode on all active 3D viewports.
+     * Set projection mode on focused 3D viewport (or active pane).
      */
     public setProjection(perspective: boolean): void {
-        this.panes.forEach(pane => {
+        const targets = this.getTargetPanes();
+        targets.forEach(pane => {
             if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                 pane.instance.setProjection?.(perspective);
             }
@@ -1266,6 +1324,10 @@ export class WorkspaceManager {
     }
 
     public destroy(): void {
+        if (this.themeListener) {
+            window.removeEventListener('blastdemon-theme-change', this.themeListener);
+            this.themeListener = null;
+        }
         if (this.windowResizeListener) {
             window.removeEventListener('resize', this.windowResizeListener);
             this.windowResizeListener = null;
