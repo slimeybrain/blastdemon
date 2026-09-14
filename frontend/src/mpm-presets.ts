@@ -107,7 +107,7 @@ export interface MPMMaterialParams {
     atm_pressure?: number;
     atm_temperature?: number;
     gamma?: number;
-    // JWL CFD
+    // JWL CFD & Programmed Burn
     composition?: string;
     rho?: number;
     detonation_energy?: number;
@@ -117,6 +117,30 @@ export interface MPMMaterialParams {
     jwl_R1?: number;
     jwl_R2?: number;
     jwl_omega?: number;
+    burn_zone_cells?: number;
+    tau_burn_min?: number;
+    // Lee-Tarver Ignition & Growth Kinetics
+    lt_I?: number;
+    lt_a?: number;
+    lt_b?: number;
+    lt_x?: number;
+    lt_G1?: number;
+    lt_c?: number;
+    lt_d?: number;
+    lt_y?: number;
+    lt_G2?: number;
+    lt_e?: number;
+    lt_g?: number;
+    lt_z?: number;
+    lt_F_ig_max?: number;
+    lt_F_G1_max?: number;
+    lt_F_G2_min?: number;
+    // Provenance & Architectural Pillar Metadata
+    provenance?: 'experimental' | 'hybrid' | 'default' | 'user';
+    test_method?: string;
+    solid_model?: string;
+    burn_model?: string;
+    product_model?: string;
     ideal_gamma?: number;
     ideal_rho_0?: number;
     ideal_e_0?: number;
@@ -131,7 +155,7 @@ export interface MPMMaterialParamInfo {
     label: string;
     shortDesc: string;
     unit?: string;
-    section: 'model' | 'elasticity' | 'plasticity' | 'failure' | 'erosion' | 'johnson_cook' | 'mie_gruneisen' | 'davis_reactant' | 'davis_product' | 'crest_kinetics' | 'concrete_base' | 'rht' | 'kc' | 'cscm' | 'ideal_gas' | 'jwl';
+    section: 'model' | 'elasticity' | 'plasticity' | 'failure' | 'erosion' | 'johnson_cook' | 'mie_gruneisen' | 'davis_reactant' | 'davis_product' | 'crest_kinetics' | 'concrete_base' | 'rht' | 'kc' | 'cscm' | 'ideal_gas' | 'jwl' | 'programmed_burn' | 'lee_tarver';
     solverScope?: SolverScope;
     tooltip: string;
 }
@@ -1082,6 +1106,161 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         section: 'jwl',
         solverScope: 'FV',
         tooltip: 'Fractional Grüneisen ratio omega = Cp/Cv - 1 for product gas.'
+    },
+    // JWL Programmed Burn Wavefront Parameters
+    'burn_zone_cells': {
+        key: 'burn_zone_cells',
+        label: 'Burn Zone Width (N_cells)',
+        shortDesc: 'Numerical reaction wavefront smearing cells',
+        unit: 'cells',
+        section: 'programmed_burn',
+        solverScope: 'MPM+FV',
+        tooltip: 'Number of spatial grid cells N_cells over which programmed detonation wavefront is smoothed to prevent numerical ringing.'
+    },
+    'tau_burn_min': {
+        key: 'tau_burn_min',
+        label: 'Min Burn Duration (τ_min)',
+        shortDesc: 'Reaction progress timescale lower bound',
+        unit: 's',
+        section: 'programmed_burn',
+        solverScope: 'MPM+FV',
+        tooltip: 'Minimum physical duration limiter (s) for programmed burn to ensure stability with ultra-fine grids.'
+    },
+    // Lee-Tarver Ignition & Growth Kinetics
+    'lt_I': {
+        key: 'lt_I',
+        label: 'Lee-Tarver Ignition Rate (I)',
+        shortDesc: 'Hot-spot ignition rate multiplier',
+        unit: '1/s',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Ignition frequency constant I (1/s) for hot-spot formation under shock compression.'
+    },
+    'lt_a': {
+        key: 'lt_a',
+        label: 'Lee-Tarver Ignition Comp Thresh (a)',
+        shortDesc: 'Critical compression threshold for ignition',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Critical volumetric strain parameter a: ignition triggers when (1 - v) > a.'
+    },
+    'lt_b': {
+        key: 'lt_b',
+        label: 'Lee-Tarver Ignition Depletion Exp (b)',
+        shortDesc: 'Reactant depletion power in ignition',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Exponent b on unreacted fraction (1 - λ) in ignition rate law.'
+    },
+    'lt_x': {
+        key: 'lt_x',
+        label: 'Lee-Tarver Ignition Comp Exp (x)',
+        shortDesc: 'Shock compression sensitivity exponent',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Exponent x on (1 - v - a) scaling compression sensitivity in ignition.'
+    },
+    'lt_G1': {
+        key: 'lt_G1',
+        label: 'Lee-Tarver Growth Rate 1 (G₁)',
+        shortDesc: 'Initial slow burning growth coefficient',
+        unit: '1/s',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Growth constant G1 (1/s) governing deflagration propagation from ignited hot-spots.'
+    },
+    'lt_c': {
+        key: 'lt_c',
+        label: 'Lee-Tarver Growth Reactant Exp (c)',
+        shortDesc: 'Unreacted reactant power in growth 1',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Exponent c on unreacted solid fraction (1 - λ) in growth regime 1.'
+    },
+    'lt_d': {
+        key: 'lt_d',
+        label: 'Lee-Tarver Growth Product Exp (d)',
+        shortDesc: 'Burned product fraction exponent in growth 1',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Exponent d on reacted fraction λ in growth regime 1.'
+    },
+    'lt_y': {
+        key: 'lt_y',
+        label: 'Lee-Tarver Growth Pressure Exp (y)',
+        shortDesc: 'Pressure sensitivity exponent in growth 1',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Pressure dependence exponent y for reaction growth regime 1.'
+    },
+    'lt_G2': {
+        key: 'lt_G2',
+        label: 'Lee-Tarver Growth Rate 2 (G₂)',
+        shortDesc: 'Fast high-pressure detonation completion rate',
+        unit: '1/s',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Fast reaction rate constant G2 (1/s) governing rapid transition to full detonation.'
+    },
+    'lt_e': {
+        key: 'lt_e',
+        label: 'Lee-Tarver Completion Reactant Exp (e)',
+        shortDesc: 'Unreacted fraction power in completion 2',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Exponent e on (1 - λ) in fast completion regime 2.'
+    },
+    'lt_g': {
+        key: 'lt_g',
+        label: 'Lee-Tarver Completion Product Exp (g)',
+        shortDesc: 'Product fraction power in completion 2',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Exponent g on λ in fast completion regime 2.'
+    },
+    'lt_z': {
+        key: 'lt_z',
+        label: 'Lee-Tarver Completion Pressure Exp (z)',
+        shortDesc: 'Pressure sensitivity exponent in completion 2',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'High-pressure sensitivity exponent z in completion regime 2.'
+    },
+    'lt_F_ig_max': {
+        key: 'lt_F_ig_max',
+        label: 'Lee-Tarver Max Ignition Progress (F_ig_max)',
+        shortDesc: 'Hot-spot ignition cutoff fraction',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Upper progress limit F_ig_max beyond which hot-spot ignition shuts off.'
+    },
+    'lt_F_G1_max': {
+        key: 'lt_F_G1_max',
+        label: 'Lee-Tarver Max Growth 1 Progress (F_G1_max)',
+        shortDesc: 'Intermediate growth cutoff fraction',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Upper progress limit F_G1_max beyond which intermediate growth regime 1 terminates.'
+    },
+    'lt_F_G2_min': {
+        key: 'lt_F_G2_min',
+        label: 'Lee-Tarver Min Growth 2 Progress (F_G2_min)',
+        shortDesc: 'Detonation completion onset fraction',
+        unit: 'dim',
+        section: 'lee_tarver',
+        solverScope: 'MPM+FV',
+        tooltip: 'Lower progress threshold F_G2_min above which rapid detonation completion regime 2 activates.'
     }
 };
 
@@ -1295,6 +1474,35 @@ export const MPM_MATERIAL_CATEGORIES: MPMCategoryGroup[] = [
             'Mining Emulsion',
             'Nitromethane',
             'Water Gel'
+        ]
+    },
+    {
+        category: 'JWL Programmed Burn Presets',
+        presets: [
+            'C-4 (Composition C-4) - JWL Programmed Burn',
+            'TNT (Trinitrotoluene) - JWL Programmed Burn',
+            'Composition B (Comp B) - JWL Programmed Burn',
+            'PETN (Pentaerythritol Tetranitrate) - JWL Programmed Burn',
+            'HMX (Octogen) - JWL Programmed Burn',
+            'RDX (Hexogen) - JWL Programmed Burn',
+            'PBX 9404 (HMX/NC 94/3) - JWL Programmed Burn',
+            'PBX 9501 (HMX/Estane 95/5) - JWL Programmed Burn',
+            'PBX 9502 (TATB/Kel-F 95/5) - JWL Programmed Burn',
+            'LX-04 (HMX/Viton 85/15) - JWL Programmed Burn',
+            'LX-10 (HMX/Viton 95/5) - JWL Programmed Burn',
+            'LX-14 (HMX/Estane 95.5/4.5) - JWL Programmed Burn',
+            'LX-17 (TATB/Kel-F 92.5/7.5) - JWL Programmed Burn',
+            'ANFO (Ammonium Nitrate/Fuel Oil) - JWL Programmed Burn',
+            'Tritonal (TNT/Al 80/20) - JWL Programmed Burn'
+        ]
+    },
+    {
+        category: 'Lee-Tarver Ignition & Growth Presets',
+        presets: [
+            'LX-17 (TATB/Kel-F 92.5/7.5) - Lee-Tarver I&G',
+            'PBX 9404 (HMX/NC 94/3) - Lee-Tarver I&G',
+            'PBX 9502 (TATB/Kel-F 95/5) - Lee-Tarver I&G',
+            'Composition B (RDX/TNT 60/40) - Lee-Tarver I&G'
         ]
     },
     {
@@ -1980,6 +2188,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         davis_c0: 2050.0, davis_s1: 2.12, davis_gamma0: 0.65, davis_cv: 1000.0, davis_t0: 293.0, davis_rho0: 1895.0,
         davis_a: 2.85, davis_b: 1.10, davis_k: 1.35, davis_vc: 0.65, davis_pc: 12.5e9, davis_q_det: 3.90e6,
         crest_b1: 1.2e7, crest_c1: 0.67, crest_m1: 2.5, crest_b2: 3.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.5, crest_s0: 15.0, crest_s_threshold: 2.0,
+        provenance: 'experimental', test_method: 'Gas-gun plate impact & embedded electromagnetic particle velocity gauges',
+        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Shock Entropy Kinetics', product_model: 'Davis Detonation Product',
         category: 'CREST Reactive Burn Presets', reference: 'Handley, C. A. (2007) CREST reactive burn model for PBX 9502; Davis (1998)'
     },
     'EDC37 (HMX/NC/K10 91/1/8) - CREST Davis': {
@@ -1988,6 +2198,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         davis_c0: 2750.0, davis_s1: 1.85, davis_gamma0: 0.70, davis_cv: 1100.0, davis_t0: 293.0, davis_rho0: 1841.0,
         davis_a: 3.10, davis_b: 1.25, davis_k: 1.30, davis_vc: 0.60, davis_pc: 14.2e9, davis_q_det: 5.20e6,
         crest_b1: 2.5e7, crest_c1: 0.67, crest_m1: 2.0, crest_b2: 6.8e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.2, crest_s0: 14.0, crest_s_threshold: 1.5,
+        provenance: 'experimental', test_method: 'Gas-gun plate impact & embedded electromagnetic particle velocity gauges',
+        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Shock Entropy Kinetics', product_model: 'Davis Detonation Product',
         category: 'CREST Reactive Burn Presets', reference: 'Whitworth, N. J. (2008) CREST modeling of EDC37 shock initiation'
     },
     'PBX 9501 (HMX/Estane 95/5) - CREST Davis': {
@@ -1996,6 +2208,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         davis_c0: 2600.0, davis_s1: 1.90, davis_gamma0: 0.68, davis_cv: 1080.0, davis_t0: 293.0, davis_rho0: 1830.0,
         davis_a: 3.00, davis_b: 1.20, davis_k: 1.32, davis_vc: 0.62, davis_pc: 13.8e9, davis_q_det: 5.00e6,
         crest_b1: 2.0e7, crest_c1: 0.67, crest_m1: 2.2, crest_b2: 5.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.3, crest_s0: 14.0, crest_s_threshold: 2.0,
+        provenance: 'experimental', test_method: 'Gas-gun plate impact & embedded electromagnetic particle velocity gauges',
+        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Shock Entropy Kinetics', product_model: 'Davis Detonation Product',
         category: 'CREST Reactive Burn Presets', reference: 'Gibbs & Popolato (1980) LASL Explosive Property Data / Davis EOS'
     },
     'Composition B (RDX/TNT 60/40) - CREST Davis': {
@@ -2004,6 +2218,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         davis_c0: 2450.0, davis_s1: 1.95, davis_gamma0: 0.72, davis_cv: 1050.0, davis_t0: 293.0, davis_rho0: 1717.0,
         davis_a: 2.70, davis_b: 1.15, davis_k: 1.36, davis_vc: 0.66, davis_pc: 11.8e9, davis_q_det: 4.60e6,
         crest_b1: 1.8e7, crest_c1: 0.67, crest_m1: 2.3, crest_b2: 4.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.4, crest_s0: 15.0, crest_s_threshold: 1.5,
+        provenance: 'experimental', test_method: 'Gas-gun plate impact & embedded electromagnetic particle velocity gauges',
+        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Shock Entropy Kinetics', product_model: 'Davis Detonation Product',
         category: 'CREST Reactive Burn Presets', reference: 'Urtiew et al. (1998) Shock initiation of Comp B / Davis EOS parameters'
     },
     'LX-17 (TATB/Kel-F 92.5/7.5) - CREST Davis': {
@@ -2012,7 +2228,211 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         davis_c0: 2020.0, davis_s1: 2.15, davis_gamma0: 0.64, davis_cv: 990.0, davis_t0: 293.0, davis_rho0: 1905.0,
         davis_a: 2.80, davis_b: 1.08, davis_k: 1.35, davis_vc: 0.65, davis_pc: 12.2e9, davis_q_det: 3.80e6,
         crest_b1: 1.1e7, crest_c1: 0.67, crest_m1: 2.5, crest_b2: 3.2e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.5, crest_s0: 15.0, crest_s_threshold: 3.0,
+        provenance: 'experimental', test_method: 'Gas-gun plate impact & embedded electromagnetic particle velocity gauges',
+        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Shock Entropy Kinetics', product_model: 'Davis Detonation Product',
         category: 'CREST Reactive Burn Presets', reference: 'LLNL Explosives Handbook / CREST Parameters for Insensitive HE'
+    },
+
+    // ---------------------------------------------------------
+    // 11. JWL Programmed Burn Presets (Mie-Grüneisen Solid + JWL Products)
+    // ---------------------------------------------------------
+    'C-4 (Composition C-4) - JWL Programmed Burn': {
+        density: 1600.0, youngs_modulus: 1.5e9, poissons_ratio: 0.38, yield_stress: 2.0e6, hardening_modulus: 20.0e6, failure_strain: 0.15, tensile_failure_stress: 0.8e6,
+        jc_A: 2.0e6, jc_B: 10.0e6, jc_n: 0.40, jc_C: 0.02, jc_m: 1.0, T_melt: 477.0, T_room: 293.0, Cp: 1200.0, mg_gamma0: 1.10, mg_c0: 2400.0, mg_s: 1.58,
+        det_vel: 8190.0, detonation_energy: 5.62e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 609.77e9, jwl_B: 12.95e9, jwl_R1: 4.50, jwl_R2: 1.40, jwl_omega: 0.25,
+        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997 / Dobratz (1985)',
+        test_method: 'Cylinder Expansion Test (1-inch & 2-inch) + Plate Impact Hugoniot',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'TNT (Trinitrotoluene) - JWL Programmed Burn': {
+        density: 1630.0, youngs_modulus: 6.0e9, poissons_ratio: 0.35, yield_stress: 20.0e6, hardening_modulus: 120.0e6, failure_strain: 0.07, tensile_failure_stress: 5.0e6,
+        jc_A: 20.0e6, jc_B: 60.0e6, jc_n: 0.38, jc_C: 0.01, jc_m: 1.0, T_melt: 354.0, T_room: 293.0, Cp: 1260.0, mg_gamma0: 0.92, mg_c0: 2470.0, mg_s: 1.59,
+        det_vel: 6930.0, detonation_energy: 4.29e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 373.77e9, jwl_B: 3.747e9, jwl_R1: 4.15, jwl_R2: 0.90, jwl_omega: 0.35,
+        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997 / Dobratz (1985)',
+        test_method: 'Cylinder Expansion Test (1-inch & 2-inch) + Plate Impact Hugoniot',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'Composition B (Comp B) - JWL Programmed Burn': {
+        density: 1717.0, youngs_modulus: 7.2e9, poissons_ratio: 0.34, yield_stress: 35.0e6, hardening_modulus: 70.0e6, failure_strain: 0.15, tensile_failure_stress: 40.0e6,
+        jc_A: 35.0e6, jc_B: 70.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 354.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 0.72, mg_c0: 2450.0, mg_s: 1.95,
+        det_vel: 7980.0, detonation_energy: 5.19e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 524.23e9, jwl_B: 7.678e9, jwl_R1: 4.20, jwl_R2: 1.10, jwl_omega: 0.34,
+        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997 / Dobratz (1985)',
+        test_method: 'Cylinder Expansion Test (1-inch & 2-inch) + Plate Impact Hugoniot',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'PETN (Pentaerythritol Tetranitrate) - JWL Programmed Burn': {
+        density: 1770.0, youngs_modulus: 14.0e9, poissons_ratio: 0.29, yield_stress: 40.0e6, hardening_modulus: 250.0e6, failure_strain: 0.03, tensile_failure_stress: 10.0e6,
+        jc_A: 40.0e6, jc_B: 125.0e6, jc_n: 0.32, jc_C: 0.01, jc_m: 1.0, T_melt: 414.0, T_room: 293.0, Cp: 1090.0, mg_gamma0: 1.08, mg_c0: 2810.0, mg_s: 1.66,
+        det_vel: 8300.0, detonation_energy: 5.80e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 625.3e9, jwl_B: 23.29e9, jwl_R1: 5.25, jwl_R2: 1.60, jwl_omega: 0.28,
+        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
+        test_method: 'Cylinder Expansion Test (1-inch) + Laser Velocimetry',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'HMX (Octogen) - JWL Programmed Burn': {
+        density: 1890.0, youngs_modulus: 18.0e9, poissons_ratio: 0.28, yield_stress: 55.0e6, hardening_modulus: 350.0e6, failure_strain: 0.02, tensile_failure_stress: 14.0e6,
+        jc_A: 55.0e6, jc_B: 160.0e6, jc_n: 0.28, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 1.15, mg_c0: 2900.0, mg_s: 1.70,
+        det_vel: 9110.0, detonation_energy: 6.78e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 778.3e9, jwl_B: 7.07e9, jwl_R1: 4.20, jwl_R2: 1.00, jwl_omega: 0.30,
+        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
+        test_method: 'Cylinder Expansion Test + Gas Gun Shock Hugoniot',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'RDX (Hexogen) - JWL Programmed Burn': {
+        density: 1800.0, youngs_modulus: 15.0e9, poissons_ratio: 0.29, yield_stress: 42.0e6, hardening_modulus: 270.0e6, failure_strain: 0.03, tensile_failure_stress: 10.5e6,
+        jc_A: 42.0e6, jc_B: 130.0e6, jc_n: 0.31, jc_C: 0.01, jc_m: 1.0, T_melt: 477.0, T_room: 293.0, Cp: 1070.0, mg_gamma0: 1.10, mg_c0: 2840.0, mg_s: 1.67,
+        det_vel: 8750.0, detonation_energy: 5.90e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 648.0e9, jwl_B: 9.38e9, jwl_R1: 4.50, jwl_R2: 1.40, jwl_omega: 0.33,
+        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
+        test_method: 'Cylinder Expansion Test + Plate Impact',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'PBX 9404 (HMX/NC 94/3) - JWL Programmed Burn': {
+        density: 1840.0, youngs_modulus: 9.5e9, poissons_ratio: 0.34, yield_stress: 45.0e6, hardening_modulus: 150.0e6, failure_strain: 0.05, tensile_failure_stress: 12.0e6,
+        jc_A: 45.0e6, jc_B: 120.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1100.0, mg_gamma0: 0.88, mg_c0: 2430.0, mg_s: 1.88,
+        det_vel: 8800.0, detonation_energy: 5.95e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 852.4e9, jwl_B: 18.02e9, jwl_R1: 4.60, jwl_R2: 1.30, jwl_omega: 0.38,
+        provenance: 'experimental', reference: 'Lee & Tarver (1980) / LLNL Explosives Handbook',
+        test_method: 'Cylinder Expansion Test + Manganin Gauge Shock Data',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'PBX 9501 (HMX/Estane 95/5) - JWL Programmed Burn': {
+        density: 1830.0, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 45.0e6, hardening_modulus: 90.0e6, failure_strain: 0.10, tensile_failure_stress: 55.0e6,
+        jc_A: 45.0e6, jc_B: 90.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1080.0, mg_gamma0: 0.68, mg_c0: 2600.0, mg_s: 1.90,
+        det_vel: 8800.0, detonation_energy: 5.90e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 856.0e9, jwl_B: 18.3e9, jwl_R1: 4.60, jwl_R2: 1.30, jwl_omega: 0.38,
+        provenance: 'experimental', reference: 'Gibbs & Popolato (1980) LASL Explosive Property Data',
+        test_method: 'Cylinder Expansion Test (1-inch & 2-inch) + Gas Gun',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'PBX 9502 (TATB/Kel-F 95/5) - JWL Programmed Burn': {
+        density: 1895.0, youngs_modulus: 10.0e9, poissons_ratio: 0.35, yield_stress: 50.0e6, hardening_modulus: 100.0e6, failure_strain: 0.10, tensile_failure_stress: 60.0e6,
+        jc_A: 50.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 623.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.65, mg_c0: 2050.0, mg_s: 2.12,
+        det_vel: 7670.0, detonation_energy: 4.30e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 556.0e9, jwl_B: 8.44e9, jwl_R1: 4.39, jwl_R2: 1.10, jwl_omega: 0.35,
+        provenance: 'experimental', reference: 'Bahl et al. (1998) / LLNL Explosives Handbook',
+        test_method: 'Cylinder Expansion Test + Embedded Gauges',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'LX-04 (HMX/Viton 85/15) - JWL Programmed Burn': {
+        density: 1860.0, youngs_modulus: 8.5e9, poissons_ratio: 0.36, yield_stress: 38.0e6, hardening_modulus: 95.0e6, failure_strain: 0.08, tensile_failure_stress: 10.0e6,
+        jc_A: 38.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1120.0, mg_gamma0: 0.85, mg_c0: 2450.0, mg_s: 1.85,
+        det_vel: 8460.0, detonation_energy: 5.25e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 720.0e9, jwl_B: 15.0e9, jwl_R1: 4.50, jwl_R2: 1.25, jwl_omega: 0.35,
+        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
+        test_method: 'Cylinder Expansion Test (1-inch)',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'LX-10 (HMX/Viton 95/5) - JWL Programmed Burn': {
+        density: 1865.0, youngs_modulus: 9.2e9, poissons_ratio: 0.35, yield_stress: 42.0e6, hardening_modulus: 110.0e6, failure_strain: 0.07, tensile_failure_stress: 11.0e6,
+        jc_A: 42.0e6, jc_B: 110.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1090.0, mg_gamma0: 0.90, mg_c0: 2500.0, mg_s: 1.82,
+        det_vel: 8820.0, detonation_energy: 6.05e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 831.2e9, jwl_B: 15.53e9, jwl_R1: 4.55, jwl_R2: 1.30, jwl_omega: 0.38,
+        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
+        test_method: 'Cylinder Expansion Test (1-inch & 2-inch)',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'LX-14 (HMX/Estane 95.5/4.5) - JWL Programmed Burn': {
+        density: 1835.0, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 44.0e6, hardening_modulus: 95.0e6, failure_strain: 0.09, tensile_failure_stress: 12.0e6,
+        jc_A: 44.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1080.0, mg_gamma0: 0.88, mg_c0: 2550.0, mg_s: 1.86,
+        det_vel: 8830.0, detonation_energy: 5.95e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 826.1e9, jwl_B: 17.24e9, jwl_R1: 4.55, jwl_R2: 1.32, jwl_omega: 0.38,
+        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
+        test_method: 'Cylinder Expansion Test',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'LX-17 (TATB/Kel-F 92.5/7.5) - JWL Programmed Burn': {
+        density: 1905.0, youngs_modulus: 10.5e9, poissons_ratio: 0.35, yield_stress: 52.0e6, hardening_modulus: 105.0e6, failure_strain: 0.10, tensile_failure_stress: 62.0e6,
+        jc_A: 52.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 623.0, T_room: 293.0, Cp: 990.0, mg_gamma0: 0.64, mg_c0: 2020.0, mg_s: 2.15,
+        det_vel: 7630.0, detonation_energy: 4.25e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 593.5e9, jwl_B: 15.2e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.38,
+        provenance: 'experimental', reference: 'Tarver & Chidester (2005) / LLNL Explosives Handbook',
+        test_method: 'Cylinder Expansion Test (1-inch & 2-inch) + Fabry-Perot',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'ANFO (Ammonium Nitrate/Fuel Oil) - JWL Programmed Burn': {
+        density: 850.0, youngs_modulus: 1.0e9, poissons_ratio: 0.38, yield_stress: 1.0e6, hardening_modulus: 5.0e6, failure_strain: 0.20, tensile_failure_stress: 0.3e6,
+        jc_A: 1.0e6, jc_B: 5.0e6, jc_n: 0.40, jc_C: 0.01, jc_m: 1.0, T_melt: 442.0, T_room: 293.0, Cp: 1400.0, mg_gamma0: 0.50, mg_c0: 1500.0, mg_s: 1.40,
+        det_vel: 4560.0, detonation_energy: 2.45e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 49.46e9, jwl_B: 1.891e9, jwl_R1: 3.90, jwl_R2: 1.10, jwl_omega: 0.33,
+        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
+        test_method: 'Large Diameter Cylinder Expansion (4-inch)',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+    'Tritonal (TNT/Al 80/20) - JWL Programmed Burn': {
+        density: 1780.0, youngs_modulus: 8.0e9, poissons_ratio: 0.33, yield_stress: 25.0e6, hardening_modulus: 140.0e6, failure_strain: 0.06, tensile_failure_stress: 6.0e6,
+        jc_A: 25.0e6, jc_B: 80.0e6, jc_n: 0.35, jc_C: 0.01, jc_m: 1.0, T_melt: 354.0, T_room: 293.0, Cp: 1180.0, mg_gamma0: 1.10, mg_c0: 2600.0, mg_s: 1.62,
+        det_vel: 6700.0, detonation_energy: 5.20e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 420.0e9, jwl_B: 4.50e9, jwl_R1: 4.20, jwl_R2: 0.95, jwl_omega: 0.32,
+        provenance: 'experimental', reference: 'Dobratz (1985) / LLNL Explosives Handbook',
+        test_method: 'Cylinder Expansion Test + Blast Characterization',
+        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Huygens Wavefront Smeared Progress', product_model: 'JWL High-Pressure Gas',
+        category: 'JWL Programmed Burn Presets'
+    },
+
+    // ---------------------------------------------------------
+    // 12. Lee-Tarver Ignition & Growth Presets (3-Term Reaction Kinetics)
+    // ---------------------------------------------------------
+    'LX-17 (TATB/Kel-F 92.5/7.5) - Lee-Tarver I&G': {
+        density: 1905.0, youngs_modulus: 10.5e9, poissons_ratio: 0.35, yield_stress: 52.0e6, hardening_modulus: 105.0e6, failure_strain: 0.10, tensile_failure_stress: 62.0e6,
+        jc_A: 52.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 623.0, T_room: 293.0, Cp: 990.0, mg_gamma0: 0.64, mg_c0: 2020.0, mg_s: 2.15,
+        det_vel: 7630.0, detonation_energy: 4.25e6,
+        jwl_A: 593.5e9, jwl_B: 15.2e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.38,
+        lt_I: 4.0e6, lt_a: 0.24, lt_b: 0.667, lt_x: 7.0, lt_G1: 2.5e-3, lt_c: 0.667, lt_d: 0.333, lt_y: 2.0, lt_G2: 0.05, lt_e: 0.667, lt_g: 0.333, lt_z: 3.0, lt_F_ig_max: 0.02, lt_F_G1_max: 0.30, lt_F_G2_min: 0.30,
+        provenance: 'experimental', reference: 'Tarver & Chidester (2005) LX-17 Ignition and Growth Calibrations',
+        test_method: 'Manganin Pressure Gauges & Fabry-Perot Laser Velocimetry (LLNL)',
+        solid_model: 'Mie-Grüneisen Unreacted Solid', burn_model: '3-Stage Hot-Spot Ignition & Growth ODE', product_model: 'JWL Product Gas',
+        category: 'Lee-Tarver Ignition & Growth Presets'
+    },
+    'PBX 9404 (HMX/NC 94/3) - Lee-Tarver I&G': {
+        density: 1840.0, youngs_modulus: 9.5e9, poissons_ratio: 0.34, yield_stress: 45.0e6, hardening_modulus: 150.0e6, failure_strain: 0.05, tensile_failure_stress: 12.0e6,
+        jc_A: 45.0e6, jc_B: 120.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1100.0, mg_gamma0: 0.88, mg_c0: 2430.0, mg_s: 1.88,
+        det_vel: 8800.0, detonation_energy: 5.95e6,
+        jwl_A: 852.4e9, jwl_B: 18.02e9, jwl_R1: 4.60, jwl_R2: 1.30, jwl_omega: 0.38,
+        lt_I: 4.4e7, lt_a: 0.04, lt_b: 0.667, lt_x: 4.0, lt_G1: 0.85, lt_c: 0.667, lt_d: 0.29, lt_y: 1.0, lt_G2: 0.0, lt_e: 0.0, lt_g: 0.0, lt_z: 0.0, lt_F_ig_max: 0.03, lt_F_G1_max: 1.0, lt_F_G2_min: 0.0,
+        provenance: 'experimental', reference: 'Lee & Tarver (1980) Phenomenological Model of Shock Initiation',
+        test_method: 'Wedge Tests & Manganin Foil Gauges',
+        solid_model: 'Mie-Grüneisen Unreacted Solid', burn_model: 'Hot-Spot Ignition & Compaction Wave Growth', product_model: 'JWL Product Gas',
+        category: 'Lee-Tarver Ignition & Growth Presets'
+    },
+    'PBX 9502 (TATB/Kel-F 95/5) - Lee-Tarver I&G': {
+        density: 1895.0, youngs_modulus: 10.0e9, poissons_ratio: 0.35, yield_stress: 50.0e6, hardening_modulus: 100.0e6, failure_strain: 0.10, tensile_failure_stress: 60.0e6,
+        jc_A: 50.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 623.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.65, mg_c0: 2050.0, mg_s: 2.12,
+        det_vel: 7670.0, detonation_energy: 4.30e6,
+        jwl_A: 556.0e9, jwl_B: 8.44e9, jwl_R1: 4.39, jwl_R2: 1.10, jwl_omega: 0.35,
+        lt_I: 4.0e6, lt_a: 0.22, lt_b: 0.667, lt_x: 7.0, lt_G1: 2.3e-3, lt_c: 0.667, lt_d: 0.333, lt_y: 2.0, lt_G2: 0.045, lt_e: 0.667, lt_g: 0.333, lt_z: 3.0, lt_F_ig_max: 0.02, lt_F_G1_max: 0.30, lt_F_G2_min: 0.30,
+        provenance: 'experimental', reference: 'Bahl et al. (1998) PBX 9502 Shock Initiation',
+        test_method: 'Symmetric Gas-Gun Impact & Fabry-Perot Velocimetry',
+        solid_model: 'Mie-Grüneisen Unreacted Solid', burn_model: '3-Stage Hot-Spot Ignition & Growth ODE', product_model: 'JWL Product Gas',
+        category: 'Lee-Tarver Ignition & Growth Presets'
+    },
+    'Composition B (RDX/TNT 60/40) - Lee-Tarver I&G': {
+        density: 1717.0, youngs_modulus: 7.2e9, poissons_ratio: 0.34, yield_stress: 35.0e6, hardening_modulus: 70.0e6, failure_strain: 0.15, tensile_failure_stress: 40.0e6,
+        jc_A: 35.0e6, jc_B: 70.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 354.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 0.72, mg_c0: 2450.0, mg_s: 1.95,
+        det_vel: 7980.0, detonation_energy: 5.19e6,
+        jwl_A: 524.2e9, jwl_B: 7.678e9, jwl_R1: 4.20, jwl_R2: 1.10, jwl_omega: 0.34,
+        lt_I: 4.0e7, lt_a: 0.08, lt_b: 0.667, lt_x: 4.0, lt_G1: 0.45, lt_c: 0.667, lt_d: 0.29, lt_y: 1.2, lt_G2: 0.0, lt_e: 0.0, lt_g: 0.0, lt_z: 0.0, lt_F_ig_max: 0.03, lt_F_G1_max: 1.0, lt_F_G2_min: 0.0,
+        provenance: 'experimental', reference: 'Urtiew et al. (1998) Shock Initiation of Composition B',
+        test_method: 'Manganin In-Situ Stress Gauges',
+        solid_model: 'Mie-Grüneisen Unreacted Solid', burn_model: 'Hot-Spot Ignition & Reaction Growth', product_model: 'JWL Product Gas',
+        category: 'Lee-Tarver Ignition & Growth Presets'
     },
 
     // ---------------------------------------------------------
@@ -2578,6 +2998,8 @@ export function getConstitutiveModels(): string[] {
         'Johnson-Cook + Mie-Grüneisen',
         'Linear Elastic',
         'CREST Reactive Burn',
+        'JWL Programmed Burn',
+        'Lee-Tarver Ignition & Growth',
         'RHT Concrete',
         'Karagozian & Case (K&C)',
         'CSCM Concrete',
@@ -2636,6 +3058,12 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
             ].concat(
                 MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Energetic Solids & Unreacted Explosives')?.presets || []
             ).concat(['Custom']);
+
+        case 'JWL Programmed Burn':
+            return (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'JWL Programmed Burn Presets')?.presets || []).concat(['Custom']);
+
+        case 'Lee-Tarver Ignition & Growth':
+            return (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Lee-Tarver Ignition & Growth Presets')?.presets || []).concat(['Custom']);
 
         case 'RHT Concrete':
             return [
@@ -2724,6 +3152,22 @@ export function getCategorizedPresetsForModel(modelName: string): CategorizedPre
             result.push({
                 category: 'CREST Reactive Burn Calibrations',
                 presets: crestDavisPresets
+            });
+        }
+    } else if (modelName === 'JWL Programmed Burn') {
+        const jwlPresets = (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'JWL Programmed Burn Presets')?.presets || []).filter(p => validPresets.has(p));
+        if (jwlPresets.length > 0) {
+            result.push({
+                category: 'JWL Programmed Burn Calibrations',
+                presets: jwlPresets
+            });
+        }
+    } else if (modelName === 'Lee-Tarver Ignition & Growth') {
+        const ltPresets = (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Lee-Tarver Ignition & Growth Presets')?.presets || []).filter(p => validPresets.has(p));
+        if (ltPresets.length > 0) {
+            result.push({
+                category: 'Lee-Tarver Ignition & Growth Calibrations',
+                presets: ltPresets
             });
         }
     } else if (modelName === 'RHT Concrete') {
@@ -2852,6 +3296,8 @@ export function getDefaultPresetForModel(modelName: string): string {
     if (modelName === 'Hypoelastic') return 'Structural Steel (A36)';
     if (modelName === 'Linear Elastic') return 'Structural Steel (A36)';
     if (modelName === 'CREST Reactive Burn') return 'PBX 9502 (TATB/Kel-F 95/5) - CREST Davis';
+    if (modelName === 'JWL Programmed Burn') return 'C-4 (Composition C-4) - JWL Programmed Burn';
+    if (modelName === 'Lee-Tarver Ignition & Growth') return 'LX-17 (TATB/Kel-F 92.5/7.5) - Lee-Tarver I&G';
     if (modelName === 'RHT Concrete') return 'Normal-Strength Concrete C35/45 (RHT Default)';
     if (modelName === 'Karagozian & Case (K&C)') return 'Normal-Strength Concrete C35/45 (K&C Auto MAT_072R3)';
     if (modelName === 'CSCM Concrete') return 'Normal-Strength Concrete C35/45 (CSCM MAT_159 Standard)';

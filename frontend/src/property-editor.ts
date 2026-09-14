@@ -1,4 +1,4 @@
-import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, syncMPMMaterialParameters, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES } from './state-manager.js';
+import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, getMaterialDisplayHTML, syncMPMMaterialParameters, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES } from './state-manager.js';
 import { getMemoryDisplayHTML } from './memory-validator.js';
 import { Node, SimulationState } from './types.js';
 import { validateSimulationState } from './validation.js';
@@ -568,6 +568,15 @@ export class PropertyEditor {
             info.id = 'memory-info-display';
             info.innerHTML = memHTML;
             memInfoDiv = info;
+        }
+
+        let matInfoDiv: HTMLDivElement | null = null;
+        if (nType === 'Material') {
+            const info = document.createElement('div');
+            info.id = 'material-info-display';
+            info.innerHTML = getMaterialDisplayHTML(node, state ?? undefined);
+            matInfoDiv = info;
+            form.appendChild(matInfoDiv);
         }
 
         // Background Grid / Mesh Connection Selector for Solvers / Domains
@@ -1602,9 +1611,14 @@ export class PropertyEditor {
                     } else {
                         cellSize = Number(mpmMesh?.parameters['cell_size'] ?? mpmMesh?.parameters['dx'] ?? 0.001);
                     }
-                    const objPpc = state.nodes.find(n => n.type === 'MPMObject3D')?.parameters['ppc'];
-                    const domainPpc = Number(objPpc ?? mpmMesh?.parameters['ppc'] ?? 8);
-                    const pPerDim = Math.max(1, Math.round(Math.cbrt(domainPpc)));
+                    const mpmObjects = state.nodes.filter(n => n.type === 'MPMObject3D');
+                    let maxPpc = Number(mpmMesh?.parameters['ppc'] ?? 8);
+                    for (const obj of mpmObjects) {
+                        if (obj.parameters['ppc'] != null) {
+                            maxPpc = Math.max(maxPpc, Number(obj.parameters['ppc']));
+                        }
+                    }
+                    const pPerDim = Math.max(1, Math.round(Math.cbrt(maxPpc)));
                     defaultDiam = (cellSize / pPerDim) * 0.8;
                 }
                 (mpmDiamEl as HTMLInputElement).value = String(defaultDiam);
@@ -2012,6 +2026,8 @@ export class PropertyEditor {
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
             'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+            'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
+            'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
             // FEM keys
             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
             'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
@@ -2028,6 +2044,12 @@ export class PropertyEditor {
             'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
             'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
             'initiation_radius', 'booster_overpressure',
+            // JWL Programmed Burn & Lee-Tarver Ignition & Growth
+            'burn_zone_cells', 'tau_burn_min',
+            'lt_I', 'lt_a', 'lt_b', 'lt_x',
+            'lt_G1', 'lt_c', 'lt_d', 'lt_y',
+            'lt_G2', 'lt_e', 'lt_g', 'lt_z',
+            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
             // VTK ROI & Strides
             'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
             'nonlocal_radius', 'opacity',
@@ -2058,6 +2080,9 @@ export class PropertyEditor {
             'storage_backend': ['HDF5 Stream', 'Live Telemetry'],
             'preset': dynamicPresets,
             'material_model': getConstitutiveModels(),
+            'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
+            'burn_model': ['Programmed Wavefront Burn', 'Lee-Tarver 3-Stage ODE', 'CREST Shock Entropy Kinetics'],
+            'product_model': ['JWL Product Gas', 'Davis Detonation Product'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
@@ -2125,6 +2150,10 @@ export class PropertyEditor {
             'boundary_filling': ['Stairstepped', 'Partial'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
             'smooth_plastic_strain': ['Enabled', 'Disabled'],
+            'enable_sdf_barrier': ['Enabled', 'Disabled'],
+            'contact_method': ['Single-Velocity', 'Sub-Grid DEM', 'Multi-Velocity (Bardenhagen)'],
+            'enable_dem_contact': ['Disabled', 'Enabled'],
+            'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
             'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
             'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'origin_mode': ['CAD Origin', 'Center'],
@@ -2419,6 +2448,8 @@ export class PropertyEditor {
                     if (strVal && (
                         opt.toLowerCase() === strVal.toLowerCase() ||
                         opt === strVal ||
+                        (opt === 'Enabled' && (value === true || strVal === 'true' || strVal === 'Enabled')) ||
+                        (opt === 'Disabled' && (value === false || strVal === 'false' || strVal === 'Disabled')) ||
                         (!isNaN(Number(opt)) && !isNaN(Number(strVal)) && (Math.abs(Number(opt) - Number(strVal)) < 0.0005 || (Number(strVal) > 0 && Math.abs(Number(opt) - Number(strVal)) / Number(strVal) < 0.05)))
                     )) {
                         option.selected = true;
@@ -2462,10 +2493,80 @@ export class PropertyEditor {
                     }
                 } else {
                     if (numericKeys.includes(key)) val = Number(val);
+                    else if (val === 'Enabled') val = true;
+                    else if (val === 'Disabled') val = false;
                     this.updateParameter(key, val);
                 }
             });
             return select;
+        }
+
+        if (key === 'ppc') {
+            const container = document.createElement('div');
+            container.style.display = 'flex';
+            container.style.flexDirection = 'column';
+            container.style.gap = '5px';
+            container.style.width = '100%';
+
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.min = '1';
+            input.step = '1';
+            const defaultPpc = node.type.includes('2D') ? 4 : 8;
+            input.value = String(value ?? defaultPpc);
+            input.style.width = '100%';
+            input.style.background = '#252526';
+            input.style.color = '#ccc';
+            input.style.border = '1px solid #444';
+            input.style.padding = '4px';
+            input.style.boxSizing = 'border-box';
+
+            input.addEventListener('input', () => {
+                let parsed = parseInt(input.value, 10);
+                if (isNaN(parsed) || parsed < 1) parsed = 1;
+                this.updateParameter(key, parsed);
+            });
+
+            container.appendChild(input);
+
+            const chipRow = document.createElement('div');
+            chipRow.style.display = 'flex';
+            chipRow.style.gap = '4px';
+            chipRow.style.flexWrap = 'wrap';
+
+            const is2D = node.type.includes('2D');
+            const presets = is2D ? [1, 4, 9, 16] : [1, 8, 27, 64];
+
+            presets.forEach(preset => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.textContent = `${preset}`;
+                const subgrid = is2D 
+                    ? `${preset} pts/cell (${Math.round(Math.sqrt(preset))}×${Math.round(Math.sqrt(preset))})`
+                    : `${preset} pts/cell (${Math.round(Math.cbrt(preset))}×${Math.round(Math.cbrt(preset))}×${Math.round(Math.cbrt(preset))})`;
+                btn.title = `Preset: ${subgrid}`;
+                btn.style.background = '#334155';
+                btn.style.color = '#94a3b8';
+                btn.style.border = '1px solid #475569';
+                btn.style.borderRadius = '3px';
+                btn.style.padding = '2px 7px';
+                btn.style.fontSize = '11px';
+                btn.style.fontWeight = '600';
+                btn.style.cursor = 'pointer';
+                btn.style.lineHeight = '1.2';
+                btn.addEventListener('mouseenter', () => { btn.style.background = '#475569'; btn.style.color = '#f8fafc'; });
+                btn.addEventListener('mouseleave', () => { btn.style.background = '#334155'; btn.style.color = '#94a3b8'; });
+                btn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    input.value = String(preset);
+                    this.updateParameter(key, preset);
+                });
+                chipRow.appendChild(btn);
+            });
+
+            container.appendChild(chipRow);
+            return container;
         }
 
         const input = document.createElement('input');
@@ -3728,7 +3829,19 @@ export class PropertyEditor {
                     // Energetic solid presets must activate the CREST reactive burn model
                     // so the backend detonation hotspot logic is triggered on INIT_MPM_3D
                     updates['material_model'] = 'CREST Reactive Burn';
+                } else if (presetData.category === 'JWL Programmed Burn Presets') {
+                    updates['material_type'] = 'JWL Charge';
+                    updates['material_model'] = 'JWL Programmed Burn';
+                } else if (presetData.category === 'Lee-Tarver Ignition & Growth Presets') {
+                    updates['material_type'] = 'JWL Charge';
+                    updates['material_model'] = 'Lee-Tarver Ignition & Growth';
                 }
+                if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                if (presetData.reference) updates['reference'] = presetData.reference;
+                if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                if (presetData.product_model) updates['product_model'] = presetData.product_model;
             }
         } else if (node.type === 'Material' && key === 'material_model') {
             if (value === 'Ideal Gas') {
@@ -3762,6 +3875,36 @@ export class PropertyEditor {
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
                 if (presetData) Object.assign(updates, presetData);
+            } else if (value === 'JWL Programmed Burn') {
+                updates['material_model'] = 'JWL Programmed Burn';
+                updates['material_type'] = 'JWL Charge';
+                const defPreset = getDefaultPresetForModel(value) || 'C-4 (Composition 4) - Programmed Burn';
+                updates['preset'] = defPreset;
+                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                if (presetData) {
+                    Object.assign(updates, presetData);
+                    if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                    if (presetData.reference) updates['reference'] = presetData.reference;
+                    if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                    if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                    if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                    if (presetData.product_model) updates['product_model'] = presetData.product_model;
+                }
+            } else if (value === 'Lee-Tarver Ignition & Growth') {
+                updates['material_model'] = 'Lee-Tarver Ignition & Growth';
+                updates['material_type'] = 'JWL Charge';
+                const defPreset = getDefaultPresetForModel(value) || 'LX-17 (Lee-Tarver Calibrated)';
+                updates['preset'] = defPreset;
+                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                if (presetData) {
+                    Object.assign(updates, presetData);
+                    if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                    if (presetData.reference) updates['reference'] = presetData.reference;
+                    if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                    if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                    if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                    if (presetData.product_model) updates['product_model'] = presetData.product_model;
+                }
             } else {
                 delete updates['material_type'];
                 delete updates['composition'];
@@ -3771,6 +3914,12 @@ export class PropertyEditor {
                     const presetData = MPM_MATERIAL_PRESETS[defPreset];
                     if (presetData) {
                         Object.assign(updates, presetData);
+                        if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                        if (presetData.reference) updates['reference'] = presetData.reference;
+                        if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                        if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                        if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                        if (presetData.product_model) updates['product_model'] = presetData.product_model;
                     }
                 }
             }
@@ -3791,11 +3940,14 @@ export class PropertyEditor {
             updates['ambient_rho'] = rho;
             updates['ambient_p'] = p;
             updates['preset'] = 'Custom';
+            updates['provenance'] = 'user';
         } else if (node.type === 'Material' && key === 'density' && node.parameters['material_model'] === 'Ideal Gas') {
             updates['ambient_rho'] = Number(value);
             updates['preset'] = 'Custom';
-        } else if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma', 'atm_pressure', 'atm_temperature', 'gamma', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus'].includes(key)) {
+            updates['provenance'] = 'user';
+        } else if (node.type === 'Material' && key !== 'preset' && key !== 'material_model') {
             updates['preset'] = 'Custom';
+            updates['provenance'] = 'user';
         } else if (node.type === 'STLGeometry') {
             const vpNode = state?.nodes.find(n => n.type === 'Telemetry3DViewport');
             if (vpNode) {
@@ -4059,7 +4211,14 @@ export class PropertyEditor {
             }
         }
         
-        const structuralKeys = ['material_type', 'composition', 'preset', 'material_model', 'dimension', 'charge_shape', 'init_mode', 'velocity_scheme', 'trigger_type'];
+        const structuralKeys = [
+            'material_type', 'composition', 'preset', 'material_model',
+            'solid_model', 'burn_model', 'product_model',
+            'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion',
+            'enable_heterogeneity', 'enable_anisotropy', 'kc_auto_generate',
+            'dimension', 'charge_shape', 'init_mode', 'velocity_scheme', 'trigger_type',
+            'contact_method', 'enable_dem_contact', 'dem_contact_mode'
+        ];
         this.render(structuralKeys.includes(key));
     }
 

@@ -2811,6 +2811,8 @@ export class NodeViewer {
             'mg_gamma0', 'mg_c0', 'mg_s',
             'ppc',
             'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+            'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
+            'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
             // FEM keys
             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
             'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
@@ -2827,6 +2829,12 @@ export class NodeViewer {
             'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
             'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
             'initiation_radius', 'booster_overpressure',
+            // JWL Programmed Burn & Lee-Tarver Ignition & Growth
+            'burn_zone_cells', 'tau_burn_min',
+            'lt_I', 'lt_a', 'lt_b', 'lt_x',
+            'lt_G1', 'lt_c', 'lt_d', 'lt_y',
+            'lt_G2', 'lt_e', 'lt_g', 'lt_z',
+            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
             // VTK ROI & Strides
             'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
             'nonlocal_radius', 'opacity',
@@ -2866,6 +2874,9 @@ export class NodeViewer {
             'storage_backend': ['HDF5 Stream', 'Live Telemetry'],
             'material_model': getConstitutiveModels(),
             'preset': dynamicPresets,
+            'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
+            'burn_model': ['Programmed Wavefront Burn', 'Lee-Tarver 3-Stage ODE', 'CREST Shock Entropy Kinetics'],
+            'product_model': ['JWL Product Gas', 'Davis Detonation Product'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
@@ -2911,6 +2922,7 @@ export class NodeViewer {
                 ['Default', 'BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'] : 
                 ['BSpline', 'Radial MLS', 'Cubic BSpline', 'GIMP', 'Standard'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
+            'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
             'voxelization_method': node.type === 'MPMObject3D' ? ['watertight_raycast', 'winding_number'] : ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
             'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'origin_mode': ['CAD Origin', 'Center'],
@@ -3622,6 +3634,36 @@ export class NodeViewer {
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
                 if (presetData) Object.assign(updates, presetData);
+            } else if (value === 'JWL Programmed Burn') {
+                updates['material_model'] = 'JWL Programmed Burn';
+                updates['material_type'] = 'JWL Charge';
+                const defPreset = getDefaultPresetForModel(value) || 'C-4 (Composition 4) - Programmed Burn';
+                updates['preset'] = defPreset;
+                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                if (presetData) {
+                    Object.assign(updates, presetData);
+                    if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                    if (presetData.reference) updates['reference'] = presetData.reference;
+                    if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                    if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                    if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                    if (presetData.product_model) updates['product_model'] = presetData.product_model;
+                }
+            } else if (value === 'Lee-Tarver Ignition & Growth') {
+                updates['material_model'] = 'Lee-Tarver Ignition & Growth';
+                updates['material_type'] = 'JWL Charge';
+                const defPreset = getDefaultPresetForModel(value) || 'LX-17 (Lee-Tarver Calibrated)';
+                updates['preset'] = defPreset;
+                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                if (presetData) {
+                    Object.assign(updates, presetData);
+                    if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                    if (presetData.reference) updates['reference'] = presetData.reference;
+                    if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                    if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                    if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                    if (presetData.product_model) updates['product_model'] = presetData.product_model;
+                }
             } else {
                 delete updates['material_type'];
                 delete updates['composition'];
@@ -3631,6 +3673,12 @@ export class NodeViewer {
                     const presetData = MPM_MATERIAL_PRESETS[defPreset];
                     if (presetData) {
                         Object.assign(updates, presetData);
+                        if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                        if (presetData.reference) updates['reference'] = presetData.reference;
+                        if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                        if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                        if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                        if (presetData.product_model) updates['product_model'] = presetData.product_model;
                     }
                 }
             }

@@ -940,6 +940,50 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 if (isNaN(detonation_energy) || detonation_energy <= 0) {
                     addMessage(node.id, 'error', "Detonation energy must be greater than 0.");
                 }
+            } else if (matModel === 'JWL Programmed Burn') {
+                const rho = Number(node.parameters?.density ?? node.parameters?.rho ?? 1630);
+                const det_vel = Number(node.parameters?.det_vel ?? 6930);
+                const detonation_energy = Number(node.parameters?.detonation_energy ?? 4290000);
+                if (isNaN(rho) || rho <= 0) {
+                    addMessage(node.id, 'error', "Programmed Burn explosive density (density) must be greater than 0.");
+                }
+                if (isNaN(det_vel) || det_vel <= 0) {
+                    addMessage(node.id, 'error', "Detonation velocity (det_vel) must be greater than 0.");
+                }
+                if (isNaN(detonation_energy) || detonation_energy <= 0) {
+                    addMessage(node.id, 'error', "Detonation energy must be greater than 0.");
+                }
+                const hasDetonator = state.nodes.some(n => 
+                    n.type === 'DetonatorLocation3D' || 
+                    n.type === 'TriggerLocation3D' || 
+                    n.type === 'DetonatorLocation' || 
+                    n.type === 'TriggerLocation'
+                );
+                if (!hasDetonator) {
+                    addMessage(node.id, 'warning', "JWL Programmed Burn requires at least one Detonator / Trigger node in the model to initiate detonation wavefront.");
+                }
+            } else if (matModel === 'Lee-Tarver Ignition & Growth') {
+                const rho = Number(node.parameters?.density ?? node.parameters?.rho ?? 1850);
+                const det_vel = Number(node.parameters?.det_vel ?? 7600);
+                const detonation_energy = Number(node.parameters?.detonation_energy ?? 4000000);
+                if (isNaN(rho) || rho <= 0) {
+                    addMessage(node.id, 'error', "Lee-Tarver reactant density (density) must be greater than 0.");
+                }
+                if (isNaN(det_vel) || det_vel <= 0) {
+                    addMessage(node.id, 'error', "Detonation velocity (det_vel) must be greater than 0.");
+                }
+                if (isNaN(detonation_energy) || detonation_energy <= 0) {
+                    addMessage(node.id, 'error', "Detonation energy must be greater than 0.");
+                }
+                const hasDetonator = state.nodes.some(n => 
+                    n.type === 'DetonatorLocation3D' || 
+                    n.type === 'TriggerLocation3D' || 
+                    n.type === 'DetonatorLocation' || 
+                    n.type === 'TriggerLocation'
+                );
+                if (!hasDetonator) {
+                    addMessage(node.id, 'warning', "Lee-Tarver Ignition & Growth requires at least one Detonator / Trigger node in the model to initiate detonation wavefront.");
+                }
             } else if (matType === 'Ideal Gas Charge') {
                 const ideal_gamma = Number(node.parameters?.ideal_gamma ?? 1.4);
                 const ideal_rho_0 = Number(node.parameters?.ideal_rho_0 ?? 1630.0);
@@ -959,7 +1003,17 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 if (isNaN(density) || density <= 0) {
                     addMessage(node.id, 'error', "Material density must be greater than 0.");
                 }
-                if (matModel !== 'CREST Reactive Burn' && matModel !== 'RHT Concrete' && matModel !== 'Karagozian & Case (K&C)' && matModel !== 'CSCM Concrete') {
+                if (matModel === 'CREST Reactive Burn') {
+                    const hasDetonator = state.nodes.some(n => 
+                        n.type === 'DetonatorLocation3D' || 
+                        n.type === 'TriggerLocation3D' || 
+                        n.type === 'DetonatorLocation' || 
+                        n.type === 'TriggerLocation'
+                    );
+                    if (!hasDetonator) {
+                        addMessage(node.id, 'warning', "CREST Reactive Burn requires at least one Detonator / Trigger node in the model to initiate detonation wavefront.");
+                    }
+                } else if (matModel !== 'RHT Concrete' && matModel !== 'Karagozian & Case (K&C)' && matModel !== 'CSCM Concrete') {
                     const E = Number(node.parameters?.youngs_modulus ?? 200e9);
                     const nu = Number(node.parameters?.poissons_ratio ?? 0.3);
                     if (isNaN(E) || E <= 0) {

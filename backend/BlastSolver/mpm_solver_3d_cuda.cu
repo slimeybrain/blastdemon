@@ -1,5 +1,8 @@
 #include "mpm_solver_3d_cuda.hpp"
 #include "constitutive_concrete_models.hpp"
+#include "constitutive_crest_davis.hpp"
+#include "constitutive_jwl.hpp"
+#include "constitutive_lee_tarver.hpp"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <algorithm>
@@ -20,6 +23,8 @@
 #endif
 
 namespace Blast {
+
+__constant__ float d_current_sim_time;
 
 __device__ inline float computeWeibullFactor_dev(float x, float y, float z, float V0, float weibull_modulus, float weibull_scale, float weibull_ref_volume = 1.0e-6f) {
     if (weibull_modulus <= 0.001f) return 1.0f;
@@ -172,6 +177,34 @@ __global__ void kernel_clear_active_nodes_3d(MPMGridNode3D* grid, const int* act
     node.plastic_strain = 0.0f;
 }
 
+// Sparse multi-material active node clearing kernel (Bardenhagen contact)
+__global__ void kernel_clear_active_mat_nodes_3d(
+    float* d_mat_m, float* d_mat_p, float* d_mat_f,
+    float* d_mat_dv,
+    const int* active_nodes, int num_active,
+    size_t num_nodes, int num_materials)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_active) return;
+    int node_idx = active_nodes[idx];
+
+    for (int m = 0; m < num_materials; ++m) {
+        size_t mn_idx = static_cast<size_t>(m) * num_nodes + node_idx;
+        d_mat_m[mn_idx] = 0.0f;
+        d_mat_p[mn_idx * 3 + 0] = 0.0f;
+        d_mat_p[mn_idx * 3 + 1] = 0.0f;
+        d_mat_p[mn_idx * 3 + 2] = 0.0f;
+        d_mat_f[mn_idx * 3 + 0] = 0.0f;
+        d_mat_f[mn_idx * 3 + 1] = 0.0f;
+        d_mat_f[mn_idx * 3 + 2] = 0.0f;
+        if (d_mat_dv) {
+            d_mat_dv[mn_idx * 3 + 0] = 0.0f;
+            d_mat_dv[mn_idx * 3 + 1] = 0.0f;
+            d_mat_dv[mn_idx * 3 + 2] = 0.0f;
+        }
+    }
+}
+
 // SoA Pack/Unpack Kernels
 __global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSoA soa, int chunk_size, int offset = 0) {
     int local_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -213,6 +246,7 @@ __global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSo
     soa.ep_bar[idx] = p.ep_bar;
     soa.damage[idx] = p.damage;
     if (soa.lambda) soa.lambda[idx] = p.lambda;
+    if (soa.t_arrival) soa.t_arrival[idx] = p.t_arrival;
     if (soa.v_min) soa.v_min[idx] = p.v_min;
     if (soa.s_shock) soa.s_shock[idx] = p.s_shock;
     if (soa.weibull_factor) soa.weibull_factor[idx] = p.weibull_factor;
@@ -221,6 +255,7 @@ __global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSo
     soa.object_id[idx] = p.object_id;
     if (soa.state) soa.state[idx] = static_cast<int>(p.state);
     if (soa.cluster_id) soa.cluster_id[idx] = p.cluster_id;
+    if (soa.material_id) soa.material_id[idx] = p.material_id;
 }
 
 __global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA soa, int chunk_size, int offset = 0) {
@@ -261,6 +296,7 @@ __global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA so
     p.ep_bar = soa.ep_bar[idx];
     p.damage = soa.damage[idx];
     if (soa.lambda) p.lambda = soa.lambda[idx];
+    if (soa.t_arrival) p.t_arrival = soa.t_arrival[idx];
     if (soa.v_min) p.v_min = soa.v_min[idx];
     if (soa.s_shock) p.s_shock = soa.s_shock[idx];
     if (soa.weibull_factor) p.weibull_factor = soa.weibull_factor[idx];
@@ -269,6 +305,7 @@ __global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA so
     p.object_id = soa.object_id[idx];
     if (soa.state) p.state = static_cast<uint8_t>(soa.state[idx]);
     if (soa.cluster_id) p.cluster_id = soa.cluster_id[idx];
+    if (soa.material_id) p.material_id = soa.material_id[idx];
 }
 
 __global__ void kernel_extract_mpm_vtk_snapshot_3d(
@@ -318,9 +355,17 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                               float dx, float dy, float dz, int transfer_scheme,
                               float xmin, float ymin, float zmin,
                               int* d_active_nodes, int* d_num_active_nodes,
-                              const MaterialTable3D* d_mat_tables) {
+                              const MaterialTable3D* d_mat_tables,
+                              float* d_mat_m = nullptr, float* d_mat_p = nullptr,
+                              float* d_mat_f = nullptr,
+                              int num_materials = 1) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (p_idx >= num_particles || (soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
+
+    int p_mat_id = (soa.material_id ? soa.material_id[p_idx] : 0);
+    if (p_mat_id < 0 || p_mat_id >= num_materials) p_mat_id = 0;
+    size_t num_nodes_total = static_cast<size_t>(nx) * ny * nz;
+    size_t mat_offset = static_cast<size_t>(p_mat_id) * num_nodes_total;
 
     int obj_id = soa.object_id[p_idx];
     const MaterialTable3D& mat = d_mat_tables[obj_id];
@@ -509,11 +554,26 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                         atomicAdd(&node->p[1], p_m * weight * v_apic_y);
                         atomicAdd(&node->p[2], p_m * weight * v_apic_z);
 
-                        atomicAdd(&node->f_int[0], -p_V * weight * (s_Dinv[0][0] * dc_x + s_Dinv[0][1] * dc_y + s_Dinv[0][2] * dc_z));
-                        atomicAdd(&node->f_int[1], -p_V * weight * (s_Dinv[1][0] * dc_x + s_Dinv[1][1] * dc_y + s_Dinv[1][2] * dc_z));
-                        atomicAdd(&node->f_int[2], -p_V * weight * (s_Dinv[2][0] * dc_x + s_Dinv[2][1] * dc_y + s_Dinv[2][2] * dc_z));
+                        float f_stress_x = -p_V * weight * (s_Dinv[0][0] * dc_x + s_Dinv[0][1] * dc_y + s_Dinv[0][2] * dc_z);
+                        float f_stress_y = -p_V * weight * (s_Dinv[1][0] * dc_x + s_Dinv[1][1] * dc_y + s_Dinv[1][2] * dc_z);
+                        float f_stress_z = -p_V * weight * (s_Dinv[2][0] * dc_x + s_Dinv[2][1] * dc_y + s_Dinv[2][2] * dc_z);
+
+                        atomicAdd(&node->f_int[0], f_stress_x);
+                        atomicAdd(&node->f_int[1], f_stress_y);
+                        atomicAdd(&node->f_int[2], f_stress_z);
 
                         atomicAdd(&node->plastic_strain, p_m * weight * p_ep_bar);
+
+                        if (d_mat_m) {
+                            size_t mn_idx = mat_offset + node_idx;
+                            atomicAdd(&d_mat_m[mn_idx], p_m * weight);
+                            atomicAdd(&d_mat_p[mn_idx * 3 + 0], p_m * weight * v_apic_x);
+                            atomicAdd(&d_mat_p[mn_idx * 3 + 1], p_m * weight * v_apic_y);
+                            atomicAdd(&d_mat_p[mn_idx * 3 + 2], p_m * weight * v_apic_z);
+                            atomicAdd(&d_mat_f[mn_idx * 3 + 0], f_stress_x);
+                            atomicAdd(&d_mat_f[mn_idx * 3 + 1], f_stress_y);
+                            atomicAdd(&d_mat_f[mn_idx * 3 + 2], f_stress_z);
+                        }
                     }
                 }
             }
@@ -590,11 +650,26 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                     atomicAdd(&node->p[1], p_m * weight * v_apic_y);
                     atomicAdd(&node->p[2], p_m * weight * v_apic_z);
 
-                    atomicAdd(&node->f_int[0], -p_V * (s_xx * dN_dx + s_xy * dN_dy + s_zx * dN_dz));
-                    atomicAdd(&node->f_int[1], -p_V * (s_xy * dN_dx + s_yy * dN_dy + s_yz * dN_dz));
-                    atomicAdd(&node->f_int[2], -p_V * (s_zx * dN_dx + s_yz * dN_dy + s_zz * dN_dz));
+                    float f_stress_x = -p_V * (s_xx * dN_dx + s_xy * dN_dy + s_zx * dN_dz);
+                    float f_stress_y = -p_V * (s_xy * dN_dx + s_yy * dN_dy + s_yz * dN_dz);
+                    float f_stress_z = -p_V * (s_zx * dN_dx + s_yz * dN_dy + s_zz * dN_dz);
+
+                    atomicAdd(&node->f_int[0], f_stress_x);
+                    atomicAdd(&node->f_int[1], f_stress_y);
+                    atomicAdd(&node->f_int[2], f_stress_z);
 
                     atomicAdd(&node->plastic_strain, p_m * weight * p_ep_bar);
+
+                    if (d_mat_m) {
+                        size_t mn_idx = mat_offset + node_idx;
+                        atomicAdd(&d_mat_m[mn_idx], p_m * weight);
+                        atomicAdd(&d_mat_p[mn_idx * 3 + 0], p_m * weight * v_apic_x);
+                        atomicAdd(&d_mat_p[mn_idx * 3 + 1], p_m * weight * v_apic_y);
+                        atomicAdd(&d_mat_p[mn_idx * 3 + 2], p_m * weight * v_apic_z);
+                        atomicAdd(&d_mat_f[mn_idx * 3 + 0], f_stress_x);
+                        atomicAdd(&d_mat_f[mn_idx * 3 + 1], f_stress_y);
+                        atomicAdd(&d_mat_f[mn_idx * 3 + 2], f_stress_z);
+                    }
                 }
             }
         }
@@ -704,11 +779,26 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                     atomicAdd(&node->p[1], p_m * weight * v_apic_y);
                     atomicAdd(&node->p[2], p_m * weight * v_apic_z);
 
-                    atomicAdd(&node->f_int[0], -p_V * (s_xx * dN_dx + s_xy * dN_dy + s_zx * dN_dz));
-                    atomicAdd(&node->f_int[1], -p_V * (s_xy * dN_dx + s_yy * dN_dy + s_yz * dN_dz));
-                    atomicAdd(&node->f_int[2], -p_V * (s_zx * dN_dx + s_yz * dN_dy + s_zz * dN_dz));
+                    float f_stress_x = -p_V * (s_xx * dN_dx + s_xy * dN_dy + s_zx * dN_dz);
+                    float f_stress_y = -p_V * (s_xy * dN_dx + s_yy * dN_dy + s_yz * dN_dz);
+                    float f_stress_z = -p_V * (s_zx * dN_dx + s_yz * dN_dy + s_zz * dN_dz);
+
+                    atomicAdd(&node->f_int[0], f_stress_x);
+                    atomicAdd(&node->f_int[1], f_stress_y);
+                    atomicAdd(&node->f_int[2], f_stress_z);
 
                     atomicAdd(&node->plastic_strain, p_m * weight * p_ep_bar);
+
+                    if (d_mat_m) {
+                        size_t mn_idx = mat_offset + node_idx;
+                        atomicAdd(&d_mat_m[mn_idx], p_m * weight);
+                        atomicAdd(&d_mat_p[mn_idx * 3 + 0], p_m * weight * v_apic_x);
+                        atomicAdd(&d_mat_p[mn_idx * 3 + 1], p_m * weight * v_apic_y);
+                        atomicAdd(&d_mat_p[mn_idx * 3 + 2], p_m * weight * v_apic_z);
+                        atomicAdd(&d_mat_f[mn_idx * 3 + 0], f_stress_x);
+                        atomicAdd(&d_mat_f[mn_idx * 3 + 1], f_stress_y);
+                        atomicAdd(&d_mat_f[mn_idx * 3 + 2], f_stress_z);
+                    }
                 }
             }
         }
@@ -754,6 +844,301 @@ __global__ void kernel_grid_update_3d(MPMGridNode3D* grid, int num_nodes, int nx
 
     if ((k <= 3 && bc_z_min == 0) || (k >= nz - 4 && bc_z_max == 0)) { node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f; }
     else if ((k <= 3 && (bc_z_min == 1 || bc_z_min == 2)) || (k >= nz - 4 && (bc_z_max == 1 || bc_z_max == 2))) { node.p[2] = 0.0f; }
+}
+
+// 2b. Bardenhagen Multi-Velocity Field Contact Grid Kinematics Kernel
+__global__ void kernel_bardenhagen_grid_update_3d(
+    MPMGridNode3D* grid, int num_nodes, int nx, int ny, int nz,
+    float dt, float avg_p_mass,
+    int bc_x_min, int bc_x_max,
+    int bc_y_min, int bc_y_max,
+    int bc_z_min, int bc_z_max,
+    const int* active_nodes, int num_active,
+    int num_materials,
+    float* d_mat_m, float* d_mat_p, float* d_mat_f,
+    float* d_mat_v, float* d_mat_dv,
+    float friction, float restitution,
+    float dx,
+    const MaterialTable3D* d_mat_tables = nullptr,
+    const int* d_mat_to_obj = nullptr)
+{
+    int idx;
+    if (active_nodes && num_active > 0) {
+        int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (t_idx >= num_active) return;
+        idx = active_nodes[t_idx];
+    } else {
+        idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx >= num_nodes) return;
+    }
+
+    MPMGridNode3D& node = grid[idx];
+    if (node.m <= 1.0e-11f) return;
+
+    node.plastic_strain /= node.m;
+
+    float m_cm = 0.0f;
+    float p_cm[3] = {0.0f, 0.0f, 0.0f};
+
+    for (int m = 0; m < num_materials; ++m) {
+        size_t mn_idx = static_cast<size_t>(m) * num_nodes + idx;
+        float mat_mass = d_mat_m[mn_idx];
+        if (mat_mass > 1.0e-11f) {
+            m_cm += mat_mass;
+
+            // Cache pre-update velocity v_old in d_mat_dv
+            float inv_m = 1.0f / mat_mass;
+            if (d_mat_dv) {
+                d_mat_dv[mn_idx * 3 + 0] = d_mat_p[mn_idx * 3 + 0] * inv_m;
+                d_mat_dv[mn_idx * 3 + 1] = d_mat_p[mn_idx * 3 + 1] * inv_m;
+                d_mat_dv[mn_idx * 3 + 2] = d_mat_p[mn_idx * 3 + 2] * inv_m;
+            }
+
+            float f_ext_x = node.f_ext[0] * (mat_mass / node.m);
+            float f_ext_y = node.f_ext[1] * (mat_mass / node.m);
+            float f_ext_z = node.f_ext[2] * (mat_mass / node.m);
+
+            d_mat_p[mn_idx * 3 + 0] += dt * (d_mat_f[mn_idx * 3 + 0] + f_ext_x);
+            d_mat_p[mn_idx * 3 + 1] += dt * (d_mat_f[mn_idx * 3 + 1] + f_ext_y);
+            d_mat_p[mn_idx * 3 + 2] += dt * (d_mat_f[mn_idx * 3 + 2] + f_ext_z);
+
+            p_cm[0] += d_mat_p[mn_idx * 3 + 0];
+            p_cm[1] += d_mat_p[mn_idx * 3 + 1];
+            p_cm[2] += d_mat_p[mn_idx * 3 + 2];
+        } else if (d_mat_dv) {
+            d_mat_dv[mn_idx * 3 + 0] = 0.0f;
+            d_mat_dv[mn_idx * 3 + 1] = 0.0f;
+            d_mat_dv[mn_idx * 3 + 2] = 0.0f;
+        }
+    }
+
+    if (m_cm <= 1.0e-11f) {
+        node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
+        return;
+    }
+
+    float inv_m_cm = 1.0f / m_cm;
+    float v_cm[3] = {p_cm[0] * inv_m_cm, p_cm[1] * inv_m_cm, p_cm[2] * inv_m_cm};
+
+    int k = idx % nz;
+    int j = (idx / nz) % ny;
+    int i = idx / (ny * nz);
+
+    auto applyBC = [&](float& vx, float& vy, float& vz) {
+        if ((i <= 3 && bc_x_min == 0) || (i >= nx - 4 && bc_x_max == 0)) { vx = 0.0f; vy = 0.0f; vz = 0.0f; }
+        else if ((i <= 3 && (bc_x_min == 1 || bc_x_min == 2)) || (i >= nx - 4 && (bc_x_max == 1 || bc_x_max == 2))) { vx = 0.0f; }
+
+        if ((j <= 3 && bc_y_min == 0) || (j >= ny - 4 && bc_y_max == 0)) { vx = 0.0f; vy = 0.0f; vz = 0.0f; }
+        else if ((j <= 3 && (bc_y_min == 1 || bc_y_min == 2)) || (j >= ny - 4 && (bc_y_max == 1 || bc_y_max == 2))) { vy = 0.0f; }
+
+        if ((k <= 3 && bc_z_min == 0) || (k >= nz - 4 && bc_z_max == 0)) { vx = 0.0f; vy = 0.0f; vz = 0.0f; }
+        else if ((k <= 3 && (bc_z_min == 1 || bc_z_min == 2)) || (k >= nz - 4 && (bc_z_max == 1 || bc_z_max == 2))) { vz = 0.0f; }
+    };
+
+    // Identify materials with physical mass presence on this node
+    int sig_count = 0;
+    bool any_fluid = false;
+
+    for (int m = 0; m < num_materials; ++m) {
+        size_t mn_idx = static_cast<size_t>(m) * num_nodes + idx;
+        float mat_mass = d_mat_m[mn_idx];
+        if (mat_mass > 1.0e-11f) {
+            sig_count++;
+
+            int obj_id = d_mat_to_obj ? d_mat_to_obj[m] : (m + 1);
+            if (d_mat_tables) {
+                auto m_model = d_mat_tables[obj_id].material_model;
+                if (m_model == MPMMaterialModel::CRESTReactiveBurn ||
+                    m_model == MPMMaterialModel::JWLProgrammedBurn ||
+                    m_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
+                    any_fluid = true;
+                }
+            }
+        }
+    }
+
+    if (sig_count <= 1) {
+        for (int m = 0; m < num_materials; ++m) {
+            size_t mn_idx = static_cast<size_t>(m) * num_nodes + idx;
+            float mat_mass = d_mat_m[mn_idx];
+            if (mat_mass > 1.0e-11f) {
+                float inv_m = 1.0f / mat_mass;
+                float vx = d_mat_p[mn_idx * 3 + 0] * inv_m;
+                float vy = d_mat_p[mn_idx * 3 + 1] * inv_m;
+                float vz = d_mat_p[mn_idx * 3 + 2] * inv_m;
+                applyBC(vx, vy, vz);
+                d_mat_v[mn_idx * 3 + 0] = vx;
+                d_mat_v[mn_idx * 3 + 1] = vy;
+                d_mat_v[mn_idx * 3 + 2] = vz;
+                if (d_mat_dv) {
+                    d_mat_dv[mn_idx * 3 + 0] = vx - d_mat_dv[mn_idx * 3 + 0];
+                    d_mat_dv[mn_idx * 3 + 1] = vy - d_mat_dv[mn_idx * 3 + 1];
+                    d_mat_dv[mn_idx * 3 + 2] = vz - d_mat_dv[mn_idx * 3 + 2];
+                }
+            } else {
+                d_mat_v[mn_idx * 3 + 0] = 0.0f;
+                d_mat_v[mn_idx * 3 + 1] = 0.0f;
+                d_mat_v[mn_idx * 3 + 2] = 0.0f;
+                if (d_mat_dv) {
+                    d_mat_dv[mn_idx * 3 + 0] = 0.0f;
+                    d_mat_dv[mn_idx * 3 + 1] = 0.0f;
+                    d_mat_dv[mn_idx * 3 + 2] = 0.0f;
+                }
+            }
+        }
+        float p0 = p_cm[0], p1 = p_cm[1], p2 = p_cm[2];
+        applyBC(p0, p1, p2);
+        node.p[0] = p0; node.p[1] = p1; node.p[2] = p2;
+        return;
+    }
+
+    // On-the-fly 2nd-order finite difference normals (evaluated strictly on multi-material interface cells)
+    float inv_2dx = 0.5f / dx;
+    float G_norm_total[3] = {0.0f, 0.0f, 0.0f};
+
+    for (int m = 0; m < num_materials; ++m) {
+        size_t mn_idx = static_cast<size_t>(m) * num_nodes + idx;
+        float mat_mass = d_mat_m[mn_idx];
+        if (mat_mass > 1.0e-11f) {
+            size_t base_m = static_cast<size_t>(m) * num_nodes;
+            size_t idx_ip = (i + 1 < nx) ? (base_m + (static_cast<size_t>(i + 1) * ny + j) * nz + k) : mn_idx;
+            size_t idx_im = (i > 0)      ? (base_m + (static_cast<size_t>(i - 1) * ny + j) * nz + k) : mn_idx;
+            size_t idx_jp = (j + 1 < ny) ? (base_m + (static_cast<size_t>(i) * ny + (j + 1)) * nz + k) : mn_idx;
+            size_t idx_jm = (j > 0)      ? (base_m + (static_cast<size_t>(i) * ny + (j - 1)) * nz + k) : mn_idx;
+            size_t idx_kp = (k + 1 < nz) ? (base_m + (static_cast<size_t>(i) * ny + j) * nz + (k + 1)) : mn_idx;
+            size_t idx_km = (k > 0)      ? (base_m + (static_cast<size_t>(i) * ny + j) * nz + (k - 1)) : mn_idx;
+
+            float gm_x = (d_mat_m[idx_im] - d_mat_m[idx_ip]) * inv_2dx;
+            float gm_y = (d_mat_m[idx_jm] - d_mat_m[idx_jp]) * inv_2dx;
+            float gm_z = (d_mat_m[idx_km] - d_mat_m[idx_kp]) * inv_2dx;
+
+            float inv_mat_mass = 1.0f / mat_mass;
+            G_norm_total[0] += gm_x * inv_mat_mass;
+            G_norm_total[1] += gm_y * inv_mat_mass;
+            G_norm_total[2] += gm_z * inv_mat_mass;
+        }
+    }
+
+    float rest = fminf(fmaxf(restitution, 0.0f), 1.0f);
+
+    for (int m = 0; m < num_materials; ++m) {
+        size_t mn_idx = static_cast<size_t>(m) * num_nodes + idx;
+        float mat_mass = d_mat_m[mn_idx];
+        if (mat_mass <= 1.0e-11f) {
+            d_mat_v[mn_idx * 3 + 0] = 0.0f;
+            d_mat_v[mn_idx * 3 + 1] = 0.0f;
+            d_mat_v[mn_idx * 3 + 2] = 0.0f;
+            if (d_mat_dv) {
+                d_mat_dv[mn_idx * 3 + 0] = 0.0f;
+                d_mat_dv[mn_idx * 3 + 1] = 0.0f;
+                d_mat_dv[mn_idx * 3 + 2] = 0.0f;
+            }
+            continue;
+        }
+
+        // Fluid/gas interfaces experience zero Coulomb friction along boundaries
+        float eff_friction = any_fluid ? 0.0f : friction;
+
+        float inv_m = 1.0f / mat_mass;
+        float v_star[3] = {d_mat_p[mn_idx * 3 + 0] * inv_m,
+                           d_mat_p[mn_idx * 3 + 1] * inv_m,
+                           d_mat_p[mn_idx * 3 + 2] * inv_m};
+
+        float v_corr[3] = {v_star[0], v_star[1], v_star[2]};
+
+        size_t base_m = static_cast<size_t>(m) * num_nodes;
+        size_t idx_ip = (i + 1 < nx) ? (base_m + (static_cast<size_t>(i + 1) * ny + j) * nz + k) : mn_idx;
+        size_t idx_im = (i > 0)      ? (base_m + (static_cast<size_t>(i - 1) * ny + j) * nz + k) : mn_idx;
+        size_t idx_jp = (j + 1 < ny) ? (base_m + (static_cast<size_t>(i) * ny + (j + 1)) * nz + k) : mn_idx;
+        size_t idx_jm = (j > 0)      ? (base_m + (static_cast<size_t>(i) * ny + (j - 1)) * nz + k) : mn_idx;
+        size_t idx_kp = (k + 1 < nz) ? (base_m + (static_cast<size_t>(i) * ny + j) * nz + (k + 1)) : mn_idx;
+        size_t idx_km = (k > 0)      ? (base_m + (static_cast<size_t>(i) * ny + j) * nz + (k - 1)) : mn_idx;
+
+        float gm_x = (d_mat_m[idx_im] - d_mat_m[idx_ip]) * inv_2dx;
+        float gm_y = (d_mat_m[idx_jm] - d_mat_m[idx_jp]) * inv_2dx;
+        float gm_z = (d_mat_m[idx_km] - d_mat_m[idx_kp]) * inv_2dx;
+
+        float inv_mat_mass = 1.0f / mat_mass;
+        float g_hat[3] = {
+            gm_x * inv_mat_mass,
+            gm_y * inv_mat_mass,
+            gm_z * inv_mat_mass
+        };
+        float inv_other = 1.0f / static_cast<float>(sig_count - 1);
+        float factor_self = static_cast<float>(sig_count) * inv_other;
+        float G_m[3] = {
+            factor_self * g_hat[0] - inv_other * G_norm_total[0],
+            factor_self * g_hat[1] - inv_other * G_norm_total[1],
+            factor_self * g_hat[2] - inv_other * G_norm_total[2]
+        };
+        float glen = sqrtf(G_m[0] * G_m[0] + G_m[1] * G_m[1] + G_m[2] * G_m[2]);
+
+        if (glen > 1.0e-4f) {
+            float inv_g = 1.0f / glen;
+            float n[3] = {G_m[0] * inv_g, G_m[1] * inv_g, G_m[2] * inv_g};
+
+            float v_rel[3] = {v_star[0] - v_cm[0], v_star[1] - v_cm[1], v_star[2] - v_cm[2]};
+            float v_approach = v_rel[0] * n[0] + v_rel[1] * n[1] + v_rel[2] * n[2];
+
+            if (v_approach > 0.0f) {
+                float v_cm_n = v_cm[0] * n[0] + v_cm[1] * n[1] + v_cm[2] * n[2];
+                float v_norm = v_cm_n - rest * v_approach;
+
+                float v_star_n = v_star[0] * n[0] + v_star[1] * n[1] + v_star[2] * n[2];
+                float v_tang[3] = {v_star[0] - v_star_n * n[0],
+                                   v_star[1] - v_star_n * n[1],
+                                   v_star[2] - v_star_n * n[2]};
+                float v_cm_tang[3] = {v_cm[0] - v_cm_n * n[0],
+                                      v_cm[1] - v_cm_n * n[1],
+                                      v_cm[2] - v_cm_n * n[2]};
+
+                float v_slip[3] = {v_tang[0] - v_cm_tang[0],
+                                   v_tang[1] - v_cm_tang[1],
+                                   v_tang[2] - v_cm_tang[2]};
+                float slip_speed = sqrtf(v_slip[0] * v_slip[0] + v_slip[1] * v_slip[1] + v_slip[2] * v_slip[2]);
+
+                float max_friction_dv = eff_friction * v_approach;
+                float v_tang_corr[3];
+                if (slip_speed <= max_friction_dv || slip_speed < 1.0e-7f) {
+                    v_tang_corr[0] = v_cm_tang[0];
+                    v_tang_corr[1] = v_cm_tang[1];
+                    v_tang_corr[2] = v_cm_tang[2];
+                } else {
+                    float factor = (eff_friction > 0.0f) ? (1.0f - max_friction_dv / slip_speed) : 1.0f;
+                    v_tang_corr[0] = v_cm_tang[0] + factor * v_slip[0];
+                    v_tang_corr[1] = v_cm_tang[1] + factor * v_slip[1];
+                    v_tang_corr[2] = v_cm_tang[2] + factor * v_slip[2];
+                }
+
+                v_corr[0] = v_norm * n[0] + v_tang_corr[0];
+                v_corr[1] = v_norm * n[1] + v_tang_corr[1];
+                v_corr[2] = v_norm * n[2] + v_tang_corr[2];
+            }
+        } else {
+            // Degenerate surface normal: materials are co-located in cell.
+            // Move together at center of mass velocity to conserve total momentum
+            v_corr[0] = v_cm[0];
+            v_corr[1] = v_cm[1];
+            v_corr[2] = v_cm[2];
+        }
+
+        applyBC(v_corr[0], v_corr[1], v_corr[2]);
+
+        d_mat_v[mn_idx * 3 + 0] = v_corr[0];
+        d_mat_v[mn_idx * 3 + 1] = v_corr[1];
+        d_mat_v[mn_idx * 3 + 2] = v_corr[2];
+        if (d_mat_dv) {
+            d_mat_dv[mn_idx * 3 + 0] = v_corr[0] - d_mat_dv[mn_idx * 3 + 0];
+            d_mat_dv[mn_idx * 3 + 1] = v_corr[1] - d_mat_dv[mn_idx * 3 + 1];
+            d_mat_dv[mn_idx * 3 + 2] = v_corr[2] - d_mat_dv[mn_idx * 3 + 2];
+        }
+    }
+
+    float p0 = p_cm[0], p1 = p_cm[1], p2 = p_cm[2];
+    applyBC(p0, p1, p2);
+    node.p[0] = p0;
+    node.p[1] = p1;
+    node.p[2] = p2;
 }
 
 __global__ void kernel_smooth_plastic_strain_3d(const MPMGridNode3D* grid_in, float* plastic_strain_out, int nx, int ny, int nz, const int* active_nodes, int num_active) {
@@ -814,22 +1199,110 @@ __global__ void kernel_copy_smoothed_plastic_strain_3d(MPMGridNode3D* grid_in, c
 // Forward declaration of constitutive stress update
 __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat);
 
+// Device helper: integrate particle position and enforce domain boundary conditions
+__device__ inline void integrate_particle_position_and_bc(
+    int p_idx, float dt, float final_vx, float final_vy, float final_vz,
+    MPMParticle3DSoA soa, int nx, int ny, int nz,
+    float dx, float dy, float dz, float xmin, float ymin, float zmin,
+    int bc_x_min, int bc_x_max, int bc_y_min, int bc_y_max, int bc_z_min, int bc_z_max) {
+
+    float new_x = soa.x[0][p_idx] + dt * final_vx;
+    float new_y = soa.x[1][p_idx] + dt * final_vy;
+    float new_z = soa.x[2][p_idx] + dt * final_vz;
+
+    float min_x = xmin + 3.0f * dx; float max_x = xmin + (static_cast<float>(nx - 4)) * dx;
+    float min_y = ymin + 3.0f * dy; float max_y = ymin + (static_cast<float>(ny - 4)) * dy;
+    float min_z = zmin + 3.0f * dz; float max_z = zmin + (static_cast<float>(nz - 4)) * dz;
+
+    float grid_max_x = xmin + static_cast<float>(nx) * dx;
+    float grid_max_y = ymin + static_cast<float>(ny) * dy;
+    float grid_max_z = zmin + static_cast<float>(nz) * dz;
+
+    // Detect if particle has exited the domain under Terminate boundary or left grid entirely
+    bool is_terminated = (new_x < min_x && bc_x_min == 3) || (new_x > max_x && bc_x_max == 3) ||
+                         (new_y < min_y && bc_y_min == 3) || (new_y > max_y && bc_y_max == 3) ||
+                         (new_z < min_z && bc_z_min == 3) || (new_z > max_z && bc_z_max == 3) ||
+                         (new_x < xmin || new_x > grid_max_x ||
+                          new_y < ymin || new_y > grid_max_y ||
+                          new_z < zmin || new_z > grid_max_z);
+
+    if (is_terminated) {
+        if (soa.state) soa.state[p_idx] = 2; // STATE_TERMINATED
+        soa.m[p_idx] = 0.0f;
+        soa.v[0][p_idx] = 0.0f; soa.v[1][p_idx] = 0.0f; soa.v[2][p_idx] = 0.0f;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                soa.B[r][c][p_idx] = 0.0f;
+            }
+        }
+        for (int k = 0; k < 6; ++k) {
+            soa.sigma_voigt[k][p_idx] = 0.0f;
+        }
+        return;
+    }
+
+    if (new_x < min_x && bc_x_min != 3) {
+        new_x = min_x;
+        if (final_vx < 0.0f) { final_vx = 0.0f; soa.v[0][p_idx] = 0.0f; }
+    } else if (new_x > max_x && bc_x_max != 3) {
+        new_x = max_x;
+        if (final_vx > 0.0f) { final_vx = 0.0f; soa.v[0][p_idx] = 0.0f; }
+    }
+
+    if (new_y < min_y && bc_y_min != 3) {
+        new_y = min_y;
+        if (final_vy < 0.0f) { final_vy = 0.0f; soa.v[1][p_idx] = 0.0f; }
+    } else if (new_y > max_y && bc_y_max != 3) {
+        new_y = max_y;
+        if (final_vy > 0.0f) { final_vy = 0.0f; soa.v[1][p_idx] = 0.0f; }
+    }
+
+    if (new_z < min_z && bc_z_min != 3) {
+        new_z = min_z;
+        if (final_vz < 0.0f) { final_vz = 0.0f; soa.v[2][p_idx] = 0.0f; }
+    } else if (new_z > max_z && bc_z_max != 3) {
+        new_z = max_z;
+        if (final_vz > 0.0f) { final_vz = 0.0f; soa.v[2][p_idx] = 0.0f; }
+    }
+
+    soa.x[0][p_idx] = new_x;
+    soa.x[1][p_idx] = new_y;
+    soa.x[2][p_idx] = new_z;
+}
+
 // Unified G2P Device Implementation (FUSE_STRESS = true: eliminates L_grad global memory round-trip)
 template <bool FUSE_STRESS>
 __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
-                                      const MPMGridNode3D* grid, int nx, int ny, int nz,
-                                      float dx, float dy, float dz, float dt, int transfer_scheme,
-                                      int velocity_scheme, float flip_blend,
-                                      float xmin, float ymin, float zmin,
-                                      int bc_x_min, int bc_x_max,
-                                      int bc_y_min, int bc_y_max,
-                                      int bc_z_min, int bc_z_max,
-                                      const MaterialTable3D* d_mat_tables) {
+                                       MPMGridNode3D* grid, int nx, int ny, int nz,
+                                       float dx, float dy, float dz, float dt, int transfer_scheme,
+                                       int velocity_scheme, float flip_blend,
+                                       float xmin, float ymin, float zmin,
+                                       int bc_x_min, int bc_x_max,
+                                       int bc_y_min, int bc_y_max,
+                                       int bc_z_min, int bc_z_max,
+                                       const MaterialTable3D* d_mat_tables,
+                                       const float* d_mat_grid_m = nullptr,
+                                       const float* d_mat_grid_v = nullptr,
+                                       const float* d_mat_grid_dv = nullptr,
+                                       int num_materials = 1) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (p_idx >= num_particles || (soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
+    if (p_idx >= num_particles) return;
+
+    if ((soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
+
+    size_t num_nodes_total = static_cast<size_t>(nx) * ny * nz;
+    int p_mat = (soa.material_id && num_materials > 0) ? min(max(soa.material_id[p_idx], 0), num_materials - 1) : 0;
+    bool is_multi_mat = (d_mat_grid_m != nullptr && d_mat_grid_v != nullptr);
 
     int obj_id = soa.object_id[p_idx];
     const MaterialTable3D& mat = d_mat_tables[obj_id];
+    bool has_failed_p = (soa.has_failed[p_idx] != 0);
+    bool is_melted = (mat.T_melt > mat.T_room && soa.temperature && soa.temperature[p_idx] >= mat.T_melt);
+    bool is_fluid_p = is_melted || (soa.lambda && soa.lambda[p_idx] >= 0.1f) ||
+                      (mat.material_model == MPMMaterialModel::CRESTReactiveBurn) ||
+                      (mat.material_model == MPMMaterialModel::JWLProgrammedBurn) ||
+                      (mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth);
+
     int eff_transfer_scheme = (mat.transfer_scheme >= 0) ? mat.transfer_scheme : transfer_scheme;
 
     float px = soa.x[0][p_idx] - xmin;
@@ -851,6 +1324,7 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
     float v_pic_x = 0.0f; float v_pic_y = 0.0f; float v_pic_z = 0.0f;
     float delta_v_grid_x = 0.0f; float delta_v_grid_y = 0.0f; float delta_v_grid_z = 0.0f;
     float weight_sum = 0.0f;
+    float contact_weight_sum = 0.0f;
 
     // APIC B_p & L_grad computation setup
     float max_B = 25000.0f / fminf(fminf(dx, dy), dz);
@@ -980,19 +1454,76 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                         size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
                         const MPMGridNode3D& node = grid[node_idx];
 
-                        if (node.m > 1.0e-11f) {
+                        if (is_multi_mat) {
+                            size_t mn_idx = static_cast<size_t>(p_mat) * num_nodes_total + node_idx;
+                            float mat_m = d_mat_grid_m[mn_idx];
+                            if (mat_m > 1.0e-11f) {
+                                float n_vx = d_mat_grid_v[mn_idx * 3 + 0];
+                                float n_vy = d_mat_grid_v[mn_idx * 3 + 1];
+                                float n_vz = d_mat_grid_v[mn_idx * 3 + 2];
+
+                                float delta_vx = d_mat_grid_dv ? d_mat_grid_dv[mn_idx * 3 + 0] : (n_vx - v_prev_x);
+                                float delta_vy = d_mat_grid_dv ? d_mat_grid_dv[mn_idx * 3 + 1] : (n_vy - v_prev_y);
+                                float delta_vz = d_mat_grid_dv ? d_mat_grid_dv[mn_idx * 3 + 2] : (n_vz - v_prev_z);
+
+                                v_pic_x += weight * n_vx;
+                                v_pic_y += weight * n_vy;
+                                v_pic_z += weight * n_vz;
+
+                                delta_v_grid_x += weight * delta_vx;
+                                delta_v_grid_y += weight * delta_vy;
+                                delta_v_grid_z += weight * delta_vz;
+
+                                weight_sum += weight;
+
+                                float dc_x = node_x - xc;
+                                float dc_y = node_y - yc;
+                                float dc_z = node_z - zc;
+
+                                float d_dinv_x = D_inv[0][0] * dc_x + D_inv[0][1] * dc_y + D_inv[0][2] * dc_z;
+                                float d_dinv_y = D_inv[1][0] * dc_x + D_inv[1][1] * dc_y + D_inv[1][2] * dc_z;
+                                float d_dinv_z = D_inv[2][0] * dc_x + D_inv[2][1] * dc_y + D_inv[2][2] * dc_z;
+
+                                B_new[0][0] += weight * n_vx * d_dinv_x;
+                                B_new[0][1] += weight * n_vx * d_dinv_y;
+                                B_new[0][2] += weight * n_vx * d_dinv_z;
+
+                                B_new[1][0] += weight * n_vy * d_dinv_x;
+                                B_new[1][1] += weight * n_vy * d_dinv_y;
+                                B_new[1][2] += weight * n_vy * d_dinv_z;
+
+                                B_new[2][0] += weight * n_vz * d_dinv_x;
+                                B_new[2][1] += weight * n_vz * d_dinv_y;
+                                B_new[2][2] += weight * n_vz * d_dinv_z;
+
+                                L_new[0][0] += n_vx * weight * d_dinv_x;
+                                L_new[0][1] += n_vx * weight * d_dinv_y;
+                                L_new[0][2] += n_vx * weight * d_dinv_z;
+
+                                L_new[1][0] += n_vy * weight * d_dinv_x;
+                                L_new[1][1] += n_vy * weight * d_dinv_y;
+                                L_new[1][2] += n_vy * weight * d_dinv_z;
+
+                                L_new[2][0] += n_vz * weight * d_dinv_x;
+                                L_new[2][1] += n_vz * weight * d_dinv_y;
+                                L_new[2][2] += n_vz * weight * d_dinv_z;
+                            }
+                            if ((node.m - mat_m) > 1.0e-11f) {
+                                contact_weight_sum += weight;
+                            }
+                        } else if (node.m > 1.0e-11f) {
                             float inv_m = 1.0f / node.m;
                             float n_vx = node.p[0] * inv_m;
                             float n_vy = node.p[1] * inv_m;
                             float n_vz = node.p[2] * inv_m;
 
-                            v_pic_x += weight * n_vx;
-                            v_pic_y += weight * n_vy;
-                            v_pic_z += weight * n_vz;
-
                             float delta_vx = dt * (node.f_ext[0] + node.f_int[0]) * inv_m;
                             float delta_vy = dt * (node.f_ext[1] + node.f_int[1]) * inv_m;
                             float delta_vz = dt * (node.f_ext[2] + node.f_int[2]) * inv_m;
+
+                            v_pic_x += weight * n_vx;
+                            v_pic_y += weight * n_vy;
+                            v_pic_z += weight * n_vz;
 
                             delta_v_grid_x += weight * delta_vx;
                             delta_v_grid_y += weight * delta_vy;
@@ -1094,19 +1625,40 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                     size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
                     const MPMGridNode3D& node = grid[node_idx];
 
-                    if (node.m > 1.0e-11f) {
-                        float inv_m = 1.0f / node.m;
-                        float n_vx = node.p[0] * inv_m;
-                        float n_vy = node.p[1] * inv_m;
-                        float n_vz = node.p[2] * inv_m;
+                    float n_vx = 0.0f, n_vy = 0.0f, n_vz = 0.0f;
+                    float delta_vx = 0.0f, delta_vy = 0.0f, delta_vz = 0.0f;
+                    bool node_valid = false;
 
+                    if (is_multi_mat) {
+                        size_t mn_idx = static_cast<size_t>(p_mat) * num_nodes_total + node_idx;
+                        float mat_m = d_mat_grid_m[mn_idx];
+                        if (mat_m > 1.0e-11f) {
+                            n_vx = d_mat_grid_v[mn_idx * 3 + 0];
+                            n_vy = d_mat_grid_v[mn_idx * 3 + 1];
+                            n_vz = d_mat_grid_v[mn_idx * 3 + 2];
+                            delta_vx = d_mat_grid_dv ? d_mat_grid_dv[mn_idx * 3 + 0] : (n_vx - v_prev_x);
+                            delta_vy = d_mat_grid_dv ? d_mat_grid_dv[mn_idx * 3 + 1] : (n_vy - v_prev_y);
+                            delta_vz = d_mat_grid_dv ? d_mat_grid_dv[mn_idx * 3 + 2] : (n_vz - v_prev_z);
+                            node_valid = true;
+                        }
+                        if ((node.m - mat_m) > 1.0e-11f) {
+                            contact_weight_sum += weight;
+                        }
+                    } else if (node.m > 1.0e-11f) {
+                        float inv_m = 1.0f / node.m;
+                        n_vx = node.p[0] * inv_m;
+                        n_vy = node.p[1] * inv_m;
+                        n_vz = node.p[2] * inv_m;
+                        delta_vx = dt * (node.f_ext[0] + node.f_int[0]) * inv_m;
+                        delta_vy = dt * (node.f_ext[1] + node.f_int[1]) * inv_m;
+                        delta_vz = dt * (node.f_ext[2] + node.f_int[2]) * inv_m;
+                        node_valid = true;
+                    }
+
+                    if (node_valid) {
                         v_pic_x += weight * n_vx;
                         v_pic_y += weight * n_vy;
                         v_pic_z += weight * n_vz;
-
-                        float delta_vx = dt * (node.f_ext[0] + node.f_int[0]) * inv_m;
-                        float delta_vy = dt * (node.f_ext[1] + node.f_int[1]) * inv_m;
-                        float delta_vz = dt * (node.f_ext[2] + node.f_int[2]) * inv_m;
 
                         delta_v_grid_x += weight * delta_vx;
                         delta_v_grid_y += weight * delta_vy;
@@ -1238,19 +1790,40 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                     size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
                     const MPMGridNode3D& node = grid[node_idx];
 
-                    if (node.m > 1.0e-11f) {
-                        float inv_m = 1.0f / node.m;
-                        float n_vx = node.p[0] * inv_m;
-                        float n_vy = node.p[1] * inv_m;
-                        float n_vz = node.p[2] * inv_m;
+                    float n_vx = 0.0f, n_vy = 0.0f, n_vz = 0.0f;
+                    float delta_vx = 0.0f, delta_vy = 0.0f, delta_vz = 0.0f;
+                    bool node_valid = false;
 
+                    if (is_multi_mat) {
+                        size_t mn_idx = static_cast<size_t>(p_mat) * num_nodes_total + node_idx;
+                        float mat_m = d_mat_grid_m[mn_idx];
+                        if (mat_m > 1.0e-11f) {
+                            n_vx = d_mat_grid_v[mn_idx * 3 + 0];
+                            n_vy = d_mat_grid_v[mn_idx * 3 + 1];
+                            n_vz = d_mat_grid_v[mn_idx * 3 + 2];
+                            delta_vx = d_mat_grid_dv ? d_mat_grid_dv[mn_idx * 3 + 0] : (n_vx - v_prev_x);
+                            delta_vy = d_mat_grid_dv ? d_mat_grid_dv[mn_idx * 3 + 1] : (n_vy - v_prev_y);
+                            delta_vz = d_mat_grid_dv ? d_mat_grid_dv[mn_idx * 3 + 2] : (n_vz - v_prev_z);
+                            node_valid = true;
+                        }
+                        if ((node.m - mat_m) > 1.0e-11f) {
+                            contact_weight_sum += weight;
+                        }
+                    } else if (node.m > 1.0e-11f) {
+                        float inv_m = 1.0f / node.m;
+                        n_vx = node.p[0] * inv_m;
+                        n_vy = node.p[1] * inv_m;
+                        n_vz = node.p[2] * inv_m;
+                        delta_vx = dt * (node.f_ext[0] + node.f_int[0]) * inv_m;
+                        delta_vy = dt * (node.f_ext[1] + node.f_int[1]) * inv_m;
+                        delta_vz = dt * (node.f_ext[2] + node.f_int[2]) * inv_m;
+                        node_valid = true;
+                    }
+
+                    if (node_valid) {
                         v_pic_x += weight * n_vx;
                         v_pic_y += weight * n_vy;
                         v_pic_z += weight * n_vz;
-
-                        float delta_vx = dt * (node.f_ext[0] + node.f_int[0]) * inv_m;
-                        float delta_vy = dt * (node.f_ext[1] + node.f_int[1]) * inv_m;
-                        float delta_vz = dt * (node.f_ext[2] + node.f_int[2]) * inv_m;
 
                         delta_v_grid_x += weight * delta_vx;
                         delta_v_grid_y += weight * delta_vy;
@@ -1303,18 +1876,25 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
         delta_v_grid_x *= inv_w;
         delta_v_grid_y *= inv_w;
         delta_v_grid_z *= inv_w;
+        if (is_multi_mat) {
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    B_new[r][c] *= inv_w;
+                    L_new[r][c] *= inv_w;
+                }
+            }
+        }
     }
-
-    bool has_failed_p = (soa.has_failed[p_idx] != 0);
 
     float target_vx = v_pic_x;
     float target_vy = v_pic_y;
     float target_vz = v_pic_z;
 
+    float contact_fraction = (is_multi_mat && weight_sum > 1.0e-7f) ? (contact_weight_sum / weight_sum) : 0.0f;
+
     // Pure FLIP velocity update for failed debris / fluid / melted particles (0% PIC grid velocity averaging).
     // Preserves relative particle separation speeds and enables fluid jetting.
-    bool is_melted = (mat.T_melt > mat.T_room && soa.temperature && soa.temperature[p_idx] >= mat.T_melt);
-    if (has_failed_p || (soa.damage && soa.damage[p_idx] >= 1.0f) || is_melted) {
+    if (has_failed_p || (soa.damage && soa.damage[p_idx] >= 1.0f) || is_fluid_p) {
         target_vx = v_prev_x + delta_v_grid_x;
         target_vy = v_prev_y + delta_v_grid_y;
         target_vz = v_prev_z + delta_v_grid_z;
@@ -1341,7 +1921,7 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
             float b_val = fminf(fmaxf(B_new[r][c], -max_B), max_B);
-            soa.B[r][c][p_idx] = (!has_failed_p && !is_melted && velocity_scheme == 0) ? b_val : 0.0f;
+            soa.B[r][c][p_idx] = (!has_failed_p && !is_fluid_p && velocity_scheme == 0) ? b_val : 0.0f;
             float l_val = (velocity_scheme == 0) ? b_val : fminf(fmaxf(L_new[r][c], -max_B), max_B);
             if constexpr (!FUSE_STRESS) {
                 soa.L_grad[r][c][p_idx] = l_val;
@@ -1351,102 +1931,53 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
         }
     }
 
-    float new_x = soa.x[0][p_idx] + dt * final_vx;
-    float new_y = soa.x[1][p_idx] + dt * final_vy;
-    float new_z = soa.x[2][p_idx] + dt * final_vz;
-
-    float min_x = xmin + 3.0f * dx; float max_x = xmin + (static_cast<float>(nx - 4)) * dx;
-    float min_y = ymin + 3.0f * dy; float max_y = ymin + (static_cast<float>(ny - 4)) * dy;
-    float min_z = zmin + 3.0f * dz; float max_z = zmin + (static_cast<float>(nz - 4)) * dz;
-
-    float grid_max_x = xmin + static_cast<float>(nx) * dx;
-    float grid_max_y = ymin + static_cast<float>(ny) * dy;
-    float grid_max_z = zmin + static_cast<float>(nz) * dz;
-
-    // Detect if particle has exited the domain under Terminate boundary or left grid entirely
-    bool is_terminated = (new_x < min_x && bc_x_min == 3) || (new_x > max_x && bc_x_max == 3) ||
-                         (new_y < min_y && bc_y_min == 3) || (new_y > max_y && bc_y_max == 3) ||
-                         (new_z < min_z && bc_z_min == 3) || (new_z > max_z && bc_z_max == 3) ||
-                         (new_x < xmin || new_x > grid_max_x ||
-                          new_y < ymin || new_y > grid_max_y ||
-                          new_z < zmin || new_z > grid_max_z);
-
-    if (is_terminated) {
-        if (soa.state) soa.state[p_idx] = 2; // STATE_TERMINATED
-        soa.m[p_idx] = 0.0f;
-        soa.v[0][p_idx] = 0.0f; soa.v[1][p_idx] = 0.0f; soa.v[2][p_idx] = 0.0f;
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                soa.B[r][c][p_idx] = 0.0f;
-            }
-        }
-        for (int k = 0; k < 6; ++k) {
-            soa.sigma_voigt[k][p_idx] = 0.0f;
-        }
-        return;
-    }
-
-    if (new_x < min_x && bc_x_min != 3) {
-        new_x = min_x;
-        if (final_vx < 0.0f) { final_vx = 0.0f; soa.v[0][p_idx] = 0.0f; }
-    } else if (new_x > max_x && bc_x_max != 3) {
-        new_x = max_x;
-        if (final_vx > 0.0f) { final_vx = 0.0f; soa.v[0][p_idx] = 0.0f; }
-    }
-
-    if (new_y < min_y && bc_y_min != 3) {
-        new_y = min_y;
-        if (final_vy < 0.0f) { final_vy = 0.0f; soa.v[1][p_idx] = 0.0f; }
-    } else if (new_y > max_y && bc_y_max != 3) {
-        new_y = max_y;
-        if (final_vy > 0.0f) { final_vy = 0.0f; soa.v[1][p_idx] = 0.0f; }
-    }
-
-    if (new_z < min_z && bc_z_min != 3) {
-        new_z = min_z;
-        if (final_vz < 0.0f) { final_vz = 0.0f; soa.v[2][p_idx] = 0.0f; }
-    } else if (new_z > max_z && bc_z_max != 3) {
-        new_z = max_z;
-        if (final_vz > 0.0f) { final_vz = 0.0f; soa.v[2][p_idx] = 0.0f; }
-    }
-
-    soa.x[0][p_idx] = new_x;
-    soa.x[1][p_idx] = new_y;
-    soa.x[2][p_idx] = new_z;
+    integrate_particle_position_and_bc(p_idx, dt, final_vx, final_vy, final_vz,
+                                       soa, nx, ny, nz, dx, dy, dz, xmin, ymin, zmin,
+                                       bc_x_min, bc_x_max, bc_y_min, bc_y_max, bc_z_min, bc_z_max);
 
     if constexpr (FUSE_STRESS) {
         update_particle_stress_constitutive(p_idx, dt, L_eff, soa, mat);
     }
 }
 
-// 3. Grid-to-Particle (G2P) Gather Kernel (Standalone)
+// 3a. Standalone G2P Kernel
 __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
-                              const MPMGridNode3D* grid, int nx, int ny, int nz,
+                              MPMGridNode3D* grid, int nx, int ny, int nz,
                               float dx, float dy, float dz, float dt, int transfer_scheme,
                               int velocity_scheme, float flip_blend,
                               float xmin, float ymin, float zmin,
                               int bc_x_min, int bc_x_max,
                               int bc_y_min, int bc_y_max,
                               int bc_z_min, int bc_z_max,
-                              const MaterialTable3D* d_mat_tables) {
+                              const MaterialTable3D* d_mat_tables,
+                              const float* d_mat_grid_m = nullptr,
+                              const float* d_mat_grid_v = nullptr,
+                              const float* d_mat_grid_dv = nullptr,
+                              int num_materials = 1) {
     g2p_device_impl<false>(soa, num_particles, grid, nx, ny, nz, dx, dy, dz, dt, transfer_scheme,
                            velocity_scheme, flip_blend, xmin, ymin, zmin,
-                           bc_x_min, bc_x_max, bc_y_min, bc_y_max, bc_z_min, bc_z_max, d_mat_tables);
+                           bc_x_min, bc_x_max, bc_y_min, bc_y_max, bc_z_min, bc_z_max, d_mat_tables,
+                           d_mat_grid_m, d_mat_grid_v, d_mat_grid_dv, num_materials);
 }
 
 // 3b. Fused G2P + Constitutive Stress Update Kernel (Single-Pass Leapfrog / Zero L_grad VRAM Traffic)
 __global__ void kernel_g2p_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
-                                           const MPMGridNode3D* grid, int nx, int ny, int nz,
-                                           float dx, float dy, float dz, float dt, int transfer_scheme,
-                                           int velocity_scheme, float flip_blend,
-                                           float xmin, float ymin, float zmin,
-                                           int bc_x_min, int bc_x_max,
-                                           int bc_y_min, int bc_y_max,
-                                           int bc_z_min, int bc_z_max,
-                                           const MaterialTable3D* d_mat_tables) {
+                                            MPMGridNode3D* grid, int nx, int ny, int nz,
+                                            float dx, float dy, float dz, float dt, int transfer_scheme,
+                                            int velocity_scheme, float flip_blend,
+                                            float xmin, float ymin, float zmin,
+                                            int bc_x_min, int bc_x_max,
+                                            int bc_y_min, int bc_y_max,
+                                            int bc_z_min, int bc_z_max,
+                                            const MaterialTable3D* d_mat_tables,
+                                            const float* d_mat_grid_m = nullptr,
+                                            const float* d_mat_grid_v = nullptr,
+                                            const float* d_mat_grid_dv = nullptr,
+                                            int num_materials = 1) {
     g2p_device_impl<true>(soa, num_particles, grid, nx, ny, nz, dx, dy, dz, dt, transfer_scheme,
                           velocity_scheme, flip_blend, xmin, ymin, zmin,
-                          bc_x_min, bc_x_max, bc_y_min, bc_y_max, bc_z_min, bc_z_max, d_mat_tables);
+                          bc_x_min, bc_x_max, bc_y_min, bc_y_max, bc_z_min, bc_z_max, d_mat_tables,
+                          d_mat_grid_m, d_mat_grid_v, d_mat_grid_dv, num_materials);
 }
 
 // 4. Stress Update Constitutive Routine (Shared by Fused G2P-Stress and Standalone Stress Update)
@@ -1483,13 +2014,35 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         soa.has_failed[p_idx] = 1;
         soa.damage[p_idx] = 1.0f;
 
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                soa.B[r][c][p_idx] = 0.0f; // Zero affine velocity gradient to eliminate elastic tensile coupling
+        bool is_concrete_model = (mat.material_model == MPMMaterialModel::RHTConcrete ||
+                                  mat.material_model == MPMMaterialModel::KCConcrete ||
+                                  mat.material_model == MPMMaterialModel::CSCMConcrete);
+
+        // For ductile metals, zero affine gradient. For concrete rubble, damp affine momentum to maintain chunk coherence.
+        if (is_concrete_model) {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    soa.B[r][c][p_idx] *= 0.85f;
+        } else {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    soa.B[r][c][p_idx] = 0.0f; // Zero affine velocity gradient to eliminate elastic tensile coupling
+        }
 
         // 1. Bulk Pressure from Volumetric Compression J = V / V0 using Parent EOS
         const float J = V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f);
         float p_comp = 0.0f;
+
+        float c_residual = 0.0f;
+        float sigma_t_rubble = 0.0f;
+        if (is_concrete_model) {
+            // Aggregate interlocking and unbroken mortar cohesion with post-failure plastic strain softening
+            float c0 = fmaxf(0.04f * mat.fc, 0.8e6f);
+            float ep_debris = fmaxf(0.0f, ep_bar_p - 0.01f);
+            c_residual = c0 * expf(-ep_debris / 0.08f);
+            sigma_t_rubble = fminf(c_residual * 0.20f, 0.10f * mat.ft);
+        }
+
         if (J < 1.0f) {
             if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen && mat.mg_c0 > 0.0f) {
                 const float mu_vol = (1.0f - J) / fmaxf(0.01f, J);
@@ -1502,23 +2055,28 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
                 const float K_parent = E_mod / (3.0f * (1.0f - 2.0f * nu));
                 p_comp = K_parent * (1.0f - J) / fmaxf(0.01f, J);
             }
+        } else if (is_concrete_model && sigma_t_rubble > 0.0f) {
+            // Softened tensile resistance for cohesive rubble chunks
+            const float E_mod    = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 30.0e9f;
+            const float nu       = fminf(fmaxf(mat.poissons_ratio, 0.01f), 0.49f);
+            const float K_parent = E_mod / (3.0f * (1.0f - 2.0f * nu));
+            float p_unconfined   = K_parent * (1.0f - J) / fmaxf(0.01f, J);
+            p_comp = fmaxf(p_unconfined, -sigma_t_rubble);
         }
 
-        // 2. Frictional Shear Resistance under Confinement (Mohr-Coulomb / Drucker-Prager: q <= M * p_comp)
+        // 2. Frictional Shear Resistance under Confinement (Mohr-Coulomb / Drucker-Prager: q <= c_res + M * p_comp)
         // Hydrodynamic shear response for failed or melted metals: zero shear resistance (q_max = 0)
         float M_friction = 0.0f;
-        if (mat.material_model == MPMMaterialModel::RHTConcrete ||
-            mat.material_model == MPMMaterialModel::KCConcrete ||
-            mat.material_model == MPMMaterialModel::CSCMConcrete) {
+        if (is_concrete_model) {
             M_friction = 0.60f; // Concrete/rock aggregate friction
         } else if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen ||
                    mat.material_model == MPMMaterialModel::Hypoelastic ||
                    mat.material_model == MPMMaterialModel::LinearElastic) {
             M_friction = 0.0f; // Pure hydrodynamic fluid response for failed or melted metals
         }
-        const float q_max = M_friction * p_comp;
+        const float q_max = c_residual + M_friction * fmaxf(0.0f, p_comp);
 
-        if (q_max <= 0.0f) {
+        if (q_max <= 0.0f && fabsf(p_comp) <= 1.0e-5f) {
             store_particle_stress_isotropic(soa, p_idx, p_comp);
             return;
         }
@@ -1713,6 +2271,170 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
             s_trial[r][r] -= p_mix;
         store_particle_stress_matrix(soa, p_idx, s_trial);
 
+        return;
+    }
+
+    // --- JWL Programmed Wavefront Burn Model ---
+    if (mat.material_model == MPMMaterialModel::JWLProgrammedBurn) {
+        const float v_rel = fminf(fmaxf(V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f), 0.02f), 50.0f);
+        float t_arr = soa.t_arrival ? soa.t_arrival[p_idx] : 1.0e10f;
+        float lam_curr = soa.lambda ? soa.lambda[p_idx] : 0.0f;
+
+        // Kinematic wavefront arrival
+        float tau_burn = fmaxf(static_cast<float>(mat.burn_zone_cells) * 0.01f / fmaxf(mat.det_vel, 100.0f), mat.tau_burn_min);
+        float lam_prog = JWL::computeProgrammedProgress(d_current_sim_time, t_arr, tau_burn);
+        float lam_new = fmaxf(lam_curr, lam_prog);
+        if (soa.lambda) soa.lambda[p_idx] = lam_new;
+        float d_lam = fmaxf(0.0f, lam_new - lam_curr);
+
+        // Two-phase EOS pressures
+        float p_solid = JWL::computeSolidReactantPressure(v_rel, e_int_p, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density);
+        float p_prod  = JWL::computeJWLProductPressure(v_rel, e_int_p + mat.detonation_energy, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.density);
+        float p_mix   = (1.0f - lam_new) * p_solid + lam_new * p_prod;
+        if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+
+        // Chemical energy deposition & compression work
+        float rho_eff = (mat.density > 10.0f) ? mat.density : 1630.0f;
+        float de_comp = (tr_deps < 0.0f) ? -(p_mix / rho_eff) * tr_deps : 0.0f;
+        float de_chem = d_lam * mat.detonation_energy;
+        e_int_p += de_comp + de_chem;
+        if (soa.e_int) soa.e_int[p_idx] = e_int_p;
+        temperature_p = mat.T_room + e_int_p / (mat.Cp > 1.0f ? mat.Cp : 1000.0f);
+        if (soa.temperature) soa.temperature[p_idx] = temperature_p;
+
+        // Deviatoric shear stress relaxation
+        float W_sig[3][3] = {}, sig_W[3][3] = {};
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                for (int k = 0; k < 3; ++k) {
+                    W_sig[r][c] += W[r][k] * sigma_p[k][c];
+                    sig_W[r][c] += sigma_p[r][k] * W[k][c];
+                }
+
+        float sig_base[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                sig_base[r][c] = sigma_p[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
+
+        const float E_mod    = mat.youngs_modulus;
+        const float nu_val   = mat.poissons_ratio;
+        const float mu_shear = (1.0f - lam_new) * (E_mod / (2.0f * (1.0f + nu_val)));
+
+        float deps_dev[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                deps_dev[r][c] = deps[r][c];
+                if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
+            }
+
+        float s_trial[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                s_trial[r][c] = (1.0f - lam_new) * (sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c]);
+
+        float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
+        for (int r = 0; r < 3; ++r)
+            s_trial[r][r] += p_s;
+
+        // Radial return plasticity for solid phase
+        float s_mag_sq = 0.0f;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                s_mag_sq += s_trial[r][c] * s_trial[r][c];
+        float q_trial = sqrtf(1.5f * s_mag_sq);
+        float q_yield = (1.0f - lam_new) * (mat.yield_stress > 1.0e5f ? mat.yield_stress : 100.0e6f);
+        if (q_trial > q_yield && q_trial > 1.0e-6f) {
+            float scale = q_yield / q_trial;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    s_trial[r][c] *= scale;
+        }
+
+        for (int r = 0; r < 3; ++r)
+            s_trial[r][r] -= p_mix;
+        store_particle_stress_matrix(soa, p_idx, s_trial);
+        return;
+    }
+
+    // --- Lee-Tarver Ignition & Growth Model ---
+    if (mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
+        const float v_rel = fminf(fmaxf(V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f), 0.02f), 50.0f);
+        float lam_curr = soa.lambda ? soa.lambda[p_idx] : 0.0f;
+        float p_curr = -(sigma_p[0][0] + sigma_p[1][1] + sigma_p[2][2]) / 3.0f;
+        if (p_curr < 0.0f) p_curr = 0.0f;
+
+        float lam_new = LeeTarver::advanceLeeTarver(dt, lam_curr, v_rel, p_curr,
+            mat.lt_I, mat.lt_a, mat.lt_b, mat.lt_x, mat.lt_ig_max,
+            mat.lt_G1, mat.lt_c, mat.lt_d, mat.lt_y, mat.lt_growth_max,
+            mat.lt_G2, mat.lt_e, mat.lt_g, mat.lt_z, mat.lt_comp_min);
+        if (soa.lambda) soa.lambda[p_idx] = lam_new;
+        float d_lam = fmaxf(0.0f, lam_new - lam_curr);
+
+        // Two-phase EOS pressures
+        float p_solid = JWL::computeSolidReactantPressure(v_rel, e_int_p, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density);
+        float p_prod  = JWL::computeJWLProductPressure(v_rel, e_int_p + mat.detonation_energy, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.density);
+        float p_mix   = (1.0f - lam_new) * p_solid + lam_new * p_prod;
+        if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+
+        // Chemical energy deposition & compression work
+        float rho_eff = (mat.density > 10.0f) ? mat.density : 1840.0f;
+        float de_comp = (tr_deps < 0.0f) ? -(p_mix / rho_eff) * tr_deps : 0.0f;
+        float de_chem = d_lam * mat.detonation_energy;
+        e_int_p += de_comp + de_chem;
+        if (soa.e_int) soa.e_int[p_idx] = e_int_p;
+        temperature_p = mat.T_room + e_int_p / (mat.Cp > 1.0f ? mat.Cp : 1000.0f);
+        if (soa.temperature) soa.temperature[p_idx] = temperature_p;
+
+        // Deviatoric shear stress relaxation
+        float W_sig[3][3] = {}, sig_W[3][3] = {};
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                for (int k = 0; k < 3; ++k) {
+                    W_sig[r][c] += W[r][k] * sigma_p[k][c];
+                    sig_W[r][c] += sigma_p[r][k] * W[k][c];
+                }
+
+        float sig_base[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                sig_base[r][c] = sigma_p[r][c] + (W_sig[r][c] - sig_W[r][c]) * dt;
+
+        const float E_mod    = mat.youngs_modulus;
+        const float nu_val   = mat.poissons_ratio;
+        const float mu_shear = (1.0f - lam_new) * (E_mod / (2.0f * (1.0f + nu_val)));
+
+        float deps_dev[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                deps_dev[r][c] = deps[r][c];
+                if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
+            }
+
+        float s_trial[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                s_trial[r][c] = (1.0f - lam_new) * (sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c]);
+
+        float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
+        for (int r = 0; r < 3; ++r)
+            s_trial[r][r] += p_s;
+
+        float s_mag_sq = 0.0f;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                s_mag_sq += s_trial[r][c] * s_trial[r][c];
+        float q_trial = sqrtf(1.5f * s_mag_sq);
+        float q_yield = (1.0f - lam_new) * (mat.yield_stress > 1.0e5f ? mat.yield_stress : 100.0e6f);
+        if (q_trial > q_yield && q_trial > 1.0e-6f) {
+            float scale = q_yield / q_trial;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    s_trial[r][c] *= scale;
+        }
+
+        for (int r = 0; r < 3; ++r)
+            s_trial[r][r] -= p_mix;
+        store_particle_stress_matrix(soa, p_idx, s_trial);
         return;
     }
 
@@ -1912,7 +2634,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
             if (r == c) s[r][c] += press;
         }
 
-    float char_len_p = cbrtf(V_p > 1.0e-20f ? V_p : 1.0e-6f);
+    float char_len_p = fmaxf(cbrtf(V_p > 1.0e-20f ? V_p : 1.0e-6f), 1.25f * cbrtf(V0_p > 1.0e-20f ? V0_p : 1.0e-6f));
     float deps_norm = 0.0f;
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
@@ -1948,6 +2670,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         for (int r = 0; r < 3; ++r)
             s[r][r] -= press;
         store_particle_stress_matrix(soa, p_idx, s);
+        return;
     } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
         KCStateVariables<float> kc_state;
         kc_state.damage = damage_p;
@@ -1976,6 +2699,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         for (int r = 0; r < 3; ++r)
             s[r][r] -= press;
         store_particle_stress_matrix(soa, p_idx, s);
+        return;
     } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
         CSCMStateVariables<float> cscm_state;
         cscm_state.damage = damage_p;
@@ -2004,6 +2728,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         for (int r = 0; r < 3; ++r)
             s[r][r] -= press;
         store_particle_stress_matrix(soa, p_idx, s);
+        return;
     } else {
         // Default Hypoelastic J2 Elastoplasticity with Weibull flaw scatter & plastic damage softening
         float w_factor = (mat.enable_heterogeneity && soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
@@ -2137,6 +2862,11 @@ __global__ void kernel_compute_max_speed(MPMParticle3DSoA soa, int num_particles
             float c_solid = sqrtf(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
             float c_det = (mat.davis_pc > 1.0e6f) ? 7500.0f : 6000.0f;
             c_s = fmaxf(c_solid, c_det);
+        } else if (mat.material_model == MPMMaterialModel::JWLProgrammedBurn || mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
+            float C0 = mat.mg_c0 > 100.0f ? mat.mg_c0 : 2500.0f;
+            float c_solid = sqrtf(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
+            float c_det = mat.det_vel > 1000.0f ? mat.det_vel : 7000.0f;
+            c_s = fmaxf(c_solid, c_det);
         } else if (mat.material_model == MPMMaterialModel::RHTConcrete || mat.material_model == MPMMaterialModel::KCConcrete || mat.material_model == MPMMaterialModel::CSCMConcrete) {
             float G = E / (2.0f * (1.0f + nu));
             float K = 1.6f * (E / (3.0f * fmaxf(0.02f, 1.0f - 2.0f * nu)));
@@ -2207,6 +2937,7 @@ __device__ inline void copy_particle_soa(MPMParticle3DSoA soa, int dst, int src)
     if (soa.ep_bar) soa.ep_bar[dst] = soa.ep_bar[src];
     if (soa.damage) soa.damage[dst] = soa.damage[src];
     if (soa.lambda) soa.lambda[dst] = soa.lambda[src];
+    if (soa.t_arrival) soa.t_arrival[dst] = soa.t_arrival[src];
     if (soa.v_min) soa.v_min[dst] = soa.v_min[src];
     if (soa.s_shock) soa.s_shock[dst] = soa.s_shock[src];
     if (soa.weibull_factor) soa.weibull_factor[dst] = soa.weibull_factor[src];
@@ -2224,8 +2955,8 @@ __global__ void kernel_count_active_particles(MPMParticle3DSoA soa, int num_part
 
     int local_active = 0;
     if (idx < num_particles) {
-        bool is_active = (!soa.state || soa.state[idx] != 2) && (soa.m[idx] > 0.0f);
-        if (is_active) local_active = 1;
+        bool active = ((!soa.state || soa.state[idx] != 2) && soa.m[idx] > 0.0f);
+        local_active = active ? 1 : 0;
     }
     s_count[tid] = local_active;
     __syncthreads();
@@ -2264,7 +2995,8 @@ __global__ void kernel_gather_holes_and_sources(
     }
 }
 
-__global__ void kernel_compact_move_soa(
+// Compaction kernel: relocates remaining active particles to fill holes
+__global__ void kernel_compact_particles(
     MPMParticle3DSoA soa, const int* d_holes, const int* d_sources, int num_moves)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2283,9 +3015,9 @@ MPMSolver3DCUDA::~MPMSolver3DCUDA() {
 }
 
 void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
-    // 3(x) + 3(v) + 6(sigma_voigt) + 9(B) + 1(lp) + 12(m..contact_radius) = 34 floats
-    // + 4 ints = 34 * 4 + 16 = 152 bytes per particle (reduced from 208 bytes)
-    size_t required_bytes = count * (34 * sizeof(float) + 4 * sizeof(int));
+    // 3(x) + 3(v) + 6(sigma_voigt) + 9(B) + 1(lp) + 13(m..contact_radius) = 35 floats
+    // + 5 ints = 35 * 4 + 20 = 160 bytes per particle
+    size_t required_bytes = count * (35 * sizeof(float) + 5 * sizeof(int));
     if (required_bytes > m_allocated_soa_bytes) {
         if (d_soa_buffer) cudaFree(d_soa_buffer);
         CUDA_CHECK_ALLOC(cudaMalloc(&d_soa_buffer, required_bytes), "Allocating d_soa_buffer (" + std::to_string(required_bytes) + " bytes)");
@@ -2335,6 +3067,7 @@ void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
     d_soa.ep_bar = fptr; fptr += count;
     d_soa.damage = fptr; fptr += count;
     d_soa.lambda = fptr; fptr += count;
+    d_soa.t_arrival = fptr; fptr += count;
     d_soa.v_min = fptr; fptr += count;
     d_soa.s_shock = fptr; fptr += count;
     d_soa.weibull_factor = fptr; fptr += count;
@@ -2345,6 +3078,7 @@ void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
     d_soa.object_id = iptr; iptr += count;
     d_soa.state = iptr; iptr += count;
     d_soa.cluster_id = iptr; iptr += count;
+    d_soa.material_id = iptr; iptr += count;
 }
 
 void MPMSolver3DCUDA::freeSoABuffer() {
@@ -2424,7 +3158,7 @@ int MPMSolver3DCUDA::compactTerminatedParticlesDevice() {
     int num_moves = std::min(counters[0], counters[1]);
     if (num_moves > 0) {
         int move_blocks = (num_moves + threads - 1) / threads;
-        kernel_compact_move_soa<<<move_blocks, threads>>>(d_soa, d_holes, d_sources, num_moves);
+        kernel_compact_particles<<<move_blocks, threads>>>(d_soa, d_holes, d_sources, num_moves);
         cudaDeviceSynchronize();
     }
 
@@ -2501,6 +3235,10 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
         m_allocated_material_tables = num_materials;
     }
 
+    if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
+        allocateMatGridBuffers(num_grid_nodes, m_num_materials);
+    }
+
     if (!d_max_v_buf) {
         CUDA_CHECK_ALLOC(cudaMalloc(&d_max_v_buf, sizeof(float)), "Allocating d_max_v_buf");
     }
@@ -2528,6 +3266,7 @@ size_t MPMSolver3DCUDA::getAllocatedVRAM() const {
     total += m_allocated_f_ext_fsi * sizeof(float);             // d_f_ext_fsi
     total += m_allocated_temp_aos_particles * sizeof(MPMParticle3D); // d_temp_aos_particles
     total += m_allocated_slice_buf;                             // d_telemetry_slice_buf
+    total += m_allocated_mat_grid_bytes;                        // d_mat_grid_buffer
     if (d_compaction_counters) total += 2 * sizeof(int);
     if (d_active_count) total += sizeof(int);
     if (d_max_v_buf) total += sizeof(float);
@@ -2572,7 +3311,11 @@ void MPMSolver3DCUDA::freeDeviceMemory() {
     if (d_max_v_pinned) { cudaFreeHost(d_max_v_pinned); d_max_v_pinned = nullptr; }
     if (d_telemetry_slice_buf) { cudaFree(d_telemetry_slice_buf); d_telemetry_slice_buf = nullptr; m_allocated_slice_buf = 0; }
     if (d_f_ext_fsi) { cudaFree(d_f_ext_fsi); d_f_ext_fsi = nullptr; }
+    if (d_dem_cell_head) { cudaFree(d_dem_cell_head); d_dem_cell_head = nullptr; }
+    if (d_dem_particle_next) { cudaFree(d_dem_particle_next); d_dem_particle_next = nullptr; }
+    m_allocated_dem_particles = 0;
     freeActiveNodeBuffers();
+    freeMatGridBuffers();
     m_allocated_grid_nodes = 0;
     m_allocated_particles = 0;
     m_allocated_material_tables = 0;
@@ -2587,6 +3330,95 @@ void MPMSolver3DCUDA::initializeGrid(int nx, int ny, int nz, float dx, float dy,
     m_host_particles.clear();
     m_num_active_particles = 0;
     allocateDeviceMemory();
+}
+
+void MPMSolver3DCUDA::allocateMatGridBuffers(size_t num_nodes, int num_materials) {
+    int mats = std::max(1, num_materials);
+    size_t mat_nodes = static_cast<size_t>(mats) * num_nodes;
+    size_t num_floats = 10 * mat_nodes;
+    size_t bytes = num_floats * sizeof(float);
+
+    if (bytes > m_allocated_mat_grid_bytes || !d_mat_grid_buffer) {
+        freeMatGridBuffers();
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_mat_grid_buffer, bytes),
+                         "Allocating d_mat_grid_buffer (" + std::to_string(num_floats) + " floats)");
+        m_allocated_mat_grid_bytes = bytes;
+    }
+
+    float* base = reinterpret_cast<float*>(d_mat_grid_buffer);
+    d_mat_grid_m      = base;
+    d_mat_grid_p      = base + mat_nodes;
+    d_mat_grid_f      = base + 4 * mat_nodes;
+    d_mat_grid_v      = base + 4 * mat_nodes; // In-place alias with d_mat_grid_f
+    d_mat_grid_dv     = base + 7 * mat_nodes;
+    cudaMemsetAsync(d_mat_grid_buffer, 0, bytes);
+}
+
+void MPMSolver3DCUDA::freeMatGridBuffers() {
+    if (d_mat_grid_buffer) {
+        cudaFree(d_mat_grid_buffer);
+        d_mat_grid_buffer = nullptr;
+    }
+    d_mat_grid_m = nullptr;
+    d_mat_grid_p = nullptr;
+    d_mat_grid_f = nullptr;
+    d_mat_grid_v = nullptr;
+    d_mat_grid_dv = nullptr;
+    if (d_mat_to_obj) {
+        cudaFree(d_mat_to_obj);
+        d_mat_to_obj = nullptr;
+    }
+    m_allocated_mat_grid_bytes = 0;
+}
+
+void MPMSolver3DCUDA::setContactMethod(MPMContactMethod method) {
+    m_contact_method = method;
+    if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
+        size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+        allocateMatGridBuffers(num_nodes, m_num_materials);
+    } else {
+        freeMatGridBuffers();
+    }
+}
+
+void MPMSolver3DCUDA::setObjectMaterialMapping(const std::vector<int>& obj_to_mat, int num_materials) {
+    m_object_to_mat = obj_to_mat;
+    m_num_materials = std::max(1, num_materials);
+    for (auto& p : m_host_particles) {
+        if (p.object_id >= 0 && p.object_id < static_cast<int>(m_object_to_mat.size())) {
+            p.material_id = m_object_to_mat[p.object_id];
+        } else if (p.object_id > 0 && (p.object_id - 1) < static_cast<int>(m_object_to_mat.size())) {
+            p.material_id = m_object_to_mat[p.object_id - 1];
+        } else {
+            p.material_id = 0;
+        }
+    }
+    m_device_dirty = true;
+
+    // Build mat_to_obj lookup table on host and upload to device
+    std::vector<int> mat_to_obj(m_num_materials, 0);
+    for (int m = 0; m < m_num_materials; ++m) {
+        mat_to_obj[m] = std::max(1, m + 1);
+    }
+    for (size_t oi = 1; oi < m_object_to_mat.size(); ++oi) {
+        int m = m_object_to_mat[oi];
+        if (m >= 0 && m < m_num_materials) {
+            mat_to_obj[m] = static_cast<int>(oi);
+        }
+    }
+    if (d_mat_to_obj) {
+        cudaFree(d_mat_to_obj);
+        d_mat_to_obj = nullptr;
+    }
+    cudaMalloc(&d_mat_to_obj, m_num_materials * sizeof(int));
+    cudaMemcpy(d_mat_to_obj, mat_to_obj.data(), m_num_materials * sizeof(int), cudaMemcpyHostToDevice);
+
+    if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
+        size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+        allocateMatGridBuffers(num_nodes, m_num_materials);
+    } else {
+        freeMatGridBuffers();
+    }
 }
 
 void MPMSolver3DCUDA::setBoundaryConditions(MPMBoundaryCondition3D x_min, MPMBoundaryCondition3D x_max,
@@ -2604,7 +3436,8 @@ void MPMSolver3DCUDA::addBoxObject(int obj_id, float pos_x, float pos_y, float p
                                     float density, float E, float nu,
                                     float yield_stress, float hardening, float failure_strain,
                                     float tensile_failure_stress, int ppc,
-                                    MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
+                                    MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill,
+                                    float rot_x, float rot_y, float rot_z) {
     if (d_soa_buffer && !m_host_particles.empty() && !m_device_dirty && m_step_count > 0) {
         downloadSoA2AoS();
     }
@@ -2612,7 +3445,8 @@ void MPMSolver3DCUDA::addBoxObject(int obj_id, float pos_x, float pos_y, float p
     cpu_solver.setDomainGeometry(m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
     cpu_solver.addBoxObject(obj_id, pos_x, pos_y, pos_z, size_x, size_y, size_z,
                             vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z,
-                            density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
+                            density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill,
+                            rot_x, rot_y, rot_z);
     m_host_particles.insert(m_host_particles.end(), cpu_solver.getParticles().begin(), cpu_solver.getParticles().end());
     if (obj_id >= static_cast<int>(m_material_tables.size())) {
         m_material_tables.resize(obj_id + 1);
@@ -2627,7 +3461,8 @@ void MPMSolver3DCUDA::addSphereObject(int obj_id, float pos_x, float pos_y, floa
                                        float density, float E, float nu,
                                        float yield_stress, float hardening, float failure_strain,
                                        float tensile_failure_stress, int ppc,
-                                       MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
+                                       MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill,
+                                       float rot_x, float rot_y, float rot_z) {
     if (d_soa_buffer && !m_host_particles.empty() && !m_device_dirty && m_step_count > 0) {
         downloadSoA2AoS();
     }
@@ -2635,7 +3470,8 @@ void MPMSolver3DCUDA::addSphereObject(int obj_id, float pos_x, float pos_y, floa
     cpu_solver.setDomainGeometry(m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
     cpu_solver.addSphereObject(obj_id, pos_x, pos_y, pos_z, radius,
                                vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z,
-                               density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
+                               density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill,
+                               rot_x, rot_y, rot_z);
     m_host_particles.insert(m_host_particles.end(), cpu_solver.getParticles().begin(), cpu_solver.getParticles().end());
     if (obj_id >= static_cast<int>(m_material_tables.size())) {
         m_material_tables.resize(obj_id + 1);
@@ -2651,7 +3487,8 @@ void MPMSolver3DCUDA::addCylinderObject(int obj_id, float pos_x, float pos_y, fl
                                           float density, float E, float nu,
                                           float yield_stress, float hardening, float failure_strain,
                                           float tensile_failure_stress, int ppc,
-                                          MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
+                                          MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill,
+                                          float rot_x, float rot_y, float rot_z) {
     if (d_soa_buffer && !m_host_particles.empty() && !m_device_dirty && m_step_count > 0) {
         downloadSoA2AoS();
     }
@@ -2659,7 +3496,8 @@ void MPMSolver3DCUDA::addCylinderObject(int obj_id, float pos_x, float pos_y, fl
     cpu_solver.setDomainGeometry(m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin);
     cpu_solver.addCylinderObject(obj_id, pos_x, pos_y, pos_z, radius, inner_radius, height,
                                 vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z,
-                                density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
+                                density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill,
+                                rot_x, rot_y, rot_z);
     m_host_particles.insert(m_host_particles.end(), cpu_solver.getParticles().begin(), cpu_solver.getParticles().end());
     if (obj_id >= static_cast<int>(m_material_tables.size())) {
         m_material_tables.resize(obj_id + 1);
@@ -2846,9 +3684,20 @@ void MPMSolver3DCUDA::clearGridDevice() {
         int threads = 256;
         int blocks = (m_num_active_nodes + threads - 1) / threads;
         kernel_clear_active_nodes_3d<<<blocks, threads>>>(d_grid, d_active_nodes, m_num_active_nodes);
+        if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer) {
+            size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+            kernel_clear_active_mat_nodes_3d<<<blocks, threads>>>(
+                d_mat_grid_m, d_mat_grid_p, d_mat_grid_f,
+                d_mat_grid_dv,
+                d_active_nodes, m_num_active_nodes,
+                num_nodes, m_num_materials);
+        }
     } else {
         size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
         cudaMemsetAsync(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
+        if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer) {
+            cudaMemsetAsync(d_mat_grid_buffer, 0, m_allocated_mat_grid_bytes);
+        }
     }
     if (d_num_active_nodes) {
         cudaMemsetAsync(d_num_active_nodes, 0, sizeof(int));
@@ -2867,6 +3716,11 @@ void MPMSolver3DCUDA::particleToGridOnly() {
     // Zero the active grid neighborhoods
     clearGridDevice();
 
+    bool use_bardenhagen = (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer != nullptr);
+    float* p_mat_m = use_bardenhagen ? d_mat_grid_m : nullptr;
+    float* p_mat_p = use_bardenhagen ? d_mat_grid_p : nullptr;
+    float* p_mat_f = use_bardenhagen ? d_mat_grid_f : nullptr;
+
     // Run P2G kernel only
     int threads_per_block = 256;
     int blocks_particles = (static_cast<int>(num_particles) + threads_per_block - 1) / threads_per_block;
@@ -2876,7 +3730,9 @@ void MPMSolver3DCUDA::particleToGridOnly() {
         m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme),
         m_xmin, m_ymin, m_zmin,
         d_active_nodes, d_num_active_nodes,
-        d_material_tables);
+        d_material_tables,
+        p_mat_m, p_mat_p, p_mat_f,
+        m_num_materials);
 
     if (d_num_active_nodes) {
         cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
@@ -2897,6 +3753,11 @@ void MPMSolver3DCUDA::particleToGridDeviceOnly() {
     // Zero the active grid neighborhoods
     clearGridDevice();
 
+    bool use_bardenhagen = (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer != nullptr);
+    float* p_mat_m = use_bardenhagen ? d_mat_grid_m : nullptr;
+    float* p_mat_p = use_bardenhagen ? d_mat_grid_p : nullptr;
+    float* p_mat_f = use_bardenhagen ? d_mat_grid_f : nullptr;
+
     // Run P2G kernel only (no CPU synchronization, no download!)
     int threads_per_block = 256;
     int blocks_particles = (static_cast<int>(num_particles) + threads_per_block - 1) / threads_per_block;
@@ -2906,7 +3767,9 @@ void MPMSolver3DCUDA::particleToGridDeviceOnly() {
         m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme),
         m_xmin, m_ymin, m_zmin,
         d_active_nodes, d_num_active_nodes,
-        d_material_tables);
+        d_material_tables,
+        p_mat_m, p_mat_p, p_mat_f,
+        m_num_materials);
 
     if (d_num_active_nodes) {
         cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
@@ -3014,6 +3877,8 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
 
     m_last_dt = dt;
     m_sim_time += static_cast<double>(dt);
+    float sim_t = static_cast<float>(m_sim_time);
+    cudaMemcpyToSymbol(d_current_sim_time, &sim_t, sizeof(float));
     m_step_count++;
 
     size_t num_particles = (m_num_active_particles > 0) ? m_num_active_particles : m_host_particles.size();
@@ -3028,6 +3893,13 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                       : blocks_nodes;
     float avg_p_mass = m_host_particles.empty() ? 0.001f : m_host_particles[0].m;
 
+    bool use_bardenhagen = (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer != nullptr);
+    float* p_mat_m = use_bardenhagen ? d_mat_grid_m : nullptr;
+    float* p_mat_p = use_bardenhagen ? d_mat_grid_p : nullptr;
+    float* p_mat_f = use_bardenhagen ? d_mat_grid_f : nullptr;
+    float* p_mat_v = use_bardenhagen ? d_mat_grid_v : nullptr;
+    float* p_mat_dv = use_bardenhagen ? d_mat_grid_dv : nullptr;
+
     if (m_time_scheme == MPMTimeIntegrationScheme::RK2) {
         // --- 2nd-Order Midpoint RK2 ---
         // 1. Predictor Stage (Half-step dt/2)
@@ -3038,7 +3910,9 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                    m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme),
                                                                    m_xmin, m_ymin, m_zmin,
                                                                    d_active_nodes, d_num_active_nodes,
-                                                                   d_material_tables);
+                                                                   d_material_tables,
+                                                                   p_mat_m, p_mat_p, p_mat_f,
+                                                                   m_num_materials);
             if (d_num_active_nodes) {
                 cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
                 blocks_active = (m_num_active_nodes > 0 && d_active_nodes)
@@ -3050,12 +3924,27 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
             kernel_restore_fsi_forces<<<blocks_nodes, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
         }
 
-        kernel_grid_update_3d<<<blocks_active, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
-                                                                   0.5f * dt, avg_p_mass,
-                                                                   static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
-                                                                   static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
-                                                                   static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
-                                                                   d_active_nodes, m_num_active_nodes);
+        if (use_bardenhagen) {
+            kernel_bardenhagen_grid_update_3d<<<blocks_active, threads_per_block>>>(
+                d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
+                0.5f * dt, avg_p_mass,
+                static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
+                d_active_nodes, m_num_active_nodes,
+                m_num_materials,
+                d_mat_grid_m, d_mat_grid_p, d_mat_grid_f,
+                d_mat_grid_v, d_mat_grid_dv,
+                m_dem_friction, m_dem_restitution, m_dx,
+                d_material_tables, d_mat_to_obj);
+        } else {
+            kernel_grid_update_3d<<<blocks_active, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
+                                                                       0.5f * dt, avg_p_mass,
+                                                                       static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                                                                       static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                                                                       static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
+                                                                       d_active_nodes, m_num_active_nodes);
+        }
 
         if (m_smooth_plastic_strain) {
             kernel_smooth_plastic_strain_3d<<<blocks_active, threads_per_block>>>(d_grid, d_grid_n, m_nx, m_ny, m_nz, d_active_nodes, m_num_active_nodes);
@@ -3070,7 +3959,8 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                              static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
                                                                              static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
                                                                              static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
-                                                                             d_material_tables);
+                                                                             d_material_tables,
+                                                                             p_mat_m, p_mat_v, p_mat_dv, m_num_materials);
 
         // 2. Corrector Stage — P2G from predictor midpoint state
         clearGridDevice();
@@ -3079,7 +3969,9 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme),
                                                                m_xmin, m_ymin, m_zmin,
                                                                d_active_nodes, d_num_active_nodes,
-                                                               d_material_tables);
+                                                               d_material_tables,
+                                                               p_mat_m, p_mat_p, p_mat_f,
+                                                               m_num_materials);
         if (d_num_active_nodes) {
             cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
             blocks_active = (m_num_active_nodes > 0 && d_active_nodes)
@@ -3090,12 +3982,27 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
             kernel_restore_fsi_forces<<<blocks_nodes, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
         }
 
-        kernel_grid_update_3d<<<blocks_active, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
-                                                                   dt, avg_p_mass,
-                                                                   static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
-                                                                   static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
-                                                                   static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
-                                                                   d_active_nodes, m_num_active_nodes);
+        if (use_bardenhagen) {
+            kernel_bardenhagen_grid_update_3d<<<blocks_active, threads_per_block>>>(
+                d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
+                dt, avg_p_mass,
+                static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
+                d_active_nodes, m_num_active_nodes,
+                m_num_materials,
+                d_mat_grid_m, d_mat_grid_p, d_mat_grid_f,
+                d_mat_grid_v, d_mat_grid_dv,
+                m_dem_friction, m_dem_restitution, m_dx,
+                d_material_tables, d_mat_to_obj);
+        } else {
+            kernel_grid_update_3d<<<blocks_active, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
+                                                                       dt, avg_p_mass,
+                                                                       static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                                                                       static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                                                                       static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
+                                                                       d_active_nodes, m_num_active_nodes);
+        }
 
         if (m_smooth_plastic_strain) {
             kernel_smooth_plastic_strain_3d<<<blocks_active, threads_per_block>>>(d_grid, d_grid_n, m_nx, m_ny, m_nz, d_active_nodes, m_num_active_nodes);
@@ -3110,7 +4017,8 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                              static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
                                                                              static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
                                                                              static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
-                                                                             d_material_tables);
+                                                                             d_material_tables,
+                                                                             p_mat_m, p_mat_v, p_mat_dv, m_num_materials);
     } else {
         // --- 1st-Order USL / USF ---
         if (run_p2g) {
@@ -3120,7 +4028,9 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                    m_dx, m_dy, m_dz, static_cast<int>(m_transfer_scheme),
                                                                    m_xmin, m_ymin, m_zmin,
                                                                    d_active_nodes, d_num_active_nodes,
-                                                                   d_material_tables);
+                                                                   d_material_tables,
+                                                                   p_mat_m, p_mat_p, p_mat_f,
+                                                                   m_num_materials);
             if (d_num_active_nodes) {
                 cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
                 blocks_active = (m_num_active_nodes > 0 && d_active_nodes)
@@ -3132,12 +4042,27 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
             kernel_restore_fsi_forces<<<blocks_nodes, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
         }
 
-        kernel_grid_update_3d<<<blocks_active, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
-                                                                   dt, avg_p_mass,
-                                                                   static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
-                                                                   static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
-                                                                   static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
-                                                                   d_active_nodes, m_num_active_nodes);
+        if (use_bardenhagen) {
+            kernel_bardenhagen_grid_update_3d<<<blocks_active, threads_per_block>>>(
+                d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
+                dt, avg_p_mass,
+                static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
+                d_active_nodes, m_num_active_nodes,
+                m_num_materials,
+                d_mat_grid_m, d_mat_grid_p, d_mat_grid_f,
+                d_mat_grid_v, d_mat_grid_dv,
+                m_dem_friction, m_dem_restitution, m_dx,
+                d_material_tables, d_mat_to_obj);
+        } else {
+            kernel_grid_update_3d<<<blocks_active, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
+                                                                       dt, avg_p_mass,
+                                                                       static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
+                                                                       static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
+                                                                       static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
+                                                                       d_active_nodes, m_num_active_nodes);
+        }
 
         if (m_smooth_plastic_strain) {
             kernel_smooth_plastic_strain_3d<<<blocks_active, threads_per_block>>>(d_grid, d_grid_n, m_nx, m_ny, m_nz, d_active_nodes, m_num_active_nodes);
@@ -3152,11 +4077,14 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                              static_cast<int>(m_bc_x_min), static_cast<int>(m_bc_x_max),
                                                                              static_cast<int>(m_bc_y_min), static_cast<int>(m_bc_y_max),
                                                                              static_cast<int>(m_bc_z_min), static_cast<int>(m_bc_z_max),
-                                                                             d_material_tables);
+                                                                             d_material_tables,
+                                                                             p_mat_m, p_mat_v, p_mat_dv, m_num_materials);
     }
 
     // Resolve Discrete Element (DEM) Contact & Collisions on GPU
-    evaluateDEMContactDevice(dt);
+    if (m_contact_method == MPMContactMethod::SubGridDEM || m_enable_dem_contact) {
+        evaluateDEMContactDevice(dt);
+    }
 
     // Periodically compact terminated particles on device
     if (m_step_count % 50 == 0) {
@@ -3164,8 +4092,251 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
     }
 }
 
+__device__ inline uint32_t hashCoordsDEM3D(int cx, int cy, int cz, uint32_t table_size) {
+    return ((static_cast<uint32_t>(cx) * 73856093u) ^
+            (static_cast<uint32_t>(cy) * 19349663u) ^
+            (static_cast<uint32_t>(cz) * 83492791u)) & (table_size - 1u);
+}
+
+__global__ void kernel_dem_clear_hash_table_3d(int* cell_head, uint32_t table_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < table_size) {
+        cell_head[idx] = -1;
+    }
+}
+
+__global__ void kernel_dem_insert_particles_3d(
+    MPMParticle3DSoA soa, int num_particles,
+    int* cell_head, int* particle_next, uint32_t table_size,
+    float inv_h_bin, float xmin, float ymin, float zmin) {
+    
+    int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p_idx >= num_particles) return;
+
+    if ((soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) {
+        particle_next[p_idx] = -1;
+        return;
+    }
+
+    int cx = static_cast<int>(floorf((soa.x[0][p_idx] - xmin) * inv_h_bin));
+    int cy = static_cast<int>(floorf((soa.x[1][p_idx] - ymin) * inv_h_bin));
+    int cz = static_cast<int>(floorf((soa.x[2][p_idx] - zmin) * inv_h_bin));
+
+    uint32_t bucket = hashCoordsDEM3D(cx, cy, cz, table_size);
+    int old_head = atomicExch(&cell_head[bucket], p_idx);
+    particle_next[p_idx] = old_head;
+}
+
+__device__ inline bool isDeviceGasParticle(int p_idx, const MPMParticle3DSoA& soa, const MaterialTable3D* d_mat_tables, int num_mat_tables) {
+    if (soa.state && soa.state[p_idx] == 1) return true;
+    if (d_mat_tables && num_mat_tables > 0) {
+        int obj_id = soa.object_id[p_idx];
+        if (obj_id >= 0 && obj_id < num_mat_tables) {
+            const auto& mat = d_mat_tables[obj_id];
+            bool is_energetic = (mat.material_model == MPMMaterialModel::CRESTReactiveBurn ||
+                                 mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
+                                 mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth);
+            if (is_energetic) {
+                return (soa.lambda && soa.lambda[p_idx] > 0.5f);
+            }
+        }
+    }
+    return false;
+}
+
+__global__ void kernel_dem_resolve_contact_3d(
+    MPMParticle3DSoA soa, int num_particles,
+    const int* cell_head, const int* particle_next, uint32_t table_size,
+    float inv_h_bin, float xmin, float ymin, float zmin,
+    float contact_scale, float restitution, float friction_coef,
+    int contact_mode, float velocity_threshold,
+    const MaterialTable3D* d_mat_tables, int num_mat_tables) {
+
+    int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= num_particles) return;
+
+    if ((soa.state && soa.state[p] == 2) || soa.m[p] <= 0.0f) return;
+
+    float px = soa.x[0][p];
+    float py = soa.x[1][p];
+    float pz = soa.x[2][p];
+
+    int cx = static_cast<int>(floorf((px - xmin) * inv_h_bin));
+    int cy = static_cast<int>(floorf((py - ymin) * inv_h_bin));
+    int cz = static_cast<int>(floorf((pz - zmin) * inv_h_bin));
+
+    float r_p = (soa.contact_radius && soa.contact_radius[p] > 1.0e-6f) ? soa.contact_radius[p] : (0.5f * cbrtf(fmaxf(1.0e-18f, soa.V0[p])));
+    int obj_p = soa.object_id[p];
+    float m_p = soa.m[p];
+
+    float p_vx = soa.v[0][p];
+    float p_vy = soa.v[1][p];
+    float p_vz = soa.v[2][p];
+    float total_dv_p = 0.0f;
+
+    bool p_is_gas = isDeviceGasParticle(p, soa, d_mat_tables, num_mat_tables);
+    bool p_is_solid = !p_is_gas;
+
+    for (int dz_idx = -1; dz_idx <= 1; ++dz_idx) {
+        for (int dy_idx = -1; dy_idx <= 1; ++dy_idx) {
+            for (int dx_idx = -1; dx_idx <= 1; ++dx_idx) {
+                uint32_t bucket = hashCoordsDEM3D(cx + dx_idx, cy + dy_idx, cz + dz_idx, table_size);
+                int q = cell_head[bucket];
+
+                while (q != -1) {
+                    if (q > p) {
+                        if ((!soa.state || soa.state[q] != 2) && soa.m[q] > 0.0f) {
+                            int obj_q = soa.object_id[q];
+                            // Intra-object contact is strictly excluded to prevent continuum popcorn fragmentation
+                            if (obj_p != obj_q) {
+                                bool q_is_gas = isDeviceGasParticle(q, soa, d_mat_tables, num_mat_tables);
+                                bool q_is_solid = !q_is_gas;
+
+                                bool eligible = false;
+                                if (contact_mode == 0) { // GasSolidOnly
+                                    eligible = (p_is_gas && q_is_solid) || (p_is_solid && q_is_gas);
+                                } else if (contact_mode == 1) { // BallisticAndGas
+                                    bool is_gas_solid = (p_is_gas && q_is_solid) || (p_is_solid && q_is_gas);
+                                    bool is_solid_solid = p_is_solid && q_is_solid;
+                                    eligible = is_gas_solid || is_solid_solid;
+                                } else { // AllDynamic
+                                    eligible = true;
+                                }
+
+                                if (eligible) {
+                                    float r_q = (soa.contact_radius && soa.contact_radius[q] > 1.0e-6f) ? soa.contact_radius[q] : (0.5f * cbrtf(fmaxf(1.0e-18f, soa.V0[q])));
+                                    float R_sum = contact_scale * (r_p + r_q);
+                                    float R_sum_sq = R_sum * R_sum;
+
+                                    float rx = px - soa.x[0][q];
+                                    float ry = py - soa.x[1][q];
+                                    float rz = pz - soa.x[2][q];
+                                    float dist_sq = rx * rx + ry * ry + rz * rz;
+
+                                    if (dist_sq < R_sum_sq && dist_sq > 1.0e-14f) {
+                                        float dist = sqrtf(dist_sq);
+                                        float inv_dist = 1.0f / dist;
+                                        float nx = rx * inv_dist;
+                                        float ny = ry * inv_dist;
+                                        float nz = rz * inv_dist;
+
+                                        float vx_rel = p_vx - soa.v[0][q];
+                                        float vy_rel = p_vy - soa.v[1][q];
+                                        float vz_rel = p_vz - soa.v[2][q];
+
+                                        float v_n = vx_rel * nx + vy_rel * ny + vz_rel * nz;
+
+                                        // Strict Approach Velocity Gate:
+                                        // Static proximity at rest (v_n >= 0 or |v_n| <= v_thresh) generates zero force!
+                                        if (v_n < -velocity_threshold) {
+                                            float m_q = soa.m[q];
+                                            float m_eff = (m_p * m_q) / (m_p + m_q);
+
+                                            float target_vn = - restitution * v_n;
+                                            float dv_n = target_vn - v_n;
+                                            float max_dvn = (1.0f + restitution) * (-v_n);
+                                            dv_n = fminf(fmaxf(dv_n, 0.0f), max_dvn);
+                                            float J_n = m_eff * dv_n;
+
+                                            if (J_n > 0.0f) {
+                                                float v_tx = vx_rel - v_n * nx;
+                                                float v_ty = vy_rel - v_n * ny;
+                                                float v_tz = vz_rel - v_n * nz;
+                                                float v_t_mag = sqrtf(v_tx * v_tx + v_ty * v_ty + v_tz * v_tz);
+
+                                                float J_tx = 0.0f, J_ty = 0.0f, J_tz = 0.0f;
+                                                if (v_t_mag > 1.0e-5f && friction_coef > 0.0f) {
+                                                    float J_t_limit = fminf(friction_coef * J_n, m_eff * v_t_mag);
+                                                    float inv_vt = J_t_limit / v_t_mag;
+                                                    J_tx = v_tx * inv_vt;
+                                                    J_ty = v_ty * inv_vt;
+                                                    J_tz = v_tz * inv_vt;
+                                                }
+
+                                                float Jx = J_n * nx - J_tx;
+                                                float Jy = J_n * ny - J_ty;
+                                                float Jz = J_n * nz - J_tz;
+
+                                                float inv_mp = 1.0f / m_p;
+                                                float inv_mq = 1.0f / m_q;
+
+                                                float dv_p_x = Jx * inv_mp;
+                                                float dv_p_y = Jy * inv_mp;
+                                                float dv_p_z = Jz * inv_mp;
+
+                                                atomicAdd(&soa.v[0][p], dv_p_x);
+                                                atomicAdd(&soa.v[1][p], dv_p_y);
+                                                atomicAdd(&soa.v[2][p], dv_p_z);
+
+                                                atomicAdd(&soa.v[0][q], -Jx * inv_mq);
+                                                atomicAdd(&soa.v[1][q], -Jy * inv_mq);
+                                                atomicAdd(&soa.v[2][q], -Jz * inv_mq);
+
+                                                p_vx += dv_p_x;
+                                                p_vy += dv_p_y;
+                                                p_vz += dv_p_z;
+                                                total_dv_p += sqrtf(dv_p_x * dv_p_x + dv_p_y * dv_p_y + dv_p_z * dv_p_z);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    q = particle_next[q];
+                }
+            }
+        }
+    }
+
+    if (total_dv_p > 25.0f && soa.B[0][0]) {
+        float relax = fmaxf(0.2f, 1.0f - (total_dv_p - 25.0f) * 0.005f);
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                soa.B[r][c][p] *= relax;
+            }
+        }
+    }
+}
+
 void MPMSolver3DCUDA::evaluateDEMContactDevice(float dt) {
-    (void)dt;
+    if (!m_enable_dem_contact || m_num_active_particles == 0 || dt <= 1.0e-12f) return;
+
+    if (!d_dem_cell_head) {
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_dem_cell_head, DEM_HASH_TABLE_SIZE * sizeof(int)), "Allocating d_dem_cell_head");
+    }
+    if (m_allocated_particles > m_allocated_dem_particles || !d_dem_particle_next) {
+        if (d_dem_particle_next) cudaFree(d_dem_particle_next);
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_dem_particle_next, m_allocated_particles * sizeof(int)), "Allocating d_dem_particle_next");
+        m_allocated_dem_particles = m_allocated_particles;
+    }
+
+    int block_size = 256;
+    int grid_clear = (static_cast<int>(DEM_HASH_TABLE_SIZE) + block_size - 1) / block_size;
+    kernel_dem_clear_hash_table_3d<<<grid_clear, block_size>>>(d_dem_cell_head, static_cast<uint32_t>(DEM_HASH_TABLE_SIZE));
+
+    float max_cell_size = fmaxf(fmaxf(m_dx, m_dy), m_dz);
+    if (max_cell_size < 1.0e-4f) max_cell_size = 0.02f;
+    float h_bin = fmaxf(max_cell_size, 1.25f * m_dem_contact_scale * max_cell_size);
+    float inv_h_bin = 1.0f / h_bin;
+
+    int grid_p = (static_cast<int>(m_num_active_particles) + block_size - 1) / block_size;
+    kernel_dem_insert_particles_3d<<<grid_p, block_size>>>(
+        d_soa, static_cast<int>(m_num_active_particles),
+        d_dem_cell_head, d_dem_particle_next, static_cast<uint32_t>(DEM_HASH_TABLE_SIZE),
+        inv_h_bin, m_xmin, m_ymin, m_zmin);
+
+    float contact_scale = fmaxf(0.1f, m_dem_contact_scale);
+    float restitution = fminf(fmaxf(m_dem_restitution, 0.0f), 1.0f);
+    float friction_coef = fmaxf(m_dem_friction, 0.0f);
+
+    kernel_dem_resolve_contact_3d<<<grid_p, block_size>>>(
+        d_soa, static_cast<int>(m_num_active_particles),
+        d_dem_cell_head, d_dem_particle_next, static_cast<uint32_t>(DEM_HASH_TABLE_SIZE),
+        inv_h_bin, m_xmin, m_ymin, m_zmin,
+        contact_scale, restitution, friction_coef,
+        static_cast<int>(m_dem_contact_mode), m_dem_velocity_threshold,
+        d_material_tables, static_cast<int>(m_material_tables.size()));
 }
 
 __global__ void kernel_extract_slice_3d(const MPMGridNode3D* grid, float* slice_out, int nx, int ny, int nz, int axis_code, int offset_idx, int req_qty_code) {

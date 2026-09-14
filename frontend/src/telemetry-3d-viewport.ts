@@ -277,10 +277,11 @@ export class Telemetry3DViewport {
                             lz: Number(changedNode.parameters.lz ?? changedNode.parameters.charge_lz ?? 0.2),
                             rot_x: Number(changedNode.parameters.rot_x ?? changedNode.parameters.charge_rot_x ?? 0.0),
                             rot_y: Number(changedNode.parameters.rot_y ?? changedNode.parameters.charge_rot_y ?? 0.0),
-                            rot_z: Number(changedNode.parameters.rot_z ?? changedNode.parameters.charge_rot_z ?? 0.0)
+                            rot_z: Number(changedNode.parameters.rot_z ?? changedNode.parameters.charge_rot_z ?? 0.0),
+                            visible: changedNode.parameters.visible !== false && !changedNode.parameters.hidden
                         };
-                    } else if (['MPMObject3D'].includes(changedNode.type)) {
-                        const mpmNodes = targetModel?.nodes.filter((n: any) => n.type === 'MPMObject3D') || [];
+                    } else if (['MPMObject3D', 'MPMObject2D'].includes(changedNode.type)) {
+                        const mpmNodes = targetModel?.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D') || [];
                         workerData.mpmObjects = mpmNodes.map((n: any) => ({
                             id: n.id,
                             shape: n.parameters.shape_type || 'Box',
@@ -304,13 +305,82 @@ export class Telemetry3DViewport {
                             scale_x: Number(n.parameters.scale_x ?? 1.0),
                             scale_y: Number(n.parameters.scale_y ?? 1.0),
                             scale_z: Number(n.parameters.scale_z ?? 1.0),
-                            stl_file: n.parameters.stl_file || ''
+                            stl_file: n.parameters.stl_file || '',
+                            visible: n.parameters.visible !== false && !n.parameters.hidden
                         }));
+                    } else if (['FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D'].includes(changedNode.type)) {
+                        const femObjNodes = targetModel?.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D') || [];
+                        workerData.femObjects = femObjNodes.map((n: any) => ({
+                            id: n.id,
+                            type: n.type,
+                            name: n.parameters?.name || n.id,
+                            visible: n.parameters.visible !== false && !n.parameters.hidden,
+                            shape: n.parameters?.shape_type || 'Box',
+                            shape_type: n.parameters?.shape_type || 'Box',
+                            mesh_source: n.parameters?.mesh_source || 'Box Generator',
+                            x: Number(n.parameters?.pos_x ?? 0.0),
+                            y: Number(n.parameters?.pos_y ?? 0.0),
+                            z: Number(n.parameters?.pos_z ?? 0.0),
+                            pos_x: Number(n.parameters?.pos_x ?? 0.0),
+                            pos_y: Number(n.parameters?.pos_y ?? 0.0),
+                            pos_z: Number(n.parameters?.pos_z ?? 0.0),
+                            size_x: Number(n.parameters?.size_x ?? n.parameters?.lx ?? 0.2),
+                            size_y: Number(n.parameters?.size_y ?? n.parameters?.ly ?? 0.2),
+                            size_z: Number(n.parameters?.size_z ?? n.parameters?.lz ?? 0.2),
+                            radius: Number(n.parameters?.radius ?? 0.1),
+                            height: Number(n.parameters?.height ?? 0.2),
+                            rot_x: Number(n.parameters?.rot_x ?? 0.0),
+                            rot_y: Number(n.parameters?.rot_y ?? 0.0),
+                            rot_z: Number(n.parameters?.rot_z ?? 0.0),
+                            k_file: n.parameters?.k_file || ''
+                        }));
+                    } else if (changedNode.type === 'STLGeometry') {
+                        workerData.stlTransform = {
+                            origin_mode: changedNode.parameters.origin_mode || 'CAD Origin',
+                            scale_x: Number(changedNode.parameters.scale_x ?? 1.0),
+                            scale_y: Number(changedNode.parameters.scale_y ?? 1.0),
+                            scale_z: Number(changedNode.parameters.scale_z ?? 1.0),
+                            pos_x: Number(changedNode.parameters.pos_x ?? 0.0),
+                            pos_y: Number(changedNode.parameters.pos_y ?? 0.0),
+                            pos_z: Number(changedNode.parameters.pos_z ?? 0.0),
+                            rot_x: Number(changedNode.parameters.rot_x ?? 0.0),
+                            rot_y: Number(changedNode.parameters.rot_y ?? 0.0),
+                            rot_z: Number(changedNode.parameters.rot_z ?? 0.0),
+                            visible: changedNode.parameters.visible !== false && !changedNode.parameters.hidden
+                        };
+                    } else if (['TriggerLocation3D', 'TriggerLocation', 'DetonatorLocation3D', 'DetonatorLocation'].includes(changedNode.type)) {
+                        const detNodes = targetModel?.nodes.filter((n: any) => ['TriggerLocation3D', 'TriggerLocation', 'DetonatorLocation3D', 'DetonatorLocation'].includes(n.type)) || [];
+                        workerData.detonators = detNodes.map((n: any) => ({
+                            id: n.id,
+                            x: Number(n.parameters?.detonator_x ?? n.parameters?.trigger_x ?? n.parameters?.det_x ?? n.parameters?.pos_x ?? n.parameters?.x ?? 0),
+                            y: Number(n.parameters?.detonator_y ?? n.parameters?.trigger_y ?? n.parameters?.det_y ?? n.parameters?.pos_y ?? n.parameters?.y ?? 0),
+                            z: Number(n.parameters?.detonator_z ?? n.parameters?.trigger_z ?? n.parameters?.det_z ?? n.parameters?.pos_z ?? n.parameters?.z ?? 0),
+                            radius: Number(n.parameters?.detonator_radius ?? n.parameters?.trigger_radius ?? n.parameters?.det_radius ?? n.parameters?.radius ?? 0.01),
+                            visible: n.parameters.visible !== false && !n.parameters.hidden
+                        }));
+                    } else if (['VirtualGauges3D', 'VirtualGauge', 'VirtualGaugeArray'].includes(changedNode.type)) {
+                        const vgNodes = targetModel?.nodes.filter((n: any) => ['VirtualGauges3D', 'VirtualGauge', 'VirtualGaugeArray'].includes(n.type)) || [];
+                        const allGauges: any[] = [];
+                        for (const vgn of vgNodes) {
+                            const isNodeVis = (vgn.parameters.visible !== false && !vgn.parameters.hidden);
+                            if (vgn.parameters.gauges && Array.isArray(vgn.parameters.gauges)) {
+                                for (const g of vgn.parameters.gauges) {
+                                    allGauges.push({
+                                        ...g,
+                                        visible: isNodeVis && (g.visible !== false && !g.hidden)
+                                    });
+                                }
+                            }
+                        }
+                        workerData.gauges = allGauges;
+                    } else if (['Obstacle3D', 'ImmersedObstacle', 'Obstacle'].includes(changedNode.type)) {
+                        workerData.showObstacles = (changedNode.parameters.visible !== false && !changedNode.parameters.hidden);
                     }
                 }
 
                 if (Object.keys(workerData).length > 0) {
                     this.worker.postMessage({ type: 'setConfig', data: workerData });
+                    this.worker.postMessage({ type: 'requestRender' });
                 }
                 this.requestColorbarUpdate();
                 // Do NOT call syncControls(true) when the ONLY changed keys are pure camera
@@ -5815,9 +5885,14 @@ export class Telemetry3DViewport {
             } else {
                 cellSize = Number(mpmMesh?.parameters['cell_size'] ?? mpmMesh?.parameters['dx'] ?? 0.001);
             }
-            const objPpc = state.nodes.find(n => n.type === 'MPMObject3D')?.parameters['ppc'];
-            const domainPpc = Number(objPpc ?? mpmDomain?.parameters['ppc'] ?? mpmMesh?.parameters['ppc'] ?? 8);
-            const pPerDim = Math.max(1, Math.round(Math.cbrt(domainPpc)));
+            const mpmObjects = state.nodes.filter(n => n.type === 'MPMObject3D');
+            let maxPpc = Number(mpmDomain?.parameters['ppc'] ?? mpmMesh?.parameters['ppc'] ?? 8);
+            for (const obj of mpmObjects) {
+                if (obj.parameters['ppc'] != null) {
+                    maxPpc = Math.max(maxPpc, Number(obj.parameters['ppc']));
+                }
+            }
+            const pPerDim = Math.max(1, Math.round(Math.cbrt(maxPpc)));
             return (cellSize / pPerDim) * 0.8;
         }
         return 0.0005;
@@ -7475,12 +7550,12 @@ export class Telemetry3DViewport {
 
         const slicesEnabled = (vpNode.parameters.slices || []).some((s: any) => s.enabled !== false);
         const femVisible = vpNode.parameters.showFEMMesh !== false && (vpNode.parameters.femSolid !== false || vpNode.parameters.femWireframe !== false);
-        const beamVisible = (vpNode.parameters.showBeams !== false && vpNode.parameters.showRebar !== false) &&
-            (vpNode.parameters.beamSolid !== false || vpNode.parameters.rebarSolid !== false || vpNode.parameters.beamWireframe !== false || vpNode.parameters.rebarWireframe !== false);
+        const beamVisible = vpNode.parameters.showBeams !== false && (vpNode.parameters.beamSolid !== false || vpNode.parameters.beamWireframe !== false);
+        const rebarVisible = vpNode.parameters.showRebar !== false && (vpNode.parameters.rebarSolid !== false || vpNode.parameters.rebarWireframe !== false);
         updateChipStyle('slices', slicesEnabled);
         updateChipStyle('fem', femVisible);
         updateChipStyle('beams', beamVisible);
-        updateChipStyle('rebar', beamVisible);
+        updateChipStyle('rebar', rebarVisible);
         updateChipStyle('mpm', vpNode.parameters.showMPMParticles !== false);
         updateChipStyle('stl', vpNode.parameters.show_stl !== false);
         updateChipStyle('obstacles', vpNode.parameters.show_obstacles !== false);
@@ -7690,7 +7765,8 @@ export class Telemetry3DViewport {
                     x: cx, y: cy, z: cz,
                     radius: radius, height: height,
                     lx: lx, ly: ly, lz: lz,
-                    rot_x: rot_x, rot_y: rot_y, rot_z: rot_z
+                    rot_x: rot_x, rot_y: rot_y, rot_z: rot_z,
+                    visible: (chargeNode.parameters.visible !== false && !chargeNode.parameters.hidden)
                 };
 
                 const detConn = (solverNode3D && modelState) ? modelState.connections.find((c: any) => c.toNode === solverNode3D.id && (c.toPort === 'trigger' || c.toPort === 'detonator')) : null;
@@ -7704,7 +7780,7 @@ export class Telemetry3DViewport {
                 }
             }
 
-            const mpmObjectNodes = modelState?.nodes.filter((n: any) => n.type === 'MPMObject3D') || [];
+            const mpmObjectNodes = modelState?.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D') || [];
             const mpmObjects = mpmObjectNodes.map((n: any) => {
                 const geom = this.extractObjectGeometryData(n);
                 const isSTL = (geom?.shape_type === 'STL' || n.parameters?.shape_type === 'STL');
@@ -7733,7 +7809,39 @@ export class Telemetry3DViewport {
                     rot_y: geom?.rot_y ?? 0.0,
                     rot_z: geom?.rot_z ?? 0.0,
                     origin_mode: geom?.origin_mode || n.parameters?.origin_mode || 'CAD Origin',
-                    stl_file: geom?.stl_file || n.parameters?.stl_file || ''
+                    stl_file: geom?.stl_file || n.parameters?.stl_file || '',
+                    visible: n.parameters?.visible !== false && !n.parameters?.hidden
+                };
+            });
+
+            const femObjectNodes = modelState?.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D') || [];
+            const femObjects = femObjectNodes.map((n: any) => {
+                const isSTL = (n.parameters?.shape_type === 'STL' || n.parameters?.mesh_source === 'STL Geometry');
+                const isCADOrigin = (n.parameters?.origin_mode === 'CAD Origin' || !n.parameters?.origin_mode);
+                const defPos = (isSTL && isCADOrigin) ? 0.0 : 0.5;
+                return {
+                    id: n.id,
+                    type: n.type,
+                    name: n.parameters?.name || n.id,
+                    visible: n.parameters?.visible !== false && !n.parameters?.hidden,
+                    shape: n.parameters?.shape_type || 'Box',
+                    shape_type: n.parameters?.shape_type || 'Box',
+                    mesh_source: n.parameters?.mesh_source || 'Box Generator',
+                    x: Number(n.parameters?.pos_x ?? defPos),
+                    y: Number(n.parameters?.pos_y ?? defPos),
+                    z: Number(n.parameters?.pos_z ?? defPos),
+                    pos_x: Number(n.parameters?.pos_x ?? defPos),
+                    pos_y: Number(n.parameters?.pos_y ?? defPos),
+                    pos_z: Number(n.parameters?.pos_z ?? defPos),
+                    size_x: Number(n.parameters?.size_x ?? n.parameters?.lx ?? 0.2),
+                    size_y: Number(n.parameters?.size_y ?? n.parameters?.ly ?? 0.2),
+                    size_z: Number(n.parameters?.size_z ?? n.parameters?.lz ?? 0.2),
+                    radius: Number(n.parameters?.radius ?? 0.1),
+                    height: Number(n.parameters?.height ?? 0.2),
+                    rot_x: Number(n.parameters?.rot_x ?? 0.0),
+                    rot_y: Number(n.parameters?.rot_y ?? 0.0),
+                    rot_z: Number(n.parameters?.rot_z ?? 0.0),
+                    k_file: n.parameters?.k_file || ''
                 };
             });
 
@@ -7743,7 +7851,8 @@ export class Telemetry3DViewport {
                 x: Number(n.parameters?.detonator_x ?? n.parameters?.trigger_x ?? n.parameters?.det_x ?? n.parameters?.pos_x ?? n.parameters?.x ?? 0),
                 y: Number(n.parameters?.detonator_y ?? n.parameters?.trigger_y ?? n.parameters?.det_y ?? n.parameters?.pos_y ?? n.parameters?.y ?? 0),
                 z: Number(n.parameters?.detonator_z ?? n.parameters?.trigger_z ?? n.parameters?.det_z ?? n.parameters?.pos_z ?? n.parameters?.z ?? 0),
-                radius: Number(n.parameters?.detonator_radius ?? n.parameters?.trigger_radius ?? n.parameters?.det_radius ?? n.parameters?.radius ?? 0.01)
+                radius: Number(n.parameters?.detonator_radius ?? n.parameters?.trigger_radius ?? n.parameters?.det_radius ?? n.parameters?.radius ?? 0.01),
+                visible: n.parameters?.visible !== false && !n.parameters?.hidden
             }));
             if (detonatorsList.length === 0 && chargeParams && (chargeParams.det_x !== undefined || chargeParams.det_y !== undefined || chargeParams.det_z !== undefined)) {
                 detonatorsList = [{
@@ -7751,7 +7860,8 @@ export class Telemetry3DViewport {
                     x: chargeParams.det_x,
                     y: chargeParams.det_y,
                     z: chargeParams.det_z,
-                    radius: 0.015
+                    radius: 0.015,
+                    visible: true
                 }];
             }
 
@@ -7805,6 +7915,7 @@ export class Telemetry3DViewport {
                     detonatorOpacity: vpNode.parameters.detonators_opacity ?? vpNode.parameters.detonator_opacity ?? 1.0,
                     detonators: detonatorsList,
                     mpmObjects: mpmObjects,
+                    femObjects: femObjects,
                     stlTransform: geomNode ? {
                         origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
                         scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
@@ -7816,6 +7927,7 @@ export class Telemetry3DViewport {
                         rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
                         rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
                         rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
+                        visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden
                     } : undefined,
                     submeshes: submeshes,
                     ppc: Number(modelState?.nodes.find((n: any) => n.type === 'MPMObject3D')?.parameters['ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D')?.parameters['ppc'] ?? 8),

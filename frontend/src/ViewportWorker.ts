@@ -1755,6 +1755,7 @@ let gpuMPMParticlesBuffer: any = null;
 let gpuMPMParticlesBufferSize: number = 0;
 let cachedMPMVertexData: Float32Array | null = null;
 let gpuUniformBufferMPM: any = null;
+let gpuUniformBufferFEM: any = null;
 let gpuMPMBindGroup: any = null;
 let lastMPMTextureView: any = null;
 let gpuSampler: any = null;
@@ -1905,7 +1906,20 @@ let rawSTLVertices: Float32Array | null = null;
 let rawSTLSubtractiveFlags: Float32Array | null = null;
 let transformedSTLVertices: Float32Array | null = null;
 let transformedRawSTLVertices: Float32Array | null = null;
-let stlTransform = {
+let stlTransform: {
+    origin_mode: string;
+    scale_x: number;
+    scale_y: number;
+    scale_z: number;
+    pos_x: number;
+    pos_y: number;
+    pos_z: number;
+    rot_x: number;
+    rot_y: number;
+    rot_z: number;
+    visible?: boolean;
+    hidden?: boolean;
+} = {
     origin_mode: 'CAD Origin',
     scale_x: 1.0,
     scale_y: 1.0,
@@ -1915,7 +1929,9 @@ let stlTransform = {
     pos_z: 0.0,
     rot_x: 0.0,
     rot_y: 0.0,
-    rot_z: 0.0
+    rot_z: 0.0,
+    visible: true,
+    hidden: false
 };
 let gpuSTLBuffer: any = null;
 let gpuSTLIndexBuffer: any = null;
@@ -3542,6 +3558,31 @@ function rotatePointEuler(u: number, v: number, w: number, ax: number, ay: numbe
     return [u_rot, v_rot, w_rot];
 }
 
+function invRotatePointEuler(u: number, v: number, w: number, ax: number, ay: number, az: number): [number, number, number] {
+    if (ax === 0 && ay === 0 && az === 0) return [u, v, w];
+    const cx = Math.cos(ax), sx = Math.sin(ax);
+    const cy = Math.cos(ay), sy = Math.sin(ay);
+    const cz = Math.cos(az), sz = Math.sin(az);
+
+    // Step 1: Inverse rotation around Z (-az)
+    const u1 = cz * u + sz * v;
+    const v1 = -sz * u + cz * v;
+    const w1 = w;
+
+    // Step 2: Inverse rotation around Y (-ay)
+    const u2 = cy * u1 - sy * w1;
+    const v2 = v1;
+    const w2 = sy * u1 + cy * w1;
+
+    // Step 3: Inverse rotation around X (-ax)
+    const u_rot = u2;
+    const v_rot = cx * v2 + sx * w2;
+    const w_rot = -sx * v2 + cx * w2;
+
+    return [u_rot, v_rot, w_rot];
+}
+
+
 function getCylinderVertices(cx: number, cy: number, cz: number, r: number, h: number, ax: number, ay: number, az: number, dimX: number, dimY: number, dimZ: number): number[] {
     const verts: number[] = [];
     const segments = 24;
@@ -3659,6 +3700,7 @@ function updateGaugesGeometry() {
 
     let verts: number[] = [];
     for (const g of gaugesList) {
+        if (g.visible === false || g.hidden === true) continue;
         const gx = Number(g.x ?? 0.0);
         const gy = Number(g.y ?? 0.0);
         const gz = Number(g.z ?? 0.0);
@@ -3737,6 +3779,13 @@ let mpmPreviewBuffer: WebGLBuffer | null = null;
 let mpmPreviewCount: number = 0;
 let gpuMPMPreviewBuffer: any = null;
 let gpuMPMPreviewBufferSize: number = 0;
+
+let femObjectsData: any[] = [];
+let femPreviewBuffer: WebGLBuffer | null = null;
+let femPreviewCount: number = 0;
+let gpuFEMPreviewBuffer: any = null;
+let gpuFEMPreviewBufferSize: number = 0;
+let cachedFEMFacetPartMap: Int32Array | null = null;
 
 let latestMPMParticlesData: Float32Array | null = null;
 let latestMPMFloatsPerParticle: number = 14;
@@ -3939,7 +3988,61 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
     let beamEmpiricalMin = Infinity;
     let beamEmpiricalMax = -Infinity;
 
+    if (femObjectsData && femObjectsData.length > 0) {
+        if (!cachedFEMFacetPartMap || cachedFEMFacetPartMap.length !== nFacets) {
+            cachedFEMFacetPartMap = new Int32Array(nFacets);
+            for (let f = 0; f < nFacets; f++) {
+                const n0 = Math.round(latestFEMFacetsData[f * 8 + 0]);
+                const n1 = Math.round(latestFEMFacetsData[f * 8 + 1]);
+                const n2 = Math.round(latestFEMFacetsData[f * 8 + 2]);
+                const n3 = Math.round(latestFEMFacetsData[f * 8 + 3]);
+                const isLine = (n2 < 0 || n3 < 0);
+
+                let fcx = 0, fcy = 0, fcz = 0;
+                if (n0 >= 0 && n0 < nNodes && n1 >= 0 && n1 < nNodes) {
+                    if (isLine) {
+                        fcx = (latestFEMNodesData[n0 * 7 + 0] + latestFEMNodesData[n1 * 7 + 0]) * 0.5;
+                        fcy = (latestFEMNodesData[n0 * 7 + 1] + latestFEMNodesData[n1 * 7 + 1]) * 0.5;
+                        fcz = (latestFEMNodesData[n0 * 7 + 2] + latestFEMNodesData[n1 * 7 + 2]) * 0.5;
+                    } else if (n2 >= 0 && n2 < nNodes) {
+                        const count = (n3 >= 0 && n3 < nNodes) ? 4 : 3;
+                        fcx = (latestFEMNodesData[n0 * 7 + 0] + latestFEMNodesData[n1 * 7 + 0] + latestFEMNodesData[n2 * 7 + 0] + (count === 4 ? latestFEMNodesData[n3 * 7 + 0] : 0)) / count;
+                        fcy = (latestFEMNodesData[n0 * 7 + 1] + latestFEMNodesData[n1 * 7 + 1] + latestFEMNodesData[n2 * 7 + 1] + (count === 4 ? latestFEMNodesData[n3 * 7 + 1] : 0)) / count;
+                        fcz = (latestFEMNodesData[n0 * 7 + 2] + latestFEMNodesData[n1 * 7 + 2] + latestFEMNodesData[n2 * 7 + 2] + (count === 4 ? latestFEMNodesData[n3 * 7 + 2] : 0)) / count;
+                    }
+                }
+                let bestIdx = 0;
+                let bestDist2 = Infinity;
+                for (let o = 0; o < femObjectsData.length; o++) {
+                    const obj = femObjectsData[o];
+                    if (isLine && (obj.type === 'FEMObject3D' || obj.type === 'LSDynaImporter3D')) continue;
+                    if (!isLine && (obj.type === 'FEMBeam3D' || obj.type === 'FEMRebar3D')) continue;
+                    const ocx = Number(obj.x ?? obj.pos_x ?? 0.0);
+                    const ocy = Number(obj.y ?? obj.pos_y ?? 0.0);
+                    const ocz = Number(obj.z ?? obj.pos_z ?? 0.0);
+                    const dx_o = fcx - ocx;
+                    const dy_o = fcy - ocy;
+                    const dz_o = fcz - ocz;
+                    const d2 = dx_o * dx_o + dy_o * dy_o + dz_o * dz_o;
+                    if (d2 < bestDist2) {
+                        bestDist2 = d2;
+                        bestIdx = o;
+                    }
+                }
+                cachedFEMFacetPartMap[f] = bestIdx;
+            }
+        }
+    }
+
     for (let f = 0; f < nFacets; f++) {
+        if (cachedFEMFacetPartMap && femObjectsData && femObjectsData.length > 0) {
+            const partIdx = cachedFEMFacetPartMap[f];
+            if (partIdx >= 0 && partIdx < femObjectsData.length) {
+                const partObj = femObjectsData[partIdx];
+                if (partObj.visible === false || partObj.hidden === true) continue;
+            }
+        }
+
         const n2 = Math.round(latestFEMFacetsData[f * 8 + 2]);
         const n3 = Math.round(latestFEMFacetsData[f * 8 + 3]);
         const isLine = (n2 < 0 || n3 < 0);
@@ -4019,6 +4122,17 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
     let wireIdx = 0;
 
     for (let f = 0; f < nFacets; f++) {
+        let facetObj: any = null;
+        if (cachedFEMFacetPartMap && femObjectsData && femObjectsData.length > 0) {
+            const partIdx = cachedFEMFacetPartMap[f];
+            if (partIdx >= 0 && partIdx < femObjectsData.length) {
+                facetObj = femObjectsData[partIdx];
+                if (facetObj.visible === false || facetObj.hidden === true) {
+                    continue;
+                }
+            }
+        }
+
         const n0 = Math.round(latestFEMFacetsData[f * 8 + 0]);
         const n1 = Math.round(latestFEMFacetsData[f * 8 + 1]);
         const n2 = Math.round(latestFEMFacetsData[f * 8 + 2]);
@@ -4043,11 +4157,15 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         const p1 = [latestFEMNodesData[n1 * 7 + 0] * sx + tx, latestFEMNodesData[n1 * 7 + 1] * sy + ty, latestFEMNodesData[n1 * 7 + 2] * sz + tz];
 
         if (isLine) {
-            const isVisible = (showBeams !== false && showRebar !== false);
-            if (!isVisible) continue;
+            const isBeam = (facetObj?.type === 'FEMBeam3D');
+            const isRebar = (facetObj?.type === 'FEMRebar3D');
+            if (isBeam && showBeams === false) continue;
+            if (isRebar && showRebar === false) continue;
+            if (!isBeam && !isRebar && showBeams === false && showRebar === false) continue;
 
-            const isSolid = (beamSolid !== false && rebarSolid !== false);
-            const isWire = (beamWireframe !== false && rebarWireframe !== false);
+            const isSolid = isBeam ? (beamSolid !== false) : (isRebar ? (rebarSolid !== false) : (beamSolid !== false || rebarSolid !== false));
+            const isWire = isBeam ? (beamWireframe !== false) : (isRebar ? (rebarWireframe !== false) : (beamWireframe !== false || rebarWireframe !== false));
+            if (!isSolid && !isWire) continue;
 
             const val = getBeamQuantityValue(f, beamQuantity);
             let normVal = 0.0;
@@ -4390,8 +4508,24 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     let empiricalMin = Infinity;
     let empiricalMax = -Infinity;
 
+    const isMpmObjVisible: boolean[] = [];
+    if (mpmObjectsData && mpmObjectsData.length > 0) {
+        for (let o = 0; o < mpmObjectsData.length; o++) {
+            const obj = mpmObjectsData[o];
+            isMpmObjVisible[o] = (obj.visible !== false && !obj.hidden);
+        }
+    }
+
     for (let i = 0; i < nParticles; i++) {
         const base = i * stride;
+        if (isMpmObjVisible.length > 0) {
+            const rawId = Math.round(latestMPMParticlesData[base + 12]);
+            const objIdx = rawId > 0 ? (rawId - 1) : 0;
+            if (objIdx >= 0 && objIdx < isMpmObjVisible.length) {
+                if (!isMpmObjVisible[objIdx]) continue;
+            }
+        }
+
         let val = 0.0;
         if (isVelocity) {
             const vx = latestMPMParticlesData[base + 3], vy = latestMPMParticlesData[base + 4], vz = latestMPMParticlesData[base + 5];
@@ -4466,6 +4600,13 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
 
     for (let i = 0; i < nParticles; i += userStep) {
         const base = i * stride;
+        if (isMpmObjVisible.length > 0) {
+            const rawId = Math.round(latestMPMParticlesData[base + 12]);
+            const objIdx = rawId > 0 ? (rawId - 1) : 0;
+            if (objIdx >= 0 && objIdx < isMpmObjVisible.length) {
+                if (!isMpmObjVisible[objIdx]) continue;
+            }
+        }
         if (mpmParticleHideEroded) {
             const hasFailed = latestMPMParticlesData[base + 11] > 0.5;
             const damage = latestMPMParticlesData[base + 10];
@@ -4639,7 +4780,7 @@ function getRotatedBoxWireframeVertices(cx: number, cy: number, cz: number, lx: 
 }
 
 function updateChargeGeometry() {
-    if (!chargeData) {
+    if (!chargeData || chargeData.visible === false || chargeData.hidden === true) {
         chargeCount = 0;
         chargeWireCount = 0;
         return;
@@ -4761,6 +4902,7 @@ function updateDetonatorGeometry() {
     let wireVerts: number[] = [];
 
     items.forEach((item: any) => {
+        if (item.visible === false || item.hidden === true) return;
         const cx = Number(item.x ?? (xmin + dimX * 0.5));
         const cy = Number(item.y ?? (ymin + dimY * 0.5));
         const cz = Number(item.z ?? (zmin + dimZ * 0.5));
@@ -4905,9 +5047,10 @@ function updateMPMPreviewGeometry() {
     let allVerts: number[] = [];
 
     for (const obj of mpmObjectsData) {
-        const cx = Number(obj.x ?? (xmin + dimX * 0.5));
-        const cy = Number(obj.y ?? (ymin + dimY * 0.5));
-        const cz = Number(obj.z ?? (zmin + dimZ * 0.5));
+        if (obj.visible === false || obj.hidden === true) continue;
+        const cx = Number(obj.pos_x ?? obj.x ?? (xmin + dimX * 0.5));
+        const cy = Number(obj.pos_y ?? obj.y ?? (ymin + dimY * 0.5));
+        const cz = Number(obj.pos_z ?? obj.z ?? (zmin + dimZ * 0.5));
 
         const px = normX(cx);
         const py = normY(cy);
@@ -5034,6 +5177,92 @@ function normY(y: number): number {
 function normZ(z: number): number {
     const dimZ = getDimZ();
     return (z - zmin) / dimZ - 0.5;
+}
+
+function updateFEMPreviewGeometry() {
+    if (!femObjectsData || femObjectsData.length === 0) {
+        femPreviewCount = 0;
+        return;
+    }
+
+    const dimX = getDimX();
+    const dimY = getDimY();
+    const dimZ = getDimZ();
+
+    let allVerts: number[] = [];
+
+    for (const obj of femObjectsData) {
+        if (obj.visible === false || obj.hidden === true) continue;
+
+        const cx = Number(obj.x ?? obj.pos_x ?? (xmin + dimX * 0.5));
+        const cy = Number(obj.y ?? obj.pos_y ?? (ymin + dimY * 0.5));
+        const cz = Number(obj.z ?? obj.pos_z ?? (zmin + dimZ * 0.5));
+
+        const px = normX(cx);
+        const py = normY(cy);
+        const pz = normZ(cz);
+
+        if (obj.type === 'FEMBeam3D' || obj.type === 'FEMRebar3D') {
+            const p1x = Number(obj.node1_x ?? (obj.pos_x ?? (obj.x ?? 0)));
+            const p1y = Number(obj.node1_y ?? (obj.pos_y ?? (obj.y ?? 0)));
+            const p1z = Number(obj.node1_z ?? (obj.pos_z ?? (obj.z ?? 0)));
+            const p2x = Number(obj.node2_x ?? (p1x + 0.2));
+            const p2y = Number(obj.node2_y ?? p1y);
+            const p2z = Number(obj.node2_z ?? p1z);
+            allVerts.push(normX(p1x), normY(p1y), normZ(p1z), 0, 0);
+            allVerts.push(normX(p2x), normY(p2y), normZ(p2z), 0, 0);
+            continue;
+        }
+
+        const shape = obj.shape || obj.shape_type || 'Box';
+        if (shape === 'Box') {
+            const lx = Number(obj.size_x ?? obj.lx ?? 0.2);
+            const ly = Number(obj.size_y ?? obj.ly ?? 0.2);
+            const lz = Number(obj.size_z ?? obj.lz ?? 0.2);
+            const rotX = (Number(obj.rot_x) || 0.0) * Math.PI / 180.0;
+            const rotY = (Number(obj.rot_y) || 0.0) * Math.PI / 180.0;
+            const rotZ = (Number(obj.rot_z) || 0.0) * Math.PI / 180.0;
+            const wire = getRotatedBoxWireframeVertices(px, py, pz, lx, ly, lz, rotX, rotY, rotZ, dimX, dimY, dimZ);
+            allVerts.push(...wire);
+        } else if (shape === 'Cylinder') {
+            const r = Number(obj.radius ?? 0.1);
+            const h = Number(obj.height ?? 0.2);
+            const rotX = (Number(obj.rot_x) || 0.0) * Math.PI / 180.0;
+            const rotY = (Number(obj.rot_y) || 0.0) * Math.PI / 180.0;
+            const rotZ = (Number(obj.rot_z) || 0.0) * Math.PI / 180.0;
+            const wire = getCylinderWireframeVertices(px, py, pz, r, h, rotX, rotY, rotZ, dimX, dimY, dimZ);
+            allVerts.push(...wire);
+        } else if (shape === 'Sphere') {
+            const r = Number(obj.radius ?? 0.1);
+            const wire = getSphereWireframeVertices(px, py, pz, r / dimX, r / dimY, r / dimZ);
+            allVerts.push(...wire);
+        }
+    }
+
+    if (gl) {
+        if (!femPreviewBuffer) femPreviewBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, femPreviewBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(allVerts), gl.STATIC_DRAW);
+        femPreviewCount = allVerts.length / 5;
+    }
+
+    if (isWebGPU && gpuDevice) {
+        if (allVerts.length > 0) {
+            const bytes = allVerts.length * 4;
+            if (!gpuFEMPreviewBuffer || gpuFEMPreviewBufferSize < bytes) {
+                if (gpuFEMPreviewBuffer) gpuFEMPreviewBuffer.destroy();
+                gpuFEMPreviewBufferSize = bytes;
+                gpuFEMPreviewBuffer = gpuDevice.createBuffer({
+                    size: bytes,
+                    usage: 32 | 8 // VERTEX | COPY_DST
+                });
+            }
+            gpuDevice.queue.writeBuffer(gpuFEMPreviewBuffer, 0, new Float32Array(allVerts));
+            femPreviewCount = allVerts.length / 5;
+        } else {
+            femPreviewCount = 0;
+        }
+    }
 }
 
 function updateAMRTilesGeometry(tiles: any[]) {
@@ -7313,7 +7542,15 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
             const center = physToNorm(cx, cy, cz);
 
             if (shape === 'Cylinder') {
-                addCleanCylinderWireframe(center, r, h, 2, 48, 16);
+                const rotX = (Number(obj.rot_x ?? objDef?.rot_x) || 0.0) * Math.PI / 180.0;
+                const rotY = (Number(obj.rot_y ?? objDef?.rot_y) || 0.0) * Math.PI / 180.0;
+                const rotZ = (Number(obj.rot_z ?? objDef?.rot_z) || 0.0) * Math.PI / 180.0;
+                if (rotX === 0 && rotY === 0 && rotZ === 0) {
+                    addCleanCylinderWireframe(center, r, h, 2, 48, 16);
+                } else {
+                    const wire = getCylinderWireframeVertices(center[0], center[1], center[2], r, h, rotX, rotY, rotZ, sizeX, sizeY, sizeZ);
+                    lines.push(...wire);
+                }
             } else if (shape === 'Sphere' || shape === 'Circle') {
                 addCleanSphereWireframe(center, r, 48);
             } else if (shape === 'STL') {
@@ -7330,17 +7567,25 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
                     }
                 }
             } else {
-                const boxMin = [
-                    center[0] - (lx * 0.5) / sizeX,
-                    center[1] - (ly * 0.5) / sizeY,
-                    center[2] - (lz * 0.5) / sizeZ
-                ];
-                const boxMax = [
-                    center[0] + (lx * 0.5) / sizeX,
-                    center[1] + (ly * 0.5) / sizeY,
-                    center[2] + (lz * 0.5) / sizeZ
-                ];
-                addCleanBoxWireframe(boxMin, boxMax);
+                const rotX = (Number(obj.rot_x ?? objDef?.rot_x) || 0.0) * Math.PI / 180.0;
+                const rotY = (Number(obj.rot_y ?? objDef?.rot_y) || 0.0) * Math.PI / 180.0;
+                const rotZ = (Number(obj.rot_z ?? objDef?.rot_z) || 0.0) * Math.PI / 180.0;
+                if (rotX === 0 && rotY === 0 && rotZ === 0) {
+                    const boxMin = [
+                        center[0] - (lx * 0.5) / sizeX,
+                        center[1] - (ly * 0.5) / sizeY,
+                        center[2] - (lz * 0.5) / sizeZ
+                    ];
+                    const boxMax = [
+                        center[0] + (lx * 0.5) / sizeX,
+                        center[1] + (ly * 0.5) / sizeY,
+                        center[2] + (lz * 0.5) / sizeZ
+                    ];
+                    addCleanBoxWireframe(boxMin, boxMax);
+                } else {
+                    const wire = getRotatedBoxWireframeVertices(center[0], center[1], center[2], lx, ly, lz, rotX, rotY, rotZ, sizeX, sizeY, sizeZ);
+                    lines.push(...wire);
+                }
             }
         }
     } else if (objectType === 'FEMObject3D' || objectType === 'FEMMesh3D' || objectType === 'FEMBeam3D' || objectType === 'FEMRebar3D' || objectType === 'LSDynaImporter3D') {
@@ -7489,6 +7734,7 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
         const rWorld = Math.max(radiusMeters / maxSize, 0.015);
 
         gaugesList.forEach((g: any, gIdx: number) => {
+            if (g.visible === false || g.hidden === true) return;
             const gx = Number(g.x ?? 0.0);
             const gy = Number(g.y ?? 0.0);
             const gz = Number(g.z ?? 0.0);
@@ -7512,6 +7758,7 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
     if (showDetonators) {
         if (detonatorsList && detonatorsList.length > 0) {
             detonatorsList.forEach((d: any, dIdx: number) => {
+                if (d.visible === false || d.hidden === true) return;
                 const dxCoord = Number(d.x ?? (xmin + sizeX * 0.5));
                 const dyCoord = Number(d.y ?? (ymin + sizeY * 0.5));
                 const dzCoord = Number(d.z ?? (zmin + sizeZ * 0.5));
@@ -7549,7 +7796,7 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
     }
 
     // 3. Explosive Charge
-    if (showCharge && chargeData) {
+    if (showCharge && chargeData && chargeData.visible !== false && !chargeData.hidden) {
         const cx = Number(chargeData.x ?? (xmin + sizeX * 0.5));
         const cy = Number(chargeData.y ?? (ymin + sizeY * 0.5));
         const cz = Number(chargeData.z ?? (zmin + sizeZ * 0.5));
@@ -7648,7 +7895,7 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
     }
 
     // 5. STL Solid CAD Mesh (Spatial BVH with Exact Triangle Intersection)
-    if (showSTL && transformedRawSTLVertices && transformedRawSTLVertices.length >= 9) {
+    if (showSTL && stlTransform?.visible !== false && !stlTransform?.hidden && transformedRawSTLVertices && transformedRawSTLVertices.length >= 9) {
         if (!stlBVH) {
             stlBVH = buildMeshBVH(transformedRawSTLVertices, 9);
         }
@@ -7685,6 +7932,13 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
             if (latestFEMFacetsData && latestFEMFacetsData.length > 0) {
                 const nFacets = Math.floor(latestFEMFacetsData.length / 8);
                 for (let f = 0; f < nFacets; f++) {
+                    if (cachedFEMFacetPartMap && femObjectsData && femObjectsData.length > 0) {
+                        const partIdx = cachedFEMFacetPartMap[f];
+                        if (partIdx >= 0 && partIdx < femObjectsData.length) {
+                            const partObj = femObjectsData[partIdx];
+                            if (partObj.visible === false || partObj.hidden === true) continue;
+                        }
+                    }
                     const n0 = Math.round(latestFEMFacetsData[f * 8 + 0]);
                     const n1 = Math.round(latestFEMFacetsData[f * 8 + 1]);
                     const n2 = Math.round(latestFEMFacetsData[f * 8 + 2]);
@@ -7740,6 +7994,74 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
         }
     }
 
+    // 6b. Configured / Uninitialized FEM Objects
+    if (showFEMMesh && femObjectsData && femObjectsData.length > 0 && (!latestFEMFacetsData || latestFEMFacetsData.length === 0)) {
+        femObjectsData.forEach((obj: any, idx: number) => {
+            if (obj.visible === false || obj.hidden === true) return;
+            const cx = Number(obj.x ?? obj.pos_x ?? (xmin + sizeX * 0.5));
+            const cy = Number(obj.y ?? obj.pos_y ?? (ymin + sizeY * 0.5));
+            const cz = Number(obj.z ?? obj.pos_z ?? (zmin + sizeZ * 0.5));
+            const center = physToWorld(cx, cy, cz);
+            const shape = obj.shape || obj.shape_type || 'Box';
+            if (shape === 'Cylinder') {
+                const r = Number(obj.radius ?? 0.1);
+                const h = Number(obj.height ?? 0.2);
+                const rWorld = r / maxSize;
+                const hWorld = (h * 0.5) / maxSize;
+                const t = rayCylinderIntersect(O, D, center, rWorld, hWorld);
+                if (t !== null && t > 1e-4 && t < minSolidT) {
+                    minSolidT = t;
+                    solidHit = {
+                        t,
+                        hitPoint: [O[0] + t * D[0], O[1] + t * D[1], O[2] + t * D[2]],
+                        objectType: obj.type || 'FEMObject3D',
+                        objectId: obj.id || `fem_${idx}`,
+                        label: obj.name || obj.label || obj.id || 'FEM Object'
+                    };
+                }
+            } else if (shape === 'Sphere') {
+                const r = Number(obj.radius ?? 0.1);
+                const rWorld = Math.max(r / maxSize, 0.01);
+                const t = raySphereIntersect(O, D, center, rWorld);
+                if (t !== null && t > 1e-4 && t < minSolidT) {
+                    minSolidT = t;
+                    solidHit = {
+                        t,
+                        hitPoint: [O[0] + t * D[0], O[1] + t * D[1], O[2] + t * D[2]],
+                        objectType: obj.type || 'FEMObject3D',
+                        objectId: obj.id || `fem_${idx}`,
+                        label: obj.name || obj.label || obj.id || 'FEM Object'
+                    };
+                }
+            } else {
+                const lx = Number(obj.size_x ?? obj.lx ?? 0.2);
+                const ly = Number(obj.size_y ?? obj.ly ?? 0.2);
+                const lz = Number(obj.size_z ?? obj.lz ?? 0.2);
+                const boxMin = [
+                    center[0] - (lx * 0.5) / maxSize,
+                    center[1] - (ly * 0.5) / maxSize,
+                    center[2] - (lz * 0.5) / maxSize
+                ];
+                const boxMax = [
+                    center[0] + (lx * 0.5) / maxSize,
+                    center[1] + (ly * 0.5) / maxSize,
+                    center[2] + (lz * 0.5) / maxSize
+                ];
+                const t = rayBoxIntersect(O, D, boxMin, boxMax);
+                if (t !== null && t > 1e-4 && t < minSolidT) {
+                    minSolidT = t;
+                    solidHit = {
+                        t,
+                        hitPoint: [O[0] + t * D[0], O[1] + t * D[1], O[2] + t * D[2]],
+                        objectType: obj.type || 'FEMObject3D',
+                        objectId: obj.id || `fem_${idx}`,
+                        label: obj.name || obj.label || obj.id || 'FEM Object'
+                    };
+                }
+            }
+        });
+    }
+
     // 7. MPM Particles & Bodies
     if (showMPMParticles && latestMPMParticlesData && latestMPMParticlesData.length > 0 && cachedMpmAABB) {
         const wMpmMin = physToWorld(cachedMpmAABB.minX, cachedMpmAABB.minY, cachedMpmAABB.minZ);
@@ -7761,17 +8083,29 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
     // 8. Configured / Uninitialized MPM Objects
     if (showMPMParticles && mpmObjectsData && mpmObjectsData.length > 0 && (!latestMPMParticlesData || latestMPMParticlesData.length === 0)) {
         mpmObjectsData.forEach((obj: any, idx: number) => {
-            const cx = Number(obj.x ?? (xmin + sizeX * 0.5));
-            const cy = Number(obj.y ?? (ymin + sizeY * 0.5));
-            const cz = Number(obj.z ?? (zmin + sizeZ * 0.5));
+            if (obj.visible === false || obj.hidden === true) return;
+            const cx = Number(obj.pos_x ?? obj.x ?? (xmin + sizeX * 0.5));
+            const cy = Number(obj.pos_y ?? obj.y ?? (ymin + sizeY * 0.5));
+            const cz = Number(obj.pos_z ?? obj.z ?? (zmin + sizeZ * 0.5));
             const center = physToWorld(cx, cy, cz);
-            const shape = obj.shape || 'Box';
+            const shape = obj.shape || obj.shape_type || 'Box';
+            const rotX = (Number(obj.rot_x) || 0.0) * Math.PI / 180.0;
+            const rotY = (Number(obj.rot_y) || 0.0) * Math.PI / 180.0;
+            const rotZ = (Number(obj.rot_z) || 0.0) * Math.PI / 180.0;
             if (shape === 'Cylinder') {
                 const r = Number(obj.radius ?? 0.1);
                 const h = Number(obj.height ?? 0.2);
                 const rWorld = r / maxSize;
                 const hWorld = (h * 0.5) / maxSize;
-                const t = rayCylinderIntersect(O, D, center, rWorld, hWorld);
+                let t: number | null = null;
+                if (rotX === 0 && rotY === 0 && rotZ === 0) {
+                    t = rayCylinderIntersect(O, D, center, rWorld, hWorld);
+                } else {
+                    const relO = [O[0] - center[0], O[1] - center[1], O[2] - center[2]];
+                    const locO = invRotatePointEuler(relO[0], relO[1], relO[2], rotX, rotY, rotZ);
+                    const locD = invRotatePointEuler(D[0], D[1], D[2], rotX, rotY, rotZ);
+                    t = rayCylinderIntersect(locO, locD, [0, 0, 0], rWorld, hWorld);
+                }
                 if (t !== null && t > 1e-4 && t < minSolidT) {
                     minSolidT = t;
                     solidHit = {
@@ -7800,17 +8134,28 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
                 const lx = Number(obj.size_x ?? 0.2);
                 const ly = Number(obj.size_y ?? 0.2);
                 const lz = Number(obj.size_z ?? 0.2);
-                const boxMin = [
-                    center[0] - (lx * 0.5) / maxSize,
-                    center[1] - (ly * 0.5) / maxSize,
-                    center[2] - (lz * 0.5) / maxSize
-                ];
-                const boxMax = [
-                    center[0] + (lx * 0.5) / maxSize,
-                    center[1] + (ly * 0.5) / maxSize,
-                    center[2] + (lz * 0.5) / maxSize
-                ];
-                const t = rayBoxIntersect(O, D, boxMin, boxMax);
+                let t: number | null = null;
+                if (rotX === 0 && rotY === 0 && rotZ === 0) {
+                    const boxMin = [
+                        center[0] - (lx * 0.5) / maxSize,
+                        center[1] - (ly * 0.5) / maxSize,
+                        center[2] - (lz * 0.5) / maxSize
+                    ];
+                    const boxMax = [
+                        center[0] + (lx * 0.5) / maxSize,
+                        center[1] + (ly * 0.5) / maxSize,
+                        center[2] + (lz * 0.5) / maxSize
+                    ];
+                    t = rayBoxIntersect(O, D, boxMin, boxMax);
+                } else {
+                    const relO = [O[0] - center[0], O[1] - center[1], O[2] - center[2]];
+                    const locO = invRotatePointEuler(relO[0], relO[1], relO[2], rotX, rotY, rotZ);
+                    const locD = invRotatePointEuler(D[0], D[1], D[2], rotX, rotY, rotZ);
+                    const hx = (lx * 0.5) / maxSize;
+                    const hy = (ly * 0.5) / maxSize;
+                    const hz = (lz * 0.5) / maxSize;
+                    t = rayBoxIntersect(locO, locD, [-hx, -hy, -hz], [hx, hy, hz]);
+                }
                 if (t !== null && t > 1e-4 && t < minSolidT) {
                     minSolidT = t;
                     solidHit = {
@@ -8261,7 +8606,7 @@ function render() {
         let stlDrawnThisFrameWebGPU = false;
         const drawSTLWebGPU = () => {
             if (stlDrawnThisFrameWebGPU) return;
-            if (!showSTL || !gpuSTLBuffer || !transformedSTLVertices || transformedSTLVertices.length === 0) return;
+            if (!showSTL || (stlTransform && (stlTransform.visible === false || stlTransform.hidden === true)) || !gpuSTLBuffer || !transformedSTLVertices || transformedSTLVertices.length === 0) return;
             const count = transformedSTLVertices.length / 7;
             if (count === 0) return;
 
@@ -8798,6 +9143,35 @@ function render() {
             passEncoder.draw(mpmPreviewCount);
         }
 
+        // Draw Uninitialized FEM Object Wireframes in WebGPU
+        if (showFEMMesh && femSolidCount === 0 && gpuFEMPreviewBuffer && femPreviewCount > 0 && gpuLinePipeline) {
+            if (!gpuUniformBufferFEM) {
+                gpuUniformBufferFEM = gpuDevice.createBuffer({
+                    size: 384,
+                    usage: 64 | 8
+                });
+            }
+            const uFEM = new Float32Array(uniformData);
+            uFEM[48] = 0.9;
+            uFEM[53] = 16.0; // Vibrant Electric Cyan Wireframe
+            gpuDevice.queue.writeBuffer(gpuUniformBufferFEM, 0, uFEM.buffer);
+
+            const femBindGroup = gpuDevice.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: gpuUniformBufferFEM } },
+                    { binding: 1, resource: gpuDummyTextureView },
+                    { binding: 2, resource: gpuSampler! },
+                    { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
+                ]
+            });
+
+            passEncoder.setPipeline(gpuLinePipeline);
+            passEncoder.setBindGroup(0, femBindGroup);
+            passEncoder.setVertexBuffer(0, gpuFEMPreviewBuffer);
+            passEncoder.draw(femPreviewCount);
+        }
+
         // 2. Draw Slices
         const slicesArray = (showSlices !== false) ? Object.values(activeSlicesWebGPU).filter(s => {
             const cfg = getSliceConfig(s.index);
@@ -9158,7 +9532,7 @@ function render() {
     let stlDrawnThisFrameWebGL = false;
     const drawSTLWebGL = () => {
         if (stlDrawnThisFrameWebGL) return;
-        if (!gl || !showSTL || !stlBuffer || !transformedSTLVertices || transformedSTLVertices.length === 0) return;
+        if (!gl || !showSTL || (stlTransform && (stlTransform.visible === false || stlTransform.hidden === true)) || !stlBuffer || !transformedSTLVertices || transformedSTLVertices.length === 0) return;
         const activeGl = gl;
         const count = transformedSTLVertices.length / 7;
         if (count === 0) return;
@@ -9664,6 +10038,18 @@ function render() {
         gl.disableVertexAttribArray(1);
         gl.disableVertexAttribArray(2);
         gl.drawArrays(gl.LINES, 0, mpmPreviewCount);
+    }
+
+    // Draw Uninitialized FEM Object Wireframes in WebGL
+    if (showFEMMesh && femSolidCount === 0 && femPreviewBuffer && femPreviewCount > 0) {
+        if (uIsWF) gl.uniform1i(uIsWF, 16); // Vibrant Electric Cyan
+        if (uAlpha) gl.uniform1f(uAlpha, 0.9);
+        gl.bindBuffer(gl.ARRAY_BUFFER, femPreviewBuffer);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+        gl.enableVertexAttribArray(0);
+        gl.disableVertexAttribArray(1);
+        gl.disableVertexAttribArray(2);
+        gl.drawArrays(gl.LINES, 0, femPreviewCount);
     }
 
     // Draw Primary Selection Highlight (Electric Cyan Frame & Accents)
@@ -10286,7 +10672,9 @@ self.onmessage = async (e) => {
                     pos_z: Number(data.stlTransform.pos_z ?? 0.0),
                     rot_x: Number(data.stlTransform.rot_x ?? 0.0),
                     rot_y: Number(data.stlTransform.rot_y ?? 0.0),
-                    rot_z: Number(data.stlTransform.rot_z ?? 0.0)
+                    rot_z: Number(data.stlTransform.rot_z ?? 0.0),
+                    visible: data.stlTransform.visible !== false && !data.stlTransform.hidden,
+                    hidden: data.stlTransform.hidden === true || data.stlTransform.visible === false
                 };
             }
             updateSTLGeometry();
@@ -10573,6 +10961,9 @@ self.onmessage = async (e) => {
             latestFEMFacetsData = null;
             femSolidCount = 0;
             femWireframeCount = 0;
+            cachedFEMFacetPartMap = null;
+            cachedFemAABB = null;
+            cachedMpmAABB = null;
             cachedSlices = [];
             Object.values(activeSlicesWebGL).forEach(s => {
                 if (gl) {
@@ -10775,10 +11166,13 @@ self.onmessage = async (e) => {
                     pos_z: Number(data.stlTransform.pos_z ?? 0.0),
                     rot_x: Number(data.stlTransform.rot_x ?? 0.0),
                     rot_y: Number(data.stlTransform.rot_y ?? 0.0),
-                    rot_z: Number(data.stlTransform.rot_z ?? 0.0)
+                    rot_z: Number(data.stlTransform.rot_z ?? 0.0),
+                    visible: data.stlTransform.visible !== false && !data.stlTransform.hidden,
+                    hidden: data.stlTransform.hidden === true || data.stlTransform.visible === false
                 };
                 updateSTLGeometry();
                 updateMPMPreviewGeometry();
+                requestRender();
             }
 
             if (data.stlColormap !== undefined) stlColormap = data.stlColormap;
@@ -10865,8 +11259,15 @@ self.onmessage = async (e) => {
             if (data.femOpacity !== undefined) {
                 femOpacity = data.femOpacity;
             }
+            if (data.femObjects !== undefined) {
+                femObjectsData = data.femObjects;
+                cachedFEMFacetPartMap = null;
+                femChanged = true;
+                updateFEMPreviewGeometry();
+            }
             if (femChanged) {
                 updateFEMMeshGeometry();
+                requestRender();
             }
             if (data.gaugeQuantity !== undefined) gaugeQuantity = data.gaugeQuantity;
             if (data.gaugeSolid !== undefined) gaugeSolid = data.gaugeSolid;
@@ -10955,6 +11356,7 @@ self.onmessage = async (e) => {
             if (data.mpmObjects !== undefined) {
                 mpmObjectsData = data.mpmObjects;
                 updateMPMPreviewGeometry();
+                updateMPMParticlesGeometry();
                 requestRender();
             }
             if (mpmChanged) {
@@ -10969,6 +11371,7 @@ self.onmessage = async (e) => {
                 updateChargeGeometry();
                 updateDetonatorGeometry();
                 updateMPMPreviewGeometry();
+                updateFEMPreviewGeometry();
             }
             if (gaugesChanged) {
                 updateGaugesGeometry();

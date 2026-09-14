@@ -82,6 +82,8 @@ const NUMERIC_KEYS = new Set([
     'mg_gamma0', 'mg_c0', 'mg_s',
     'ppc',
     'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+    'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
+    'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
     'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
     'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
     'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
@@ -1940,9 +1942,16 @@ export class PropertyGrid {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const isVisible = p.showMPMParticles !== false;
-            table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
-                this.updateDisplayParam(node, 'showMPMParticles', val);
+            const isDomain = (node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D');
+            const isVisible = isDomain
+                ? (p.showMPMParticles !== false)
+                : (node.parameters.visible !== false && !node.parameters.hidden);
+            table.appendChild(this.createTableRow(isDomain ? 'All MPM Particles Layer' : 'Active in Viewport', this.createCheckbox(isVisible, (val) => {
+                if (isDomain) {
+                    this.updateDisplayParam(node, 'showMPMParticles', val);
+                } else {
+                    this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
+                }
             })));
 
             const styleOptions = [
@@ -2027,9 +2036,16 @@ export class PropertyGrid {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const isVisible = p.showFEMMesh !== false;
-            table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
-                this.updateDisplayParam(node, 'showFEMMesh', val);
+            const isDomain = (node.type === 'FEMDomain3D');
+            const isVisible = isDomain
+                ? (p.showFEMMesh !== false)
+                : (node.parameters.visible !== false && !node.parameters.hidden);
+            table.appendChild(this.createTableRow(isDomain ? 'All FEM Mesh Layer' : 'Active in Viewport', this.createCheckbox(isVisible, (val) => {
+                if (isDomain) {
+                    this.updateDisplayParam(node, 'showFEMMesh', val);
+                } else {
+                    this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
+                }
             })));
 
             const solid = p.femSolid !== false;
@@ -2114,9 +2130,9 @@ export class PropertyGrid {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const isVisible = p.showBeams !== false;
+            const isVisible = node.parameters.visible !== false && !node.parameters.hidden;
             table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
-                this.updateDisplayParam(node, 'showBeams', val);
+                this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
             })));
 
             const solid = p.beamSolid !== false;
@@ -2165,9 +2181,9 @@ export class PropertyGrid {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const isVisible = p.showRebar !== false;
+            const isVisible = node.parameters.visible !== false && !node.parameters.hidden;
             table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
-                this.updateDisplayParam(node, 'showRebar', val);
+                this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
             })));
 
             const solid = p.rebarSolid !== false;
@@ -2205,10 +2221,9 @@ export class PropertyGrid {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const isVisible = p.show_stl !== false && p.showSTL !== false;
+            const isVisible = node.parameters.visible !== false && !node.parameters.hidden;
             table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
-                this.updateDisplayParam(node, 'show_stl', val);
-                this.updateDisplayParam(node, 'showSTL', val);
+                this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
             })));
 
             const solid = p.stl_solids !== false && p.stlSolids !== false;
@@ -2302,10 +2317,9 @@ export class PropertyGrid {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const isVisible = p.show_obstacles !== false && p.showObstacles !== false;
+            const isVisible = node.parameters.visible !== false && !node.parameters.hidden;
             table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
-                this.updateDisplayParam(node, 'show_obstacles', val);
-                this.updateDisplayParam(node, 'showObstacles', val);
+                this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
             })));
 
             const solid = p.obstacles_solid !== false && p.obstaclesSolid !== false;
@@ -2378,10 +2392,9 @@ export class PropertyGrid {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const isVisible = p.show_charge !== false && p.showCharge !== false;
+            const isVisible = node.parameters.visible !== false && !node.parameters.hidden;
             table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
-                this.updateDisplayParam(node, 'show_charge', val);
-                this.updateDisplayParam(node, 'showCharge', val);
+                this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
             })));
 
             const solid = p.charge_solid !== false && p.chargeSolid !== false;
@@ -2422,12 +2435,19 @@ export class PropertyGrid {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const isVisible = (p.show_detonators !== false && p.show_detonator !== false && p.showDetonators !== false && p.show_triggers !== false && p.show_trigger !== false && p.showTriggers !== false);
+            const isDetNode = ['DetonatorLocation3D', 'TriggerLocation3D', 'DetonatorLocation', 'TriggerLocation'].includes(node.type);
+            const isVisible = isDetNode
+                ? (node.parameters.visible !== false && !node.parameters.hidden)
+                : (p.show_detonators !== false && p.show_detonator !== false && p.showDetonators !== false && p.show_triggers !== false && p.show_trigger !== false && p.showTriggers !== false);
             table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
-                this.updateDisplayParam(node, 'show_detonators', val);
-                this.updateDisplayParam(node, 'show_detonator', val);
-                this.updateDisplayParam(node, 'show_triggers', val);
-                this.updateDisplayParam(node, 'show_trigger', val);
+                if (isDetNode) {
+                    this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
+                } else {
+                    this.updateDisplayParam(node, 'show_detonators', val);
+                    this.updateDisplayParam(node, 'show_detonator', val);
+                    this.updateDisplayParam(node, 'show_triggers', val);
+                    this.updateDisplayParam(node, 'show_trigger', val);
+                }
             })));
 
             const solid = (p.detonatorSolid !== false && p.detonators_solid !== false && p.detonator_solid !== false && p.triggerSolid !== false && p.triggers_solid !== false && p.trigger_solid !== false);
@@ -2511,10 +2531,9 @@ export class PropertyGrid {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const isVisible = p.show_gauges !== false && p.showGauges !== false;
+            const isVisible = node.parameters.visible !== false && !node.parameters.hidden;
             table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
-                this.updateDisplayParam(node, 'show_gauges', val);
-                this.updateDisplayParam(node, 'showGauges', val);
+                this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
             })));
 
             const solid = p.gauge_solid !== false && p.gaugeSolid !== false;
@@ -2852,6 +2871,9 @@ export class PropertyGrid {
         const dropdowns: Record<string, string[]> = {
             'preset': dynamicPresets,
             'material_model': getConstitutiveModels(),
+            'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
+            'burn_model': ['Programmed Wavefront Burn', 'Lee-Tarver 3-Stage ODE', 'CREST Shock Entropy Kinetics'],
+            'product_model': ['JWL Product Gas', 'Davis Detonation Product'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
@@ -2920,6 +2942,10 @@ export class PropertyGrid {
             'boundary_filling': ['Stairstepped', 'Partial'],
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
             'smooth_plastic_strain': ['Enabled', 'Disabled'],
+            'enable_sdf_barrier': ['Enabled', 'Disabled'],
+            'contact_method': ['Single-Velocity', 'Sub-Grid DEM', 'Multi-Velocity (Bardenhagen)'],
+            'enable_dem_contact': ['Disabled', 'Enabled'],
+            'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
             'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
             'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'anisotropy_axis': ['X', 'Y', 'Z', 'Custom'],
@@ -2939,6 +2965,10 @@ export class PropertyGrid {
         if (dropdowns[key]) {
             const options = dropdowns[key];
             let currentStr = String(value ?? '');
+            if (options.includes('Enabled') && options.includes('Disabled')) {
+                if (value === true || currentStr === 'true' || currentStr === 'Enabled') currentStr = 'Enabled';
+                else if (value === false || currentStr === 'false' || currentStr === 'Disabled') currentStr = 'Disabled';
+            }
             if (key === 'space_time_scheme' && (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D') && !currentStr) {
                 const so = Number(node.parameters['spatial_order'] ?? 2);
                 const to = Number(node.parameters['temporal_order'] ?? 4);
@@ -2948,7 +2978,9 @@ export class PropertyGrid {
             }
             return this.createDropdown(options, currentStr, (val) => {
                 let castVal: any = val;
-                if (NUMERIC_KEYS.has(key)) {
+                if (val === 'Enabled') castVal = true;
+                else if (val === 'Disabled') castVal = false;
+                else if (NUMERIC_KEYS.has(key)) {
                     const num = Number(val);
                     if (!isNaN(num)) castVal = num;
                 }
@@ -3696,7 +3728,19 @@ export class PropertyGrid {
                     // Energetic solid presets must activate the CREST reactive burn model
                     // so the backend detonation hotspot logic is triggered on INIT_MPM_3D
                     updates['material_model'] = 'CREST Reactive Burn';
+                } else if (presetData.category === 'JWL Programmed Burn Presets') {
+                    updates['material_type'] = 'JWL Charge';
+                    updates['material_model'] = 'JWL Programmed Burn';
+                } else if (presetData.category === 'Lee-Tarver Ignition & Growth Presets') {
+                    updates['material_type'] = 'JWL Charge';
+                    updates['material_model'] = 'Lee-Tarver Ignition & Growth';
                 }
+                if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                if (presetData.reference) updates['reference'] = presetData.reference;
+                if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                if (presetData.product_model) updates['product_model'] = presetData.product_model;
             }
         } else if (node.type === 'Material' && key === 'material_model') {
             if (value === 'Ideal Gas') {
@@ -3730,6 +3774,36 @@ export class PropertyGrid {
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
                 if (presetData) Object.assign(updates, presetData);
+            } else if (value === 'JWL Programmed Burn') {
+                updates['material_model'] = 'JWL Programmed Burn';
+                updates['material_type'] = 'JWL Charge';
+                const defPreset = 'C-4 (Composition C-4) - JWL Programmed Burn';
+                updates['preset'] = defPreset;
+                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                if (presetData) Object.assign(updates, presetData);
+                updates['solid_model'] = presetData?.solid_model || 'Mie-Grüneisen Shock Reactant';
+                updates['burn_model'] = presetData?.burn_model || 'Programmed Wavefront Burn';
+                updates['product_model'] = presetData?.product_model || 'JWL Product Gas';
+            } else if (value === 'Lee-Tarver Ignition & Growth') {
+                updates['material_model'] = 'Lee-Tarver Ignition & Growth';
+                updates['material_type'] = 'JWL Charge';
+                const defPreset = 'LX-17 (TATB/Kel-F 92.5/7.5) - Lee-Tarver I&G';
+                updates['preset'] = defPreset;
+                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                if (presetData) Object.assign(updates, presetData);
+                updates['solid_model'] = presetData?.solid_model || 'Mie-Grüneisen Shock Reactant';
+                updates['burn_model'] = presetData?.burn_model || 'Lee-Tarver 3-Stage ODE';
+                updates['product_model'] = presetData?.product_model || 'JWL Product Gas';
+            } else if (value === 'CREST Reactive Burn') {
+                updates['material_model'] = 'CREST Reactive Burn';
+                delete updates['material_type'];
+                const defPreset = 'PBX 9502 (TATB/Kel-F 95/5) - CREST Davis';
+                updates['preset'] = defPreset;
+                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                if (presetData) Object.assign(updates, presetData);
+                updates['solid_model'] = presetData?.solid_model || 'Davis Solid Reactant';
+                updates['burn_model'] = presetData?.burn_model || 'CREST Shock Entropy Kinetics';
+                updates['product_model'] = presetData?.product_model || 'Davis Detonation Product';
             } else {
                 delete updates['material_type'];
                 delete updates['composition'];
@@ -3804,7 +3878,14 @@ export class PropertyGrid {
         // Live update stats card & discretization rows immediately
         this.updateLiveStats(node);
 
-        const structuralKeys = ['material_model', 'material_type', 'preset', 'composition', 'charge_shape', 'shape_type', 'dimension', 'space_time_scheme', 'init_mode'];
+        const structuralKeys = [
+            'material_model', 'material_type', 'preset', 'composition', 'charge_shape',
+            'shape_type', 'dimension', 'space_time_scheme', 'init_mode',
+            'solid_model', 'burn_model', 'product_model',
+            'enable_heterogeneity', 'enable_anisotropy',
+            'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion',
+            'kc_auto_generate'
+        ];
         if (structuralKeys.includes(key)) {
             this.render(true);
         }
@@ -3871,14 +3952,14 @@ export class PropertyGrid {
         if (node.type === 'Material') {
             syncMPMMaterialParameters(node, node.parameters);
             
-            const matModel = node.parameters['material_model'];
+            const matModel = node.parameters['material_model'] || 'Hypoelastic';
 
             if (matModel === 'Ideal Gas') {
                 return ['material_model', 'preset', 'density', 'atm_pressure', 'atm_temperature', 'gamma'];
             } else if (matModel === 'JWL Detonation Gas') {
-                return ['material_model', 'preset', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+                return ['material_model', 'preset', 'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
             } else if (matModel === 'Ideal Gas Charge') {
-                return ['material_model', 'preset', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma'];
+                return ['material_model', 'preset', 'composition', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma'];
             }
 
             if (!node.parameters['material_model']) {
@@ -3888,121 +3969,149 @@ export class PropertyGrid {
                 node.parameters['preset'] = getDefaultPresetForModel(node.parameters['material_model']);
             }
 
-            const matModelResolved = node.parameters['material_model'];
+            const matModelResolved = node.parameters['material_model'] || 'Hypoelastic';
+            const isEnergetic = ['JWL Programmed Burn', 'Lee-Tarver Ignition & Growth', 'CREST Reactive Burn', 'Davis Reactive Burn'].includes(matModelResolved);
+
+            if (isEnergetic) {
+                const keys: string[] = ['material_model', 'preset', 'transfer_scheme', 'solid_model', 'burn_model', 'product_model'];
+
+                // Pillar 1: Solid Reactant EOS
+                const solidModel = node.parameters['solid_model'] || (matModelResolved.includes('CREST') || matModelResolved.includes('Davis') ? 'Davis Solid Reactant' : 'Mie-Grüneisen Shock Reactant');
+                keys.push('density', 'youngs_modulus', 'poissons_ratio', 'yield_stress');
+                if (solidModel.includes('Davis')) {
+                    keys.push('davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0');
+                } else {
+                    keys.push('mg_c0', 'mg_s', 'mg_gamma0');
+                }
+
+                // Pillar 2: Reaction Kinetics
+                const burnModel = node.parameters['burn_model'] || (matModelResolved === 'Lee-Tarver Ignition & Growth' ? 'Lee-Tarver 3-Stage ODE' : (matModelResolved === 'CREST Reactive Burn' ? 'CREST Shock Entropy Kinetics' : 'Programmed Wavefront Burn'));
+                if (burnModel.includes('Lee-Tarver')) {
+                    keys.push('det_vel', 'detonation_energy', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min');
+                } else if (burnModel.includes('CREST')) {
+                    keys.push('crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold');
+                } else {
+                    keys.push('det_vel', 'detonation_energy', 'burn_zone_cells', 'tau_burn_min');
+                }
+
+                // Pillar 3: Detonation Products EOS
+                const prodModel = node.parameters['product_model'] || (matModelResolved.includes('CREST') || matModelResolved.includes('Davis') ? 'Davis Detonation Product' : 'JWL Product Gas');
+                if (prodModel.includes('Davis')) {
+                    keys.push('davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det');
+                } else {
+                    keys.push('jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega');
+                }
+
+                return keys;
+            }
+
             if (matModelResolved === 'Linear Elastic') {
-                return [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'tensile_failure_stress',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-                ];
-            } else if (matModel === 'Johnson-Cook + Mie-Grüneisen' || matModel === 'Johnson-Cook') {
-                return [
+                const keys = ['material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'tensile_failure_stress'];
+                if (node.parameters['enable_heterogeneity']) {
+                    keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+                }
+                if (node.parameters['enable_anisotropy']) {
+                    keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
+                }
+                return keys;
+            }
+
+            if (matModelResolved === 'Johnson-Cook + Mie-Grüneisen' || matModelResolved === 'Johnson-Cook') {
+                const keys = [
                     'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'failure_strain', 'tensile_failure_stress',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
                     'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
                     'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
                     'T_melt', 'T_room', 'Cp',
-                    'mg_gamma0', 'mg_c0', 'mg_s',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                    'mg_gamma0', 'mg_c0', 'mg_s'
                 ];
-            } else if (matModel === 'CREST Reactive Burn') {
-                return [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'yield_stress', 'hardening_modulus',
-                    'failure_strain', 'tensile_failure_stress',
-                    'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
-                    'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-                ];
-            } else if (matModel === 'Davis Reactive Burn') {
-                return [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'yield_stress', 'hardening_modulus',
-                    'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
-                    'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-                ];
-            } else if (matModel === 'RHT Concrete') {
-                return [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
-                    'directional_crack_band', 'nonlocal_radius',
-                    'failure_strain', 'tensile_failure_stress',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
-                    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-                ];
-            } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'K&C Concrete') {
-                return [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
-                    'directional_crack_band', 'nonlocal_radius',
-                    'failure_strain', 'tensile_failure_stress',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-                ];
-            } else if (matModel === 'CSCM Concrete') {
-                return [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
-                    'directional_crack_band', 'nonlocal_radius',
-                    'failure_strain', 'tensile_failure_stress',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-                ];
-            } else if (matModel === 'Ideal Gas') {
-                return [
-                    'material_model', 'preset',
-                    'density', 'atm_pressure', 'atm_temperature', 'gamma'
-                ];
-            } else if (matModel === 'JWL Detonation Gas' || matModel === 'JWL') {
-                return [
-                    'material_model', 'preset',
-                    'composition', 'rho', 'detonation_energy', 'det_vel',
-                    'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
-                    'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'
-                ];
-            } else if (matModel === 'Deshpande-Fleck Foam') {
-                return [
-                    'material_model', 'preset', 'transfer_scheme',
-                    'density', 'youngs_modulus', 'poissons_ratio',
-                    'yield_stress', 'hardening_modulus',
-                    'failure_strain', 'tensile_failure_stress',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-                ];
-            } else if (matModel === 'Drucker-Prager') {
-                return [
-                    'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
-                ].filter(k => k in node.parameters);
+                if (node.parameters['enable_strain_erosion']) keys.push('enable_strain_erosion', 'erosion_strain');
+                if (node.parameters['enable_stress_erosion']) keys.push('enable_stress_erosion', 'erosion_stress');
+                if (node.parameters['enable_timestep_erosion']) keys.push('enable_timestep_erosion', 'timestep_erosion_factor');
+                if (node.parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+                if (node.parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
+                return keys;
             }
+
+            if (matModelResolved === 'RHT Concrete') {
+                const keys = [
+                    'material_model', 'preset', 'transfer_scheme',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'directional_crack_band', 'nonlocal_radius',
+                    'failure_strain', 'tensile_failure_stress',
+                    'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
+                    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat'
+                ];
+                if (node.parameters['enable_strain_erosion']) keys.push('enable_strain_erosion', 'erosion_strain');
+                if (node.parameters['enable_stress_erosion']) keys.push('enable_stress_erosion', 'erosion_stress');
+                if (node.parameters['enable_timestep_erosion']) keys.push('enable_timestep_erosion', 'timestep_erosion_factor');
+                if (node.parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+                if (node.parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
+                return keys;
+            }
+
+            if (matModelResolved === 'Karagozian & Case (K&C)' || matModelResolved === 'K&C Concrete') {
+                const keys = [
+                    'material_model', 'preset', 'transfer_scheme',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'directional_crack_band', 'nonlocal_radius',
+                    'failure_strain', 'tensile_failure_stress',
+                    'kc_auto_generate'
+                ];
+                if (node.parameters['kc_auto_generate'] === false) {
+                    keys.push('kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega');
+                }
+                if (node.parameters['enable_strain_erosion']) keys.push('enable_strain_erosion', 'erosion_strain');
+                if (node.parameters['enable_stress_erosion']) keys.push('enable_stress_erosion', 'erosion_stress');
+                if (node.parameters['enable_timestep_erosion']) keys.push('enable_timestep_erosion', 'timestep_erosion_factor');
+                if (node.parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+                if (node.parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
+                return keys;
+            }
+
+            if (matModelResolved === 'CSCM Concrete') {
+                const keys = [
+                    'material_model', 'preset', 'transfer_scheme',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
+                    'directional_crack_band', 'nonlocal_radius',
+                    'failure_strain', 'tensile_failure_stress',
+                    'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
+                ];
+                if (node.parameters['enable_strain_erosion']) keys.push('enable_strain_erosion', 'erosion_strain');
+                if (node.parameters['enable_stress_erosion']) keys.push('enable_stress_erosion', 'erosion_stress');
+                if (node.parameters['enable_timestep_erosion']) keys.push('enable_timestep_erosion', 'timestep_erosion_factor');
+                if (node.parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+                if (node.parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
+                return keys;
+            }
+
+            if (matModelResolved === 'Deshpande-Fleck Foam') {
+                return [
+                    'material_model', 'preset', 'transfer_scheme',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'yield_stress', 'hardening_modulus',
+                    'failure_strain', 'tensile_failure_stress'
+                ];
+            }
+
+            // Default Hypoelastic
+            const keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'yield_stress', 'hardening_modulus',
+                'failure_strain', 'tensile_failure_stress'
+            ];
+            if (node.parameters['directional_crack_band']) keys.push('directional_crack_band', 'nonlocal_radius');
+            if (node.parameters['enable_strain_erosion']) keys.push('enable_strain_erosion', 'erosion_strain');
+            if (node.parameters['enable_stress_erosion']) keys.push('enable_stress_erosion', 'erosion_stress');
+            if (node.parameters['enable_timestep_erosion']) keys.push('enable_timestep_erosion', 'timestep_erosion_factor');
+            if (node.parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+            if (node.parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
+            return keys;
         }
 
         if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
@@ -4018,7 +4127,7 @@ export class PropertyGrid {
 
         if (node.type === 'MPMDomain2D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            const keys = ['precision', 'particle_distribution', 'boundary_filling', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
+            const keys = ['precision', 'transfer_scheme', 'particle_distribution', 'boundary_filling', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
             if (hasFLIP) keys.push('flip_blend');
             keys.push('ppc', 'cfl', 'endtime');
             return keys.filter(k => k in node.parameters);
@@ -4026,26 +4135,26 @@ export class PropertyGrid {
 
         if (node.type === 'MPMDomain3D') {
             const hasFLIP = node.parameters['velocity_scheme'] === 'FLIP';
-            const keys = ['device', 'precision', 'particle_distribution', 'boundary_filling', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain'];
+            const keys = ['device', 'precision', 'transfer_scheme', 'particle_distribution', 'boundary_filling', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain', 'contact_method', 'enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale'];
             if (hasFLIP) keys.push('flip_blend');
             keys.push('ppc', 'cfl', 'endtime');
             return keys.filter(k => k in node.parameters);
         }
 
         if (node.type === 'MPMObject2D') {
-            return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'].filter(k => k in node.parameters || k === 'material');
+            return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'].filter(k => k in node.parameters || k === 'material');
         }
 
         if (node.type === 'MPMObject3D') {
             const shape = node.parameters['shape_type'] || 'Box';
             if (shape === 'Box') {
-                return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material');
+                return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material');
             } else if (shape === 'Sphere') {
-                return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'pos_z', 'radius', 'inner_radius', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material');
+                return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'pos_x', 'pos_y', 'pos_z', 'radius', 'inner_radius', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material');
             } else if (shape === 'Cylinder') {
-                return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'pos_z', 'radius', 'inner_radius', 'height', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material');
+                return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'radius', 'inner_radius', 'height', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material');
             } else if (shape === 'STL') {
-                return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'voxelization_method', 'stl_file', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material' || k === 'origin_mode');
+                return ['material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'voxelization_method', 'stl_file', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'].filter(k => k in node.parameters || k === 'material' || k === 'origin_mode');
             }
         }
 
@@ -4278,61 +4387,142 @@ export class PropertyGrid {
         }
 
         if (node.type === 'Material') {
-            const matModel = node.parameters['material_model'];
+            const matModel = node.parameters['material_model'] || 'Hypoelastic';
+            const isEnergetic = ['JWL Programmed Burn', 'Lee-Tarver Ignition & Growth', 'CREST Reactive Burn', 'Davis Reactive Burn'].includes(matModel);
+
+            if (isEnergetic) {
+                const solidModel = node.parameters['solid_model'] || (matModel.includes('CREST') || matModel.includes('Davis') ? 'Davis Solid Reactant' : 'Mie-Grüneisen Shock Reactant');
+                const burnModel = node.parameters['burn_model'] || (matModel === 'Lee-Tarver Ignition & Growth' ? 'Lee-Tarver 3-Stage ODE' : (matModel === 'CREST Reactive Burn' ? 'CREST Shock Entropy Kinetics' : 'Programmed Wavefront Burn'));
+                const prodModel = node.parameters['product_model'] || (matModel.includes('CREST') || matModel.includes('Davis') ? 'Davis Detonation Product' : 'JWL Product Gas');
+
+                let solidShort = solidModel.includes('Davis') ? 'Davis Solid' : 'Mie-Grüneisen';
+                let burnShort = burnModel.includes('Lee-Tarver') ? 'Lee-Tarver ODE' : (burnModel.includes('CREST') ? 'CREST Kinetics' : 'Wavefront Burn');
+                let prodShort = prodModel.includes('Davis') ? 'Davis Gas' : 'JWL Gas';
+
+                addGroup('mat_arch', 'Three-Pillar Architecture & Presets', [
+                    'material_model', 'preset', 'transfer_scheme',
+                    'solid_model', 'burn_model', 'product_model'
+                ]);
+
+                addGroup('mat_solid', `Pillar 1: Solid Reactant EOS [${solidShort}]`, [
+                    'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress',
+                    'mg_c0', 'mg_s', 'mg_gamma0',
+                    'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0'
+                ]);
+
+                addGroup('mat_burn', `Pillar 2: Reaction Kinetics [${burnShort}]`, [
+                    'det_vel', 'detonation_energy', 'burn_zone_cells', 'tau_burn_min',
+                    'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min',
+                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'
+                ]);
+
+                addGroup('mat_prod', `Pillar 3: Detonation Products EOS [${prodShort}]`, [
+                    'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
+                    'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det'
+                ]);
+
+                return groups;
+            }
 
             if (matModel === 'Ideal Gas') {
                 addGroup('mat_ambient', 'Atmospheric & Ambient EOS', [
                     'material_model', 'preset',
                     'density', 'atm_pressure', 'atm_temperature', 'gamma'
                 ]);
-            } else if (matModel === 'JWL Detonation Gas') {
-                addGroup('mat_jwl', 'High-Explosive & JWL EOS', [
-                    'material_model', 'preset',
-                    'rho', 'detonation_energy', 'det_vel',
-                    'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'
-                ]);
-            } else if (matModel === 'Ideal Gas Charge') {
-                addGroup('mat_idealgas', 'Ideal Gas Blast EOS', [
-                    'material_model', 'preset',
-                    'ideal_rho_0', 'ideal_e_0', 'ideal_gamma'
-                ]);
-            } else {
-                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
-                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
-                addGroup('mat_strength', 'Plastic Yield & Concrete Strength', ['yield_stress', 'hardening_modulus', 'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension']);
-                
-                const viscoKeys = visibleKeys.filter(k => 
-                    k.startsWith('jc_') || k.startsWith('mg_') || k.startsWith('rht_') || k.startsWith('kc_') || k.startsWith('cscm_') || 
-                    k.startsWith('davis_') || k.startsWith('crest_') || k === 'T_melt' || k === 'T_room' || k === 'Cp' || 
-                    k === 'rho' || k === 'detonation_energy' || k === 'det_vel' || k.startsWith('jwl_') || k.startsWith('ideal_')
-                );
-                addGroup('mat_visco_eos', 'Viscoplasticity & Shock EOS', viscoKeys);
-
-                const failureKeys = visibleKeys.filter(k => 
-                    k === 'failure_strain' || k === 'tensile_failure_stress' || k === 'directional_crack_band' || k === 'nonlocal_radius' || 
-                    k.includes('erosion')
-                );
-                addGroup('mat_failure', 'Constitutive Failure & Erosion', failureKeys);
-
-                const flawsKeys = visibleKeys.filter(k => 
-                    k === 'enable_heterogeneity' || k.startsWith('weibull_')
-                );
-                addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', flawsKeys);
-
-                const anisoKeys = visibleKeys.filter(k => 
-                    k === 'enable_anisotropy' || k.startsWith('anisotropy_')
-                );
-                addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', anisoKeys);
+                return groups;
             }
 
-            const remainingMat = visibleKeys.filter(k => !assignedKeys.has(k));
-            addGroup('mat_general', 'General Parameters', remainingMat);
+            if (matModel === 'JWL Detonation Gas') {
+                addGroup('mat_jwl', 'High-Explosive & JWL EOS', [
+                    'material_model', 'preset',
+                    'composition', 'rho', 'detonation_energy', 'det_vel',
+                    'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'
+                ]);
+                return groups;
+            }
+
+            if (matModel === 'Ideal Gas Charge') {
+                addGroup('mat_idealgas', 'Ideal Gas Blast EOS', [
+                    'material_model', 'preset',
+                    'composition', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma'
+                ]);
+                return groups;
+            }
+
+            if (matModel === 'Linear Elastic') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Spall Failure', ['density', 'youngs_modulus', 'poissons_ratio', 'tensile_failure_stress']);
+                if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
+                    addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
+                }
+                if (visibleKeys.some(k => k === 'enable_anisotropy' || k.startsWith('anisotropy_'))) {
+                    addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', ['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z']);
+                }
+                return groups;
+            }
+
+            if (matModel === 'Johnson-Cook + Mie-Grüneisen' || matModel === 'Johnson-Cook') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+                addGroup('mat_jc_plasticity', 'Johnson-Cook Viscoplasticity', ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp']);
+                addGroup('mat_jc_damage', 'Failure & Spall Fracture', ['failure_strain', 'tensile_failure_stress', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5']);
+                addGroup('mat_shock_eos', 'Mie-Grüneisen Shock EOS', ['mg_gamma0', 'mg_c0', 'mg_s']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_failure', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
+                    addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
+                }
+                if (visibleKeys.some(k => k === 'enable_anisotropy' || k.startsWith('anisotropy_'))) {
+                    addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', ['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z']);
+                }
+                return groups;
+            }
+
+            if (['RHT Concrete', 'Karagozian & Case (K&C)', 'K&C Concrete', 'CSCM Concrete'].includes(matModel)) {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+                addGroup('mat_strength', 'Concrete Core Strength & Fracture', ['fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension']);
+                const concreteKeys = visibleKeys.filter(k => k.startsWith('rht_') || k.startsWith('kc_') || k.startsWith('cscm_'));
+                if (concreteKeys.length > 0) {
+                    addGroup('mat_concrete_adv', 'Advanced Concrete Damage Parameters', concreteKeys);
+                }
+                addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
+                    addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
+                }
+                if (visibleKeys.some(k => k === 'enable_anisotropy' || k.startsWith('anisotropy_'))) {
+                    addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', ['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z']);
+                }
+                return groups;
+            }
+
+            // Default Hypoelastic / General Solid
+            addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+            addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+            addGroup('mat_strength', 'Plastic Yield & Hardening', ['yield_stress', 'hardening_modulus']);
+            addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius']);
+            if (visibleKeys.some(k => k.includes('erosion'))) {
+                addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+            }
+            if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
+                addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
+            }
+            if (visibleKeys.some(k => k === 'enable_anisotropy' || k.startsWith('anisotropy_'))) {
+                addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', ['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z']);
+            }
             return groups;
         }
 
         if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
             addGroup('mpm_numerics', 'Discretization & Particle Formulation', ['particle_distribution', 'boundary_filling', 'ppc', 'smooth_plastic_strain']);
             addGroup('mpm_time', 'Velocity Scheme & Time Stepping', ['velocity_scheme', 'flip_blend', 'space_time_scheme', 'cfl', 'endtime']);
+            if (node.type === 'MPMDomain3D') {
+                addGroup('mpm_dem_contact', 'Sub-Grid & Multi-Field Contact Mechanics', ['contact_method', 'enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale']);
+            }
             addGroup('mpm_hardware', 'Hardware & Precision', ['device', 'precision']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
@@ -4815,8 +5005,10 @@ export class PropertyGrid {
                     table.appendChild(this.createStatRow('Associated Background Grid', `${(domainMeshNode as any).name || domainMeshNode.parameters?.name || domainMeshNode.type} [${domainMeshNode.id.substring(0, 8)}]`, '#38bdf8'));
                     table.appendChild(this.createStatRow('Grid Cell Spacing (dx)', `dx = ${(cellSize * 1000).toFixed(2)} mm`, '#4ec9b0'));
 
-                    const pSpacing = (cellSize / (node.type === 'MPMObject3D' ? Math.cbrt(domainPpc) : Math.sqrt(domainPpc))) * 1000;
-                    table.appendChild(this.createStatRow('Particle Sampling Spacing', `~${pSpacing.toFixed(2)} mm (${domainPpc} particles/cell)`, '#4ec9b0'));
+                    const effPpc = Number(node.parameters?.ppc ?? domainPpc);
+                    const isPerObj = node.parameters?.ppc !== undefined && node.parameters?.ppc !== null;
+                    const pSpacing = (cellSize / (node.type === 'MPMObject3D' ? Math.cbrt(effPpc) : Math.sqrt(effPpc))) * 1000;
+                    table.appendChild(this.createStatRow('Particle Sampling Spacing', `~${pSpacing.toFixed(2)} mm (${effPpc} particles/cell ${isPerObj ? '[Per-Object Override]' : '[Domain Default]'})`, '#4ec9b0'));
 
                     if (node.type === 'MPMObject3D' && domainMeshNode.type === 'DomainMesh3D') {
                         const gxMin = Number(p.xmin ?? 0.0);

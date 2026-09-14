@@ -39,6 +39,22 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'User-defined custom identifier for the pipeline entity',
         detailedDesc: 'Custom alphanumeric name displayed across the Pipeline Browser, Visual Node Graph, and Property Inspector. Independent of immutable internal node IDs.'
     },
+    'visible': {
+        key: 'visible',
+        label: 'Active in Viewport',
+        category: 'Identification & Hierarchy',
+        shortDesc: 'Controls whether this individual entity is rendered in 3D/2D viewports',
+        detailedDesc: 'Single Source of Truth boolean flag governing the viewport visibility and rendering of this specific object or part. When disabled, the object, its wireframe, and its simulation particles or facets are excluded from the render pipeline without invalidating solver simulation state.',
+        defaultVal: true
+    },
+    'hidden': {
+        key: 'hidden',
+        label: 'Hidden in Viewport',
+        category: 'Identification & Hierarchy',
+        shortDesc: 'Inverse visibility flag maintained for backward compatibility',
+        detailedDesc: 'Complementary boolean flag to visible. When true, suppresses rendering of this entity across all viewports.',
+        defaultVal: false
+    },
 
     // --- Domain & Mesh Discretization ---
     'dimension': {
@@ -876,13 +892,98 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Filter plastic strain across background grid',
         detailedDesc: 'Applies background grid smoothing to accumulated effective plastic strain to prevent unphysical localized shear band singularities.'
     },
+    'enable_sdf_barrier': {
+        key: 'enable_sdf_barrier',
+        label: 'Grid Solid SDF Barrier',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Prevents sparse gaseous and debris particles from tunneling through solid structures',
+        detailedDesc: 'Activates an Eulerian Grid Signed Distance Field (SDF) Kinematic Barrier. Replaces stiff Hookean penalty springs with Moreau-Signorini kinematic impulse projection and exact geometric position correction, unconditionally preventing expanding detonation gases or sparse debris from penetrating solid structures (e.g. steel plates or casings) without CFL timestep reduction or high-frequency acoustic chatter.'
+    },
+    'sdf_barrier_restitution': {
+        key: 'sdf_barrier_restitution',
+        label: 'Barrier Restitution Coefficient',
+        unit: 'ratio [0, 1]',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Kinematic normal velocity reflection coefficient upon solid boundary contact',
+        detailedDesc: 'Kinematic restitution coefficient (e_restitution in [0, 1]) applied to the relative normal approach velocity when a gas or debris particle contacts the solid boundary. 0.0 = fully inelastic stagnation, 0.10 = realistic dissipative shock reflection, 1.0 = fully elastic rebound.'
+    },
+    'sdf_barrier_friction': {
+        key: 'sdf_barrier_friction',
+        label: 'Barrier Coulomb Friction (μ)',
+        unit: 'ratio [0, 1]',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Coulomb wall friction coefficient for tangential slip along solid boundaries',
+        detailedDesc: 'Coulomb friction coefficient (μ in [0, 1]) governing tangential deceleration of gas and debris particles sliding along the solid surface. Allows detonation gases to jet tangentially along metal plates with physical boundary-layer shear resistance.'
+    },
+    'sdf_barrier_skin': {
+        key: 'sdf_barrier_skin',
+        label: 'Barrier Interface Skin Fraction',
+        unit: 'ratio [0, 1]',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Solid volume fraction threshold (S_solid) defining the contact boundary skin',
+        detailedDesc: 'Normalized solid volume fraction threshold (typically 0.40 to 0.60, default 0.50) on the Eulerian Cartesian grid defining the physical half-density continuum boundary where the kinematic SDF barrier activates. Setting this to 0.50 aligns the contact barrier precisely with the physical outer boundary of the solid body, preventing premature contact or artificial separation of adjacent bodies in initial proximity.'
+    },
+    'contact_method': {
+        key: 'contact_method',
+        label: 'Contact Formulation & Method',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Selects the multi-body contact algorithm for inter-material and inter-body interactions',
+        detailedDesc: 'Governs how interacting bodies and materials are handled on the background grid: (1) Single-Velocity (Standard MPM): All particles share a single lumped velocity field at each grid node; touching bodies naturally stick/weld together with continuous velocity. (2) Sub-Grid DEM: Pairwise kinematic impulse contact between Lagrangian particles to prevent high-speed debris and gaseous detonation products from tunneling through solid structures. (3) Multi-Velocity (Bardenhagen): Formulates distinct velocity and momentum fields per material on the background grid (Bardenhagen et al. 2000/2001). Resolves normal non-penetration and tangential Coulomb friction at interface nodes where multiple materials overlap, while allowing natural separation and rebound without numerical sticking.'
+    },
+    'enable_dem_contact': {
+        key: 'enable_dem_contact',
+        label: 'Particle DEM Contact & Barrier',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Enables sub-grid Discrete Element Method (DEM) pairwise contact between MPM particles',
+        detailedDesc: 'Activates sub-grid Discrete Element Method (DEM) kinematic impulse contact resolution between Lagrangian MPM material points. Prevents high-speed detonation gas particles and fragmented debris from tunneling through solid structures (steel casings, concrete walls). Conserves linear momentum exactly via pairwise kinematic impulse exchange and Coulomb frictional slip without Hookean penalty springs, avoiding high-frequency chatter or CFL timestep reductions.'
+    },
+    'dem_friction': {
+        key: 'dem_friction',
+        label: 'DEM Coulomb Friction (μ)',
+        unit: 'ratio [0, 1]',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Coulomb friction coefficient for inter-particle sliding and shear resistance',
+        detailedDesc: 'Coulomb friction coefficient (μ in [0, 1]) governing the tangential slip impulse between contacting particles: J_t <= μ * J_n. Dissipates tangential kinetic energy and prevents unphysical frictionless slipping between debris fragments and structural walls.'
+    },
+    'dem_restitution': {
+        key: 'dem_restitution',
+        label: 'DEM Restitution Coefficient',
+        unit: 'ratio [0, 1]',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Normal restitution coefficient for particle collisions',
+        detailedDesc: 'Coefficient of restitution (e in [0, 1]) applied to relative normal approach velocity during particle contact: v_rel,post = -e * v_rel,pre. For extreme explosive shock and high-speed metal impact, default 0.0 (fully plastic dissipation) provides maximum numerical stability and prevents artificial kinetic bounce.'
+    },
+    'dem_contact_scale': {
+        key: 'dem_contact_scale',
+        label: 'DEM Contact Radius Multiplier',
+        unit: 'multiplier',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Geometric multiplier on particle contact sphere radius',
+        detailedDesc: 'Scaling factor applied to the effective sphere radius of material points (R_contact = scale * 0.5 * (V_p)^(1/3)). Values near 1.0 match the physical continuum particle volume. The stabilized DEM kernel employs in-register relative velocity updates, physical impulse bounds, and APIC affine tensor relaxation to guarantee strict energy dissipation and numerical stability even at elevated multipliers (scale = 1.25 to 1.50+), creating an impenetrable protective barrier against high-velocity particle tunneling without numerical explosions.'
+    },
+    'dem_contact_mode': {
+        key: 'dem_contact_mode',
+        label: 'DEM Contact Interaction Mode',
+        unit: 'discrete mode',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Selective pairwise filtering mode governing which material categories participate in DEM contact',
+        detailedDesc: 'Selects the multi-body contact filtering strategy to protect continuum mechanics while preventing unphysical interpenetration across diverse physics regimes: (1) Gas-Solid Only (Default): Enforces non-penetration strictly between reacted detonation gas products (lambda > 0.5) and solid structures; unreacted explosive and solid-solid interfaces remain 100% governed by the continuum grid without initial boundary shocks. (2) Ballistic Impacts & Gas: Evaluates both reacted gas-solid contact and high-velocity solid-solid inter-object impacts (projectiles, shrapnel, soil ejecta, armor plate impact). (3) All Dynamic Contacts: Evaluates all inter-object particle pairs meeting the relative approach velocity threshold.'
+    },
+    'dem_velocity_threshold': {
+        key: 'dem_velocity_threshold',
+        label: 'DEM Approach Velocity Gate',
+        unit: 'm/s',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Minimum relative normal closing velocity required to activate kinematic contact impulse',
+        detailedDesc: 'Minimum normal approach velocity (|v_n| = -(v_rel · n) >= v_thresh, default 1.0 m/s) required to activate DEM repulsion between particles. Touching CAD interfaces and bodies at rest (v_rel = 0 at t = 0) or separating particles experience identically zero DEM impulse, eliminating artificial pre-detonation shockwaves, pre-shattering, or distortion of explosive charges prior to detonation.'
+    },
     'ppc': {
         key: 'ppc',
         label: 'Particles Per Cell (PPC)',
         unit: 'particles',
         category: 'MPM Particle Mechanics',
-        shortDesc: 'Initial particle sampling density per cell',
-        detailedDesc: 'Number of Lagrangian material points initialized per Eulerian grid cell (typically 4 for 2D, 8 for 3D). Higher PPC resolves complex boundary geometries and fracture fragments with higher fidelity.'
+        shortDesc: 'Particle sampling density per cell (per-object or domain default)',
+        detailedDesc: 'Number of Lagrangian material points initialized per Eulerian grid cell (typically 4 for 2D, 8 for 3D). When configured on an MPMObject2D or MPMObject3D body, it controls particle resolution specifically for that body, overriding the domain default. Higher PPC resolves thin features, curved boundaries, and fracture fragments with higher fidelity.'
     },
     'shape_type': {
         key: 'shape_type',
@@ -1034,6 +1135,39 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Material Constitutive',
         shortDesc: 'Pre-calibrated empirical parameters from literature for the selected model',
         detailedDesc: 'Loads peer-reviewed, laboratory-calibrated material properties dynamically filtered for the active constitutive formulation: structural & armor steels, light alloys, concrete/masonry grades, soils & geomaterials (marine clay, silty clay, saturated mud/slurry, sand, granite, basalt, sandstone, limestone, shale, ice), soft materials & bio-surrogates (10% & 20% ballistic gelatins, hydrodynamic water, silicone tissue simulant, hydrogel), polymers, ceramics, unreacted explosive solids, CFD ideal gases, and JWL detonation products (or Custom).'
+    },
+    'solid_model': {
+        key: 'solid_model',
+        label: 'Pillar 1: Solid Reactant EOS',
+        unit: 'model',
+        category: 'Energetic Material Architecture',
+        shortDesc: 'Unreacted solid reactant equation of state formulation',
+        detailedDesc: 'Thermodynamic equation of state governing unreacted solid explosive before initiation: Mie-Grüneisen Shock Reactant (Rankine-Hugoniot shock velocity Us = c0 + s*up with Grüneisen gamma) or Davis Solid Reactant (Davis-Fickett complete reactant EOS with temperature and specific heat).',
+        allowedValues: ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
+        defaultVal: 'Mie-Grüneisen Shock Reactant',
+        solverScope: 'MPM+FV'
+    },
+    'burn_model': {
+        key: 'burn_model',
+        label: 'Pillar 2: Reaction Kinetics',
+        unit: 'model',
+        category: 'Energetic Material Architecture',
+        shortDesc: 'Detonation reaction progress rate law and kinetics formulation',
+        detailedDesc: 'Chemical reaction rate law governing explosive progress fraction lambda: Programmed Wavefront Burn (Huygens geometric raycast wavefront smearing), Lee-Tarver 3-Stage ODE (ignition at hot-spots, intermediate laminar burn growth, and rapid completion), or CREST Shock Entropy Kinetics (entropy- and shock-filtered hot-spot nucleation).',
+        allowedValues: ['Programmed Wavefront Burn', 'Lee-Tarver 3-Stage ODE', 'CREST Shock Entropy Kinetics'],
+        defaultVal: 'Programmed Wavefront Burn',
+        solverScope: 'MPM+FV'
+    },
+    'product_model': {
+        key: 'product_model',
+        label: 'Pillar 3: Detonation Products EOS',
+        unit: 'model',
+        category: 'Energetic Material Architecture',
+        shortDesc: 'Reacted explosive detonation product gas equation of state',
+        detailedDesc: 'Thermodynamic expansion equation of state for reacted detonation product gases: JWL Product Gas (Jones-Wilkins-Lee high-pressure expansion EOS with dual exponential terms) or Davis Detonation Product (Davis-Fickett product gas EOS with variable adiabatic gamma).',
+        allowedValues: ['JWL Product Gas', 'Davis Detonation Product'],
+        defaultVal: 'JWL Product Gas',
+        solverScope: 'MPM+FV'
     },
     'density': {
         key: 'density',
@@ -1548,6 +1682,146 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Detonator & Initiation',
         shortDesc: 'Initial overpressure for detonator booster seed zone',
         detailedDesc: 'Initial shock overpressure (Pa) applied inside initiation radius to seed hot-spots for CREST reactive burn.'
+    },
+
+    // --- Programmed Burn Wavefront Kinetics ---
+    'burn_zone_cells': {
+        key: 'burn_zone_cells',
+        label: 'Programmed Burn Zone Width',
+        unit: 'cells',
+        category: 'Programmed Wavefront Kinetics',
+        shortDesc: 'Numerical reaction wavefront smearing width in cell units',
+        detailedDesc: 'Number of spatial mesh/grid cells N_cells over which the programmed detonation burn progress variable λ is linearly or sinusoidally smeared across time Δt_burn = N_cells · Δx / D_cj. Prevents numerical grid oscillations and high-frequency acoustic shock ringing.'
+    },
+    'tau_burn_min': {
+        key: 'tau_burn_min',
+        label: 'Minimum Burn Duration Limit',
+        unit: 's',
+        category: 'Programmed Wavefront Kinetics',
+        shortDesc: 'Reaction progress timescale lower bound limiter',
+        detailedDesc: 'Minimum physical burn duration limiter τ_min (s) enforced on programmed reaction progress. Ensures numerical stability when mesh cell size Δx is extremely refined, preventing instantaneous energy deposition.'
+    },
+
+    // --- Lee-Tarver Ignition & Growth Kinetics ---
+    'lt_I': {
+        key: 'lt_I',
+        label: 'Lee-Tarver Ignition Multiplier (I)',
+        unit: '1/s',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Hot-spot formation rate constant for shock ignition',
+        detailedDesc: 'Frequency coefficient I (1/s) in the Lee-Tarver ignition term: dλ_ign/dt = I · (1 - λ)^b · (ρ / ρ₀ - 1 - a)^x for λ < F_ig_max. Governs rate of hot-spot creation under initial shock compression.'
+    },
+    'lt_a': {
+        key: 'lt_a',
+        label: 'Lee-Tarver Ignition Compression Threshold (a)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Critical volumetric compression threshold for hot-spot ignition onset',
+        detailedDesc: 'Dimensionless compression parameter a. Hot-spot ignition initiates strictly when volumetric compression (ρ / ρ₀ - 1) exceeds threshold a. Below this compression level, ignition rate is zero.'
+    },
+    'lt_b': {
+        key: 'lt_b',
+        label: 'Lee-Tarver Ignition Depletion Exponent (b)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Unreacted solid reactant exponent in the ignition rate law',
+        detailedDesc: 'Dimensionless exponent b scaling unreacted solid mass fraction (1 - λ)^b in the hot-spot ignition rate equation.'
+    },
+    'lt_x': {
+        key: 'lt_x',
+        label: 'Lee-Tarver Ignition Compression Exponent (x)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Shock compression sensitivity exponent in the ignition rate law',
+        detailedDesc: 'Dimensionless power x governing sensitivity of hot-spot ignition to shock compression (ρ / ρ₀ - 1 - a)^x.'
+    },
+    'lt_G1': {
+        key: 'lt_G1',
+        label: 'Lee-Tarver Growth Rate Coefficient 1 (G₁)',
+        unit: '1/s',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Intermediate reaction growth rate coefficient',
+        detailedDesc: 'Reaction growth multiplier G₁ (1/s) governing laminar deflagration outward from ignited hot-spots: dλ_grow1/dt = G₁ · (1 - λ)^c · λ^d · p^y for λ < F_G1_max.'
+    },
+    'lt_c': {
+        key: 'lt_c',
+        label: 'Lee-Tarver Growth 1 Reactant Exponent (c)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Unreacted reactant exponent for intermediate growth regime',
+        detailedDesc: 'Dimensionless exponent c scaling remaining unreacted explosive (1 - λ)^c during hot-spot outward burning.'
+    },
+    'lt_d': {
+        key: 'lt_d',
+        label: 'Lee-Tarver Growth 1 Product Exponent (d)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Reacted product fraction exponent for intermediate growth regime',
+        detailedDesc: 'Dimensionless exponent d scaling reaction progress λ^d, representing increasing reactive surface area as hot-spots expand.'
+    },
+    'lt_y': {
+        key: 'lt_y',
+        label: 'Lee-Tarver Growth 1 Pressure Exponent (y)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Pressure sensitivity exponent for intermediate reaction growth',
+        detailedDesc: 'Dimensionless pressure exponent y scaling local pressure p^y in intermediate reaction growth.'
+    },
+    'lt_G2': {
+        key: 'lt_G2',
+        label: 'Lee-Tarver Growth Rate Coefficient 2 (G₂)',
+        unit: '1/s',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Rapid high-pressure detonation completion rate coefficient',
+        detailedDesc: 'Completion rate multiplier G₂ (1/s) governing final high-pressure coalescence and transition to Chapman-Jouguet detonation: dλ_grow2/dt = G₂ · (1 - λ)^e · λ^g · p^z for λ > F_G2_min.'
+    },
+    'lt_e': {
+        key: 'lt_e',
+        label: 'Lee-Tarver Completion Reactant Exponent (e)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Unreacted reactant exponent for high-pressure completion regime',
+        detailedDesc: 'Dimensionless exponent e scaling (1 - λ)^e in high-pressure reaction completion kinetics.'
+    },
+    'lt_g': {
+        key: 'lt_g',
+        label: 'Lee-Tarver Completion Product Exponent (g)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Burned product fraction exponent for completion regime',
+        detailedDesc: 'Dimensionless exponent g scaling λ^g during final detonation completion.'
+    },
+    'lt_z': {
+        key: 'lt_z',
+        label: 'Lee-Tarver Completion Pressure Exponent (z)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Pressure sensitivity exponent for high-pressure completion',
+        detailedDesc: 'Dimensionless pressure exponent z scaling p^z during fast detonation completion.'
+    },
+    'lt_F_ig_max': {
+        key: 'lt_F_ig_max',
+        label: 'Lee-Tarver Ignition Cutoff Progress (F_ig_max)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Maximum reaction progress limit for the ignition regime',
+        detailedDesc: 'Upper reaction progress limit F_ig_max (typically 0.02 - 0.05). Once λ reaches F_ig_max, hot-spot ignition ceases and reaction transitions entirely to pressure-driven growth.'
+    },
+    'lt_F_G1_max': {
+        key: 'lt_F_G1_max',
+        label: 'Lee-Tarver Growth 1 Cutoff Progress (F_G1_max)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Upper progress cutoff limit for intermediate growth regime',
+        detailedDesc: 'Upper reaction progress limit F_G1_max (typically 0.30 - 1.00) beyond which intermediate slow growth terminates.'
+    },
+    'lt_F_G2_min': {
+        key: 'lt_F_G2_min',
+        label: 'Lee-Tarver Growth 2 Onset Progress (F_G2_min)',
+        unit: 'dim',
+        category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Minimum progress onset threshold for rapid detonation completion',
+        detailedDesc: 'Lower reaction progress threshold F_G2_min (typically 0.30 - 0.50) above which high-pressure completion regime 2 activates to rapidly consume remaining reactant.'
     },
 
     // --- Concrete Models (RHT, K&C, CSCM) ---
@@ -3089,6 +3363,14 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
                 <p>The <strong>MPMDomain3D</strong> node executes 3D Material Point Method continuum particle dynamics. Seamlessly models hyper-velocity impact, ductile tearing, ceramic shattering, and explosive detonation on CPU or CUDA GPU backends.</p>
             </div>
             <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & DEM Contact</div>
+                <p>The solver integrates continuum Cauchy momentum conservation across moving Lagrangian material points and an Eulerian background Cartesian grid:</p>
+                <ul>
+                    <li><strong>Particle-to-Grid (P2G) & Grid-to-Particle (G2P):</strong> Transferred via APIC (Affine Particle-In-Cell) or FLIP/PIC velocity schemes with 2nd-order Symplectic Leapfrog time integration.</li>
+                    <li><strong>Discrete Element Method (DEM) Contact Barrier:</strong> An optional sub-grid kinematic impulse contact model resolves inter-particle collisions between distinct bodies (e.g. expanding gaseous detonation products versus casing walls, or high-velocity fragment debris). Momentum is conserved exactly (p.m × Δv_p + q.m × Δv_q = 0) with zero stiff penalty springs, ensuring unconditional stability without reducing the solver CFL timestep.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
                 <div class="node-doc-heading">Inputs & Upstream Connections</div>
                 <ul>
                     <li><strong>Grid (mesh):</strong> Connects from <code>DomainMesh3D</code> to specify the background Cartesian grid dimensions, cell size, and boundary conditions.</li>
@@ -3103,6 +3385,17 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
                     <li><strong>MPM State (mpm_out):</strong> Connects to <code>FSICoupler3D</code> for coupled fluid-structure interaction simulations.</li>
                 </ul>
             </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>enable_dem_contact</code>: Toggle to unconditionally prevent gaseous detonation products or high-velocity debris from tunneling through solid structures.</li>
+                    <li><code>dem_contact_mode</code>: Multi-scenario interaction mode ('Gas-Solid Only' for cased explosives; 'Ballistic Impacts & Gas' for projectiles, armor impacts, and shrapnel; 'All Dynamic Contacts' for general multi-body collisions).</li>
+                    <li><code>dem_velocity_threshold</code>: Minimum closing speed (default 1.0 m/s) to trigger DEM impulse. Prevents static CAD boundaries at rest from experiencing artificial explosive shocks at t = 0.</li>
+                    <li><code>dem_friction</code>: Coulomb friction coefficient (default 0.20) for tangential shearing between contacting particles.</li>
+                    <li><code>dem_restitution</code>: Normal restitution coefficient (default 0.0 for inelastic explosive impact; 1.0 for elastic bouncing).</li>
+                    <li><code>dem_contact_scale</code>: Geometric sphere radius multiplier (default 1.0; increase to 1.10 - 1.50 for impenetrable barriers with stabilized pairwise impulse damping).</li>
+                </ul>
+            </div>
         `
     },
 
@@ -3110,11 +3403,40 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'MPMObject2D',
         title: '2D MPM Solid Object',
         category: 'Lagrangian MPM Solid Mechanics',
-        shortDesc: '2D MPM Primitive Object defining geometry shape, position, initial velocities, and material binding.',
+        shortDesc: '2D MPM Primitive Object defining geometry shape, position, per-object PPC discretization, initial velocities, and material binding.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>MPMObject2D</strong> node defines a discrete 2D deformable solid body represented by MPM material points. Specifies shape, initial position, linear/angular velocity, and material model bindings.</p>
+                <p>The <strong>MPMObject2D</strong> node defines a discrete 2D deformable solid body represented by Lagrangian material points. It specifies shape geometry (Rectangle, Circle), initial position, linear and angular velocities, per-object particle discretization density (PPC), and constitutive material bindings.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Discretization</div>
+                <p>During model initialization, the solid geometry is discretized into discrete material points within the Eulerian background grid cells. The particle sampling density is governed by the per-object <code>ppc</code> parameter:</p>
+                <ul>
+                    <li><strong>Per-Object Resolution (PPC):</strong> Sets the number of particles per cell for this specific object (e.g., 4 PPC = 2×2, 9 PPC = 3×3, 16 PPC = 4×4). This allows fine features or critical bodies to be discretized at higher resolution than surrounding objects.</li>
+                    <li><strong>Particle Volume & Mass:</strong> Particle volume is computed as <code>Vp = (dx × dy) / ppc</code>, and particle mass as <code>mp = Vp × ρ</code>.</li>
+                    <li><strong>Seeding Layout:</strong> Supports Cartesian grid seeding or Hexagonal close-packing to reduce directional lattice bias.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li><strong>Material (material):</strong> Connects to a <code>Material</code> node providing density, elastic moduli, yield stress, hardening, and failure models.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>Object Spec (out):</strong> Connects to the <code>objects</code> port of an <code>MPMDomain2D</code> node.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>ppc</code>: Particle density per cell (default 4). Use 9 or 16 for high-curvature circular boundaries or intense shear deformation.</li>
+                    <li><code>particle_distribution</code>: Choose Cartesian for rectilinear shapes or Hexagonal for isotropic plastic flow.</li>
+                    <li><code>boundary_filling</code>: Choose Partial to accurately capture fractional cell boundary volumes or Stairstepped for full nominal cell volumes.</li>
+                </ul>
             </div>
         `
     },
@@ -3123,11 +3445,42 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'MPMObject3D',
         title: '3D MPM Solid Object',
         category: 'Lagrangian MPM Solid Mechanics',
-        shortDesc: '3D MPM Continuum Solid Object defining geometry, initial velocities, and material bindings.',
+        shortDesc: '3D MPM Continuum Solid Object defining geometry, per-object PPC discretization, initial velocities, and material bindings.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>MPMObject3D</strong> node instantiates a 3D deformable solid body discretized into Lagrangian material points. Supports Box, Cylinder, Sphere, and STL CAD surface geometry sources.</p>
+                <p>The <strong>MPMObject3D</strong> node instantiates a 3D deformable solid body discretized into Lagrangian material points. Supports Box, Cylinder, Sphere, and STL CAD surface geometry sources with independent per-object particle resolution (PPC).</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Discretization</div>
+                <p>The continuous body volume is seeded with Lagrangian material points that carry mass, momentum, deformation gradient, and constitutive state history:</p>
+                <ul>
+                    <li><strong>Per-Object Resolution (PPC):</strong> Controls the number of particles per cell for this specific body (e.g., 8 PPC = 2×2×2, 27 PPC = 3×3×3, 64 PPC = 4×4×4). High-stress components (such as projectiles or casing shells) can be seeded at 27 or 64 PPC while bulky background structures remain at 8 PPC to conserve VRAM.</li>
+                    <li><strong>Particle Volume & Mass:</strong> Particle volume is computed as <code>Vp = (dx × dy × dz) / ppc</code>, and initial mass is <code>mp = Vp × ρ</code>.</li>
+                    <li><strong>CAD Surface Voxelization:</strong> For STL meshes, ray-casting or winding-number solid-angle integration voxelizes the watertight interior into particles according to the object's specific PPC spacing.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li><strong>Material (material):</strong> Connects to a <code>Material</code> node defining constitutive equations (Hypoelastic, Johnson-Cook, Mie-Grüneisen, CREST, Davis, etc.).</li>
+                    <li><strong>STL Geometry (stl):</strong> Optional connection to an <code>STLGeometry</code> node providing triangle surface CAD data.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>Object Spec (out):</strong> Connects to the <code>objects</code> port of an <code>MPMDomain3D</code> node.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>ppc</code>: Particles per cell (default 8). Select 27 (3×3×3) or 64 (4×4×4) for thin projectile penetrators or fragile fragmenting casings.</li>
+                    <li><code>shape_type</code>: Box, Sphere, Cylinder, or STL CAD mesh.</li>
+                    <li><code>particle_distribution</code>: Cartesian or Hexagonal close-packed.</li>
+                    <li><code>voxelization_method</code>: Watertight raycasting or generalized solid-angle winding number for complex CAD files.</li>
+                </ul>
             </div>
         `
     },
@@ -3327,9 +3680,13 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
     if (fvOnlyKeys.includes(key)) return 'FV';
 
     const mpmFvKeys = [
+        'solid_model', 'burn_model', 'product_model',
         'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
         'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-        'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'
+        'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+        'burn_zone_cells', 'tau_burn_min',
+        'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_G2', 'lt_e', 'lt_g', 'lt_z',
+        'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min'
     ];
     if (mpmFvKeys.includes(key)) return 'MPM+FV';
 
@@ -3614,20 +3971,47 @@ export function getParamKeysForNode(
 
     if (nodeType === 'Material') {
         const matModel = parameters['material_model'] || 'Hypoelastic';
+        const isEnergetic = ['JWL Programmed Burn', 'Lee-Tarver Ignition & Growth', 'CREST Reactive Burn', 'Davis Reactive Burn'].includes(matModel);
+
         if (matModel === 'Ideal Gas') {
-            keys = ['material_model', 'preset', 'atm_pressure', 'atm_temperature', 'gamma', 'density'];
+            keys = ['material_model', 'preset', 'density', 'atm_pressure', 'atm_temperature', 'gamma'];
         } else if (matModel === 'JWL Detonation Gas') {
-            keys = ['material_model', 'preset', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+            keys = ['material_model', 'preset', 'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
         } else if (matModel === 'Ideal Gas Charge') {
-            keys = ['material_model', 'preset', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma'];
+            keys = ['material_model', 'preset', 'composition', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma'];
+        } else if (isEnergetic) {
+            keys = ['material_model', 'preset', 'transfer_scheme', 'solid_model', 'burn_model', 'product_model'];
+
+            // Pillar 1: Solid Reactant EOS
+            const solidModel = parameters['solid_model'] || (matModel.includes('CREST') || matModel.includes('Davis') ? 'Davis Solid Reactant' : 'Mie-Grüneisen Shock Reactant');
+            keys.push('density', 'youngs_modulus', 'poissons_ratio', 'yield_stress');
+            if (solidModel.includes('Davis')) {
+                keys.push('davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0');
+            } else {
+                keys.push('mg_c0', 'mg_s', 'mg_gamma0');
+            }
+
+            // Pillar 2: Reaction Kinetics
+            const burnModel = parameters['burn_model'] || (matModel === 'Lee-Tarver Ignition & Growth' ? 'Lee-Tarver 3-Stage ODE' : (matModel === 'CREST Reactive Burn' ? 'CREST Shock Entropy Kinetics' : 'Programmed Wavefront Burn'));
+            if (burnModel.includes('Lee-Tarver')) {
+                keys.push('det_vel', 'detonation_energy', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min');
+            } else if (burnModel.includes('CREST')) {
+                keys.push('crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold');
+            } else {
+                keys.push('det_vel', 'detonation_energy', 'burn_zone_cells', 'tau_burn_min');
+            }
+
+            // Pillar 3: Detonation Products EOS
+            const prodModel = parameters['product_model'] || (matModel.includes('CREST') || matModel.includes('Davis') ? 'Davis Detonation Product' : 'JWL Product Gas');
+            if (prodModel.includes('Davis')) {
+                keys.push('davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det');
+            } else {
+                keys.push('jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega');
+            }
         } else if (matModel === 'Linear Elastic') {
-            keys = [
-                'material_model', 'preset', 'transfer_scheme',
-                'density', 'youngs_modulus', 'poissons_ratio',
-                'tensile_failure_stress',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-            ];
+            keys = ['material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'tensile_failure_stress'];
+            if (parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+            if (parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
         } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
             keys = [
                 'material_model', 'preset', 'transfer_scheme',
@@ -3636,25 +4020,13 @@ export function getParamKeysForNode(
                 'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
                 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
                 'T_melt', 'T_room', 'Cp',
-                'mg_gamma0', 'mg_c0', 'mg_s',
-                'enable_strain_erosion', 'erosion_strain',
-                'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                'mg_gamma0', 'mg_c0', 'mg_s'
             ];
-        } else if (matModel === 'CREST Reactive Burn') {
-            keys = [
-                'material_model', 'preset', 'transfer_scheme',
-                'density', 'youngs_modulus', 'poissons_ratio',
-                'yield_stress', 'hardening_modulus',
-                'failure_strain', 'tensile_failure_stress',
-                'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
-                'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-                'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-            ];
+            if (parameters['enable_strain_erosion']) keys.push('enable_strain_erosion', 'erosion_strain');
+            if (parameters['enable_stress_erosion']) keys.push('enable_stress_erosion', 'erosion_stress');
+            if (parameters['enable_timestep_erosion']) keys.push('enable_timestep_erosion', 'timestep_erosion_factor');
+            if (parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+            if (parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
         } else if (matModel === 'RHT Concrete') {
             keys = [
                 'material_model', 'preset', 'transfer_scheme',
@@ -3663,27 +4035,30 @@ export function getParamKeysForNode(
                 'directional_crack_band', 'nonlocal_radius',
                 'failure_strain', 'tensile_failure_stress',
                 'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
-                'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
-                'enable_strain_erosion', 'erosion_strain',
-                'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat'
             ];
-        } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case') {
+            if (parameters['enable_strain_erosion']) keys.push('enable_strain_erosion', 'erosion_strain');
+            if (parameters['enable_stress_erosion']) keys.push('enable_stress_erosion', 'erosion_stress');
+            if (parameters['enable_timestep_erosion']) keys.push('enable_timestep_erosion', 'timestep_erosion_factor');
+            if (parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+            if (parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
+        } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case' || matModel === 'K&C Concrete') {
             keys = [
                 'material_model', 'preset', 'transfer_scheme',
                 'density', 'youngs_modulus', 'poissons_ratio',
                 'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                 'directional_crack_band', 'nonlocal_radius',
                 'failure_strain', 'tensile_failure_stress',
-                'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
-                'enable_strain_erosion', 'erosion_strain',
-                'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                'kc_auto_generate'
             ];
+            if (parameters['kc_auto_generate'] === false) {
+                keys.push('kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega');
+            }
+            if (parameters['enable_strain_erosion']) keys.push('enable_strain_erosion', 'erosion_strain');
+            if (parameters['enable_stress_erosion']) keys.push('enable_stress_erosion', 'erosion_stress');
+            if (parameters['enable_timestep_erosion']) keys.push('enable_timestep_erosion', 'timestep_erosion_factor');
+            if (parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+            if (parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
         } else if (matModel === 'CSCM Concrete') {
             keys = [
                 'material_model', 'preset', 'transfer_scheme',
@@ -3691,13 +4066,13 @@ export function getParamKeysForNode(
                 'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                 'directional_crack_band', 'nonlocal_radius',
                 'failure_strain', 'tensile_failure_stress',
-                'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
-                'enable_strain_erosion', 'erosion_strain',
-                'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
             ];
+            if (parameters['enable_strain_erosion']) keys.push('enable_strain_erosion', 'erosion_strain');
+            if (parameters['enable_stress_erosion']) keys.push('enable_stress_erosion', 'erosion_stress');
+            if (parameters['enable_timestep_erosion']) keys.push('enable_timestep_erosion', 'timestep_erosion_factor');
+            if (parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+            if (parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
         } else {
             // Default Hypoelastic
             keys = [
@@ -3705,13 +4080,13 @@ export function getParamKeysForNode(
                 'density', 'youngs_modulus', 'poissons_ratio',
                 'yield_stress', 'hardening_modulus',
                 'failure_strain', 'tensile_failure_stress',
-                'directional_crack_band', 'nonlocal_radius',
-                'enable_strain_erosion', 'erosion_strain',
-                'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                'directional_crack_band', 'nonlocal_radius'
             ];
+            if (parameters['enable_strain_erosion']) keys.push('enable_strain_erosion', 'erosion_strain');
+            if (parameters['enable_stress_erosion']) keys.push('enable_stress_erosion', 'erosion_stress');
+            if (parameters['enable_timestep_erosion']) keys.push('enable_timestep_erosion', 'timestep_erosion_factor');
+            if (parameters['enable_heterogeneity']) keys.push('enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume');
+            if (parameters['enable_anisotropy']) keys.push('enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z');
         }
     } else if (nodeType === 'DomainMesh') {
         keys = ['dimension', 'domain_radius', 'cell_size', 'left_bc', 'right_bc'];
@@ -3741,13 +4116,13 @@ export function getParamKeysForNode(
     } else if (nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver') {
         keys = ['connected_detonators', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
     } else if (nodeType === 'MPMDomain3D') {
-        keys = ['device', 'precision', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
+        keys = ['device', 'precision', 'transfer_scheme', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'contact_method', 'enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale', 'cfl', 'endtime'];
     } else if (nodeType === 'MPMDomain2D') {
-        keys = ['precision', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
+        keys = ['precision', 'transfer_scheme', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
     } else if (nodeType === 'MPMObject2D') {
-        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'];
+        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'];
     } else if (nodeType === 'MPMObject3D') {
-        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'voxelization_method', 'stl_file', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
+        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'voxelization_method', 'stl_file', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
     } else if (nodeType === 'FEMDomain3D') {
         keys = [
             'device', 'precision', 'cfl', 'endtime',
@@ -3755,8 +4130,12 @@ export function getParamKeysForNode(
             'enable_directional_crack_band', 'enable_nonlocal_damage',
             'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
             'contact_penalty_scale', 'friction_static', 'friction_kinetic',
-            'enable_heterogeneity', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed',
-            'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+            'damping_alpha', 'mass_scaling_dt', 'subgrid_submesh_depth', 'subgrid_amr_levels',
+            'refinement_criterion', 'max_aspect_ratio', 'contact_smoothing',
+            'nonlocal_radius', 'stress_update_stride', 'stress_extrapolation',
+            'energy_balance_logging', 'adaptive_remesh_interval', 'strain_limit_element_deletion',
+            'shell_formulation', 'solid_element_formulation', 'incompatible_modes',
+            'b_bar_stabilization', 'drill_dof_stabilization', 'initial_temperature'
         ];
     } else if (nodeType === 'FEMObject3D') {
         keys = [
@@ -3818,6 +4197,42 @@ export function shouldSkipNodeParameter(
     if (nodeType === 'VirtualGauges' && key === 'telemetry_channel') return true;
 
     if (nodeType === 'Material') {
+        const matModel = parameters['material_model'] || 'Hypoelastic';
+        const isEnergetic = ['JWL Programmed Burn', 'Lee-Tarver Ignition & Growth', 'CREST Reactive Burn', 'Davis Reactive Burn'].includes(matModel);
+
+        if (isEnergetic) {
+            const solidModel = parameters['solid_model'] || (matModel.includes('CREST') || matModel.includes('Davis') ? 'Davis Solid Reactant' : 'Mie-Grüneisen Shock Reactant');
+            const burnModel = parameters['burn_model'] || (matModel === 'Lee-Tarver Ignition & Growth' ? 'Lee-Tarver 3-Stage ODE' : (matModel === 'CREST Reactive Burn' ? 'CREST Shock Entropy Kinetics' : 'Programmed Wavefront Burn'));
+            const prodModel = parameters['product_model'] || (matModel.includes('CREST') || matModel.includes('Davis') ? 'Davis Detonation Product' : 'JWL Product Gas');
+
+            // Skip non-active pillar parameters
+            if (['davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0'].includes(key) && !solidModel.includes('Davis')) return true;
+            if (['mg_c0', 'mg_s', 'mg_gamma0'].includes(key) && solidModel.includes('Davis')) return true;
+
+            if (['lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min'].includes(key) && !burnModel.includes('Lee-Tarver')) return true;
+            if (['crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'].includes(key) && !burnModel.includes('CREST')) return true;
+            if (['burn_zone_cells', 'tau_burn_min'].includes(key) && (burnModel.includes('Lee-Tarver') || burnModel.includes('CREST'))) return true;
+
+            if (['davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det'].includes(key) && !prodModel.includes('Davis')) return true;
+            if (['jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].includes(key) && prodModel.includes('Davis')) return true;
+
+            // Energetic models do not expose strain hardening / failure / erosion / heterogeneity / anisotropy
+            if (['hardening_modulus', 'failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius'].includes(key)) return true;
+            if (['fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension'].includes(key)) return true;
+            if (['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp'].includes(key)) return true;
+            if (['rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2', 'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat'].includes(key)) return true;
+            if (['kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'].includes(key)) return true;
+            if (['cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'].includes(key)) return true;
+            if (['enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress', 'enable_timestep_erosion', 'timestep_erosion_factor'].includes(key)) return true;
+            if (['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume'].includes(key)) return true;
+            if (['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'].includes(key)) return true;
+        } else {
+            // Non-energetic models do not expose pillar selector dropdowns or reaction kinetics
+            if (['solid_model', 'burn_model', 'product_model'].includes(key)) return true;
+            if (['burn_zone_cells', 'tau_burn_min', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min', 'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'].includes(key)) return true;
+            if (['davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0', 'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det'].includes(key)) return true;
+        }
+
         if (key === 'erosion_strain' && !parameters['enable_strain_erosion']) return true;
         if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
         if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
@@ -3840,6 +4255,15 @@ export function shouldSkipNodeParameter(
         }
     } else if (nodeType === 'MPMDomain2D' || nodeType === 'MPMDomain3D') {
         if (key === 'flip_blend' && parameters['velocity_scheme'] !== 'FLIP') return true;
+        if (nodeType === 'MPMDomain3D') {
+            const method = parameters['contact_method'] || (parameters['enable_dem_contact'] ? 'Sub-Grid DEM' : 'Single-Velocity');
+            if (method === 'Single-Velocity') {
+                if (['enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale'].includes(key)) return true;
+            } else if (method === 'Multi-Velocity (Bardenhagen)') {
+                if (['enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_contact_scale'].includes(key)) return true;
+            }
+        }
+        if (['enable_sdf_barrier', 'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin'].includes(key)) return true;
     } else if (nodeType === 'MPMObject2D') {
         const shape = parameters['shape_type'] || 'Rectangle';
         if (shape === 'Rectangle' && key === 'radius') return true;
@@ -3901,6 +4325,17 @@ export function getNodeSectionInfo(
     is3D: boolean = false
 ): NodeSectionInfo | null {
     if (nodeType === 'Material') {
+        const matModel = parameters['material_model'] || 'Hypoelastic';
+        const isEnergetic = ['JWL Programmed Burn', 'Lee-Tarver Ignition & Growth', 'CREST Reactive Burn', 'Davis Reactive Burn'].includes(matModel);
+
+        if (isEnergetic) {
+            if (key === 'transfer_scheme') return { title: 'MPM TRANSFER SCHEME [MPM ONLY]', color: '#c084fc', defaultCollapsed: false };
+            if (key === 'solid_model') return { title: 'PILLAR 1: SOLID REACTANT EOS [MPM · FV]', color: '#38bdf8', defaultCollapsed: false };
+            if (key === 'burn_model') return { title: 'PILLAR 2: REACTION KINETICS [MPM · FV]', color: '#fb923c', defaultCollapsed: false };
+            if (key === 'product_model') return { title: 'PILLAR 3: DETONATION PRODUCTS EOS [MPM · FV]', color: '#ef4444', defaultCollapsed: false };
+            return null;
+        }
+
         if (key === 'transfer_scheme') return { title: 'MPM TRANSFER SCHEME [MPM ONLY]', color: '#c084fc', defaultCollapsed: false };
         if (key === 'atm_pressure') return { title: 'AMBIENT THERMODYNAMICS [FV ONLY]', color: '#fbbf24', defaultCollapsed: false };
         if (key === 'rho') return { title: 'JWL DETONATION STATE [FV ONLY]', color: '#fbbf24', defaultCollapsed: false };
@@ -3917,6 +4352,15 @@ export function getNodeSectionInfo(
         if (key === 'davis_c0') return { title: 'DAVIS SOLID REACTANT EOS [MPM · FV]', color: '#22d3ee', defaultCollapsed: true };
         if (key === 'davis_a') return { title: 'DAVIS DETONATION PRODUCT EOS [MPM · FV]', color: '#22d3ee', defaultCollapsed: true };
         if (key === 'crest_b1') return { title: 'CREST REACTION KINETICS [MPM · FV]', color: '#22d3ee', defaultCollapsed: true };
+        if (key === 'burn_zone_cells' || (key === 'det_vel' && parameters['material_model'] === 'JWL Programmed Burn')) {
+            return { title: 'PROGRAMMED BURN WAVEFRONT KINETICS [MPM · FV]', color: '#fb923c', defaultCollapsed: false };
+        }
+        if (key === 'lt_I') {
+            return { title: 'LEE-TARVER IGNITION & GROWTH KINETICS [MPM · FV]', color: '#f97316', defaultCollapsed: false };
+        }
+        if (key === 'jwl_A' && (parameters['material_model'] === 'JWL Programmed Burn' || parameters['material_model'] === 'Lee-Tarver Ignition & Growth')) {
+            return { title: 'JWL DETONATION PRODUCT GAS EOS [MPM · FV]', color: '#ef4444', defaultCollapsed: false };
+        }
         if (key === 'rht_A') return { title: 'RHT ENVELOPES & POROUS EOS [MPM · FEM]', color: '#60a5fa', defaultCollapsed: true };
         if (key === 'kc_auto_generate' || key === 'kc_a0') return { title: 'K&C DAMAGE PLASTICITY [MPM · FEM]', color: '#60a5fa', defaultCollapsed: true };
         if (key === 'cscm_alpha') return { title: 'CSCM SMOOTH CAP & DAMAGE [MPM · FEM]', color: '#60a5fa', defaultCollapsed: true };
@@ -3935,7 +4379,8 @@ export function getNodeSectionInfo(
         if (key === 'particle_distribution') return { title: 'PARTICLE DISCRETIZATION', color: '#c084fc', defaultCollapsed: false };
         if (key === 'velocity_scheme') return { title: 'KINEMATICS & TIME STEPPING', color: '#c084fc', defaultCollapsed: false };
     } else if (nodeType === 'MPMObject2D' || nodeType === 'MPMObject3D') {
-        if (key === 'pos_x' || key === 'size_x' || key === 'radius' || key === 'stl_file') return { title: 'SPATIAL EXTENT & GEOMETRY', color: '#c084fc', defaultCollapsed: false };
+        if (key === 'particle_distribution' || key === 'boundary_filling' || key === 'ppc') return { title: 'PARTICLE DISCRETIZATION & SEEDING', color: '#c084fc', defaultCollapsed: false };
+        if (key === 'pos_x' || key === 'size_x' || key === 'radius' || key === 'stl_file' || key === 'shape_type' || key === 'voxelization_method' || key === 'origin_mode') return { title: 'SPATIAL EXTENT & GEOMETRY', color: '#c084fc', defaultCollapsed: false };
         if (key === 'vel_x') return { title: 'INITIAL VELOCITY & MOTION', color: '#c084fc', defaultCollapsed: true };
     } else if (nodeType === 'STLGeometry') {
         if (key === 'stl_file') return { title: 'CAD FILE & VOXELIZATION', color: '#569cd6', defaultCollapsed: false };

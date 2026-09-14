@@ -4,9 +4,9 @@
 #include <iomanip>
 #include <cmath>
 
-void run_test(const std::string& name, Blast::MPMMaterialModel model_type, Blast::MPMTransferScheme transfer_scheme) {
+void run_test(const std::string& name, Blast::MPMMaterialModel model_type, Blast::MPMTransferScheme transfer_scheme, float vel_z = -115.0f) {
     std::cout << "\n===========================================================\n";
-    std::cout << "RUNNING EXACT UI TAYLOR ANVIL TEST: " << name << "\n";
+    std::cout << "RUNNING EXACT UI TAYLOR ANVIL TEST: " << name << " (vel_z = " << vel_z << " m/s)\n";
     std::cout << "===========================================================\n";
 
     float xmin = -0.015f, xmax = 0.015f;
@@ -37,9 +37,9 @@ void run_test(const std::string& name, Blast::MPMMaterialModel model_type, Blast
     solver.setSmoothPlasticStrain(true);
     solver.setBoundaryConditions(bc_trans, bc_trans, bc_trans, bc_trans, bc_refl, bc_trans);
 
-    // Cylinder: pos_z = 0.0254, r = 0.004, h = 0.04, v_z = -115 m/s
+    // Cylinder: pos_z = 0.0254, r = 0.004, h = 0.04
     solver.addCylinderObject(1, 0.0f, 0.0f, 0.0254f, 0.004f, 0.0f, 0.04f,
-                             0.0f, 0.0f, -115.0f, 0.0f, 0.0f, 0.0f,
+                             0.0f, 0.0f, vel_z, 0.0f, 0.0f, 0.0f,
                              8960.0f, 124.0e9f, 0.34f,
                              90.0e6f, 292.0e6f, 0.54f, 230.0e6f, 8);
 
@@ -51,6 +51,17 @@ void run_test(const std::string& name, Blast::MPMMaterialModel model_type, Blast
     mat.tensile_failure_stress = 230.0e6f;
     mat.enable_strain_erosion = false;
     mat.enable_stress_erosion = false;
+    mat.jc_A = 90.0e6f;
+    mat.jc_B = 292.0e6f;
+    mat.jc_n = 0.31f;
+    mat.jc_C = 0.025f;
+    mat.jc_m = 1.09f;
+    mat.T_melt = 1356.0f;
+    mat.T_room = 293.0f;
+    mat.Cp = 383.0f;
+    mat.mg_gamma0 = 2.02f;
+    mat.mg_c0 = 3940.0f;
+    mat.mg_s = 1.49f;
 
     solver.syncToDevice();
     size_t num_particles = solver.getParticles().size();
@@ -60,12 +71,12 @@ void run_test(const std::string& name, Blast::MPMMaterialModel model_type, Blast
     double sim_time = 0.0;
     int step = 0;
 
-    for (int i = 1; i <= 2000; ++i) {
+    for (int i = 1; i <= 3000; ++i) {
         solver.step(cfl);
         step++;
         sim_time = solver.getSimTime();
 
-        if (i % 100 == 0 || i == 1 || i == 10) {
+        if (i % 500 == 0 || i == 1 || i == 100) {
             solver.syncToHost();
             const auto& parts = solver.getParticles();
             float min_z = 1e9f, max_z = -1e9f, max_r = 0.0f, max_v = 0.0f, max_ep = 0.0f;
@@ -104,7 +115,9 @@ void run_test(const std::string& name, Blast::MPMMaterialModel model_type, Blast
 }
 
 int main() {
-    run_test("Variant 1: Linear Elastic (BSpline)", Blast::MPMMaterialModel::LinearElastic, Blast::MPMTransferScheme::BSpline);
-    run_test("Variant 3: Johnson-Cook (BSpline)", Blast::MPMMaterialModel::JohnsonCookMieGruneisen, Blast::MPMTransferScheme::BSpline);
+    run_test("Johnson-Cook (BSpline, vel=-200)", Blast::MPMMaterialModel::JohnsonCookMieGruneisen, Blast::MPMTransferScheme::BSpline, -200.0f);
+    run_test("Johnson-Cook (RadialMLS, vel=-200)", Blast::MPMMaterialModel::JohnsonCookMieGruneisen, Blast::MPMTransferScheme::RadialMLS, -200.0f);
+    run_test("Hypoelastic (BSpline, vel=-200)", Blast::MPMMaterialModel::Hypoelastic, Blast::MPMTransferScheme::BSpline, -200.0f);
+    run_test("Hypoelastic (RadialMLS, vel=-200)", Blast::MPMMaterialModel::Hypoelastic, Blast::MPMTransferScheme::RadialMLS, -200.0f);
     return 0;
 }

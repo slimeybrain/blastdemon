@@ -1,4 +1,6 @@
 #include "mpm_solver_2d.hpp"
+#include "constitutive_jwl.hpp"
+#include "constitutive_lee_tarver.hpp"
 #include <cstring>
 
 namespace Blast {
@@ -103,7 +105,7 @@ void MPMSolver2D::addRectangleObject(int obj_id, float pos_x, float pos_y, float
                                      MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
     (void)boundary_fill;
     int particles_per_dim = static_cast<int>(std::round(std::sqrt(static_cast<float>(ppc))));
-    if (particles_per_dim < 1) particles_per_dim = 2;
+    if (particles_per_dim < 1) particles_per_dim = 1;
 
     float p_dx = m_dx / static_cast<float>(particles_per_dim);
     float p_dy = (particle_dist == MPMParticleDistribution::Hexagonal) ? 
@@ -167,7 +169,7 @@ void MPMSolver2D::addCircleObject(int obj_id, float pos_x, float pos_y, float ra
                                   float yield_stress, float hardening, float failure_strain, float tensile_failure_stress, int ppc,
                                   MPMParticleDistribution particle_dist, MPMBoundaryFilling boundary_fill) {
     int particles_per_dim = static_cast<int>(std::round(std::sqrt(static_cast<float>(ppc))));
-    if (particles_per_dim < 1) particles_per_dim = 2;
+    if (particles_per_dim < 1) particles_per_dim = 1;
 
     float p_dx = m_dx / static_cast<float>(particles_per_dim);
     float p_dy = (particle_dist == MPMParticleDistribution::Hexagonal) ? 
@@ -1135,6 +1137,144 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             return;
         }
 
+        // --- JWL Programmed Wavefront Burn Model ---
+        if (p.material_model == MPMMaterialModel::JWLProgrammedBurn) {
+            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.02f * p.V0, 50.0f * p.V0);
+            const float v_rel = std::clamp(p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f), 0.02f, 50.0f);
+            float t_arr = p.t_arrival;
+            float lam_curr = p.lambda;
+
+            // Kinematic wavefront arrival
+            float h_min = std::min(m_dx, m_dy);
+            float tau_burn = std::max(static_cast<float>(p.burn_zone_cells) * h_min / std::max(p.det_vel, 100.0f), p.tau_burn_min);
+            float lam_prog = JWL::computeProgrammedProgress(static_cast<float>(m_sim_time), t_arr, tau_burn);
+            float lam_new = std::max(lam_curr, lam_prog);
+            p.lambda = lam_new;
+            float d_lam = std::max(0.0f, lam_new - lam_curr);
+
+            // Two-phase EOS pressures
+            float p_solid = JWL::computeSolidReactantPressure(v_rel, p.e_int, p.mg_c0, p.mg_s, p.mg_gamma0, p.density);
+            float p_prod  = JWL::computeJWLProductPressure(v_rel, p.e_int + p.detonation_energy, p.jwl_A, p.jwl_B, p.jwl_R1, p.jwl_R2, p.jwl_omega, p.density);
+            float p_mix   = (1.0f - lam_new) * p_solid + lam_new * p_prod;
+            if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+
+            // Chemical energy deposition & compression work
+            float rho_eff = (p.density > 10.0f) ? p.density : 1630.0f;
+            float de_comp = (tr_deps < 0.0f) ? -(p_mix / rho_eff) * tr_deps : 0.0f;
+            float de_chem = d_lam * p.detonation_energy;
+            p.e_int += de_comp + de_chem;
+            p.temperature = p.T_room + p.e_int / (p.Cp > 1.0f ? p.Cp : 1000.0f);
+
+            // Jaumann rotation
+            float W_xy = 0.5f * (L[0][1] - L[1][0]);
+            float rot_xx =  2.0f * W_xy * p.sigma[0][1] * dt;
+            float rot_yy = -2.0f * W_xy * p.sigma[0][1] * dt;
+            float rot_xy =  W_xy * (p.sigma[1][1] - p.sigma[0][0]) * dt;
+
+            float sig_xx_base = p.sigma[0][0] + rot_xx;
+            float sig_yy_base = p.sigma[1][1] + rot_yy;
+            float sig_xy_base = p.sigma[0][1] + rot_xy;
+
+            const float E_mod    = p.youngs_modulus;
+            const float nu_val   = p.poissons_ratio;
+            const float mu_shear = (1.0f - lam_new) * (E_mod / (2.0f * (1.0f + nu_val)));
+
+            float deps_xx_dev = deps_xx - 0.5f * tr_deps;
+            float deps_yy_dev = deps_yy - 0.5f * tr_deps;
+            float deps_xy_dev = deps_xy;
+
+            float s_xx_trial = (1.0f - lam_new) * (sig_xx_base + 2.0f * mu_shear * deps_xx_dev);
+            float s_yy_trial = (1.0f - lam_new) * (sig_yy_base + 2.0f * mu_shear * deps_yy_dev);
+            float s_xy_trial = (1.0f - lam_new) * (sig_xy_base + 2.0f * mu_shear * deps_xy_dev);
+
+            float press_s = -0.5f * (s_xx_trial + s_yy_trial);
+            s_xx_trial += press_s;
+            s_yy_trial += press_s;
+
+            // Radial return plasticity for solid phase
+            float s_mag_sq = s_xx_trial * s_xx_trial + s_yy_trial * s_yy_trial + 2.0f * s_xy_trial * s_xy_trial;
+            float q_trial = std::sqrt(1.5f * s_mag_sq);
+            float q_yield = (1.0f - lam_new) * (p.yield_stress > 1.0e5f ? p.yield_stress : 100.0e6f);
+            if (q_trial > q_yield && q_trial > 1.0e-6f) {
+                float scale = q_yield / q_trial;
+                s_xx_trial *= scale;
+                s_yy_trial *= scale;
+                s_xy_trial *= scale;
+            }
+
+            p.sigma.set(s_xx_trial - p_mix, s_yy_trial - p_mix, s_xy_trial);
+            return;
+        }
+
+        // --- Lee-Tarver Ignition & Growth Model ---
+        if (p.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
+            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.02f * p.V0, 50.0f * p.V0);
+            const float v_rel = std::clamp(p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f), 0.02f, 50.0f);
+            float lam_curr = p.lambda;
+            float p_curr = -0.5f * (p.sigma[0][0] + p.sigma[1][1]);
+            if (p_curr < 0.0f) p_curr = 0.0f;
+
+            float lam_new = LeeTarver::advanceLeeTarver(dt, lam_curr, v_rel, p_curr,
+                p.lt_I, p.lt_a, p.lt_b, p.lt_x, p.lt_ig_max,
+                p.lt_G1, p.lt_c, p.lt_d, p.lt_y, p.lt_growth_max,
+                p.lt_G2, p.lt_e, p.lt_g, p.lt_z, p.lt_comp_min);
+            p.lambda = lam_new;
+            float d_lam = std::max(0.0f, lam_new - lam_curr);
+
+            // Two-phase EOS pressures
+            float p_solid = JWL::computeSolidReactantPressure(v_rel, p.e_int, p.mg_c0, p.mg_s, p.mg_gamma0, p.density);
+            float p_prod  = JWL::computeJWLProductPressure(v_rel, p.e_int + p.detonation_energy, p.jwl_A, p.jwl_B, p.jwl_R1, p.jwl_R2, p.jwl_omega, p.density);
+            float p_mix   = (1.0f - lam_new) * p_solid + lam_new * p_prod;
+            if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+
+            // Chemical energy deposition & compression work
+            float rho_eff = (p.density > 10.0f) ? p.density : 1840.0f;
+            float de_comp = (tr_deps < 0.0f) ? -(p_mix / rho_eff) * tr_deps : 0.0f;
+            float de_chem = d_lam * p.detonation_energy;
+            p.e_int += de_comp + de_chem;
+            p.temperature = p.T_room + p.e_int / (p.Cp > 1.0f ? p.Cp : 1000.0f);
+
+            // Jaumann rotation
+            float W_xy = 0.5f * (L[0][1] - L[1][0]);
+            float rot_xx =  2.0f * W_xy * p.sigma[0][1] * dt;
+            float rot_yy = -2.0f * W_xy * p.sigma[0][1] * dt;
+            float rot_xy =  W_xy * (p.sigma[1][1] - p.sigma[0][0]) * dt;
+
+            float sig_xx_base = p.sigma[0][0] + rot_xx;
+            float sig_yy_base = p.sigma[1][1] + rot_yy;
+            float sig_xy_base = p.sigma[0][1] + rot_xy;
+
+            const float E_mod    = p.youngs_modulus;
+            const float nu_val   = p.poissons_ratio;
+            const float mu_shear = (1.0f - lam_new) * (E_mod / (2.0f * (1.0f + nu_val)));
+
+            float deps_xx_dev = deps_xx - 0.5f * tr_deps;
+            float deps_yy_dev = deps_yy - 0.5f * tr_deps;
+            float deps_xy_dev = deps_xy;
+
+            float s_xx_trial = (1.0f - lam_new) * (sig_xx_base + 2.0f * mu_shear * deps_xx_dev);
+            float s_yy_trial = (1.0f - lam_new) * (sig_yy_base + 2.0f * mu_shear * deps_yy_dev);
+            float s_xy_trial = (1.0f - lam_new) * (sig_xy_base + 2.0f * mu_shear * deps_xy_dev);
+
+            float press_s = -0.5f * (s_xx_trial + s_yy_trial);
+            s_xx_trial += press_s;
+            s_yy_trial += press_s;
+
+            // Radial return plasticity for solid phase
+            float s_mag_sq = s_xx_trial * s_xx_trial + s_yy_trial * s_yy_trial + 2.0f * s_xy_trial * s_xy_trial;
+            float q_trial = std::sqrt(1.5f * s_mag_sq);
+            float q_yield = (1.0f - lam_new) * (p.yield_stress > 1.0e5f ? p.yield_stress : 100.0e6f);
+            if (q_trial > q_yield && q_trial > 1.0e-6f) {
+                float scale = q_yield / q_trial;
+                s_xx_trial *= scale;
+                s_yy_trial *= scale;
+                s_xy_trial *= scale;
+            }
+
+            p.sigma.set(s_xx_trial - p_mix, s_yy_trial - p_mix, s_xy_trial);
+            return;
+        }
+
 
         // Vorticity W = 0.5 * (L - L^T)
         float W_xy = 0.5f * (L[0][1] - L[1][0]);
@@ -1272,6 +1412,11 @@ float MPMSolver2D::computeStepSize(float cfl) const {
         if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
             float C0 = p.mg_c0;
             c_s = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
+        } else if (p.material_model == MPMMaterialModel::JWLProgrammedBurn || p.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
+            float C0 = p.mg_c0 > 100.0f ? p.mg_c0 : 2500.0f;
+            float c_solid = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
+            float c_det = p.det_vel > 1000.0f ? p.det_vel : 7000.0f;
+            c_s = std::max(c_solid, c_det);
         } else {
             if (nu >= 0.0f && nu < 0.5f) {
                 float denom = (1.0f + nu) * std::max(0.02f, 1.0f - 2.0f * nu);

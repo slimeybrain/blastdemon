@@ -441,9 +441,14 @@ export class TransportController {
             } else {
                 cellSize = Number(mpmMesh?.parameters['cell_size'] ?? mpmMesh?.parameters['dx'] ?? 0.001);
             }
-            const objPpc = state.nodes.find(n => n.type === 'MPMObject3D')?.parameters['ppc'];
-            const domainPpc = Number(objPpc ?? mpmMesh?.parameters['ppc'] ?? 8);
-            const pPerDim = Math.max(1, Math.round(Math.cbrt(domainPpc)));
+            const mpmObjects = state.nodes.filter(n => n.type === 'MPMObject3D');
+            let maxPpc = Number(mpmMesh?.parameters['ppc'] ?? 8);
+            for (const obj of mpmObjects) {
+                if (obj.parameters['ppc'] != null) {
+                    maxPpc = Math.max(maxPpc, Number(obj.parameters['ppc']));
+                }
+            }
+            const pPerDim = Math.max(1, Math.round(Math.cbrt(maxPpc)));
             return (cellSize / pPerDim) * 0.8;
         }
         return 0.0005;

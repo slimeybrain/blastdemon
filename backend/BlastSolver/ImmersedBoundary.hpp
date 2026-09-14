@@ -175,27 +175,33 @@ HD_FUNC inline float signed_solid_angle(const Point3D& p, const Point3D& v0, con
 HD_FUNC inline bool ray_triangle_intersect(
     const Point3D& O, const Point3D& D,
     const Point3D& V0, const Point3D& V1, const Point3D& V2,
-    float& t
+    float& t,
+    float bary_tol = 5.0e-3f
 ) {
-    const float EPSILON = 1e-6f;
     Point3D edge1 = { V1.x - V0.x, V1.y - V0.y, V1.z - V0.z };
     Point3D edge2 = { V2.x - V0.x, V2.y - V0.y, V2.z - V0.z };
     Point3D h = { D.y * edge2.z - D.z * edge2.y,
                   D.z * edge2.x - D.x * edge2.z,
                   D.x * edge2.y - D.y * edge2.x };
     float a = edge1.x * h.x + edge1.y * h.y + edge1.z * h.z;
-    if (a > -EPSILON && a < EPSILON) return false;
+
+    // Scale-aware determinant threshold (prevents rejecting small or millimeter-scale triangles)
+    float e1_sq = edge1.x * edge1.x + edge1.y * edge1.y + edge1.z * edge1.z;
+    float e2_sq = edge2.x * edge2.x + edge2.y * edge2.y + edge2.z * edge2.z;
+    float scale = sqrtf(e1_sq * e2_sq);
+    float eps_a = 1.0e-7f * (scale > 1.0e-10f ? scale : 1.0e-10f);
+    if (a > -eps_a && a < eps_a) return false;
     
     float f = 1.0f / a;
     Point3D s = { O.x - V0.x, O.y - V0.y, O.z - V0.z };
     float u = f * (s.x * h.x + s.y * h.y + s.z * h.z);
-    if (u < 0.0f || u > 1.0f) return false;
+    if (u < -bary_tol || u > 1.0f + bary_tol) return false;
     
     Point3D q = { s.y * edge1.z - s.z * edge1.y,
                   s.z * edge1.x - s.x * edge1.z,
                   s.x * edge1.y - s.y * edge1.x };
     float v = f * (D.x * q.x + D.y * q.y + D.z * q.z);
-    if (v < 0.0f || u + v > 1.0f) return false;
+    if (v < -bary_tol || u + v > 1.0f + bary_tol) return false;
     
     t = f * (edge2.x * q.x + edge2.y * q.y + edge2.z * q.z);
     return true;

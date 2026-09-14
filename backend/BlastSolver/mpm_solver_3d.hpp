@@ -4,6 +4,8 @@
 #include "mpm_solver_2d.hpp"
 #include "constitutive_concrete_models.hpp"
 #include "constitutive_crest_davis.hpp"
+#include "constitutive_jwl.hpp"
+#include "constitutive_lee_tarver.hpp"
 #include "VTKWriter.hpp"
 #include <vector>
 #include <string>
@@ -11,6 +13,18 @@
 #include <array>
 
 namespace Blast {
+
+enum class MPMDEMContactMode : int {
+    GasSolidOnly = 0,
+    BallisticAndGas = 1,
+    AllDynamic = 2
+};
+
+enum class MPMContactMethod : int {
+    SingleVelocity = 0,
+    SubGridDEM = 1,
+    MultiVelocityBardenhagen = 2
+};
 
 struct MaterialTable3D {
     MPMMaterialModel material_model{MPMMaterialModel::Hypoelastic};
@@ -115,6 +129,34 @@ struct MaterialTable3D {
     float crest_m2{1.5f};                // Growth entropy power exponent
     float crest_s0{100.0f};              // Reference entropy scale (J/(kg K))
     float crest_s_threshold{45.0f};      // Shock entropy ignition threshold (J/(kg K))
+
+    // JWL Product Gas EOS & Programmed Burn Parameters
+    float jwl_A{373.77e9f};              // High pressure coefficient A (Pa)
+    float jwl_B{3.747e9f};               // Moderate pressure coefficient B (Pa)
+    float jwl_R1{4.15f};                 // High pressure exponent R1
+    float jwl_R2{0.90f};                 // Moderate pressure exponent R2
+    float jwl_omega{0.35f};              // Grüneisen ratio omega
+    float det_vel{6930.0f};              // Detonation velocity D_cj (m/s)
+    float detonation_energy{4.29e6f};    // Detonation chemical energy release e0 (J/kg)
+    int   burn_zone_cells{4};            // Smeared burn zone cell width N_cells
+    float tau_burn_min{1.0e-7f};         // Minimum burn duration limiter (s)
+
+    // Lee-Tarver Ignition & Growth Parameters
+    float lt_I{4.0e6f};                  // Ignition rate coefficient (1/s)
+    float lt_a{0.24f};                   // Ignition compression threshold
+    float lt_b{0.667f};                  // Ignition depletion exponent
+    float lt_x{7.0f};                    // Ignition compression exponent
+    float lt_G1{130.0e-6f};              // Growth rate coefficient (1/(s Pa^y))
+    float lt_c{0.667f};                  // Growth depletion exponent
+    float lt_d{0.333f};                  // Growth reaction progress exponent
+    float lt_y{2.0f};                    // Growth pressure exponent
+    float lt_G2{400.0e-6f};              // Completion rate coefficient (1/(s Pa^z))
+    float lt_e{0.333f};                  // Completion depletion exponent
+    float lt_g{0.667f};                  // Completion reaction progress exponent
+    float lt_z{3.0f};                    // Completion pressure exponent
+    float lt_ig_max{0.02f};              // Maximum ignition fraction
+    float lt_growth_max{0.50f};          // Maximum growth fraction
+    float lt_comp_min{0.50f};            // Minimum completion threshold
 
     // Artificial Bulk Viscosity & Timestep Erosion Parameters
     float bulk_viscosity_b1{0.06f};       // Linear artificial bulk viscosity coefficient
@@ -248,7 +290,8 @@ struct MPMParticle3D {
     SymmetricTensor3D sigma;     // Cauchy stress tensor (compact 6-float Voigt: xx, yy, zz, xy, yz, zx)
     float ep_bar{0.0f};          // Equivalent plastic strain
     float damage{0.0f};          // Scalar damage D in [0, 1]
-    float lambda{0.0f};          // Modified damage scaling parameter (K&C / CSCM cap) / CREST reaction progress [0, 1]
+    float lambda{0.0f};          // Modified damage scaling parameter (K&C / CSCM cap) / Reaction progress [0, 1]
+    float t_arrival{1.0e10f};    // Programmed detonation arrival time (s)
     float v_min{1.0f};           // Minimum relative volume reached (V_min / V0)
     float s_shock{0.0f};         // Latched peak shock entropy (J/(kg K))
     bool has_failed{false};      // Total failure status flag
@@ -257,12 +300,13 @@ struct MPMParticle3D {
     int cluster_id{0};           // Macro-fragment grouping cluster ID
     float weibull_factor{1.0f};  // Persistent intrinsic microstructural flaw factor
     int object_id{0};            // Object / Material Table ID
+    int material_id{0};          // Material Multi-Velocity Field ID
     int transfer_scheme{-1};     // -1 = Inherit domain default, otherwise MPMTransferScheme
 };
 
 struct alignas(32) MPMGridNode3D {
-    float m{0.0f};            // Mass (4B)
-    float p[3]{0.0f, 0.0f, 0.0f};         // Momentum (px, py, pz) (12B)
+    float m{0.0f};            // Total Mass (4B)
+    float p[3]{0.0f, 0.0f, 0.0f};         // Total Momentum (px, py, pz) (12B)
     float f_ext[3]{0.0f, 0.0f, 0.0f};     // External force (FSI coupling) (12B)
     float f_int[3]{0.0f, 0.0f, 0.0f};     // Internal stress force (12B)
     float plastic_strain{0.0f}; // Interpolated plastic strain for smoothing (4B)
@@ -309,7 +353,8 @@ public:
                       float yield_stress, float hardening, float failure_strain = 0.25f,
                       float tensile_failure_stress = 600.0e6f, int ppc = 8,
                       MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
-                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
+                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
+                      float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
 
     void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius,
                          float vel_x, float vel_y, float vel_z,
@@ -318,7 +363,8 @@ public:
                          float yield_stress, float hardening, float failure_strain = 0.25f,
                          float tensile_failure_stress = 600.0e6f, int ppc = 8,
                          MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
-                         MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
+                         MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
+                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
 
     void addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
                            float radius, float inner_radius, float height,
@@ -328,7 +374,8 @@ public:
                            float yield_stress, float hardening, float failure_strain = 0.25f,
                            float tensile_failure_stress = 600.0e6f, int ppc = 8,
                            MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
-                           MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
+                           MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
+                           float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
 
     void addSTLObject(int obj_id, const std::string& stl_filepath,
                       float pos_x, float pos_y, float pos_z,
@@ -393,6 +440,41 @@ public:
     double getSimTime() const { return m_sim_time; }
     int getStepCount() const { return m_step_count; }
 
+    // Discrete Element (DEM) Contact & Non-Penetration Pipeline
+    void setDemContact(bool enable, float friction = 0.20f, float restitution = 0.0f, float scale = 1.0f,
+                       MPMDEMContactMode mode = MPMDEMContactMode::GasSolidOnly, float v_threshold = 1.0f) {
+        m_enable_dem_contact = enable;
+        m_dem_friction = friction;
+        m_dem_restitution = restitution;
+        m_dem_contact_scale = scale;
+        m_dem_contact_mode = mode;
+        m_dem_velocity_threshold = v_threshold;
+    }
+    bool getEnableDemContact() const { return m_enable_dem_contact; }
+    float getDemFriction() const { return m_dem_friction; }
+    float getDemRestitution() const { return m_dem_restitution; }
+    float getDemContactScale() const { return m_dem_contact_scale; }
+    MPMDEMContactMode getDemContactMode() const { return m_dem_contact_mode; }
+    float getDemVelocityThreshold() const { return m_dem_velocity_threshold; }
+    void setDemContactMode(MPMDEMContactMode mode) { m_dem_contact_mode = mode; }
+    void setDemVelocityThreshold(float v_thresh) { m_dem_velocity_threshold = v_thresh; }
+
+    // Multi-Velocity Field (Bardenhagen) Contact Pipeline
+    void setContactMethod(MPMContactMethod method);
+    MPMContactMethod getContactMethod() const { return m_contact_method; }
+    void setObjectMaterialMapping(const std::vector<int>& obj_to_mat, int num_materials);
+    int getNumMaterials() const { return m_num_materials; }
+
+    // Retained for backward API compatibility (Clean Single-Grid Continuum Contact)
+    void setSdfBarrier([[maybe_unused]] bool enable = false,
+                       [[maybe_unused]] float restitution = 0.10f,
+                       [[maybe_unused]] float friction = 0.25f,
+                       [[maybe_unused]] float skin = 0.15f) {}
+    bool getEnableSdfBarrier() const { return false; }
+    float getSdfBarrierRestitution() const { return 0.0f; }
+    float getSdfBarrierFriction() const { return 0.0f; }
+    float getSdfBarrierSkin() const { return 0.0f; }
+
     void particleToGrid();
     void evaluateDEMContact(float dt);
     void updateFragmentClusters();
@@ -435,6 +517,14 @@ private:
     MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::Leapfrog};
     float m_flip_blend{0.95f};
     bool m_smooth_plastic_strain{true};
+    bool m_enable_dem_contact{false};
+    float m_dem_friction{0.20f};
+    float m_dem_restitution{0.0f};
+    float m_dem_contact_scale{1.0f};
+    MPMDEMContactMode m_dem_contact_mode{MPMDEMContactMode::GasSolidOnly};
+    float m_dem_velocity_threshold{1.0f};
+    std::vector<int> m_dem_cell_head;
+    std::vector<int> m_dem_particle_next;
 
     MPMBoundaryCondition3D m_bc_x_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_x_max{MPMBoundaryCondition3D::Sticky};
@@ -442,6 +532,31 @@ private:
     MPMBoundaryCondition3D m_bc_y_max{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_z_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_z_max{MPMBoundaryCondition3D::Sticky};
+
+    struct MPMGatheredKinematics3D {
+        float target_v[3]{0.0f, 0.0f, 0.0f};
+        float B_new[3][3]{{0,0,0},{0,0,0},{0,0,0}};
+        float L_new[3][3]{{0,0,0},{0,0,0},{0,0,0}};
+    };
+    MPMGatheredKinematics3D gatherParticleKinematics(const MPMParticle3D& p, float dt) const;
+    MPMGatheredKinematics3D gatherParticleKinematicsBardenhagen(const MPMParticle3D& p, float dt) const;
+
+    struct MPMGridMaterialField3D {
+        std::vector<float> m;
+        std::vector<float> p[3];
+        std::vector<float> f_int[3];
+        std::vector<float> v[3];
+        std::vector<float> dv[3];
+    };
+    std::vector<MPMGridMaterialField3D> m_mat_fields;
+    MPMContactMethod m_contact_method{MPMContactMethod::SingleVelocity};
+    int m_num_materials{1};
+    std::vector<int> m_object_to_mat;
+    std::vector<int> m_mat_to_obj;
+
+    void particleToGridBardenhagen();
+    void updateGridKinematicsBardenhagen(float dt);
+    void gridToParticleAndStressBardenhagen(float dt);
 
     std::vector<MaterialTable3D> m_material_tables;
     std::vector<MPMGridNode3D> m_grid;

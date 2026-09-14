@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
               << ", proj_is_explosive=" << (proj_is_explosive ? "TRUE" : "FALSE") << std::endl;
     std::cout << "=======================================================" << std::endl;
 
-    float xmin = -0.1f, xmax = 0.5f;
+    float xmin = -0.2f, xmax = 0.6f;
     float ymin = -0.5f, ymax = 0.5f;
     float zmin = -0.5f, zmax = 0.5f;
     float dx = 0.004f;
@@ -27,6 +27,9 @@ int main(int argc, char** argv) {
 
     MPMSolver3DCUDA solver;
     solver.initializeGrid(nx, ny, nz, dx, dx, dx, xmin, ymin, zmin);
+    solver.setBoundaryConditions(MPMBoundaryCondition3D::Terminate, MPMBoundaryCondition3D::Terminate,
+                                 MPMBoundaryCondition3D::Terminate, MPMBoundaryCondition3D::Terminate,
+                                 MPMBoundaryCondition3D::Terminate, MPMBoundaryCondition3D::Terminate);
     solver.setTransferScheme(MPMTransferScheme::BSpline);
     solver.setVelocityScheme(MPMVelocityScheme::APIC);
     solver.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
@@ -44,8 +47,41 @@ int main(int argc, char** argv) {
     std::cout << "Adding Object 3: Projectile..." << std::endl;
     solver.addSTLObject(3, path_proj, 0, 0, 0, 0.001f, 0.001f, 0.001f, 0,0,0, 0,0,0, 8960.0f, 117.0e9f, 0.34f, 70.0e6f, 100.0e6f, 0.54f, 300.0e6f, 8, MPMParticleDistribution::Cartesian, MPMBoundaryFilling::Stairstepped, "watertight_raycast", 0,0,0, "CAD Origin");
 
+    bool use_bardenhagen = (argc > 4 ? (std::string(argv[4]) != "none") : true);
+    if (use_bardenhagen) {
+        solver.setContactMethod(MPMContactMethod::MultiVelocityBardenhagen);
+    } else {
+        solver.setContactMethod(MPMContactMethod::SingleVelocity);
+    }
+
+    bool use_dem = (argc > 6 && (std::string(argv[6]) == "dem" || std::string(argv[6]) == "DEM"));
+    float dem_scale = (argc > 8) ? std::stof(argv[8]) : 1.5f;
+    if (use_dem) {
+        std::cout << "[INFO] Enabling DEM Contact: scale=" << dem_scale << ", rest=0.3, mode=GasSolidOnly, v_thresh=1.0\n";
+        solver.setDemContact(true, 0.0f, 0.3f, dem_scale, MPMDEMContactMode::GasSolidOnly, 1.0f);
+    }
+
+    std::vector<int> obj_to_mat = {0, 1, 2, 3};
+    solver.setObjectMaterialMapping(obj_to_mat, 4);
+
     auto& mat_tables = solver.getMaterialTables();
     mat_tables.resize(4);
+
+    for (int oid = 1; oid <= 3; ++oid) {
+        float min_x = 1e9, max_x = -1e9;
+        float min_y = 1e9, max_y = -1e9;
+        float min_z = 1e9, max_z = -1e9;
+        for (const auto& p : solver.getParticles()) {
+            if (p.object_id == oid) {
+                min_x = std::min(min_x, p.x[0]); max_x = std::max(max_x, p.x[0]);
+                min_y = std::min(min_y, p.x[1]); max_y = std::max(max_y, p.x[1]);
+                min_z = std::min(min_z, p.x[2]); max_z = std::max(max_z, p.x[2]);
+            }
+        }
+        std::cout << "  Object " << oid << " Bounds: X=[" << min_x << ", " << max_x << "]"
+                  << " Y=[" << min_y << ", " << max_y << "]"
+                  << " Z=[" << min_z << ", " << max_z << "]\n";
+    }
 
     // Object 1: LX-14 CREST Reactive Burn
     mat_tables[1].material_model = MPMMaterialModel::CRESTReactiveBurn;
@@ -110,27 +146,124 @@ int main(int argc, char** argv) {
 
     solver.syncToDevice();
 
-    std::cout << "\nStepping 10 steps..." << std::endl;
-    for (int s = 1; s <= 10; ++s) {
-        solver.step(0.6f);
-        solver.syncParticlesToHost();
+    float t_target = (argc > 5) ? std::stof(argv[5]) : 100.0e-6f;
 
-        float max_v = 0.0f;
-        float max_p = 0.0f;
-        float max_lam = 0.0f;
-        for (const auto& p : solver.getParticles()) {
-            float v = std::sqrt(p.v[0]*p.v[0] + p.v[1]*p.v[1] + p.v[2]*p.v[2]);
-            max_v = std::max(max_v, v);
-            float press = -(p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
-            max_p = std::max(max_p, press);
-            max_lam = std::max(max_lam, p.lambda);
+    float cfl_val = (argc > 7) ? std::stof(argv[7]) : 0.6f;
+    std::cout << "\nStepping until t = " << (t_target * 1e6f) << " us (CFL=" << cfl_val << ")..." << std::endl;
+    float next_report_t = 5.0e-6f;
+    int step_num = 0;
+
+    while (solver.getSimTime() < t_target) {
+        solver.step(cfl_val);
+        step_num++;
+
+        float cur_t = static_cast<float>(solver.getSimTime());
+        if (cur_t >= next_report_t || cur_t >= t_target) {
+            solver.syncParticlesToHost();
+            const auto& all_p = solver.getParticles();
+
+            float v1_max = 0, v2_max = 0, v3_max = 0;
+            float v1_avg = 0, v2_avg = 0, v3_avg = 0;
+            int n1 = 0, n2 = 0, n3 = 0;
+            int failed_case = 0;
+            float proj_min_x = 1e9f, proj_max_x = -1e9f;
+            float proj_apex_x = 1e9f; // lowest X in projectile
+            float exp_front_x = -1e9f; // highest X in explosive behind or near apex
+
+            for (const auto& p : all_p) {
+                float v = std::sqrt(p.v[0]*p.v[0] + p.v[1]*p.v[1] + p.v[2]*p.v[2]);
+                if (p.object_id == 1) {
+                    v1_max = std::max(v1_max, v);
+                    v1_avg += v;
+                    n1++;
+                    // Find highest X of ignited explosive
+                    if (p.lambda > 0.5f) {
+                        exp_front_x = std::max(exp_front_x, p.x[0]);
+                    }
+                } else if (p.object_id == 2) {
+                    v2_max = std::max(v2_max, v);
+                    v2_avg += v;
+                    n2++;
+                    if (p.has_failed || p.damage >= 1.0f) failed_case++;
+                } else if (p.object_id == 3) {
+                    v3_max = std::max(v3_max, v);
+                    v3_avg += v;
+                    n3++;
+                    proj_min_x = std::min(proj_min_x, p.x[0]);
+                    proj_max_x = std::max(proj_max_x, p.x[0]);
+                }
+            }
+            if (n1 > 0) v1_avg /= n1;
+            if (n2 > 0) v2_avg /= n2;
+            if (n3 > 0) v3_avg /= n3;
+
+            // Check if any explosive gas has penetrated IN FRONT OF the projectile
+            int penetrated_gas_particles = 0;
+            for (const auto& p : all_p) {
+                if (p.object_id == 1 && p.lambda > 0.5f) {
+                    // Check if gas is near the axis (r < 0.05) and has x > proj_max_x
+                    float r = std::sqrt(p.x[1]*p.x[1] + p.x[2]*p.x[2]);
+                    if (r < 0.03f && p.x[0] > proj_max_x) {
+                        penetrated_gas_particles++;
+                    }
+                }
+            }
+
+            float ke1 = 0, ke2 = 0, ke3 = 0;
+            float px1 = 0, px2 = 0, px3 = 0;
+            for (const auto& p : all_p) {
+                float v2 = p.v[0]*p.v[0] + p.v[1]*p.v[1] + p.v[2]*p.v[2];
+                if (p.object_id == 1) { ke1 += 0.5f * p.m * v2; px1 += p.m * p.v[0]; }
+                else if (p.object_id == 2) { ke2 += 0.5f * p.m * v2; px2 += p.m * p.v[0]; }
+                else if (p.object_id == 3) { ke3 += 0.5f * p.m * v2; px3 += p.m * p.v[0]; }
+            }
+
+            std::cout << "  Time " << std::fixed << std::setprecision(2) << (cur_t * 1e6f) << " us (Step " << step_num << ")"
+                      << " | Exp vMax=" << std::setprecision(1) << v1_max << " vAvg=" << v1_avg << " KE=" << (ke1 * 1e-6f) << "MJ"
+                      << " | Case vMax=" << v2_max << " vAvg=" << v2_avg << " KE=" << (ke2 * 1e-6f) << "MJ Fail=" << failed_case << "/" << n2
+                      << " | Proj vMax=" << v3_max << " vAvg=" << v3_avg << " KE=" << (ke3 * 1e-6f) << "MJ X=[" << std::setprecision(4) << proj_min_x << ", " << proj_max_x << "]"
+                      << " | GasAhead=" << penetrated_gas_particles << std::endl;
+
+            if (penetrated_gas_particles > 0 && cur_t <= 45.0e-6f) {
+                std::cout << "    --> DIAGNOSTIC: GasAhead Particles:" << std::endl;
+                int printed = 0;
+                for (size_t pi = 0; pi < all_p.size() && printed < 5; ++pi) {
+                    const auto& p = all_p[pi];
+                    if (p.object_id == 1 && p.lambda > 0.5f) {
+                        float r = std::sqrt(p.x[1]*p.x[1] + p.x[2]*p.x[2]);
+                        if (r < 0.03f && p.x[0] > proj_max_x) {
+                            std::cout << "      Gas P" << pi << ": pos=(" << p.x[0] << ", " << p.x[1] << ", " << p.x[2] << ")"
+                                      << " r=" << r << " v=(" << p.v[0] << ", " << p.v[1] << ", " << p.v[2] << ") |v|=" << std::sqrt(p.v[0]*p.v[0]+p.v[1]*p.v[1]+p.v[2]*p.v[2]) << std::endl;
+                            printed++;
+                        }
+                    }
+                }
+            }
+
+            if (cur_t >= t_target) {
+                std::cout << "\n=== FINAL DIAGNOSTIC: Fastest Particles ===" << std::endl;
+                for (int oid = 1; oid <= 3; ++oid) {
+                    std::vector<std::pair<float, size_t>> sorted_p;
+                    for (size_t pi = 0; pi < all_p.size(); ++pi) {
+                        if (all_p[pi].object_id == oid) {
+                            float v = std::sqrt(all_p[pi].v[0]*all_p[pi].v[0] + all_p[pi].v[1]*all_p[pi].v[1] + all_p[pi].v[2]*all_p[pi].v[2]);
+                            sorted_p.push_back({v, pi});
+                        }
+                    }
+                    std::sort(sorted_p.rbegin(), sorted_p.rend());
+                    std::cout << "  Top 3 for Object " << oid << ":" << std::endl;
+                    for (size_t i = 0; i < std::min((size_t)3, sorted_p.size()); ++i) {
+                        const auto& p = all_p[sorted_p[i].second];
+                        std::cout << "    P" << sorted_p[i].second << " v=" << sorted_p[i].first
+                                  << " pos=(" << p.x[0] << ", " << p.x[1] << ", " << p.x[2] << ")"
+                                  << " m=" << p.m << " V=" << p.V << " fail=" << (int)p.has_failed << std::endl;
+                    }
+                }
+            }
+
+            if (next_report_t < 20.0e-6f) next_report_t += 5.0e-6f;
+            else next_report_t += 10.0e-6f;
         }
-        std::cout << "  Step " << std::setw(2) << s 
-                  << " | time=" << std::scientific << std::setprecision(3) << solver.getSimTime()
-                  << " | max_v=" << std::fixed << std::setprecision(1) << max_v << " m/s"
-                  << " | max_p=" << (max_p * 1e-9f) << " GPa"
-                  << " | max_lam=" << max_lam
-                  << std::endl;
     }
     return 0;
 }

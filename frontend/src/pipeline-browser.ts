@@ -118,6 +118,7 @@ export class PipelineBrowser {
     private sliceSelectionListener: (sliceIdx: number | null) => void;
     private gaugeSelectionListener: (gaugeIdx: number | null) => void;
     private modelStatusListener: (modelId: string, status: SimulationStatus) => void;
+    private inPlaceListener: (nodeId: string, params: Record<string, any>) => void;
 
     // Optional callbacks
     private onSimCommand?: (cmd: string, modelId: string) => void;
@@ -170,8 +171,23 @@ export class PipelineBrowser {
             this.handleSelectionChange(nodeId, null, gaugeIdx);
         };
         this.modelStatusListener = () => this.renderHeader();
+        this.inPlaceListener = (nodeId: string, params: Record<string, any>) => {
+            if (params.visible !== undefined || params.hidden !== undefined) {
+                const item = this.container.querySelector(`.pipeline-item[data-node-id="${nodeId}"]`);
+                if (item) {
+                    const eyeBtn = item.querySelector('.pipeline-eye-btn') as HTMLElement;
+                    if (eyeBtn) {
+                        const isVisible = params.visible !== false && !params.hidden;
+                        eyeBtn.className = `pipeline-eye-btn ${isVisible ? 'visible' : 'hidden'}`;
+                        eyeBtn.innerHTML = isVisible ? EYE_OPEN_SVG : EYE_CLOSED_SVG;
+                        eyeBtn.title = isVisible ? 'Hide in viewports' : 'Show in viewports';
+                    }
+                }
+            }
+        };
 
         this.stateManager.onStateChange(this.stateListener);
+        this.stateManager.onInPlaceParameterChange(this.inPlaceListener);
         this.stateManager.onSelectionChange(this.selectionListener);
         this.stateManager.onSliceSelectionChange(this.sliceSelectionListener);
         this.stateManager.onGaugeSelectionChange(this.gaugeSelectionListener);

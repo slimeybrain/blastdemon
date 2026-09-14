@@ -86,31 +86,35 @@ export function estimateNodeMemory(node: Node, state?: SimulationState): MemoryE
         if (state) {
             const mpmObjects = state.nodes.filter(n => n.type === 'MPMObject3D');
             if (mpmObjects.length > 0) {
-                const pVol = (cellSize * cellSize * cellSize) / Math.max(1, ppc);
+                const cellVol = cellSize * cellSize * cellSize;
                 const domainVol = Math.max(0.0001, (xmax - xmin) * (ymax - ymin) * (zmax - zmin));
-                let totalObjVol = 0;
+                let totalEst = 0;
                 for (const obj of mpmObjects) {
                     const op = obj.parameters || {};
+                    const objPpc = Math.max(1, Math.round(Number(op.ppc ?? ppc)));
+                    const pVol = cellVol / objPpc;
                     const shape = String(op.shape_type || 'Box');
+                    let objVol = 0;
                     if (shape === 'Sphere') {
                         const r = Number(op.radius) || 0.1;
-                        totalObjVol += (4.0 / 3.0) * Math.PI * r * r * r;
+                        objVol = (4.0 / 3.0) * Math.PI * r * r * r;
                     } else if (shape === 'Cylinder') {
                         const r = Number(op.radius) || 0.1;
                         const ir = Number(op.inner_radius) || 0;
                         const h = Number(op.height) || 0.2;
-                        totalObjVol += Math.PI * (r * r - ir * ir) * h;
+                        objVol = Math.PI * (r * r - ir * ir) * h;
                     } else if (shape === 'STL') {
-                        totalObjVol += domainVol * 0.12;
+                        objVol = domainVol * 0.12;
                     } else {
                         const sx = Number(op.size_x) || 0.2;
                         const sy = Number(op.size_y) || 0.2;
                         const sz = Number(op.size_z) || 0.2;
-                        totalObjVol += sx * sy * sz;
+                        objVol = sx * sy * sz;
                     }
+                    objVol = Math.min(objVol, domainVol * 0.4);
+                    totalEst += Math.max(10, Math.ceil(objVol / pVol));
                 }
-                totalObjVol = Math.min(totalObjVol, domainVol * 0.4);
-                estParticles = Math.max(1000, Math.ceil(totalObjVol / pVol));
+                estParticles = Math.max(1000, totalEst);
             }
         }
         if (estParticles === 0) {

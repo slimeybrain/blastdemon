@@ -207,6 +207,23 @@ HD_CONC_FUNC void updateRHTStress(
     if (p_calc < static_cast<T>(0.0)) {
         T D_tensile = state.damage;
         K_tangent = (static_cast<T>(1.0) - static_cast<T>(0.9) * D_tensile) * K_bulk;
+
+        // Hydrostatic tensile spall cutoff & softening
+        T p_spall_limit = (static_cast<T>(1.0) - state.damage) * ft * dif_t;
+        T p_min = -p_spall_limit;
+        if (p_calc < p_min) {
+            T h = (char_len > static_cast<T>(1.0e-6)) ? char_len : static_cast<T>(0.01);
+            T ep_f_tensile = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (G_f / (ft * h)) : static_cast<T>(0.005);
+            if (ep_f_tensile < static_cast<T>(1.0e-5)) ep_f_tensile = static_cast<T>(1.0e-5);
+            if (ep_f_tensile > static_cast<T>(1.0)) ep_f_tensile = static_cast<T>(1.0);
+
+            T d_ep_vol = (p_min - p_calc) / (K_bulk + static_cast<T>(1.0e6));
+            T d_D = d_ep_vol / ep_f_tensile;
+            state.damage += d_D;
+            if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
+
+            p_calc = -(static_cast<T>(1.0) - state.damage) * ft * dif_t;
+        }
     }
 
     state.p_hydro = p_calc;
@@ -278,6 +295,13 @@ HD_CONC_FUNC void updateRHTStress(
         state.damage += d_D;
         if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
     }
+
+    if (state.p_hydro < static_cast<T>(0.0)) {
+        T p_spall_limit_final = (static_cast<T>(1.0) - state.damage) * ft * dif_t;
+        if (state.p_hydro < -p_spall_limit_final) {
+            state.p_hydro = -p_spall_limit_final;
+        }
+    }
 }
 
 // ============================================================================
@@ -335,13 +359,30 @@ HD_CONC_FUNC void updateKCStress(
         omega = static_cast<T>(0.50);
     }
 
-    T p_calc = p_trial; // Compression positive
-    state.p_hydro = p_calc;
-    state.K_tangent = K_bulk * (p_calc > static_cast<T>(0.0) ? (static_cast<T>(1.0) + static_cast<T>(0.5) * p_calc / fc) : static_cast<T>(1.0));
-
     // Rate enhancement
     T dif_c, dif_t;
     computeDIF(strain_rate, static_cast<T>(0.03), static_cast<T>(0.08), dif_cap_c, dif_cap_t, dif_c, dif_t);
+
+    T p_calc = p_trial; // Compression positive
+
+    // Hydrostatic tensile spall cutoff & softening
+    if (p_calc < static_cast<T>(0.0)) {
+        T p_spall_limit = (static_cast<T>(1.0) - state.damage) * ft * dif_t;
+        T p_min = -p_spall_limit;
+        if (p_calc < p_min) {
+            T h = (char_len > static_cast<T>(1.0e-6)) ? char_len : static_cast<T>(0.01);
+            T lambda_f = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (static_cast<T>(2.0) * G_f / (ft * h)) : static_cast<T>(0.005);
+            if (lambda_f < static_cast<T>(0.005)) lambda_f = static_cast<T>(0.005);
+            T d_ep_vol = (p_min - p_calc) / (K_bulk + static_cast<T>(1.0e6));
+            T d_D = d_ep_vol / lambda_f;
+            state.damage += d_D;
+            if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
+            p_calc = -(static_cast<T>(1.0) - state.damage) * ft * dif_t;
+        }
+    }
+
+    state.p_hydro = p_calc;
+    state.K_tangent = K_bulk * (p_calc > static_cast<T>(0.0) ? (static_cast<T>(1.0) + static_cast<T>(0.5) * p_calc / fc) : static_cast<T>(1.0));
 
     // 2. Strength Surfaces (Maximum, Yield, Residual)
     T denom_m = a1 + a2 * p_calc;
@@ -408,6 +449,13 @@ HD_CONC_FUNC void updateKCStress(
             if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
         }
     }
+
+    if (state.p_hydro < static_cast<T>(0.0)) {
+        T p_spall_limit_final = (static_cast<T>(1.0) - state.damage) * ft * dif_t;
+        if (state.p_hydro < -p_spall_limit_final) {
+            state.p_hydro = -p_spall_limit_final;
+        }
+    }
 }
 
 // ============================================================================
@@ -471,6 +519,24 @@ HD_CONC_FUNC void updateCSCMStress(
     T dif_c, dif_t;
     computeDIF(strain_rate, static_cast<T>(0.032), static_cast<T>(0.036), dif_cap_c, dif_cap_t, dif_c, dif_t);
 
+    // Hydrostatic tensile spall cutoff & softening
+    if (p_trial < static_cast<T>(0.0)) {
+        T p_spall_limit = (static_cast<T>(1.0) - state.damage) * ft * dif_t;
+        T p_min = -p_spall_limit;
+        if (p_trial < p_min) {
+            T h = (char_len > static_cast<T>(1.0e-6)) ? char_len : static_cast<T>(0.01);
+            T g_reg = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (static_cast<T>(2.0) * G_f / (ft * h)) : static_cast<T>(0.005);
+            if (g_reg < static_cast<T>(0.005)) g_reg = static_cast<T>(0.005);
+            T d_ep_vol = (p_min - p_trial) / (K_bulk + static_cast<T>(1.0e6));
+            T d_D = d_ep_vol / g_reg;
+            state.damage_brittle += d_D;
+            state.damage = std::max(state.damage_brittle, state.damage_ductile);
+            if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
+            p_trial = -(static_cast<T>(1.0) - state.damage) * ft * dif_t;
+        }
+    }
+    state.p_hydro = p_trial;
+
     // 2. Stress Invariants
     T J2, J3, q_vm, lode_theta;
     computeStressInvariants(s_trial, J2, J3, q_vm, lode_theta);
@@ -524,6 +590,14 @@ HD_CONC_FUNC void updateCSCMStress(
         state.damage = std::max(state.damage_brittle, state.damage_ductile);
         if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
     }
+
+    if (p_trial < static_cast<T>(0.0)) {
+        T p_spall_limit_final = (static_cast<T>(1.0) - state.damage) * ft * dif_t;
+        if (p_trial < -p_spall_limit_final) {
+            p_trial = -p_spall_limit_final;
+        }
+    }
+    state.p_hydro = p_trial;
 }
 
 template <typename T, typename MatType>

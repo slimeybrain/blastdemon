@@ -75,6 +75,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'mg_gamma0', 'mg_c0', 'mg_s',
         'ppc',
         'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+        'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
+        'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
         // FEM keys
         'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
         'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
@@ -91,6 +93,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
         'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
         'initiation_radius', 'booster_overpressure',
+        // JWL Programmed Burn & Lee-Tarver Ignition & Growth
+        'burn_zone_cells', 'tau_burn_min',
+        'lt_I', 'lt_a', 'lt_b', 'lt_x',
+        'lt_G1', 'lt_c', 'lt_d', 'lt_y',
+        'lt_G2', 'lt_e', 'lt_g', 'lt_z',
+        'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
         // VTK ROI & Strides
         'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
         'nonlocal_radius', 'opacity',
@@ -107,7 +115,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
     ];
 
     const booleanKeys = [
-        'enabled', 'smooth_plastic_strain', 'export_ascii', 'export_binary', 'export_hdf5',
+        'enabled', 'smooth_plastic_strain', 'enable_sdf_barrier', 'enable_dem_contact', 'export_ascii', 'export_binary', 'export_hdf5',
         'include_header', 'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy',
         'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_overpressure', 'qty_impulse',
         'export_slices', 'export_volumes', 'export_fem', 'export_mpm', 'export_pvd',
@@ -889,9 +897,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     }
                     if (objParams['vel_x'] === undefined && objParams['initial_velocity_x'] !== undefined) objParams['vel_x'] = objParams['initial_velocity_x'];
                     if (objParams['vel_y'] === undefined && objParams['initial_velocity_y'] !== undefined) objParams['vel_y'] = objParams['initial_velocity_y'];
-                    if (objParams['ppc'] === undefined) {
-                        objParams['ppc'] = domainPpc;
-                    }
+                    objParams['ppc'] = Math.max(1, Math.round(Number(objNode.parameters?.ppc ?? domainPpc)));
                     if (domainParticleDist && (objParams['particle_distribution'] === undefined || objParams['particle_distribution'] === 'Cartesian')) {
                         objParams['particle_distribution'] = domainParticleDist;
                     }
@@ -1115,9 +1121,19 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                         matNode = state.nodes.find(n => n.type === 'Material' && !isJWLMaterialNode(n) && !isIdealGasMaterialNode(n)) || state.nodes.find(n => n.type === 'Material');
                     }
                     if (matNode) {
+                        if (matConn || objNode.parameters?.material) {
+                            objParams['material_id'] = matNode.id;
+                            objParams['material_name'] = (matNode as any).name || matNode.parameters?.name || matNode.id;
+                        } else {
+                            objParams['material_id'] = 'mat_' + objNode.id;
+                            objParams['material_name'] = ((matNode as any).name || matNode.parameters?.name || 'Material') + '_' + objNode.id;
+                        }
                         Object.entries(matNode.parameters).forEach(([k, v]) => {
                             objParams[k] = numericKeys.includes(k) ? Number(v) : v;
                         });
+                    } else {
+                        objParams['material_id'] = objNode.parameters?.material || ('mat_' + objNode.id);
+                        objParams['material_name'] = objNode.parameters?.material || ('mat_' + objNode.id);
                     }
                     const nonConstitutiveKeys = [
                         'name', 'shape', 'shape_type', 'pos_x', 'pos_y', 'pos_z',
@@ -1148,9 +1164,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     if (objParams['vel_x'] === undefined && objParams['initial_velocity_x'] !== undefined) objParams['vel_x'] = objParams['initial_velocity_x'];
                     if (objParams['vel_y'] === undefined && objParams['initial_velocity_y'] !== undefined) objParams['vel_y'] = objParams['initial_velocity_y'];
                     if (objParams['vel_z'] === undefined && objParams['initial_velocity_z'] !== undefined) objParams['vel_z'] = objParams['initial_velocity_z'];
-                    if (objParams['ppc'] === undefined) {
-                        objParams['ppc'] = domainPpc;
-                    }
+                    objParams['ppc'] = Math.max(1, Math.round(Number(objNode.parameters?.ppc ?? domainPpc)));
                     if (domainParticleDist && (objParams['particle_distribution'] === undefined || objParams['particle_distribution'] === 'Cartesian')) {
                         objParams['particle_distribution'] = domainParticleDist;
                     }
@@ -1614,9 +1628,14 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                         matNode = state.nodes.find(n => n.type === 'Material' && !isJWLMaterialNode(n) && !isIdealGasMaterialNode(n)) || state.nodes.find(n => n.type === 'Material');
                     }
                     if (matNode) {
+                        objParams['material_id'] = matNode.id;
+                        objParams['material_name'] = (matNode as any).name || matNode.parameters?.name || matNode.id;
                         Object.entries(matNode.parameters).forEach(([k, v]) => {
                             objParams[k] = numericKeys.includes(k) ? Number(v) : v;
                         });
+                    } else {
+                        objParams['material_id'] = objNode.parameters?.material || ('mat_' + objNode.id);
+                        objParams['material_name'] = objNode.parameters?.material || ('mat_' + objNode.id);
                     }
                     if (matNode?.parameters?.['material_model']) {
                         objParams['material_model'] = matNode.parameters['material_model'];
@@ -1625,9 +1644,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     }
                     if (objParams['vel_x'] === undefined && objParams['initial_velocity_x'] !== undefined) objParams['vel_x'] = objParams['initial_velocity_x'];
                     if (objParams['vel_y'] === undefined && objParams['initial_velocity_y'] !== undefined) objParams['vel_y'] = objParams['initial_velocity_y'];
-                    if (objParams['ppc'] === undefined) {
-                        objParams['ppc'] = domainPpc;
-                    }
+                    objParams['ppc'] = Math.max(1, Math.round(Number(objNode.parameters?.ppc ?? domainPpc)));
                     if (domainParticleDist && (objParams['particle_distribution'] === undefined || objParams['particle_distribution'] === 'Cartesian')) {
                         objParams['particle_distribution'] = domainParticleDist;
                     }
@@ -1668,8 +1685,9 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 });
             }
 
-            let chosenTransferScheme2D = 'BSpline';
-            if (mpmObjects.length > 0 && mpmObjects[0].transfer_scheme && mpmObjects[0].transfer_scheme !== 'Default') {
+            let chosenTransferScheme2D = mpmDomain.parameters?.['transfer_scheme'] || 'BSpline';
+            if ((!mpmDomain.parameters?.['transfer_scheme'] || mpmDomain.parameters?.['transfer_scheme'] === 'Default') &&
+                mpmObjects.length > 0 && mpmObjects[0].transfer_scheme && mpmObjects[0].transfer_scheme !== 'Default') {
                 chosenTransferScheme2D = mpmObjects[0].transfer_scheme;
             }
             flattenedParams['transfer_scheme'] = chosenTransferScheme2D;
@@ -1842,9 +1860,21 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     }
                 }
                 if (matNode) {
+                    if (matConn || objNode.parameters?.material) {
+                        objParams['material_id'] = matNode.id;
+                        objParams['material_name'] = (matNode as any).name || matNode.parameters?.name || matNode.id;
+                    } else {
+                        // Inherited constitutive parameters from fallback material, but retain unique material identity
+                        // per object so unconnected bodies do not unintentionally fuse into a single velocity field
+                        objParams['material_id'] = 'mat_' + objNode.id;
+                        objParams['material_name'] = ((matNode as any).name || matNode.parameters?.name || 'Material') + '_' + objNode.id;
+                    }
                     Object.entries(matNode.parameters).forEach(([k, v]) => {
                         objParams[k] = castParam(k, v);
                     });
+                } else {
+                    objParams['material_id'] = objNode.parameters?.material || ('mat_' + objNode.id);
+                    objParams['material_name'] = objNode.parameters?.material || ('mat_' + objNode.id);
                 }
 
                 // Re-apply explicit objNode parameters to ensure geometric precedence over material defaults
@@ -1908,7 +1938,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 objParams['vel_x'] = Number(objNode.parameters?.vel_x ?? objNode.parameters?.initial_velocity_x ?? 0.0);
                 objParams['vel_y'] = Number(objNode.parameters?.vel_y ?? objNode.parameters?.initial_velocity_y ?? 0.0);
                 objParams['vel_z'] = Number(objNode.parameters?.vel_z ?? objNode.parameters?.initial_velocity_z ?? 0.0);
-                objParams['ppc'] = Number(objNode.parameters?.ppc ?? domainPpc);
+                objParams['ppc'] = Math.max(1, Math.round(Number(objNode.parameters?.ppc ?? domainPpc)));
 
                 if (domainParticleDist && (objParams['particle_distribution'] === undefined || objParams['particle_distribution'] === 'Cartesian')) {
                     objParams['particle_distribution'] = domainParticleDist;
@@ -1956,8 +1986,9 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 });
             }
 
-            let chosenTransferScheme3D = 'BSpline';
-            if (mpmObjects.length > 0 && mpmObjects[0].transfer_scheme && mpmObjects[0].transfer_scheme !== 'Default') {
+            let chosenTransferScheme3D = mpmDomain.parameters?.['transfer_scheme'] || 'BSpline';
+            if ((!mpmDomain.parameters?.['transfer_scheme'] || mpmDomain.parameters?.['transfer_scheme'] === 'Default') &&
+                mpmObjects.length > 0 && mpmObjects[0].transfer_scheme && mpmObjects[0].transfer_scheme !== 'Default') {
                 chosenTransferScheme3D = mpmObjects[0].transfer_scheme;
             }
             flattenedParams['transfer_scheme'] = chosenTransferScheme3D;

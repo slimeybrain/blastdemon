@@ -160,6 +160,12 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
                     parameters[k] = v;
                 }
             }
+            parameters['provenance'] = presetData.provenance || 'experimental';
+            parameters['reference'] = presetData.reference;
+            if (presetData.test_method) parameters['test_method'] = presetData.test_method;
+            if (presetData.solid_model) parameters['solid_model'] = presetData.solid_model;
+            if (presetData.burn_model) parameters['burn_model'] = presetData.burn_model;
+            if (presetData.product_model) parameters['product_model'] = presetData.product_model;
         }
     } else {
         const materialKeys = [
@@ -177,11 +183,31 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
             'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
             'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
-            'directional_crack_band', 'nonlocal_radius'
+            'det_vel', 'detonation_energy', 'burn_zone_cells', 'tau_burn_min',
+            'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
+            'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_G2', 'lt_e', 'lt_g', 'lt_z',
+            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
+            'directional_crack_band', 'nonlocal_radius',
+            'solid_model', 'burn_model', 'product_model'
         ];
         if (updatedKey && materialKeys.includes(updatedKey)) {
             parameters['preset'] = 'Custom';
+            parameters['provenance'] = 'user';
         }
+    }
+
+    if (modelName === 'JWL Programmed Burn') {
+        if (!parameters['solid_model']) parameters['solid_model'] = 'Mie-Grüneisen Shock Reactant';
+        if (!parameters['burn_model']) parameters['burn_model'] = 'Programmed Wavefront Burn';
+        if (!parameters['product_model']) parameters['product_model'] = 'JWL Product Gas';
+    } else if (modelName === 'Lee-Tarver Ignition & Growth') {
+        if (!parameters['solid_model']) parameters['solid_model'] = 'Mie-Grüneisen Shock Reactant';
+        if (!parameters['burn_model']) parameters['burn_model'] = 'Lee-Tarver 3-Stage ODE';
+        if (!parameters['product_model']) parameters['product_model'] = 'JWL Product Gas';
+    } else if (modelName === 'CREST Reactive Burn') {
+        if (!parameters['solid_model']) parameters['solid_model'] = 'Davis Solid Reactant';
+        if (!parameters['burn_model']) parameters['burn_model'] = 'CREST Shock Entropy Kinetics';
+        if (!parameters['product_model']) parameters['product_model'] = 'Davis Detonation Product';
     }
 
     if (parameters['transfer_scheme'] === undefined) parameters['transfer_scheme'] = 'BSpline';
@@ -221,7 +247,7 @@ export function isExplosiveMaterialNode(node: Node | undefined): boolean {
     const type = node.parameters?.material_type;
     const model = node.parameters?.material_model;
     if (type === 'JWL Charge' || type === 'Ideal Gas Charge') return true;
-    if (model === 'JWL Detonation Gas' || model === 'Ideal Gas Charge' || model === 'CREST Reactive High Explosive' || model === 'CREST Reactive Burn' || model === 'CREST') return true;
+    if (model === 'JWL Detonation Gas' || model === 'Ideal Gas Charge' || model === 'CREST Reactive High Explosive' || model === 'CREST Reactive Burn' || model === 'CREST' || model === 'JWL Programmed Burn' || model === 'Lee-Tarver Ignition & Growth') return true;
     if (type === 'Air' || model === 'Ideal Gas') return false;
     const comp = String(node.parameters?.composition || '').toLowerCase();
     const preset = String(node.parameters?.preset || '').toLowerCase();
@@ -567,6 +593,9 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'Material': {
         material_model: 'Hypoelastic',
         preset: 'Structural Steel (A36)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        burn_model: 'Programmed Wavefront Burn',
+        product_model: 'JWL Product Gas',
         density: 7850.0,
         youngs_modulus: 200.0e9,
         poissons_ratio: 0.26,
@@ -687,6 +716,24 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         jwl_R1: 4.15,
         jwl_R2: 0.90,
         jwl_omega: 0.35,
+        burn_zone_cells: 4,
+        tau_burn_min: 1.0e-7,
+        // Lee-Tarver I&G
+        lt_I: 4.0e6,
+        lt_a: 0.24,
+        lt_b: 0.667,
+        lt_x: 7.0,
+        lt_G1: 2.5e-3,
+        lt_c: 0.667,
+        lt_d: 0.333,
+        lt_y: 2.0,
+        lt_G2: 0.05,
+        lt_e: 0.667,
+        lt_g: 0.333,
+        lt_z: 3.0,
+        lt_F_ig_max: 0.02,
+        lt_F_G1_max: 0.30,
+        lt_F_G2_min: 0.30,
         ideal_gamma: 1.4,
         ideal_rho_0: 1630,
         ideal_e_0: 4290000
@@ -784,13 +831,17 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         detonator_x: 0.5,
         detonator_y: 0.5,
         detonator_z: 0.5,
-        detonator_radius: 0.01
+        detonator_radius: 0.01,
+        visible: true,
+        hidden: false
     },
     'TriggerLocation3D': {
         trigger_x: 0.5,
         trigger_y: 0.5,
         trigger_z: 0.5,
-        trigger_radius: 0.01
+        trigger_radius: 0.01,
+        visible: true,
+        hidden: false
     },
     'STLGeometry': {
         stl_file: '',
@@ -805,7 +856,9 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         pos_z: 0.0,
         rot_x: 0.0,
         rot_y: 0.0,
-        rot_z: 0.0
+        rot_z: 0.0,
+        visible: true,
+        hidden: false
     },
     'PrimitiveGeometry3D': {
         primitives: [],
@@ -940,7 +993,9 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         charge_lx: 0.2, charge_ly: 0.2, charge_lz: 0.2,
         charge_rot_x: 0.0,
         charge_rot_y: 0.0,
-        charge_rot_z: 0.0
+        charge_rot_z: 0.0,
+        visible: true,
+        hidden: false
     },
     'CFDSolver3D': {
         cfl: 0.6,
@@ -1125,6 +1180,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     },
     'MPMDomain2D': {
         precision: 'single',
+        transfer_scheme: 'BSpline',
         particle_distribution: 'Cartesian',
         boundary_filling: 'Stairstepped',
         velocity_scheme: 'APIC',
@@ -1138,12 +1194,20 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'MPMDomain3D': {
         device: 'gpu',
         precision: 'single',
+        transfer_scheme: 'BSpline',
         particle_distribution: 'Cartesian',
         boundary_filling: 'Stairstepped',
         velocity_scheme: 'APIC',
         space_time_scheme: 'Leapfrog',
         flip_blend: 0.95,
         smooth_plastic_strain: true,
+        contact_method: 'Single-Velocity',
+        enable_dem_contact: false,
+        dem_contact_mode: 'Gas-Solid Only',
+        dem_velocity_threshold: 1.0,
+        dem_friction: 0.20,
+        dem_restitution: 0.0,
+        dem_contact_scale: 1.0,
         ppc: 8,
         cfl: 0.6,
         endtime: 1.0
@@ -1153,6 +1217,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         shape_type: 'Rectangle',
         particle_distribution: 'Cartesian',
         boundary_filling: 'Stairstepped',
+        ppc: 4,
         pos_x: 0.5,
         pos_y: 0.5,
         size_x: 0.2,
@@ -1160,13 +1225,16 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         radius: 0.1,
         vel_x: 0.0,
         vel_y: 0.0,
-        angular_vel: 0.0
+        angular_vel: 0.0,
+        visible: true,
+        hidden: false
     },
     'MPMObject3D': {
         material: '',
         shape_type: 'Box',
         particle_distribution: 'Cartesian',
         boundary_filling: 'Stairstepped',
+        ppc: 8,
         pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
         size_x: 0.2, size_y: 0.2, size_z: 0.2,
         radius: 0.1, inner_radius: 0.0, height: 0.2,
@@ -1175,7 +1243,9 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         origin_mode: 'CAD Origin',
         voxelization_method: 'watertight_raycast',
         vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
-        angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0
+        angular_vel_x: 0.0, angular_vel_y: 0.0, angular_vel_z: 0.0,
+        visible: true,
+        hidden: false
     },
     'FSICoupler2D': {
         cfl: 0.6,
@@ -1222,11 +1292,42 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         radius: 0.1, inner_radius: 0.0, height: 0.2,
         nx: 10, ny: 10, nz: 10,
         vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
-        k_file: ''
+        k_file: '',
+        visible: true,
+        hidden: false
     },
     'LSDynaImporter3D': {
         k_file: '',
-        scale_factor: 1.0
+        scale_factor: 1.0,
+        visible: true,
+        hidden: false
+    },
+    'FEMBeam3D': {
+        visible: true,
+        hidden: false,
+        node1_x: 0, node1_y: 0, node1_z: 0,
+        node2_x: 1, node2_y: 0, node2_z: 0,
+        radius: 0.01
+    },
+    'FEMRebar3D': {
+        visible: true,
+        hidden: false,
+        node1_x: 0, node1_y: 0, node1_z: 0,
+        node2_x: 1, node2_y: 0, node2_z: 0,
+        radius: 0.008
+    },
+    'Obstacle3D': {
+        visible: true,
+        hidden: false,
+        stl_file: '',
+        origin_mode: 'CAD Origin',
+        scale_x: 1.0, scale_y: 1.0, scale_z: 1.0,
+        pos_x: 0.0, pos_y: 0.0, pos_z: 0.0
+    },
+    'VirtualGauges3D': {
+        visible: true,
+        hidden: false,
+        gauges: []
     },
     'FEMFSICoupler3D': {
         cfl: 0.6,
@@ -5697,7 +5798,11 @@ export function resolveMPMCounts(node: Node, state?: SimulationState) {
                 const objNode = state.nodes.find(n => n.id === conn.fromNode);
                 if (objNode) {
                     const { volume } = getMPMObjectVolume(objNode, state);
-                    connectedParticles += Math.max(1, Math.round(volume / (p_vol > 0 ? p_vol : 1e-9)));
+                    const objPpc = Number(objNode.parameters?.ppc ?? ppc);
+                    const objPPerDim = is3D ? Math.max(1, Math.round(Math.cbrt(objPpc))) : Math.max(1, Math.round(Math.sqrt(objPpc)));
+                    const objPDx = cellSize / objPPerDim;
+                    const objPVol = is3D ? Math.pow(objPDx, 3) : Math.pow(objPDx, 2);
+                    connectedParticles += Math.max(1, Math.round(volume / (objPVol > 0 ? objPVol : 1e-9)));
                 }
             }
         }
@@ -5988,6 +6093,123 @@ export function getTelemetryDisplayHTML(node: Node, state?: SimulationState): st
     return '';
 }
 
+export function getMaterialDisplayHTML(node: Node, state?: SimulationState): string {
+    if (node.type !== 'Material') return '';
+    const p = node.parameters || {};
+    const matModel = p['material_model'] || 'Hypoelastic';
+    const isEnergetic = isExplosiveMaterialNode(node);
+
+    const presetName = p['preset'] || 'Custom';
+    const provenance = p['provenance'] || (presetName === 'Custom' ? 'user' : 'default');
+    const testMethod = p['test_method'] || '';
+    const reference = p['reference'] || '';
+
+    let provBadge = '';
+    let provColor = '#ef4444';
+    let provBg = 'rgba(239, 68, 68, 0.12)';
+    let provBorder = 'rgba(239, 68, 68, 0.4)';
+    let provTitle = 'Uncalibrated Default Values: Parameters are heuristic or placeholder defaults.';
+
+    if (provenance === 'experimental') {
+        provColor = '#22c55e';
+        provBg = 'rgba(34, 197, 94, 0.12)';
+        provBorder = 'rgba(34, 197, 94, 0.4)';
+        provBadge = '🟢 Calibrated';
+        provTitle = 'Calibrated Experimental: Sourced directly from peer-reviewed hydrocode experiments.';
+    } else if (provenance === 'hybrid') {
+        provColor = '#eab308';
+        provBg = 'rgba(234, 179, 8, 0.12)';
+        provBorder = 'rgba(234, 179, 8, 0.4)';
+        provBadge = '🟡 Hybrid';
+        provTitle = 'Hybrid Calibration: Mixed experimental data and theoretical approximations.';
+    } else if (provenance === 'user') {
+        provColor = '#38bdf8';
+        provBg = 'rgba(56, 189, 248, 0.12)';
+        provBorder = 'rgba(56, 189, 248, 0.4)';
+        provBadge = '🔵 Custom';
+        provTitle = 'User Modified: Based on preset or custom entries altered by the user.';
+    } else {
+        provBadge = '🔴 Uncalibrated';
+    }
+
+    let detonatorWarning = '';
+    if (isEnergetic && state) {
+        const hasDetonator = state.nodes.some(n => 
+            n.type === 'DetonatorLocation3D' || 
+            n.type === 'TriggerLocation3D' || 
+            n.type === 'DetonatorLocation' || 
+            n.type === 'TriggerLocation'
+        );
+        if (!hasDetonator) {
+            detonatorWarning = `
+            <div style="margin-top: 5px; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; border-radius: 3px; padding: 4px 6px; color: #fca5a5; font-size: 10px; display: flex; align-items: center; gap: 5px; line-height: 1.25;">
+                <span style="font-size: 12px; flex-shrink: 0;">⚠️</span>
+                <div><b>Detonator Required:</b> Connect a TriggerLocation / Detonator node to initiate detonation wavefront.</div>
+            </div>`;
+        }
+    }
+
+    let pillarsHTML = '';
+    if (isEnergetic) {
+        const solid = p['solid_model'] || (matModel === 'CREST Reactive Burn' ? 'Davis Solid Reactant' : 'Mie-Grüneisen Shock Reactant');
+        const burn = p['burn_model'] || (matModel === 'Lee-Tarver Ignition & Growth' ? 'Lee-Tarver 3-Stage ODE' : (matModel === 'CREST Reactive Burn' ? 'CREST Shock Entropy Kinetics' : 'Programmed Wavefront Burn'));
+        const prod = p['product_model'] || (matModel === 'CREST Reactive Burn' ? 'Davis Detonation Product' : 'JWL Product Gas');
+
+        let solidShort = 'Mie-Grüneisen';
+        if (solid.includes('Davis')) solidShort = 'Davis Solid';
+        else if (solid.includes('Elastic')) solidShort = 'Elastic Solid';
+
+        let burnShort = 'Wavefront Burn';
+        if (burn.includes('Lee-Tarver') || burn.includes('ODE')) burnShort = 'Lee-Tarver ODE';
+        else if (burn.includes('CREST')) burnShort = 'CREST Kinetics';
+
+        let prodShort = 'JWL Gas';
+        if (prod.includes('Davis')) prodShort = 'Davis Gas';
+        else if (prod.includes('Ideal')) prodShort = 'Ideal Gas';
+
+        pillarsHTML = `
+        <div style="margin-top: 5px; padding: 4px 6px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 4px; box-sizing: border-box; width: 100%;">
+            <div style="font-size: 8.5px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 3px;">Three-Pillar Energetic Architecture</div>
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 3px; width: 100%; box-sizing: border-box;">
+                <div style="flex: 1 1 0; min-width: 0; box-sizing: border-box; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 3px; padding: 3px 4px; text-align: center; overflow: hidden;" title="Pillar 1 (Solid Reactant): ${solid}">
+                    <div style="color: #93c5fd; font-size: 8px; font-weight: 700; letter-spacing: 0.3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">1. REACTANT</div>
+                    <div style="color: #f8fafc; font-size: 9.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px;">${solidShort}</div>
+                </div>
+                <div style="color: #64748b; font-size: 9px; flex-shrink: 0; line-height: 1;">➔</div>
+                <div style="flex: 1.1 1 0; min-width: 0; box-sizing: border-box; background: rgba(249, 115, 22, 0.15); border: 1px solid rgba(249, 115, 22, 0.35); border-radius: 3px; padding: 3px 4px; text-align: center; overflow: hidden;" title="Pillar 2 (Reaction Kinetics): ${burn}">
+                    <div style="color: #fdba74; font-size: 8px; font-weight: 700; letter-spacing: 0.3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">2. KINETICS</div>
+                    <div style="color: #f8fafc; font-size: 9.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px;">${burnShort}</div>
+                </div>
+                <div style="color: #64748b; font-size: 9px; flex-shrink: 0; line-height: 1;">➔</div>
+                <div style="flex: 1 1 0; min-width: 0; box-sizing: border-box; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.35); border-radius: 3px; padding: 3px 4px; text-align: center; overflow: hidden;" title="Pillar 3 (Detonation Products): ${prod}">
+                    <div style="color: #fca5a5; font-size: 8px; font-weight: 700; letter-spacing: 0.3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">3. EXPANSION</div>
+                    <div style="color: #f8fafc; font-size: 9.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px;">${prodShort}</div>
+                </div>
+            </div>
+        </div>`;
+    }
+
+    let metaHTML = '';
+    if (reference || testMethod) {
+        metaHTML = `
+        <div style="margin-top: 4px; font-size: 9.5px; color: #94a3b8; display: flex; flex-direction: column; gap: 1px; line-height: 1.25;">
+            ${testMethod ? `<div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${testMethod}"><b>Test:</b> ${testMethod}</div>` : ''}
+            ${reference ? `<div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #64748b;" title="${reference}"><b>Ref:</b> <i>${reference}</i></div>` : ''}
+        </div>`;
+    }
+
+    return `
+    <div style="background: rgba(30, 41, 59, 0.5); border: 1px solid #334155; border-radius: 4px; padding: 6px 8px; font-size: 11px; margin-bottom: 6px; box-sizing: border-box; overflow: hidden;">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px;">
+            <span style="font-weight: 700; color: #f1f5f9; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${isEnergetic ? '💥 Energetic Material Spec' : '🧱 Material Specification'}</span>
+            <span style="background: ${provBg}; border: 1px solid ${provBorder}; color: ${provColor}; border-radius: 3px; padding: 1px 5px; font-size: 9.5px; font-weight: 600; white-space: nowrap; flex-shrink: 0;" title="${provTitle}">${provBadge}</span>
+        </div>
+        ${metaHTML}
+        ${pillarsHTML}
+        ${detonatorWarning}
+    </div>`;
+}
+
 export function getEntityStatsHTML(node: Node, state?: SimulationState): string {
     if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D') {
         return getMeshDisplayHTML(node, state);
@@ -6006,6 +6228,9 @@ export function getEntityStatsHTML(node: Node, state?: SimulationState): string 
     }
     if (node.type === 'VirtualGauges' || node.type === 'VTKOutput' || node.type === 'Telemetry3DViewport' || node.type === 'TelemetryText') {
         return getTelemetryDisplayHTML(node, state);
+    }
+    if (node.type === 'Material') {
+        return getMaterialDisplayHTML(node, state);
     }
     return '';
 }

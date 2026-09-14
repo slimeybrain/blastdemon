@@ -1,5 +1,5 @@
 import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
-import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, syncMPMMaterialParameters, getCompatibleMaterialsForNode } from './state-manager.js';
+import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, getMaterialDisplayHTML, isExplosiveMaterialNode, syncMPMMaterialParameters, getCompatibleMaterialsForNode } from './state-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
@@ -2188,6 +2188,79 @@ export class GraphRenderer {
                     } else if (valStatus.state !== 'error') {
                         errorBadge.style.display = 'none';
                     }
+
+                    if (node.type === 'Material') {
+                        let provChip = header.querySelector('.node-provenance-chip') as HTMLElement;
+                        if (!provChip) {
+                            provChip = document.createElement('span');
+                            provChip.className = 'node-provenance-chip';
+                            provChip.style.fontSize = '9px';
+                            provChip.style.padding = '1px 4px';
+                            provChip.style.borderRadius = '3px';
+                            provChip.style.fontWeight = 'bold';
+                            provChip.style.marginLeft = '4px';
+                            provChip.style.cursor = 'default';
+                            header.appendChild(provChip);
+                        }
+                        const prov = node.parameters?.provenance || 'default';
+                        if (prov === 'experimental') {
+                            provChip.textContent = '🟢 EXP';
+                            provChip.style.background = 'rgba(34, 197, 94, 0.2)';
+                            provChip.style.color = '#4ade80';
+                            provChip.style.border = '1px solid rgba(34, 197, 94, 0.4)';
+                            provChip.title = 'Calibrated Experimental Literature Preset: Sourced directly from peer-reviewed experiments.';
+                        } else if (prov === 'hybrid') {
+                            provChip.textContent = '🟡 HYB';
+                            provChip.style.background = 'rgba(234, 179, 8, 0.2)';
+                            provChip.style.color = '#facc15';
+                            provChip.style.border = '1px solid rgba(234, 179, 8, 0.4)';
+                            provChip.title = 'Hybrid Calibration: Mixed experimental data and theoretical approximations.';
+                        } else if (prov === 'user') {
+                            provChip.textContent = '🔵 USER';
+                            provChip.style.background = 'rgba(56, 189, 248, 0.2)';
+                            provChip.style.color = '#38bdf8';
+                            provChip.style.border = '1px solid rgba(56, 189, 248, 0.4)';
+                            provChip.title = 'User Modified: Custom parameters altered by user.';
+                        } else {
+                            provChip.textContent = '🔴 DEF';
+                            provChip.style.background = 'rgba(239, 68, 68, 0.2)';
+                            provChip.style.color = '#f87171';
+                            provChip.style.border = '1px solid rgba(239, 68, 68, 0.4)';
+                            provChip.title = 'Uncalibrated Default Values: Heuristic or baseline defaults.';
+                        }
+
+                        let detWarningChip = header.querySelector('.node-detonator-warning-chip') as HTMLElement;
+                        const isEnergetic = isExplosiveMaterialNode(node);
+                        const stateCopy = this.stateManager.getCurrentState();
+                        const hasDetonator = stateCopy ? stateCopy.nodes.some(n => 
+                            n.type === 'DetonatorLocation3D' || 
+                            n.type === 'TriggerLocation3D' || 
+                            n.type === 'DetonatorLocation' || 
+                            n.type === 'TriggerLocation'
+                        ) : true;
+
+                        if (isEnergetic && !hasDetonator) {
+                            if (!detWarningChip) {
+                                detWarningChip = document.createElement('span');
+                                detWarningChip.className = 'node-detonator-warning-chip';
+                                detWarningChip.style.fontSize = '9px';
+                                detWarningChip.style.padding = '1px 4px';
+                                detWarningChip.style.borderRadius = '3px';
+                                detWarningChip.style.fontWeight = 'bold';
+                                detWarningChip.style.marginLeft = '4px';
+                                detWarningChip.style.background = 'rgba(239, 68, 68, 0.25)';
+                                detWarningChip.style.color = '#fca5a5';
+                                detWarningChip.style.border = '1px solid #ef4444';
+                                detWarningChip.textContent = '⚠️ NO DET';
+                                detWarningChip.title = 'Missing Detonator / Trigger: Energetic material requires a detonation trigger node in the model!';
+                                header.appendChild(detWarningChip);
+                            } else {
+                                detWarningChip.style.display = 'inline-block';
+                            }
+                        } else if (detWarningChip) {
+                            detWarningChip.style.display = 'none';
+                        }
+                    }
                 }
 
 
@@ -4171,10 +4244,20 @@ export class GraphRenderer {
                 const anisoAxis = node.parameters['anisotropy_axis'] || 'X';
                 const kcAuto = node.parameters['kc_auto_generate'] !== false;
                 const dCrack = !!node.parameters['directional_crack_band'];
+                const prov = node.parameters['provenance'] || 'default';
+                const isEnergetic = isExplosiveMaterialNode(node);
+                const hasDetonator = state ? state.nodes.some(n => 
+                    n.type === 'DetonatorLocation3D' || 
+                    n.type === 'TriggerLocation3D' || 
+                    n.type === 'DetonatorLocation' || 
+                    n.type === 'TriggerLocation'
+                ) : true;
                 if (form.dataset.renderedComposition !== comp.toString() ||
                     form.dataset.renderedMaterialType !== matType.toString() ||
                     form.dataset.renderedMaterialModel !== matModel.toString() ||
                     form.dataset.renderedPreset !== preset.toString() ||
+                    form.dataset.renderedProvenance !== prov.toString() ||
+                    form.dataset.renderedDetonatorWarning !== hasDetonator.toString() ||
                     form.dataset.renderedEnableStrainErosion !== eStrain.toString() ||
                     form.dataset.renderedEnableStressErosion !== eStress.toString() ||
                     form.dataset.renderedEnableTimestepErosion !== eTime.toString() ||
@@ -4343,10 +4426,20 @@ export class GraphRenderer {
             const anisoAxis = node.parameters['anisotropy_axis'] || 'X';
             const kcAuto = node.parameters['kc_auto_generate'] !== false;
             const dCrack = !!node.parameters['directional_crack_band'];
+            const prov = node.parameters['provenance'] || 'default';
+            const isEnergetic = isExplosiveMaterialNode(node);
+            const hasDetonator = state ? state.nodes.some(n => 
+                n.type === 'DetonatorLocation3D' || 
+                n.type === 'TriggerLocation3D' || 
+                n.type === 'DetonatorLocation' || 
+                n.type === 'TriggerLocation'
+            ) : true;
             form.dataset.renderedComposition = comp.toString();
             form.dataset.renderedMaterialType = matType.toString();
             form.dataset.renderedMaterialModel = matModel.toString();
             form.dataset.renderedPreset = preset.toString();
+            form.dataset.renderedProvenance = prov.toString();
+            form.dataset.renderedDetonatorWarning = hasDetonator.toString();
             form.dataset.renderedEnableStrainErosion = eStrain.toString();
             form.dataset.renderedEnableStressErosion = eStress.toString();
             form.dataset.renderedEnableTimestepErosion = eTime.toString();
@@ -4471,6 +4564,15 @@ export class GraphRenderer {
             info.className = 'telemetry-info-display';
             info.innerHTML = getTelemetryDisplayHTML(node, state ?? undefined);
             telemetryInfoDiv = info;
+        }
+
+        let matInfoDiv: HTMLDivElement | null = null;
+        if (nType === 'Material') {
+            const info = document.createElement('div');
+            info.className = 'material-info-display';
+            info.innerHTML = getMaterialDisplayHTML(node, state ?? undefined);
+            matInfoDiv = info;
+            form.appendChild(matInfoDiv);
         }
 
         let currentGridDiv: HTMLDivElement | null = null;
@@ -4663,6 +4765,9 @@ export class GraphRenderer {
                 'filter_level': ['All', 'Metrics Only', 'Logs Only'],
                 'timestamp_mode': ['None', 'Relative', 'Clock'],
                 'material_model': getConstitutiveModels(),
+                'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
+                'burn_model': ['Programmed Wavefront Burn', 'Lee-Tarver 3-Stage ODE', 'CREST Shock Entropy Kinetics'],
+                'product_model': ['JWL Product Gas', 'Davis Detonation Product'],
                 'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
                 'coupling_scheme': ['Two-Way Staggered', 'Sub-Cycling'],
                 'pressure_integration': ['2x2 Gauss Quadrature', '1-Point Centroid'],
@@ -4721,6 +4826,10 @@ export class GraphRenderer {
                 'boundary_filling': ['Stairstepped', 'Partial'],
                 'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
                 'smooth_plastic_strain': ['Enabled', 'Disabled'],
+                'enable_sdf_barrier': ['Enabled', 'Disabled'],
+                'contact_method': ['Single-Velocity', 'Sub-Grid DEM', 'Multi-Velocity (Bardenhagen)'],
+                'enable_dem_contact': ['Disabled', 'Enabled'],
+                'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
                 'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
                 'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
                 'origin_mode': ['CAD Origin', 'Center'],
@@ -4836,7 +4945,11 @@ export class GraphRenderer {
                         return { value: opt, label: label };
                     });
                 }
-                const selectedVal = String(value ?? (dropdowns[key] ? dropdowns[key][0] : ''));
+                let selectedVal = String(value ?? (dropdowns[key] ? dropdowns[key][0] : ''));
+                if (dropdowns[key] && dropdowns[key].includes('Enabled') && dropdowns[key].includes('Disabled')) {
+                    if (value === true || value === 'true' || value === 'Enabled') selectedVal = 'Enabled';
+                    else if (value === false || value === 'false' || value === 'Disabled') selectedVal = 'Disabled';
+                }
                 inputEl = this.createCustomDropdown(
                     options,
                     selectedVal,
@@ -4905,6 +5018,8 @@ export class GraphRenderer {
                             'mg_gamma0', 'mg_c0', 'mg_s',
                             'ppc',
                             'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+                            'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
+                            'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
                             // FEM keys
                             'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
                             'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
@@ -4921,6 +5036,12 @@ export class GraphRenderer {
                             'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
                             'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
                             'initiation_radius', 'booster_overpressure',
+                            // JWL Programmed Burn & Lee-Tarver Ignition & Growth
+                            'burn_zone_cells', 'tau_burn_min',
+                            'lt_I', 'lt_a', 'lt_b', 'lt_x',
+                            'lt_G1', 'lt_c', 'lt_d', 'lt_y',
+                            'lt_G2', 'lt_e', 'lt_g', 'lt_z',
+                            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
                             // VTK ROI & Strides
                             'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
                             'nonlocal_radius', 'opacity',
@@ -4939,9 +5060,9 @@ export class GraphRenderer {
                         let castValue: any = newVal;
                         if (numericKeys.includes(key)) {
                             castValue = Number(newVal);
-                        } else if (newVal === 'true') {
+                        } else if (newVal === 'true' || newVal === 'Enabled') {
                             castValue = true;
-                        } else if (newVal === 'false') {
+                        } else if (newVal === 'false' || newVal === 'Disabled') {
                             castValue = false;
                         }
                         const updates: Record<string, any> = { [key]: castValue };
@@ -5316,7 +5437,19 @@ export class GraphRenderer {
                                     // Energetic solid presets must activate the CREST reactive burn model
                                     // so the backend detonation hotspot logic is triggered on INIT_MPM_3D
                                     updates['material_model'] = 'CREST Reactive Burn';
+                                } else if (presetData.category === 'JWL Programmed Burn Presets') {
+                                    updates['material_type'] = 'JWL Charge';
+                                    updates['material_model'] = 'JWL Programmed Burn';
+                                } else if (presetData.category === 'Lee-Tarver Ignition & Growth Presets') {
+                                    updates['material_type'] = 'JWL Charge';
+                                    updates['material_model'] = 'Lee-Tarver Ignition & Growth';
                                 }
+                                if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                                if (presetData.reference) updates['reference'] = presetData.reference;
+                                if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                                if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                                if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                                if (presetData.product_model) updates['product_model'] = presetData.product_model;
                             }
                         } else if (node.type === 'Material' && key === 'material_model') {
                             if (newVal === 'Ideal Gas') {
@@ -5350,6 +5483,36 @@ export class GraphRenderer {
                                 updates['preset'] = defPreset;
                                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
                                 if (presetData) Object.assign(updates, presetData);
+                            } else if (newVal === 'JWL Programmed Burn') {
+                                updates['material_model'] = 'JWL Programmed Burn';
+                                updates['material_type'] = 'JWL Charge';
+                                const defPreset = getDefaultPresetForModel(newVal) || 'C-4 (Composition 4) - Programmed Burn';
+                                updates['preset'] = defPreset;
+                                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                                if (presetData) {
+                                    Object.assign(updates, presetData);
+                                    if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                                    if (presetData.reference) updates['reference'] = presetData.reference;
+                                    if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                                    if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                                    if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                                    if (presetData.product_model) updates['product_model'] = presetData.product_model;
+                                }
+                            } else if (newVal === 'Lee-Tarver Ignition & Growth') {
+                                updates['material_model'] = 'Lee-Tarver Ignition & Growth';
+                                updates['material_type'] = 'JWL Charge';
+                                const defPreset = getDefaultPresetForModel(newVal) || 'LX-17 (Lee-Tarver Calibrated)';
+                                updates['preset'] = defPreset;
+                                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                                if (presetData) {
+                                    Object.assign(updates, presetData);
+                                    if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                                    if (presetData.reference) updates['reference'] = presetData.reference;
+                                    if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                                    if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                                    if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                                    if (presetData.product_model) updates['product_model'] = presetData.product_model;
+                                }
                             } else {
                                 delete updates['material_type'];
                                 delete updates['composition'];
@@ -5359,11 +5522,18 @@ export class GraphRenderer {
                                     const presetData = MPM_MATERIAL_PRESETS[defPreset];
                                     if (presetData) {
                                         Object.assign(updates, presetData);
+                                        if (presetData.provenance) updates['provenance'] = presetData.provenance;
+                                        if (presetData.reference) updates['reference'] = presetData.reference;
+                                        if (presetData.test_method) updates['test_method'] = presetData.test_method;
+                                        if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
+                                        if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
+                                        if (presetData.product_model) updates['product_model'] = presetData.product_model;
                                     }
                                 }
                             }
-                        } else if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma', 'atm_pressure', 'atm_temperature', 'gamma', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus'].includes(key)) {
+                        } else if (node.type === 'Material') {
                             updates['preset'] = 'Custom';
+                            updates['provenance'] = 'user';
                         } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && newVal === 'STL') || (key === 'origin_mode' && newVal === 'CAD Origin'))) {
                             if (key === 'shape_type' && newVal === 'STL') {
                                 updates['origin_mode'] = node.parameters['origin_mode'] || 'CAD Origin';
@@ -5415,11 +5585,14 @@ export class GraphRenderer {
                         updates['ambient_rho'] = rho;
                         updates['ambient_p'] = p;
                         updates['preset'] = 'Custom';
+                        updates['provenance'] = 'user';
                     } else if (node.type === 'Material' && key === 'density' && node.parameters['material_model'] === 'Ideal Gas') {
                         updates['ambient_rho'] = Number(newVal);
                         updates['preset'] = 'Custom';
-                    } else if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma', 'atm_pressure', 'atm_temperature', 'gamma', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus'].includes(key)) {
+                        updates['provenance'] = 'user';
+                    } else if (node.type === 'Material') {
                         updates['preset'] = 'Custom';
+                        updates['provenance'] = 'user';
                     }
                     
                     const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'cfl';

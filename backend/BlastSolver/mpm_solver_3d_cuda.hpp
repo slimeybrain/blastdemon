@@ -22,6 +22,7 @@ struct MPMParticle3DSoA {
     float* ep_bar{nullptr};
     float* damage{nullptr};
     float* lambda{nullptr};
+    float* t_arrival{nullptr};
     float* v_min{nullptr};
     float* s_shock{nullptr};
     float* weibull_factor{nullptr};
@@ -30,6 +31,7 @@ struct MPMParticle3DSoA {
     int* object_id{nullptr};
     int* state{nullptr};
     int* cluster_id{nullptr};
+    int* material_id{nullptr};
 };
 
 // 3D MPM Tile structure matching TILE_SIZE_3D = 8 (512 nodes per block) for CFD-MPM alignment
@@ -50,6 +52,42 @@ public:
     bool getSmoothPlasticStrain() const { return m_smooth_plastic_strain; }
     void setFlipBlend(float alpha) { m_flip_blend = alpha; }
     float getFlipBlend() const { return m_flip_blend; }
+
+    // Discrete Element (DEM) Contact & Non-Penetration Pipeline
+    void setDemContact(bool enable, float friction = 0.20f, float restitution = 0.0f, float scale = 1.0f,
+                       MPMDEMContactMode mode = MPMDEMContactMode::GasSolidOnly, float v_threshold = 1.0f) {
+        m_enable_dem_contact = enable;
+        m_dem_friction = friction;
+        m_dem_restitution = restitution;
+        m_dem_contact_scale = scale;
+        m_dem_contact_mode = mode;
+        m_dem_velocity_threshold = v_threshold;
+    }
+    bool getEnableDemContact() const { return m_enable_dem_contact; }
+    float getDemFriction() const { return m_dem_friction; }
+    float getDemRestitution() const { return m_dem_restitution; }
+    float getDemContactScale() const { return m_dem_contact_scale; }
+    MPMDEMContactMode getDemContactMode() const { return m_dem_contact_mode; }
+    float getDemVelocityThreshold() const { return m_dem_velocity_threshold; }
+    void setDemContactMode(MPMDEMContactMode mode) { m_dem_contact_mode = mode; }
+    void setDemVelocityThreshold(float v_thresh) { m_dem_velocity_threshold = v_thresh; }
+
+    // Multi-Velocity Field (Bardenhagen) Contact Pipeline
+    void setContactMethod(MPMContactMethod method);
+    MPMContactMethod getContactMethod() const { return m_contact_method; }
+    void setObjectMaterialMapping(const std::vector<int>& obj_to_mat, int num_materials);
+    int getNumMaterials() const { return m_num_materials; }
+
+    // Retained for backward API compatibility (Clean Single-Grid Continuum Contact)
+    void setSdfBarrier([[maybe_unused]] bool enable = false,
+                       [[maybe_unused]] float restitution = 0.10f,
+                       [[maybe_unused]] float friction = 0.25f,
+                       [[maybe_unused]] float skin = 0.15f) {}
+    bool getEnableSdfBarrier() const { return false; }
+    float getSdfBarrierRestitution() const { return 0.0f; }
+    float getSdfBarrierFriction() const { return 0.0f; }
+    float getSdfBarrierSkin() const { return 0.0f; }
+
     float getXMin() const { return m_xmin; }
     float getYMin() const { return m_ymin; }
     float getZMin() const { return m_zmin; }
@@ -65,7 +103,8 @@ public:
                       float yield_stress, float hardening, float failure_strain = 0.25f,
                       float tensile_failure_stress = 600.0e6f, int ppc = 8,
                       MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
-                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
+                      MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
+                      float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
 
     void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius,
                          float vel_x, float vel_y, float vel_z,
@@ -74,7 +113,8 @@ public:
                          float yield_stress, float hardening, float failure_strain = 0.25f,
                          float tensile_failure_stress = 600.0e6f, int ppc = 8,
                          MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
-                         MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
+                         MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
+                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
 
     void addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
                            float radius, float inner_radius, float height,
@@ -84,7 +124,8 @@ public:
                            float yield_stress, float hardening, float failure_strain = 0.25f,
                            float tensile_failure_stress = 600.0e6f, int ppc = 8,
                            MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
-                           MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped);
+                           MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
+                           float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
 
     void addSTLObject(int obj_id, const std::string& stl_filepath,
                       float pos_x, float pos_y, float pos_z,
@@ -260,6 +301,19 @@ private:
     int* d_compaction_indices{nullptr};
     size_t m_allocated_compaction_indices{0};
 
+    // Zero-allocation GPU DEM contact acceleration buffers
+    int* d_dem_cell_head{nullptr};
+    int* d_dem_particle_next{nullptr};
+    size_t m_allocated_dem_particles{0};
+    static constexpr size_t DEM_HASH_TABLE_SIZE = 131072;
+
+    bool m_enable_dem_contact{false};
+    float m_dem_friction{0.20f};
+    float m_dem_restitution{0.0f};
+    float m_dem_contact_scale{1.0f};
+    MPMDEMContactMode m_dem_contact_mode{MPMDEMContactMode::GasSolidOnly};
+    float m_dem_velocity_threshold{1.0f};
+
     float m_last_dt{0.0f};
     float m_last_cfl{0.3f};
     mutable float m_last_v_max{0.0f};
@@ -271,6 +325,22 @@ private:
     float m_zmin{0.0f};
     float m_cached_dt{1.0e-6f};
     int m_dt_calc_counter{0};
+    int m_ppc{8};
+
+    MPMContactMethod m_contact_method{MPMContactMethod::SingleVelocity};
+    std::vector<int> m_object_to_mat;
+    int m_num_materials{1};
+
+    void* d_mat_grid_buffer{nullptr};
+    size_t m_allocated_mat_grid_bytes{0};
+    float* d_mat_grid_m{nullptr};
+    float* d_mat_grid_p{nullptr};
+    float* d_mat_grid_f{nullptr};
+    float* d_mat_grid_v{nullptr};
+    float* d_mat_grid_dv{nullptr};
+    int* d_mat_to_obj{nullptr};
+    void allocateMatGridBuffers(size_t num_nodes, int num_materials);
+    void freeMatGridBuffers();
 };
 
 } // namespace Blast

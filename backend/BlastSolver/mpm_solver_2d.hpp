@@ -49,7 +49,9 @@ enum class MPMMaterialModel {
     RHTConcrete = 3,
     KCConcrete = 4,
     CSCMConcrete = 5,
-    CRESTReactiveBurn = 6
+    CRESTReactiveBurn = 6,
+    JWLProgrammedBurn = 7,
+    LeeTarverIgnitionGrowth = 8
 };
 
 struct MPMParticle2D {
@@ -165,6 +167,39 @@ struct MPMParticle2D {
     } sigma;
     float ep_bar{0.0f};          // Equivalent plastic strain
     float damage{0.0f};          // Scalar damage D in [0, 1]
+    float lambda{0.0f};          // Reaction progress [0, 1]
+    float t_arrival{1.0e10f};    // Programmed detonation arrival time (s)
+    float v_min{1.0f};           // Minimum relative volume
+    float s_shock{0.0f};         // Latched shock entropy
+
+    // JWL Product Gas EOS & Programmed Burn Parameters
+    float jwl_A{373.77e9f};              // High pressure coefficient A (Pa)
+    float jwl_B{3.747e9f};               // Moderate pressure coefficient B (Pa)
+    float jwl_R1{4.15f};                 // High pressure exponent R1
+    float jwl_R2{0.90f};                 // Moderate pressure exponent R2
+    float jwl_omega{0.35f};              // Grüneisen ratio omega
+    float det_vel{6930.0f};              // Detonation velocity D_cj (m/s)
+    float detonation_energy{4.29e6f};    // Detonation chemical energy release e0 (J/kg)
+    int   burn_zone_cells{4};            // Smeared burn zone cell width N_cells
+    float tau_burn_min{1.0e-7f};         // Minimum burn duration limiter (s)
+
+    // Lee-Tarver Ignition & Growth Parameters
+    float lt_I{4.0e6f};                  // Ignition rate coefficient (1/s)
+    float lt_a{0.24f};                   // Ignition compression threshold
+    float lt_b{0.667f};                  // Ignition depletion exponent
+    float lt_x{7.0f};                    // Ignition compression exponent
+    float lt_G1{130.0e-6f};              // Growth rate coefficient (1/(s Pa^y))
+    float lt_c{0.667f};                  // Growth depletion exponent
+    float lt_d{0.333f};                  // Growth reaction progress exponent
+    float lt_y{2.0f};                    // Growth pressure exponent
+    float lt_G2{400.0e-6f};              // Completion rate coefficient (1/(s Pa^z))
+    float lt_e{0.333f};                  // Completion depletion exponent
+    float lt_g{0.667f};                  // Completion reaction progress exponent
+    float lt_z{3.0f};                    // Completion pressure exponent
+    float lt_ig_max{0.02f};              // Maximum ignition fraction
+    float lt_growth_max{0.50f};          // Maximum growth fraction
+    float lt_comp_min{0.50f};            // Minimum completion threshold
+
     bool has_failed{false};      // Total failure status flag
     int object_id{0};
     int transfer_scheme{-1};    // -1 = Inherit domain default, otherwise MPMTransferScheme cast
