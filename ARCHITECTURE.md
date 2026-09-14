@@ -24,6 +24,7 @@ These architectural rules are absolute, immutable, and strictly enforced across 
 | **Strict Prohibition of Raw LaTeX Math** | NEVER emit raw LaTeX delimiters (`$`, `$$`, `\(`, `\)`, `\[`, `\]`, `\frac`, etc.) in documentation or chat responses. All mathematical formulas must use inline code, standard Unicode math symbols (`Δt`, `ρ`, `σ`, `γ`, `∇·u`, `√`), or fenced code blocks. |
 | **Browser Agent Prohibition** | The `browser_subagent` tool must never be invoked. UI layout, visual changes, and state logic are verified via static analysis, code reviews, and manual inspection. |
 | **Automatic Broker Management Directive** | AI assistants must **never** automatically launch or restart `./Broker` in the background; the user manages the Broker process manually in their own terminal. |
+| **Mandatory Fully Exhaustive V&V Directive** | Zero unverified code permitted across the framework. All formulations must pass automated quantitative verification from single-element patch tests and Hugoniot curves up to full 3D multi-physics test cases (full 3D reinforced concrete blast wall with spall throw to MPM, full naval hull UNDEX, full vehicle crash) with explicit mathematical tolerances (`e_L2`, `e_Linf`, `R^2 >= 0.985`, `e_energy <= 1.0e-3`) and automated living manual compilation. |
 
 ---
 

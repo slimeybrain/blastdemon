@@ -87,3 +87,20 @@
   - New node types MUST have a complete multi-section documentation definition in `frontend/src/parameter-definitions.ts` (including Overview & Role, Governing Physics & Formulations, Inputs & Upstream Connections, Outputs & Telemetry, and Key Parameter Tuning Guide).
   - Parameter popovers, native tooltips, and node info overlays across `property-editor.ts`, `graph-renderer.ts`, and `node-viewer.ts` must stay synchronized with this master single-source-of-truth definitions registry.
 
+## 16. Mandatory Fully Exhaustive Verification & Validation (V&V) Directive (ABSOLUTE RULE)
+- **Zero Unverified Code:** No element formulation, constitutive model, contact law, shock algorithm, or coupling scheme may be committed or merged without an automated, quantitative verification test in `backend/BlastSolver/verification/`.
+- **Multi-Scale Verification Pyramid:** Tests must be exhaustive across all physical scales:
+  1. *Unit / Single-Element Level:* Rigid body modes (zero strain energy), patch tests, uniaxial tension/compression, simple shear, bending, locking checks, single material-point cyclic load reversal, crack closure, and Hugoniot/JWL isentropes.
+  2. *Canonical Mesoscale Level:* Clamped plates, Scordelis-Lo cylindrical roofs, Hertzian elastic contact, Coulomb stick-slip friction, S-rail folding, Sod shock tube, hydrostatic water column, and submerged acoustic added mass.
+  3. *Full 3D Multi-Physics System Level:* Full 3D reinforced concrete blast walls under high explosive detonation (Eulerian blast wave reflection, two-way FSI, solid concrete cracking/crushing, rebar plastic yielding, and back-face spall throw to MPM debris), full naval submarine hull sections under close-in/stand-off UNDEX with bubble pulsation, and full automotive frontal crash barrier impact.
+- **Strict Quantitative Error Norms (Prohibition of Qualitative Checks):** Qualitative "looks plausible" assertions are strictly prohibited. Every test must evaluate explicit mathematical tolerances:
+  - Relative L2 Error Norm (`e_L2 <= tolerance`)
+  - Maximum Point-wise Linf Error Norm (`e_Linf <= tolerance`)
+  - Hamiltonian Energy Conservation (`e_energy <= 1.0e-3`)
+  - Momentum Vector Conservation (`e_momentum <= 1.0e-12`)
+  - Asymptotic Convergence Rate (`1.90 <= p_obs <= 2.10` for 2nd-order schemes)
+  - Statistical Correlation (`R^2 >= 0.985` for empirical validation data)
+- **Autonomous Living Verification Compendium:** The headless test suite (`bin/blast_verify`) must compile and execute continuously, generating zero-dependency vector SVG plots with shaded `± 1.0%` (green) and `± 5.0%` (yellow) error corridors, and automatically compiling `VERIFICATION_MANUAL.md` with live Pass/Fail badges.
+- **Strict LaTeX Math Prohibition in V&V:** All formulas in test code, comments, reports, and living manuals MUST strictly use clean Unicode and inline code formatting. Raw LaTeX commands (`$`, `$$`, `\(`, `\)`, `\frac`, etc.) are strictly prohibited per Directive 7.
+
+
