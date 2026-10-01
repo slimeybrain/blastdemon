@@ -23,7 +23,9 @@ void CFDSolver2DImpl<RealType>::updateActiveRegion() {
             for (int k = 0; k < TILE_SIZE * TILE_SIZE; ++k) {
                 if (std::abs((double)states_pool[pool_idx].p[k] - ambient_p) / ambient_p > 1e-4 ||
                     std::abs((double)states_pool[pool_idx].ur[k]) > 1e-2 ||
-                    std::abs((double)states_pool[pool_idx].uz[k]) > 1e-2) {
+                    std::abs((double)states_pool[pool_idx].uz[k]) > 1e-2 ||
+                    states_pool[pool_idx].alpha1[k] > (RealType)1e-4 ||
+                    states_pool[pool_idx].alpha2[k] > (RealType)1e-4) {
                     is_active = true;
                     break;
                 }
@@ -834,6 +836,40 @@ void CFDSolver2DImpl<RealType>::step(double dt) {
                     if (currentMaterials.detonation_energy > 0.0 && dF > (RealType)0.0) {
                         RealType rho_expl = U_pool[pool_idx].arho1[k] + U_pool[pool_idx].arho2[k];
                         U_pool[pool_idx].E[k] += dF * rho_expl * (RealType)currentMaterials.detonation_energy;
+                    }
+
+                    if (currentMaterials.afterburn.enabled) {
+                        RealType arho0 = U_pool[pool_idx].rho[k] - U_pool[pool_idx].arho1[k] - U_pool[pool_idx].arho2[k];
+                        RealType ke = (RealType)0.5 * (U_pool[pool_idx].rhour[k] * U_pool[pool_idx].rhour[k] + U_pool[pool_idx].rhouz[k] * U_pool[pool_idx].rhouz[k]) / U_pool[pool_idx].rho[k];
+                        RealType R_ch = (RealType)charge_radius;
+                        RealType tmp_alpha1_ab = U_pool[pool_idx].alpha1[k];
+                        RealType tmp_arho1_ab = U_pool[pool_idx].arho1[k];
+
+                        RealType vort_2d = (RealType)0.0;
+                        int lx_cell = k & 15;
+                        int lz_cell = k >> 4;
+                        if (lx_cell > 0 && lx_cell < 15 && lz_cell > 0 && lz_cell < 15) {
+                            int k_pr = k + 1;
+                            int k_mr = k - 1;
+                            int k_pz = k + 16;
+                            int k_mz = k - 16;
+                            RealType uz_pr = U_pool[pool_idx].rhouz[k_pr] / U_pool[pool_idx].rho[k_pr];
+                            RealType uz_mr = U_pool[pool_idx].rhouz[k_mr] / U_pool[pool_idx].rho[k_mr];
+                            RealType ur_pz = U_pool[pool_idx].rhour[k_pz] / U_pool[pool_idx].rho[k_pz];
+                            RealType ur_mz = U_pool[pool_idx].rhour[k_mz] / U_pool[pool_idx].rho[k_mz];
+                            RealType duz_dr = (uz_pr - uz_mr) / (RealType)(2.0 * dr);
+                            RealType dur_dz = (ur_pz - ur_mz) / (RealType)(2.0 * dz);
+                            vort_2d = std::abs(duz_dr - dur_dz);
+                        }
+
+                        MultiMat::computeAfterburn(
+                            dt_r, currentTime_r, R_ch, (RealType)currentMaterials.det_vel,
+                            currentMaterials.afterburn,
+                            U_pool[pool_idx].rho[k], tmp_alpha1_ab, tmp_arho1_ab, arho0, U_pool[pool_idx].E[k], ke,
+                            vort_2d
+                        );
+                        U_pool[pool_idx].alpha1[k] = tmp_alpha1_ab;
+                        U_pool[pool_idx].arho1[k] = tmp_arho1_ab;
                     }
                 }
             }

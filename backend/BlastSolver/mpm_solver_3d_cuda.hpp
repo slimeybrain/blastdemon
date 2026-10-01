@@ -94,6 +94,19 @@ public:
     void setBoundaryConditions(MPMBoundaryCondition3D x_min, MPMBoundaryCondition3D x_max,
                                MPMBoundaryCondition3D y_min, MPMBoundaryCondition3D y_max,
                                MPMBoundaryCondition3D z_min, MPMBoundaryCondition3D z_max);
+    void setLysmerParams(const LysmerDashpotParams& params) { m_lysmer_params = params; }
+    const LysmerDashpotParams& getLysmerParams() const { return m_lysmer_params; }
+
+    // Gravity & Stratified Initial Condition
+    void setGravity(float gx, float gy, float gz) {
+        m_gravity[0] = gx;
+        m_gravity[1] = gy;
+        m_gravity[2] = gz;
+        m_has_gravity = (gx != 0.0f || gy != 0.0f || gz != 0.0f);
+    }
+    bool hasGravity() const { return m_has_gravity; }
+    const float* getGravity() const { return m_gravity; }
+    void applyStratifiedInitialCondition(const Blast::Stratified3DParams& strat);
 
     void addBoxObject(int obj_id, float pos_x, float pos_y, float pos_z,
                       float size_x, float size_y, float size_z,
@@ -106,7 +119,7 @@ public:
                       MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
                       float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
 
-    void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius,
+    void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius, float inner_radius,
                          float vel_x, float vel_y, float vel_z,
                          float angular_vel_x, float angular_vel_y, float angular_vel_z,
                          float density, float E, float nu,
@@ -115,6 +128,18 @@ public:
                          MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                          MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
                          float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
+
+    void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius,
+                         float vel_x, float vel_y, float vel_z,
+                         float angular_vel_x, float angular_vel_y, float angular_vel_z,
+                         float density, float E, float nu,
+                         float yield_stress, float hardening, float failure_strain = 0.25f,
+                         float tensile_failure_stress = 600.0e6f, int ppc = 8,
+                         MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                         MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
+                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f) {
+        addSphereObject(obj_id, pos_x, pos_y, pos_z, radius, 0.0f, vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+    }
 
     void addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
                            float radius, float inner_radius, float height,
@@ -248,6 +273,8 @@ private:
     float m_dx{0.01f};
     float m_dy{0.01f};
     float m_dz{0.01f};
+    float m_gravity[3]{0.0f, 0.0f, 0.0f};
+    bool m_has_gravity{false};
 
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
@@ -261,6 +288,7 @@ private:
     MPMBoundaryCondition3D m_bc_y_max{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_z_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_z_max{MPMBoundaryCondition3D::Sticky};
+    LysmerDashpotParams m_lysmer_params;
 
     std::vector<MPMGridNode3D> m_host_grid;
     std::vector<MPMParticle3D> m_host_particles;

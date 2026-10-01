@@ -3,6 +3,13 @@ build/
 .cache/
 *.o
 *.a
+/BlastSolver
+/Broker
+/blastcli
+/BlastStudio
+/blast_verify
+bin/
+/perf.data
 
 # ─── Simulation output & mesh data ──────────────────────────────────────────────
 *.h5

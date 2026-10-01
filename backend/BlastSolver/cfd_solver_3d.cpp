@@ -45,6 +45,7 @@ template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, double amb_rho, double amb_p) {
     ambient_rho = amb_rho;
     ambient_p = amb_p;
+    charge_radius = charge.radius;
     currentMaterials = materials;
     MultiMat::initializePrecalculatedTerms(currentMaterials);
 
@@ -203,30 +204,364 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setInitialCondition(const Charg
 }
 
 template <typename RealType, bool IsMultiMaterial>
-void CFDSolver3DImpl<RealType, IsMultiMaterial>::updateActiveRegions() {
-    int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
-    std::vector<uint8_t> physically_active(total_tiles, 0);
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::setAcousticWavePacket(
+    double x0, double sigma, double delta_p, double amb_rho, double amb_p) {
+    this->ambient_rho = amb_rho;
+    this->ambient_p = amb_p;
+    this->charge_radius = sigma;
+    double c_sound = std::sqrt(this->gamma * amb_p / amb_rho);
+    double Z0 = amb_rho * c_sound;
+
+    #pragma omp parallel for
+    for (int t = 0; t < (int)states_pool.size(); ++t) {
+        auto& tile = states_pool[t];
+        auto& u_tile = U_pool[t];
+        for (int i = 0; i < TILE_CELLS_3D; ++i) {
+            tile.rho[i] = (RealType)amb_rho;
+            tile.ux[i] = 0.0;
+            tile.uy[i] = 0.0;
+            tile.uz[i] = 0.0;
+            tile.p[i] = (RealType)amb_p;
+            if constexpr (IsMultiMaterial) {
+                tile.alpha1[i] = 0.0; tile.alpha2[i] = 0.0;
+                tile.arho1[i] = 0.0; tile.arho2[i] = 0.0;
+            }
+            tile.floor_status[i] = 0;
+            tile.peak_overpressure[i] = 0.0;
+            tile.peak_impulse[i] = 0.0;
+
+            u_tile.rho[i] = (RealType)amb_rho;
+            u_tile.rhoux[i] = 0.0;
+            u_tile.rhouy[i] = 0.0;
+            u_tile.rhouz[i] = 0.0;
+            u_tile.E[i] = (RealType)(amb_p / (this->gamma - 1.0));
+            if constexpr (IsMultiMaterial) {
+                u_tile.alpha1[i] = 0.0; u_tile.alpha2[i] = 0.0;
+                u_tile.arho1[i] = 0.0; u_tile.arho2[i] = 0.0;
+            }
+        }
+    }
 
     #pragma omp parallel for collapse(3)
     for (int tz = 0; tz < n_tiles_z; ++tz) {
         for (int ty = 0; ty < n_tiles_y; ++ty) {
             for (int tx = 0; tx < n_tiles_x; ++tx) {
                 int t_idx = tx + ty * n_tiles_x + tz * n_tiles_x * n_tiles_y;
-                const auto& tile = states_pool[t_idx];
-                bool active = false;
-                for (int i = 0; i < TILE_CELLS_3D; ++i) {
-                    double u2 = (double)(tile.ux[i]*tile.ux[i] + tile.uy[i]*tile.uy[i] + tile.uz[i]*tile.uz[i]);
-                    double dp = std::abs((double)tile.p[i] - ambient_p);
-                    double a2 = 0.0;
-                    if constexpr (IsMultiMaterial) {
-                        a2 = (double)tile.alpha2[i];
-                    }
-                    if (a2 > 1e-4 || dp > 1e-3 * ambient_p || u2 > 1e-2) {
-                        active = true;
-                        break;
+                auto& tile = states_pool[t_idx];
+                auto& u_tile = U_pool[t_idx];
+                for (int k = 0; k < TILE_SIZE_3D; ++k) {
+                    int gz = tz * TILE_SIZE_3D + k;
+                    if (gz >= nz) continue;
+                    for (int j = 0; j < TILE_SIZE_3D; ++j) {
+                        int gy = ty * TILE_SIZE_3D + j;
+                        if (gy >= ny) continue;
+                        for (int i = 0; i < TILE_SIZE_3D; ++i) {
+                            int gx = tx * TILE_SIZE_3D + i;
+                            if (gx >= nx) continue;
+                            double x_c = xmin + (gx + 0.5) * cellSize;
+                            double dx_val = (x_c - x0) / sigma;
+                            double dp = delta_p * std::exp(-dx_val * dx_val);
+                            double p_cell = amb_p + dp;
+                            double rho_cell = amb_rho + dp / (c_sound * c_sound);
+                            double ux_cell = dp / Z0;
+
+                            int c_idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
+                            tile.p[c_idx] = (RealType)p_cell;
+                            tile.rho[c_idx] = (RealType)rho_cell;
+                            tile.ux[c_idx] = (RealType)ux_cell;
+                            tile.uy[c_idx] = 0.0;
+                            tile.uz[c_idx] = 0.0;
+
+                            RealType ke = (RealType)(0.5 * rho_cell * ux_cell * ux_cell);
+                            u_tile.rho[c_idx] = (RealType)rho_cell;
+                            u_tile.rhoux[c_idx] = (RealType)(rho_cell * ux_cell);
+                            u_tile.rhouy[c_idx] = 0.0;
+                            u_tile.rhouz[c_idx] = 0.0;
+                            u_tile.E[c_idx] = (RealType)(p_cell / (this->gamma - 1.0)) + ke;
+                        }
                     }
                 }
-                physically_active[t_idx] = active ? 1 : 0;
+            }
+        }
+    }
+    updateActiveRegions();
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::setStratifiedInitialCondition(
+    const Charge3DParams& charge, const MultiMat::MaterialSet& materials, const Blast::Stratified3DParams& strat) {
+    Blast::Stratified3DParams strat_snapped = strat;
+    strat_snapped.enabled = true;
+    int gz_seabed = std::max(1, (int)std::round((strat.seabed_surface_z - zmin) / cellSize));
+    strat_snapped.seabed_surface_z = zmin + (double)gz_seabed * cellSize;
+    strat_snapped.charge_x = charge.x;
+    strat_snapped.charge_y = charge.y;
+    strat_snapped.charge_z = charge.z;
+    strat_snapped.charge_radius = charge.radius;
+    this->stratified_params = strat_snapped;
+    if (strat_snapped.gravity_z != 0.0) {
+        this->setGravity(0.0, 0.0, strat_snapped.gravity_z);
+    }
+    double g_mag = std::abs(strat_snapped.gravity_z);
+    if (g_mag < 1e-6) g_mag = 9.81;
+
+    this->ambient_rho = strat_snapped.air_rho;
+    this->ambient_p = strat_snapped.p_atm;
+    this->charge_radius = charge.radius;
+    this->currentMaterials = materials;
+    MultiMat::initializePrecalculatedTerms(this->currentMaterials);
+
+    #pragma omp parallel for collapse(3)
+    for (int tz = 0; tz < n_tiles_z; ++tz) {
+        for (int ty = 0; ty < n_tiles_y; ++ty) {
+            for (int tx = 0; tx < n_tiles_x; ++tx) {
+                int t_idx = tx + ty * n_tiles_x + tz * n_tiles_x * n_tiles_y;
+                auto& tile = states_pool[t_idx];
+                auto& u_tile = U_pool[t_idx];
+
+                for (int k = 0; k < TILE_SIZE_3D; ++k) {
+                    int gz = tz * TILE_SIZE_3D + k;
+                    if (gz >= nz) continue;
+                    double z_c = zmin + (gz + 0.5) * cellSize;
+                    for (int j = 0; j < TILE_SIZE_3D; ++j) {
+                        int gy = ty * TILE_SIZE_3D + j;
+                        if (gy >= ny) continue;
+                        for (int i = 0; i < TILE_SIZE_3D; ++i) {
+                            int gx = tx * TILE_SIZE_3D + i;
+                            if (gx >= nx) continue;
+                            int c_idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
+
+                            double cell_p = strat_snapped.p_atm;
+                            double cell_rho = strat_snapped.air_rho;
+                            double cell_E = 0.0;
+                            CellState3D<IsMultiMaterial> temp_s{};
+
+                            if (z_c > strat_snapped.water_surface_z) {
+                                // Zone 1: Atmosphere (Hydrostatic Air Column)
+                                double z_air_depth = z_c - strat_snapped.water_surface_z;
+                                cell_p = strat_snapped.p_atm - strat_snapped.air_rho * g_mag * z_air_depth;
+                                cell_rho = strat_snapped.air_rho;
+                                cell_E = getEnergy3D<IsMultiMaterial>(cell_p, cell_rho, temp_s, gamma, this->currentMaterials.products, this->currentMaterials.unreacted);
+                            } else if (z_c >= strat_snapped.seabed_surface_z) {
+                                // Zone 2: Seawater column (Modified Tait EOS)
+                                double p_h = 0.0, rho_h = 0.0, e_h = 0.0;
+                                Blast::TaitEOSWater::compute_hydrostatic_state(
+                                    z_c, strat_snapped.water_surface_z, g_mag, strat_snapped.p_atm,
+                                    p_h, rho_h, e_h, strat_snapped.tait_B, strat_snapped.tait_gamma, strat_snapped.tait_rho0
+                                );
+                                cell_p = p_h;
+                                cell_rho = rho_h;
+                                if constexpr (IsMultiMaterial) {
+                                    cell_E = cell_rho * e_h;
+                                } else if (this->is_water_tait_val) {
+                                    cell_E = cell_rho * e_h;
+                                } else {
+                                    cell_E = cell_p / (gamma - 1.0);
+                                }
+                            } else {
+                                // Zone 3: Geotechnical Seabed
+                                double p_bed = 0.0, rho_bed = 0.0, e_bed = 0.0;
+                                Blast::TaitEOSWater::compute_hydrostatic_state(
+                                    strat_snapped.seabed_surface_z, strat_snapped.water_surface_z, g_mag, strat_snapped.p_atm,
+                                    p_bed, rho_bed, e_bed, strat_snapped.tait_B, strat_snapped.tait_gamma, strat_snapped.tait_rho0
+                                );
+                                double sig_v = 0.0, u_p = 0.0, sig_h = 0.0;
+                                Blast::TaitEOSWater::compute_geostatic_stress(
+                                    z_c, strat_snapped.seabed_surface_z, p_bed, strat_snapped.soil_density, strat_snapped.tait_rho0, g_mag, strat_snapped.k0_earth_pressure,
+                                    sig_v, u_p, sig_h
+                                );
+                                cell_p = sig_v;
+                                double gamma_soil = strat_snapped.soil_gamma > 0.0 ? strat_snapped.soil_gamma : 4.0;
+                                double rho0_soil = strat_snapped.soil_density > 0.0 ? strat_snapped.soil_density : 2000.0;
+                                double c0_soil = strat_snapped.soil_c0 > 0.0 ? strat_snapped.soil_c0 : 2500.0;
+                                double B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                                double p0_soil = strat_snapped.p_atm;
+                                cell_rho = Blast::TaitEOSWater::compute_density_isentropic(
+                                    cell_p, B_soil, gamma_soil, rho0_soil, p0_soil
+                                );
+                                double e_soil = Blast::TaitEOSWater::compute_energy_isentropic(cell_rho, B_soil, gamma_soil, rho0_soil);
+                                cell_E = cell_rho * e_soil;
+                            }
+
+                            tile.rho[c_idx] = (RealType)cell_rho;
+                            tile.ux[c_idx] = 0.0;
+                            tile.uy[c_idx] = 0.0;
+                            tile.uz[c_idx] = 0.0;
+                            tile.p[c_idx] = (RealType)cell_p;
+                            tile.floor_status[c_idx] = 0;
+                            tile.peak_overpressure[c_idx] = 0.0;
+                            tile.peak_impulse[c_idx] = 0.0;
+
+                            if constexpr (IsMultiMaterial) {
+                                tile.alpha1[c_idx] = 0.0;
+                                tile.alpha2[c_idx] = 0.0;
+                                tile.arho1[c_idx] = 0.0;
+                                tile.arho2[c_idx] = 0.0;
+                            }
+
+                            u_tile.rho[c_idx] = (RealType)cell_rho;
+                            u_tile.rhoux[c_idx] = 0.0;
+                            u_tile.rhouy[c_idx] = 0.0;
+                            u_tile.rhouz[c_idx] = 0.0;
+                            u_tile.E[c_idx] = (RealType)cell_E;
+
+                            if constexpr (IsMultiMaterial) {
+                                u_tile.alpha1[c_idx] = 0.0;
+                                u_tile.alpha2[c_idx] = 0.0;
+                                u_tile.arho1[c_idx] = 0.0;
+                                u_tile.arho2[c_idx] = 0.0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (charge.radius > 0.0 || charge.lx > 0.0) {
+        const double deg2rad = 3.14159265358979323846 / 180.0;
+        const double ax = charge.rot_x * deg2rad;
+        const double ay = charge.rot_y * deg2rad;
+        const double az = charge.rot_z * deg2rad;
+        const double cx_rot = std::cos(ax), sx_rot = std::sin(ax);
+        const double cy_rot = std::cos(ay), sy_rot = std::sin(ay);
+        const double cz_rot = std::cos(az), sz_rot = std::sin(az);
+        const bool has_rot = (charge.rot_x != 0.0 || charge.rot_y != 0.0 || charge.rot_z != 0.0);
+
+        #pragma omp parallel for collapse(3)
+        for (int tz = 0; tz < n_tiles_z; ++tz) {
+            for (int ty = 0; ty < n_tiles_y; ++ty) {
+                for (int tx = 0; tx < n_tiles_x; ++tx) {
+                    int t_idx = tx + ty * n_tiles_x + tz * n_tiles_x * n_tiles_y;
+                    auto& tile = states_pool[t_idx];
+                    bool tile_has_charge = false;
+
+                    for (int k = 0; k < TILE_SIZE_3D; ++k) {
+                        int gz = tz * TILE_SIZE_3D + k;
+                        if (gz >= nz) continue;
+                        double z_c = zmin + (gz + 0.5) * cellSize;
+                        for (int j = 0; j < TILE_SIZE_3D; ++j) {
+                            int gy = ty * TILE_SIZE_3D + j;
+                            if (gy >= ny) continue;
+                            double y_c = ymin + (gy + 0.5) * cellSize;
+                            for (int i = 0; i < TILE_SIZE_3D; ++i) {
+                                int gx = tx * TILE_SIZE_3D + i;
+                                if (gx >= nx) continue;
+                                double x_c = xmin + (gx + 0.5) * cellSize;
+                                int c_idx = i + j * TILE_SIZE_3D + k * TILE_SIZE_3D * TILE_SIZE_3D;
+
+                                int points_inside = 0;
+                                int total_points = 64;
+                                for (double ox : {-0.375, -0.125, 0.125, 0.375}) {
+                                    for (double oy : {-0.375, -0.125, 0.125, 0.375}) {
+                                        for (double oz : {-0.375, -0.125, 0.125, 0.375}) {
+                                            double px = x_c + ox * cellSize;
+                                            double py = y_c + oy * cellSize;
+                                            double pz = z_c + oz * cellSize;
+                                            double dx = px - charge.x;
+                                            double dy = py - charge.y;
+                                            double dz = pz - charge.z;
+                                            double x_loc = dx;
+                                            double y_loc = dy;
+                                            double z_loc = dz;
+                                            if (has_rot) {
+                                                double x1 = cz_rot * dx + sz_rot * dy;
+                                                double y1 = -sz_rot * dx + cz_rot * dy;
+                                                double z1 = dz;
+                                                double x2 = cy_rot * x1 - sy_rot * z1;
+                                                double y2 = y1;
+                                                double z2 = sy_rot * x1 + cy_rot * z1;
+                                                x_loc = x2;
+                                                y_loc = cx_rot * y2 + sx_rot * z2;
+                                                z_loc = -sx_rot * y2 + cx_rot * z2;
+                                            }
+                                            bool inside = false;
+                                            if (charge.shape_type == 0) {
+                                                double dist_sq = dx*dx + dy*dy + dz*dz;
+                                                if (dist_sq <= charge.radius * charge.radius) inside = true;
+                                            } else if (charge.shape_type == 1) {
+                                                if (std::abs(x_loc) <= charge.lx*0.5 && std::abs(y_loc) <= charge.ly*0.5 && std::abs(z_loc) <= charge.lz*0.5) inside = true;
+                                            } else if (charge.shape_type == 2) {
+                                                double dr_sq = x_loc*x_loc + y_loc*y_loc;
+                                                if (dr_sq <= charge.radius*charge.radius && std::abs(z_loc) <= charge.height*0.5) inside = true;
+                                            }
+                                            if (inside) points_inside++;
+                                        }
+                                    }
+                                }
+                                double f_vol = (double)points_inside / (double)total_points;
+                                if (f_vol > 0.0) {
+                                    tile_has_charge = true;
+                                    CellState3D<IsMultiMaterial> temp_s;
+                                    if constexpr (IsMultiMaterial) {
+                                        tile.alpha1[c_idx] = 0.0;
+                                        tile.alpha2[c_idx] = (RealType)f_vol;
+                                        tile.arho1[c_idx] = 0.0;
+                                        tile.arho2[c_idx] = tile.alpha2[c_idx] * (RealType)materials.unreacted.rho0;
+                                        tile.rho[c_idx] = ((RealType)1.0 - (RealType)f_vol) * tile.rho[c_idx] + tile.arho2[c_idx];
+                                        RealType p_solid = (RealType)MultiMat::getReferencePressure_Unreacted<RealType>(materials.unreacted);
+                                        tile.p[c_idx] = ((RealType)1.0 - f_vol) * tile.p[c_idx] + f_vol * std::max(tile.p[c_idx], p_solid);
+                                        temp_s.alpha1 = (double)tile.alpha1[c_idx]; temp_s.alpha2 = (double)tile.alpha2[c_idx];
+                                        temp_s.arho1 = (double)tile.arho1[c_idx]; temp_s.arho2 = (double)tile.arho2[c_idx];
+                                    } else {
+                                        tile.rho[c_idx] = (RealType)(f_vol * materials.unreacted.rho0 + (1.0 - f_vol) * (double)tile.rho[c_idx]);
+                                        double p_high = (gamma - 1.0) * materials.unreacted.rho0 * materials.detonation_energy;
+                                        tile.p[c_idx] = (RealType)(f_vol * p_high + (1.0 - f_vol) * (double)tile.p[c_idx]);
+                                    }
+                                    auto& u_tile = U_pool[t_idx];
+                                    u_tile.rho[c_idx] = tile.rho[c_idx];
+                                    u_tile.rhoux[c_idx] = 0.0;
+                                    u_tile.rhouy[c_idx] = 0.0;
+                                    u_tile.rhouz[c_idx] = 0.0;
+                                    u_tile.E[c_idx] = (RealType)getEnergy3D<IsMultiMaterial>((double)tile.p[c_idx], (double)tile.rho[c_idx], temp_s, gamma, this->currentMaterials.products, this->currentMaterials.unreacted);
+                                    if constexpr (IsMultiMaterial) {
+                                        u_tile.alpha1[c_idx] = tile.alpha1[c_idx];
+                                        u_tile.alpha2[c_idx] = tile.alpha2[c_idx];
+                                        u_tile.arho1[c_idx] = tile.arho1[c_idx];
+                                        u_tile.arho2[c_idx] = tile.arho2[c_idx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (tile_has_charge) active_tiles[t_idx] = 1;
+                }
+            }
+        }
+    }
+    updateActiveRegions();
+}
+
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::updateActiveRegions() {
+    int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
+    std::vector<uint8_t> physically_active(total_tiles, 0);
+
+    if (stratified_params.enabled) {
+        std::fill(physically_active.begin(), physically_active.end(), 1);
+    } else {
+        #pragma omp parallel for collapse(3)
+        for (int tz = 0; tz < n_tiles_z; ++tz) {
+            for (int ty = 0; ty < n_tiles_y; ++ty) {
+                for (int tx = 0; tx < n_tiles_x; ++tx) {
+                    int t_idx = tx + ty * n_tiles_x + tz * n_tiles_x * n_tiles_y;
+                    const auto& tile = states_pool[t_idx];
+                    bool active = false;
+                    for (int i = 0; i < TILE_CELLS_3D; ++i) {
+                        double u2 = (double)(tile.ux[i]*tile.ux[i] + tile.uy[i]*tile.uy[i] + tile.uz[i]*tile.uz[i]);
+                        double dp = std::abs((double)tile.p[i] - ambient_p);
+                        double a1 = 0.0, a2 = 0.0;
+                        if constexpr (IsMultiMaterial) {
+                            a1 = (double)tile.alpha1[i];
+                            a2 = (double)tile.alpha2[i];
+                        }
+                        if (a1 > 1e-4 || a2 > 1e-4 || dp > 1e-3 * ambient_p || u2 > 1e-2) {
+                            active = true;
+                            break;
+                        }
+                    }
+                    physically_active[t_idx] = active ? 1 : 0;
+                }
             }
         }
     }
@@ -295,7 +630,8 @@ template <typename RealType, bool IsMultiMaterial>
 Flux3DT<RealType, IsMultiMaterial> getRusanovFlux3D(
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& sL, 
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& sR, 
-    int dir, RealType gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    int dir, RealType gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted,
+    bool is_water = false, const Blast::TaitEOSParams* tait = nullptr) {
     
     auto physFlux = [](const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& s, int dir) {
         Flux3DT<RealType, IsMultiMaterial> f;
@@ -316,7 +652,13 @@ Flux3DT<RealType, IsMultiMaterial> getRusanovFlux3D(
     Flux3DT<RealType, IsMultiMaterial> fR = physFlux(sR, dir);
 
     RealType cL, cR;
-    if constexpr (IsMultiMaterial) {
+    if (is_water && tait) {
+        CellState3D<IsMultiMaterial> sL_tmp{}, sR_tmp{};
+        sL_tmp.ux = sL.ux; sL_tmp.uy = sL.uy; sL_tmp.uz = sL.uz; sL_tmp.p = sL.p; sL_tmp.E = sL.E; sL_tmp.rho = sL.rho;
+        sR_tmp.ux = sR.ux; sR_tmp.uy = sR.uy; sR_tmp.uz = sR.uz; sR_tmp.p = sR.p; sR_tmp.E = sR.E; sR_tmp.rho = sR.rho;
+        cL = (RealType)getSoundSpeed3D<IsMultiMaterial>((double)sL.p, (double)sL.rho, sL_tmp, (double)gamma, products, unreacted, true, tait);
+        cR = (RealType)getSoundSpeed3D<IsMultiMaterial>((double)sR.p, (double)sR.rho, sR_tmp, (double)gamma, products, unreacted, true, tait);
+    } else if constexpr (IsMultiMaterial) {
         cL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, products, unreacted);
         cR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, products, unreacted);
     } else {
@@ -349,10 +691,19 @@ template <typename RealType, bool IsMultiMaterial>
 Flux3DT<RealType, IsMultiMaterial> getAUSMPlusFlux3D(
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& sL, 
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& sR, 
-    int dir, RealType gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    int dir, RealType gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted,
+    bool is_water = false, const Blast::TaitEOSParams* tait = nullptr,
+    RealType z_cL = (RealType)0.0, RealType z_cR = (RealType)0.0,
+    bool has_gravity = false, RealType gravity_z = (RealType)0.0) {
     
     RealType aL, aR;
-    if constexpr (IsMultiMaterial) {
+    if (is_water && tait) {
+        CellState3D<IsMultiMaterial> sL_tmp{}, sR_tmp{};
+        sL_tmp.ux = sL.ux; sL_tmp.uy = sL.uy; sL_tmp.uz = sL.uz; sL_tmp.p = sL.p; sL_tmp.E = sL.E; sL_tmp.rho = sL.rho;
+        sR_tmp.ux = sR.ux; sR_tmp.uy = sR.uy; sR_tmp.uz = sR.uz; sR_tmp.p = sR.p; sR_tmp.E = sR.E; sR_tmp.rho = sR.rho;
+        aL = (RealType)getSoundSpeed3D<IsMultiMaterial>((double)sL.p, (double)sL.rho, sL_tmp, (double)gamma, products, unreacted, true, tait);
+        aR = (RealType)getSoundSpeed3D<IsMultiMaterial>((double)sR.p, (double)sR.rho, sR_tmp, (double)gamma, products, unreacted, true, tait);
+    } else if constexpr (IsMultiMaterial) {
         aL = MultiMat::getMixtureSoundSpeed(sL.p, sL.rho, sL.alpha1, sL.alpha2, sL.arho1, sL.arho2, gamma, products, unreacted);
         aR = MultiMat::getMixtureSoundSpeed(sR.p, sR.rho, sR.alpha1, sR.alpha2, sR.arho1, sR.arho2, gamma, products, unreacted);
     } else {
@@ -413,12 +764,32 @@ Flux3DT<RealType, IsMultiMaterial> getAUSMPlusFlux3D(
     RealType M_half_unmod = get_M_plus(ML) + get_M_minus(MR);
     RealType p_half_unmod = get_P_plus(ML) * sL.p + get_P_minus(MR) * sR.p;
     
-    // AUSM+-up stabilization terms to prevent carbuncle/cube artifacts
-    RealType Kp = (RealType)0.25;
-    RealType Ku = (RealType)0.75;
+    // AUSM+-up stabilization terms to prevent carbuncle/cube artifacts with Liou (2006) shock cutoff
+    RealType M_bar_sq = (sL.ux*sL.ux + sL.uy*sL.uy + sL.uz*sL.uz + sR.ux*sR.ux + sR.uy*sR.uy + sR.uz*sR.uz) / ((RealType)2.0 * a_half * a_half);
+    RealType fa = (M_bar_sq < (RealType)1.0) ? ((RealType)1.0 - M_bar_sq) : (RealType)0.0;
     RealType rho_half = (RealType)0.5 * (sL.rho + sR.rho);
+
+    bool is_large_density_jump = (sL.rho > (RealType)1.5 * sR.rho || sR.rho > (RealType)1.5 * sL.rho);
+    if (is_large_density_jump) {
+        RealType zL_ausm = std::max((RealType)1e-3, sL.rho * aL);
+        RealType zR_ausm = std::max((RealType)1e-3, sR.rho * aR);
+        rho_half = (RealType)2.0 * sL.rho * sR.rho / (sL.rho + sR.rho);
+        p_half_unmod = (zR_ausm * sL.p + zL_ausm * sR.p) / (zL_ausm + zR_ausm);
+    }
+
+    RealType dp_wave = sR.p - sL.p;
+
+    RealType p_scale = (is_water && tait) ? (RealType)tait->B : std::min(sL.p, sR.p);
+    RealType dp_rel = (p_scale > (RealType)1e-6) ? (std::abs(dp_wave) / p_scale) : (RealType)0.0;
+    RealType shock_sense = (dp_rel > (RealType)0.2) ? ((RealType)1.0 / ((RealType)1.0 + dp_rel * dp_rel)) : (RealType)1.0;
+    RealType Kp = (RealType)0.25 * fa * shock_sense;
+    RealType Ku = (RealType)0.75 * shock_sense;
+    if (is_large_density_jump || (dir == 2 && has_gravity && std::abs(uL) < (RealType)1.0e-3 && std::abs(uR) < (RealType)1.0e-3)) {
+        Kp = (RealType)0.0;
+        if (is_large_density_jump) Ku = (RealType)0.0;
+    }
     
-    RealType M_half = M_half_unmod - Kp * (sR.p - sL.p) / std::max((RealType)1e-6, rho_half * a_half * a_half);
+    RealType M_half = M_half_unmod - Kp * dp_wave / std::max((RealType)1e-6, rho_half * a_half * a_half);
     RealType p_half = p_half_unmod - Ku * get_P_plus(ML) * get_P_minus(MR) * rho_half * a_half * (uR - uL);
 
     Flux3DT<RealType, IsMultiMaterial> F;
@@ -481,12 +852,24 @@ typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealT
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& sL, 
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& sC, 
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& sR, 
-    RealType side, int spatialOrder, RealType gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    RealType side, int spatialOrder, RealType gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted,
+    bool is_water = false, const Blast::TaitEOSParams* tait = nullptr) {
     
     typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial> res;
     
     if (spatialOrder == 1) {
-        return sC;
+        RealType ke = (RealType)0.5 * sC.rho * (sC.ux*sC.ux + sC.uy*sC.uy + sC.uz*sC.uz);
+        res = sC;
+        if constexpr (IsMultiMaterial) {
+            res.E = MultiMat::getMixtureEnergy(res.p, res.rho, res.alpha1, res.alpha2, res.arho1, res.arho2, gamma, products, unreacted) + ke;
+        } else if (is_water && tait) {
+            CellState3D<IsMultiMaterial> s_tmp{};
+            s_tmp.rho = res.rho;
+            res.E = (RealType)getEnergy3D<IsMultiMaterial>((double)res.p, (double)res.rho, s_tmp, (double)gamma, products, unreacted, true, tait) + ke;
+        } else {
+            res.E = res.p / (gamma - (RealType)1.0) + ke;
+        }
+        return res;
     }
     
     if (spatialOrder == 3) {
@@ -534,6 +917,10 @@ typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealT
     RealType ke = (RealType)0.5 * res.rho * (res.ux*res.ux + res.uy*res.uy + res.uz*res.uz);
     if constexpr (IsMultiMaterial) {
         res.E = MultiMat::getMixtureEnergy(res.p, res.rho, res.alpha1, res.alpha2, res.arho1, res.arho2, gamma, products, unreacted) + ke;
+    } else if (is_water && tait) {
+        CellState3D<IsMultiMaterial> s_tmp{};
+        s_tmp.rho = res.rho;
+        res.E = (RealType)getEnergy3D<IsMultiMaterial>((double)res.p, (double)res.rho, s_tmp, (double)gamma, products, unreacted, true, tait) + ke;
     } else {
         res.E = res.p / (gamma - (RealType)1.0) + ke;
     }
@@ -614,7 +1001,12 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
 
                         auto is_solid_cell = [&](int x, int y, int z) -> bool {
                             if (geom_pool.empty()) return false;
-                            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return true;
+                            if (x < 0) return bcXmin == BCType3D::REFLECTIVE;
+                            if (x >= nx) return bcXmax == BCType3D::REFLECTIVE;
+                            if (y < 0) return bcYmin == BCType3D::REFLECTIVE;
+                            if (y >= ny) return bcYmax == BCType3D::REFLECTIVE;
+                            if (z < 0) return bcZmin == BCType3D::REFLECTIVE;
+                            if (z >= nz) return bcZmax == BCType3D::REFLECTIVE;
                             int t_idx = (x >> 3) + (y >> 3) * n_tiles_x + (z >> 3) * n_tiles_x * n_tiles_y;
                             int c_idx = (x & 7) + (y & 7) * 8 + (z & 7) * 64;
                             return geom_pool[t_idx].cells[c_idx].is_boundary;
@@ -676,14 +1068,42 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                             if (!is_interior_tile && (is_solid_cell(xLL, yLL, zLL) || is_solid_cell(xRR, yRR, zRR))) {
                                 eff_order = 1;
                             }
+                            if (this->stratified_params.enabled) {
+                                RealType z_L1 = (RealType)this->zmin + ((RealType)zL + (RealType)0.5) * (RealType)this->cellSize;
+                                RealType z_R1 = (RealType)this->zmin + ((RealType)zR + (RealType)0.5) * (RealType)this->cellSize;
+                                bool soil_L = (z_L1 < (RealType)this->stratified_params.seabed_surface_z);
+                                bool soil_R = (z_R1 < (RealType)this->stratified_params.seabed_surface_z);
+                                bool water_L = (z_L1 <= (RealType)this->stratified_params.water_surface_z);
+                                bool water_R = (z_R1 <= (RealType)this->stratified_params.water_surface_z);
+                                if (soil_L != soil_R || water_L != water_R) {
+                                    eff_order = 1;
+                                }
+                            }
                             auto sL2 = sample_func(xLL, yLL, zLL, gx, gy, gz, dir);
                             auto sL1 = sample_func(xL, yL, zL, gx, gy, gz, dir);
                             auto sR1 = sample_func(xR, yR, zR, gx, gy, gz, dir);
                             auto sR2 = sample_func(xRR, yRR, zRR, gx, gy, gz, dir);
-                            auto wL = reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, eff_order, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                            auto wR = reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, eff_order, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                            return useAUSM ? getAUSMPlusFlux3D<RealType, IsMultiMaterial>(wL, wR, dir, gamma_r, currentMaterials.products, currentMaterials.unreacted)
-                                           : getRusanovFlux3D<RealType, IsMultiMaterial>(wL, wR, dir, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                            auto wL = reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, eff_order, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                            auto wR = reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, eff_order, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                            RealType z_cL = (RealType)this->zmin + ((RealType)zL + (RealType)0.5) * (RealType)this->cellSize;
+                            RealType z_cR = (RealType)this->zmin + ((RealType)zR + (RealType)0.5) * (RealType)this->cellSize;
+                            bool has_g = this->stratified_params.enabled || std::abs(this->gravity_z) > 1e-6;
+                            RealType g_z = (RealType)(this->stratified_params.enabled ? this->stratified_params.gravity_z : this->gravity_z);
+
+                            if (this->stratified_params.enabled && dir == 2 && has_g) {
+                                bool soil_L = (z_cL < (RealType)this->stratified_params.seabed_surface_z);
+                                bool soil_R = (z_cR < (RealType)this->stratified_params.seabed_surface_z);
+                                bool water_L = (z_cL <= (RealType)this->stratified_params.water_surface_z);
+                                bool water_R = (z_cR <= (RealType)this->stratified_params.water_surface_z);
+                                if (soil_L != soil_R || water_L != water_R) {
+                                    wL.p = sL1.p + (RealType)0.5 * sL1.rho * g_z * (RealType)this->cellSize;
+                                    wR.p = sR1.p - (RealType)0.5 * sR1.rho * g_z * (RealType)this->cellSize;
+                                }
+                            }
+
+                            auto flx = useAUSM ? getAUSMPlusFlux3D<RealType, IsMultiMaterial>(wL, wR, dir, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params, z_cL, z_cR, has_g, g_z)
+                                           : getRusanovFlux3D<RealType, IsMultiMaterial>(wL, wR, dir, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                            return flx;
                         };
 
                         // X-Fluxes
@@ -761,6 +1181,61 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::applyProgrammedBurn(double dt) 
                             RealType rho_expl = u.arho1[c_idx] + u.arho2[c_idx];
                             u.E[c_idx] += dF * rho_expl * (RealType)currentMaterials.detonation_energy;
                         }
+                        if (currentMaterials.afterburn.enabled) {
+                            RealType arho0 = u.rho[c_idx] - u.arho1[c_idx] - u.arho2[c_idx];
+                            RealType ke = (RealType)0.5 * (u.rhoux[c_idx] * u.rhoux[c_idx] + u.rhouy[c_idx] * u.rhouy[c_idx] + u.rhouz[c_idx] * u.rhouz[c_idx]) / u.rho[c_idx];
+                            RealType R_ch = (RealType)charge_radius;
+                            RealType tmp_alpha1_ab = u.alpha1[c_idx];
+                            RealType tmp_arho1_ab = u.arho1[c_idx];
+
+                            RealType vort_mag = (RealType)0.0;
+                            if (i > 0 && i < TILE_SIZE_3D - 1 && j > 0 && j < TILE_SIZE_3D - 1 && k > 0 && k < TILE_SIZE_3D - 1) {
+                                int c_px = c_idx + 1;
+                                int c_mx = c_idx - 1;
+                                int c_py = c_idx + TILE_SIZE_3D;
+                                int c_my = c_idx - TILE_SIZE_3D;
+                                int c_pz = c_idx + TILE_SIZE_3D * TILE_SIZE_3D;
+                                int c_mz = c_idx - TILE_SIZE_3D * TILE_SIZE_3D;
+
+                                RealType inv_rho_py = (RealType)1.0 / u.rho[c_py];
+                                RealType inv_rho_my = (RealType)1.0 / u.rho[c_my];
+                                RealType inv_rho_pz = (RealType)1.0 / u.rho[c_pz];
+                                RealType inv_rho_mz = (RealType)1.0 / u.rho[c_mz];
+                                RealType inv_rho_px = (RealType)1.0 / u.rho[c_px];
+                                RealType inv_rho_mx = (RealType)1.0 / u.rho[c_mx];
+
+                                RealType ux_py = u.rhoux[c_py] * inv_rho_py;
+                                RealType ux_my = u.rhoux[c_my] * inv_rho_my;
+                                RealType ux_pz = u.rhoux[c_pz] * inv_rho_pz;
+                                RealType ux_mz = u.rhoux[c_mz] * inv_rho_mz;
+
+                                RealType uy_px = u.rhouy[c_px] * inv_rho_px;
+                                RealType uy_mx = u.rhouy[c_mx] * inv_rho_mx;
+                                RealType uy_pz = u.rhouy[c_pz] * inv_rho_pz;
+                                RealType uy_mz = u.rhouy[c_mz] * inv_rho_mz;
+
+                                RealType uz_px = u.rhouz[c_px] * inv_rho_px;
+                                RealType uz_mx = u.rhouz[c_mx] * inv_rho_mx;
+                                RealType uz_py = u.rhouz[c_py] * inv_rho_py;
+                                RealType uz_my = u.rhouz[c_my] * inv_rho_my;
+
+                                RealType inv_2dx = (RealType)0.5 / (RealType)cellSize;
+                                RealType wx = (uz_py - uz_my - (uy_pz - uy_mz)) * inv_2dx;
+                                RealType wy = (ux_pz - ux_mz - (uz_px - uz_mx)) * inv_2dx;
+                                RealType wz = (uy_px - uy_mx - (ux_py - ux_my)) * inv_2dx;
+                                using std::sqrt;
+                                vort_mag = sqrt(wx * wx + wy * wy + wz * wz);
+                            }
+
+                            MultiMat::computeAfterburn(
+                                (RealType)dt, (RealType)currentTime, R_ch, (RealType)currentMaterials.det_vel,
+                                currentMaterials.afterburn,
+                                u.rho[c_idx], tmp_alpha1_ab, tmp_arho1_ab, arho0, u.E[c_idx], ke,
+                                vort_mag
+                            );
+                            u.alpha1[c_idx] = tmp_alpha1_ab;
+                            u.arho1[c_idx] = tmp_arho1_ab;
+                        }
                     }
                 }
             }
@@ -773,11 +1248,31 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
     RealType gamma_r = (RealType)gamma;
     int n_active = (int)active_tile_indices.size();
 
+    // Pre-compute stratified hydrostatic recovery constants for bad-cell fallback.
+    // CRITICAL: bad cells in soil/water zones MUST recover to their correct hydrostatic
+    // reference state, NOT to ambient air. Resetting soil/water cells to ambient air
+    // (rho~1.2, p~101325) was the root cause of the seabed/water interface instability
+    // and the persistent solid blue-line colormap artifact.
+    const bool   strat_en        = stratified_params.enabled;
+    const double strat_seabed_z  = stratified_params.seabed_surface_z;
+    const double strat_water_z   = stratified_params.water_surface_z;
+    const double strat_g_mag     = std::abs(stratified_params.gravity_z);
+    const double strat_p_atm_r   = stratified_params.p_atm;
+    const double strat_tait_B    = stratified_params.tait_B;
+    const double strat_tait_g    = stratified_params.tait_gamma;
+    const double strat_tait_r0   = stratified_params.tait_rho0;
+    const double strat_rho_soil  = (stratified_params.soil_density > 0.0) ? stratified_params.soil_density : 2000.0;
+    const double strat_c0_soil   = (stratified_params.soil_c0 > 0.0)      ? stratified_params.soil_c0      : 2500.0;
+    const double strat_gam_soil  = (stratified_params.soil_gamma > 0.0)   ? stratified_params.soil_gamma   : 4.0;
+    const double strat_pcav_soil = (stratified_params.soil_p_cav != 0.0)  ? stratified_params.soil_p_cav  : -1.0e5;
+
     #pragma omp parallel for schedule(guided)
     for (int a = 0; a < n_active; ++a) {
         int t = active_tile_indices[a];
         auto& s = states_pool[t];
         auto& u = U_pool[t];
+        // Tile z-index for per-cell z-coordinate computation in stratified fallback.
+        int tz_tile = t / (n_tiles_x * n_tiles_y);
         for (int i = 0; i < TILE_CELLS_3D; ++i) {
             RealType u_rho = u.rho[i];
             RealType u_rhoux = u.rhoux[i];
@@ -821,7 +1316,39 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
                         s.arho1[i] = (s.arho1[i] / sum) * s.rho[i];
                         s.arho2[i] = (s.arho2[i] / sum) * s.rho[i];
                     }
-                    RealType p_val = MultiMat::getMixturePressure(e_int, s.rho[i], s.alpha1[i], s.alpha2[i], s.arho1[i], s.arho2[i], gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                    int tz = t / (n_tiles_x * n_tiles_y);
+                    int k = i / (TILE_SIZE_3D * TILE_SIZE_3D);
+                    int gz = tz * TILE_SIZE_3D + k;
+                    RealType z_c = (RealType)zmin + ((RealType)gz + (RealType)0.5) * (RealType)cellSize;
+                    bool is_water = false;
+                    bool is_soil = false;
+                    bool is_he = (s.alpha1[i] > (RealType)0.02 || s.alpha2[i] > (RealType)0.02);
+                    if (this->stratified_params.enabled) {
+                        if (z_c < (RealType)this->stratified_params.seabed_surface_z) {
+                            is_water = false;
+                            is_soil = true;
+                        } else if (z_c <= (RealType)this->stratified_params.water_surface_z) {
+                            is_water = true;
+                        } else if (!is_he) {
+                            is_water = (s.rho[i] >= (RealType)800.0);
+                        }
+                    } else if (!is_he && this->is_water_tait_val) {
+                        is_water = (s.rho[i] > (RealType)100.0);
+                    }
+                    RealType p_val;
+                    if (is_water) {
+                        p_val = MultiMat::getMixturePressureTait<RealType>(e_int, s.rho[i], s.alpha1[i], s.alpha2[i], s.arho1[i], s.arho2[i], this->tait_water_params, currentMaterials.products, currentMaterials.unreacted);
+                    } else if (is_soil) {
+                        RealType gamma_soil = (RealType)(this->stratified_params.soil_gamma > 0.0 ? this->stratified_params.soil_gamma : 4.0);
+                        RealType rho0_soil = (RealType)(this->stratified_params.soil_density > 0.0 ? this->stratified_params.soil_density : 2000.0);
+                        RealType c0_soil = (RealType)(this->stratified_params.soil_c0 > 0.0 ? this->stratified_params.soil_c0 : 2500.0);
+                        RealType B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                        RealType p0_soil = (RealType)this->stratified_params.p_atm;
+                        RealType p_cav_soil = (RealType)(this->stratified_params.soil_p_cav != 0.0 ? this->stratified_params.soil_p_cav : -1.0e5);
+                        p_val = (RealType)Blast::TaitEOSWater::compute_pressure_isentropic((double)s.rho[i], (double)B_soil, (double)gamma_soil, (double)rho0_soil, (double)p_cav_soil, (double)p0_soil);
+                    } else {
+                        p_val = MultiMat::getMixturePressure(e_int, s.rho[i], s.alpha1[i], s.alpha2[i], s.arho1[i], s.arho2[i], gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                    }
                     if (std::isnan(p_val) || std::isinf(p_val) || p_val < (RealType)1e-8) {
                         bad = true;
                     } else {
@@ -832,8 +1359,15 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
                         u.arho2[i] = s.arho2[i];
                     }
                 } else {
-                    RealType p_val = e_int * (gamma_r - (RealType)1.0);
-                    if (std::isnan(p_val) || std::isinf(p_val) || p_val < (RealType)1e-8) {
+                    RealType p_val;
+                    if (this->is_water_tait_val) {
+                        CellState3D<IsMultiMaterial> s_tmp{};
+                        s_tmp.rho = s.rho[i];
+                        p_val = (RealType)getPressure3D<IsMultiMaterial>((double)e_int, (double)s.rho[i], s_tmp, (double)gamma, currentMaterials.products, currentMaterials.unreacted, true, &this->tait_water_params);
+                    } else {
+                        p_val = e_int * (gamma_r - (RealType)1.0);
+                    }
+                    if (std::isnan(p_val) || std::isinf(p_val) || (!this->is_water_tait_val && p_val < (RealType)1e-8)) {
                         bad = true;
                     } else {
                         s.p[i] = p_val;
@@ -842,11 +1376,44 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
             }
 
             if (bad) {
-                s.rho[i] = (RealType)ambient_rho;
-                s.ux[i] = 0.0;
-                s.uy[i] = 0.0;
-                s.uz[i] = 0.0;
-                s.p[i] = (RealType)ambient_p;
+                // Recover to the correct hydrostatic reference state for this cell's zone.
+                // For soil/water cells, this is their Tait EOS hydrostatic state — NOT air.
+                double rec_rho = ambient_rho;
+                double rec_p   = ambient_p;
+                if (strat_en) {
+                    // Compute cell z-coordinate
+                    int k_local = i / (TILE_SIZE_3D * TILE_SIZE_3D);
+                    int gz_cell = tz_tile * TILE_SIZE_3D + k_local;
+                    double z_c  = zmin + (gz_cell + 0.5) * cellSize;
+                    if (z_c < strat_seabed_z) {
+                        // Soil zone: Tait isentropic EOS at geostatic pressure
+                        double p_bed = 0.0, rho_bed_unused = 0.0, e_bed_unused = 0.0;
+                        Blast::TaitEOSWater::compute_hydrostatic_state(
+                            strat_seabed_z, strat_water_z, strat_g_mag, strat_p_atm_r,
+                            p_bed, rho_bed_unused, e_bed_unused, strat_tait_B, strat_tait_g, strat_tait_r0);
+                        double sig_v = 0.0, u_pw = 0.0, sig_h = 0.0;
+                        Blast::TaitEOSWater::compute_geostatic_stress(
+                            z_c, strat_seabed_z, p_bed, strat_rho_soil, strat_tait_r0, strat_g_mag,
+                            stratified_params.k0_earth_pressure, sig_v, u_pw, sig_h);
+                        rec_p = std::max(sig_v, strat_p_atm_r);
+                        double B_soil = (strat_rho_soil * strat_c0_soil * strat_c0_soil) / strat_gam_soil;
+                        rec_rho = (double)Blast::TaitEOSWater::compute_density_isentropic(
+                            rec_p, B_soil, strat_gam_soil, strat_rho_soil, strat_p_atm_r);
+                    } else if (z_c <= strat_water_z) {
+                        // Water zone: Tait EOS hydrostatic state
+                        double p_h = 0.0, e_h = 0.0;
+                        Blast::TaitEOSWater::compute_hydrostatic_state(
+                            z_c, strat_water_z, strat_g_mag, strat_p_atm_r,
+                            p_h, rec_rho, e_h, strat_tait_B, strat_tait_g, strat_tait_r0);
+                        rec_p = p_h;
+                    }
+                    // Air zone: falls through to ambient_rho / ambient_p
+                }
+                s.rho[i] = (RealType)rec_rho;
+                s.ux[i]  = 0.0;
+                s.uy[i]  = 0.0;
+                s.uz[i]  = 0.0;
+                s.p[i]   = (RealType)rec_p;
                 CellState3D<IsMultiMaterial> temp_s;
                 if constexpr (IsMultiMaterial) {
                     temp_s.alpha1 = 0.0; temp_s.alpha2 = 0.0;
@@ -854,18 +1421,20 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
                     s.alpha1[i] = 0.0; s.alpha2[i] = 0.0;
                     s.arho1[i] = 0.0; s.arho2[i] = 0.0;
                 }
-                u.rho[i] = (RealType)ambient_rho;
+                u.rho[i]   = (RealType)rec_rho;
                 u.rhoux[i] = 0.0;
                 u.rhouy[i] = 0.0;
                 u.rhouz[i] = 0.0;
-                u.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(ambient_p, ambient_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
+                u.E[i]     = (RealType)getEnergy3D<IsMultiMaterial>(
+                    rec_p, rec_rho, temp_s, gamma, currentMaterials.products,
+                    currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
                 if constexpr (IsMultiMaterial) {
                     u.alpha1[i] = 0.0; u.alpha2[i] = 0.0;
                     u.arho1[i] = 0.0; u.arho2[i] = 0.0;
                 }
-                s.floor_status[i] = 1;
+                s.floor_status[i] = (s.floor_status[i] & 2) | 1;
             } else {
-                s.floor_status[i] = 0;
+                s.floor_status[i] = (s.floor_status[i] & 2);
             }
 
             if (!geom_pool.empty() && geom_pool[t].cells[i].is_boundary) {
@@ -911,12 +1480,17 @@ struct PhysicalFlux3D {
 template <typename RealType, bool IsMultiMaterial>
 PhysicalFlux3D<RealType, IsMultiMaterial> getPhysicalFlux(
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& s, int dir, RealType gamma_val, 
-    const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+    const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted,
+    bool is_water = false, const Blast::TaitEOSParams* tait = nullptr) {
     PhysicalFlux3D<RealType, IsMultiMaterial> f;
     RealType ke = (RealType)0.5 * s.rho * (s.ux*s.ux + s.uy*s.uy + s.uz*s.uz);
     RealType total_E;
     if constexpr (IsMultiMaterial) {
         total_E = (RealType)MultiMat::getMixtureEnergy((double)s.p, (double)s.rho, (double)s.alpha1, (double)s.alpha2, (double)s.arho1, (double)s.arho2, (double)gamma_val, products, unreacted) + ke;
+    } else if (is_water && tait) {
+        CellState3D<IsMultiMaterial> s_tmp{};
+        s_tmp.rho = s.rho;
+        total_E = (RealType)getEnergy3D<IsMultiMaterial>((double)s.p, (double)s.rho, s_tmp, (double)gamma_val, products, unreacted, true, tait) + ke;
     } else {
         total_E = s.p / (gamma_val - (RealType)1.0) + ke;
     }
@@ -977,15 +1551,16 @@ void computeTimeDerivative(
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& d_y,
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& d_z,
     RealType gamma_r,
-    typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& dW_dt) {
+    typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& dW_dt,
+    RealType gx = 0, RealType gy = 0, RealType gz = 0) {
     
     dW_dt.rho = -(sC.ux * d_x.rho + sC.rho * d_x.ux +
                   sC.uy * d_y.rho + sC.rho * d_y.uy +
                   sC.uz * d_z.rho + sC.rho * d_z.uz);
                   
-    dW_dt.ux = -(sC.ux * d_x.ux + sC.uy * d_y.ux + sC.uz * d_z.ux + (RealType)1.0 / sC.rho * d_x.p);
-    dW_dt.uy = -(sC.ux * d_x.uy + sC.uy * d_y.uy + sC.uz * d_z.uy + (RealType)1.0 / sC.rho * d_y.p);
-    dW_dt.uz = -(sC.ux * d_x.uz + sC.uy * d_y.uz + sC.uz * d_z.uz + (RealType)1.0 / sC.rho * d_z.p);
+    dW_dt.ux = -(sC.ux * d_x.ux + sC.uy * d_y.ux + sC.uz * d_z.ux + (RealType)1.0 / sC.rho * d_x.p) + gx;
+    dW_dt.uy = -(sC.ux * d_x.uy + sC.uy * d_y.uy + sC.uz * d_z.uy + (RealType)1.0 / sC.rho * d_y.p) + gy;
+    dW_dt.uz = -(sC.ux * d_x.uz + sC.uy * d_y.uz + sC.uz * d_z.uz + (RealType)1.0 / sC.rho * d_z.p) + gz;
     
     dW_dt.p = -(sC.ux * d_x.p + sC.uy * d_y.p + sC.uz * d_z.p + gamma_r * sC.p * (d_x.ux + d_y.uy + d_z.uz));
     
@@ -1025,6 +1600,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                 RealType total_E;
                 if constexpr (IsMultiMaterial) {
                     total_E = (RealType)MultiMat::getMixtureEnergy((double)s.p[i], (double)s.rho[i], (double)s.alpha1[i], (double)s.alpha2[i], (double)s.arho1[i], (double)s.arho2[i], gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+                } else if (this->is_water_tait_val) {
+                    CellState3D<IsMultiMaterial> s_tmp{};
+                    s_tmp.rho = s.rho[i];
+                    total_E = (RealType)getEnergy3D<IsMultiMaterial>((double)s.p[i], (double)s.rho[i], s_tmp, gamma, currentMaterials.products, currentMaterials.unreacted, true, &this->tait_water_params) + ke;
                 } else {
                     total_E = s.p[i] / (gamma - (RealType)1.0) + ke;
                 }
@@ -1069,7 +1648,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
             
             auto cons_to_prim = [&](RealType u_rho, RealType u_rhoux, RealType u_rhouy, RealType u_rhouz, RealType u_E,
                                     RealType& u_alpha1, RealType& u_alpha2, RealType& u_arho1, RealType& u_arho2,
-                                    CellState3DT<RealType, IsMultiMaterial>& out_s) {
+                                    CellState3DT<RealType, IsMultiMaterial>& out_s, RealType z_c = (RealType)0.0) {
                 bool bad = std::isnan(u_rho) || std::isinf(u_rho) || u_rho < (RealType)1e-8 ||
                            std::isnan(u_rhoux) || std::isinf(u_rhoux) ||
                            std::isnan(u_rhouy) || std::isinf(u_rhouy) ||
@@ -1106,7 +1685,35 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                             out_s.arho1 = (out_s.arho1 / sum) * out_s.rho;
                             out_s.arho2 = (out_s.arho2 / sum) * out_s.rho;
                         }
-                        RealType p_val = MultiMat::getMixturePressure(e_int, out_s.rho, out_s.alpha1, out_s.alpha2, out_s.arho1, out_s.arho2, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        bool is_water = false;
+                        bool is_soil = false;
+                        bool is_he = (out_s.alpha1 > (RealType)0.02 || out_s.alpha2 > (RealType)0.02);
+                        if (this->stratified_params.enabled) {
+                            if (z_c < (RealType)this->stratified_params.seabed_surface_z) {
+                                is_water = false;
+                                is_soil = true;
+                            } else if (z_c <= (RealType)this->stratified_params.water_surface_z) {
+                                is_water = true;
+                            } else if (!is_he) {
+                                is_water = (out_s.rho >= (RealType)800.0);
+                            }
+                        } else if (!is_he && this->is_water_tait_val) {
+                            is_water = (out_s.rho > (RealType)100.0);
+                        }
+                        RealType p_val;
+                        if (is_water) {
+                            p_val = MultiMat::getMixturePressureTait<RealType>(e_int, out_s.rho, out_s.alpha1, out_s.alpha2, out_s.arho1, out_s.arho2, this->tait_water_params, currentMaterials.products, currentMaterials.unreacted);
+                        } else if (is_soil) {
+                            RealType gamma_soil = (RealType)(this->stratified_params.soil_gamma > 0.0 ? this->stratified_params.soil_gamma : 4.0);
+                            RealType rho0_soil = (RealType)(this->stratified_params.soil_density > 0.0 ? this->stratified_params.soil_density : 2000.0);
+                            RealType c0_soil = (RealType)(this->stratified_params.soil_c0 > 0.0 ? this->stratified_params.soil_c0 : 2500.0);
+                            RealType B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                            RealType p0_soil = (RealType)this->stratified_params.p_atm;
+                            RealType p_cav_soil = (RealType)(this->stratified_params.soil_p_cav != 0.0 ? this->stratified_params.soil_p_cav : -1.0e5);
+                            p_val = (RealType)Blast::TaitEOSWater::compute_pressure_isentropic((double)out_s.rho, (double)B_soil, (double)gamma_soil, (double)rho0_soil, (double)p_cav_soil, (double)p0_soil);
+                        } else {
+                            p_val = MultiMat::getMixturePressure(e_int, out_s.rho, out_s.alpha1, out_s.alpha2, out_s.arho1, out_s.arho2, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        }
                         if (std::isnan(p_val) || std::isinf(p_val) || p_val < (RealType)1e-8) {
                             bad = true;
                         } else {
@@ -1115,6 +1722,15 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                             u_alpha2 = out_s.alpha2;
                             u_arho1 = out_s.arho1;
                             u_arho2 = out_s.arho2;
+                        }
+                    } else if (this->is_water_tait_val) {
+                        CellState3D<IsMultiMaterial> s_tmp{};
+                        s_tmp.rho = out_s.rho;
+                        RealType p_val = (RealType)getPressure3D<IsMultiMaterial>((double)e_int, (double)out_s.rho, s_tmp, (double)gamma, currentMaterials.products, currentMaterials.unreacted, true, &this->tait_water_params);
+                        if (std::isnan(p_val) || std::isinf(p_val)) {
+                            bad = true;
+                        } else {
+                            out_s.p = p_val;
                         }
                     } else {
                         RealType p_val = e_int * (gamma_r - (RealType)1.0);
@@ -1163,19 +1779,19 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                         auto sZ_D = sample_func(gx, gy, gz - 1, gx, gy, gz, 2);
                         auto sZ_U = sample_func(gx, gy, gz + 1, gx, gy, gz, 2);
                         
-                        auto W_xL = reconstruct<RealType, IsMultiMaterial>(sX_L, sC, sX_R, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                        auto W_xR = reconstruct<RealType, IsMultiMaterial>(sX_L, sC, sX_R, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                        auto W_yB = reconstruct<RealType, IsMultiMaterial>(sY_B, sC, sY_T, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                        auto W_yT = reconstruct<RealType, IsMultiMaterial>(sY_B, sC, sY_T, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                        auto W_zD = reconstruct<RealType, IsMultiMaterial>(sZ_D, sC, sZ_U, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                        auto W_zU = reconstruct<RealType, IsMultiMaterial>(sZ_D, sC, sZ_U, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto W_xL = reconstruct<RealType, IsMultiMaterial>(sX_L, sC, sX_R, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                        auto W_xR = reconstruct<RealType, IsMultiMaterial>(sX_L, sC, sX_R, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                        auto W_yB = reconstruct<RealType, IsMultiMaterial>(sY_B, sC, sY_T, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                        auto W_yT = reconstruct<RealType, IsMultiMaterial>(sY_B, sC, sY_T, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                        auto W_zD = reconstruct<RealType, IsMultiMaterial>(sZ_D, sC, sZ_U, (RealType)-0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                        auto W_zU = reconstruct<RealType, IsMultiMaterial>(sZ_D, sC, sZ_U, (RealType)0.5, spatialOrder, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
                         
-                        auto F_L = getPhysicalFlux<RealType, IsMultiMaterial>(W_xL, 0, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                        auto F_R = getPhysicalFlux<RealType, IsMultiMaterial>(W_xR, 0, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                        auto G_B = getPhysicalFlux<RealType, IsMultiMaterial>(W_yB, 1, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                        auto G_T = getPhysicalFlux<RealType, IsMultiMaterial>(W_yT, 1, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                        auto H_D = getPhysicalFlux<RealType, IsMultiMaterial>(W_zD, 2, gamma_r, currentMaterials.products, currentMaterials.unreacted);
-                        auto H_U = getPhysicalFlux<RealType, IsMultiMaterial>(W_zU, 2, gamma_r, currentMaterials.products, currentMaterials.unreacted);
+                        auto F_L = getPhysicalFlux<RealType, IsMultiMaterial>(W_xL, 0, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                        auto F_R = getPhysicalFlux<RealType, IsMultiMaterial>(W_xR, 0, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                        auto G_B = getPhysicalFlux<RealType, IsMultiMaterial>(W_yB, 1, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                        auto G_T = getPhysicalFlux<RealType, IsMultiMaterial>(W_yT, 1, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                        auto H_D = getPhysicalFlux<RealType, IsMultiMaterial>(W_zD, 2, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                        auto H_U = getPhysicalFlux<RealType, IsMultiMaterial>(W_zU, 2, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
                         
                         RealType dt_dx = (RealType)(0.5 * dt * invDx);
                         
@@ -1187,6 +1803,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                         RealType u_E;
                         if constexpr (IsMultiMaterial) {
                             u_E = MultiMat::getMixtureEnergy(sC.p, sC.rho, sC.alpha1, sC.alpha2, sC.arho1, sC.arho2, gamma_r, currentMaterials.products, currentMaterials.unreacted) + ke;
+                        } else if (this->is_water_tait_val) {
+                            CellState3D<IsMultiMaterial> s_tmp{};
+                            s_tmp.rho = sC.rho;
+                            u_E = (RealType)getEnergy3D<IsMultiMaterial>((double)sC.p, (double)sC.rho, s_tmp, gamma, currentMaterials.products, currentMaterials.unreacted, true, &this->tait_water_params) + ke;
                         } else {
                             u_E = sC.p / (gamma_r - (RealType)1.0) + ke;
                         }
@@ -1196,6 +1816,13 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                         u_rhouy -= dt_dx * (F_R.rhouy - F_L.rhouy + G_T.rhouy - G_B.rhouy + H_U.rhouy - H_D.rhouy);
                         u_rhouz -= dt_dx * (F_R.rhouz - F_L.rhouz + G_T.rhouz - G_B.rhouz + H_U.rhouz - H_D.rhouz);
                         u_E -= dt_dx * (F_R.E - F_L.E + G_T.E - G_B.E + H_U.E - H_D.E);
+                        if (this->gravity_x != 0.0 || this->gravity_y != 0.0 || this->gravity_z != 0.0) {
+                            RealType half_dt = (RealType)(0.5 * dt);
+                            u_rhoux += half_dt * sC.rho * (RealType)this->gravity_x;
+                            u_rhouy += half_dt * sC.rho * (RealType)this->gravity_y;
+                            u_rhouz += half_dt * sC.rho * (RealType)this->gravity_z;
+                            u_E     += half_dt * (sC.rho * sC.ux * (RealType)this->gravity_x + sC.rho * sC.uy * (RealType)this->gravity_y + sC.rho * sC.uz * (RealType)this->gravity_z);
+                        }
                         
                         RealType u_alpha1 = 0, u_alpha2 = 0, u_arho1 = 0, u_arho2 = 0;
                         if constexpr (IsMultiMaterial) {
@@ -1212,7 +1839,8 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                         }
                         
                         CellState3DT<RealType, IsMultiMaterial> pred_s;
-                        cons_to_prim(u_rho, u_rhoux, u_rhouy, u_rhouz, u_E, u_alpha1, u_alpha2, u_arho1, u_arho2, pred_s);
+                        RealType z_c = (RealType)zmin + ((RealType)gz + (RealType)0.5) * (RealType)cellSize;
+                        cons_to_prim(u_rho, u_rhoux, u_rhouy, u_rhouz, u_E, u_alpha1, u_alpha2, u_arho1, u_arho2, pred_s, z_c);
                         
                         s_pred_tile.rho[idx] = pred_s.rho;
                         s_pred_tile.ux[idx] = pred_s.ux;
@@ -1296,7 +1924,12 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                         
                         auto is_solid_cell = [&](int x, int y, int z) -> bool {
                             if (geom_pool.empty()) return false;
-                            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return true;
+                            if (x < 0) return bcXmin == BCType3D::REFLECTIVE;
+                            if (x >= nx) return bcXmax == BCType3D::REFLECTIVE;
+                            if (y < 0) return bcYmin == BCType3D::REFLECTIVE;
+                            if (y >= ny) return bcYmax == BCType3D::REFLECTIVE;
+                            if (z < 0) return bcZmin == BCType3D::REFLECTIVE;
+                            if (z >= nz) return bcZmax == BCType3D::REFLECTIVE;
                             int t_idx = (x >> 3) + (y >> 3) * n_tiles_x + (z >> 3) * n_tiles_x * n_tiles_y;
                             int c_idx = (x & 7) + (y & 7) * 8 + (z & 7) * 64;
                             return geom_pool[t_idx].cells[c_idx].is_boundary;
@@ -1382,7 +2015,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                         }
                         
                         CellState3DT<RealType, IsMultiMaterial> dW_dt;
-                        computeTimeDerivative<RealType, IsMultiMaterial>(sC, d_x, d_y, d_z, gamma_r, dW_dt);
+                        computeTimeDerivative<RealType, IsMultiMaterial>(sC, d_x, d_y, d_z, gamma_r, dW_dt, (RealType)this->gravity_x, (RealType)this->gravity_y, (RealType)this->gravity_z);
                         
                         // Store the first time derivative
                         dW_dt_tile.rho[idx] = dW_dt.rho;
@@ -1486,7 +2119,12 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                             
                             auto is_solid_cell = [&](int x, int y, int z) -> bool {
                                 if (geom_pool.empty()) return false;
-                                if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return true;
+                                if (x < 0) return bcXmin == BCType3D::REFLECTIVE;
+                                if (x >= nx) return bcXmax == BCType3D::REFLECTIVE;
+                                if (y < 0) return bcYmin == BCType3D::REFLECTIVE;
+                                if (y >= ny) return bcYmax == BCType3D::REFLECTIVE;
+                                if (z < 0) return bcZmin == BCType3D::REFLECTIVE;
+                                if (z >= nz) return bcZmax == BCType3D::REFLECTIVE;
                                 int t_idx = (x >> 3) + (y >> 3) * n_tiles_x + (z >> 3) * n_tiles_x * n_tiles_y;
                                 int c_idx = (x & 7) + (y & 7) * 8 + (z & 7) * 64;
                                 return geom_pool[t_idx].cells[c_idx].is_boundary;
@@ -1572,7 +2210,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                             }
                             
                             CellState3DT<RealType, IsMultiMaterial> dW_dt_mid;
-                            computeTimeDerivative<RealType, IsMultiMaterial>(sC, d_x, d_y, d_z, gamma_r, dW_dt_mid);
+                            computeTimeDerivative<RealType, IsMultiMaterial>(sC, d_x, d_y, d_z, gamma_r, dW_dt_mid, (RealType)this->gravity_x, (RealType)this->gravity_y, (RealType)this->gravity_z);
                             
                             // states_pred contains the original state W^n because of the swap!
                             auto& s_orig = states_pred[t];
@@ -1624,6 +2262,33 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
         applyProgrammedBurn(dt);
     }
 
+    if (this->gravity_x != 0.0 || this->gravity_y != 0.0 || this->gravity_z != 0.0) {
+        RealType gx = (RealType)this->gravity_x;
+        RealType gy = (RealType)this->gravity_y;
+        RealType gz = (RealType)this->gravity_z;
+        RealType dt_r = (RealType)dt;
+        int n_act = (int)active_tile_indices.size();
+        // For stratified (ocean/seabed) media, soil cells must NOT receive the generic
+        // gravity impulse. The soil EOS is a stiff Tait model initialised to geostatic
+        // equilibrium, so any net rhouz impulse injected into a nearly-incompressible
+        // soil cell is NOT balanced by a matching hydrostatic pressure gradient from the
+        // flux divergence — the two operators are applied separately (operator splitting).
+        // The resulting spurious velocity accumulation at the seabed/water interface is
+        // what drives both the instability and the blue-line colormap artifact.
+        //
+        #pragma omp parallel for schedule(guided)
+        for (int a = 0; a < n_act; ++a) {
+            int t = active_tile_indices[a];
+            auto& u = U_pool[t];
+            for (int i = 0; i < TILE_CELLS_3D; ++i) {
+                u.rhoux[i] += dt_r * u.rho[i] * gx;
+                u.rhouy[i] += dt_r * u.rho[i] * gy;
+                u.rhouz[i] += dt_r * u.rho[i] * gz;
+                u.E[i]     += dt_r * (u.rhoux[i] * gx + u.rhouy[i] * gy + u.rhouz[i] * gz);
+            }
+        }
+    }
+
     updatePrimitiveFromConservative();
     applyBC();
 
@@ -1648,7 +2313,134 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
 }
 
 template <typename RealType, bool IsMultiMaterial>
-void CFDSolver3DImpl<RealType, IsMultiMaterial>::applyBC() {}
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::applyBC() {
+    // Enforce frozen-geostatic rigid seabed BC for stratified UNDEX simulations.
+    //
+    // RATIONALE: The Rusanov/acoustic Riemann solver applied across the soil/water
+    // density discontinuity generates a small but non-zero net z-momentum residual
+    // each timestep, even for a perfectly hydrostatic IC. This imbalance arises
+    // because the discrete pressure gradient across the density jump does not
+    // exactly cancel the operator-split gravity source for both materials
+    // simultaneously. Without correction, soil cells accumulate upward velocity
+    // which radiates spurious pressure waves into the water column — the
+    // persistent "seabed instability" and visible hard horizontal line.
+    //
+    // The physical truth for UNDEX: seabed soil/rock has acoustic impedance
+    // 3-10x higher than water. For engineering purposes it IS effectively rigid.
+    // Freezing the soil state to geostatic equilibrium every step:
+    //   (a) Eliminates the flux-imbalance accumulation
+    //   (b) Gives water cells a stable, correctly-pressured Dirichlet BC on
+    //       the soil side of every interface face
+    //   (c) Produces correct hard-bottom acoustic reflection in the water column
+    if (!stratified_params.enabled) return;
+
+    const double seabed_z   = stratified_params.seabed_surface_z;
+    const double water_z    = stratified_params.water_surface_z;
+    const double g_mag      = std::abs(stratified_params.gravity_z);
+    const double p_atm_ref  = stratified_params.p_atm;
+    const double tait_B     = stratified_params.tait_B;
+    const double tait_g     = stratified_params.tait_gamma;
+    const double tait_r0    = stratified_params.tait_rho0;
+    const double rho_soil   = (stratified_params.soil_density > 0.0) ? stratified_params.soil_density : 2000.0;
+    const double c0_soil    = (stratified_params.soil_c0 > 0.0)      ? stratified_params.soil_c0      : 2500.0;
+    const double gam_soil   = (stratified_params.soil_gamma > 0.0)   ? stratified_params.soil_gamma   : 4.0;
+    const double k0         = stratified_params.k0_earth_pressure;
+    const double B_soil     = (rho_soil * c0_soil * c0_soil) / gam_soil;
+
+    // Precompute the seabed pressure once (expensive call, shared across threads)
+    double p_bed = 0.0, rho_bed_unused = 0.0, e_bed_unused = 0.0;
+    Blast::TaitEOSWater::compute_hydrostatic_state(
+        seabed_z, water_z, g_mag, p_atm_ref,
+        p_bed, rho_bed_unused, e_bed_unused, tait_B, tait_g, tait_r0);
+
+    int n_act = (int)active_tile_indices.size();
+    #pragma omp parallel for schedule(guided)
+    for (int a = 0; a < n_act; ++a) {
+        int t = active_tile_indices[a];
+        auto& s = states_pool[t];
+        auto& u = U_pool[t];
+        int tx_tile = t % n_tiles_x;
+        int ty_tile = (t / n_tiles_x) % n_tiles_y;
+        int tz_tile = t / (n_tiles_x * n_tiles_y);
+
+        for (int i = 0; i < TILE_CELLS_3D; ++i) {
+            int i_loc = i % TILE_SIZE_3D;
+            int j_loc = (i / TILE_SIZE_3D) % TILE_SIZE_3D;
+            int k_loc = i / (TILE_SIZE_3D * TILE_SIZE_3D);
+            int gx_cell = tx_tile * TILE_SIZE_3D + i_loc;
+            int gy_cell = ty_tile * TILE_SIZE_3D + j_loc;
+            int gz_cell = tz_tile * TILE_SIZE_3D + k_loc;
+            double x_c = xmin + (gx_cell + 0.5) * cellSize;
+            double y_c = ymin + (gy_cell + 0.5) * cellSize;
+            double z_c = zmin + (gz_cell + 0.5) * cellSize;
+
+            if (z_c >= seabed_z) continue;  // Mudline interface or water cell — skip
+
+            // Recompute geostatic reference at this z-level
+            double sig_v = 0.0, u_pw = 0.0, sig_h = 0.0;
+            Blast::TaitEOSWater::compute_geostatic_stress(
+                z_c, seabed_z, p_bed, rho_soil, tait_r0, g_mag, k0,
+                sig_v, u_pw, sig_h);
+
+            double ref_p   = std::max(sig_v, p_atm_ref);
+            double ref_rho = (double)Blast::TaitEOSWater::compute_density_isentropic(
+                ref_p, B_soil, gam_soil, rho_soil, p_atm_ref);
+            double ref_e   = (double)Blast::TaitEOSWater::compute_energy_isentropic(
+                ref_rho, B_soil, gam_soil, rho_soil);
+            double ref_E   = ref_rho * ref_e;
+
+            // Causality distance & minimum physical shock arrival time check:
+            double dx_chg = x_c - stratified_params.charge_x;
+            double dy_chg = y_c - stratified_params.charge_y;
+            double dz_chg = z_c - stratified_params.charge_z;
+            double dist_chg = std::sqrt(dx_chg * dx_chg + dy_chg * dy_chg + dz_chg * dz_chg);
+            double prop_dist = std::max(0.0, dist_chg - stratified_params.charge_radius);
+            double t_arrival = (stratified_params.charge_radius <= 0.0) ? 1.0e30 : (prop_dist / 2200.0);
+
+            if (s.floor_status[i] & 2) {
+                continue; // Already activated by blast shock - stay dynamic permanently!
+            }
+
+            // Check if dynamic waves are propagating through the soil:
+            RealType p_cur = s.p[i];
+            RealType ux_cur = s.ux[i];
+            RealType uy_cur = s.uy[i];
+            RealType uz_cur = s.uz[i];
+            RealType v_sq = ux_cur * ux_cur + uy_cur * uy_cur + uz_cur * uz_cur;
+
+            // If the blast shock has physically arrived AND perturbation exceeds threshold,
+            // allow the genuine dynamic shock to propagate into the seabed according to the soil EOS!
+            if (currentTime >= t_arrival && (std::abs(p_cur - (RealType)ref_p) > (RealType)2.0e5 || v_sq > (RealType)0.04)) {
+                s.floor_status[i] |= 2; // Latch active
+                continue;
+            }
+
+            // Enforce frozen geostatic state (zero velocity, reference rho/p/E)
+            s.rho[i]  = (RealType)ref_rho;
+            s.ux[i]   = (RealType)0.0;
+            s.uy[i]   = (RealType)0.0;
+            s.uz[i]   = (RealType)0.0;
+            s.p[i]    = (RealType)ref_p;
+
+            u.rho[i]   = (RealType)ref_rho;
+            u.rhoux[i] = (RealType)0.0;
+            u.rhouy[i] = (RealType)0.0;
+            u.rhouz[i] = (RealType)0.0;
+            u.E[i]     = (RealType)ref_E;
+
+            if constexpr (IsMultiMaterial) {
+                s.alpha1[i] = (RealType)0.0;
+                s.alpha2[i] = (RealType)0.0;
+                s.arho1[i]  = (RealType)0.0;
+                s.arho2[i]  = (RealType)0.0;
+                u.alpha1[i] = (RealType)0.0;
+                u.alpha2[i] = (RealType)0.0;
+                u.arho1[i]  = (RealType)0.0;
+                u.arho2[i]  = (RealType)0.0;
+            }
+        }
+    }
+}
 
 template <typename RealType, bool IsMultiMaterial>
 double CFDSolver3DImpl<RealType, IsMultiMaterial>::computeStepSize(double cfl) const {
@@ -1666,7 +2458,11 @@ double CFDSolver3DImpl<RealType, IsMultiMaterial>::computeStepSize(double cfl) c
             using std::sqrt;
             using std::max;
             RealType c;
-            if constexpr (IsMultiMaterial) {
+            if (this->is_water_tait_val) {
+                CellState3D<IsMultiMaterial> s_tmp{};
+                s_tmp.ux = tile.ux[i]; s_tmp.uy = tile.uy[i]; s_tmp.uz = tile.uz[i]; s_tmp.p = tile.p[i]; s_tmp.rho = tile.rho[i];
+                c = (RealType)getSoundSpeed3D<IsMultiMaterial>((double)tile.p[i], (double)tile.rho[i], s_tmp, (double)gamma, currentMaterials.products, currentMaterials.unreacted, true, &this->tait_water_params);
+            } else if constexpr (IsMultiMaterial) {
                 c = MultiMat::getMixtureSoundSpeed(tile.p[i], tile.rho[i], tile.alpha1[i], tile.alpha2[i], tile.arho1[i], tile.arho2[i], (RealType)gamma, currentMaterials.products, currentMaterials.unreacted);
                 RealType a2 = tile.alpha2[i];
                 RealType ar2 = tile.arho2[i];
@@ -1676,13 +2472,20 @@ double CFDSolver3DImpl<RealType, IsMultiMaterial>::computeStepSize(double cfl) c
             } else {
                 c = sqrt((RealType)gamma * tile.p[i] / max((RealType)1e-6, tile.rho[i]));
             }
+            if (std::isnan(c) || std::isinf(c) || c < (RealType)0.0) c = (RealType)1482.0;
             RealType s = abs(tile.ux[i]) + abs(tile.uy[i]) + abs(tile.uz[i]) + (RealType)3.0 * c;
             if (s > max_s) {
                 max_s = s;
             }
         }
     }
-    return cfl * cellSize / (double)max_s;
+    double max_s_d = (double)max_s;
+    if (std::isnan(max_s_d) || std::isinf(max_s_d) || max_s_d <= 0.0) {
+        max_s_d = 1e-6;
+    }
+    max_s_d = std::clamp(max_s_d, 1e-6, 1e9);
+    double dt = cfl * cellSize / max_s_d;
+    return std::max(1.0e-11, dt);
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -1691,6 +2494,44 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::sampleGauge(const
     int gx = std::clamp((int)((gauge.x - xmin) / cellSize), 0, nx - 1);
     int gy = std::clamp((int)((gauge.y - ymin) / cellSize), 0, ny - 1);
     int gz = std::clamp((int)((gauge.z - zmin) / cellSize), 0, nz - 1);
+
+    if (!geom_pool.empty()) {
+        auto is_solid = [&](int x, int y, int z) -> bool {
+            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return false;
+            int t = (x >> 3) + (y >> 3) * n_tiles_x + (z >> 3) * n_tiles_x * n_tiles_y;
+            int c = (x & 7) + ((y & 7) << 3) + ((z & 7) << 6);
+            if (t >= 0 && t < (int)geom_pool.size()) {
+                return geom_pool[t].cells[c].is_boundary != 0;
+            }
+            return false;
+        };
+
+        if (is_solid(gx, gy, gz)) {
+            int best_x = gx, best_y = gy, best_z = gz;
+            float best_dist_sq = 1e9f;
+            for (int r = 1; r <= 3; ++r) {
+                for (int dz = -r; dz <= r; ++dz) {
+                    for (int dy = -r; dy <= r; ++dy) {
+                        for (int dx = -r; dx <= r; ++dx) {
+                            if (dx == 0 && dy == 0 && dz == 0) continue;
+                            int cx = gx + dx, cy = gy + dy, cz = gz + dz;
+                            if (cx < 0 || cx >= nx || cy < 0 || cy >= ny || cz < 0 || cz >= nz) continue;
+                            if (!is_solid(cx, cy, cz)) {
+                                float dist_sq = (float)(dx * dx + dy * dy + dz * dz);
+                                if (dist_sq < best_dist_sq) {
+                                    best_dist_sq = dist_sq;
+                                    best_x = cx; best_y = cy; best_z = cz;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (best_dist_sq < 1e8f) break;
+            }
+            gx = best_x; gy = best_y; gz = best_z;
+        }
+    }
+
     auto s = sampleState(gx, gy, gz);
     std::vector<float> vals(7, 0.0f);
     vals[0] = (float)s.p; vals[1] = (float)s.rho;
@@ -1725,6 +2566,7 @@ template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(const Slice3D& slice) const {
     std::vector<float> data;
     std::string qty = (slice.quantities.empty()) ? "pressure" : slice.quantities[0];
+    std::transform(qty.begin(), qty.end(), qty.begin(), [](unsigned char c) { return std::tolower(c); });
     int stride = slice.stride > 0 ? slice.stride : 1;
 
     auto is_solid = [&](int cx, int cy, int cz) {
@@ -1747,6 +2589,85 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
         if (qty == "species3" || qty == "species_3" || qty == "air" || qty == "ambient_air" || qty == "alpha3" || qty == "alpha_3") return (float)(1.0 - s.alpha1 - s.alpha2);
         if (qty == "overpressure" || qty == "peak_overpressure") return (float)s.peak_overpressure;
         if (qty == "impulse" || qty == "peak_impulse") return (float)s.peak_impulse;
+        if (qty == "materials" || qty == "material" || qty == "phase") {
+            if (is_solid(gx_c, gy_c, gz_c)) return 5.0f; // FEM Solid / Obstacle
+            double z_c = zmin + ((double)gz_c + 0.5) * cellSize;
+            if constexpr (IsMultiMaterial) {
+                if (s.alpha2 > 0.05f && s.alpha2 >= s.alpha1) return 3.0f; // Solid HE
+                if (s.alpha1 > 0.05f) return 4.0f; // Detonation products
+            }
+            if (this->stratified_params.enabled) {
+                if (z_c < this->stratified_params.seabed_surface_z) return 2.0f; // Seabed Soil
+                if (z_c <= this->stratified_params.water_surface_z || s.rho > 300.0) return 1.0f; // Water
+            } else {
+                if (s.rho > 1800.0) return 2.0f;
+                if (s.rho > 300.0) return 1.0f;
+            }
+            return 0.0f; // Air
+        }
+        if (qty == "water" || qty == "phase_water") {
+            if (is_solid(gx_c, gy_c, gz_c)) return 0.0f;
+            double z_c = zmin + ((double)gz_c + 0.5) * cellSize;
+            if (this->stratified_params.enabled) {
+                if (z_c >= this->stratified_params.seabed_surface_z && (z_c <= this->stratified_params.water_surface_z || s.rho > 300.0)) return 1.0f;
+                return 0.0f;
+            } else {
+                return (s.rho > 300.0 && s.rho <= 1800.0) ? 1.0f : 0.0f;
+            }
+        }
+        if (qty == "soil" || qty == "phase_soil" || qty == "sediment") {
+            if (is_solid(gx_c, gy_c, gz_c)) return 0.0f;
+            double z_c = zmin + ((double)gz_c + 0.5) * cellSize;
+            if (this->stratified_params.enabled) {
+                return (z_c < this->stratified_params.seabed_surface_z) ? 1.0f : 0.0f;
+            } else {
+                return (s.rho > 1800.0) ? 1.0f : 0.0f;
+            }
+        }
+        if (qty == "temperature" || qty == "temp" || qty == "T") {
+            RealType ke = (RealType)0.5 * s.rho * (s.ux * s.ux + s.uy * s.uy + s.uz * s.uz);
+            RealType e_int = (s.E - ke) / std::max((RealType)s.rho, (RealType)1e-6);
+            RealType c_v = (RealType)718.0;
+            return (float)std::max((RealType)200.0, e_int / c_v);
+        }
+        if (qty == "afterburn_rate" || qty == "ab_rate" || qty == "combustion_rate") {
+            if constexpr (!IsMultiMaterial) return 0.0f;
+            else {
+                if (!currentMaterials.afterburn.enabled || currentMaterials.afterburn.ambient_o2_fraction <= 0.0) return 0.0f;
+                RealType ke = (RealType)0.5 * (RealType)s.rho * ((RealType)s.ux * (RealType)s.ux + (RealType)s.uy * (RealType)s.uy + (RealType)s.uz * (RealType)s.uz);
+                RealType e_int = ((RealType)s.E - ke) / std::max((RealType)s.rho, (RealType)1e-6);
+                if (e_int / (RealType)718.0 < (RealType)currentMaterials.afterburn.T_ign) return 0.0f;
+                RealType arho0 = std::max((RealType)0.0, (RealType)(s.rho - s.arho1 - s.arho2));
+                RealType rho_fuel = (RealType)currentMaterials.afterburn.f_fuel * (RealType)s.arho1;
+                RealType rho_O2 = (RealType)currentMaterials.afterburn.ambient_o2_fraction * arho0;
+                RealType tau_exp = (currentMaterials.afterburn.tau_expansion > (RealType)1e-4) ? (RealType)currentMaterials.afterburn.tau_expansion : (RealType)0.0;
+                if (tau_exp <= (RealType)0.0) {
+                    if (charge_radius > (RealType)1e-4) {
+                        RealType Q_scale = (currentMaterials.afterburn.Q_ab > (RealType)1e5) ? (RealType)currentMaterials.afterburn.Q_ab : (RealType)4.29e6;
+                        RealType rho_exp = (s.rho > (RealType)100.0) ? (RealType)s.rho : (RealType)1630.0;
+                        constexpr RealType P_amb = (RealType)101325.0;
+                        constexpr RealType c_amb = (RealType)340.0;
+                        constexpr RealType k_fireball = (RealType)0.16;
+                        RealType sedov_ratio = std::pow((RealType)(4.0 / 3.0 * M_PI) * rho_exp * Q_scale / P_amb, (RealType)(1.0 / 3.0));
+                        tau_exp = (k_fireball * sedov_ratio * (RealType)charge_radius) / c_amb;
+                    } else {
+                        tau_exp = (RealType)0.005;
+                    }
+                }
+                RealType k_mix = (RealType)1.0 / std::max(tau_exp, (RealType)1e-5);
+                RealType f_fuel_safe = std::max((RealType)currentMaterials.afterburn.f_fuel, (RealType)0.01);
+                RealType r_fuel = k_mix * std::min(rho_fuel, (RealType)(rho_O2 / (RealType)currentMaterials.afterburn.s_ratio));
+                RealType r_expl = r_fuel / f_fuel_safe;
+                return (float)(r_expl * (RealType)currentMaterials.afterburn.Q_ab);
+            }
+        }
+        if (qty == "fuel_density" || qty == "fuel_rho" || qty == "rho_fuel") {
+            if constexpr (!IsMultiMaterial) return 0.0f;
+            else {
+                RealType rho_fuel = (RealType)currentMaterials.afterburn.f_fuel * (RealType)s.arho1;
+                return (float)std::max((RealType)0.0, rho_fuel);
+            }
+        }
         return (float)s.p;
     };
 
@@ -1863,6 +2784,12 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::sampleSurfacePoints(
     }
     if (num_points == 0 || num_qtys == 0) return;
 
+    std::vector<std::string> lowered_quantities(num_qtys);
+    for (size_t q = 0; q < num_qtys; ++q) {
+        lowered_quantities[q] = quantities[q];
+        std::transform(lowered_quantities[q].begin(), lowered_quantities[q].end(), lowered_quantities[q].begin(), [](unsigned char c) { return std::tolower(c); });
+    }
+
     const double tol = 1e-4 * cellSize;
 
     auto is_solid = [&](int cx, int cy, int cz) {
@@ -1885,6 +2812,22 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::sampleSurfacePoints(
         if (qty == "species3" || qty == "air" || qty == "ambient_air") return (float)(1.0 - s.alpha1 - s.alpha2);
         if (qty == "overpressure" || qty == "peak_overpressure") return (float)s.peak_overpressure;
         if (qty == "impulse" || qty == "peak_impulse") return (float)s.peak_impulse;
+        if (qty == "materials" || qty == "material" || qty == "phase") {
+            if (is_solid(gx_c, gy_c, gz_c)) return 5.0f; // FEM Solid / Obstacle
+            double z_c = zmin + ((double)gz_c + 0.5) * cellSize;
+            if constexpr (IsMultiMaterial) {
+                if (s.alpha2 > 0.05f && s.alpha2 >= s.alpha1) return 3.0f; // Solid HE
+                if (s.alpha1 > 0.05f) return 4.0f; // Detonation products
+            }
+            if (this->stratified_params.enabled) {
+                if (z_c < this->stratified_params.seabed_surface_z) return 2.0f; // Seabed Soil
+                if (z_c <= this->stratified_params.water_surface_z || s.rho > 300.0) return 1.0f; // Water
+            } else {
+                if (s.rho > 1800.0) return 2.0f;
+                if (s.rho > 300.0) return 1.0f;
+            }
+            return 0.0f; // Air
+        }
         return (float)s.p;
     };
 
@@ -1974,10 +2917,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::sampleSurfacePoints(
 
         auto s = sampleState(gx, gy, gz);
         for (size_t q = 0; q < num_qtys; ++q) {
-            if (quantities[q] == "solid" || quantities[q] == "solid_cells") {
+            if (lowered_quantities[q] == "solid" || lowered_quantities[q] == "solid_cells") {
                 out_quantities[q][i] = point_is_solid ? 1.0f : 0.0f;
             } else {
-                out_quantities[q][i] = getVal(s, gx, gy, gz, quantities[q]);
+                out_quantities[q][i] = getVal(s, gx, gy, gz, lowered_quantities[q]);
             }
         }
     }
@@ -2105,11 +3048,9 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
     active_tiles.assign(states_pool.size(), 0);
 
     remap_1d_to_3d(r_1d, states_1d, *this, x_expl, y_expl, z_expl, R_remap);
-
-    remap_1d_to_3d(r_1d, states_1d, *this, x_expl, y_expl, z_expl, R_remap);
     commitStates();
 
-
+    double cut_r = (R_remap > 0.0) ? R_remap : (r_1d.empty() ? 0.0 : r_1d.back());
     double cell_sz_1d = (double)cellSize;
     #pragma omp parallel for
     for (int t = 0; t < (int)states_pool.size(); ++t) {
@@ -2120,7 +3061,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom1D(const std::vec
         double t_y = ymin + (ty + 0.5) * TILE_SIZE_3D * cell_sz_1d;
         double t_z = zmin + (tz + 0.5) * TILE_SIZE_3D * cell_sz_1d;
         double dist = std::sqrt((t_x - x_expl)*(t_x - x_expl) + (t_y - y_expl)*(t_y - y_expl) + (t_z - z_expl)*(t_z - z_expl));
-        if (dist <= R_remap + TILE_SIZE_3D * cell_sz_1d * 1.5) {
+        if (dist <= cut_r + TILE_SIZE_3D * cell_sz_1d * 1.5) {
             active_tiles[t] = 1;
         }
     }
@@ -2301,6 +3242,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::commitStates() {
             RealType total_E;
             if constexpr (IsMultiMaterial) {
                 total_E = (RealType)MultiMat::getMixtureEnergy((double)state_tile.p[i], (double)state_tile.rho[i], (double)state_tile.alpha1[i], (double)state_tile.alpha2[i], (double)state_tile.arho1[i], (double)state_tile.arho2[i], gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+            } else if (this->is_water_tait_val) {
+                CellState3D<IsMultiMaterial> s_tmp{};
+                s_tmp.rho = state_tile.rho[i];
+                total_E = (RealType)getEnergy3D<IsMultiMaterial>((double)state_tile.p[i], (double)state_tile.rho[i], s_tmp, gamma, currentMaterials.products, currentMaterials.unreacted, true, &this->tait_water_params) + ke;
             } else {
                 total_E = state_tile.p[i] / (gamma - (RealType)1.0) + ke;
             }

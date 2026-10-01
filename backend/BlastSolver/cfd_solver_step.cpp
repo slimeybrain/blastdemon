@@ -305,6 +305,43 @@ void CFDSolverImpl<RealType, IsMultiMaterial>::step(double dt) {
                     RealType rho_expl = U[i].arho1 + U[i].arho2;
                     U[i].E += dF * rho_expl * (RealType)currentMaterials.detonation_energy;
                 }
+
+                if (currentMaterials.afterburn.enabled) {
+                    RealType arho0 = U[i].rho - U[i].arho1 - U[i].arho2;
+                    RealType ke = (RealType)0.5 * (U[i].rhou * U[i].rhou) / U[i].rho;
+                    RealType R_ch = (RealType)charge_radius;
+                    RealType tmp_alpha1_ab = U[i].alpha1;
+                    RealType tmp_arho1_ab = U[i].arho1;
+
+                    // 1D Invariant strain rate |du/dr - u/r| and Rayleigh-Taylor baroclinic frequency
+                    RealType du_dr = (RealType)0.0;
+                    RealType u_c = U[i].rhou / U[i].rho;
+                    if (i > 0 && i < n_cells - 1) {
+                        RealType u_p = U[i+1].rhou / U[i+1].rho;
+                        RealType u_m = U[i-1].rhou / U[i-1].rho;
+                        du_dr = (u_p - u_m) / (RealType)(2.0 * dr);
+                    }
+                    RealType strain_1d = std::abs(du_dr - u_c / std::max(r_c, (RealType)1e-6));
+
+                    RealType k_RT = (RealType)0.0;
+                    if (i > 0 && i < n_cells - 1) {
+                        RealType dp_dr = (states[i+1].p - states[i-1].p) / (RealType)(2.0 * dr);
+                        RealType drho_dr = (states[i+1].rho - states[i-1].rho) / (RealType)(2.0 * dr);
+                        if (dp_dr * drho_dr < (RealType)0.0) {
+                            k_RT = std::sqrt(std::abs(- (dp_dr / U[i].rho) * (drho_dr / U[i].rho)));
+                        }
+                    }
+                    RealType turbulent_freq = std::max(strain_1d, k_RT);
+
+                    MultiMat::computeAfterburn(
+                        dt_step, t_step, R_ch, (RealType)currentMaterials.det_vel,
+                        currentMaterials.afterburn,
+                        U[i].rho, tmp_alpha1_ab, tmp_arho1_ab, arho0, U[i].E, ke,
+                        turbulent_freq
+                    );
+                    U[i].alpha1 = tmp_alpha1_ab;
+                    U[i].arho1 = tmp_arho1_ab;
+                }
             }
             updatePrimitiveFromConservative(U, states);
         }

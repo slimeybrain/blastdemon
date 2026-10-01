@@ -1,5 +1,6 @@
 #include "fem_solver_3d.hpp"
 #include "fem_contact_3d.hpp"
+#include "materials/ConstitutiveGeomaterials.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -121,6 +122,10 @@ void FEMSolver3D<T>::addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T 
     int mat_id = static_cast<int>(m_material_tables.size());
     m_material_tables.push_back(material);
 
+    nx = std::max(1, nx);
+    ny = std::max(1, ny);
+    nz = std::max(1, nz);
+
     T dx = lx / static_cast<T>(nx);
     T dy = ly / static_cast<T>(ny);
     T dz = lz / static_cast<T>(nz);
@@ -132,8 +137,8 @@ void FEMSolver3D<T>::addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T 
     int base_node_idx = static_cast<int>(m_nodes.size());
     int base_elem_idx = static_cast<int>(m_elements.size());
 
-    bool is_fixed_base = (boundary_condition == "Fixed Base");
-    bool is_fixed_entire = (boundary_condition == "Fixed Entire");
+    bool is_fixed_base = (boundary_condition == "Fixed Base" || boundary_condition == "Clamped" || boundary_condition == "FixedBase");
+    bool is_fixed_entire = (boundary_condition == "Fixed Entire" || boundary_condition == "FixedEntire" || boundary_condition == "Encastre");
 
     // Create 3D Nodal Grid
     for (int k = 0; k < num_nodes_z; ++k) {
@@ -594,6 +599,65 @@ void FEMSolver3D<T>::setNodesAndElements(const std::vector<FEMNode3D<T>>& nodes,
 }
 
 template <typename T>
+void FEMSolver3D<T>::setNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const std::vector<MaterialTable3D>& materials) {
+    m_nodes.clear();
+    m_elements.clear();
+    m_trusses.clear();
+    m_beams.clear();
+    m_rot_nodes.clear();
+    m_global_to_rot_node.clear();
+    m_material_tables = materials;
+    if (m_material_tables.empty()) {
+        MaterialTable3D def_mat{};
+        m_material_tables.push_back(def_mat);
+    }
+    m_next_part_id = 1;
+
+    m_nodes = nodes;
+    for (size_t n = 0; n < m_nodes.size(); ++n) {
+        m_nodes[n].x0[0] = m_nodes[n].x[0];
+        m_nodes[n].x0[1] = m_nodes[n].x[1];
+        m_nodes[n].x0[2] = m_nodes[n].x[2];
+    }
+
+    m_elements.reserve(elements.size());
+    for (auto elem : elements) {
+        if (elem.part_id <= 0) elem.part_id = 1;
+        if (elem.mat_id < 0 || elem.mat_id >= static_cast<int>(m_material_tables.size())) {
+            elem.mat_id = 0;
+        }
+        m_elements.push_back(elem);
+    }
+
+    for (size_t e = 0; e < m_elements.size(); ++e) {
+        auto& elem = m_elements[e];
+        T x_nodes[8][3];
+        for (int n = 0; n < 8; ++n) {
+            int nid = elem.node_ids[n];
+            x_nodes[n][0] = m_nodes[nid].x[0];
+            x_nodes[n][1] = m_nodes[nid].x[1];
+            x_nodes[n][2] = m_nodes[nid].x[2];
+        }
+
+        T B[6][24], detJ;
+        computeHex8BMatrix(x_nodes, B, detJ);
+        elem.V0 = std::abs(detJ) * static_cast<T>(8.0f);
+        elem.V = elem.V0;
+
+        T L_e = computeHex8CharacteristicLength(x_nodes, elem.V0);
+        const auto& mat_tb = m_material_tables[elem.mat_id];
+        T cd = computeDilatationalWaveSpeed<T>(mat_tb);
+        elem.dt0 = L_e / cd;
+    }
+    ensureGaussPointHistory();
+
+    m_surface_facets_dirty = true;
+    computeLumpedMasses();
+    extractBoundaryFacets();
+    computeGlobalEnergy();
+}
+
+template <typename T>
 void FEMSolver3D<T>::appendNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const MaterialTable3D& mat) {
     int mat_id = static_cast<int>(m_material_tables.size());
     m_material_tables.push_back(mat);
@@ -613,8 +677,10 @@ void FEMSolver3D<T>::appendNodesAndElements(const std::vector<FEMNode3D<T>>& nod
         for (int n = 0; n < 8; ++n) {
             elem.node_ids[n] += base_node_idx;
         }
-        elem.mat_id = mat_id;
-        elem.part_id = part_id;
+        if (elem.part_id <= 0) elem.part_id = part_id;
+        if (elem.mat_id < 0 || elem.mat_id >= static_cast<int>(m_material_tables.size())) {
+            elem.mat_id = mat_id;
+        }
         m_elements.push_back(elem);
     }
 
@@ -1401,8 +1467,11 @@ void FEMSolver3D<T>::computeHourglassForcesFB(FEMElement3D<T>& elem, T dt, const
 #ifdef _OPENMP
                 #pragma omp atomic
                 m_nodes[nid].f_int[c] += f_hg;
+                #pragma omp atomic
+                m_energy_tracker.E_hg += std::abs(f_hg * v_nodes[n][c] * dt);
 #else
                 m_nodes[nid].f_int[c] += f_hg;
+                m_energy_tracker.E_hg += std::abs(f_hg * v_nodes[n][c] * dt);
 #endif
             }
         }
@@ -1768,20 +1837,33 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                             + gp_hist.F_gp[g][0][2] * (gp_hist.F_gp[g][1][0]*gp_hist.F_gp[g][2][1] - gp_hist.F_gp[g][1][1]*gp_hist.F_gp[g][2][0]);
                     vol_strain_g = F_det - static_cast<T>(1.0f);
                 }
-                if (std::abs(vol_strain_g) < static_cast<T>(1.0e-6f)) {
+                if (std::abs(vol_strain_g) < static_cast<T>(1.0e-14f)) {
                     vol_strain_g = static_cast<T>(0.0f);
                 }
                 
-                // Mie-Grueneisen Shock EOS Hydrostatic Pressure
+                // Mie-Grueneisen Shock EOS or Tait Water Hydrostatic Pressure
                 T p_hydro_g = static_cast<T>(0.0f);
-                if (mat.mg_c0 > static_cast<T>(0.0f) && mat.mg_gamma0 > static_cast<T>(0.0f)) {
+                if (mat.material_model == MPMMaterialModel::TaitWater) {
+                    T J_elem = (elem.V > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f))
+                             ? (elem.V / elem.V0) : static_cast<T>(1.0f);
+                    T rho_elem = static_cast<T>(mat.tait_rho0) / std::max(static_cast<T>(0.05f), J_elem);
+                    T e_elem = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 4184.0f) * (gp_hist.temp_gp[g] - static_cast<T>(mat.T_room > 0.0f ? mat.T_room : 293.15f));
+                    if (mat.tait_variant == 1) { // Caloric
+                        p_hydro_g = Blast::TaitEOSWater::compute_pressure_caloric(rho_elem, e_elem, static_cast<T>(mat.tait_B), static_cast<T>(mat.tait_gamma), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_gruneisen), static_cast<T>(mat.tait_p_cav));
+                    } else if (mat.tait_variant == 2) { // Shock Hugoniot
+                        p_hydro_g = Blast::TaitEOSWater::compute_pressure_hugoniot(rho_elem, e_elem, static_cast<T>(mat.tait_c0), static_cast<T>(1.75), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_gruneisen), static_cast<T>(mat.tait_p_cav));
+                    } else { // Isentropic
+                        p_hydro_g = Blast::TaitEOSWater::compute_pressure_isentropic(rho_elem, static_cast<T>(mat.tait_B), static_cast<T>(mat.tait_gamma), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_p_cav));
+                    }
+                    p_hydro_g += q_visc_g;
+                } else if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen && mat.mg_c0 > static_cast<T>(0.0f) && mat.mg_gamma0 > static_cast<T>(0.0f)) {
                     T c0 = static_cast<T>(mat.mg_c0);
                     T s1 = static_cast<T>(mat.mg_s > 0.0f ? mat.mg_s : 1.49f);
                     T gamma0 = static_cast<T>(mat.mg_gamma0);
                     T mu = (elem.V > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f))
                          ? (elem.V0 / elem.V - static_cast<T>(1.0f))
                          : static_cast<T>(0.0f);
-                    if (std::abs(mu) < static_cast<T>(1.0e-6f)) {
+                    if (std::abs(mu) < static_cast<T>(1.0e-14f)) {
                         mu = static_cast<T>(0.0f);
                     }
                     T E_v = density * (mat.Cp > 0.0f ? mat.Cp : 477.0f) * (gp_hist.temp_gp[g] - (mat.T_room > 0.0f ? mat.T_room : 293.0f));
@@ -1871,9 +1953,33 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     gp_hist.damage_gp[g] = cscm_state.damage;
                     gp_hist.lambda_gp[g] = cscm_state.kappa;
                     gp_hist.ep_bar_gp[g] = cscm_state.ep_bar;
-                    p_hydro_g = cscm_state.p_hydro;
-                } else if (mat.material_model == MPMMaterialModel::LinearElastic) {
-                    // Pure Hookean linear elasticity - no plastic yielding
+                } else if (mat.material_model == MPMMaterialModel::DruckerPragerSoil) {
+                    Blast::Materials::DruckerPragerParams<T> dp_p;
+                    dp_p.cohesion = static_cast<T>(mat.dp_cohesion);
+                    dp_p.friction_angle = static_cast<T>(mat.dp_friction_angle * 3.14159265358979323846 / 180.0);
+                    dp_p.dilatancy_angle = static_cast<T>(mat.dp_dilatancy_angle * 3.14159265358979323846 / 180.0);
+                    dp_p.tensile_cutoff = static_cast<T>(mat.dp_tensile_cutoff);
+                    dp_p.H_plastic = static_cast<T>(mat.dp_hardening_modulus);
+
+                    T d_eps_g[3][3];
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            d_eps_g[r][c] = d_dev_g[r][c] * dt + (r == c ? static_cast<T>(1.0 / 3.0) * div_v_g * dt : static_cast<T>(0.0));
+                        }
+                    }
+                    Blast::Materials::update_constitutive_drucker_prager<T>(
+                        E, nu, dp_p, d_eps_g, gp_hist.s_dev_gp[g], p_hydro_g, gp_hist.ep_bar_gp[g], false
+                    );
+                } else if (mat.material_model == MPMMaterialModel::LinearElastic || mat.material_model == MPMMaterialModel::TaitWater) {
+                    // Pure Hookean linear elasticity or Tait fluid - no plastic yielding
+                    if (mat.material_model == MPMMaterialModel::TaitWater) {
+                        T mu_fluid = static_cast<T>(mat.tait_viscosity > 0.0f ? mat.tait_viscosity : 1.002e-3f);
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                gp_hist.s_dev_gp[g][r][c] = static_cast<T>(2.0f) * mu_fluid * d_dev_g[r][c];
+                            }
+                        }
+                    }
                 } else {
                     T s_norm_g = std::sqrt(
                         gp_hist.s_dev_gp[g][0][0]*gp_hist.s_dev_gp[g][0][0] + gp_hist.s_dev_gp[g][1][1]*gp_hist.s_dev_gp[g][1][1] + gp_hist.s_dev_gp[g][2][2]*gp_hist.s_dev_gp[g][2][2] +
@@ -2183,20 +2289,33 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
         }
 
         T vol_strain = (elem.V0 > static_cast<T>(1.0e-18f)) ? (elem.V / elem.V0 - static_cast<T>(1.0f)) : static_cast<T>(0.0f);
-        if (std::abs(vol_strain) < static_cast<T>(1.0e-6f)) {
+        if (std::abs(vol_strain) < static_cast<T>(1.0e-14f)) {
             vol_strain = static_cast<T>(0.0f);
         }
 
-        // Mie-Grueneisen Shock EOS Hydrostatic Pressure
+        // Mie-Grueneisen Shock EOS or Tait Water Hydrostatic Pressure
         T p_hydro = static_cast<T>(0.0f);
-        if (mat.mg_c0 > static_cast<T>(0.0f) && mat.mg_gamma0 > static_cast<T>(0.0f)) {
+        if (mat.material_model == MPMMaterialModel::TaitWater) {
+            T J_elem = (elem.V > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f))
+                     ? (elem.V / elem.V0) : static_cast<T>(1.0f);
+            T rho_elem = static_cast<T>(mat.tait_rho0) / std::max(static_cast<T>(0.05f), J_elem);
+            T e_elem = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 4184.0f) * (elem.temperature - static_cast<T>(mat.T_room > 0.0f ? mat.T_room : 293.15f));
+            if (mat.tait_variant == 1) { // Caloric
+                p_hydro = Blast::TaitEOSWater::compute_pressure_caloric(rho_elem, e_elem, static_cast<T>(mat.tait_B), static_cast<T>(mat.tait_gamma), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_gruneisen), static_cast<T>(mat.tait_p_cav));
+            } else if (mat.tait_variant == 2) { // Shock Hugoniot
+                p_hydro = Blast::TaitEOSWater::compute_pressure_hugoniot(rho_elem, e_elem, static_cast<T>(mat.tait_c0), static_cast<T>(1.75), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_gruneisen), static_cast<T>(mat.tait_p_cav));
+            } else { // Isentropic
+                p_hydro = Blast::TaitEOSWater::compute_pressure_isentropic(rho_elem, static_cast<T>(mat.tait_B), static_cast<T>(mat.tait_gamma), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_p_cav));
+            }
+            p_hydro += q_visc;
+        } else if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen && mat.mg_c0 > static_cast<T>(0.0f) && mat.mg_gamma0 > static_cast<T>(0.0f)) {
             T c0 = static_cast<T>(mat.mg_c0);
             T s1 = static_cast<T>(mat.mg_s > 0.0f ? mat.mg_s : 1.49f);
             T gamma0 = static_cast<T>(mat.mg_gamma0);
             T mu = (elem.V > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f))
                  ? (elem.V0 / elem.V - static_cast<T>(1.0f))
                  : static_cast<T>(0.0f);
-            if (std::abs(mu) < static_cast<T>(1.0e-6f)) {
+            if (std::abs(mu) < static_cast<T>(1.0e-14f)) {
                 mu = static_cast<T>(0.0f);
             }
             T E_v = density * (mat.Cp > 0.0f ? mat.Cp : 477.0f) * (elem.temperature - (mat.T_room > 0.0f ? mat.T_room : 293.0f));
@@ -2286,8 +2405,33 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             elem.lambda = cscm_state.kappa;
             elem.ep_bar = cscm_state.ep_bar;
             p_hydro = cscm_state.p_hydro;
-        } else if (mat.material_model == MPMMaterialModel::LinearElastic) {
-            // Pure Hookean linear elasticity - no plastic yielding
+        } else if (mat.material_model == MPMMaterialModel::DruckerPragerSoil) {
+            Blast::Materials::DruckerPragerParams<T> dp_p;
+            dp_p.cohesion = static_cast<T>(mat.dp_cohesion);
+            dp_p.friction_angle = static_cast<T>(mat.dp_friction_angle * 3.14159265358979323846 / 180.0);
+            dp_p.dilatancy_angle = static_cast<T>(mat.dp_dilatancy_angle * 3.14159265358979323846 / 180.0);
+            dp_p.tensile_cutoff = static_cast<T>(mat.dp_tensile_cutoff);
+            dp_p.H_plastic = static_cast<T>(mat.dp_hardening_modulus);
+
+            T d_eps_elem[3][3];
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    d_eps_elem[r][c] = d_dev[r][c] * dt + (r == c ? static_cast<T>(1.0 / 3.0) * div_v * dt : static_cast<T>(0.0));
+                }
+            }
+            Blast::Materials::update_constitutive_drucker_prager<T>(
+                E, nu, dp_p, d_eps_elem, elem.s_dev, p_hydro, elem.ep_bar, false
+            );
+        } else if (mat.material_model == MPMMaterialModel::LinearElastic || mat.material_model == MPMMaterialModel::TaitWater) {
+            // Pure Hookean linear elasticity or Tait fluid - no plastic yielding
+            if (mat.material_model == MPMMaterialModel::TaitWater) {
+                T mu_fluid = static_cast<T>(mat.tait_viscosity > 0.0f ? mat.tait_viscosity : 1.002e-3f);
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        elem.s_dev[r][c] = static_cast<T>(2.0f) * mu_fluid * d_dev[r][c];
+                    }
+                }
+            }
         } else {
             T s_norm = std::sqrt(
                 elem.s_dev[0][0]*elem.s_dev[0][0] + elem.s_dev[1][1]*elem.s_dev[1][1] + elem.s_dev[2][2]*elem.s_dev[2][2] +
@@ -2470,11 +2614,24 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
             }
         }
 
-        if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion || mat.failure_strain > 0.0f || mat.erosion_strain > 0.0f || m_erosion_criteria.failure_strain > 0.0f) {
-            T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : m_erosion_criteria.failure_strain));
-            fail_strain *= (het_factor * aniso_factor);
-            if (fail_strain > static_cast<T>(0.0f) && ep_bar_effective[e] >= fail_strain) {
+        bool is_concrete = (mat.material_model == MPMMaterialModel::RHTConcrete ||
+                            mat.material_model == MPMMaterialModel::KCConcrete ||
+                            mat.material_model == MPMMaterialModel::CSCMConcrete);
+
+        if (is_concrete) {
+            T conc_erosion_strain = static_cast<T>((mat.erosion_strain >= 0.02f) ? mat.erosion_strain : (m_erosion_criteria.failure_strain >= 0.02f ? m_erosion_criteria.failure_strain : 0.10f));
+            conc_erosion_strain *= (het_factor * aniso_factor);
+            bool damage_saturated = (elem.damage >= static_cast<T>(0.95f));
+            if (damage_saturated && ep_bar_effective[e] >= conc_erosion_strain) {
                 newly_eroded = true;
+            }
+        } else {
+            if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion || mat.failure_strain > 0.0f || mat.erosion_strain > 0.0f || m_erosion_criteria.failure_strain > 0.0f) {
+                T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : m_erosion_criteria.failure_strain));
+                fail_strain *= (het_factor * aniso_factor);
+                if (fail_strain > static_cast<T>(0.0f) && ep_bar_effective[e] >= fail_strain) {
+                    newly_eroded = true;
+                }
             }
         }
 
@@ -2483,7 +2640,9 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
             T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : m_erosion_criteria.tensile_failure_stress));
             fail_stress *= (het_factor * aniso_factor);
             if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
-                newly_eroded = true;
+                if (!is_concrete || elem.damage >= static_cast<T>(0.95f)) {
+                    newly_eroded = true;
+                }
             }
         }
 
@@ -3376,6 +3535,9 @@ void FEMSolver3D<T>::stepWithDt(T dt) {
     computeTrussForces1D(dt);
     computeBeamForces3D(dt);
     updateKinematicsCentralDifference(dt);
+    if (m_lysmer_params.enabled) {
+        applyLysmerDashpots(dt);
+    }
     updateRotationalKinematicsCentralDifference(dt);
 
     // 3. Complete 2nd-Order Full Velocity Update for step n+1
@@ -3432,6 +3594,62 @@ void FEMSolver3D<T>::setNodalVelocity(int node_idx, T vx, T vy, T vz) {
         m_nodes[node_idx].v[0] = vx;
         m_nodes[node_idx].v[1] = vy;
         m_nodes[node_idx].v[2] = vz;
+    }
+}
+
+template <typename T>
+void FEMSolver3D<T>::applyLysmerDashpots(T dt) {
+    (void)dt;
+    if (!m_lysmer_params.enabled) return;
+    const auto& facets = getSurfaceFacets();
+    if (facets.empty()) return;
+
+    T rho = static_cast<T>(m_lysmer_params.rho);
+    T cp = static_cast<T>(m_lysmer_params.c_p);
+    T cs = static_cast<T>(m_lysmer_params.c_s);
+    T norm_rel = static_cast<T>(m_lysmer_params.normal_relaxation);
+    T shear_rel = static_cast<T>(m_lysmer_params.shear_relaxation);
+
+    for (const auto& facet : facets) {
+        if (facet.is_eroded) continue;
+
+        if (m_lysmer_params.filter_box) {
+            T cx = static_cast<T>(0.25f) * (m_nodes[facet.node_ids[0]].x[0] + m_nodes[facet.node_ids[1]].x[0] + m_nodes[facet.node_ids[2]].x[0] + m_nodes[facet.node_ids[3]].x[0]);
+            T cy = static_cast<T>(0.25f) * (m_nodes[facet.node_ids[0]].x[1] + m_nodes[facet.node_ids[1]].x[1] + m_nodes[facet.node_ids[2]].x[1] + m_nodes[facet.node_ids[3]].x[1]);
+            T cz = static_cast<T>(0.25f) * (m_nodes[facet.node_ids[0]].x[2] + m_nodes[facet.node_ids[1]].x[2] + m_nodes[facet.node_ids[2]].x[2] + m_nodes[facet.node_ids[3]].x[2]);
+            T tol = static_cast<T>(m_lysmer_params.tol);
+
+            bool on_bound = (std::abs(cx - static_cast<T>(m_lysmer_params.x_min)) <= tol) ||
+                            (std::abs(cx - static_cast<T>(m_lysmer_params.x_max)) <= tol) ||
+                            (std::abs(cy - static_cast<T>(m_lysmer_params.y_min)) <= tol) ||
+                            (std::abs(cy - static_cast<T>(m_lysmer_params.y_max)) <= tol) ||
+                            (std::abs(cz - static_cast<T>(m_lysmer_params.z_min)) <= tol) ||
+                            (std::abs(cz - static_cast<T>(m_lysmer_params.z_max)) <= tol);
+            if (!on_bound) continue;
+        }
+
+        T A_node = static_cast<T>(0.25f) * facet.area;
+        T nx = facet.normal[0], ny = facet.normal[1], nz = facet.normal[2];
+
+        for (int k = 0; k < 4; ++k) {
+            int nid = facet.node_ids[k];
+            auto& node = m_nodes[nid];
+            if (node.is_eroded || node.m <= static_cast<T>(1.0e-12f)) continue;
+
+            T vn = node.v[0] * nx + node.v[1] * ny + node.v[2] * nz;
+            T vs_x = node.v[0] - vn * nx;
+            T vs_y = node.v[1] - vn * ny;
+            T vs_z = node.v[2] - vn * nz;
+
+            T fn = - A_node * rho * cp * norm_rel * vn;
+            T fs_x = - A_node * rho * cs * shear_rel * vs_x;
+            T fs_y = - A_node * rho * cs * shear_rel * vs_y;
+            T fs_z = - A_node * rho * cs * shear_rel * vs_z;
+
+            node.a[0] += (fn * nx + fs_x) / node.m;
+            node.a[1] += (fn * ny + fs_y) / node.m;
+            node.a[2] += (fn * nz + fs_z) / node.m;
+        }
     }
 }
 

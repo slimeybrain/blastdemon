@@ -626,6 +626,7 @@ __global__ void applyProgrammedBurn_kernel(
     int num_tiles_r, int num_tiles_z, int nr_cells, int nz_cells,
     RealType dr, RealType dz, RealType currentTime, RealType dt,
     RealType det_x, RealType det_y, RealType det_z,
+    RealType charge_radius,
     MultiMat::MaterialSet* d_materials,
     const int32_t* tile_map,
     ConservativeTileT<RealType>* d_U_pool) {
@@ -669,6 +670,37 @@ __global__ void applyProgrammedBurn_kernel(
             d_U_pool[pool_idx].E[k] += dF * rho_expl * (RealType)d_materials->detonation_energy;
         }
     }
+
+    if (d_materials->afterburn.enabled) {
+        RealType arho0 = d_U_pool[pool_idx].rho[k] - arho1 - arho2;
+        RealType ke = (RealType)0.5 * (d_U_pool[pool_idx].rhour[k] * d_U_pool[pool_idx].rhour[k] + d_U_pool[pool_idx].rhouz[k] * d_U_pool[pool_idx].rhouz[k]) / d_U_pool[pool_idx].rho[k];
+
+        RealType vort_2d = (RealType)0.0;
+        int lx_cell = k & 15;
+        int lz_cell = k >> 4;
+        if (lx_cell > 0 && lx_cell < 15 && lz_cell > 0 && lz_cell < 15) {
+            int k_pr = k + 1;
+            int k_mr = k - 1;
+            int k_pz = k + 16;
+            int k_mz = k - 16;
+            RealType uz_pr = d_U_pool[pool_idx].rhouz[k_pr] / d_U_pool[pool_idx].rho[k_pr];
+            RealType uz_mr = d_U_pool[pool_idx].rhouz[k_mr] / d_U_pool[pool_idx].rho[k_mr];
+            RealType ur_pz = d_U_pool[pool_idx].rhour[k_pz] / d_U_pool[pool_idx].rho[k_pz];
+            RealType ur_mz = d_U_pool[pool_idx].rhour[k_mz] / d_U_pool[pool_idx].rho[k_mz];
+            RealType duz_dr = (uz_pr - uz_mr) / (RealType)(2.0 * dr);
+            RealType dur_dz = (ur_pz - ur_mz) / (RealType)(2.0 * dz);
+            using std::abs;
+            vort_2d = abs(duz_dr - dur_dz);
+        }
+
+        MultiMat::computeAfterburn(
+            dt, currentTime, charge_radius, (RealType)d_materials->det_vel,
+            d_materials->afterburn,
+            d_U_pool[pool_idx].rho[k], alpha1, arho1, arho0, d_U_pool[pool_idx].E[k], ke,
+            vort_2d
+        );
+    }
+
     d_U_pool[pool_idx].alpha1[k] = alpha1;
     d_U_pool[pool_idx].alpha2[k] = alpha2;
     d_U_pool[pool_idx].arho1[k] = arho1;
@@ -1095,6 +1127,7 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionTNT(double explosive_z, d
     this->det_y = 0.0;
     this->det_z = explosive_z;
     this->is_ideal_gas = false;
+    this->charge_radius = explosive_radius;
 
     // Reset tile pool to clear stale states
     std::fill(host_tile_map.begin(), host_tile_map.end(), -1);
@@ -1385,6 +1418,7 @@ void CFDSolver2DCudaImpl<RealType>::setInitialConditionTNTCylinder(double explos
     this->det_y = 0.0;
     this->det_z = explosive_z + height / 2.0;
     this->is_ideal_gas = false;
+    this->charge_radius = radius;
 
     // Reset tile pool to clear stale states
     std::fill(host_tile_map.begin(), host_tile_map.end(), -1);
@@ -1627,7 +1661,8 @@ void CFDSolver2DCudaImpl<RealType>::step(double dt) {
     }
     
     if (!is_ideal_gas) {
-        applyProgrammedBurn_kernel<<<blocks, threads>>>(num_tiles_r, num_tiles_z, nr_cells, nz_cells, dr_r, dz_r, currentTime_r, dt_r, det_x_r, det_y_r, det_z_r, d_materials, d_tile_map, d_U_pool);
+        RealType charge_radius_r = (RealType)this->charge_radius;
+        applyProgrammedBurn_kernel<<<blocks, threads>>>(num_tiles_r, num_tiles_z, nr_cells, nz_cells, dr_r, dz_r, currentTime_r, dt_r, det_x_r, det_y_r, det_z_r, charge_radius_r, d_materials, d_tile_map, d_U_pool);
         CUDA_CHECK(cudaGetLastError());
         
         updatePrimitiveFromConservative_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma_r, d_materials, ambient_rho_r, ambient_p_r, d_U_pool, d_states_pool);

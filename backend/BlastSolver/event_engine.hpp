@@ -315,6 +315,8 @@ public:
 
 private:
     void execute_action(const ASTAction& action, uint64_t step, double current_t) {
+        (void)step;
+        (void)current_t;
         switch (action.type) {
             case ActionType::SET_PARAM:
                 if (param_setter_) param_setter_(action.target_param, action.target_value);

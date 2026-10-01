@@ -1,5 +1,5 @@
 import { Node, SimulationState } from './types.js';
-import { calculateCFDMemory } from './state-manager.js';
+import { calculateCFDMemory, resolveFEMCounts } from './state-manager.js';
 
 export interface MemoryEstimateResult {
     ramBytes: number;
@@ -63,7 +63,7 @@ export function estimateNodeMemory(node: Node, state?: SimulationState): MemoryE
                 ramBytes = cfdMem.totalBytes * 0.2; // host staging buffer
             }
         } else {
-            // For pure MPM/FEM models, DomainMesh is the background grid whose memory is tracked by MPMDomain/FEMDomain
+            // For pure MPM models, DomainMesh is the background grid whose memory is tracked by MPMDomain
             ramBytes = 0;
             vramBytes = 0;
         }
@@ -129,18 +129,18 @@ export function estimateNodeMemory(node: Node, state?: SimulationState): MemoryE
             vramBytes = 0;
         }
     } else if (type === 'FEMDomain3D') {
-        const nx = Number(params.nx) || 20;
-        const ny = Number(params.ny) || 20;
-        const nz = Number(params.nz) || 20;
-        const numElements = nx * ny * nz;
-        const numNodes = (nx + 1) * (ny + 1) * (nz + 1);
+        const counts = resolveFEMCounts(node, state);
+        const numElements = counts.totalElements || counts.numElements;
+        const numNodes = counts.totalNodes || counts.numNodes;
 
-        if (isCuda) {
-            vramBytes = (numNodes * 128) + (numElements * 256) + (64 * 1024 * 1024);
-            ramBytes = (numNodes * 128) + (numElements * 256) + (64 * 1024 * 1024);
-        } else {
-            ramBytes = (numNodes * 128) + (numElements * 256 * 2);
-            vramBytes = 0;
+        if (numElements > 0 || numNodes > 0) {
+            if (isCuda) {
+                vramBytes = (numNodes * 128) + (numElements * 1024) + (64 * 1024 * 1024);
+                ramBytes = (numNodes * 128) + (numElements * 512) + (64 * 1024 * 1024);
+            } else {
+                ramBytes = (numNodes * 128) + (numElements * 1024);
+                vramBytes = 0;
+            }
         }
     }
 

@@ -75,7 +75,18 @@ struct CellState3D {
 };
 
 template <bool IsMultiMaterial>
-inline double getPressure3D(double E_internal, double rho, const CellState3D<IsMultiMaterial>& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+inline double getPressure3D(double E_internal, double rho, const CellState3D<IsMultiMaterial>& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted, bool is_water = false, const Blast::TaitEOSParams* tait = nullptr) {
+    if (is_water && tait) {
+        if (tait->variant == Blast::TaitVariant::CaloricGruneisen) {
+            double e = E_internal / std::max(1e-6, rho);
+            return Blast::TaitEOSWater::compute_pressure_caloric(rho, e, tait->B, tait->gamma, tait->rho0, tait->gruneisen, tait->p_cav, tait->p0);
+        } else if (tait->variant == Blast::TaitVariant::ShockHugoniot) {
+            double e = E_internal / std::max(1e-6, rho);
+            return Blast::TaitEOSWater::compute_pressure_hugoniot(rho, e, tait->c0, tait->s_hugoniot, tait->rho0, tait->gruneisen, tait->p_cav);
+        } else {
+            return Blast::TaitEOSWater::compute_pressure_isentropic(rho, tait->B, tait->gamma, tait->rho0, tait->p_cav, tait->p0);
+        }
+    }
     if constexpr (IsMultiMaterial) {
         return MultiMat::getMixturePressure(E_internal, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
     } else {
@@ -84,7 +95,13 @@ inline double getPressure3D(double E_internal, double rho, const CellState3D<IsM
 }
 
 template <bool IsMultiMaterial>
-inline double getSoundSpeed3D(double p, double rho, const CellState3D<IsMultiMaterial>& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+inline double getSoundSpeed3D(double p, double rho, const CellState3D<IsMultiMaterial>& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted, bool is_water = false, const Blast::TaitEOSParams* tait = nullptr) {
+    if (is_water && tait) {
+        double e = (tait->variant == Blast::TaitVariant::CaloricGruneisen || tait->variant == Blast::TaitVariant::ShockHugoniot)
+                 ? (MultiMat::getEnergy_Tait<double>(p, rho, tait->B, tait->gamma, tait->rho0, tait->gruneisen, true))
+                 : 0.0;
+        return Blast::TaitEOSWater::compute_sound_speed_unified(rho, p, e, tait->variant, tait->B, tait->gamma, tait->rho0, tait->c0, tait->gruneisen, tait->s_hugoniot);
+    }
     if constexpr (IsMultiMaterial) {
         return MultiMat::getMixtureSoundSpeed(p, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
     } else {
@@ -93,7 +110,11 @@ inline double getSoundSpeed3D(double p, double rho, const CellState3D<IsMultiMat
 }
 
 template <bool IsMultiMaterial>
-inline double getEnergy3D(double p, double rho, const CellState3D<IsMultiMaterial>& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted) {
+inline double getEnergy3D(double p, double rho, const CellState3D<IsMultiMaterial>& s, double gamma, const MultiMat::JWLParams& products, const MultiMat::JWLParams& unreacted, bool is_water = false, const Blast::TaitEOSParams* tait = nullptr) {
+    if (is_water && tait) {
+        bool is_cal = (tait->variant == Blast::TaitVariant::CaloricGruneisen || tait->variant == Blast::TaitVariant::ShockHugoniot);
+        return rho * MultiMat::getEnergy_Tait<double>(p, rho, tait->B, tait->gamma, tait->rho0, tait->gruneisen, is_cal);
+    }
     if constexpr (IsMultiMaterial) {
         return MultiMat::getMixtureEnergy(p, rho, s.alpha1, s.alpha2, s.arho1, s.arho2, gamma, products, unreacted);
     } else {
@@ -130,6 +151,11 @@ public:
     virtual ~CFDSolver3D() = default;
 
     virtual void setInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, double ambient_rho, double ambient_p) = 0;
+    virtual void setStratifiedInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, const Blast::Stratified3DParams& strat) {
+        setInitialCondition(charge, materials, strat.air_rho, strat.p_atm);
+    }
+    virtual void setAcousticWavePacket(double /*x0*/, double /*sigma*/, double /*delta_p*/, double /*ambient_rho*/, double /*ambient_p*/) {}
+    virtual void setGravity(double /*gx*/, double /*gy*/, double /*gz*/) {}
     virtual void setDetonatorLocation(double x, double y, double z) = 0;
     virtual void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) = 0;
     virtual void setFluxScheme(const std::string& scheme_name) = 0;
@@ -153,6 +179,7 @@ public:
     virtual double getYMin() const = 0;
     virtual double getZMin() const = 0;
     virtual double getCellSize() const = 0;
+    virtual double getDx() const { return getCellSize(); }
     virtual double getDy() const { return getCellSize(); }
     virtual double getDz() const { return getCellSize(); }
 
@@ -230,13 +257,24 @@ public:
     virtual bool isCUDA() const { return false; }
     virtual void setGamma(double) {}
     virtual void setIdealGas(bool) {}
+    virtual bool isWaterTait() const { return false; }
+    virtual void setWaterTait(bool) {}
+    virtual const Blast::TaitEOSParams& getTaitParams() const { static Blast::TaitEOSParams p; return p; }
+    virtual void setTaitParams(const Blast::TaitEOSParams&) {}
     virtual void setMaterialParameters(const MultiMat::MaterialSet&) {}
     virtual const MultiMat::MaterialSet& getMaterialParameters() const = 0;
     virtual double getAmbientP() const = 0;
     virtual double getAmbientRho() const = 0;
     virtual void setAmbientState(double, double) {}
     virtual void setTime(double) {}
+    virtual void setChargeRadius(double r) { charge_radius = r; }
+    virtual double getChargeRadius() const { return charge_radius; }
     virtual size_t getAllocatedVRAM() const { return 0; }
+
+protected:
+    double charge_radius = 0.05;
+
+public:
     virtual void setGeometry(const std::string& stl_filepath, const std::string& geometry_hash, const std::string& voxelization_method,
                              const std::atomic<bool>* terminate_flag = nullptr,
                              std::function<void(double)> progress_callback = nullptr) = 0;
@@ -264,6 +302,12 @@ protected:
     double ambient_rho = 1.225;
     double ambient_p = 101325.0;
     bool is_ideal_gas_val = false;
+    bool is_water_tait_val = false;
+    Blast::TaitEOSParams tait_water_params;
+    double gravity_x = 0.0;
+    double gravity_y = 0.0;
+    double gravity_z = 0.0;
+    Blast::Stratified3DParams stratified_params;
 
     BCType3D bcXmin = BCType3D::REFLECTIVE;
     BCType3D bcXmax = BCType3D::TRANSMISSIVE;
@@ -305,6 +349,12 @@ public:
         bcZmin = zmin; bcZmax = zmax;
     }
 
+    void setGravity(double gx, double gy, double gz) override {
+        gravity_x = gx;
+        gravity_y = gy;
+        gravity_z = gz;
+    }
+
     void setCancelFlag(std::atomic<bool>* flag) override { cancel_flag = flag; }
     void setProgressRef(std::atomic<int>* ref) override { progress_ref = ref; }
 
@@ -316,12 +366,20 @@ public:
     double getYMin() const { return ymin; }
     double getZMin() const { return zmin; }
     double getCellSize() const override { return cellSize; }
+    double getDx() const override { return cellSize; }
     double getDy() const override { return cellSize; }
     double getDz() const override { return cellSize; }
     bool is_terminated() const override { return terminated; }
     double getGamma() const override { return gamma; }
     void setGamma(double g) override { gamma = g; }
     void setIdealGas(bool val) override { is_ideal_gas_val = val; }
+    bool isWaterTait() const override { return is_water_tait_val; }
+    void setWaterTait(bool val) override { is_water_tait_val = val; }
+    const Blast::TaitEOSParams& getTaitParams() const override { return tait_water_params; }
+    void setTaitParams(const Blast::TaitEOSParams& p) override {
+        tait_water_params = p;
+        is_water_tait_val = true;
+    }
     void setMaterialParameters(const MultiMat::MaterialSet& materials) override { currentMaterials = materials; }
     void setTime(double t) override { currentTime = t; }
     void setGeometry(const std::string&, const std::string&, const std::string&,
@@ -360,6 +418,8 @@ public:
     void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) override;
 
     void setInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, double ambient_rho, double ambient_p) override;
+    void setStratifiedInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, const Blast::Stratified3DParams& strat) override;
+    void setAcousticWavePacket(double x0, double sigma, double delta_p, double ambient_rho, double ambient_p) override;
     void setFluxScheme(const std::string& scheme_name) override;
     void setSpatialOrder(int order) override;
     void setTemporalOrder(int order) override;
@@ -661,7 +721,12 @@ public:
         float W_total = 0.0f;
 
         auto is_solid_cpu = [&](int x, int y, int z) {
-            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return true;
+            if (x < 0) return bcXmin == BCType3D::REFLECTIVE;
+            if (x >= nx) return bcXmax == BCType3D::REFLECTIVE;
+            if (y < 0) return bcYmin == BCType3D::REFLECTIVE;
+            if (y >= ny) return bcYmax == BCType3D::REFLECTIVE;
+            if (z < 0) return bcZmin == BCType3D::REFLECTIVE;
+            if (z >= nz) return bcZmax == BCType3D::REFLECTIVE;
             int tx = (x >> 3) + (y >> 3) * n_tiles_x + (z >> 3) * n_tiles_x * n_tiles_y;
             int cx = (x & 7) + (y & 7) * 8 + (z & 7) * 64;
             return geom_pool[tx].cells[cx].is_boundary != 0;
@@ -772,6 +837,10 @@ public:
         RealType ke = (RealType)0.5 * s_ghost.rho * (s_ghost.ux*s_ghost.ux + s_ghost.uy*s_ghost.uy + s_ghost.uz*s_ghost.uz);
         if constexpr (IsMultiMaterial) {
             s_ghost.E = (RealType)MultiMat::getMixtureEnergy(s_ghost.p, s_ghost.rho, s_ghost.alpha1, s_ghost.alpha2, s_ghost.arho1, s_ghost.arho2, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+        } else if (this->is_water_tait_val) {
+            CellState3D<IsMultiMaterial> s_tmp{};
+            s_tmp.rho = s_ghost.rho;
+            s_ghost.E = (RealType)getEnergy3D<IsMultiMaterial>((double)s_ghost.p, (double)s_ghost.rho, s_tmp, (double)gamma, currentMaterials.products, currentMaterials.unreacted, true, &this->tait_water_params) + ke;
         } else {
             s_ghost.E = s_ghost.p / ((RealType)gamma - (RealType)1.0) + ke;
         }
@@ -784,6 +853,7 @@ public:
 
     inline CellState3DT<RealType, IsMultiMaterial> sampleStateInternalWithMirror(int gx, int gy, int gz, bool /*enable_mirror*/) const {
         bool reflective_x = false, reflective_y = false, reflective_z = false;
+        int orig_gx = gx, orig_gy = gy, orig_gz = gz;
 
         applyBC3DHelper(gx, nx, bcXmin, bcXmax, reflective_x);
         applyBC3DHelper(gy, ny, bcYmin, bcYmax, reflective_y);
@@ -810,9 +880,235 @@ public:
             s.alpha1 = tile.alpha1[c_idx]; s.alpha2 = tile.alpha2[c_idx];
             s.arho1 = tile.arho1[c_idx]; s.arho2 = tile.arho2[c_idx];
             s.E = (RealType)MultiMat::getMixtureEnergy(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+        } else if (this->is_water_tait_val) {
+            CellState3D<IsMultiMaterial> s_tmp{};
+            s_tmp.rho = s.rho;
+            s.alpha1 = 0.0; s.alpha2 = 0.0; s.arho1 = 0.0; s.arho2 = 0.0;
+            s.E = (RealType)getEnergy3D<IsMultiMaterial>((double)s.p, (double)s.rho, s_tmp, (double)gamma, currentMaterials.products, currentMaterials.unreacted, true, &this->tait_water_params) + ke;
         } else {
             s.alpha1 = 0.0; s.alpha2 = 0.0; s.arho1 = 0.0; s.arho2 = 0.0;
             s.E = s.p / ((RealType)gamma - (RealType)1.0) + ke;
+        }
+
+        // Bottom floor hydrostatic well-balancing under gravity
+        if (orig_gz < 0 && stratified_params.enabled) {
+            double g_mag = std::abs(gravity_z);
+            if (std::abs(stratified_params.gravity_z) > 1e-6) {
+                g_mag = std::abs(stratified_params.gravity_z);
+            }
+            if (g_mag > 1e-6) {
+                double dist_z = (double)(gz - orig_gz) * cellSize;
+                s.p += (RealType)(s.rho * g_mag * dist_z);
+                double z_c = this->zmin + ((double)orig_gz + 0.5) * this->cellSize;
+                bool is_soil = (this->stratified_params.enabled && z_c < this->stratified_params.seabed_surface_z);
+                if (is_soil) {
+                    double gamma_soil = this->stratified_params.soil_gamma > 0.0 ? this->stratified_params.soil_gamma : 4.0;
+                    double rho0_soil = this->stratified_params.soil_density > 0.0 ? this->stratified_params.soil_density : 2000.0;
+                    double c0_soil = this->stratified_params.soil_c0 > 0.0 ? this->stratified_params.soil_c0 : 2500.0;
+                    double B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                    double p0_soil = this->stratified_params.p_atm;
+                    s.rho = (RealType)Blast::TaitEOSWater::compute_density_isentropic(
+                        (double)s.p, B_soil, gamma_soil, rho0_soil, p0_soil);
+                    double e_soil = Blast::TaitEOSWater::compute_energy_isentropic(
+                        (double)s.rho, B_soil, gamma_soil, rho0_soil);
+                    s.E = (RealType)((double)s.rho * e_soil + ke);
+                } else if (this->is_water_tait_val || stratified_params.enabled) {
+                    s.rho = (RealType)Blast::TaitEOSWater::compute_density_isentropic(
+                        (double)s.p, this->tait_water_params.B, this->tait_water_params.gamma,
+                        (double)s.rho, this->tait_water_params.p0);
+                    double e_w = Blast::TaitEOSWater::compute_energy_dispatcher((double)s.rho, (double)s.p, this->tait_water_params);
+                    s.E = (RealType)((double)s.rho * e_w + ke);
+                } else {
+                    s.E = (RealType)((double)s.p / ((double)gamma - 1.0) + ke);
+                }
+            }
+        }
+
+        // Top boundary hydrostatic pressure profile under gravity
+        if (orig_gz >= nz && stratified_params.enabled) {
+            double dist_z = (double)(orig_gz - gz) * cellSize;
+            double g_z = stratified_params.gravity_z != 0.0 ? stratified_params.gravity_z : gravity_z;
+            s.p = (RealType)std::max((double)stratified_params.p_atm, (double)s.p + (double)s.rho * g_z * dist_z);
+            double z_c = this->zmin + ((double)orig_gz + 0.5) * this->cellSize;
+            bool is_soil = (this->stratified_params.enabled && z_c < this->stratified_params.seabed_surface_z);
+            if (is_soil) {
+                double gamma_soil = this->stratified_params.soil_gamma > 0.0 ? this->stratified_params.soil_gamma : 4.0;
+                double rho0_soil = this->stratified_params.soil_density > 0.0 ? this->stratified_params.soil_density : 2000.0;
+                double c0_soil = this->stratified_params.soil_c0 > 0.0 ? this->stratified_params.soil_c0 : 2500.0;
+                double B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                double p0_soil = this->stratified_params.p_atm;
+                s.rho = (RealType)Blast::TaitEOSWater::compute_density_isentropic(
+                    (double)s.p, B_soil, gamma_soil, rho0_soil, p0_soil);
+                double e_soil = Blast::TaitEOSWater::compute_energy_isentropic(
+                    (double)s.rho, B_soil, gamma_soil, rho0_soil);
+                s.E = (RealType)((double)s.rho * e_soil + ke);
+            } else if (this->is_water_tait_val || (stratified_params.enabled && z_c <= this->stratified_params.water_surface_z)) {
+                s.rho = (RealType)Blast::TaitEOSWater::compute_density_isentropic(
+                    (double)s.p, this->tait_water_params.B, this->tait_water_params.gamma,
+                    (double)s.rho, this->tait_water_params.p0);
+                double e_w = Blast::TaitEOSWater::compute_energy_dispatcher((double)s.rho, (double)s.p, this->tait_water_params);
+                s.E = (RealType)((double)s.rho * e_w + ke);
+            } else {
+                s.E = (RealType)((double)s.p / ((double)gamma - 1.0) + ke);
+            }
+        }
+
+        // Non-reflecting characteristic Riemann boundary condition (OUTFLOW_RIEMANN)
+        bool is_riemann = (orig_gx < 0 && bcXmin == BCType3D::OUTFLOW_RIEMANN) ||
+                          (orig_gx >= nx && bcXmax == BCType3D::OUTFLOW_RIEMANN) ||
+                          (orig_gy < 0 && bcYmin == BCType3D::OUTFLOW_RIEMANN) ||
+                          (orig_gy >= ny && bcYmax == BCType3D::OUTFLOW_RIEMANN) ||
+                          (orig_gz < 0 && bcZmin == BCType3D::OUTFLOW_RIEMANN) ||
+                          (orig_gz >= nz && bcZmax == BCType3D::OUTFLOW_RIEMANN);
+
+        if (is_riemann) {
+            double nx_out = 0.0, ny_out = 0.0, nz_out = 0.0;
+            if (orig_gx < 0 && bcXmin == BCType3D::OUTFLOW_RIEMANN) nx_out = -1.0;
+            else if (orig_gx >= nx && bcXmax == BCType3D::OUTFLOW_RIEMANN) nx_out = 1.0;
+            else if (orig_gy < 0 && bcYmin == BCType3D::OUTFLOW_RIEMANN) ny_out = -1.0;
+            else if (orig_gy >= ny && bcYmax == BCType3D::OUTFLOW_RIEMANN) ny_out = 1.0;
+            else if (orig_gz < 0 && bcZmin == BCType3D::OUTFLOW_RIEMANN) nz_out = -1.0;
+            else if (orig_gz >= nz && bcZmax == BCType3D::OUTFLOW_RIEMANN) nz_out = 1.0;
+
+            double un_int = (double)s.ux * nx_out + (double)s.uy * ny_out + (double)s.uz * nz_out;
+
+            double p_target = this->ambient_p;
+            double rho_target = this->ambient_rho;
+            double p_hydro_int = this->ambient_p;
+            bool is_water_target = this->is_water_tait_val;
+            bool is_soil_target = false;
+
+            if (this->stratified_params.enabled) {
+                double z_c = this->zmin + ((double)orig_gz + 0.5) * this->cellSize;
+                double z_int = this->zmin + ((double)gz + 0.5) * this->cellSize;
+                double g_mag = std::abs(this->stratified_params.gravity_z);
+                if (g_mag < 1e-6) g_mag = 9.81;
+
+                auto eval_hydro = [&](double z_eval, double& p_out, double& rho_out, bool& is_w, bool& is_s) {
+                    if (z_eval > this->stratified_params.water_surface_z) {
+                        double z_air_depth = z_eval - this->stratified_params.water_surface_z;
+                        p_out = this->stratified_params.p_atm - this->stratified_params.air_rho * g_mag * z_air_depth;
+                        rho_out = this->stratified_params.air_rho;
+                        is_w = false; is_s = false;
+                    } else if (z_eval >= this->stratified_params.seabed_surface_z) {
+                        double p_h = 0.0, rho_h = 0.0, e_h = 0.0;
+                        Blast::TaitEOSWater::compute_hydrostatic_state(
+                            z_eval, this->stratified_params.water_surface_z, g_mag, this->stratified_params.p_atm,
+                            p_h, rho_h, e_h, this->stratified_params.tait_B, this->stratified_params.tait_gamma, this->stratified_params.tait_rho0
+                        );
+                        p_out = p_h;
+                        rho_out = rho_h;
+                        is_w = true; is_s = false;
+                    } else {
+                        double p_bed = 0.0, rho_bed = 0.0, e_bed = 0.0;
+                        Blast::TaitEOSWater::compute_hydrostatic_state(
+                            this->stratified_params.seabed_surface_z, this->stratified_params.water_surface_z, g_mag, this->stratified_params.p_atm,
+                            p_bed, rho_bed, e_bed, this->stratified_params.tait_B, this->stratified_params.tait_gamma, this->stratified_params.tait_rho0
+                        );
+                        double sig_v = 0.0, u_p = 0.0, sig_h = 0.0;
+                        Blast::TaitEOSWater::compute_geostatic_stress(
+                            z_eval, this->stratified_params.seabed_surface_z, p_bed, this->stratified_params.soil_density, this->stratified_params.tait_rho0, g_mag, this->stratified_params.k0_earth_pressure,
+                            sig_v, u_p, sig_h
+                        );
+                        p_out = sig_v;
+                        double gamma_soil = this->stratified_params.soil_gamma > 0.0 ? this->stratified_params.soil_gamma : 4.0;
+                        double rho0_soil = this->stratified_params.soil_density > 0.0 ? this->stratified_params.soil_density : 2000.0;
+                        double c0_soil = this->stratified_params.soil_c0 > 0.0 ? this->stratified_params.soil_c0 : 2500.0;
+                        double B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                        double p0_soil = this->stratified_params.p_atm;
+                        rho_out = Blast::TaitEOSWater::compute_density_isentropic(
+                            sig_v, B_soil, gamma_soil, rho0_soil, p0_soil);
+                        is_s = true; is_w = false;
+                    }
+                };
+
+                bool dummy_w, dummy_s;
+                eval_hydro(z_c, p_target, rho_target, is_water_target, is_soil_target);
+                eval_hydro(z_int, p_hydro_int, rho_target, dummy_w, dummy_s);
+            }
+
+            if (is_soil_target) {
+                double gamma_soil = this->stratified_params.soil_gamma > 0.0 ? this->stratified_params.soil_gamma : 4.0;
+                double rho0_soil = this->stratified_params.soil_density > 0.0 ? this->stratified_params.soil_density : 2000.0;
+                double c0_soil = this->stratified_params.soil_c0 > 0.0 ? this->stratified_params.soil_c0 : 2500.0;
+                double B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                double p0_soil = this->stratified_params.p_atm;
+                double p_cav_soil = this->stratified_params.soil_p_cav != 0.0 ? this->stratified_params.soil_p_cav : -1.0e5;
+
+                double c_soil = Blast::TaitEOSWater::compute_sound_speed_isentropic(
+                    (double)s.rho, B_soil, gamma_soil, rho0_soil);
+                double Z = (double)s.rho * c_soil;
+                if (Z < 1.0e-3) Z = rho0_soil * c0_soil;
+
+                double p_pert_int = (double)s.p - p_hydro_int;
+                double un_ghost = 0.5 * (un_int + p_pert_int / Z);
+                double p_ghost = p_target + 0.5 * (p_pert_int + Z * un_int);
+                if (p_ghost < p_cav_soil) p_ghost = p_cav_soil;
+
+                double rho_ghost = Blast::TaitEOSWater::compute_density_isentropic(
+                    p_ghost, B_soil, gamma_soil, rho0_soil, p0_soil);
+
+                s.ux += (RealType)((un_ghost - un_int) * nx_out);
+                s.uy += (RealType)((un_ghost - un_int) * ny_out);
+                s.uz += (RealType)((un_ghost - un_int) * nz_out);
+                s.p = (RealType)p_ghost;
+                s.rho = (RealType)rho_ghost;
+
+                double e_soil = Blast::TaitEOSWater::compute_energy_isentropic(
+                    rho_ghost, B_soil, gamma_soil, rho0_soil);
+                double ke_r = 0.5 * (double)s.rho * ((double)s.ux * (double)s.ux + (double)s.uy * (double)s.uy + (double)s.uz * (double)s.uz);
+                s.E = (RealType)(rho_ghost * e_soil + ke_r);
+            } else if (is_water_target || this->is_water_tait_val) {
+                double c_w = Blast::TaitEOSWater::compute_sound_speed_dispatcher(
+                    (double)s.rho, (double)s.p, this->tait_water_params, 0.0);
+                double Z = (double)s.rho * c_w;
+                if (Z < 1.0e-3) Z = 1.0e3 * 1482.0;
+
+                double p_pert_int = (double)s.p - p_hydro_int;
+                double un_ghost = 0.5 * (un_int + p_pert_int / Z);
+                double p_ghost = p_target + 0.5 * (p_pert_int + Z * un_int);
+                if (p_ghost < this->tait_water_params.p_cav) p_ghost = this->tait_water_params.p_cav;
+
+                double rho_ghost = Blast::TaitEOSWater::compute_density_isentropic(
+                    p_ghost, this->tait_water_params.B, this->tait_water_params.gamma,
+                    rho_target, this->tait_water_params.p0);
+
+                s.ux += (RealType)((un_ghost - un_int) * nx_out);
+                s.uy += (RealType)((un_ghost - un_int) * ny_out);
+                s.uz += (RealType)((un_ghost - un_int) * nz_out);
+                s.p = (RealType)p_ghost;
+                s.rho = (RealType)rho_ghost;
+
+                double e_w = Blast::TaitEOSWater::compute_energy_dispatcher(rho_ghost, p_ghost, this->tait_water_params);
+                double ke_r = 0.5 * (double)s.rho * ((double)s.ux * (double)s.ux + (double)s.uy * (double)s.uy + (double)s.uz * (double)s.uz);
+                s.E = (RealType)(rho_ghost * e_w + ke_r);
+            } else {
+                double gm1 = (double)gamma - 1.0;
+                double c_int = std::sqrt((double)gamma * (double)s.p / std::max(1e-6, (double)s.rho));
+                double c_atm = std::sqrt((double)gamma * p_target / std::max(1e-6, rho_target));
+
+                double R_plus = un_int + 2.0 * c_int / gm1;
+                double R_minus = - 2.0 * c_atm / gm1;
+                double un_ghost = 0.5 * (R_plus + R_minus);
+                double c_ghost = std::max(0.1, 0.25 * gm1 * (R_plus - R_minus));
+
+                double c_ratio = c_ghost / c_atm;
+                double rho_ghost = rho_target * std::pow(c_ratio, 2.0 / gm1);
+                double p_ghost = p_target * std::pow(c_ratio, 2.0 * (double)gamma / gm1);
+
+                s.ux += (RealType)((un_ghost - un_int) * nx_out);
+                s.uy += (RealType)((un_ghost - un_int) * ny_out);
+                s.uz += (RealType)((un_ghost - un_int) * nz_out);
+                s.p = (RealType)p_ghost;
+                s.rho = (RealType)rho_ghost;
+
+                double ke_r = 0.5 * (double)s.rho * ((double)s.ux * (double)s.ux + (double)s.uy * (double)s.uy + (double)s.uz * (double)s.uz);
+                if constexpr (IsMultiMaterial) {
+                    s.E = (RealType)MultiMat::getMixtureEnergy((double)s.p, (double)s.rho, (double)s.alpha1, (double)s.alpha2, (double)s.arho1, (double)s.arho2, (double)gamma, currentMaterials.products, currentMaterials.unreacted) + (RealType)ke_r;
+                } else {
+                    s.E = (RealType)(s.p / ((double)gamma - 1.0) + ke_r);
+                }
+            }
         }
         return s;
     }
@@ -833,6 +1129,7 @@ public:
 
     inline CellState3D<IsMultiMaterial> sampleStateWithMirror(int gx, int gy, int gz, bool enable_mirror) const {
         bool reflective_x = false, reflective_y = false, reflective_z = false;
+        int orig_gx = gx, orig_gy = gy, orig_gz = gz;
 
         applyBC3DHelper(gx, nx, bcXmin, bcXmax, reflective_x);
         applyBC3DHelper(gy, ny, bcYmin, bcYmax, reflective_y);
@@ -1089,6 +1386,213 @@ public:
         } else {
             s.alpha1 = 0.0; s.alpha2 = 0.0; s.arho1 = 0.0; s.arho2 = 0.0;
             s.E = s.p / ((double)gamma - 1.0) + ke;
+        }
+
+        // Bottom floor hydrostatic well-balancing under gravity
+        if (orig_gz < 0 && stratified_params.enabled) {
+            double g_mag = std::abs(gravity_z);
+            if (std::abs(stratified_params.gravity_z) > 1e-6) {
+                g_mag = std::abs(stratified_params.gravity_z);
+            }
+            if (g_mag > 1e-6) {
+                double dist_z = (double)(gz - orig_gz) * cellSize;
+                s.p += (RealType)(s.rho * g_mag * dist_z);
+                double z_c = this->zmin + ((double)orig_gz + 0.5) * this->cellSize;
+                bool is_soil = (this->stratified_params.enabled && z_c < this->stratified_params.seabed_surface_z);
+                if (is_soil) {
+                    double gamma_soil = this->stratified_params.soil_gamma > 0.0 ? this->stratified_params.soil_gamma : 4.0;
+                    double rho0_soil = this->stratified_params.soil_density > 0.0 ? this->stratified_params.soil_density : 2000.0;
+                    double c0_soil = this->stratified_params.soil_c0 > 0.0 ? this->stratified_params.soil_c0 : 2500.0;
+                    double B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                    double p0_soil = this->stratified_params.p_atm;
+                    s.rho = (RealType)Blast::TaitEOSWater::compute_density_isentropic(
+                        (double)s.p, B_soil, gamma_soil, rho0_soil, p0_soil);
+                    double e_soil = Blast::TaitEOSWater::compute_energy_isentropic(
+                        (double)s.rho, B_soil, gamma_soil, rho0_soil);
+                    s.E = (RealType)((double)s.rho * e_soil + ke);
+                } else if (this->is_water_tait_val || stratified_params.enabled) {
+                    s.rho = (RealType)Blast::TaitEOSWater::compute_density_isentropic(
+                        (double)s.p, this->tait_water_params.B, this->tait_water_params.gamma,
+                        (double)s.rho, this->tait_water_params.p0);
+                    double e_w = Blast::TaitEOSWater::compute_energy_dispatcher((double)s.rho, (double)s.p, this->tait_water_params);
+                    s.E = (RealType)((double)s.rho * e_w + ke);
+                } else {
+                    s.E = (RealType)((double)s.p / ((double)gamma - 1.0) + ke);
+                }
+            }
+        }
+
+        // Top boundary hydrostatic pressure profile under gravity
+        if (orig_gz >= nz && stratified_params.enabled) {
+            double dist_z = (double)(orig_gz - gz) * cellSize;
+            double g_z = stratified_params.gravity_z != 0.0 ? stratified_params.gravity_z : gravity_z;
+            s.p = (RealType)std::max((double)stratified_params.p_atm, (double)s.p + (double)s.rho * g_z * dist_z);
+            double z_c = this->zmin + ((double)orig_gz + 0.5) * this->cellSize;
+            bool is_soil = (this->stratified_params.enabled && z_c < this->stratified_params.seabed_surface_z);
+            if (is_soil) {
+                double gamma_soil = this->stratified_params.soil_gamma > 0.0 ? this->stratified_params.soil_gamma : 4.0;
+                double rho0_soil = this->stratified_params.soil_density > 0.0 ? this->stratified_params.soil_density : 2000.0;
+                double c0_soil = this->stratified_params.soil_c0 > 0.0 ? this->stratified_params.soil_c0 : 2500.0;
+                double B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                double p0_soil = this->stratified_params.p_atm;
+                s.rho = (RealType)Blast::TaitEOSWater::compute_density_isentropic(
+                    (double)s.p, B_soil, gamma_soil, rho0_soil, p0_soil);
+                double e_soil = Blast::TaitEOSWater::compute_energy_isentropic(
+                    (double)s.rho, B_soil, gamma_soil, rho0_soil);
+                s.E = (RealType)((double)s.rho * e_soil + ke);
+            } else if (this->is_water_tait_val || (stratified_params.enabled && z_c <= this->stratified_params.water_surface_z)) {
+                s.rho = (RealType)Blast::TaitEOSWater::compute_density_isentropic(
+                    (double)s.p, this->tait_water_params.B, this->tait_water_params.gamma,
+                    (double)s.rho, this->tait_water_params.p0);
+                double e_w = Blast::TaitEOSWater::compute_energy_dispatcher((double)s.rho, (double)s.p, this->tait_water_params);
+                s.E = (RealType)((double)s.rho * e_w + ke);
+            } else {
+                s.E = (RealType)((double)s.p / ((double)gamma - 1.0) + ke);
+            }
+        }
+
+        // Non-reflecting characteristic Riemann boundary condition (OUTFLOW_RIEMANN)
+        bool is_riemann = (orig_gx < 0 && bcXmin == BCType3D::OUTFLOW_RIEMANN) ||
+                          (orig_gx >= nx && bcXmax == BCType3D::OUTFLOW_RIEMANN) ||
+                          (orig_gy < 0 && bcYmin == BCType3D::OUTFLOW_RIEMANN) ||
+                          (orig_gy >= ny && bcYmax == BCType3D::OUTFLOW_RIEMANN) ||
+                          (orig_gz < 0 && bcZmin == BCType3D::OUTFLOW_RIEMANN) ||
+                          (orig_gz >= nz && bcZmax == BCType3D::OUTFLOW_RIEMANN);
+
+        if (is_riemann) {
+            double nx_out = 0.0, ny_out = 0.0, nz_out = 0.0;
+            if (orig_gx < 0 && bcXmin == BCType3D::OUTFLOW_RIEMANN) nx_out = -1.0;
+            else if (orig_gx >= nx && bcXmax == BCType3D::OUTFLOW_RIEMANN) nx_out = 1.0;
+            else if (orig_gy < 0 && bcYmin == BCType3D::OUTFLOW_RIEMANN) ny_out = -1.0;
+            else if (orig_gy >= ny && bcYmax == BCType3D::OUTFLOW_RIEMANN) ny_out = 1.0;
+            else if (orig_gz < 0 && bcZmin == BCType3D::OUTFLOW_RIEMANN) nz_out = -1.0;
+            else if (orig_gz >= nz && bcZmax == BCType3D::OUTFLOW_RIEMANN) nz_out = 1.0;
+
+            double un_int = (double)s.ux * nx_out + (double)s.uy * ny_out + (double)s.uz * nz_out;
+
+            double p_target = this->ambient_p;
+            double rho_target = this->ambient_rho;
+            bool is_water_target = this->is_water_tait_val;
+            bool is_soil_target = false;
+
+            if (this->stratified_params.enabled) {
+                double z_c = this->zmin + ((double)orig_gz + 0.5) * this->cellSize;
+                double g_mag = std::abs(this->stratified_params.gravity_z);
+                if (g_mag < 1e-6) g_mag = 9.81;
+
+                if (z_c > this->stratified_params.water_surface_z) {
+                    p_target = this->stratified_params.p_atm;
+                    rho_target = this->stratified_params.air_rho;
+                    is_water_target = false;
+                } else if (z_c >= this->stratified_params.seabed_surface_z) {
+                    double p_h = 0.0, rho_h = 0.0, e_h = 0.0;
+                    Blast::TaitEOSWater::compute_hydrostatic_state(
+                        z_c, this->stratified_params.water_surface_z, g_mag, this->stratified_params.p_atm,
+                        p_h, rho_h, e_h, this->stratified_params.tait_B, this->stratified_params.tait_gamma, this->stratified_params.tait_rho0
+                    );
+                    p_target = p_h;
+                    rho_target = rho_h;
+                    is_water_target = true;
+                } else {
+                    double p_bed = 0.0, rho_bed = 0.0, e_bed = 0.0;
+                    Blast::TaitEOSWater::compute_hydrostatic_state(
+                        this->stratified_params.seabed_surface_z, this->stratified_params.water_surface_z, g_mag, this->stratified_params.p_atm,
+                        p_bed, rho_bed, e_bed, this->stratified_params.tait_B, this->stratified_params.tait_gamma, this->stratified_params.tait_rho0
+                    );
+                    double sig_v = 0.0, u_p = 0.0, sig_h = 0.0;
+                    Blast::TaitEOSWater::compute_geostatic_stress(
+                        z_c, this->stratified_params.seabed_surface_z, p_bed, this->stratified_params.soil_density, this->stratified_params.tait_rho0, g_mag, this->stratified_params.k0_earth_pressure,
+                        sig_v, u_p, sig_h
+                    );
+                    p_target = sig_v;
+                    double gamma_soil = this->stratified_params.soil_gamma > 0.0 ? this->stratified_params.soil_gamma : 4.0;
+                    double rho0_soil = this->stratified_params.soil_density > 0.0 ? this->stratified_params.soil_density : 2000.0;
+                    double c0_soil = this->stratified_params.soil_c0 > 0.0 ? this->stratified_params.soil_c0 : 2500.0;
+                    double B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                    double p0_soil = this->stratified_params.p_atm;
+                    rho_target = Blast::TaitEOSWater::compute_density_isentropic(
+                        sig_v, B_soil, gamma_soil, rho0_soil, p0_soil);
+                    is_soil_target = true;
+                    is_water_target = false;
+                }
+            }
+
+            if (is_soil_target) {
+                double gamma_soil = this->stratified_params.soil_gamma > 0.0 ? this->stratified_params.soil_gamma : 4.0;
+                double rho0_soil = this->stratified_params.soil_density > 0.0 ? this->stratified_params.soil_density : 2000.0;
+                double c0_soil = this->stratified_params.soil_c0 > 0.0 ? this->stratified_params.soil_c0 : 2500.0;
+                double B_soil = (rho0_soil * c0_soil * c0_soil) / gamma_soil;
+                double p0_soil = this->stratified_params.p_atm;
+                double p_cav_soil = this->stratified_params.soil_p_cav != 0.0 ? this->stratified_params.soil_p_cav : -1.0e5;
+
+                double c_soil = Blast::TaitEOSWater::compute_sound_speed_isentropic(
+                    (double)s.rho, B_soil, gamma_soil, rho0_soil);
+                double Z = (double)s.rho * c_soil;
+                if (Z < 1.0e-3) Z = rho0_soil * c0_soil;
+
+                double un_ghost = 0.5 * (un_int + ((double)s.p - p_target) / Z);
+                double p_ghost = 0.5 * ((double)s.p + p_target + Z * un_int);
+                if (p_ghost < p_cav_soil) p_ghost = p_cav_soil;
+
+                double rho_ghost = Blast::TaitEOSWater::compute_density_isentropic(
+                    p_ghost, B_soil, gamma_soil, rho0_soil, p0_soil);
+
+                s.ux += (RealType)((un_ghost - un_int) * nx_out);
+                s.uy += (RealType)((un_ghost - un_int) * ny_out);
+                s.uz += (RealType)((un_ghost - un_int) * nz_out);
+                s.p = (RealType)p_ghost;
+                s.rho = (RealType)rho_ghost;
+
+                double e_soil = Blast::TaitEOSWater::compute_energy_isentropic(
+                    rho_ghost, B_soil, gamma_soil, rho0_soil);
+                double ke_r = 0.5 * (double)s.rho * ((double)s.ux * (double)s.ux + (double)s.uy * (double)s.uy + (double)s.uz * (double)s.uz);
+                s.E = (RealType)(rho_ghost * e_soil + ke_r);
+            } else if (is_water_target || this->is_water_tait_val) {
+                double c_w = Blast::TaitEOSWater::compute_sound_speed_dispatcher(
+                    (double)s.rho, (double)s.p, this->tait_water_params, 0.0);
+                double Z = (double)s.rho * c_w;
+                if (Z < 1.0e-3) Z = 1.0e3 * 1482.0;
+
+                double un_ghost = 0.5 * (un_int + ((double)s.p - p_target) / Z);
+                double p_ghost = 0.5 * ((double)s.p + p_target + Z * un_int);
+                if (p_ghost < this->tait_water_params.p_cav) p_ghost = this->tait_water_params.p_cav;
+
+                double rho_ghost = Blast::TaitEOSWater::compute_density_isentropic(
+                    p_ghost, this->tait_water_params.B, this->tait_water_params.gamma,
+                    rho_target, this->tait_water_params.p0);
+
+                s.ux += (RealType)((un_ghost - un_int) * nx_out);
+                s.uy += (RealType)((un_ghost - un_int) * ny_out);
+                s.uz += (RealType)((un_ghost - un_int) * nz_out);
+                s.p = (RealType)p_ghost;
+                s.rho = (RealType)rho_ghost;
+
+                double e_w = Blast::TaitEOSWater::compute_energy_dispatcher(rho_ghost, p_ghost, this->tait_water_params);
+                double ke_r = 0.5 * (double)s.rho * ((double)s.ux * (double)s.ux + (double)s.uy * (double)s.uy + (double)s.uz * (double)s.uz);
+                s.E = (RealType)(rho_ghost * e_w + ke_r);
+            } else {
+                double gm1 = (double)gamma - 1.0;
+                double c_int = std::sqrt((double)gamma * (double)s.p / std::max(1e-6, (double)s.rho));
+                double c_atm = std::sqrt((double)gamma * p_target / std::max(1e-6, rho_target));
+
+                double R_plus = un_int + 2.0 * c_int / gm1;
+                double R_minus = - 2.0 * c_atm / gm1;
+                double un_ghost = 0.5 * (R_plus + R_minus);
+                double c_ghost = std::max(0.1, 0.25 * gm1 * (R_plus - R_minus));
+
+                double c_ratio = c_ghost / c_atm;
+                double rho_ghost = rho_target * std::pow(c_ratio, 2.0 / gm1);
+                double p_ghost = p_target * std::pow(c_ratio, 2.0 * (double)gamma / gm1);
+
+                s.ux += (RealType)((un_ghost - un_int) * nx_out);
+                s.uy += (RealType)((un_ghost - un_int) * ny_out);
+                s.uz += (RealType)((un_ghost - un_int) * nz_out);
+                s.p = (RealType)p_ghost;
+                s.rho = (RealType)rho_ghost;
+
+                double ke_r = 0.5 * (double)s.rho * ((double)s.ux * (double)s.ux + (double)s.uy * (double)s.uy + (double)s.uz * (double)s.uz);
+                s.E = (RealType)(p_ghost / gm1 + ke_r);
+            }
         }
         return s;
     }

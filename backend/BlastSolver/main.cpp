@@ -52,6 +52,7 @@
 #include "fem_contact_3d.hpp"
 #include "fem_fsi_coupler_3d.hpp"
 #include "fem_fsi_coupler_3d_cuda.hpp"
+#include <unordered_set>
 
 void select_cuda_device(const std::string& device);
 bool is_cuda_device(const std::string& device);
@@ -133,6 +134,64 @@ inline void parse_cfd_space_time_scheme(const nlohmann::json& j, int& spatial_or
     temporal_order = get_json_int(j, "temporal_order", temporal_order);
 }
 
+inline void apply_cfd_tait_config(const nlohmann::json& msg, CFDSolver3D* solver) {
+    if (!solver) return;
+    bool is_water = get_json_bool(msg, "is_water", false) ||
+                    (msg.value("medium_type", "") == "Water") ||
+                    (msg.value("fluid_type", "") == "Water") ||
+                    (msg.value("eos_type", "") == "Tait") ||
+                    (msg.value("eos_type", "") == "TaitWater") ||
+                    (msg.value("material", "") == "Water (Tait)") ||
+                    (msg.value("init_mode", "") == "Hydrostatic_Stratified_3D") ||
+                    msg.contains("water_surface_z");
+    if (is_water) {
+        Blast::TaitEOSParams twp;
+        twp.B = get_json_double(msg, "tait_B", 3.039e8);
+        twp.gamma = get_json_double(msg, "tait_gamma", 7.15);
+        twp.rho0 = get_json_double(msg, "tait_rho0", 1000.0);
+        twp.c0 = get_json_double(msg, "tait_c0", 1482.0);
+        twp.p_cav = get_json_double(msg, "tait_p_cav", -1.0e5);
+        twp.gruneisen = get_json_double(msg, "tait_gruneisen", 0.28);
+        twp.p0 = get_json_double(msg, "atm_pressure", get_json_double(msg, "p_atm", 101325.0));
+        int v_int = get_json_int(msg, "tait_variant", 1);
+        if (msg.contains("tait_variant_str")) {
+            std::string vs = msg.value("tait_variant_str", "");
+            if (vs == "CaloricGruneisen" || vs == "Caloric" || vs == "NearField") v_int = 1;
+            else if (vs == "ShockHugoniot" || vs == "Hugoniot") v_int = 2;
+            else if (vs == "Isentropic") v_int = 0;
+        }
+        twp.variant = static_cast<Blast::TaitVariant>(v_int);
+        solver->setWaterTait(true);
+        solver->setTaitParams(twp);
+        std::cout << "[BlastSolver] Configured Tait Water EOS for CFDSolver3D: B=" << twp.B
+                  << ", gamma=" << twp.gamma << ", rho0=" << twp.rho0 << ", variant=" << static_cast<int>(twp.variant) << std::endl;
+    }
+}
+
+inline Blast::Stratified3DParams parse_stratified_params(const nlohmann::json& msg, double ambient_rho, double ambient_p) {
+    Blast::Stratified3DParams strat;
+    strat.enabled = true;
+    strat.water_surface_z = get_json_double(msg, "water_surface_z", 10.0);
+    strat.seabed_surface_z = get_json_double(msg, "seabed_surface_z", 2.0);
+    strat.k0_earth_pressure = get_json_double(msg, "k0_earth_pressure", 0.50);
+    strat.gravity_z = get_json_double(msg, "gravity_z", get_json_double(msg, "gz", -9.81));
+    strat.tait_B = get_json_double(msg, "tait_B", 3.039e8);
+    strat.tait_gamma = get_json_double(msg, "tait_gamma", 7.15);
+    strat.tait_rho0 = get_json_double(msg, "tait_rho0", 1000.0);
+    strat.air_rho = get_json_double(msg, "air_rho", ambient_rho);
+    strat.p_atm = get_json_double(msg, "p_atm", ambient_p);
+    strat.soil_density = get_json_double(msg, "soil_density", get_json_double(msg, "seabed_density", 2000.0));
+    strat.soil_friction_angle = get_json_double(msg, "soil_friction_angle", get_json_double(msg, "seabed_friction_angle", 30.0));
+    strat.soil_cohesion = get_json_double(msg, "soil_cohesion", get_json_double(msg, "seabed_cohesion", 0.0));
+    strat.soil_c0 = get_json_double(msg, "soil_c0", get_json_double(msg, "seabed_c0", 2500.0));
+    strat.soil_gamma = get_json_double(msg, "soil_gamma", get_json_double(msg, "seabed_gamma", 4.0));
+    strat.soil_s = get_json_double(msg, "soil_s", get_json_double(msg, "seabed_s", 1.35));
+    strat.soil_gruneisen = get_json_double(msg, "soil_gruneisen", get_json_double(msg, "seabed_gruneisen", 1.45));
+    strat.soil_p_cav = get_json_double(msg, "soil_p_cav", get_json_double(msg, "seabed_p_cav", -1.0e5));
+    strat.soil_eos_variant = get_json_int(msg, "soil_eos_variant", get_json_int(msg, "seabed_eos_variant", 0));
+    return strat;
+}
+
 inline Blast::MPMMaterialModel parseMPMMaterialModel(const std::string& mat_model_str) {
     if (mat_model_str == "Linear Elastic" || mat_model_str == "LinearElastic" || mat_model_str == "Elastic") {
         return Blast::MPMMaterialModel::LinearElastic;
@@ -155,6 +214,21 @@ inline Blast::MPMMaterialModel parseMPMMaterialModel(const std::string& mat_mode
         return Blast::MPMMaterialModel::KCConcrete;
     } else if (mat_model_str == "CSCM Concrete" || mat_model_str == "CSCM") {
         return Blast::MPMMaterialModel::CSCMConcrete;
+    } else if (mat_model_str == "Hyperelastic (Yeoh)" || mat_model_str == "Yeoh" || mat_model_str == "HyperelasticYeoh" || mat_model_str == "Hyperelastic") {
+        return Blast::MPMMaterialModel::HyperelasticYeoh;
+    } else if (mat_model_str == "Hyperelastic (Mooney-Rivlin)" || mat_model_str == "Mooney-Rivlin" || mat_model_str == "MooneyRivlin" || mat_model_str == "HyperelasticMooneyRivlin") {
+        return Blast::MPMMaterialModel::HyperelasticMooneyRivlin;
+    } else if (mat_model_str == "Concrete Damage Plasticity (CDP)" || mat_model_str == "CDP" || mat_model_str == "Concrete Damage Plasticity" || mat_model_str == "ConcreteDamagePlasticity") {
+        return Blast::MPMMaterialModel::ConcreteDamagePlasticity;
+    } else if (mat_model_str == "Hill48 Orthotropic" || mat_model_str == "Hill48" || mat_model_str == "Hill48Orthotropic" || mat_model_str == "Hill 48") {
+        return Blast::MPMMaterialModel::Hill48Orthotropic;
+    } else if (mat_model_str == "Tait Water" || mat_model_str == "TaitWater" || mat_model_str == "Tait" || mat_model_str == "Water (Tait)" || mat_model_str == "Water") {
+        return Blast::MPMMaterialModel::TaitWater;
+    } else if (mat_model_str == "Drucker-Prager" || mat_model_str == "DruckerPrager" ||
+               mat_model_str == "Mohr-Coulomb" || mat_model_str == "MohrCoulomb" ||
+               mat_model_str == "Drucker-Prager Soil" || mat_model_str == "DruckerPragerSoil" ||
+               mat_model_str == "Soil" || mat_model_str == "Rock" || mat_model_str == "Geomaterial") {
+        return Blast::MPMMaterialModel::DruckerPragerSoil;
     } else {
         return Blast::MPMMaterialModel::Hypoelastic;
     }
@@ -196,7 +270,53 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
             std::cerr << "[BlastSolver] [WARN] material_model was 'Hypoelastic' but preset='" << preset_name
                       << "' / category='" << category << "' indicates an energetic solid. "
                       << "Auto-promoted to 'CREST Reactive Burn'. Please set material_model explicitly in the UI." << std::endl;
+        } else {
+            bool is_water = contains_ci(category, "water") || contains_ci(category, "fluid") ||
+                            contains_ci(preset_name, "water") || contains_ci(preset_name, "seawater");
+            if (is_water) {
+                mat.material_model = Blast::MPMMaterialModel::TaitWater;
+                std::cout << "[BlastSolver] Detected water/fluid preset '" << preset_name
+                          << "': assigned MPMMaterialModel::TaitWater." << std::endl;
+            }
         }
+    }
+
+    // Three-Pillar Energetic Material Architecture defaults
+    if (mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn) {
+        mat.solid_model = Blast::SolidReactantEOS::DavisSolid;
+        mat.burn_model = Blast::ReactionKinetics::CRESTEntropy;
+        mat.product_model = Blast::DetonationProductEOS::DavisProduct;
+    } else if (mat.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth) {
+        mat.solid_model = Blast::SolidReactantEOS::MieGruneisen;
+        mat.burn_model = Blast::ReactionKinetics::LeeTarverODE;
+        mat.product_model = Blast::DetonationProductEOS::JWLProductGas;
+    } else if (mat.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn) {
+        mat.solid_model = Blast::SolidReactantEOS::MieGruneisen;
+        mat.burn_model = Blast::ReactionKinetics::ProgrammedBurn;
+        mat.product_model = Blast::DetonationProductEOS::JWLProductGas;
+    }
+
+    // Explicit Three-Pillar overrides from JSON configuration
+    std::string solid_str = obj.value("solid_model", "");
+    std::string burn_str = obj.value("burn_model", "");
+    std::string prod_str = obj.value("product_model", "");
+
+    if (!solid_str.empty()) {
+        if (solid_str.find("Davis") != std::string::npos) mat.solid_model = Blast::SolidReactantEOS::DavisSolid;
+        else if (solid_str.find("Mie") != std::string::npos || solid_str.find("Gruneisen") != std::string::npos || solid_str.find("Grüneisen") != std::string::npos) mat.solid_model = Blast::SolidReactantEOS::MieGruneisen;
+    }
+    if (!burn_str.empty()) {
+        if (burn_str.find("CREST") != std::string::npos) mat.burn_model = Blast::ReactionKinetics::CRESTEntropy;
+        else if (burn_str.find("Lee-Tarver") != std::string::npos || burn_str.find("LeeTarver") != std::string::npos || burn_str.find("ODE") != std::string::npos) mat.burn_model = Blast::ReactionKinetics::LeeTarverODE;
+        else if (burn_str.find("Programmed") != std::string::npos || burn_str.find("Wavefront") != std::string::npos) mat.burn_model = Blast::ReactionKinetics::ProgrammedBurn;
+    }
+    if (!prod_str.empty()) {
+        if (prod_str.find("Davis") != std::string::npos) mat.product_model = Blast::DetonationProductEOS::DavisProduct;
+        else if (prod_str.find("JWL") != std::string::npos) mat.product_model = Blast::DetonationProductEOS::JWLProductGas;
+    }
+
+    if (mat.material_model == Blast::MPMMaterialModel::Hypoelastic && (!solid_str.empty() || !burn_str.empty() || !prod_str.empty())) {
+        mat.material_model = Blast::MPMMaterialModel::JWLProgrammedBurn;
     }
 
     mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
@@ -207,7 +327,8 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
     mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
     mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", false);
-    mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", mat.failure_strain));
+    float default_erosion_strain = (mat.failure_strain >= 0.02f) ? mat.failure_strain : 0.10f;
+    mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", default_erosion_strain));
     mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
     mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", mat.tensile_failure_stress));
     mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", false);
@@ -331,9 +452,56 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.cscm_D1 = static_cast<float>(get_json_double(obj, "cscm_D1", 2.5e-9));
     mat.cscm_D2 = static_cast<float>(get_json_double(obj, "cscm_D2", 1.0));
 
+    // Hyperelastic (Yeoh & Mooney-Rivlin)
+    mat.yeoh_c10 = static_cast<float>(get_json_double(obj, "yeoh_c10", 0.57e6));
+    mat.yeoh_c20 = static_cast<float>(get_json_double(obj, "yeoh_c20", -0.047e6));
+    mat.yeoh_c30 = static_cast<float>(get_json_double(obj, "yeoh_c30", 0.0033e6));
+    mat.mr_c10 = static_cast<float>(get_json_double(obj, "mr_c10", 0.40e6));
+    mat.mr_c01 = static_cast<float>(get_json_double(obj, "mr_c01", 0.10e6));
+    mat.k_bulk = static_cast<float>(get_json_double(obj, "k_bulk", 1.0e8));
+
+    // Concrete Damage Plasticity (CDP)
+    mat.cdp_f_t0 = static_cast<float>(get_json_double(obj, "cdp_f_t0", 3.5e6));
+    mat.cdp_f_c0 = static_cast<float>(get_json_double(obj, "cdp_f_c0", 35.0e6));
+    mat.cdp_g_f = static_cast<float>(get_json_double(obj, "cdp_g_f", 120.0));
+    mat.cdp_l_ch = static_cast<float>(get_json_double(obj, "cdp_l_ch", 0.05));
+
+    // Hill48 Orthotropic
+    mat.hill_F = static_cast<float>(get_json_double(obj, "hill_F", 0.35));
+    mat.hill_G = static_cast<float>(get_json_double(obj, "hill_G", 0.45));
+    mat.hill_H = static_cast<float>(get_json_double(obj, "hill_H", 0.55));
+    mat.hill_L = static_cast<float>(get_json_double(obj, "hill_L", 1.50));
+    mat.hill_M = static_cast<float>(get_json_double(obj, "hill_M", 1.50));
+    mat.hill_N = static_cast<float>(get_json_double(obj, "hill_N", 1.60));
+    mat.hill_sigma_y0 = static_cast<float>(get_json_double(obj, "hill_sigma_y0", mat.yield_stress));
+
+    // Tait Water & Shock Fluid
+    mat.tait_B = static_cast<float>(get_json_double(obj, "tait_B", 3.039e8));
+    mat.tait_gamma = static_cast<float>(get_json_double(obj, "tait_gamma", 7.15));
+    mat.tait_rho0 = static_cast<float>(get_json_double(obj, "tait_rho0", 1000.0));
+    mat.tait_c0 = static_cast<float>(get_json_double(obj, "tait_c0", 1482.0));
+    mat.tait_p_cav = static_cast<float>(get_json_double(obj, "tait_p_cav", 0.0));
+    mat.tait_p0 = static_cast<float>(get_json_double(obj, "tait_p0", get_json_double(obj, "p0", 0.0)));
+    mat.tait_viscosity = static_cast<float>(get_json_double(obj, "tait_viscosity", 1.0e-3));
+    mat.tait_gruneisen = static_cast<float>(get_json_double(obj, "tait_gruneisen", 0.28));
+    mat.tait_variant = get_json_int(obj, "tait_variant", 0);
+    if (obj.contains("tait_variant_str")) {
+        std::string vstr = obj.value("tait_variant_str", "");
+        if (vstr == "CaloricGruneisen" || vstr == "Caloric" || vstr == "NearField") mat.tait_variant = 1;
+        else if (vstr == "ShockHugoniot" || vstr == "Hugoniot") mat.tait_variant = 2;
+        else mat.tait_variant = 0;
+    }
+
     bool is_concrete = (mat.material_model == Blast::MPMMaterialModel::RHTConcrete || 
                         mat.material_model == Blast::MPMMaterialModel::KCConcrete || 
                         mat.material_model == Blast::MPMMaterialModel::CSCMConcrete);
+    if (is_concrete) {
+        // Decouple concrete erosion strain cutoff from compressive yield microstrain fc (mat.failure_strain ~ 0.0035).
+        // Concrete element erosion represents physical rubble/mass ejection and must never trigger at microstrains < 2%.
+        if (!obj.contains("erosion_strain") || mat.erosion_strain < 0.02f) {
+            mat.erosion_strain = 0.10f;
+        }
+    }
     mat.directional_crack_band = get_json_bool(obj, "directional_crack_band", is_concrete);
     mat.nonlocal_radius = static_cast<float>(get_json_double(obj, "nonlocal_radius", is_concrete ? 0.05 : 0.0));
 
@@ -382,6 +550,13 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.jc_d4 = static_cast<float>(get_json_double(obj, "jc_d4", 0.002));
     mat.jc_d5 = static_cast<float>(get_json_double(obj, "jc_d5", 0.61));
 
+    // Drucker-Prager & Mohr-Coulomb Soil / Geomaterial Parameters
+    mat.dp_cohesion = static_cast<float>(get_json_double(obj, "dp_cohesion", get_json_double(obj, "cohesion", 20.0e3)));
+    mat.dp_friction_angle = static_cast<float>(get_json_double(obj, "dp_friction_angle", get_json_double(obj, "friction_angle", 30.0)));
+    mat.dp_dilatancy_angle = static_cast<float>(get_json_double(obj, "dp_dilatancy_angle", get_json_double(obj, "dilatancy_angle", 0.0)));
+    mat.dp_tensile_cutoff = static_cast<float>(get_json_double(obj, "dp_tensile_cutoff", get_json_double(obj, "tensile_cutoff", 10.0e3)));
+    mat.dp_hardening_modulus = static_cast<float>(get_json_double(obj, "dp_hardening_modulus", get_json_double(obj, "hardening_modulus", 0.0)));
+
     // Statistical Fragment Size Distribution & DEM Parameters Parsing
     return mat;
 }
@@ -397,7 +572,9 @@ inline void loadAndTransformLSDynaMesh(
     std::vector<Blast::FEMNode3D<T>>& out_nodes,
     std::vector<Blast::FEMElement3D<T>>& out_elements,
     std::vector<Blast::FEMTrussElement3D<T>>* out_trusses = nullptr,
-    std::vector<Blast::FEMBeam3DElement<T>>* out_beams = nullptr
+    std::vector<Blast::FEMBeam3DElement<T>>* out_beams = nullptr,
+    const nlohmann::json* obj_json = nullptr,
+    std::vector<Blast::MaterialTable3D>* out_mat_tables = nullptr
 ) {
     Blast::LSDynaReader3D<T> reader;
     std::vector<Blast::MaterialTable3D> mat_list;
@@ -407,6 +584,113 @@ inline void loadAndTransformLSDynaMesh(
     auto& trusses_ref = out_trusses ? *out_trusses : local_trusses;
     auto& beams_ref = out_beams ? *out_beams : local_beams;
     reader.parseFile(k_file, out_nodes, out_elements, trusses_ref, beams_ref, mutable_mat, mat_list);
+
+    int num_canvas_mats = 1;
+    if (out_mat_tables) {
+        out_mat_tables->clear();
+        if (obj_json && obj_json->is_object() && obj_json->contains("fem_materials") &&
+            (*obj_json)["fem_materials"].is_array() && !(*obj_json)["fem_materials"].empty()) {
+            num_canvas_mats = 0;
+            for (const auto& mj : (*obj_json)["fem_materials"]) {
+                out_mat_tables->push_back(parseMaterialTable3D(mj));
+                num_canvas_mats++;
+            }
+        } else {
+            out_mat_tables->push_back(obj_mat);
+            num_canvas_mats = 1;
+        }
+        for (const auto& m : mat_list) {
+            out_mat_tables->push_back(m);
+        }
+    }
+
+    std::unordered_set<int> suppressed_part_ids;
+    std::unordered_map<int, std::array<T, 3>> part_velocities;
+    std::unordered_map<int, int> part_mat_remapping;
+
+    if (obj_json && obj_json->is_object()) {
+        if (obj_json->contains("fem_parts") && (*obj_json)["fem_parts"].is_array()) {
+            for (const auto& p : (*obj_json)["fem_parts"]) {
+                int pid = p.value("part_id", 1);
+                if (p.value("suppressed", false)) {
+                    suppressed_part_ids.insert(pid);
+                }
+                if (p.contains("initial_velocity") && p["initial_velocity"].is_array() && p["initial_velocity"].size() >= 3) {
+                    part_velocities[pid] = {
+                        static_cast<T>(p["initial_velocity"][0].template get<double>()),
+                        static_cast<T>(p["initial_velocity"][1].template get<double>()),
+                        static_cast<T>(p["initial_velocity"][2].template get<double>())
+                    };
+                }
+                if (p.contains("material_id")) {
+                    part_mat_remapping[pid] = p["material_id"].template get<int>();
+                }
+            }
+        }
+    }
+
+    if (!suppressed_part_ids.empty()) {
+        std::vector<Blast::FEMElement3D<T>> kept_elements;
+        kept_elements.reserve(out_elements.size());
+        for (const auto& e : out_elements) {
+            if (suppressed_part_ids.find(e.part_id) == suppressed_part_ids.end()) {
+                kept_elements.push_back(e);
+            }
+        }
+        out_elements = std::move(kept_elements);
+
+        std::vector<Blast::FEMTrussElement3D<T>> kept_trusses;
+        kept_trusses.reserve(trusses_ref.size());
+        for (const auto& t : trusses_ref) {
+            if (suppressed_part_ids.find(t.part_id) == suppressed_part_ids.end()) {
+                kept_trusses.push_back(t);
+            }
+        }
+        trusses_ref = std::move(kept_trusses);
+
+        std::vector<Blast::FEMBeam3DElement<T>> kept_beams;
+        kept_beams.reserve(beams_ref.size());
+        for (const auto& b : beams_ref) {
+            if (suppressed_part_ids.find(b.part_id) == suppressed_part_ids.end()) {
+                kept_beams.push_back(b);
+            }
+        }
+        beams_ref = std::move(kept_beams);
+    }
+
+    if (!part_mat_remapping.empty()) {
+        for (auto& el : out_elements) {
+            if (part_mat_remapping.count(el.part_id)) {
+                el.mat_id = part_mat_remapping[el.part_id];
+            }
+        }
+        for (auto& tr : trusses_ref) {
+            if (part_mat_remapping.count(tr.part_id)) {
+                tr.mat_id = part_mat_remapping[tr.part_id];
+            }
+        }
+        for (auto& bm : beams_ref) {
+            if (part_mat_remapping.count(bm.part_id)) {
+                bm.mat_id = part_mat_remapping[bm.part_id];
+            }
+        }
+    } else if (num_canvas_mats > 0 && !mat_list.empty()) {
+        int total_mats = static_cast<int>(out_mat_tables ? out_mat_tables->size() : 0);
+        for (auto& tr : trusses_ref) {
+            if (tr.mat_id > 0 && (num_canvas_mats + tr.mat_id) < total_mats) {
+                tr.mat_id += num_canvas_mats;
+            } else if (num_canvas_mats > 1) {
+                tr.mat_id = 1;
+            }
+        }
+        for (auto& bm : beams_ref) {
+            if (bm.mat_id > 0 && (num_canvas_mats + bm.mat_id) < total_mats) {
+                bm.mat_id += num_canvas_mats;
+            } else if (num_canvas_mats > 1) {
+                bm.mat_id = 1;
+            }
+        }
+    }
 
     bool is_fixed_base = (bc_cond == "Fixed Base");
     bool is_fixed_entire = (bc_cond == "Fixed Entire");
@@ -436,6 +720,81 @@ inline void loadAndTransformLSDynaMesh(
             nd.is_fixed[0] = true;
             nd.is_fixed[1] = true;
             nd.is_fixed[2] = true;
+        }
+    }
+
+    if (!part_velocities.empty()) {
+        for (const auto& el : out_elements) {
+            if (part_velocities.count(el.part_id)) {
+                const auto& pv = part_velocities[el.part_id];
+                for (int n = 0; n < 8; ++n) {
+                    int nid = el.node_ids[n];
+                    if (nid >= 0 && nid < static_cast<int>(out_nodes.size())) {
+                        out_nodes[nid].v[0] += pv[0];
+                        out_nodes[nid].v[1] += pv[1];
+                        out_nodes[nid].v[2] += pv[2];
+                    }
+                }
+            }
+        }
+    }
+
+    if (obj_json && obj_json->is_object()) {
+        if (obj_json->contains("boundary_conditions") && (*obj_json)["boundary_conditions"].is_array()) {
+            for (const auto& bc : (*obj_json)["boundary_conditions"]) {
+                if (!bc.value("active", true)) continue;
+                std::string target_type = bc.value("target_type", "NODE_SET");
+                bool dofx = false, dofy = false, dofz = false;
+                if (bc.contains("dofs") && bc["dofs"].is_array() && bc["dofs"].size() >= 3) {
+                    dofx = bc["dofs"][0].template get<bool>();
+                    dofy = bc["dofs"][1].template get<bool>();
+                    dofz = bc["dofs"][2].template get<bool>();
+                }
+                if (target_type == "NODE_SET") {
+                    int sid = bc.value("target_id", 1);
+                    if (reader.getSets().count(sid)) {
+                        for (int64_t lsdyna_nid : reader.getSets().at(sid).ids) {
+                            if (reader.getNodeIdToIndex().count(lsdyna_nid)) {
+                                int idx = reader.getNodeIdToIndex().at(lsdyna_nid);
+                                if (idx >= 0 && idx < static_cast<int>(out_nodes.size())) {
+                                    if (dofx) out_nodes[idx].is_fixed[0] = true;
+                                    if (dofy) out_nodes[idx].is_fixed[1] = true;
+                                    if (dofz) out_nodes[idx].is_fixed[2] = true;
+                                }
+                            }
+                        }
+                    }
+                } else if (target_type == "PART") {
+                    int pid = bc.value("target_id", 1);
+                    for (const auto& el : out_elements) {
+                        if (el.part_id == pid) {
+                            for (int n = 0; n < 8; ++n) {
+                                int idx = el.node_ids[n];
+                                if (idx >= 0 && idx < static_cast<int>(out_nodes.size())) {
+                                    if (dofx) out_nodes[idx].is_fixed[0] = true;
+                                    if (dofy) out_nodes[idx].is_fixed[1] = true;
+                                    if (dofz) out_nodes[idx].is_fixed[2] = true;
+                                }
+                            }
+                        }
+                    }
+                } else if (target_type == "GEOMETRIC_PLANE") {
+                    std::string plane = bc.value("plane", "z_min");
+                    T plane_coord = static_cast<T>(bc.value("plane_coord", 0.0));
+                    T tol = static_cast<T>(bc.value("tolerance", 1e-4));
+                    for (auto& nd : out_nodes) {
+                        bool match = false;
+                        if (plane == "z_min" || plane == "z_max") match = std::abs(nd.x[2] - plane_coord) < tol;
+                        else if (plane == "x_min" || plane == "x_max") match = std::abs(nd.x[0] - plane_coord) < tol;
+                        else if (plane == "y_min" || plane == "y_max") match = std::abs(nd.x[1] - plane_coord) < tol;
+                        if (match) {
+                            if (dofx) nd.is_fixed[0] = true;
+                            if (dofy) nd.is_fixed[1] = true;
+                            if (dofz) nd.is_fixed[2] = true;
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -505,6 +864,157 @@ inline void populateFEMPhysicsParams(const nlohmann::json& msg, Blast::BlastPhys
     physics_params.enable_nonlocal_damage = get_json_bool(msg, "enable_nonlocal_damage", true);
 }
 
+void emit_kernel_log(const std::string& level, const std::string& msg, double t, const std::string& scope = "1d", int step = -1);
+
+template <typename T>
+inline Blast::FEMErosionCriteria<T> populateFEMErosionCriteria(const nlohmann::json& msg) {
+    Blast::FEMErosionCriteria<T> erosion{};
+    const nlohmann::json* src = &msg;
+    const nlohmann::json* obj0 = (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty())
+        ? &msg["fem_objects"][0] : nullptr;
+
+    auto get_bool_val = [&](const std::string& k, bool def) -> bool {
+        if (src->contains(k)) return get_json_bool(*src, k, def);
+        if (obj0 && obj0->contains(k)) return get_json_bool(*obj0, k, def);
+        return def;
+    };
+    auto get_double_val = [&](const std::string& k, double def) -> double {
+        if (src->contains(k)) return get_json_double(*src, k, def);
+        if (obj0 && obj0->contains(k)) return get_json_double(*obj0, k, def);
+        return def;
+    };
+
+    erosion.enable_strain_erosion = get_bool_val("enable_strain_erosion", true);
+    erosion.enable_timestep_erosion = get_bool_val("enable_timestep_erosion", false);
+    erosion.enable_stress_erosion = get_bool_val("enable_stress_erosion", false);
+    double default_erosion = get_double_val("erosion_strain", -1.0);
+    if (default_erosion > 0.0) {
+        erosion.failure_strain = static_cast<T>(default_erosion);
+    } else {
+        double f_strain = get_double_val("failure_strain", 0.50);
+        erosion.failure_strain = static_cast<T>((f_strain >= 0.02) ? f_strain : 0.10);
+    }
+    erosion.timestep_erosion_factor = static_cast<T>(get_double_val("timestep_erosion_factor", 0.10));
+    erosion.min_volume_ratio = static_cast<T>(get_double_val("min_volume_ratio", 0.02));
+    erosion.tensile_failure_stress = static_cast<T>(get_double_val("tensile_failure_stress", 600.0e6));
+
+    return erosion;
+}
+
+inline Blast::LysmerBoundaryParams populateFEMLysmerParams(const nlohmann::json& m) {
+    Blast::LysmerBoundaryParams p;
+    p.enabled = m.value("lysmer_enabled", false);
+    std::string bc_fem = m.value("bc_fem", "");
+    if (bc_fem == "Lysmer" || bc_fem == "LysmerDashpot" || bc_fem == "Absorbing" || bc_fem == "NonReflecting" || bc_fem == "Transmitting" || bc_fem == "TRANSMISSIVE" ||
+        m.value("bc_x_min", "") == "Lysmer" || m.value("bc_x_max", "") == "Lysmer" ||
+        m.value("bc_y_min", "") == "Lysmer" || m.value("bc_y_max", "") == "Lysmer" ||
+        m.value("bc_z_min", "") == "Lysmer" || m.value("bc_z_max", "") == "Lysmer" ||
+        m.value("bc_x_min", "") == "Transmitting" || m.value("bc_x_max", "") == "Transmitting" ||
+        m.value("bc_y_min", "") == "Transmitting" || m.value("bc_y_max", "") == "Transmitting") {
+        p.enabled = true;
+    }
+    p.rho = static_cast<float>(get_json_double(m, "lysmer_rho", get_json_double(m, "lysmer_density", 2000.0)));
+    p.c_p = static_cast<float>(get_json_double(m, "lysmer_cp", get_json_double(m, "lysmer_c_p", 2000.0)));
+    p.c_s = static_cast<float>(get_json_double(m, "lysmer_cs", get_json_double(m, "lysmer_c_s", 1000.0)));
+    p.normal_relaxation = static_cast<float>(get_json_double(m, "lysmer_normal_relaxation", 1.0));
+    p.shear_relaxation = static_cast<float>(get_json_double(m, "lysmer_shear_relaxation", 1.0));
+    p.filter_box = m.value("lysmer_filter_box", false);
+    if (m.contains("lysmer_x_min")) p.x_min = static_cast<float>(get_json_double(m, "lysmer_x_min", -1e9));
+    if (m.contains("lysmer_x_max")) p.x_max = static_cast<float>(get_json_double(m, "lysmer_x_max", 1e9));
+    if (m.contains("lysmer_y_min")) p.y_min = static_cast<float>(get_json_double(m, "lysmer_y_min", -1e9));
+    if (m.contains("lysmer_y_max")) p.y_max = static_cast<float>(get_json_double(m, "lysmer_y_max", 1e9));
+    if (m.contains("lysmer_z_min")) p.z_min = static_cast<float>(get_json_double(m, "lysmer_z_min", -1e9));
+    if (m.contains("lysmer_z_max")) p.z_max = static_cast<float>(get_json_double(m, "lysmer_z_max", 1e9));
+    if (m.contains("lysmer_tol")) p.tol = static_cast<float>(get_json_double(m, "lysmer_tol", 1e-3));
+    return p;
+}
+
+template <typename SolverPtr, typename T>
+inline void ingestStandaloneBeams(SolverPtr& fem, const nlohmann::json& msg, const std::string& rebar_form) {
+    if (!msg.contains("fem_standalone_beams") || !msg["fem_standalone_beams"].is_array()) return;
+    size_t beam_count = 0;
+    size_t truss_count = 0;
+    for (const auto& b : msg["fem_standalone_beams"]) {
+        Blast::MaterialTable3D mat = parseMaterialTable3D(b);
+        T n1_x = static_cast<T>(get_json_double(b, "node1_x", 0.0));
+        T n1_y = static_cast<T>(get_json_double(b, "node1_y", 0.0));
+        T n1_z = static_cast<T>(get_json_double(b, "node1_z", 0.0));
+        T n2_x = static_cast<T>(get_json_double(b, "node2_x", 1.0));
+        T n2_y = static_cast<T>(get_json_double(b, "node2_y", 0.0));
+        T n2_z = static_cast<T>(get_json_double(b, "node2_z", 0.0));
+
+        int n1 = fem->addNode(n1_x, n1_y, n1_z);
+        int n2 = fem->addNode(n2_x, n2_y, n2_z);
+
+        T failure_strain = static_cast<T>(get_json_double(b, "failure_strain", 0.20));
+        std::string b_type = b.value("type", "FEMBeam3D");
+
+        if (b_type == "FEMRebar3D" && rebar_form == "AxialTruss1D") {
+            T area = static_cast<T>(get_json_double(b, "cross_section_area", 0.000314));
+            fem->addTruss(n1, n2, area, mat, failure_strain);
+            truss_count++;
+        } else {
+            T diameter = static_cast<T>(get_json_double(b, "diameter", 0.02));
+            if (b_type == "FEMRebar3D") {
+                T area = static_cast<T>(get_json_double(b, "cross_section_area", 0.000314));
+                diameter = static_cast<T>(std::sqrt(4.0 * area / 3.141592653589793));
+            }
+            fem->addBeam3D(n1, n2, diameter, mat, failure_strain);
+            beam_count++;
+        }
+    }
+    if (beam_count > 0 || truss_count > 0) {
+        char log_buf[256];
+        snprintf(log_buf, sizeof(log_buf), "Ingested Standalone Canvas 1D Elements: %zu Beams, %zu Trusses (Rebar Mode: %s)",
+                 beam_count, truss_count, rebar_form.c_str());
+        emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
+    }
+}
+
+template <typename CouplerPtr, typename T>
+inline void configureFEMFSICouplerCUDA(CouplerPtr& coupler, const nlohmann::json& msg) {
+    std::string integ_str = msg.value("pressure_integration", "Gauss2x2");
+    if (integ_str == "Centroid1Pt") {
+        coupler->setPressureIntegration(Blast::FSIPressureIntegration::Centroid1Pt);
+    } else {
+        coupler->setPressureIntegration(Blast::FSIPressureIntegration::Gauss2x2);
+    }
+    T rho_vac = static_cast<T>(get_json_double(msg, "fsi_rho_vac", 1.0e-6));
+    T p_vac = static_cast<T>(get_json_double(msg, "fsi_p_vac", 1.0e-2));
+    coupler->setVacuumState(rho_vac, p_vac);
+}
+
+template <typename CouplerPtr, typename T>
+inline void configureFEMFSICouplerCPU(CouplerPtr& coupler, const nlohmann::json& msg) {
+    std::string method_str = msg.value("fsi_method", "TwoWayStaggered");
+    if (method_str == "SubCycling") {
+        coupler->setMethod(Blast::FSIMethod3D::SubCycling);
+    } else {
+        coupler->setMethod(Blast::FSIMethod3D::TwoWayStaggered);
+    }
+
+    std::string integ_str = msg.value("pressure_integration", "Gauss2x2");
+    if (integ_str == "Centroid1Pt") {
+        coupler->setPressureIntegration(Blast::FSIPressureIntegration::Centroid1Pt);
+    } else {
+        coupler->setPressureIntegration(Blast::FSIPressureIntegration::Gauss2x2);
+    }
+
+    std::string uncov_str = msg.value("uncovering_method", "ConservativeIDW_VacuumCavity");
+    if (uncov_str == "StandardGhostFluid") {
+        coupler->setUncoveringMethod(Blast::FSIUncoveringMethod::StandardGhostFluid);
+    } else {
+        coupler->setUncoveringMethod(Blast::FSIUncoveringMethod::ConservativeIDW_VacuumCavity);
+    }
+
+    bool erosion_venting = get_json_bool(msg, "erosion_venting", true);
+    coupler->setErosionVenting(erosion_venting);
+
+    T rho_vac = static_cast<T>(get_json_double(msg, "fsi_rho_vac", 1.0e-6));
+    T p_vac = static_cast<T>(get_json_double(msg, "fsi_p_vac", 1.0e-2));
+    coupler->setVacuumState(rho_vac, p_vac);
+}
+
 std::atomic<bool> sim2d_running{false};
 std::atomic<bool> sim2d_paused{false};
 std::atomic<int> global_telemetry_stride{1};
@@ -543,6 +1053,8 @@ std::atomic<bool> global_exec_until_end_3d{false};
 std::atomic<double> global_cfl_3d{0.6};
 std::atomic<double> global_endtime_3d{1.0};
 std::atomic<double> global_wallclock_3d{0.0};
+static Blast::Stratified3DParams g_strat_fsi_params;
+static std::atomic<bool> g_is_stratified_fsi{false};
 std::atomic<double> global_last_compute_ms{0.0};
 std::atomic<double> global_last_io_ms{0.0};
 std::atomic<double> global_last_comms_ms{0.0};
@@ -554,6 +1066,7 @@ std::atomic<int> global_last_vtk_step{0};
 std::atomic<bool> global_enable_gauges{true};
 std::atomic<bool> global_enable_vtk{false};
 std::atomic<bool> global_telemetry_enabled{true};
+void worker_3d_thread_func();
 
 inline void reset_timing_metrics() {
     global_cum_compute_s = 0.0;
@@ -640,6 +1153,9 @@ struct GaugeOutputConfig {
     bool qty_air = true;
     bool qty_overpressure = true;
     bool qty_impulse = true;
+    bool qty_temperature = true;
+    bool qty_afterburn_rate = true;
+    bool qty_fuel_density = true;
 } global_gauge_config;
 
 struct VTKOutputConfig {
@@ -668,8 +1184,14 @@ struct VTKOutputConfig {
     bool qty_reacted = true;
     bool qty_unreacted = true;
     bool qty_air = true;
+    bool qty_materials = true;
+    bool qty_water = true;
+    bool qty_soil = true;
     bool qty_overpressure = true;
     bool qty_impulse = true;
+    bool qty_temperature = true;
+    bool qty_afterburn_rate = true;
+    bool qty_fuel_density = true;
     // Solid FEM Quantities
     bool qty_fem_stress = true;
     bool qty_fem_strain = true;
@@ -685,6 +1207,8 @@ struct VTKOutputConfig {
     bool qty_mpm_temp = true;
     bool qty_mpm_vel = true;
     bool qty_mpm_disp = true;
+    bool qty_mpm_pressure = true;
+    bool qty_mpm_material_id = true;
     // Spatial ROI & Strides
     bool roi_enabled = false;
     double roi_xmin = 0.0;
@@ -921,8 +1445,14 @@ void write_vtk_outputs(int step, double time) {
         bool has_reacted = global_vtk_config.qty_reacted;
         bool has_unreacted = global_vtk_config.qty_unreacted;
         bool has_air = global_vtk_config.qty_air;
+        bool has_materials = global_vtk_config.qty_materials;
+        bool has_water = global_vtk_config.qty_water;
+        bool has_soil = global_vtk_config.qty_soil;
         bool has_overpressure = global_vtk_config.qty_overpressure;
         bool has_impulse = global_vtk_config.qty_impulse;
+        bool has_temp = global_vtk_config.qty_temperature;
+        bool has_ab_rate = global_vtk_config.qty_afterburn_rate;
+        bool has_fuel_rho = global_vtk_config.qty_fuel_density;
 
         const auto& active_stl_triangles = (!global_tessellated_stl_triangles.empty())
             ? global_tessellated_stl_triangles
@@ -961,8 +1491,14 @@ void write_vtk_outputs(int step, double time) {
                 snap.has_unreacted = has_unreacted;
                 snap.has_air = has_air;
                 snap.has_solid = true;
+                snap.has_materials = has_materials;
+                snap.has_water = has_water;
+                snap.has_soil = has_soil;
                 snap.has_overpressure = has_overpressure;
                 snap.has_impulse = has_impulse;
+                snap.has_temp = has_temp;
+                snap.has_afterburn_rate = has_ab_rate;
+                snap.has_fuel_density = has_fuel_rho;
 
                 Slice3D slice_query = global_slices_3d[i];
                 slice_query.stride = snap.stride;
@@ -975,8 +1511,14 @@ void write_vtk_outputs(int step, double time) {
                 if (has_unreacted) { slice_query.quantities = { "species2" }; snap.unreacted = global_solver_3d->extractSlice(slice_query); }
                 if (has_air) { slice_query.quantities = { "species3" }; snap.air = global_solver_3d->extractSlice(slice_query); }
                 if (snap.has_solid) { slice_query.quantities = { "solid" }; snap.solid = global_solver_3d->extractSlice(slice_query); }
+                if (has_materials) { slice_query.quantities = { "materials" }; snap.materials = global_solver_3d->extractSlice(slice_query); }
+                if (has_water) { slice_query.quantities = { "water" }; snap.water = global_solver_3d->extractSlice(slice_query); }
+                if (has_soil) { slice_query.quantities = { "soil" }; snap.soil = global_solver_3d->extractSlice(slice_query); }
                 if (has_overpressure) { slice_query.quantities = { "overpressure" }; snap.overpressure = global_solver_3d->extractSlice(slice_query); }
                 if (has_impulse) { slice_query.quantities = { "impulse" }; snap.impulse = global_solver_3d->extractSlice(slice_query); }
+                if (has_temp) { slice_query.quantities = { "temperature" }; snap.temp = global_solver_3d->extractSlice(slice_query); }
+                if (has_ab_rate) { slice_query.quantities = { "afterburn_rate" }; snap.afterburn_rate = global_solver_3d->extractSlice(slice_query); }
+                if (has_fuel_rho) { slice_query.quantities = { "fuel_density" }; snap.fuel_density = global_solver_3d->extractSlice(slice_query); }
 
                 Blast::AsyncVTKWriter::getInstance().enqueue([filename, snap = std::move(snap), format, export_pvd, pvd_filename, time, rel_filename]() {
                     export_vtu_slice_3d_snapshot(filename, snap, format);
@@ -1017,6 +1559,9 @@ void write_vtk_outputs(int step, double time) {
             snap.has_unreacted = has_unreacted;
             snap.has_air = has_air;
             snap.has_solid = true;
+            snap.has_materials = has_materials;
+            snap.has_water = has_water;
+            snap.has_soil = has_soil;
             snap.has_overpressure = has_overpressure;
             snap.has_impulse = has_impulse;
 
@@ -1050,8 +1595,17 @@ void write_vtk_outputs(int step, double time) {
             if (has_unreacted) { vol_query.quantities = { "species2" }; snap.unreacted = global_solver_3d->extractSlice(vol_query); }
             if (has_air) { vol_query.quantities = { "species3" }; snap.air = global_solver_3d->extractSlice(vol_query); }
             if (snap.has_solid) { vol_query.quantities = { "solid" }; snap.solid = global_solver_3d->extractSlice(vol_query); }
+            if (has_materials) { vol_query.quantities = { "materials" }; snap.materials = global_solver_3d->extractSlice(vol_query); }
+            if (has_water) { vol_query.quantities = { "water" }; snap.water = global_solver_3d->extractSlice(vol_query); }
+            if (has_soil) { vol_query.quantities = { "soil" }; snap.soil = global_solver_3d->extractSlice(vol_query); }
             if (has_overpressure) { vol_query.quantities = { "overpressure" }; snap.overpressure = global_solver_3d->extractSlice(vol_query); }
             if (has_impulse) { vol_query.quantities = { "impulse" }; snap.impulse = global_solver_3d->extractSlice(vol_query); }
+            snap.has_temp = has_temp;
+            snap.has_afterburn_rate = has_ab_rate;
+            snap.has_fuel_density = has_fuel_rho;
+            if (has_temp) { vol_query.quantities = { "temperature" }; snap.temp = global_solver_3d->extractSlice(vol_query); }
+            if (has_ab_rate) { vol_query.quantities = { "afterburn_rate" }; snap.afterburn_rate = global_solver_3d->extractSlice(vol_query); }
+            if (has_fuel_rho) { vol_query.quantities = { "fuel_density" }; snap.fuel_density = global_solver_3d->extractSlice(vol_query); }
 
             Blast::AsyncVTKWriter::getInstance().enqueue([filename, snap = std::move(snap), format, export_pvd, pvd_filename, time, rel_filename]() {
                 export_vtu_volume_3d_snapshot(filename, snap, format);
@@ -1301,6 +1855,8 @@ void write_vtk_outputs(int step, double time) {
     if (global_vtk_config.export_mpm) {
         auto enqueue_mpm_snap = [&](MPMVTKSnapshot3D snap) {
             if (snap.num_particles <= 0) return;
+            snap.has_material_id = global_vtk_config.qty_mpm_material_id;
+            snap.has_pressure = global_vtk_config.qty_mpm_pressure;
             std::string rel_filename = global_vtk_config.custom_filename + "_mpm_" + std::to_string(step) + ".vtu";
             std::string filename = out_dir + "/" + rel_filename;
             std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_mpm.pvd";
@@ -1468,8 +2024,14 @@ void parse_vtk_config(const nlohmann::json& msg) {
                     global_vtk_config.qty_reacted = get_json_bool(params, "qty_reacted", true);
                     global_vtk_config.qty_unreacted = get_json_bool(params, "qty_unreacted", true);
                     global_vtk_config.qty_air = get_json_bool(params, "qty_air", true);
+                    global_vtk_config.qty_materials = get_json_bool(params, "qty_materials", true);
+                    global_vtk_config.qty_water = get_json_bool(params, "qty_water", true);
+                    global_vtk_config.qty_soil = get_json_bool(params, "qty_soil", true);
                     global_vtk_config.qty_overpressure = get_json_bool(params, "qty_overpressure", true);
                     global_vtk_config.qty_impulse = get_json_bool(params, "qty_impulse", true);
+                    global_vtk_config.qty_temperature = get_json_bool(params, "qty_temperature", true);
+                    global_vtk_config.qty_afterburn_rate = get_json_bool(params, "qty_afterburn_rate", true);
+                    global_vtk_config.qty_fuel_density = get_json_bool(params, "qty_fuel_density", true);
                     // FEM Fields
                     global_vtk_config.qty_fem_stress = get_json_bool(params, "qty_fem_stress", true);
                     global_vtk_config.qty_fem_strain = get_json_bool(params, "qty_fem_strain", true);
@@ -1485,6 +2047,8 @@ void parse_vtk_config(const nlohmann::json& msg) {
                     global_vtk_config.qty_mpm_temp = get_json_bool(params, "qty_mpm_temp", true);
                     global_vtk_config.qty_mpm_vel = get_json_bool(params, "qty_mpm_vel", true);
                     global_vtk_config.qty_mpm_disp = get_json_bool(params, "qty_mpm_disp", true);
+                    global_vtk_config.qty_mpm_pressure = get_json_bool(params, "qty_mpm_pressure", true);
+                    global_vtk_config.qty_mpm_material_id = get_json_bool(params, "qty_mpm_material_id", true);
                     // Spatial ROI & Strides
                     global_vtk_config.roi_enabled = get_json_bool(params, "roi_enabled", false);
                     global_vtk_config.roi_xmin = params.value("roi_xmin", 0.0);
@@ -1522,6 +2086,11 @@ void parse_vtk_config(const nlohmann::json& msg) {
         if (params.contains("roi_enabled")) global_vtk_config.roi_enabled = params.value("roi_enabled", global_vtk_config.roi_enabled);
         if (params.contains("volume_stride")) global_vtk_config.volume_stride = params.value("volume_stride", global_vtk_config.volume_stride);
         if (params.contains("slice_stride")) global_vtk_config.slice_stride = params.value("slice_stride", global_vtk_config.slice_stride);
+        if (params.contains("qty_materials")) global_vtk_config.qty_materials = get_json_bool(params, "qty_materials", global_vtk_config.qty_materials);
+        if (params.contains("qty_water")) global_vtk_config.qty_water = get_json_bool(params, "qty_water", global_vtk_config.qty_water);
+        if (params.contains("qty_soil")) global_vtk_config.qty_soil = get_json_bool(params, "qty_soil", global_vtk_config.qty_soil);
+        if (params.contains("qty_mpm_pressure")) global_vtk_config.qty_mpm_pressure = get_json_bool(params, "qty_mpm_pressure", global_vtk_config.qty_mpm_pressure);
+        if (params.contains("qty_mpm_material_id")) global_vtk_config.qty_mpm_material_id = get_json_bool(params, "qty_mpm_material_id", global_vtk_config.qty_mpm_material_id);
     }
 
     if (msg.contains("trigger_type") && msg["trigger_type"].is_string()) global_vtk_config.trigger_type = msg["trigger_type"].get<std::string>();
@@ -1541,6 +2110,11 @@ void parse_vtk_config(const nlohmann::json& msg) {
     if (msg.contains("export_pvd")) global_vtk_config.export_pvd = get_json_bool(msg, "export_pvd", global_vtk_config.export_pvd);
     if (msg.contains("step_interval")) global_vtk_config.step_interval = get_json_int(msg, "step_interval", global_vtk_config.step_interval);
     if (msg.contains("time_interval")) global_vtk_config.time_interval = get_json_double(msg, "time_interval", global_vtk_config.time_interval);
+    if (msg.contains("qty_materials")) global_vtk_config.qty_materials = get_json_bool(msg, "qty_materials", global_vtk_config.qty_materials);
+    if (msg.contains("qty_water")) global_vtk_config.qty_water = get_json_bool(msg, "qty_water", global_vtk_config.qty_water);
+    if (msg.contains("qty_soil")) global_vtk_config.qty_soil = get_json_bool(msg, "qty_soil", global_vtk_config.qty_soil);
+    if (msg.contains("qty_mpm_pressure")) global_vtk_config.qty_mpm_pressure = get_json_bool(msg, "qty_mpm_pressure", global_vtk_config.qty_mpm_pressure);
+    if (msg.contains("qty_mpm_material_id")) global_vtk_config.qty_mpm_material_id = get_json_bool(msg, "qty_mpm_material_id", global_vtk_config.qty_mpm_material_id);
 
     std::string default_dir = ".";
     try {
@@ -1619,13 +2193,17 @@ void init_gauges(const nlohmann::json& msg) {
                     global_gauge_config.qty_air = get_json_bool(params, "qty_air", true);
                     global_gauge_config.qty_overpressure = get_json_bool(params, "qty_overpressure", true);
                     global_gauge_config.qty_impulse = get_json_bool(params, "qty_impulse", true);
+                    global_gauge_config.qty_temperature = get_json_bool(params, "qty_temperature", true);
+                    global_gauge_config.qty_afterburn_rate = get_json_bool(params, "qty_afterburn_rate", true);
+                    global_gauge_config.qty_fuel_density = get_json_bool(params, "qty_fuel_density", true);
                 }
                 
                 if (source_mode == "manual" && node.contains("parameters") && node["parameters"].contains("gauges")) {
                     for (const auto& gauge : node["parameters"]["gauges"]) {
                         GaugeDef g;
-                        if (gauge.contains("x") || gauge.contains("y")) {
+                        if (gauge.contains("x") || gauge.contains("y") || gauge.contains("z")) {
                             g.id = gauge.value("id", gauge.value("name", ""));
+                            if (g.id.empty()) g.id = "G" + std::to_string(global_gauges.size() + 1);
                             g.x = gauge.value("x", 0.0);
                             g.y = gauge.value("y", 0.0);
                             g.z = gauge.value("z", 0.0);
@@ -1633,6 +2211,7 @@ void init_gauges(const nlohmann::json& msg) {
                             g.is_3d = true;
                         } else {
                             g.id = gauge.value("id", gauge.value("name", ""));
+                            if (g.id.empty()) g.id = "G" + std::to_string(global_gauges.size() + 1);
                             g.r = gauge.value("r", 0.0);
                             g.z = gauge.value("z", 0.0);
                             g.x = 0.0;
@@ -1644,6 +2223,34 @@ void init_gauges(const nlohmann::json& msg) {
                 }
             }
         }
+    }
+
+    if (global_gauges.empty() && msg.contains("gauges") && msg["gauges"].is_array()) {
+        for (const auto& gauge : msg["gauges"]) {
+            GaugeDef g;
+            if (gauge.contains("x") || gauge.contains("y") || gauge.contains("z")) {
+                g.id = gauge.value("id", gauge.value("name", ""));
+                if (g.id.empty()) g.id = "G" + std::to_string(global_gauges.size() + 1);
+                g.x = gauge.value("x", 0.0);
+                g.y = gauge.value("y", 0.0);
+                g.z = gauge.value("z", 0.0);
+                g.r = 0.0;
+                g.is_3d = true;
+            } else {
+                g.id = gauge.value("id", gauge.value("name", ""));
+                if (g.id.empty()) g.id = "G" + std::to_string(global_gauges.size() + 1);
+                g.r = gauge.value("r", 0.0);
+                g.z = gauge.value("z", 0.0);
+                g.x = 0.0;
+                g.y = 0.0;
+                g.is_3d = false;
+            }
+            global_gauges.push_back(g);
+        }
+    }
+
+    if (msg.contains("enable_gauges")) {
+        global_enable_gauges = (msg.value("enable_gauges", "Enabled") != "Disabled");
     }
     // Note: VTKOutput parameters are parsed by parse_vtk_config(msg) called below.
 
@@ -1900,7 +2507,7 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated = false, int step 
 void emit_telemetry_fem_3d(double elapsed = 0.0, bool is_terminated = false, int step = -1);
 void emit_resource_pulse();
 
-void emit_kernel_log(const std::string& level, const std::string& msg, double t, const std::string& scope = "1d", int step = -1) {
+void emit_kernel_log(const std::string& level, const std::string& msg, double t, const std::string& scope, int step) {
     std::lock_guard<std::mutex> lock(cout_mutex);
     nlohmann::json log;
     log["type"] = "log";
@@ -1961,7 +2568,7 @@ void worker_thread_func() {
     int total_range = global_solver->getNumCells() - initial_idx;
 
     int step_count = 0;
-    double last_dt = 1.0e-7;
+    double last_dt = (global_dt_1d > 1.0e-12) ? global_dt_1d : 1.0e-7;
     double interval_compute_ms = 0.0;
     double interval_io_ms = 0.0;
     int interval_steps = 0;
@@ -1990,10 +2597,10 @@ void worker_thread_func() {
 
         auto step_start = std::chrono::steady_clock::now();
         double dt = global_solver->computeStepSize(global_cfl.load());
-        if (step_count == 0) {
+        if (global_t == 0.0 && step_count == 0) {
             dt = std::min(dt, 1.0e-7);
         } else {
-            dt = std::min(dt, 1.3 * last_dt);
+            dt = std::min(dt, 2.0 * last_dt);
         }
         if (end_time > 0.0 && global_t + dt > end_time) {
             dt = std::max(1e-12, end_time - global_t);
@@ -2359,6 +2966,14 @@ struct PendingRemap {
 static std::mutex g_pending_remap_mutex;
 static PendingRemap g_pending_remap;
 
+struct PendingExec3D {
+    bool has_pending = false;
+    std::string command = ""; // "STEP_3D" or "EXEC_ALL_3D"
+    nlohmann::json msg;
+};
+static std::mutex g_pending_exec_3d_mutex;
+static PendingExec3D g_pending_exec_3d;
+
 void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFDSolver3D* solver_3d, CFDSolver2D* solver_2d, CFDSolver2DCuda* solver_2d_cuda) {
     if (type == "1D") {
         double explosive_z = msg.value("explosive_z", 0.0);
@@ -2410,8 +3025,8 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
 
         if (solver_3d) {
             auto map_bc_3d = [](const std::string& str) {
-                if (str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::TRANSMISSIVE;
-                if (str == "Terminate" || str == "OUTFLOW_RIEMANN") return BCType3D::OUTFLOW_RIEMANN;
+                if (str == "Terminate" || str == "OUTFLOW_RIEMANN" || str == "Riemann" || str == "NonReflecting" || str == "Absorbing" || str == "Lysmer" || str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::OUTFLOW_RIEMANN;
+                if (str == "Outflow" || str == "Neumann") return BCType3D::TRANSMISSIVE;
                 return BCType3D::REFLECTIVE;
             };
             solver_3d->setBoundaryConditions(
@@ -2422,6 +3037,10 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             solver_3d->setGamma(gamma);
             solver_3d->setIdealGas(is_ideal_gas);
             solver_3d->setMaterialParameters(matSet);
+            solver_3d->setAmbientState(ambient_rho, ambient_p);
+            if (msg.contains("charge_radius")) {
+                solver_3d->setChargeRadius(msg.value("charge_radius", 0.05));
+            }
             double explosive_x = msg.value("explosive_x", 0.5);
             double explosive_y = msg.value("explosive_y", 0.5);
             double start_time = msg.value("time", msg.value("sim_time", 0.0));
@@ -2435,6 +3054,9 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             solver_2d->setGamma(gamma);
             solver_2d->setIdealGas(is_ideal_gas);
             solver_2d->setMaterialParameters(matSet);
+            if (msg.contains("charge_radius")) {
+                solver_2d->setChargeRadius(msg.value("charge_radius", 0.05));
+            }
             solver_2d->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
             solver_2d->setTime(0.0);
             global_t2d = 0.0;
@@ -2446,6 +3068,9 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             solver_2d_cuda->setGamma(gamma);
             solver_2d_cuda->setIdealGas(is_ideal_gas);
             solver_2d_cuda->setMaterialParameters(matSet);
+            if (msg.contains("charge_radius")) {
+                solver_2d_cuda->setChargeRadius(msg.value("charge_radius", 0.05));
+            }
             solver_2d_cuda->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
             solver_2d_cuda->setTime(0.0);
             global_t2d = 0.0;
@@ -2569,8 +3194,8 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
 
         if (solver_3d && !states_2d.empty()) {
             auto map_bc_3d = [](const std::string& str) {
-                if (str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::TRANSMISSIVE;
-                if (str == "Terminate" || str == "OUTFLOW_RIEMANN") return BCType3D::OUTFLOW_RIEMANN;
+                if (str == "Terminate" || str == "OUTFLOW_RIEMANN" || str == "Riemann" || str == "NonReflecting" || str == "Absorbing" || str == "Lysmer" || str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::OUTFLOW_RIEMANN;
+                if (str == "Outflow" || str == "Neumann") return BCType3D::TRANSMISSIVE;
                 return BCType3D::REFLECTIVE;
             };
             solver_3d->setBoundaryConditions(
@@ -2583,6 +3208,9 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             solver_3d->setIdealGas(is_ideal_gas_val);
             solver_3d->setMaterialParameters(matSet_val);
             solver_3d->setAmbientState(amb_rho_val, amb_p_val);
+            if (msg.contains("charge_radius")) {
+                solver_3d->setChargeRadius(msg.value("charge_radius", 0.05));
+            }
             double start_time = msg.value("time", msg.value("sim_time", 0.0));
             solver_3d->initializeFrom2D(nr, nz, dr, dz, states_2d, explosive_x, explosive_y, explosive_z, remap_radius, source_explosive_z);
             solver_3d->setTime(start_time);
@@ -2692,6 +3320,7 @@ void init_3d_thread_func(nlohmann::json msg) {
         local_solver_3d->setFluxScheme(flux_scheme);
         local_solver_3d->setSpatialOrder(spatial_order);
         local_solver_3d->setTemporalOrder(temporal_order);
+        apply_cfd_tait_config(msg, local_solver_3d.get());
 
         Charge3DParams cp;
         std::string shape_str = msg.value("charge_shape", "Sphere");
@@ -2714,23 +3343,43 @@ void init_3d_thread_func(nlohmann::json msg) {
         cp.rot_y = msg.value("charge_rot_y", msg.value("rot_y", 0.0));
         cp.rot_z = msg.value("charge_rot_z", msg.value("rot_z", 0.0));
 
+        if (init_mode == "From1D" || init_mode == "From2D") {
+            cp.radius = 0.0;
+            cp.lx = 0.0;
+            cp.ly = 0.0;
+            cp.lz = 0.0;
+        }
+
         MultiMat::MaterialSet matSet = parseMaterialSet(msg);
 
         double ambient_rho = msg.value("ambient_rho", 1.225648589);
         double ambient_p = msg.value("atm_pressure", 101325.0);
 
-        local_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);
+        double dx = get_json_double(msg, "trigger_x", get_json_double(msg, "detonator_x", cp.x));
+        double dy = get_json_double(msg, "trigger_y", get_json_double(msg, "detonator_y", cp.y));
+        double dz = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", cp.z));
+        local_solver_3d->setDetonatorLocation(dx, dy, dz);
 
-        if (msg.contains("trigger_x") || msg.contains("detonator_x")) {
-            double dx = get_json_double(msg, "trigger_x", get_json_double(msg, "detonator_x", cp.x));
-            double dy = get_json_double(msg, "trigger_y", get_json_double(msg, "detonator_y", cp.y));
-            double dz = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", cp.z));
-            local_solver_3d->setDetonatorLocation(dx, dy, dz);
+        if (init_mode == "Hydrostatic_Stratified_3D" || get_json_bool(msg, "stratified_equilibrium", false)) {
+            Blast::Stratified3DParams strat = parse_stratified_params(msg, ambient_rho, ambient_p);
+            double gx = get_json_double(msg, "gravity_x", get_json_double(msg, "gx", 0.0));
+            double gy = get_json_double(msg, "gravity_y", get_json_double(msg, "gy", 0.0));
+            double gz = strat.gravity_z;
+            local_solver_3d->setGravity(gx, gy, gz);
+            local_solver_3d->setStratifiedInitialCondition(cp, matSet, strat);
+        } else {
+            if (msg.contains("gravity_z") || msg.contains("gz") || msg.contains("gravity_y") || msg.contains("gy") || msg.contains("gravity_x") || msg.contains("gx")) {
+                double gx = get_json_double(msg, "gravity_x", get_json_double(msg, "gx", 0.0));
+                double gy = get_json_double(msg, "gravity_y", get_json_double(msg, "gy", 0.0));
+                double gz = get_json_double(msg, "gravity_z", get_json_double(msg, "gz", 0.0));
+                local_solver_3d->setGravity(gx, gy, gz);
+            }
+            local_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);
         }
 
         auto map_bc_3d = [](const std::string& str) {
-            if (str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::TRANSMISSIVE;
-            if (str == "Terminate" || str == "OUTFLOW_RIEMANN") return BCType3D::OUTFLOW_RIEMANN;
+            if (str == "Terminate" || str == "OUTFLOW_RIEMANN" || str == "Riemann" || str == "NonReflecting" || str == "Absorbing" || str == "Lysmer" || str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::OUTFLOW_RIEMANN;
+            if (str == "Outflow" || str == "Neumann") return BCType3D::TRANSMISSIVE;
             return BCType3D::REFLECTIVE;
         };
         local_solver_3d->setBoundaryConditions(
@@ -2866,11 +3515,56 @@ void init_3d_thread_func(nlohmann::json msg) {
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] Exception in 3D solver initialization thread: " << e.what() << std::endl;
         emit_kernel_log("ERROR", std::string("Initialization failed: ") + e.what(), 0.0, "3d");
+        std::lock_guard<std::mutex> lock(g_pending_exec_3d_mutex);
+        g_pending_exec_3d.has_pending = false;
     } catch (...) {
         std::cerr << "[ERROR] Unknown exception in 3D solver initialization thread" << std::endl;
         emit_kernel_log("ERROR", "Initialization failed with unknown error", 0.0, "3d");
+        std::lock_guard<std::mutex> lock(g_pending_exec_3d_mutex);
+        g_pending_exec_3d.has_pending = false;
     }
     sim3d_init_in_progress = false;
+
+    // Check if a STEP_3D or EXEC_ALL_3D command was queued while initialization was running
+    {
+        std::lock_guard<std::mutex> lock(g_pending_exec_3d_mutex);
+        if (g_pending_exec_3d.has_pending && global_solver_3d && !sim3d_terminate.load()) {
+            std::string cmd = g_pending_exec_3d.command;
+            nlohmann::json p_msg = g_pending_exec_3d.msg;
+            g_pending_exec_3d.has_pending = false;
+            emit_kernel_log("INFO", "Executing queued " + cmd + " after 3D initialization completed.", 0.0, "3d");
+            if (cmd == "STEP_3D") {
+                init_gauges(p_msg);
+                int steps = p_msg.value("steps", 1);
+                global_cfl_3d = p_msg.value("cfl", 0.6);
+                if (p_msg.contains("endtime")) global_endtime_3d = p_msg.value("endtime", 1.0);
+                global_exec_until_end_3d = false;
+                if (!sim3d_running) {
+                    global_target_steps_3d = steps;
+                    sim3d_running = true;
+                    sim3d_paused = false;
+                    sim3d_terminate = false;
+                    std::thread(worker_3d_thread_func).detach();
+                } else {
+                    global_target_steps_3d.fetch_add(steps);
+                    sim3d_paused = false;
+                }
+            } else if (cmd == "EXEC_ALL_3D") {
+                init_gauges(p_msg);
+                global_cfl_3d = p_msg.value("cfl", 0.6);
+                if (p_msg.contains("endtime")) global_endtime_3d = p_msg.value("endtime", 1.0);
+                global_exec_until_end_3d = true;
+                if (!sim3d_running) {
+                    sim3d_running = true;
+                    sim3d_paused = false;
+                    sim3d_terminate = false;
+                    std::thread(worker_3d_thread_func).detach();
+                } else {
+                    sim3d_paused = false;
+                }
+            }
+        }
+    }
 }
 
 void worker_3d_thread_func() {
@@ -2886,7 +3580,7 @@ void worker_3d_thread_func() {
         auto last_telemetry_time = std::chrono::steady_clock::now();
     int initial_steps = global_target_steps_3d.load();
     int step_count = 0;
-    double last_dt = 1.0e-7;
+    double last_dt = (global_dt_3d > 1.0e-12) ? global_dt_3d : 1.0e-7;
     double interval_compute_ms = 0.0;
     double interval_io_ms = 0.0;
     int interval_steps = 0;
@@ -2916,14 +3610,15 @@ void worker_3d_thread_func() {
 
         auto step_start = std::chrono::steady_clock::now();
         double dt = global_solver_3d->computeStepSize(global_cfl_3d.load());
-        if (step_count == 0) {
+        if (global_step_3d.load() == 0 && step_count == 0) {
             dt = std::min(dt, 1.0e-7);
         } else {
-            dt = std::min(dt, 1.3 * last_dt);
+            dt = std::min(dt, 2.0 * last_dt);
         }
         if (end_time > 0.0 && global_t3d + dt > end_time) {
             dt = std::max(1e-12, end_time - global_t3d);
         }
+        dt = std::max(dt, 1.0e-11);
         global_solver_3d->step(dt);
         auto step_end = std::chrono::steady_clock::now();
         double comp_ms = std::chrono::duration<double, std::milli>(step_end - step_start).count();
@@ -3073,7 +3768,7 @@ void worker_2d_thread_func() {
         auto last_telemetry_time = std::chrono::steady_clock::now();
     int initial_steps = global_target_steps_2d.load();
     int step_count = 0;
-    double last_dt = 1.0e-7;
+    double last_dt = (global_dt_2d > 1.0e-12) ? global_dt_2d : 1.0e-7;
     double interval_compute_ms = 0.0;
     double interval_io_ms = 0.0;
     int interval_steps = 0;
@@ -3124,10 +3819,10 @@ void worker_2d_thread_func() {
             } else {
                 double max_s = global_solver_2d_cuda->getMaxWaveSpeed();
                 dt = global_cfl_2d.load() * std::min(global_solver_2d_cuda->getDr(), global_solver_2d_cuda->getDz()) / max_s;
-                if (step_count == 0) {
+                if (global_step_2d.load() == 0 && step_count == 0) {
                     dt = std::min(dt, 1.0e-7);
                 } else {
-                    dt = std::min(dt, 1.3 * last_dt);
+                    dt = std::min(dt, 2.0 * last_dt);
                 }
                 if (end_time > 0.0 && global_t2d + dt > end_time) {
                     dt = std::max(1e-12, end_time - global_t2d);
@@ -3136,10 +3831,10 @@ void worker_2d_thread_func() {
             }
         } else if (global_solver_2d) {
             dt = global_solver_2d->computeStepSize(global_cfl_2d.load());
-            if (step_count == 0) {
+            if (global_step_2d.load() == 0 && step_count == 0) {
                 dt = std::min(dt, 1.0e-7);
             } else {
-                dt = std::min(dt, 1.3 * last_dt);
+                dt = std::min(dt, 2.0 * last_dt);
             }
             if (end_time > 0.0 && global_t2d + dt > end_time) {
                 dt = std::max(1e-12, end_time - global_t2d);
@@ -4119,7 +4814,7 @@ void worker_fsi_2d_thread_func() {
         double interval_io_ms = 0.0;
         int interval_steps = 0;
         auto last_telemetry_time = std::chrono::steady_clock::now();
-        double last_dt = 1.0e-7;
+        double last_dt = (global_dt_2d > 1.0e-12) ? global_dt_2d : 1.0e-7;
 
     while (!sim_fsi_terminate.load()) {
         if (sim_fsi_paused.load()) {
@@ -4264,10 +4959,10 @@ void worker_fsi_2d_thread_func() {
             }
 
             double dt_common = std::min(static_cast<double>(dt_mpm), dt_cfd);
-            if (step_count == 0) {
+            if (global_step_2d.load() == 0 && step_count == 0) {
                 dt_common = std::min(dt_common, 1.0e-7);
             } else {
-                dt_common = std::min(dt_common, 1.3 * last_dt);
+                dt_common = std::min(dt_common, 2.0 * last_dt);
             }
             if (end_time > 0.0 && cur_time + dt_common > end_time) {
                 dt_common = std::max(1e-12, end_time - cur_time);
@@ -4296,6 +4991,10 @@ void worker_fsi_2d_thread_func() {
             global_step_2d++;
             step_count++;
             interval_steps++;
+
+            if (global_enable_gauges.load()) {
+                record_gauges_2d(global_t2d);
+            }
 
             if (!global_exec_until_end_fsi.load()) {
                 global_target_steps_fsi--;
@@ -4367,6 +5066,7 @@ void worker_fsi_2d_thread_func() {
     bool reached_end = (final_end_time > 0.0 && final_sim_time >= final_end_time - 1e-12);
     if (global_solver_mpm_2d) emit_telemetry_mpm_2d(final_sim_time, false, global_step_fsi_2d.load());
     if (has_solver_2d()) emit_telemetry_2d(global_t2d, false, global_step_fsi_2d.load());
+    write_gauge_files();
     if (reached_end) {
         emit_kernel_log("INFO", "Reached simulation end time (" + std::to_string(final_end_time) + " s). Simulation paused.", final_sim_time, "2d", global_step_fsi_2d.load());
     }
@@ -4408,7 +5108,7 @@ void worker_fsi_3d_thread_func() {
         double interval_io_ms = 0.0;
         int interval_steps = 0;
         auto last_telemetry_time = std::chrono::steady_clock::now();
-        double last_dt = 1.0e-7;
+        double last_dt = (global_dt_3d > 1.0e-12) ? global_dt_3d : 1.0e-7;
 
     while (!sim_fsi_3d_terminate.load()) {
         if (sim_fsi_3d_paused.load()) {
@@ -4435,22 +5135,7 @@ void worker_fsi_3d_thread_func() {
                 global_solver_mpm_3d_cuda->particleToGridDeviceOnly();
                 global_solver_3d->coupleFSIWithMPMGPU(global_solver_mpm_3d_cuda.get());
 
-                if (step_count % 200 == 0) {
-                    global_solver_mpm_3d_cuda->syncGridToHost();
-                    auto& grid = global_solver_mpm_3d_cuda->getGrid();
-                    double max_mass = 0.0, max_force = 0.0;
-                    int num_solid = 0;
-                    for (const auto& node : grid) {
-                        if (node.m > max_mass) max_mass = node.m;
-                        if (node.m > 1.0e-14f) num_solid++;
-                        double f_mag = std::sqrt(node.f_ext[0]*node.f_ext[0] + node.f_ext[1]*node.f_ext[1] + node.f_ext[2]*node.f_ext[2]);
-                        if (f_mag > max_force) max_force = f_mag;
-                    }
-                    std::cout << "[FSI DIAG] Step " << step_count 
-                              << " | Solid nodes = " << num_solid 
-                              << " | Max mass = " << max_mass 
-                              << " | Max FSI force = " << max_force << " N" << std::endl;
-                }
+
             } else {
                 // Step 1: P2G — scatter particle mass/momentum to grid nodes
                 if (global_solver_mpm_3d_cuda) {
@@ -4479,7 +5164,11 @@ void worker_fsi_3d_thread_func() {
                                 size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
                                 auto& node = grid[node_idx];
                                 size_t cfd_idx = static_cast<size_t>(i) + static_cast<size_t>(j) * nx + static_cast<size_t>(k) * nx * ny;
-                                if (node.m > 1.0e-8f) {
+                                double z_node = global_solver_3d->getZMin() + (static_cast<double>(k) + 0.5) * global_solver_3d->getDz();
+                                if (g_is_stratified_fsi.load() && z_node < g_strat_fsi_params.seabed_surface_z) {
+                                    continue;
+                                }
+                                if (node.m_solid > 1.0e-8f) {
                                     solid_mask[cfd_idx] = 1;
                                     solid_vel[3 * cfd_idx + 0] = node.v(0);
                                     solid_vel[3 * cfd_idx + 1] = node.v(1);
@@ -4508,62 +5197,55 @@ void worker_fsi_3d_thread_func() {
                                     auto is_fluid = [&](int xi, int yi, int zi) -> bool {
                                         if (xi < 0 || xi >= nx || yi < 0 || yi >= ny || zi < 0 || zi >= nz) return false;
                                         size_t idx = (static_cast<size_t>(xi) * ny + yi) * nz + zi;
-                                        return grid[idx].m <= 1.0e-8f;
+                                        return (grid[idx].m_solid <= 1.0e-8f);
+                                    };
+
+                                    auto pidx = [&](int xi, int yi, int zi) -> double {
+                                        xi = std::clamp(xi, 0, nx-1);
+                                        yi = std::clamp(yi, 0, ny-1);
+                                        zi = std::clamp(zi, 0, nz-1);
+                                        if (use_bulk) {
+                                            return pfield[xi + yi * nx + zi * nx * ny];
+                                        } else {
+                                            auto cv = global_solver_3d->getCellValues(xi, yi, zi);
+                                            return (!cv.empty()) ? cv[0] : 0.0;
+                                        }
                                     };
 
                                     double f_x = 0.0, f_y = 0.0, f_z = 0.0;
-                                    if (use_bulk) {
-                                        auto pidx = [&](int xi, int yi, int zi) -> double {
-                                            xi = std::clamp(xi, 0, nx-1);
-                                            yi = std::clamp(yi, 0, ny-1);
-                                            zi = std::clamp(zi, 0, nz-1);
-                                            return pfield[xi + yi * nx + zi * nx * ny];
-                                        };
+                                    if (node.m_solid > 1.0e-8f) {
+                                        // Solid boundary node: surface pressure from fluid neighbor cells
                                         if (is_fluid(i-1, j, k)) f_x += pidx(i-1, j, k);
                                         if (is_fluid(i+1, j, k)) f_x -= pidx(i+1, j, k);
                                         if (is_fluid(i, j-1, k)) f_y += pidx(i, j-1, k);
                                         if (is_fluid(i, j+1, k)) f_y -= pidx(i, j+1, k);
                                         if (is_fluid(i, j, k-1)) f_z += pidx(i, j, k-1);
                                         if (is_fluid(i, j, k+1)) f_z -= pidx(i, j, k+1);
-                                    } else {
-                                        if (i > 0 && is_fluid(i-1, j, k)) {
-                                            auto cv = global_solver_3d->getCellValues(i-1, j, k);
-                                            if (!cv.empty()) f_x += cv[0];
-                                        }
-                                        if (i < nx-1 && is_fluid(i+1, j, k)) {
-                                            auto cv = global_solver_3d->getCellValues(i+1, j, k);
-                                            if (!cv.empty()) f_x -= cv[0];
-                                        }
-                                        if (j > 0 && is_fluid(i, j-1, k)) {
-                                            auto cv = global_solver_3d->getCellValues(i, j-1, k);
-                                            if (!cv.empty()) f_y += cv[0];
-                                        }
-                                        if (j < ny-1 && is_fluid(i, j+1, k)) {
-                                            auto cv = global_solver_3d->getCellValues(i, j+1, k);
-                                            if (!cv.empty()) f_y -= cv[0];
-                                        }
-                                        if (k > 0 && is_fluid(i, j, k-1)) {
-                                            auto cv = global_solver_3d->getCellValues(i, j, k-1);
-                                            if (!cv.empty()) f_z += cv[0];
-                                        }
-                                        if (k < nz-1 && is_fluid(i, j, k+1)) {
-                                            auto cv = global_solver_3d->getCellValues(i, j, k+1);
-                                            if (!cv.empty()) f_z -= cv[0];
-                                        }
-                                    }
 
-                                    node.f_ext[0] = static_cast<float>(f_x * dy * dz);
-                                    node.f_ext[1] = static_cast<float>(f_y * dx * dz);
-                                    node.f_ext[2] = static_cast<float>(f_z * dx * dy);
+                                        node.f_ext[0] = static_cast<float>(f_x * dy * dz);
+                                        node.f_ext[1] = static_cast<float>(f_y * dx * dz);
+                                        node.f_ext[2] = static_cast<float>(f_z * dx * dy);
+                                    } else {
+                                        // Fluid sleeve node: volumetric pressure gradient force F = -grad(P) * V
+                                        f_x = -0.5 * (pidx(i+1, j, k) - pidx(i-1, j, k));
+                                        f_y = -0.5 * (pidx(i, j+1, k) - pidx(i, j-1, k));
+                                        f_z = -0.5 * (pidx(i, j, k+1) - pidx(i, j, k-1));
+
+                                        node.f_ext[0] = static_cast<float>(f_x * dy * dz);
+                                        node.f_ext[1] = static_cast<float>(f_y * dx * dz);
+                                        node.f_ext[2] = static_cast<float>(f_z * dx * dy);
+                                    }
                                 }
                             }
                         }
                     }
 
-                    // Upload the grid with FSI forces back to GPU (for CUDA path)
+                    // Upload the grid with FSI forces back to GPU (for CUDA path) or cache on CPU
                     if (global_solver_mpm_3d_cuda) {
                         global_solver_mpm_3d_cuda->uploadGridToDevice();
                         global_solver_mpm_3d_cuda->storeFSIForces();
+                    } else if (global_solver_mpm_3d) {
+                        global_solver_mpm_3d->storeFSIForces();
                     }
                 }
             }
@@ -4574,10 +5256,10 @@ void worker_fsi_3d_thread_func() {
             double dt_cfd = global_solver_3d ? global_solver_3d->computeStepSize(cfl) : 1.0e-4;
 
             double dt_common = std::min(static_cast<double>(dt_mpm), dt_cfd);
-            if (step_count == 0) {
+            if (global_step_3d.load() == 0 && step_count == 0) {
                 dt_common = std::min(dt_common, 1.0e-7);
             } else {
-                dt_common = std::min(dt_common, 1.25 * last_dt);
+                dt_common = std::min(dt_common, 2.0 * last_dt);
             }
             if (end_time > 0.0 && global_t3d + dt_common > end_time) {
                 dt_common = std::max(1e-12, end_time - global_t3d);
@@ -4597,6 +5279,52 @@ void worker_fsi_3d_thread_func() {
                 global_t3d += dt_common;
             }
 
+            // Direct hydrodynamic / aerodynamic drag coupling onto debris and water sleeve particles
+            if (global_solver_mpm_3d && global_solver_3d) {
+                auto& particles = global_solver_mpm_3d->getParticles();
+                double f_xmin = global_solver_3d->getXMin();
+                double f_ymin = global_solver_3d->getYMin();
+                double f_zmin = global_solver_3d->getZMin();
+                double f_dx = global_solver_3d->getDx();
+                double f_dy = global_solver_3d->getDy();
+                double f_dz = global_solver_3d->getDz();
+                int f_nx = global_solver_3d->getNx();
+                int f_ny = global_solver_3d->getNy();
+                int f_nz = global_solver_3d->getNz();
+                float dt_f = static_cast<float>(dt_common);
+                int num_mat_tables = static_cast<int>(global_solver_mpm_3d->getMaterialTables().size());
+                for (auto& p : particles) {
+                    bool is_fluid_p = (p.object_id >= 0 && p.object_id < num_mat_tables)
+                        ? (global_solver_mpm_3d->getMaterialTable(p.object_id).material_model == Blast::MPMMaterialModel::TaitWater)
+                        : false;
+                    if (p.has_failed || p.damage >= 1.0f || is_fluid_p) {
+                        int ci = std::clamp(static_cast<int>(std::floor((p.x[0] - f_xmin) / f_dx)), 0, f_nx - 1);
+                        int cj = std::clamp(static_cast<int>(std::floor((p.x[1] - f_ymin) / f_dy)), 0, f_ny - 1);
+                        int ck = std::clamp(static_cast<int>(std::floor((p.x[2] - f_zmin) / f_dz)), 0, f_nz - 1);
+                        float u_f = 0.0f, v_f = 0.0f, w_f = 0.0f, rho_f = 0.0f, p_f = 0.0f;
+                        if (global_solver_3d->getFluidVelocity(ci, cj, ck, u_f, v_f, w_f, rho_f, p_f)) {
+                            float rel_vx = u_f - p.v[0];
+                            float rel_vy = v_f - p.v[1];
+                            float rel_vz = w_f - p.v[2];
+                            float rel_v = std::sqrt(rel_vx * rel_vx + rel_vy * rel_vy + rel_vz * rel_vz);
+                            if (rel_v > 1.0e-4f) {
+                                float r_p = (p.contact_radius > 0.0f) ? p.contact_radius : (0.5f * std::cbrt(std::max(1.0e-12f, p.V)));
+                                float A_p = 3.14159265f * r_p * r_p;
+                                float Cd = is_fluid_p ? 0.47f : 1.2f;
+                                float F_drag = 0.5f * Cd * rho_f * A_p * rel_v;
+                                float m_p = std::max(1.0e-12f, p.m);
+                                float dv_mag = (dt_f * F_drag) / m_p;
+                                if (dv_mag > rel_v) dv_mag = rel_v;
+                                float factor = dv_mag / rel_v;
+                                p.v[0] += factor * rel_vx;
+                                p.v[1] += factor * rel_vy;
+                                p.v[2] += factor * rel_vz;
+                            }
+                        }
+                    }
+                }
+            }
+
             auto step_end = std::chrono::steady_clock::now();
             double comp_ms = std::chrono::duration<double, std::milli>(step_end - step_start).count();
             interval_compute_ms += comp_ms;
@@ -4605,6 +5333,10 @@ void worker_fsi_3d_thread_func() {
             global_step_fsi_3d++;
             global_step_3d++;
             step_count++;
+
+            if (global_enable_gauges.load() && global_solver_3d) {
+                record_gauges_3d(global_t3d);
+            }
 
             auto io_start = std::chrono::steady_clock::now();
             if (global_enable_vtk.load()) {
@@ -4639,9 +5371,13 @@ void worker_fsi_3d_thread_func() {
                 interval_io_ms = 0.0;
                 interval_steps = 0;
 
-                // Emit single unified telemetry frame to eliminate 3D viewport flickering
+                // Emit single unified telemetry frame (emit_telemetry_3d packs CFD slices, MPM particles, and FEM mesh atomically)
                 auto comms_start = std::chrono::steady_clock::now();
-                if (global_solver_3d) emit_telemetry_3d(global_t3d, false, global_step_fsi_3d.load());
+                if (global_solver_3d) {
+                    emit_telemetry_3d(global_t3d, false, global_step_fsi_3d.load());
+                } else if ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) || (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty())) {
+                    emit_telemetry_mpm_3d(global_t3d, false, global_step_fsi_3d.load());
+                }
                 auto comms_end = std::chrono::steady_clock::now();
                 double comms_ms = std::chrono::duration<double, std::milli>(comms_end - comms_start).count();
                 global_last_comms_ms = comms_ms;
@@ -4692,7 +5428,12 @@ void worker_fsi_3d_thread_func() {
         global_last_compute_ms = interval_compute_ms / steps_in_interval;
         global_last_io_ms = interval_io_ms / steps_in_interval;
     }
-    if (global_solver_3d) emit_telemetry_3d(global_t3d, false, global_step_fsi_3d.load());
+    if (global_solver_3d) {
+        emit_telemetry_3d(global_t3d, false, global_step_fsi_3d.load());
+    } else if ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) || (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty())) {
+        emit_telemetry_mpm_3d(global_t3d, false, global_step_fsi_3d.load());
+    }
+    write_gauge_files();
 
     if (reached_end) {
         emit_kernel_log("INFO", "Reached simulation end time (" + std::to_string(final_end_time) + " s). Simulation paused.", final_sim_time, "3d", global_step_fsi_3d.load());
@@ -4742,7 +5483,7 @@ void worker_fem_fsi_3d_thread_func() {
         double interval_io_ms = 0.0;
         int interval_steps = 0;
         auto last_telemetry_time = std::chrono::steady_clock::now();
-        double last_dt = 1.0e-7;
+        double last_dt = (global_dt_3d > 1.0e-12) ? global_dt_3d : 1.0e-7;
 
         std::string m_id = global_model_id.empty() ? "default_fem" : global_model_id;
 
@@ -4810,15 +5551,11 @@ void worker_fem_fsi_3d_thread_func() {
                 if (global_solver_3d) global_solver_3d->step(last_dt);
             }
 
-            // If no FSI coupler handled MPM stepping, advance MPM directly
-            bool has_fsi_coupler = !global_fem_fsi_couplers_cuda_float.empty() || !global_fem_fsi_couplers_cuda_double.empty()
-                                || !global_fem_fsi_couplers_float.empty() || !global_fem_fsi_couplers_double.empty();
-            if (!has_fsi_coupler) {
-                if (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) {
-                    global_solver_mpm_3d_cuda->stepWithDt(static_cast<float>(last_dt));
-                } else if (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty()) {
-                    global_solver_mpm_3d->stepWithDt(static_cast<float>(last_dt));
-                }
+            // Advance MPM particles (nearfield water sleeve / soil / debris) in coupled multi-physics
+            if (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) {
+                global_solver_mpm_3d_cuda->stepWithDt(static_cast<float>(last_dt));
+            } else if (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty()) {
+                global_solver_mpm_3d->stepWithDt(static_cast<float>(last_dt));
             }
 
             auto step_end = std::chrono::steady_clock::now();
@@ -4830,6 +5567,10 @@ void worker_fem_fsi_3d_thread_func() {
             global_step_fem_fsi_3d++;
             global_step_3d++;
             step_count++;
+
+            if (global_enable_gauges.load() && global_solver_3d) {
+                record_gauges_3d(global_t3d);
+            }
 
             int current_step = global_step_fem_fsi_3d.load();
             if (global_fem_fsi_couplers_cuda_float.count(m_id) && global_fem_fsi_couplers_cuda_float[m_id]) {
@@ -4882,7 +5623,12 @@ void worker_fem_fsi_3d_thread_func() {
                 interval_steps = 0;
 
                 auto comms_start = std::chrono::steady_clock::now();
-                if (global_solver_3d) emit_telemetry_3d(global_t3d, false, current_step);
+                if (global_solver_3d) {
+                    emit_telemetry_3d(global_t3d, false, current_step);
+                } else if ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) || (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty())) {
+                    emit_telemetry_mpm_3d(global_t3d, false, current_step);
+                }
+                emit_telemetry_fem_3d(global_t3d, false, current_step);
                 auto comms_end = std::chrono::steady_clock::now();
                 double comms_ms = std::chrono::duration<double, std::milli>(comms_end - comms_start).count();
                 global_last_comms_ms = comms_ms;
@@ -4948,7 +5694,13 @@ void worker_fem_fsi_3d_thread_func() {
             global_last_compute_ms = interval_compute_ms / steps_in_interval;
             global_last_io_ms = interval_io_ms / steps_in_interval;
         }
-        if (global_solver_3d) emit_telemetry_3d(global_t3d, false, final_step);
+        if (global_solver_3d) {
+            emit_telemetry_3d(global_t3d, false, final_step);
+        } else if ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) || (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty())) {
+            emit_telemetry_mpm_3d(global_t3d, false, final_step);
+        }
+        emit_telemetry_fem_3d(final_sim_time, false, final_step);
+        write_gauge_files();
 
         if (reached_end) {
             emit_kernel_log("INFO", "Reached simulation end time (" + std::to_string(final_end_time) + " s). Simulation paused.", final_sim_time, "3d", final_step);
@@ -4986,6 +5738,7 @@ void worker_fem_fsi_3d_thread_func() {
 // NVML Dynamic Loading Declarations
 typedef int nvmlReturn_t;
 #define NVML_SUCCESS 0
+#define NVML_ERROR_INSUFFICIENT_SIZE 7
 
 typedef struct nvmlUtilization_st {
     unsigned int device;
@@ -5010,6 +5763,8 @@ typedef nvmlReturn_t (*nvmlDeviceGetGraphicsRunningProcesses_t)(nvmlDevice_t dev
 struct CPUMonitor {
     double last_cpu_time = 0.0;
     double last_wall_time = 0.0;
+    double last_dt_cpu = 0.0;
+    double last_dt_wall = 0.0;
     int num_cores = 1;
 
     CPUMonitor() {
@@ -5022,6 +5777,8 @@ struct CPUMonitor {
         if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0 && clock_gettime(CLOCK_MONOTONIC, &tw) == 0) {
             last_cpu_time = ts.tv_sec + ts.tv_nsec * 1e-9;
             last_wall_time = tw.tv_sec + tw.tv_nsec * 1e-9;
+            last_dt_cpu = 0.0;
+            last_dt_wall = 0.0;
         }
     }
 
@@ -5040,9 +5797,51 @@ struct CPUMonitor {
 
         last_cpu_time = cpu_time;
         last_wall_time = wall_time;
+        last_dt_cpu = dt_cpu;
+        last_dt_wall = dt_wall;
 
         double usage = (dt_cpu / dt_wall / num_cores) * 100.0;
         return std::clamp(usage, 0.0, 100.0);
+    }
+};
+
+struct SystemCPUMonitor {
+    uint64_t prev_user = 0, prev_nice = 0, prev_system = 0, prev_idle = 0;
+    uint64_t prev_iowait = 0, prev_irq = 0, prev_softirq = 0, prev_steal = 0;
+    bool has_prev = false;
+
+    double get_usage() {
+        std::ifstream file("/proc/stat");
+        if (!file.is_open()) return 0.0;
+        std::string cpu;
+        uint64_t user = 0, nice = 0, system = 0, idle = 0, iowait = 0, irq = 0, softirq = 0, steal = 0;
+        if (!(file >> cpu >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal)) {
+            return 0.0;
+        }
+        if (!has_prev) {
+            prev_user = user; prev_nice = nice; prev_system = system; prev_idle = idle;
+            prev_iowait = iowait; prev_irq = irq; prev_softirq = softirq; prev_steal = steal;
+            has_prev = true;
+            return 0.0;
+        }
+        uint64_t prev_idle_all = prev_idle + prev_iowait;
+        uint64_t idle_all = idle + iowait;
+
+        uint64_t prev_non_idle = prev_user + prev_nice + prev_system + prev_irq + prev_softirq + prev_steal;
+        uint64_t non_idle = user + nice + system + irq + softirq + steal;
+
+        uint64_t prev_total = prev_idle_all + prev_non_idle;
+        uint64_t total = idle_all + non_idle;
+
+        uint64_t totald = (total > prev_total) ? (total - prev_total) : 0;
+        uint64_t idled = (idle_all > prev_idle_all) ? (idle_all - prev_idle_all) : 0;
+
+        prev_user = user; prev_nice = nice; prev_system = system; prev_idle = idle;
+        prev_iowait = iowait; prev_irq = irq; prev_softirq = softirq; prev_steal = steal;
+
+        if (totald == 0) return 0.0;
+        double cpu_pct = (double)(totald - idled) / (double)totald * 100.0;
+        return std::clamp(cpu_pct, 0.0, 100.0);
     }
 };
 
@@ -5138,6 +5937,10 @@ struct GPUMonitor {
             unsigned int info_count = 64;
             std::vector<nvmlProcessInfo_t> infos(info_count);
             nvmlReturn_t ret = p_nvmlDeviceGetComputeRunningProcesses(device, &info_count, infos.data());
+            if (ret == NVML_ERROR_INSUFFICIENT_SIZE && info_count > 64) {
+                infos.resize(info_count);
+                ret = p_nvmlDeviceGetComputeRunningProcesses(device, &info_count, infos.data());
+            }
             if (ret == NVML_SUCCESS) {
                 for (unsigned int i = 0; i < info_count; ++i) {
                     if (infos[i].pid == pid) {
@@ -5152,6 +5955,10 @@ struct GPUMonitor {
             unsigned int info_count = 64;
             std::vector<nvmlProcessInfo_t> infos(info_count);
             nvmlReturn_t ret = p_nvmlDeviceGetGraphicsRunningProcesses(device, &info_count, infos.data());
+            if (ret == NVML_ERROR_INSUFFICIENT_SIZE && info_count > 64) {
+                infos.resize(info_count);
+                ret = p_nvmlDeviceGetGraphicsRunningProcesses(device, &info_count, infos.data());
+            }
             if (ret == NVML_SUCCESS) {
                 for (unsigned int i = 0; i < info_count; ++i) {
                     if (infos[i].pid == pid) {
@@ -5240,6 +6047,26 @@ uint64_t get_system_used_ram_bytes() {
     return total - available; // fallback if available is 0, though unlikely
 }
 
+size_t get_active_solvers_allocated_vram() {
+    size_t solver_vram = 0;
+    if (global_solver_mpm_3d_cuda != nullptr) {
+        solver_vram += global_solver_mpm_3d_cuda->getAllocatedVRAM();
+    }
+    if (global_solver_2d_cuda != nullptr) {
+        solver_vram += global_solver_2d_cuda->getAllocatedVRAM();
+    }
+    if (global_solver_3d != nullptr) {
+        solver_vram += global_solver_3d->getAllocatedVRAM();
+    }
+    for (const auto& [mid, fem] : global_fem_solvers_cuda_float) {
+        if (fem) solver_vram += fem->getAllocatedVRAM();
+    }
+    for (const auto& [mid, fem] : global_fem_solvers_cuda_double) {
+        if (fem) solver_vram += fem->getAllocatedVRAM();
+    }
+    return solver_vram;
+}
+
 inline void get_memory_breakdown(double& ram_mb, double& vram_mb) {
     static std::mutex mem_query_mutex;
     static auto last_query = std::chrono::steady_clock::now();
@@ -5255,16 +6082,7 @@ inline void get_memory_breakdown(double& ram_mb, double& vram_mb) {
         uint64_t ram_bytes = get_process_ram_bytes();
         cached_ram_mb = static_cast<double>(ram_bytes) / (1024.0 * 1024.0);
 
-        size_t solver_vram = 0;
-        if (global_solver_mpm_3d_cuda != nullptr) {
-            solver_vram += global_solver_mpm_3d_cuda->getAllocatedVRAM();
-        }
-        if (global_solver_2d_cuda != nullptr) {
-            solver_vram += global_solver_2d_cuda->getAllocatedVRAM();
-        }
-        if (global_solver_3d != nullptr) {
-            solver_vram += global_solver_3d->getAllocatedVRAM();
-        }
+        size_t solver_vram = get_active_solvers_allocated_vram();
 
         unsigned long long nvml_vram = 0;
         if (global_gpu_monitor.get_process_vram(getpid(), nvml_vram) && nvml_vram > 0) {
@@ -5290,12 +6108,16 @@ inline void get_memory_breakdown(double& ram_mb, double& vram_mb) {
 
 void emit_resource_pulse() {
     cudaSetDevice(global_cuda_device_index);
+    global_gpu_monitor.set_device_index(global_cuda_device_index);
     static CPUMonitor cpu_monitor;
+    static SystemCPUMonitor sys_cpu_monitor;
     static uint64_t system_ram = get_system_ram_bytes();
 
     std::lock_guard<std::mutex> lock(cout_mutex);
 
     double cpu_usage = cpu_monitor.get_usage();
+    double cpu_cores = (cpu_monitor.last_dt_wall > 0.0) ? (cpu_monitor.last_dt_cpu / cpu_monitor.last_dt_wall) * 100.0 : 0.0;
+    double cpu_system = sys_cpu_monitor.get_usage();
     uint64_t ram_alloc = get_process_ram_bytes();
     
     // Default fallback values
@@ -5310,8 +6132,12 @@ void emit_resource_pulse() {
     // NVML query
     bool nvml_ok = global_gpu_monitor.get_metrics(gpu_util, gpu_temp);
     if (!nvml_ok) {
-        // If NVML is not available, we can mock it when the simulation is active
-        if (sim_running || sim2d_running || sim3d_running) {
+        // If NVML is not available, estimate when any simulation is active
+        bool any_sim = sim_running.load() || sim2d_running.load() || sim3d_running.load() ||
+                       sim_mpm_running.load() || sim_mpm_3d_running.load() ||
+                       sim_fem_3d_running.load() || sim_fsi_running.load() ||
+                       sim_fsi_3d_running.load() || sim_fem_fsi_3d_running.load();
+        if (any_sim) {
             gpu_util = total_vram > 0 ? 80.0 : 15.0; // GPU active or CPU active mock
             gpu_temp = total_vram > 0 ? 65.0 : 45.0;
         } else {
@@ -5320,47 +6146,31 @@ void emit_resource_pulse() {
         }
     }
 
+    size_t solver_vram = get_active_solvers_allocated_vram();
+    size_t blastdemon_vram = 0;
+    unsigned long long nvml_vram = 0;
+
+    if (global_gpu_monitor.get_process_vram(getpid(), nvml_vram) && nvml_vram > 0) {
+        global_last_valid_nvml_vram = nvml_vram;
+        blastdemon_vram = std::max<size_t>(nvml_vram, solver_vram);
+    } else if (global_last_valid_nvml_vram > 0) {
+        blastdemon_vram = std::max<size_t>(global_last_valid_nvml_vram, solver_vram);
+    } else {
+        blastdemon_vram = solver_vram;
+    }
+
     nlohmann::json pulse;
     pulse["type"] = "resource_pulse";
     pulse["cpu"] = cpu_usage;
+    pulse["cpu_cores"] = cpu_cores;
+    pulse["cpu_system"] = cpu_system;
+    pulse["num_cores"] = cpu_monitor.num_cores;
     pulse["ram_alloc"] = ram_alloc;
     pulse["ram_total"] = system_ram;
     pulse["ram_system"] = get_system_used_ram_bytes();
     pulse["gpu_util"] = gpu_util;
     pulse["vram_alloc"] = total_vram - free_vram;
     pulse["vram_total"] = total_vram;
-    
-    size_t solver_vram = 0;
-    if (global_solver_mpm_3d_cuda != nullptr) {
-        solver_vram += global_solver_mpm_3d_cuda->getAllocatedVRAM();
-    }
-    if (global_solver_2d_cuda != nullptr) {
-        solver_vram += global_solver_2d_cuda->getAllocatedVRAM();
-    }
-    if (global_solver_3d != nullptr) {
-        solver_vram += global_solver_3d->getAllocatedVRAM();
-    }
-
-    size_t blastdemon_vram = 0;
-    unsigned long long nvml_vram = 0;
-    static std::vector<unsigned long long> vram_window;
-
-    if (global_gpu_monitor.get_process_vram(getpid(), nvml_vram) && nvml_vram > 0) {
-        vram_window.push_back(nvml_vram);
-        if (vram_window.size() > 10) {
-            vram_window.erase(vram_window.begin());
-        }
-        unsigned long long min_vram = vram_window[0];
-        for (auto v : vram_window) {
-            if (v < min_vram) min_vram = v;
-        }
-        global_last_valid_nvml_vram = min_vram;
-        blastdemon_vram = min_vram;
-    } else if (global_last_valid_nvml_vram > 0) {
-        blastdemon_vram = std::max<size_t>(global_last_valid_nvml_vram, solver_vram);
-    } else {
-        blastdemon_vram = solver_vram;
-    }
     pulse["vram_blastdaemon"] = blastdemon_vram;
     pulse["gpu_temp"] = gpu_temp;
 
@@ -5800,7 +6610,7 @@ void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated,
         if (!global_gauges.empty()) {
             static auto last_gauge_emit_time = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
-            bool emit_gauges = is_terminated || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 250);
+            bool emit_gauges = is_terminated || (step >= 0) || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 100);
             if (emit_gauges) {
                 payload->has_gauges = true;
                 payload->gauge_times = global_gauge_times;
@@ -5858,7 +6668,7 @@ void emit_telemetry_2d(double elapsed, bool is_terminated, int step) {
         if (!global_gauges.empty()) {
             static auto last_gauge_emit_time = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
-            bool emit_gauges = is_terminated || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 250);
+            bool emit_gauges = is_terminated || (step >= 0) || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 100);
             if (emit_gauges) {
                 void flush_solver_gauges_locked();
                 flush_solver_gauges_locked();
@@ -6108,7 +6918,7 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool in
 
     auto payload = std::make_unique<TelemetryPayload>();
     payload->type = TelemetryPayload::TYPE_3D;
-    payload->elapsed = elapsed;
+    payload->elapsed = (elapsed > 0.0) ? elapsed : sim_time;
     payload->step = current_step;
     payload->dt = dt;
     payload->is_terminated = is_terminated;
@@ -6200,6 +7010,9 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool in
     }
 
     if (include_particles) {
+        if (global_solver_mpm_3d_cuda) {
+            global_solver_mpm_3d_cuda->syncParticlesToHost();
+        }
         const auto& particles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
         size_t total_particles = particles.size();
         size_t stride = 1;
@@ -6252,7 +7065,7 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
     if (cuda_fem_float) {
         auto payload = std::make_unique<TelemetryPayload>();
         payload->type = TelemetryPayload::TYPE_FEM_3D;
-        payload->elapsed = elapsed;
+        payload->elapsed = (elapsed > 0.0) ? elapsed : static_cast<double>(cuda_fem_float->getSimTime());
         payload->dt = static_cast<double>(cuda_fem_float->getLastDt());
         payload->step = (step >= 0) ? step : std::max(cuda_fem_float->getStepCount(), global_step_fem_fsi_3d.load());
         payload->fem_step = payload->step;
@@ -6354,7 +7167,7 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
     if (cuda_fem_double) {
         auto payload = std::make_unique<TelemetryPayload>();
         payload->type = TelemetryPayload::TYPE_FEM_3D;
-        payload->elapsed = elapsed;
+        payload->elapsed = (elapsed > 0.0) ? elapsed : cuda_fem_double->getSimTime();
         payload->dt = cuda_fem_double->getLastDt();
         payload->step = (step >= 0) ? step : std::max(cuda_fem_double->getStepCount(), global_step_fem_fsi_3d.load());
         payload->fem_step = payload->step;
@@ -6467,7 +7280,7 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
 
     auto payload = std::make_unique<TelemetryPayload>();
     payload->type = TelemetryPayload::TYPE_FEM_3D;
-    payload->elapsed = elapsed;
+    payload->elapsed = (elapsed > 0.0) ? elapsed : (fem_float ? static_cast<double>(fem_float->getSimTime()) : fem_double->getSimTime());
     payload->dt = fem_float ? static_cast<double>(fem_float->getLastDt()) : fem_double->getLastDt();
     int fem_s = fem_float ? fem_float->getStepCount() : fem_double->getStepCount();
     payload->step = (step >= 0) ? step : std::max(fem_s, global_step_fem_fsi_3d.load());
@@ -6653,14 +7466,14 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
     Blast::MPMSolver3D* mpm_sol = fem_float ? fem_float->getMPMSolver() : (fem_double ? fem_double->getMPMSolver() : global_solver_mpm_3d.get());
     if (mpm_sol && !mpm_sol->getParticles().empty()) {
         const auto& pts = mpm_sol->getParticles();
-        payload->mpm_particles.resize(pts.size() * 13);
+        payload->mpm_particles.resize(pts.size() * 14);
         for (size_t i = 0; i < pts.size(); ++i) {
-            payload->mpm_particles[i * 13 + 0] = pts[i].x[0];
-            payload->mpm_particles[i * 13 + 1] = pts[i].x[1];
-            payload->mpm_particles[i * 13 + 2] = pts[i].x[2];
-            payload->mpm_particles[i * 13 + 3] = pts[i].v[0];
-            payload->mpm_particles[i * 13 + 4] = pts[i].v[1];
-            payload->mpm_particles[i * 13 + 5] = pts[i].v[2];
+            payload->mpm_particles[i * 14 + 0] = pts[i].x[0];
+            payload->mpm_particles[i * 14 + 1] = pts[i].x[1];
+            payload->mpm_particles[i * 14 + 2] = pts[i].x[2];
+            payload->mpm_particles[i * 14 + 3] = pts[i].v[0];
+            payload->mpm_particles[i * 14 + 4] = pts[i].v[1];
+            payload->mpm_particles[i * 14 + 5] = pts[i].v[2];
             float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
             float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
             float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
@@ -6670,13 +7483,14 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
             if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol->getMaterialTables().size())) {
                 den = mpm_sol->getMaterialTables()[pts[i].object_id].density;
             }
-            payload->mpm_particles[i * 13 + 6] = p_vm;
-            payload->mpm_particles[i * 13 + 7] = pts[i].ep_bar;
-            payload->mpm_particles[i * 13 + 8] = den;
-            payload->mpm_particles[i * 13 + 9] = p_press;
-            payload->mpm_particles[i * 13 + 10] = pts[i].damage;
-            payload->mpm_particles[i * 13 + 11] = pts[i].has_failed ? 1.0f : 0.0f;
-            payload->mpm_particles[i * 13 + 12] = static_cast<float>(pts[i].object_id);
+            payload->mpm_particles[i * 14 + 6] = p_vm;
+            payload->mpm_particles[i * 14 + 7] = pts[i].ep_bar;
+            payload->mpm_particles[i * 14 + 8] = den;
+            payload->mpm_particles[i * 14 + 9] = p_press;
+            payload->mpm_particles[i * 14 + 10] = pts[i].damage;
+            payload->mpm_particles[i * 14 + 11] = pts[i].has_failed ? 1.0f : 0.0f;
+            payload->mpm_particles[i * 14 + 12] = static_cast<float>(pts[i].object_id);
+            payload->mpm_particles[i * 14 + 13] = static_cast<float>(pts[i].cluster_id);
         }
     }
 
@@ -6688,8 +7502,8 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
 
     auto payload = std::make_unique<TelemetryPayload>();
     payload->type = TelemetryPayload::TYPE_3D;
-    payload->elapsed = elapsed;
-    payload->dt = global_dt_3d;
+    payload->elapsed = (elapsed > 0.0) ? elapsed : global_t3d;
+    payload->dt = (global_dt_3d > 1.0e-14) ? global_dt_3d : (global_solver_3d ? global_solver_3d->computeStepSize(global_cfl_3d.load()) : 0.0);
     payload->step = (step >= 0) ? step : std::max({global_step_3d.load(), global_step_fsi_3d.load(), global_step_fem_fsi_3d.load()});
     payload->is_terminated = is_terminated;
     payload->wallclock = global_wallclock_3d.load();
@@ -6728,7 +7542,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
                 stride = static_cast<size_t>(user_stride);
             }
             size_t visual_count = (total_particles + stride - 1) / stride;
-            payload->mpm_particles.reserve(visual_count * 13);
+            payload->mpm_particles.reserve(visual_count * 14);
             for (size_t idx = 0; idx < total_particles; idx += stride) {
                 const auto& p = particles[idx];
                 float diff_xy = p.sigma[0][0] - p.sigma[1][1];
@@ -6752,6 +7566,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
                 payload->mpm_particles.push_back(p.damage);
                 payload->mpm_particles.push_back(p.has_failed ? 1.0f : 0.0f);
                 payload->mpm_particles.push_back(static_cast<float>(p.object_id));
+                payload->mpm_particles.push_back(static_cast<float>(p.cluster_id));
             }
         }
     }
@@ -6826,16 +7641,32 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
             }
             payload->fem_facet_data.resize(total_facets * 8);
             const auto& facets = fem_float->getSurfaceFacets();
-            for (size_t i = 0; i < n_facets; ++i) {
-                payload->fem_facet_data[i * 8 + 0] = static_cast<float>(facets[i].node_ids[0]);
-                payload->fem_facet_data[i * 8 + 1] = static_cast<float>(facets[i].node_ids[1]);
-                payload->fem_facet_data[i * 8 + 2] = static_cast<float>(facets[i].node_ids[2]);
-                payload->fem_facet_data[i * 8 + 3] = static_cast<float>(facets[i].node_ids[3]);
-                payload->fem_facet_data[i * 8 + 4] = facets[i].normal[0];
-                payload->fem_facet_data[i * 8 + 5] = facets[i].normal[1];
-                payload->fem_facet_data[i * 8 + 6] = facets[i].normal[2];
-                payload->fem_facet_data[i * 8 + 7] = facets[i].area;
-                   for (size_t t = 0; t < trusses.size(); ++t) {
+            const auto& elements = fem_float->getElements();
+            for (size_t f = 0; f < n_facets; ++f) {
+                const auto& facet = facets[f];
+                int elem_idx = facet.element_id;
+                float vm = 0.0f, ep = 0.0f, press = 0.0f, dmg = 0.0f;
+                if (elem_idx >= 0 && elem_idx < (int)elements.size()) {
+                    const auto& elem = elements[elem_idx];
+                    float s00 = elem.sigma[0][0], s11 = elem.sigma[1][1], s22 = elem.sigma[2][2];
+                    float s01 = elem.sigma[0][1], s02 = elem.sigma[0][2], s12 = elem.sigma[1][2];
+                    press = -(s00 + s11 + s22) / 3.0f;
+                    float dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
+                    float vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0f * (s01 * s01 + s02 * s02 + s12 * s12);
+                    vm = std::sqrt(std::max(0.0f, 1.5f * vm_sq));
+                    ep = elem.ep_bar;
+                    dmg = elem.damage;
+                }
+                payload->fem_facet_data[f * 8 + 0] = static_cast<float>(facet.node_ids[0]);
+                payload->fem_facet_data[f * 8 + 1] = static_cast<float>(facet.node_ids[1]);
+                payload->fem_facet_data[f * 8 + 2] = static_cast<float>(facet.node_ids[2]);
+                payload->fem_facet_data[f * 8 + 3] = static_cast<float>(facet.node_ids[3]);
+                payload->fem_facet_data[f * 8 + 4] = vm;
+                payload->fem_facet_data[f * 8 + 5] = ep;
+                payload->fem_facet_data[f * 8 + 6] = press;
+                payload->fem_facet_data[f * 8 + 7] = dmg;
+            }
+            for (size_t t = 0; t < trusses.size(); ++t) {
                 const auto& tr = trusses[t];
                 payload->fem_facet_data[(n_facets + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
                 payload->fem_facet_data[(n_facets + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
@@ -6891,15 +7722,30 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
             }
             payload->fem_facet_data.resize(total_facets * 8);
             const auto& facets = fem_double->getSurfaceFacets();
-            for (size_t i = 0; i < n_facets; ++i) {
-                payload->fem_facet_data[i * 8 + 0] = static_cast<float>(facets[i].node_ids[0]);
-                payload->fem_facet_data[i * 8 + 1] = static_cast<float>(facets[i].node_ids[1]);
-                payload->fem_facet_data[i * 8 + 2] = static_cast<float>(facets[i].node_ids[2]);
-                payload->fem_facet_data[i * 8 + 3] = static_cast<float>(facets[i].node_ids[3]);
-                payload->fem_facet_data[i * 8 + 4] = static_cast<float>(facets[i].normal[0]);
-                payload->fem_facet_data[i * 8 + 5] = static_cast<float>(facets[i].normal[1]);
-                payload->fem_facet_data[i * 8 + 6] = static_cast<float>(facets[i].normal[2]);
-                payload->fem_facet_data[i * 8 + 7] = static_cast<float>(facets[i].area);
+            const auto& elements = fem_double->getElements();
+            for (size_t f = 0; f < n_facets; ++f) {
+                const auto& facet = facets[f];
+                int elem_idx = facet.element_id;
+                float vm = 0.0f, ep = 0.0f, press = 0.0f, dmg = 0.0f;
+                if (elem_idx >= 0 && elem_idx < (int)elements.size()) {
+                    const auto& elem = elements[elem_idx];
+                    float s00 = static_cast<float>(elem.sigma[0][0]), s11 = static_cast<float>(elem.sigma[1][1]), s22 = static_cast<float>(elem.sigma[2][2]);
+                    float s01 = static_cast<float>(elem.sigma[0][1]), s02 = static_cast<float>(elem.sigma[0][2]), s12 = static_cast<float>(elem.sigma[1][2]);
+                    press = -(s00 + s11 + s22) / 3.0f;
+                    float dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
+                    float vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0f * (s01 * s01 + s02 * s02 + s12 * s12);
+                    vm = std::sqrt(std::max(0.0f, 1.5f * vm_sq));
+                    ep = static_cast<float>(elem.ep_bar);
+                    dmg = static_cast<float>(elem.damage);
+                }
+                payload->fem_facet_data[f * 8 + 0] = static_cast<float>(facet.node_ids[0]);
+                payload->fem_facet_data[f * 8 + 1] = static_cast<float>(facet.node_ids[1]);
+                payload->fem_facet_data[f * 8 + 2] = static_cast<float>(facet.node_ids[2]);
+                payload->fem_facet_data[f * 8 + 3] = static_cast<float>(facet.node_ids[3]);
+                payload->fem_facet_data[f * 8 + 4] = vm;
+                payload->fem_facet_data[f * 8 + 5] = ep;
+                payload->fem_facet_data[f * 8 + 6] = press;
+                payload->fem_facet_data[f * 8 + 7] = dmg;
             }
             for (size_t t = 0; t < trusses.size(); ++t) {
                 const auto& tr = trusses[t];
@@ -6926,7 +7772,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
                 payload->fem_facet_data[(beam_offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
                 payload->fem_facet_data[(beam_offset + b) * 8 + 6] = moment;
                 payload->fem_facet_data[(beam_offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
-            }      }
+            }
         }
         payload->fem_v_max = fem_double->getMaxVelocity();
         payload->fem_sig_max = fem_double->getMaxVonMisesStress();
@@ -6938,7 +7784,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
         if (!global_gauges.empty()) {
             static auto last_gauge_emit_time = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
-            bool emit_gauges = is_terminated || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 250);
+            bool emit_gauges = is_terminated || (step >= 0) || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 100);
             if (emit_gauges) {
                 void flush_solver_gauges_locked();
                 flush_solver_gauges_locked();
@@ -7027,40 +7873,19 @@ MultiMat::MaterialSet parseMaterialSet(const nlohmann::json& msg) {
     } else if (composition == "RDX" || composition == "Hexogen" || composition == "Cyclonite") {
         matSet = MultiMat::RDX;
     } else if (composition == "C-4" || composition == "C4" || composition == "Composition 4" || composition == "Composition C-4") {
-        matSet.products = { 596.22e9, 13.75e9, 4.50, 1.50, 0.32, 1601.0, 1000.0, 300.0 };
-        matSet.unreacted = { 770.0e9 * (1601.0 / 1800.0), -4.8e9 * (1601.0 / 1800.0), 10.5, 1.1, 0.89, 1601.0, 1000.0, 300.0 };
-        matSet.det_vel = 8193.0;
-        matSet.detonation_energy = 5.60e6;
+        matSet = MultiMat::C4;
     } else if (composition == "Comp B" || composition == "Composition B" || composition == "Comp-B") {
-        matSet.products = { 524.23e9, 7.678e9, 4.20, 1.10, 0.34, 1717.0, 1000.0, 300.0 };
-        matSet.unreacted = { 770.0e9 * (1717.0 / 1800.0), -4.8e9 * (1717.0 / 1800.0), 10.5, 1.1, 0.89, 1717.0, 1000.0, 300.0 };
-        matSet.det_vel = 7980.0;
-        matSet.detonation_energy = 5.19e6;
+        matSet = MultiMat::CompB;
     } else if (composition == "HMX" || composition == "Octogen" || composition == "EDC37") {
-        matSet.products = { 778.3e9, 7.071e9, 4.20, 1.00, 0.30, 1890.0, 1000.0, 300.0 };
-        matSet.unreacted = { 770.0e9 * (1890.0 / 1800.0), -4.8e9 * (1890.0 / 1800.0), 10.5, 1.1, 0.89, 1890.0, 1000.0, 300.0 };
-        matSet.det_vel = 9110.0;
-        matSet.detonation_energy = 6.20e6;
+        matSet = MultiMat::HMX;
     } else if (composition == "PBX 9501" || composition == "PBX-9501" || composition == "PBX9501") {
-        matSet.products = { 852.4e9, 18.02e9, 4.55, 1.30, 0.38, 1830.0, 1000.0, 300.0 };
-        matSet.unreacted = { 770.0e9 * (1830.0 / 1800.0), -4.8e9 * (1830.0 / 1800.0), 10.5, 1.1, 0.89, 1830.0, 1000.0, 300.0 };
-        matSet.det_vel = 8800.0;
-        matSet.detonation_energy = 5.50e6;
+        matSet = MultiMat::PBX9501;
     } else if (composition == "PBX 9502" || composition == "PBX-9502" || composition == "PBX9502") {
-        matSet.products = { 732.0e9, 7.50e9, 4.20, 1.10, 0.30, 1895.0, 1000.0, 300.0 };
-        matSet.unreacted = { 770.0e9 * (1895.0 / 1800.0), -4.8e9 * (1895.0 / 1800.0), 10.5, 1.1, 0.89, 1895.0, 1000.0, 300.0 };
-        matSet.det_vel = 7700.0;
-        matSet.detonation_energy = 4.30e6;
+        matSet = MultiMat::PBX9502;
     } else if (composition == "Tritonal") {
-        matSet.products = { 390.0e9, 5.0e9, 4.20, 0.95, 0.33, 1720.0, 1000.0, 300.0 };
-        matSet.unreacted = { 770.0e9 * (1720.0 / 1800.0), -4.8e9 * (1720.0 / 1800.0), 10.5, 1.1, 0.89, 1720.0, 1000.0, 300.0 };
-        matSet.det_vel = 6700.0;
-        matSet.detonation_energy = 5.10e6;
+        matSet = MultiMat::Tritonal;
     } else if (composition == "ANFO") {
-        matSet.products = { 100.0e9, 2.0e9, 4.00, 0.80, 0.30, 850.0, 1000.0, 300.0 };
-        matSet.unreacted = { 770.0e9 * (850.0 / 1800.0), -4.8e9 * (850.0 / 1800.0), 10.5, 1.1, 0.89, 850.0, 1000.0, 300.0 };
-        matSet.det_vel = 4200.0;
-        matSet.detonation_energy = 3.90e6;
+        matSet = MultiMat::ANFO;
     } else if (composition == "Nitromethane" || composition == "NM" || composition == "CH3NO2") {
         matSet = MultiMat::Nitromethane;
     } else if (composition == "TNT" || composition == "Trinitrotoluene") {
@@ -7085,13 +7910,208 @@ MultiMat::MaterialSet parseMaterialSet(const nlohmann::json& msg) {
     if (msg.contains("det_vel")) matSet.det_vel = get_json_double(msg, "det_vel", matSet.det_vel);
     if (msg.contains("detonation_energy")) matSet.detonation_energy = get_json_double(msg, "detonation_energy", matSet.detonation_energy);
 
+    // Afterburn parameters override
+    if (msg.contains("afterburn_enabled")) matSet.afterburn.enabled = get_json_bool(msg, "afterburn_enabled", matSet.afterburn.enabled);
+    if (msg.contains("afterburn_energy")) matSet.afterburn.Q_ab = get_json_double(msg, "afterburn_energy", matSet.afterburn.Q_ab);
+    if (msg.contains("afterburn_fuel_fraction")) matSet.afterburn.f_fuel = get_json_double(msg, "afterburn_fuel_fraction", matSet.afterburn.f_fuel);
+    if (msg.contains("afterburn_stoich_ratio")) matSet.afterburn.s_ratio = get_json_double(msg, "afterburn_stoich_ratio", matSet.afterburn.s_ratio);
+    if (msg.contains("afterburn_ignition_temp")) matSet.afterburn.T_ign = get_json_double(msg, "afterburn_ignition_temp", matSet.afterburn.T_ign);
+    if (msg.contains("afterburn_tau_chem")) matSet.afterburn.tau_chem = get_json_double(msg, "afterburn_tau_chem", matSet.afterburn.tau_chem);
+    if (msg.contains("afterburn_c_mix")) matSet.afterburn.C_mix = get_json_double(msg, "afterburn_c_mix", matSet.afterburn.C_mix);
+    if (msg.contains("afterburn_c_edc")) matSet.afterburn.C_edc = get_json_double(msg, "afterburn_c_edc", matSet.afterburn.C_edc);
+    if (msg.contains("afterburn_tau_expansion")) matSet.afterburn.tau_expansion = get_json_double(msg, "afterburn_tau_expansion", matSet.afterburn.tau_expansion);
+    else if (msg.contains("tau_expansion")) matSet.afterburn.tau_expansion = get_json_double(msg, "tau_expansion", matSet.afterburn.tau_expansion);
+    else if (msg.contains("t_expansion")) matSet.afterburn.tau_expansion = get_json_double(msg, "t_expansion", matSet.afterburn.tau_expansion);
+    if (msg.contains("afterburn_ambient_o2_fraction")) matSet.afterburn.ambient_o2_fraction = get_json_double(msg, "afterburn_ambient_o2_fraction", matSet.afterburn.ambient_o2_fraction);
+    else if (msg.contains("ambient_o2_fraction")) matSet.afterburn.ambient_o2_fraction = get_json_double(msg, "ambient_o2_fraction", matSet.afterburn.ambient_o2_fraction);
+    else if (msg.contains("ambient_preset") || msg.contains("preset")) {
+        std::string amb_pre = msg.value("ambient_preset", msg.value("preset", ""));
+        std::string amb_lower = amb_pre;
+        std::transform(amb_lower.begin(), amb_lower.end(), amb_lower.begin(), ::tolower);
+        if (amb_lower.find("nitrogen") != std::string::npos || amb_lower.find("n2") != std::string::npos ||
+            amb_lower.find("argon") != std::string::npos || amb_lower.find("helium") != std::string::npos ||
+            amb_lower.find("noble") != std::string::npos || amb_lower.find("vacuum") != std::string::npos) {
+            matSet.afterburn.ambient_o2_fraction = 0.0;
+        } else if (amb_lower.find("oxygen") != std::string::npos || amb_lower.find("o2") != std::string::npos) {
+            matSet.afterburn.ambient_o2_fraction = 1.0;
+        } else if (amb_lower.find("air") != std::string::npos) {
+            matSet.afterburn.ambient_o2_fraction = 0.233;
+        }
+    }
+    if (msg.contains("afterburn_delay")) matSet.afterburn.induction_delay = get_json_double(msg, "afterburn_delay", matSet.afterburn.induction_delay);
+    else if (msg.contains("afterburn_induction_delay")) matSet.afterburn.induction_delay = get_json_double(msg, "afterburn_induction_delay", matSet.afterburn.induction_delay);
+
     MultiMat::initializePrecalculatedTerms(matSet);
     return matSet;
 }
 
+static void populate_mpm_objects_from_json(const nlohmann::json& msg, bool use_gpu, const std::string& scope_tag = "mpm_3d") {
+    (void)use_gpu;
+    if (!msg.contains("mpm_objects") || !msg["mpm_objects"].is_array() || msg["mpm_objects"].empty()) {
+        return;
+    }
+    int domain_ppc = get_json_int(msg, "ppc", 8);
+    std::string domain_p_dist_str = msg.value("particle_distribution", "Cartesian");
+    std::string domain_b_fill_str = msg.value("boundary_filling", "Stairstepped");
+
+    int obj_idx = 0;
+    for (const auto& obj : msg["mpm_objects"]) {
+        obj_idx++;
+        std::string shape = obj.value("shape_type", obj.value("shape", "Box"));
+        float pos_x = static_cast<float>(get_json_double(obj, "pos_x", 0.0));
+        float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.0));
+        float pos_z = static_cast<float>(get_json_double(obj, "pos_z", 0.0));
+        float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
+        float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
+        float vel_z = static_cast<float>(get_json_double(obj, "vel_z", 0.0));
+        float ang_x = static_cast<float>(get_json_double(obj, "angular_vel_x", 0.0));
+        float ang_y = static_cast<float>(get_json_double(obj, "angular_vel_y", 0.0));
+        float ang_z = static_cast<float>(get_json_double(obj, "angular_vel_z", 0.0));
+
+        float density = static_cast<float>(get_json_double(obj, "density", 7850.0));
+        float E = static_cast<float>(get_json_double(obj, "E", 210.0e9));
+        float nu = static_cast<float>(get_json_double(obj, "nu", 0.3));
+        float yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
+        float hardening = static_cast<float>(get_json_double(obj, "tangent_modulus", 1.0e9));
+        float failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.25));
+        float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
+
+        int ppc = get_json_int(obj, "ppc", domain_ppc);
+        std::string p_dist_str = obj.value("particle_distribution", domain_p_dist_str);
+        Blast::MPMParticleDistribution particle_dist = Blast::MPMParticleDistribution::Cartesian;
+        if (p_dist_str == "Hexagonal") {
+            particle_dist = Blast::MPMParticleDistribution::Hexagonal;
+        }
+
+        std::string b_fill_str = obj.value("boundary_filling", domain_b_fill_str);
+        Blast::MPMBoundaryFilling boundary_fill = Blast::MPMBoundaryFilling::Stairstepped;
+        if (b_fill_str == "Partial") {
+            boundary_fill = Blast::MPMBoundaryFilling::Partial;
+        }
+
+        float rot_x = static_cast<float>(get_json_double(obj, "rot_x", 0.0));
+        float rot_y = static_cast<float>(get_json_double(obj, "rot_y", 0.0));
+        float rot_z = static_cast<float>(get_json_double(obj, "rot_z", 0.0));
+
+        if (shape == "Sphere") {
+            float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+            float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
+            if (global_solver_mpm_3d_cuda) {
+                global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+            } else if (global_solver_mpm_3d) {
+                global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+            }
+        } else if (shape == "Cylinder") {
+            float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+            float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
+            float height = static_cast<float>(get_json_double(obj, "height", 0.2));
+            if (global_solver_mpm_3d_cuda) {
+                global_solver_mpm_3d_cuda->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+            } else if (global_solver_mpm_3d) {
+                global_solver_mpm_3d->addCylinderObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, height, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+            }
+        } else if (shape == "STL") {
+            std::string stl_file = obj.contains("stl_file") ? obj["stl_file"].get<std::string>() : "";
+            float scale_x = static_cast<float>(get_json_double(obj, "scale_x", 1.0));
+            float scale_y = static_cast<float>(get_json_double(obj, "scale_y", 1.0));
+            float scale_z = static_cast<float>(get_json_double(obj, "scale_z", 1.0));
+            std::string origin_mode = obj.value("origin_mode", "Center");
+            std::string voxelization_method = obj.value("voxelization_method", "watertight_raycast");
+            if (global_solver_mpm_3d_cuda) {
+                global_solver_mpm_3d_cuda->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, voxelization_method, rot_x, rot_y, rot_z, origin_mode);
+            } else if (global_solver_mpm_3d) {
+                global_solver_mpm_3d->addSTLObject(obj_idx, stl_file, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, voxelization_method, rot_x, rot_y, rot_z, origin_mode);
+            }
+        } else {
+            float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
+            float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
+            float size_z = static_cast<float>(get_json_double(obj, "size_z", 0.2));
+            if (global_solver_mpm_3d_cuda) {
+                global_solver_mpm_3d_cuda->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+            } else if (global_solver_mpm_3d) {
+                global_solver_mpm_3d->addBoxObject(obj_idx, pos_x, pos_y, pos_z, size_x, size_y, size_z, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+            }
+        }
+    }
+
+    // Phase 2: Material tables for all MPM objects
+    obj_idx = 0;
+    for (const auto& obj : msg["mpm_objects"]) {
+        obj_idx++;
+        Blast::MaterialTable3D parsed_mat = parseMaterialTable3D(obj);
+        std::string mat_model_str = obj.value("material_model", "Hypoelastic");
+        if (global_solver_mpm_3d_cuda) {
+            auto& mat_tables = global_solver_mpm_3d_cuda->getMaterialTables();
+            if (obj_idx >= static_cast<int>(mat_tables.size())) {
+                mat_tables.resize(obj_idx + 1);
+            }
+            mat_tables[obj_idx] = parsed_mat;
+        }
+        if (global_solver_mpm_3d) {
+            auto& mat_tables = global_solver_mpm_3d->getMaterialTables();
+            if (obj_idx >= static_cast<int>(mat_tables.size())) {
+                mat_tables.resize(obj_idx + 1);
+            }
+            mat_tables[obj_idx] = parsed_mat;
+        }
+    }
+
+    // Phase 3: Material heterogeneity
+    obj_idx = 0;
+    for (const auto& obj : msg["mpm_objects"]) {
+        obj_idx++;
+        (void)obj;
+        if (global_solver_mpm_3d_cuda) global_solver_mpm_3d_cuda->initMaterialHeterogeneity(obj_idx);
+        if (global_solver_mpm_3d) global_solver_mpm_3d->initMaterialHeterogeneity(obj_idx);
+    }
+
+    // Phase 4: Contact mapping
+    std::unordered_map<std::string, int> mat_name_to_id;
+    std::vector<int> obj_to_mat;
+    obj_to_mat.push_back(0);
+    int next_mat_id = 0;
+    for (const auto& obj : msg["mpm_objects"]) {
+        std::string m_name = obj.value("material_name", "");
+        if (m_name.empty()) m_name = obj.value("material_id", "mat_" + std::to_string(obj_to_mat.size()));
+        auto it = mat_name_to_id.find(m_name);
+        if (it == mat_name_to_id.end()) {
+            int new_id = next_mat_id++;
+            mat_name_to_id[m_name] = new_id;
+            obj_to_mat.push_back(new_id);
+        } else {
+            obj_to_mat.push_back(it->second);
+        }
+    }
+    int num_unique_materials = std::max(1, next_mat_id);
+    Blast::MPMContactMethod contact_method = Blast::MPMContactMethod::SingleVelocity;
+    if (global_solver_mpm_3d_cuda) {
+        global_solver_mpm_3d_cuda->setContactMethod(contact_method);
+        global_solver_mpm_3d_cuda->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
+        global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
+        global_solver_mpm_3d_cuda->syncToDevice();
+    } else if (global_solver_mpm_3d) {
+        global_solver_mpm_3d->setContactMethod(contact_method);
+        global_solver_mpm_3d->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
+        global_solver_mpm_3d->particleToGrid();
+    }
+
+    size_t n_p = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles().size() : (global_solver_mpm_3d ? global_solver_mpm_3d->getParticles().size() : 0);
+    emit_kernel_log("SYSTEM", "Initialized " + std::to_string(n_p) + " MPM particles (" + std::to_string(obj_idx) + " objects) for coupled 3-way multi-physics.", 0.0, scope_tag, 0);
+}
+
+static Blast::MPMBoundaryCondition3D parse_bc_mpm3d(const std::string& str) {
+    if (str == "Sticky" || str == "STICKY") return Blast::MPMBoundaryCondition3D::Sticky;
+    if (str == "FreeSlip" || str == "Free-Slip" || str == "Slip" || str == "SLIP") return Blast::MPMBoundaryCondition3D::FreeSlip;
+    if (str == "Reflecting" || str == "REFLECTING" || str == "Reflective" || str == "REFLECTIVE" || str == "Wall" || str == "WALL") return Blast::MPMBoundaryCondition3D::Reflecting;
+    if (str == "Lysmer" || str == "LysmerDashpot" || str == "Absorbing" || str == "NonReflecting" || str == "Viscous" || str == "Transmitting" || str == "TRANSMISSIVE" || str == "Outflow" || str == "OUTFLOW" || str == "Riemann" || str == "RIEMANN" || str == "OUTFLOW_RIEMANN" || str == "Neumann") return Blast::MPMBoundaryCondition3D::LysmerDashpot;
+    if (str == "Terminate" || str == "TERMINATE") return Blast::MPMBoundaryCondition3D::Terminate;
+    return Blast::MPMBoundaryCondition3D::FreeSlip;
+}
+
 static void ensure_mpm_debris_solver(const nlohmann::json& msg_obj, bool use_gpu = false) {
     bool convert_mpm = get_json_bool(msg_obj, "convert_failed_elements_to_mpm", false);
-    if (convert_mpm) {
+    bool has_mpm_objects = (msg_obj.contains("mpm_objects") && msg_obj["mpm_objects"].is_array() && !msg_obj["mpm_objects"].empty());
+    if (convert_mpm || has_mpm_objects) {
         float xmin_d = 0.0f, ymin_d = 0.0f, zmin_d = 0.0f;
         float cs = 0.02f;
         int nx = 32, ny = 32, nz = 32;
@@ -7118,27 +8138,34 @@ static void ensure_mpm_debris_solver(const nlohmann::json& msg_obj, bool use_gpu
             nz = std::max(8, static_cast<int>(std::round((zmax_d - zmin_d) / cs)));
         }
 
+        auto mpm_bc1 = parse_bc_mpm3d(msg_obj.value("bc_x_min", "Reflecting"));
+        auto mpm_bc2 = parse_bc_mpm3d(msg_obj.value("bc_x_max", "Transmitting"));
+        auto mpm_bc3 = parse_bc_mpm3d(msg_obj.value("bc_y_min", "Reflecting"));
+        auto mpm_bc4 = parse_bc_mpm3d(msg_obj.value("bc_y_max", "Transmitting"));
+        auto mpm_bc5 = parse_bc_mpm3d(msg_obj.value("bc_z_min", "Reflecting"));
+        auto mpm_bc6 = parse_bc_mpm3d(msg_obj.value("bc_z_max", "Transmitting"));
+
         if (!global_solver_mpm_3d) {
             global_solver_mpm_3d = std::make_unique<Blast::MPMSolver3D>();
             global_solver_mpm_3d->initializeGrid(nx, ny, nz, cs, cs, cs, xmin_d, ymin_d, zmin_d);
-            global_solver_mpm_3d->setBoundaryConditions(
-                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate,
-                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate,
-                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate
-            );
+            global_solver_mpm_3d->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
+        } else {
+            global_solver_mpm_3d->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
         }
 
         if (use_gpu && !global_solver_mpm_3d_cuda) {
             global_solver_mpm_3d_cuda = std::make_unique<Blast::MPMSolver3DCUDA>();
             global_solver_mpm_3d_cuda->initializeGrid(nx, ny, nz, cs, cs, cs, xmin_d, ymin_d, zmin_d);
-            global_solver_mpm_3d_cuda->setBoundaryConditions(
-                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate,
-                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate,
-                Blast::MPMBoundaryCondition3D::Terminate, Blast::MPMBoundaryCondition3D::Terminate
-            );
-            emit_kernel_log("INFO", "Auto-initialized background GPU CUDA MPM debris solver for failed FEM conversion.", 0.0, "fem_3d", 0);
+            global_solver_mpm_3d_cuda->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
+            emit_kernel_log("INFO", "Auto-initialized background GPU CUDA MPM solver for coupled multi-physics / debris.", 0.0, "fem_3d", 0);
+        } else if (use_gpu && global_solver_mpm_3d_cuda) {
+            global_solver_mpm_3d_cuda->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
         } else if (!use_gpu) {
-            emit_kernel_log("INFO", "Auto-initialized background CPU MPM debris solver for failed FEM conversion.", 0.0, "fem_3d", 0);
+            emit_kernel_log("INFO", "Auto-initialized background CPU MPM solver for coupled multi-physics / debris.", 0.0, "fem_3d", 0);
+        }
+
+        if (has_mpm_objects) {
+            populate_mpm_objects_from_json(msg_obj, use_gpu, "fem_3d");
         }
     }
 }
@@ -7168,7 +8195,7 @@ int main() {
             try {
                 nlohmann::json msg = nlohmann::json::parse(line);
                 std::string command = msg.value("command", "");
-                if (command.rfind("INIT", 0) == 0 || command.rfind("REMAP", 0) == 0) {
+                if (command.rfind("INIT", 0) == 0 || command.rfind("REMAP", 0) == 0 || command.rfind("TERMINATE", 0) == 0) {
                     global_last_valid_nvml_vram = 0;
                 }
                 if (msg.contains("modelId")) {
@@ -7190,9 +8217,14 @@ int main() {
                     global_step_1d = 0;
                     global_wallclock_1d = 0.0;
 
-                    int n_cells = msg.at("n_cells").get<int>();
-                    double radius = msg.at("domain_radius").get<double>();
-                    double gamma = msg.at("gamma").get<double>();
+                    if (!msg.contains("n_cells") || !msg.contains("domain_radius") || !msg.contains("gamma")) {
+                        std::cerr << "[BlastSolver] [ERROR] Invalid 1D INIT payload: missing n_cells, domain_radius, or gamma." << std::endl;
+                        emit_kernel_log("ERROR", "1D CFD initialization failed: missing mesh/domain parameters (n_cells, domain_radius, gamma)", 0.0, "1d");
+                        continue;
+                    }
+                    int n_cells = msg["n_cells"].get<int>();
+                    double radius = msg["domain_radius"].get<double>();
+                    double gamma = msg["gamma"].get<double>();
 
                     global_num_cells = n_cells;
                     global_t = 0.0;
@@ -7254,6 +8286,7 @@ int main() {
                         if (!has_solver) {
                             missing_elements.push_back("CFDSolver node");
                         } else {
+                            // Check direct connections to CFDSolver or legacy connections via ThePainter
                             std::string painter_id = "";
                             for (const auto& conn : msg["connections"]) {
                                 if (conn.value("toNode", "") == solver_id && conn.value("toPort", "") == "in") {
@@ -7261,73 +8294,97 @@ int main() {
                                     break;
                                 }
                             }
-                            if (painter_id.empty()) {
-                                missing_elements.push_back("Connection from ThePainter to CFDSolver");
-                            } else {
-                                bool has_painter = false;
-                                for (const auto& node : msg["nodes"]) {
-                                    if (node.value("id", "") == painter_id && node.value("type", "") == "ThePainter") {
-                                        has_painter = true;
-                                        break;
+
+                            bool has_mesh = false;
+                            bool has_air = false;
+                            bool has_explosive = false;
+                            std::string charge_id = "";
+
+                            // 1. Check direct connections to CFDSolver
+                            for (const auto& conn : msg["connections"]) {
+                                if (conn.value("toNode", "") == solver_id) {
+                                    std::string port = conn.value("toPort", "");
+                                    std::string from = conn.value("fromNode", "");
+                                    if (port == "mesh") {
+                                        for (const auto& n : msg["nodes"]) {
+                                            if (n.value("id", "") == from && n.value("type", "") == "DomainMesh") {
+                                                has_mesh = true;
+                                            }
+                                        }
+                                    } else if (port == "air") {
+                                        for (const auto& n : msg["nodes"]) {
+                                            if (n.value("id", "") == from && n.value("type", "") == "Material") {
+                                                auto params = n.value("parameters", nlohmann::json::object());
+                                                std::string mat_type = params.value("material_type", "");
+                                                std::string mat_model = params.value("material_model", "");
+                                                if (mat_type == "Air" || (mat_model == "Ideal Gas" && mat_type != "Ideal Gas Charge")) {
+                                                    has_air = true;
+                                                }
+                                            }
+                                        }
+                                    } else if (port == "charge" || port == "explosive") {
+                                        for (const auto& n : msg["nodes"]) {
+                                            if (n.value("id", "") == from && n.value("type", "") == "Charge1D") {
+                                                has_explosive = true;
+                                                charge_id = from;
+                                            }
+                                        }
                                     }
                                 }
-                                if (!has_painter) {
-                                    missing_elements.push_back("ThePainter node");
-                                } else {
-                                    bool has_mesh = false;
-                                    bool has_air = false;
-                                    bool has_explosive = false;
-                                    std::string charge_id = "";
-                                    for (const auto& conn : msg["connections"]) {
-                                        if (conn.value("toNode", "") == painter_id) {
-                                            std::string port = conn.value("toPort", "");
-                                            std::string from = conn.value("fromNode", "");
-                                            if (port == "mesh") {
-                                                for (const auto& n : msg["nodes"]) {
-                                                    if (n.value("id", "") == from && n.value("type", "") == "DomainMesh") {
-                                                        has_mesh = true;
+                            }
+
+                            // 2. Fallback: check legacy connections via ThePainter
+                            if ((!has_mesh || !has_air || !has_explosive) && !painter_id.empty()) {
+                                for (const auto& conn : msg["connections"]) {
+                                    if (conn.value("toNode", "") == painter_id) {
+                                        std::string port = conn.value("toPort", "");
+                                        std::string from = conn.value("fromNode", "");
+                                        if (port == "mesh") {
+                                            for (const auto& n : msg["nodes"]) {
+                                                if (n.value("id", "") == from && n.value("type", "") == "DomainMesh") {
+                                                    has_mesh = true;
+                                                }
+                                            }
+                                        } else if (port == "air") {
+                                            for (const auto& n : msg["nodes"]) {
+                                                if (n.value("id", "") == from && n.value("type", "") == "Material") {
+                                                    auto params = n.value("parameters", nlohmann::json::object());
+                                                    std::string mat_type = params.value("material_type", "");
+                                                    std::string mat_model = params.value("material_model", "");
+                                                    if (mat_type == "Air" || (mat_model == "Ideal Gas" && mat_type != "Ideal Gas Charge")) {
+                                                        has_air = true;
                                                     }
                                                 }
-                                            } else if (port == "air") {
-                                                for (const auto& n : msg["nodes"]) {
-                                                    if (n.value("id", "") == from && n.value("type", "") == "Material") {
-                                                        auto params = n.value("parameters", nlohmann::json::object());
-                                                        std::string mat_type = params.value("material_type", "");
-                                                        std::string mat_model = params.value("material_model", "");
-                                                        if (mat_type == "Air" || (mat_model == "Ideal Gas" && mat_type != "Ideal Gas Charge")) {
-                                                            has_air = true;
-                                                        }
-                                                    }
-                                                }
-                                            } else if (port == "explosive") {
-                                                for (const auto& n : msg["nodes"]) {
-                                                    if (n.value("id", "") == from && n.value("type", "") == "Charge1D") {
-                                                        has_explosive = true;
-                                                        charge_id = from;
-                                                    }
+                                            }
+                                        } else if (port == "explosive") {
+                                            for (const auto& n : msg["nodes"]) {
+                                                if (n.value("id", "") == from && n.value("type", "") == "Charge1D") {
+                                                    has_explosive = true;
+                                                    charge_id = from;
                                                 }
                                             }
                                         }
                                     }
-                                    if (!has_mesh) missing_elements.push_back("DomainMesh connected to ThePainter");
-                                    if (!has_air) missing_elements.push_back("Material (Air) connected to ThePainter");
-                                    if (!has_explosive) {
-                                        missing_elements.push_back("Charge1D connected to ThePainter");
-                                    } else if (!charge_id.empty()) {
-                                        bool has_charge_material = false;
-                                        for (const auto& conn : msg["connections"]) {
-                                            if (conn.value("toNode", "") == charge_id && conn.value("toPort", "") == "material") {
-                                                std::string from = conn.value("fromNode", "");
-                                                for (const auto& n : msg["nodes"]) {
-                                                    if (n.value("id", "") == from && n.value("type", "") == "Material") {
-                                                        has_charge_material = true;
-                                                    }
-                                                }
+                                }
+                            }
+
+                            if (!has_mesh) missing_elements.push_back("DomainMesh connected to CFDSolver");
+                            if (!has_air) missing_elements.push_back("Material (Air) connected to CFDSolver");
+                            if (!has_explosive) {
+                                missing_elements.push_back("Charge1D connected to CFDSolver");
+                            } else if (!charge_id.empty()) {
+                                bool has_charge_material = false;
+                                for (const auto& conn : msg["connections"]) {
+                                    if (conn.value("toNode", "") == charge_id && conn.value("toPort", "") == "material") {
+                                        std::string from = conn.value("fromNode", "");
+                                        for (const auto& n : msg["nodes"]) {
+                                            if (n.value("id", "") == from && n.value("type", "") == "Material") {
+                                                has_charge_material = true;
                                             }
                                         }
-                                        if (!has_charge_material) missing_elements.push_back("Material connected to Charge1D");
                                     }
                                 }
+                                if (!has_charge_material) missing_elements.push_back("Material connected to Charge1D");
                             }
                         }
                     }
@@ -7339,10 +8396,10 @@ int main() {
                         emit_kernel_log("WARNING", warn_msg, global_t, "1d");
                     }
 
-                    double explosive_radius = msg.at("explosive_radius").get<double>();
-                    double high_rho         = msg.at("rho").get<double>();
-                    double ambient_rho      = msg.at("ambient_rho").get<double>();
-                    double ambient_p        = msg.at("atm_pressure").get<double>();
+                    double explosive_radius = msg.value("explosive_radius", msg.value("charge_radius", 0.05));
+                    double high_rho         = msg.value("rho", 1630.0);
+                    double ambient_rho      = msg.value("ambient_rho", 1.225);
+                    double ambient_p        = msg.value("atm_pressure", 101325.0);
 
                     MultiMat::MaterialSet matSet = parseMaterialSet(msg);
                     global_solver->setMaterialParameters(matSet);
@@ -7362,7 +8419,7 @@ int main() {
 
                 } else if (command == "STEP") {
                     if (!global_solver) continue;
-                    int steps = msg.at("steps").get<int>();
+                    int steps = msg.value("steps", 1);
                     global_cfl = msg.value("cfl", 0.6);
                     if (msg.contains("endtime")) global_endtime = msg.value("endtime", 1.0);
                     global_exec_until_end = false;
@@ -7754,7 +8811,7 @@ int main() {
                 } else if (command == "STEP_2D") {
                     if (!has_solver_2d()) continue;
                     init_gauges(msg);
-                    int steps = msg.at("steps").get<int>();
+                    int steps = msg.value("steps", 1);
                     global_cfl_2d = msg.value("cfl", 0.6);
                     if (msg.contains("endtime")) global_endtime_2d = msg.value("endtime", 1.0);
                     global_exec_until_end_2d = false;
@@ -7883,6 +8940,85 @@ int main() {
                             float mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
                             float mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
 
+                            std::string solid_str = obj.value("solid_model", "");
+                            std::string burn_str = obj.value("burn_model", "");
+                            std::string prod_str = obj.value("product_model", "");
+                            Blast::SolidReactantEOS solid_model = Blast::SolidReactantEOS::MieGruneisen;
+                            Blast::ReactionKinetics burn_model = Blast::ReactionKinetics::ProgrammedBurn;
+                            Blast::DetonationProductEOS product_model = Blast::DetonationProductEOS::JWLProductGas;
+                            if (mat_model == Blast::MPMMaterialModel::CRESTReactiveBurn) {
+                                solid_model = Blast::SolidReactantEOS::DavisSolid;
+                                burn_model = Blast::ReactionKinetics::CRESTEntropy;
+                                product_model = Blast::DetonationProductEOS::DavisProduct;
+                            } else if (mat_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth) {
+                                solid_model = Blast::SolidReactantEOS::MieGruneisen;
+                                burn_model = Blast::ReactionKinetics::LeeTarverODE;
+                                product_model = Blast::DetonationProductEOS::JWLProductGas;
+                            }
+                            if (!solid_str.empty()) {
+                                if (solid_str.find("Davis") != std::string::npos) solid_model = Blast::SolidReactantEOS::DavisSolid;
+                                else if (solid_str.find("Mie") != std::string::npos || solid_str.find("Gruneisen") != std::string::npos || solid_str.find("Grüneisen") != std::string::npos) solid_model = Blast::SolidReactantEOS::MieGruneisen;
+                            }
+                            if (!burn_str.empty()) {
+                                if (burn_str.find("CREST") != std::string::npos) burn_model = Blast::ReactionKinetics::CRESTEntropy;
+                                else if (burn_str.find("Lee-Tarver") != std::string::npos || burn_str.find("LeeTarver") != std::string::npos || burn_str.find("ODE") != std::string::npos) burn_model = Blast::ReactionKinetics::LeeTarverODE;
+                                else if (burn_str.find("Programmed") != std::string::npos || burn_str.find("Wavefront") != std::string::npos) burn_model = Blast::ReactionKinetics::ProgrammedBurn;
+                            }
+                            if (!prod_str.empty()) {
+                                if (prod_str.find("Davis") != std::string::npos) product_model = Blast::DetonationProductEOS::DavisProduct;
+                                else if (prod_str.find("JWL") != std::string::npos) product_model = Blast::DetonationProductEOS::JWLProductGas;
+                            }
+
+                            float jwl_A = static_cast<float>(get_json_double(obj, "jwl_A", 373.77e9));
+                            float jwl_B = static_cast<float>(get_json_double(obj, "jwl_B", 3.747e9));
+                            float jwl_R1 = static_cast<float>(get_json_double(obj, "jwl_R1", 4.15));
+                            float jwl_R2 = static_cast<float>(get_json_double(obj, "jwl_R2", 0.90));
+                            float jwl_omega = static_cast<float>(get_json_double(obj, "jwl_omega", 0.35));
+                            float det_vel = static_cast<float>(get_json_double(obj, "det_vel", 6930.0));
+                            float detonation_energy = static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6));
+                            int burn_zone_cells = get_json_int(obj, "burn_zone_cells", 4);
+                            float tau_burn_min = static_cast<float>(get_json_double(obj, "tau_burn_min", 1.0e-7));
+
+                            float lt_I = static_cast<float>(get_json_double(obj, "lt_I", 4.0e6));
+                            float lt_a = static_cast<float>(get_json_double(obj, "lt_a", 0.24));
+                            float lt_b = static_cast<float>(get_json_double(obj, "lt_b", 0.667));
+                            float lt_x = static_cast<float>(get_json_double(obj, "lt_x", 7.0));
+                            float lt_G1 = static_cast<float>(get_json_double(obj, "lt_G1", 130.0e-6));
+                            float lt_c = static_cast<float>(get_json_double(obj, "lt_c", 0.667));
+                            float lt_d = static_cast<float>(get_json_double(obj, "lt_d", 0.333));
+                            float lt_y = static_cast<float>(get_json_double(obj, "lt_y", 2.0));
+                            float lt_G2 = static_cast<float>(get_json_double(obj, "lt_G2", 400.0e-6));
+                            float lt_e = static_cast<float>(get_json_double(obj, "lt_e", 0.333));
+                            float lt_g = static_cast<float>(get_json_double(obj, "lt_g", 0.667));
+                            float lt_z = static_cast<float>(get_json_double(obj, "lt_z", 3.0));
+                            float lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", 0.02));
+                            float lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", 0.50));
+                            float lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", 0.50));
+
+                            float davis_c0 = static_cast<float>(get_json_double(obj, "davis_c0", 2050.0));
+                            float davis_s1 = static_cast<float>(get_json_double(obj, "davis_s1", 2.12));
+                            float davis_gamma0 = static_cast<float>(get_json_double(obj, "davis_gamma0", 0.65));
+                            float davis_cv = static_cast<float>(get_json_double(obj, "davis_cv", 1000.0));
+                            float davis_t0 = static_cast<float>(get_json_double(obj, "davis_t0", 293.0));
+                            float davis_rho0 = static_cast<float>(get_json_double(obj, "davis_rho0", 1895.0));
+
+                            float davis_a = static_cast<float>(get_json_double(obj, "davis_a", 2.85));
+                            float davis_b = static_cast<float>(get_json_double(obj, "davis_b", 1.10));
+                            float davis_k = static_cast<float>(get_json_double(obj, "davis_k", 1.35));
+                            float davis_vc = static_cast<float>(get_json_double(obj, "davis_vc", 0.65));
+                            float davis_pc = static_cast<float>(get_json_double(obj, "davis_pc", 12.5e9));
+                            float davis_q_det = static_cast<float>(get_json_double(obj, "davis_q_det", 3.90e6));
+
+                            float crest_b1 = static_cast<float>(get_json_double(obj, "crest_b1", 1.2e7));
+                            float crest_c1 = static_cast<float>(get_json_double(obj, "crest_c1", 0.67));
+                            float crest_m1 = static_cast<float>(get_json_double(obj, "crest_m1", 2.5));
+                            float crest_b2 = static_cast<float>(get_json_double(obj, "crest_b2", 3.5e6));
+                            float crest_c2 = static_cast<float>(get_json_double(obj, "crest_c2", 0.50));
+                            float crest_c3 = static_cast<float>(get_json_double(obj, "crest_c3", 0.67));
+                            float crest_m2 = static_cast<float>(get_json_double(obj, "crest_m2", 1.5));
+                            float crest_s0 = static_cast<float>(get_json_double(obj, "crest_s0", 100.0));
+                            float crest_s_threshold = static_cast<float>(get_json_double(obj, "crest_s_threshold", 45.0));
+
                             bool enable_het = get_json_bool(obj, "enable_heterogeneity", false);
                             float weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", 0.0));
                             if (weibull_modulus > 0.001f) enable_het = true;
@@ -7917,6 +9053,54 @@ int main() {
                                     p.mg_gamma0 = mg_gamma0;
                                     p.mg_c0 = mg_c0;
                                     p.mg_s = mg_s;
+                                    p.solid_model = solid_model;
+                                    p.burn_model = burn_model;
+                                    p.product_model = product_model;
+                                    p.jwl_A = jwl_A;
+                                    p.jwl_B = jwl_B;
+                                    p.jwl_R1 = jwl_R1;
+                                    p.jwl_R2 = jwl_R2;
+                                    p.jwl_omega = jwl_omega;
+                                    p.det_vel = det_vel;
+                                    p.detonation_energy = detonation_energy;
+                                    p.burn_zone_cells = burn_zone_cells;
+                                    p.tau_burn_min = tau_burn_min;
+                                    p.lt_I = lt_I;
+                                    p.lt_a = lt_a;
+                                    p.lt_b = lt_b;
+                                    p.lt_x = lt_x;
+                                    p.lt_G1 = lt_G1;
+                                    p.lt_c = lt_c;
+                                    p.lt_d = lt_d;
+                                    p.lt_y = lt_y;
+                                    p.lt_G2 = lt_G2;
+                                    p.lt_e = lt_e;
+                                    p.lt_g = lt_g;
+                                    p.lt_z = lt_z;
+                                    p.lt_ig_max = lt_ig_max;
+                                    p.lt_growth_max = lt_growth_max;
+                                    p.lt_comp_min = lt_comp_min;
+                                    p.davis_c0 = davis_c0;
+                                    p.davis_s1 = davis_s1;
+                                    p.davis_gamma0 = davis_gamma0;
+                                    p.davis_cv = davis_cv;
+                                    p.davis_t0 = davis_t0;
+                                    p.davis_rho0 = davis_rho0;
+                                    p.davis_a = davis_a;
+                                    p.davis_b = davis_b;
+                                    p.davis_k = davis_k;
+                                    p.davis_vc = davis_vc;
+                                    p.davis_pc = davis_pc;
+                                    p.davis_q_det = davis_q_det;
+                                    p.crest_b1 = crest_b1;
+                                    p.crest_c1 = crest_c1;
+                                    p.crest_m1 = crest_m1;
+                                    p.crest_b2 = crest_b2;
+                                    p.crest_c2 = crest_c2;
+                                    p.crest_c3 = crest_c3;
+                                    p.crest_m2 = crest_m2;
+                                    p.crest_s0 = crest_s0;
+                                    p.crest_s_threshold = crest_s_threshold;
                                     p.temperature = T_room;
                                     p.e_int = 0.0f;
                                     p.enable_heterogeneity = enable_het;
@@ -8112,8 +9296,11 @@ int main() {
 
                     std::string contact_method_str = msg.value("contact_method", "Single-Velocity");
                     Blast::MPMContactMethod contact_method = Blast::MPMContactMethod::SingleVelocity;
-                    if (contact_method_str == "Sub-Grid DEM" || contact_method_str == "SubGridDEM") {
+                    if (contact_method_str == "Sub-Grid DEM" || contact_method_str == "SubGridDEM" ||
+                        contact_method_str == "Discrete Element (DEM)" || contact_method_str == "DiscreteElementDEM" ||
+                        contact_method_str.find("DEM") != std::string::npos) {
                         contact_method = Blast::MPMContactMethod::SubGridDEM;
+                        enable_dem_contact = true;
                     } else if (contact_method_str.find("Bardenhagen") != std::string::npos ||
                                contact_method_str.find("Multi-Velocity") != std::string::npos ||
                                contact_method_str == "MultiVelocityBardenhagen") {
@@ -8154,6 +9341,7 @@ int main() {
                         if (str == "Sticky") return Blast::MPMBoundaryCondition3D::Sticky;
                         if (str == "FreeSlip" || str == "Free-Slip") return Blast::MPMBoundaryCondition3D::FreeSlip;
                         if (str == "Reflecting") return Blast::MPMBoundaryCondition3D::Reflecting;
+                        if (str == "Lysmer" || str == "LysmerDashpot" || str == "Absorbing" || str == "NonReflecting" || str == "Viscous" || str == "Transmitting" || str == "TRANSMISSIVE") return Blast::MPMBoundaryCondition3D::LysmerDashpot;
                         return Blast::MPMBoundaryCondition3D::Terminate;
                     };
 
@@ -8164,10 +9352,19 @@ int main() {
                     auto bc5 = parse_bc_3d(msg.value("bc_z_min", "Reflecting"));
                     auto bc6 = parse_bc_3d(msg.value("bc_z_max", "Reflecting"));
 
+                    Blast::LysmerDashpotParams mpm_lysmer;
+                    mpm_lysmer.rho = static_cast<float>(get_json_double(msg, "lysmer_rho", get_json_double(msg, "lysmer_density", 2000.0)));
+                    mpm_lysmer.c_p = static_cast<float>(get_json_double(msg, "lysmer_cp", get_json_double(msg, "lysmer_c_p", 2000.0)));
+                    mpm_lysmer.c_s = static_cast<float>(get_json_double(msg, "lysmer_cs", get_json_double(msg, "lysmer_c_s", 1000.0)));
+                    mpm_lysmer.normal_relaxation = static_cast<float>(get_json_double(msg, "lysmer_normal_relaxation", 1.0));
+                    mpm_lysmer.shear_relaxation = static_cast<float>(get_json_double(msg, "lysmer_shear_relaxation", 1.0));
+
                     if (global_solver_mpm_3d_cuda) {
                         global_solver_mpm_3d_cuda->setBoundaryConditions(bc1, bc2, bc3, bc4, bc5, bc6);
+                        global_solver_mpm_3d_cuda->setLysmerParams(mpm_lysmer);
                     } else {
                         global_solver_mpm_3d->setBoundaryConditions(bc1, bc2, bc3, bc4, bc5, bc6);
+                        global_solver_mpm_3d->setLysmerParams(mpm_lysmer);
                     }
 
                     int domain_ppc = get_json_int(msg, "ppc", 8);
@@ -8225,10 +9422,11 @@ int main() {
 
                             if (shape == "Sphere") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+                                float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+                                    global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
                                 } else {
-                                    global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+                                    global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
                                 }
                             } else if (shape == "Cylinder") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
@@ -8527,7 +9725,7 @@ int main() {
                     init_gauges(msg);
                     emit_telemetry_mpm_3d(0.0, false);
                     size_t n_p = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles().size() : global_solver_mpm_3d->getParticles().size();
-                    std::string cm_name = (contact_method == Blast::MPMContactMethod::MultiVelocityBardenhagen) ? ("Multi-Velocity (Bardenhagen, " + std::to_string(num_unique_materials) + " mats)") : ((contact_method == Blast::MPMContactMethod::SubGridDEM) ? "Sub-Grid DEM" : "Single-Velocity");
+                    std::string cm_name = (contact_method == Blast::MPMContactMethod::MultiVelocityBardenhagen) ? ("Multi-Velocity (Bardenhagen, " + std::to_string(num_unique_materials) + " mats)") : ((contact_method == Blast::MPMContactMethod::SubGridDEM) ? "Discrete Element (DEM)" : "Single-Velocity");
                     std::string init_log = "3D MPM Solver Initialized (" + std::to_string(n_p) + " particles, PPC=" + std::to_string(domain_ppc) + ", Contact=" + cm_name + ", Device=" + (is_cuda_device(device) ? "CUDA GPU" : "CPU") + ")";
                     emit_kernel_log("SYSTEM", init_log, 0.0, "mpm_3d");
                 } catch (const std::exception& e) {
@@ -8728,6 +9926,35 @@ int main() {
                             float mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
                             float mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
 
+                            std::string solid_str = obj.value("solid_model", "");
+                            std::string burn_str = obj.value("burn_model", "");
+                            std::string prod_str = obj.value("product_model", "");
+                            Blast::SolidReactantEOS solid_model = Blast::SolidReactantEOS::MieGruneisen;
+                            Blast::ReactionKinetics burn_model = Blast::ReactionKinetics::ProgrammedBurn;
+                            Blast::DetonationProductEOS product_model = Blast::DetonationProductEOS::JWLProductGas;
+                            if (mat_model == Blast::MPMMaterialModel::CRESTReactiveBurn) {
+                                solid_model = Blast::SolidReactantEOS::DavisSolid;
+                                burn_model = Blast::ReactionKinetics::CRESTEntropy;
+                                product_model = Blast::DetonationProductEOS::DavisProduct;
+                            } else if (mat_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth) {
+                                solid_model = Blast::SolidReactantEOS::MieGruneisen;
+                                burn_model = Blast::ReactionKinetics::LeeTarverODE;
+                                product_model = Blast::DetonationProductEOS::JWLProductGas;
+                            }
+                            if (!solid_str.empty()) {
+                                if (solid_str.find("Davis") != std::string::npos) solid_model = Blast::SolidReactantEOS::DavisSolid;
+                                else if (solid_str.find("Mie") != std::string::npos || solid_str.find("Gruneisen") != std::string::npos || solid_str.find("Grüneisen") != std::string::npos) solid_model = Blast::SolidReactantEOS::MieGruneisen;
+                            }
+                            if (!burn_str.empty()) {
+                                if (burn_str.find("CREST") != std::string::npos) burn_model = Blast::ReactionKinetics::CRESTEntropy;
+                                else if (burn_str.find("Lee-Tarver") != std::string::npos || burn_str.find("LeeTarver") != std::string::npos || burn_str.find("ODE") != std::string::npos) burn_model = Blast::ReactionKinetics::LeeTarverODE;
+                                else if (burn_str.find("Programmed") != std::string::npos || burn_str.find("Wavefront") != std::string::npos) burn_model = Blast::ReactionKinetics::ProgrammedBurn;
+                            }
+                            if (!prod_str.empty()) {
+                                if (prod_str.find("Davis") != std::string::npos) product_model = Blast::DetonationProductEOS::DavisProduct;
+                                else if (prod_str.find("JWL") != std::string::npos) product_model = Blast::DetonationProductEOS::JWLProductGas;
+                            }
+
                             float jwl_A = static_cast<float>(get_json_double(obj, "jwl_A", 373.77e9));
                             float jwl_B = static_cast<float>(get_json_double(obj, "jwl_B", 3.747e9));
                             float jwl_R1 = static_cast<float>(get_json_double(obj, "jwl_R1", 4.15));
@@ -8753,6 +9980,30 @@ int main() {
                             float lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", 0.02));
                             float lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", 0.50));
                             float lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", 0.50));
+
+                            float davis_c0 = static_cast<float>(get_json_double(obj, "davis_c0", 2050.0));
+                            float davis_s1 = static_cast<float>(get_json_double(obj, "davis_s1", 2.12));
+                            float davis_gamma0 = static_cast<float>(get_json_double(obj, "davis_gamma0", 0.65));
+                            float davis_cv = static_cast<float>(get_json_double(obj, "davis_cv", 1000.0));
+                            float davis_t0 = static_cast<float>(get_json_double(obj, "davis_t0", 293.0));
+                            float davis_rho0 = static_cast<float>(get_json_double(obj, "davis_rho0", 1895.0));
+
+                            float davis_a = static_cast<float>(get_json_double(obj, "davis_a", 2.85));
+                            float davis_b = static_cast<float>(get_json_double(obj, "davis_b", 1.10));
+                            float davis_k = static_cast<float>(get_json_double(obj, "davis_k", 1.35));
+                            float davis_vc = static_cast<float>(get_json_double(obj, "davis_vc", 0.65));
+                            float davis_pc = static_cast<float>(get_json_double(obj, "davis_pc", 12.5e9));
+                            float davis_q_det = static_cast<float>(get_json_double(obj, "davis_q_det", 3.90e6));
+
+                            float crest_b1 = static_cast<float>(get_json_double(obj, "crest_b1", 1.2e7));
+                            float crest_c1 = static_cast<float>(get_json_double(obj, "crest_c1", 0.67));
+                            float crest_m1 = static_cast<float>(get_json_double(obj, "crest_m1", 2.5));
+                            float crest_b2 = static_cast<float>(get_json_double(obj, "crest_b2", 3.5e6));
+                            float crest_c2 = static_cast<float>(get_json_double(obj, "crest_c2", 0.50));
+                            float crest_c3 = static_cast<float>(get_json_double(obj, "crest_c3", 0.67));
+                            float crest_m2 = static_cast<float>(get_json_double(obj, "crest_m2", 1.5));
+                            float crest_s0 = static_cast<float>(get_json_double(obj, "crest_s0", 100.0));
+                            float crest_s_threshold = static_cast<float>(get_json_double(obj, "crest_s_threshold", 45.0));
 
                             bool enable_het = get_json_bool(obj, "enable_heterogeneity", false);
                             float weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", 0.0));
@@ -8788,6 +10039,9 @@ int main() {
                                     p.mg_gamma0 = mg_gamma0;
                                     p.mg_c0 = mg_c0;
                                     p.mg_s = mg_s;
+                                    p.solid_model = solid_model;
+                                    p.burn_model = burn_model;
+                                    p.product_model = product_model;
                                     p.jwl_A = jwl_A;
                                     p.jwl_B = jwl_B;
                                     p.jwl_R1 = jwl_R1;
@@ -8812,6 +10066,27 @@ int main() {
                                     p.lt_ig_max = lt_ig_max;
                                     p.lt_growth_max = lt_growth_max;
                                     p.lt_comp_min = lt_comp_min;
+                                    p.davis_c0 = davis_c0;
+                                    p.davis_s1 = davis_s1;
+                                    p.davis_gamma0 = davis_gamma0;
+                                    p.davis_cv = davis_cv;
+                                    p.davis_t0 = davis_t0;
+                                    p.davis_rho0 = davis_rho0;
+                                    p.davis_a = davis_a;
+                                    p.davis_b = davis_b;
+                                    p.davis_k = davis_k;
+                                    p.davis_vc = davis_vc;
+                                    p.davis_pc = davis_pc;
+                                    p.davis_q_det = davis_q_det;
+                                    p.crest_b1 = crest_b1;
+                                    p.crest_c1 = crest_c1;
+                                    p.crest_m1 = crest_m1;
+                                    p.crest_b2 = crest_b2;
+                                    p.crest_c2 = crest_c2;
+                                    p.crest_c3 = crest_c3;
+                                    p.crest_m2 = crest_m2;
+                                    p.crest_s0 = crest_s0;
+                                    p.crest_s_threshold = crest_s_threshold;
                                     p.temperature = T_room;
                                     p.e_int = 0.0f;
 
@@ -9025,6 +10300,7 @@ int main() {
                     global_solver_3d->setFluxScheme(flux_scheme);
                     global_solver_3d->setSpatialOrder(spatial_order);
                     global_solver_3d->setTemporalOrder(temporal_order);
+                    apply_cfd_tait_config(msg, global_solver_3d.get());
 
                     Charge3DParams cp;
                     std::string shape_str = msg.value("charge_shape", "Sphere");
@@ -9047,22 +10323,58 @@ int main() {
                     cp.rot_y = get_json_double(msg, "charge_rot_y", get_json_double(msg, "rot_y", 0.0));
                     cp.rot_z = get_json_double(msg, "charge_rot_z", get_json_double(msg, "rot_z", 0.0));
 
+                    if (init_mode == "From1D" || init_mode == "From2D") {
+                        cp.radius = 0.0;
+                        cp.lx = 0.0;
+                        cp.ly = 0.0;
+                        cp.lz = 0.0;
+                    }
+
                     MultiMat::MaterialSet matSet = parseMaterialSet(msg);
                     double ambient_rho = get_json_double(msg, "ambient_rho", 1.225648589);
                     double ambient_p = get_json_double(msg, "atm_pressure", 101325.0);
-                    global_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);
 
-                    if (msg.contains("trigger_x") || msg.contains("detonator_x")) {
-                        global_solver_3d->setDetonatorLocation(
-                            get_json_double(msg, "trigger_x", get_json_double(msg, "detonator_x", cp.x)),
-                            get_json_double(msg, "trigger_y", get_json_double(msg, "detonator_y", cp.y)),
-                            get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", cp.z))
-                        );
+                    bool is_stratified_fsi = (init_mode == "Hydrostatic_Stratified_3D" || get_json_bool(msg, "stratified_equilibrium", false));
+                    Blast::Stratified3DParams strat_fsi;
+                    global_solver_3d->setDetonatorLocation(
+                        get_json_double(msg, "trigger_x", get_json_double(msg, "detonator_x", cp.x)),
+                        get_json_double(msg, "trigger_y", get_json_double(msg, "detonator_y", cp.y)),
+                        get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", cp.z))
+                    );
+
+                    g_is_stratified_fsi.store(is_stratified_fsi);
+                    if (is_stratified_fsi) {
+                        strat_fsi = parse_stratified_params(msg, ambient_rho, ambient_p);
+                        g_strat_fsi_params = strat_fsi;
+                        double gx = get_json_double(msg, "gravity_x", get_json_double(msg, "gx", 0.0));
+                        double gy = get_json_double(msg, "gravity_y", get_json_double(msg, "gy", 0.0));
+                        double gz = strat_fsi.gravity_z;
+                        global_solver_3d->setGravity(gx, gy, gz);
+                        global_solver_3d->setStratifiedInitialCondition(cp, matSet, strat_fsi);
+                    } else {
+                        if (msg.contains("gravity_z") || msg.contains("gz") || msg.contains("gravity_y") || msg.contains("gy") || msg.contains("gravity_x") || msg.contains("gx")) {
+                            double gx = get_json_double(msg, "gravity_x", get_json_double(msg, "gx", 0.0));
+                            double gy = get_json_double(msg, "gravity_y", get_json_double(msg, "gy", 0.0));
+                            double gz = get_json_double(msg, "gravity_z", get_json_double(msg, "gz", 0.0));
+                            global_solver_3d->setGravity(gx, gy, gz);
+                        }
+                        global_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
+                        if (g_pending_remap.has_pending) {
+                            if (init_mode == "From1D" || init_mode == "From2D") {
+                                std::cout << "[INFO] Applying queued pending " << g_pending_remap.type << " remap onto 3D solver in INIT_FSI_3D..." << std::endl;
+                                apply_remap_payload(g_pending_remap.msg, g_pending_remap.type, global_solver_3d.get(), nullptr, nullptr);
+                            }
+                            g_pending_remap.has_pending = false;
+                        }
                     }
 
                     auto map_bc_3d = [](const std::string& str) {
-                        if (str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::TRANSMISSIVE;
-                        if (str == "Terminate" || str == "OUTFLOW_RIEMANN") return BCType3D::OUTFLOW_RIEMANN;
+                        if (str == "Terminate" || str == "OUTFLOW_RIEMANN" || str == "Riemann" || str == "NonReflecting" || str == "Absorbing" || str == "Lysmer" || str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::OUTFLOW_RIEMANN;
+                        if (str == "Outflow" || str == "Neumann") return BCType3D::TRANSMISSIVE;
                         return BCType3D::REFLECTIVE;
                     };
                     global_solver_3d->setBoundaryConditions(
@@ -9109,8 +10421,11 @@ int main() {
 
                     std::string contact_method_str = msg.value("contact_method", "Single-Velocity");
                     Blast::MPMContactMethod contact_method = Blast::MPMContactMethod::SingleVelocity;
-                    if (contact_method_str == "Sub-Grid DEM" || contact_method_str == "SubGridDEM") {
+                    if (contact_method_str == "Sub-Grid DEM" || contact_method_str == "SubGridDEM" ||
+                        contact_method_str == "Discrete Element (DEM)" || contact_method_str == "DiscreteElementDEM" ||
+                        contact_method_str.find("DEM") != std::string::npos) {
                         contact_method = Blast::MPMContactMethod::SubGridDEM;
+                        enable_dem_contact = true;
                     } else if (contact_method_str.find("Bardenhagen") != std::string::npos ||
                                contact_method_str.find("Multi-Velocity") != std::string::npos ||
                                contact_method_str == "MultiVelocityBardenhagen") {
@@ -9137,21 +10452,27 @@ int main() {
                         global_solver_mpm_3d->setContactMethod(contact_method);
                     }
 
-                    auto parse_bc_mpm3d = [](const std::string& str) {
-                        if (str == "Sticky") return Blast::MPMBoundaryCondition3D::Sticky;
-                        if (str == "FreeSlip" || str == "Free-Slip") return Blast::MPMBoundaryCondition3D::FreeSlip;
-                        if (str == "Reflecting") return Blast::MPMBoundaryCondition3D::Reflecting;
-                        return Blast::MPMBoundaryCondition3D::Terminate;
-                    };
                     auto mpm_bc1 = parse_bc_mpm3d(msg.value("bc_x_min", "Reflecting"));
-                    auto mpm_bc2 = parse_bc_mpm3d(msg.value("bc_x_max", "Reflecting"));
+                    auto mpm_bc2 = parse_bc_mpm3d(msg.value("bc_x_max", "Transmitting"));
                     auto mpm_bc3 = parse_bc_mpm3d(msg.value("bc_y_min", "Reflecting"));
-                    auto mpm_bc4 = parse_bc_mpm3d(msg.value("bc_y_max", "Reflecting"));
+                    auto mpm_bc4 = parse_bc_mpm3d(msg.value("bc_y_max", "Transmitting"));
                     auto mpm_bc5 = parse_bc_mpm3d(msg.value("bc_z_min", "Reflecting"));
                     auto mpm_bc6 = parse_bc_mpm3d(msg.value("bc_z_max", "Reflecting"));
 
-                    if (global_solver_mpm_3d_cuda) global_solver_mpm_3d_cuda->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
-                    else global_solver_mpm_3d->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
+                    Blast::LysmerDashpotParams mpm_fsi_lysmer;
+                    mpm_fsi_lysmer.rho = static_cast<float>(get_json_double(msg, "lysmer_rho", get_json_double(msg, "lysmer_density", 2000.0)));
+                    mpm_fsi_lysmer.c_p = static_cast<float>(get_json_double(msg, "lysmer_cp", get_json_double(msg, "lysmer_c_p", 2000.0)));
+                    mpm_fsi_lysmer.c_s = static_cast<float>(get_json_double(msg, "lysmer_cs", get_json_double(msg, "lysmer_c_s", 1000.0)));
+                    mpm_fsi_lysmer.normal_relaxation = static_cast<float>(get_json_double(msg, "lysmer_normal_relaxation", 1.0));
+                    mpm_fsi_lysmer.shear_relaxation = static_cast<float>(get_json_double(msg, "lysmer_shear_relaxation", 1.0));
+
+                    if (global_solver_mpm_3d_cuda) {
+                        global_solver_mpm_3d_cuda->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
+                        global_solver_mpm_3d_cuda->setLysmerParams(mpm_fsi_lysmer);
+                    } else {
+                        global_solver_mpm_3d->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
+                        global_solver_mpm_3d->setLysmerParams(mpm_fsi_lysmer);
+                    }
 
                     int domain_ppc = get_json_int(msg, "ppc", 8);
                     std::string domain_p_dist_str = msg.value("particle_distribution", "Cartesian");
@@ -9208,10 +10529,11 @@ int main() {
 
                             if (shape == "Sphere") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+                                float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
                                 if (global_solver_mpm_3d_cuda) {
-                                    global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+                                    global_solver_mpm_3d_cuda->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
                                 } else {
-                                    global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+                                    global_solver_mpm_3d->addSphereObject(obj_idx, pos_x, pos_y, pos_z, radius, inner_radius, vel_x, vel_y, vel_z, ang_x, ang_y, ang_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
                                 }
                             } else if (shape == "Cylinder") {
                                 float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
@@ -9492,6 +10814,22 @@ int main() {
                         global_solver_mpm_3d->setContactMethod(contact_method);
                         global_solver_mpm_3d->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
                     }
+                    if (is_stratified_fsi) {
+                        if (global_solver_mpm_3d_cuda) {
+                            global_solver_mpm_3d_cuda->applyStratifiedInitialCondition(strat_fsi);
+                        } else if (global_solver_mpm_3d) {
+                            global_solver_mpm_3d->applyStratifiedInitialCondition(strat_fsi);
+                        }
+                    } else if (msg.contains("gravity_z") || msg.contains("gz") || msg.contains("gravity_y") || msg.contains("gy") || msg.contains("gravity_x") || msg.contains("gx")) {
+                        float gx = static_cast<float>(get_json_double(msg, "gravity_x", get_json_double(msg, "gx", 0.0)));
+                        float gy = static_cast<float>(get_json_double(msg, "gravity_y", get_json_double(msg, "gy", 0.0)));
+                        float gz = static_cast<float>(get_json_double(msg, "gravity_z", get_json_double(msg, "gz", 0.0)));
+                        if (global_solver_mpm_3d_cuda) {
+                            global_solver_mpm_3d_cuda->setGravity(gx, gy, gz);
+                        } else if (global_solver_mpm_3d) {
+                            global_solver_mpm_3d->setGravity(gx, gy, gz);
+                        }
+                    }
 
                     // Phase 5: Single synchronized upload of material tables and all particles to GPU
                     if (global_solver_mpm_3d_cuda) {
@@ -9505,13 +10843,14 @@ int main() {
                     emit_kernel_log("SYSTEM", "3D Coupled FSI Solver (CFD + MPM) Initialized", 0.0, "3d");
 
                     emit_telemetry_3d(0.0, false);
-                    emit_telemetry_mpm_3d(0.0, false);
 
                     nlohmann::json prog_report;
                     prog_report["type"] = "progress";
                     prog_report["percent"] = 100;
                     prog_report["scope"] = "3d";
                     prog_report["mode"] = "INIT_FSI_3D";
+                    prog_report["sim_time"] = 0.0;
+                    prog_report["step"] = 0;
                     {
                         std::lock_guard<std::mutex> lock(cout_mutex);
                         std::cout << prog_report.dump() << std::endl;
@@ -9539,6 +10878,8 @@ int main() {
                     global_fem_solvers_cuda_float.erase(model_id);
                     global_fem_solvers_cuda_double.erase(model_id);
 
+                    auto fem_lysmer = populateFEMLysmerParams(msg);
+
                     if (use_gpu) {
                         if (precision == "double") {
                             auto fem = std::make_unique<Blast::FEMSolver3DCUDA<double>>();
@@ -9546,8 +10887,16 @@ int main() {
                             fem->setContactPenaltyScale(static_cast<double>(get_json_double(msg, "contact_penalty_scale", 1.0)));
                             fem->setContactDamping(static_cast<double>(get_json_double(msg, "contact_damping", 0.20)));
                             fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
+                            {
+                                std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
+                                if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
+                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
+                                } else {
+                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
+                                }
+                            }
 
-                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
                             if (hg_model_str == "FlanaganBelytschkoViscous") {
                                 fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
                             } else {
@@ -9578,14 +10927,7 @@ int main() {
                                 fem->setCUDAMPMSolver(global_solver_mpm_3d_cuda.get());
                             }
 
-                            Blast::FEMErosionCriteria<double> erosion{};
-                            erosion.enable_strain_erosion = get_json_bool(msg, "enable_strain_erosion", true);
-                            erosion.enable_timestep_erosion = get_json_bool(msg, "enable_timestep_erosion", false);
-                            erosion.enable_stress_erosion = get_json_bool(msg, "enable_stress_erosion", false);
-                            erosion.failure_strain = static_cast<double>(get_json_double(msg, "failure_strain", 0.50));
-                            erosion.timestep_erosion_factor = static_cast<double>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                            erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.02));
-                            erosion.tensile_failure_stress = static_cast<double>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
+                            auto erosion = populateFEMErosionCriteria<double>(msg);
 
                             if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
                                 for (const auto& obj : msg["fem_objects"]) {
@@ -9606,6 +10948,7 @@ int main() {
                                     std::string k_file = obj.value("k_file", "");
                                     std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                     std::string shape_type = obj.value("shape_type", "Box");
+                                    std::string origin_mode = obj.value("origin_mode", "Center");
                                     std::string bc_cond = obj.value("boundary_condition", "Free");
                                     if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
                                         double radius = get_json_double(obj, "radius", 0.1);
@@ -9613,7 +10956,8 @@ int main() {
                                         double inner_radius = get_json_double(obj, "inner_radius", 0.0);
                                         double height = get_json_double(obj, "height", 0.2);
                                         if (height <= 0.0) height = get_json_double(obj, "size_z", 0.2);
-                                        fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                        double cyl_start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5 * height);
+                                        fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                         std::vector<Blast::FEMNode3D<double>> nodes;
                                         std::vector<Blast::FEMElement3D<double>> elements;
@@ -9622,23 +10966,26 @@ int main() {
                                         double scale_x = get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0));
                                         double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
                                         double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
-                                        loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
-                                        fem->setNodesAndElements(nodes, elements, obj_mat);
+                                        loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &fem->getMaterialTables());
+                                        fem->setNodesAndElements(nodes, elements, fem->getMaterialTables());
+                                        const auto& mat_tables = fem->getMaterialTables();
                                         std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                         for (const auto& t : trusses) {
+                                            const auto& t_mat = (t.mat_id >= 0 && t.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[t.mat_id] : obj_mat;
                                             if (rebar_form == "TimoshenkoBeam3D") {
                                                 double d_eq = std::sqrt(4.0 * t.A / 3.141592653589793);
-                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, t_mat, t.failure_strain, t.lsdyna_id);
                                             } else {
-                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, t_mat, t.failure_strain, t.lsdyna_id);
                                             }
                                         }
                                         for (const auto& b : beams) {
+                                            const auto& b_mat = (b.mat_id >= 0 && b.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[b.mat_id] : obj_mat;
                                             if (rebar_form == "AxialTruss1D") {
                                                 double a_eq = 0.25 * 3.141592653589793 * b.d * b.d;
-                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, b_mat, b.failure_strain, b.lsdyna_id);
                                             } else {
-                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, b_mat, b.failure_strain, b.lsdyna_id);
                                             }
                                         }
                                         char log_buf[256];
@@ -9646,11 +10993,17 @@ int main() {
                                                  nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
                                         emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                     } else {
-                                        fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                        double start_x = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_x : (pos_x - 0.5 * lx);
+                                        double start_y = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_y : (pos_y - 0.5 * ly);
+                                        double start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5 * lz);
+                                        fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
                                 }
                             }
+                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                            ingestStandaloneBeams<decltype(fem), double>(fem, msg, rebar_form);
                             fem->setErosionCriteria(erosion);
+                            fem->setLysmerParams(fem_lysmer);
                             fem->syncToDevice();
                             global_fem_solvers_cuda_double[model_id] = std::move(fem);
                         } else {
@@ -9659,8 +11012,16 @@ int main() {
                             fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
                             fem->setContactDamping(static_cast<float>(get_json_double(msg, "contact_damping", 0.20)));
                             fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
+                            {
+                                std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
+                                if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
+                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
+                                } else {
+                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
+                                }
+                            }
 
-                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
                             if (hg_model_str == "FlanaganBelytschkoViscous") {
                                 fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
                             } else if (hg_model_str == "KosloffFrazier") {
@@ -9693,14 +11054,7 @@ int main() {
                                 fem->setCUDAMPMSolver(global_solver_mpm_3d_cuda.get());
                             }
 
-                            Blast::FEMErosionCriteria<float> erosion{};
-                            erosion.enable_strain_erosion = get_json_bool(msg, "enable_strain_erosion", true);
-                            erosion.enable_timestep_erosion = get_json_bool(msg, "enable_timestep_erosion", false);
-                            erosion.enable_stress_erosion = get_json_bool(msg, "enable_stress_erosion", false);
-                            erosion.failure_strain = static_cast<float>(get_json_double(msg, "failure_strain", 0.50));
-                            erosion.timestep_erosion_factor = static_cast<float>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                            erosion.min_volume_ratio = static_cast<float>(get_json_double(msg, "min_volume_ratio", 0.02));
-                            erosion.tensile_failure_stress = static_cast<float>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
+                            auto erosion = populateFEMErosionCriteria<float>(msg);
 
                             if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
                                 for (const auto& obj : msg["fem_objects"]) {
@@ -9721,14 +11075,16 @@ int main() {
                                     std::string k_file = obj.value("k_file", "");
                                     std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                     std::string shape_type = obj.value("shape_type", "Box");
+                                    std::string origin_mode = obj.value("origin_mode", "Center");
                                     std::string bc_cond = obj.value("boundary_condition", "Free");
                                     if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
                                         float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                        if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2)) * 0.5;
+                                        if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2)) * 0.5f;
                                         float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
                                         float height = static_cast<float>(get_json_double(obj, "height", 0.2));
                                         if (height <= 0.0f) height = static_cast<float>(get_json_double(obj, "size_z", 0.2));
-                                        fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                        float cyl_start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5f * height);
+                                        fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                         std::vector<Blast::FEMNode3D<float>> nodes;
                                         std::vector<Blast::FEMElement3D<float>> elements;
@@ -9737,23 +11093,26 @@ int main() {
                                         float scale_x = static_cast<float>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                                         float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                                         float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                                        loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
-                                        fem->setNodesAndElements(nodes, elements, obj_mat);
+                                        loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &fem->getMaterialTables());
+                                        fem->setNodesAndElements(nodes, elements, fem->getMaterialTables());
+                                        const auto& mat_tables = fem->getMaterialTables();
                                         std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                         for (const auto& t : trusses) {
+                                            const auto& t_mat = (t.mat_id >= 0 && t.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[t.mat_id] : obj_mat;
                                             if (rebar_form == "TimoshenkoBeam3D") {
                                                 float d_eq = std::sqrt(4.0f * t.A / 3.141592653589793f);
-                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, t_mat, t.failure_strain, t.lsdyna_id);
                                             } else {
-                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, t_mat, t.failure_strain, t.lsdyna_id);
                                             }
                                         }
                                         for (const auto& b : beams) {
+                                            const auto& b_mat = (b.mat_id >= 0 && b.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[b.mat_id] : obj_mat;
                                             if (rebar_form == "AxialTruss1D") {
                                                 float a_eq = 0.25f * 3.141592653589793f * b.d * b.d;
-                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, b_mat, b.failure_strain, b.lsdyna_id);
                                             } else {
-                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, b_mat, b.failure_strain, b.lsdyna_id);
                                             }
                                         }
                                         char log_buf[256];
@@ -9761,11 +11120,17 @@ int main() {
                                                  nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
                                         emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                     } else {
-                                        fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                        float start_x = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_x : (pos_x - 0.5f * lx);
+                                        float start_y = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_y : (pos_y - 0.5f * ly);
+                                        float start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5f * lz);
+                                        fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
                                 }
                             }
+                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                            ingestStandaloneBeams<decltype(fem), float>(fem, msg, rebar_form);
                             fem->setErosionCriteria(erosion);
+                            fem->setLysmerParams(fem_lysmer);
                             fem->syncToDevice();
                             global_fem_solvers_cuda_float[model_id] = std::move(fem);
                         }
@@ -9776,8 +11141,16 @@ int main() {
                             fem->setContactPenaltyScale(static_cast<double>(get_json_double(msg, "contact_penalty_scale", 1.0)));
                             fem->setContactDamping(static_cast<double>(get_json_double(msg, "contact_damping", 0.20)));
                             fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
+                            {
+                                std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
+                                if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
+                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
+                                } else {
+                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
+                                }
+                            }
 
-                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
                             if (hg_model_str == "FlanaganBelytschkoViscous") {
                                 fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
                             } else {
@@ -9805,14 +11178,7 @@ int main() {
                                 fem->setMPMSolver(global_solver_mpm_3d.get());
                             }
 
-                            Blast::FEMErosionCriteria<double> erosion{};
-                            erosion.enable_strain_erosion = get_json_bool(msg, "enable_strain_erosion", true);
-                            erosion.enable_timestep_erosion = get_json_bool(msg, "enable_timestep_erosion", false);
-                            erosion.enable_stress_erosion = get_json_bool(msg, "enable_stress_erosion", false);
-                            erosion.failure_strain = static_cast<double>(get_json_double(msg, "failure_strain", 0.50));
-                            erosion.timestep_erosion_factor = static_cast<double>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                            erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.02));
-                            erosion.tensile_failure_stress = static_cast<double>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
+                            auto erosion = populateFEMErosionCriteria<double>(msg);
 
                             if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
                                 for (const auto& obj : msg["fem_objects"]) {
@@ -9833,6 +11199,7 @@ int main() {
                                     std::string k_file = obj.value("k_file", "");
                                     std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                     std::string shape_type = obj.value("shape_type", "Box");
+                                    std::string origin_mode = obj.value("origin_mode", "Center");
                                     std::string bc_cond = obj.value("boundary_condition", "Free");
                                     if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
                                         double radius = get_json_double(obj, "radius", 0.1);
@@ -9840,7 +11207,8 @@ int main() {
                                         double inner_radius = get_json_double(obj, "inner_radius", 0.0);
                                         double height = get_json_double(obj, "height", 0.2);
                                         if (height <= 0.0) height = get_json_double(obj, "size_z", 0.2);
-                                        fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                        double cyl_start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5 * height);
+                                        fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                         std::vector<Blast::FEMNode3D<double>> nodes;
                                         std::vector<Blast::FEMElement3D<double>> elements;
@@ -9849,23 +11217,26 @@ int main() {
                                         double scale_x = get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0));
                                         double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
                                         double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
-                                        loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
-                                        fem->setNodesAndElements(nodes, elements, obj_mat);
+                                        loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &fem->getMaterialTables());
+                                        fem->setNodesAndElements(nodes, elements, fem->getMaterialTables());
+                                        const auto& mat_tables = fem->getMaterialTables();
                                         std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                         for (const auto& t : trusses) {
+                                            const auto& t_mat = (t.mat_id >= 0 && t.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[t.mat_id] : obj_mat;
                                             if (rebar_form == "TimoshenkoBeam3D") {
                                                 double d_eq = std::sqrt(4.0 * t.A / 3.141592653589793);
-                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, t_mat, t.failure_strain, t.lsdyna_id);
                                             } else {
-                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, t_mat, t.failure_strain, t.lsdyna_id);
                                             }
                                         }
                                         for (const auto& b : beams) {
+                                            const auto& b_mat = (b.mat_id >= 0 && b.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[b.mat_id] : obj_mat;
                                             if (rebar_form == "AxialTruss1D") {
                                                 double a_eq = 0.25 * 3.141592653589793 * b.d * b.d;
-                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, b_mat, b.failure_strain, b.lsdyna_id);
                                             } else {
-                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, b_mat, b.failure_strain, b.lsdyna_id);
                                             }
                                         }
                                         char log_buf[256];
@@ -9873,11 +11244,17 @@ int main() {
                                                  nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
                                         emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                     } else {
-                                        fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                        double start_x = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_x : (pos_x - 0.5 * lx);
+                                        double start_y = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_y : (pos_y - 0.5 * ly);
+                                        double start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5 * lz);
+                                        fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
                                 }
                             }
+                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                            ingestStandaloneBeams<decltype(fem), double>(fem, msg, rebar_form);
                             fem->setErosionCriteria(erosion);
+                            fem->setLysmerParams(fem_lysmer);
                             global_fem_solvers_double[model_id] = std::move(fem);
                         } else {
                             auto fem = std::make_unique<Blast::FEMSolver3D<float>>();
@@ -9885,8 +11262,16 @@ int main() {
                             fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
                             fem->setContactDamping(static_cast<float>(get_json_double(msg, "contact_damping", 0.20)));
                             fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
+                            {
+                                std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
+                                if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
+                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
+                                } else {
+                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
+                                }
+                            }
 
-                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
                             if (hg_model_str == "FlanaganBelytschkoViscous") {
                                 fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
                             } else {
@@ -9914,14 +11299,7 @@ int main() {
                                 fem->setMPMSolver(global_solver_mpm_3d.get());
                             }
 
-                            Blast::FEMErosionCriteria<float> erosion{};
-                            erosion.enable_strain_erosion = get_json_bool(msg, "enable_strain_erosion", true);
-                            erosion.enable_timestep_erosion = get_json_bool(msg, "enable_timestep_erosion", false);
-                            erosion.enable_stress_erosion = get_json_bool(msg, "enable_stress_erosion", false);
-                            erosion.failure_strain = static_cast<float>(get_json_double(msg, "failure_strain", 0.50));
-                            erosion.timestep_erosion_factor = static_cast<float>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                            erosion.min_volume_ratio = static_cast<float>(get_json_double(msg, "min_volume_ratio", 0.02));
-                            erosion.tensile_failure_stress = static_cast<float>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
+                            auto erosion = populateFEMErosionCriteria<float>(msg);
 
                             if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
                                 for (const auto& obj : msg["fem_objects"]) {
@@ -9942,6 +11320,7 @@ int main() {
                                     std::string k_file = obj.value("k_file", "");
                                     std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                     std::string shape_type = obj.value("shape_type", "Box");
+                                    std::string origin_mode = obj.value("origin_mode", "Center");
                                     std::string bc_cond = obj.value("boundary_condition", "Free");
                                     if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
                                         float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
@@ -9949,7 +11328,8 @@ int main() {
                                         float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
                                         float height = static_cast<float>(get_json_double(obj, "height", 0.2));
                                         if (height <= 0.0f) height = static_cast<float>(get_json_double(obj, "size_z", 0.2));
-                                        fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                        float cyl_start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5f * height);
+                                        fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                     } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                         std::vector<Blast::FEMNode3D<float>> nodes;
                                         std::vector<Blast::FEMElement3D<float>> elements;
@@ -9958,23 +11338,26 @@ int main() {
                                         float scale_x = static_cast<float>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                                         float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                                         float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                                        loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
-                                        fem->setNodesAndElements(nodes, elements, obj_mat);
+                                        loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &fem->getMaterialTables());
+                                        fem->setNodesAndElements(nodes, elements, fem->getMaterialTables());
+                                        const auto& mat_tables = fem->getMaterialTables();
                                         std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                         for (const auto& t : trusses) {
+                                            const auto& t_mat = (t.mat_id >= 0 && t.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[t.mat_id] : obj_mat;
                                             if (rebar_form == "TimoshenkoBeam3D") {
                                                 float d_eq = std::sqrt(4.0f * t.A / 3.141592653589793f);
-                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, t_mat, t.failure_strain, t.lsdyna_id);
                                             } else {
-                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, t_mat, t.failure_strain, t.lsdyna_id);
                                             }
                                         }
                                         for (const auto& b : beams) {
+                                            const auto& b_mat = (b.mat_id >= 0 && b.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[b.mat_id] : obj_mat;
                                             if (rebar_form == "AxialTruss1D") {
                                                 float a_eq = 0.25f * 3.141592653589793f * b.d * b.d;
-                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, b_mat, b.failure_strain, b.lsdyna_id);
                                             } else {
-                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, b_mat, b.failure_strain, b.lsdyna_id);
                                             }
                                         }
                                         char log_buf[256];
@@ -9982,11 +11365,17 @@ int main() {
                                                  nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
                                         emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                     } else {
-                                        fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                        float start_x = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_x : (pos_x - 0.5f * lx);
+                                        float start_y = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_y : (pos_y - 0.5f * ly);
+                                        float start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5f * lz);
+                                        fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                     }
                                 }
                             }
+                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                            ingestStandaloneBeams<decltype(fem), float>(fem, msg, rebar_form);
                             fem->setErosionCriteria(erosion);
+                            fem->setLysmerParams(fem_lysmer);
                             global_fem_solvers_float[model_id] = std::move(fem);
                         }
                     }
@@ -10199,6 +11588,7 @@ int main() {
                         global_solver_3d->setFluxScheme(flux_scheme);
                         global_solver_3d->setSpatialOrder(spatial_order);
                         global_solver_3d->setTemporalOrder(temporal_order);
+                        apply_cfd_tait_config(msg, global_solver_3d.get());
 
                         Charge3DParams cp;
                         std::string shape_str = msg.value("charge_shape", "Sphere");
@@ -10221,22 +11611,54 @@ int main() {
                         cp.rot_y = get_json_double(msg, "charge_rot_y", get_json_double(msg, "rot_y", 0.0));
                         cp.rot_z = get_json_double(msg, "charge_rot_z", get_json_double(msg, "rot_z", 0.0));
 
+                        if (init_mode == "From1D" || init_mode == "From2D") {
+                            cp.radius = 0.0;
+                            cp.lx = 0.0;
+                            cp.ly = 0.0;
+                            cp.lz = 0.0;
+                        }
+
                         MultiMat::MaterialSet matSet = parseMaterialSet(msg);
                         double ambient_rho = get_json_double(msg, "ambient_rho", 1.225648589);
                         double ambient_p = get_json_double(msg, "atm_pressure", 101325.0);
-                        global_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);
 
-                        if (msg.contains("trigger_x") || msg.contains("detonator_x")) {
-                            global_solver_3d->setDetonatorLocation(
-                                get_json_double(msg, "trigger_x", get_json_double(msg, "detonator_x", cp.x)),
-                                get_json_double(msg, "trigger_y", get_json_double(msg, "detonator_y", cp.y)),
-                                get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", cp.z))
-                            );
+                        global_solver_3d->setDetonatorLocation(
+                            get_json_double(msg, "trigger_x", get_json_double(msg, "detonator_x", cp.x)),
+                            get_json_double(msg, "trigger_y", get_json_double(msg, "detonator_y", cp.y)),
+                            get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", cp.z))
+                        );
+
+                        if (init_mode == "Hydrostatic_Stratified_3D" || get_json_bool(msg, "stratified_equilibrium", false)) {
+                            Blast::Stratified3DParams strat = parse_stratified_params(msg, ambient_rho, ambient_p);
+                            double gx = get_json_double(msg, "gravity_x", get_json_double(msg, "gx", 0.0));
+                            double gy = get_json_double(msg, "gravity_y", get_json_double(msg, "gy", 0.0));
+                            double gz = strat.gravity_z;
+                            global_solver_3d->setGravity(gx, gy, gz);
+                            global_solver_3d->setStratifiedInitialCondition(cp, matSet, strat);
+                        } else {
+                            if (msg.contains("gravity_z") || msg.contains("gz") || msg.contains("gravity_y") || msg.contains("gy") || msg.contains("gravity_x") || msg.contains("gx")) {
+                                double gx = get_json_double(msg, "gravity_x", get_json_double(msg, "gx", 0.0));
+                                double gy = get_json_double(msg, "gravity_y", get_json_double(msg, "gy", 0.0));
+                                double gz = get_json_double(msg, "gravity_z", get_json_double(msg, "gz", 0.0));
+                                global_solver_3d->setGravity(gx, gy, gz);
+                            }
+                            global_solver_3d->setInitialCondition(cp, matSet, ambient_rho, ambient_p);
+                        }
+
+                        {
+                            std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
+                            if (g_pending_remap.has_pending) {
+                                if (init_mode == "From1D" || init_mode == "From2D") {
+                                    std::cout << "[INFO] Applying queued pending " << g_pending_remap.type << " remap onto 3D solver in INIT_FEM_FSI_3D..." << std::endl;
+                                    apply_remap_payload(g_pending_remap.msg, g_pending_remap.type, global_solver_3d.get(), nullptr, nullptr);
+                                }
+                                g_pending_remap.has_pending = false;
+                            }
                         }
 
                         auto map_bc_3d = [](const std::string& str) {
-                            if (str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::TRANSMISSIVE;
-                            if (str == "Terminate" || str == "OUTFLOW_RIEMANN") return BCType3D::OUTFLOW_RIEMANN;
+                            if (str == "Terminate" || str == "OUTFLOW_RIEMANN" || str == "Riemann" || str == "NonReflecting" || str == "Absorbing" || str == "Lysmer" || str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::OUTFLOW_RIEMANN;
+                            if (str == "Outflow" || str == "Neumann") return BCType3D::TRANSMISSIVE;
                             return BCType3D::REFLECTIVE;
                         };
                         global_solver_3d->setBoundaryConditions(
@@ -10248,6 +11670,7 @@ int main() {
                         // 2. Initialize 3D FEM Solver and Coupler
                         std::string model_id = msg.value("modelId", msg.value("model_id", global_model_id.empty() ? "default_fem" : global_model_id));
                         global_model_id = model_id;
+                        auto fem_lysmer = populateFEMLysmerParams(msg);
 
                         if (use_gpu) {
                             if (precision == "double") {
@@ -10256,8 +11679,16 @@ int main() {
                                 fem->setContactPenaltyScale(static_cast<double>(get_json_double(msg, "contact_penalty_scale", 1.0)));
                                 fem->setContactDamping(static_cast<double>(get_json_double(msg, "contact_damping", 0.20)));
                                 fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
+                                {
+                                    std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
+                                    if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
+                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
+                                    } else {
+                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
+                                    }
+                                }
 
-                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
                                 if (hg_model_str == "FlanaganBelytschkoViscous") {
                                     fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
                                 } else if (hg_model_str == "KosloffFrazier") {
@@ -10280,7 +11711,7 @@ int main() {
                                 auto physics_params = fem->getPhysicsParams();
                                 populateFEMPhysicsParams(msg, physics_params);
                                 fem->setPhysicsParams(physics_params);
-                                if (physics_params.convert_failed_elements_to_mpm) {
+                                if (physics_params.convert_failed_elements_to_mpm || (msg.contains("mpm_objects") && msg["mpm_objects"].is_array() && !msg["mpm_objects"].empty())) {
                                     ensure_mpm_debris_solver(msg, true);
                                 }
                                 if (global_solver_mpm_3d) {
@@ -10290,12 +11721,7 @@ int main() {
                                     fem->setCUDAMPMSolver(global_solver_mpm_3d_cuda.get());
                                 }
 
-                                Blast::FEMErosionCriteria<double> erosion{};
-                                erosion.enable_strain_erosion = get_json_bool(msg, "enable_strain_erosion", true);
-                                erosion.failure_strain = static_cast<double>(get_json_double(msg, "failure_strain", 0.50));
-                                erosion.timestep_erosion_factor = static_cast<double>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                                erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.02));
-                                erosion.tensile_failure_stress = static_cast<double>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
+                                auto erosion = populateFEMErosionCriteria<double>(msg);
 
                                 if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
                                     for (const auto& obj : msg["fem_objects"]) {
@@ -10315,6 +11741,7 @@ int main() {
                                         std::string k_file = obj.value("k_file", "");
                                         std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                         std::string shape_type = obj.value("shape_type", "Box");
+                                        std::string origin_mode = obj.value("origin_mode", "Center");
                                         std::string bc_cond = obj.value("boundary_condition", "Free");
 
                                         if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
@@ -10323,7 +11750,8 @@ int main() {
                                             double inner_radius = get_json_double(obj, "inner_radius", 0.0);
                                             double height = get_json_double(obj, "height", 0.2);
                                             if (height <= 0.0) height = get_json_double(obj, "size_z", 0.2);
-                                            fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                            double cyl_start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5 * height);
+                                            fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                         } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                             std::vector<Blast::FEMNode3D<double>> nodes;
                                             std::vector<Blast::FEMElement3D<double>> elements;
@@ -10332,23 +11760,26 @@ int main() {
                                             double scale_x = get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0));
                                             double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
                                             double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
-                                            loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
-                                            fem->setNodesAndElements(nodes, elements, obj_mat);
+                                            loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &fem->getMaterialTables());
+                                            fem->setNodesAndElements(nodes, elements, fem->getMaterialTables());
+                                            const auto& mat_tables = fem->getMaterialTables();
                                             std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                             for (const auto& t : trusses) {
+                                                const auto& t_mat = (t.mat_id >= 0 && t.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[t.mat_id] : obj_mat;
                                                 if (rebar_form == "TimoshenkoBeam3D") {
                                                     double d_eq = std::sqrt(4.0 * t.A / 3.141592653589793);
-                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, t_mat, t.failure_strain, t.lsdyna_id);
                                                 } else {
-                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, t_mat, t.failure_strain, t.lsdyna_id);
                                                 }
                                             }
                                             for (const auto& b : beams) {
+                                                const auto& b_mat = (b.mat_id >= 0 && b.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[b.mat_id] : obj_mat;
                                                 if (rebar_form == "AxialTruss1D") {
                                                     double a_eq = 0.25 * 3.141592653589793 * b.d * b.d;
-                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, b_mat, b.failure_strain, b.lsdyna_id);
                                                 } else {
-                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, b_mat, b.failure_strain, b.lsdyna_id);
                                                 }
                                             }
                                             char log_buf[256];
@@ -10356,15 +11787,22 @@ int main() {
                                                      nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
                                             emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                         } else {
-                                            fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                            double start_x = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_x : (pos_x - 0.5 * lx);
+                                            double start_y = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_y : (pos_y - 0.5 * ly);
+                                            double start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5 * lz);
+                                            fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                         }
                                     }
                                 }
+                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                ingestStandaloneBeams<decltype(fem), double>(fem, msg, rebar_form);
                                 fem->setErosionCriteria(erosion);
+                                fem->setLysmerParams(fem_lysmer);
                                 fem->syncToDevice();
 
                                 auto coupler = std::make_unique<Blast::FEMFSICoupler3DCUDA<double>>();
                                 coupler->attachSolvers(global_solver_3d.get(), fem.get());
+                                configureFEMFSICouplerCUDA<decltype(coupler), double>(coupler, msg);
                                 global_fem_solvers_cuda_double[model_id] = std::move(fem);
                                 global_fem_fsi_couplers_cuda_double[model_id] = std::move(coupler);
                             } else {
@@ -10373,8 +11811,16 @@ int main() {
                                 fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
                                 fem->setContactDamping(static_cast<float>(get_json_double(msg, "contact_damping", 0.20)));
                                 fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
+                                {
+                                    std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
+                                    if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
+                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
+                                    } else {
+                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
+                                    }
+                                }
 
-                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
                                 if (hg_model_str == "FlanaganBelytschkoViscous") {
                                     fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
                                 } else if (hg_model_str == "KosloffFrazier") {
@@ -10397,7 +11843,7 @@ int main() {
                                 auto physics_params = fem->getPhysicsParams();
                                 populateFEMPhysicsParams(msg, physics_params);
                                 fem->setPhysicsParams(physics_params);
-                                if (physics_params.convert_failed_elements_to_mpm) {
+                                if (physics_params.convert_failed_elements_to_mpm || (msg.contains("mpm_objects") && msg["mpm_objects"].is_array() && !msg["mpm_objects"].empty())) {
                                     ensure_mpm_debris_solver(msg, true);
                                 }
                                 if (global_solver_mpm_3d) {
@@ -10407,11 +11853,7 @@ int main() {
                                     fem->setCUDAMPMSolver(global_solver_mpm_3d_cuda.get());
                                 }
 
-                                Blast::FEMErosionCriteria<float> erosion{};
-                                erosion.failure_strain = static_cast<float>(get_json_double(msg, "failure_strain", 0.50));
-                                erosion.timestep_erosion_factor = static_cast<float>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                                erosion.min_volume_ratio = static_cast<float>(get_json_double(msg, "min_volume_ratio", 0.02));
-                                erosion.tensile_failure_stress = static_cast<float>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
+                                auto erosion = populateFEMErosionCriteria<float>(msg);
 
                                 if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
                                     for (const auto& obj : msg["fem_objects"]) {
@@ -10431,15 +11873,17 @@ int main() {
                                         std::string k_file = obj.value("k_file", "");
                                         std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                         std::string shape_type = obj.value("shape_type", "Box");
+                                        std::string origin_mode = obj.value("origin_mode", "Center");
                                         std::string bc_cond = obj.value("boundary_condition", "Free");
 
                                         if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
                                             float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                            if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2)) * 0.5;
+                                            if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2)) * 0.5f;
                                             float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
                                             float height = static_cast<float>(get_json_double(obj, "height", 0.2));
                                             if (height <= 0.0f) height = static_cast<float>(get_json_double(obj, "size_z", 0.2));
-                                            fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                            float cyl_start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5f * height);
+                                            fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                         } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                             std::vector<Blast::FEMNode3D<float>> nodes;
                                             std::vector<Blast::FEMElement3D<float>> elements;
@@ -10448,23 +11892,26 @@ int main() {
                                             float scale_x = static_cast<float>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                                             float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                                             float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                                            loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
-                                            fem->setNodesAndElements(nodes, elements, obj_mat);
+                                            loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &fem->getMaterialTables());
+                                            fem->setNodesAndElements(nodes, elements, fem->getMaterialTables());
+                                            const auto& mat_tables = fem->getMaterialTables();
                                             std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                             for (const auto& t : trusses) {
+                                                const auto& t_mat = (t.mat_id >= 0 && t.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[t.mat_id] : obj_mat;
                                                 if (rebar_form == "TimoshenkoBeam3D") {
                                                     float d_eq = std::sqrt(4.0f * t.A / 3.141592653589793f);
-                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, t_mat, t.failure_strain, t.lsdyna_id);
                                                 } else {
-                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, t_mat, t.failure_strain, t.lsdyna_id);
                                                 }
                                             }
                                             for (const auto& b : beams) {
+                                                const auto& b_mat = (b.mat_id >= 0 && b.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[b.mat_id] : obj_mat;
                                                 if (rebar_form == "AxialTruss1D") {
                                                     float a_eq = 0.25f * 3.141592653589793f * b.d * b.d;
-                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, b_mat, b.failure_strain, b.lsdyna_id);
                                                 } else {
-                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, b_mat, b.failure_strain, b.lsdyna_id);
                                                 }
                                             }
                                             char log_buf[256];
@@ -10472,15 +11919,22 @@ int main() {
                                                      nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
                                             emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                         } else {
-                                            fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                            float start_x = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_x : (pos_x - 0.5f * lx);
+                                            float start_y = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_y : (pos_y - 0.5f * ly);
+                                            float start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5f * lz);
+                                            fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                         }
                                     }
                                 }
+                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                ingestStandaloneBeams<decltype(fem), float>(fem, msg, rebar_form);
                                 fem->setErosionCriteria(erosion);
+                                fem->setLysmerParams(fem_lysmer);
                                 fem->syncToDevice();
 
                                 auto coupler = std::make_unique<Blast::FEMFSICoupler3DCUDA<float>>();
                                 coupler->attachSolvers(global_solver_3d.get(), fem.get());
+                                configureFEMFSICouplerCUDA<decltype(coupler), float>(coupler, msg);
                                 global_fem_solvers_cuda_float[model_id] = std::move(fem);
                                 global_fem_fsi_couplers_cuda_float[model_id] = std::move(coupler);
                             }
@@ -10491,8 +11945,16 @@ int main() {
                                 fem->setContactPenaltyScale(static_cast<double>(get_json_double(msg, "contact_penalty_scale", 1.0)));
                                 fem->setContactDamping(static_cast<double>(get_json_double(msg, "contact_damping", 0.20)));
                                 fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
+                                {
+                                    std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
+                                    if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
+                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
+                                    } else {
+                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
+                                    }
+                                }
 
-                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
                                 if (hg_model_str == "FlanaganBelytschkoViscous") {
                                     fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
                                 } else if (hg_model_str == "KosloffFrazier") {
@@ -10515,18 +11977,14 @@ int main() {
                                 auto physics_params = fem->getPhysicsParams();
                                 populateFEMPhysicsParams(msg, physics_params);
                                 fem->setPhysicsParams(physics_params);
-                                if (physics_params.convert_failed_elements_to_mpm) {
+                                if (physics_params.convert_failed_elements_to_mpm || (msg.contains("mpm_objects") && msg["mpm_objects"].is_array() && !msg["mpm_objects"].empty())) {
                                     ensure_mpm_debris_solver(msg, false);
                                 }
                                 if (global_solver_mpm_3d) {
                                     fem->setMPMSolver(global_solver_mpm_3d.get());
                                 }
 
-                                Blast::FEMErosionCriteria<double> erosion{};
-                                erosion.failure_strain = static_cast<double>(get_json_double(msg, "failure_strain", 0.50));
-                                erosion.timestep_erosion_factor = static_cast<double>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                                erosion.min_volume_ratio = static_cast<double>(get_json_double(msg, "min_volume_ratio", 0.02));
-                                erosion.tensile_failure_stress = static_cast<double>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
+                                auto erosion = populateFEMErosionCriteria<double>(msg);
 
                                 if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
                                     for (const auto& obj : msg["fem_objects"]) {
@@ -10546,6 +12004,7 @@ int main() {
                                         std::string k_file = obj.value("k_file", "");
                                         std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                         std::string shape_type = obj.value("shape_type", "Box");
+                                        std::string origin_mode = obj.value("origin_mode", "Center");
                                         std::string bc_cond = obj.value("boundary_condition", "Free");
 
                                         if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
@@ -10554,7 +12013,8 @@ int main() {
                                             double inner_radius = get_json_double(obj, "inner_radius", 0.0);
                                             double height = get_json_double(obj, "height", 0.2);
                                             if (height <= 0.0) height = get_json_double(obj, "size_z", 0.2);
-                                            fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                            double cyl_start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5 * height);
+                                            fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                         } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                             std::vector<Blast::FEMNode3D<double>> nodes;
                                             std::vector<Blast::FEMElement3D<double>> elements;
@@ -10563,23 +12023,26 @@ int main() {
                                             double scale_x = get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0));
                                             double scale_y = get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0));
                                             double scale_z = get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0));
-                                            loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
-                                            fem->setNodesAndElements(nodes, elements, obj_mat);
+                                            loadAndTransformLSDynaMesh<double>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &fem->getMaterialTables());
+                                            fem->setNodesAndElements(nodes, elements, fem->getMaterialTables());
+                                            const auto& mat_tables = fem->getMaterialTables();
                                             std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                             for (const auto& t : trusses) {
+                                                const auto& t_mat = (t.mat_id >= 0 && t.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[t.mat_id] : obj_mat;
                                                 if (rebar_form == "TimoshenkoBeam3D") {
                                                     double d_eq = std::sqrt(4.0 * t.A / 3.141592653589793);
-                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, t_mat, t.failure_strain, t.lsdyna_id);
                                                 } else {
-                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, t_mat, t.failure_strain, t.lsdyna_id);
                                                 }
                                             }
                                             for (const auto& b : beams) {
+                                                const auto& b_mat = (b.mat_id >= 0 && b.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[b.mat_id] : obj_mat;
                                                 if (rebar_form == "AxialTruss1D") {
                                                     double a_eq = 0.25 * 3.141592653589793 * b.d * b.d;
-                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, b_mat, b.failure_strain, b.lsdyna_id);
                                                 } else {
-                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, b_mat, b.failure_strain, b.lsdyna_id);
                                                 }
                                             }
                                             char log_buf[256];
@@ -10587,14 +12050,21 @@ int main() {
                                                      nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
                                             emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                         } else {
-                                            fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                            double start_x = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_x : (pos_x - 0.5 * lx);
+                                            double start_y = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_y : (pos_y - 0.5 * ly);
+                                            double start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5 * lz);
+                                            fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                         }
                                     }
                                 }
+                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                ingestStandaloneBeams<decltype(fem), double>(fem, msg, rebar_form);
                                 fem->setErosionCriteria(erosion);
+                                fem->setLysmerParams(fem_lysmer);
 
                                 auto coupler = std::make_unique<Blast::FEMFSICoupler3D<double>>();
                                 coupler->attachSolvers(global_solver_3d.get(), fem.get());
+                                configureFEMFSICouplerCPU<decltype(coupler), double>(coupler, msg);
                                 global_fem_solvers_double[model_id] = std::move(fem);
                                 global_fem_fsi_couplers_double[model_id] = std::move(coupler);
                             } else {
@@ -10603,8 +12073,16 @@ int main() {
                                 fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
                                 fem->setContactDamping(static_cast<float>(get_json_double(msg, "contact_damping", 0.20)));
                                 fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
+                                {
+                                    std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
+                                    if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
+                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
+                                    } else {
+                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
+                                    }
+                                }
 
-                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoStiffness");
+                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
                                 if (hg_model_str == "FlanaganBelytschkoViscous") {
                                     fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
                                 } else if (hg_model_str == "KosloffFrazier") {
@@ -10627,18 +12105,14 @@ int main() {
                                 auto physics_params = fem->getPhysicsParams();
                                 populateFEMPhysicsParams(msg, physics_params);
                                 fem->setPhysicsParams(physics_params);
-                                if (physics_params.convert_failed_elements_to_mpm) {
+                                if (physics_params.convert_failed_elements_to_mpm || (msg.contains("mpm_objects") && msg["mpm_objects"].is_array() && !msg["mpm_objects"].empty())) {
                                     ensure_mpm_debris_solver(msg);
                                 }
                                 if (global_solver_mpm_3d) {
                                     fem->setMPMSolver(global_solver_mpm_3d.get());
                                 }
 
-                                Blast::FEMErosionCriteria<float> erosion{};
-                                erosion.failure_strain = static_cast<float>(get_json_double(msg, "failure_strain", 0.50));
-                                erosion.timestep_erosion_factor = static_cast<float>(get_json_double(msg, "timestep_erosion_factor", 0.10));
-                                erosion.min_volume_ratio = static_cast<float>(get_json_double(msg, "min_volume_ratio", 0.02));
-                                erosion.tensile_failure_stress = static_cast<float>(get_json_double(msg, "tensile_failure_stress", 600.0e6));
+                                auto erosion = populateFEMErosionCriteria<float>(msg);
 
                                 if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
                                     for (const auto& obj : msg["fem_objects"]) {
@@ -10658,15 +12132,17 @@ int main() {
                                         std::string k_file = obj.value("k_file", "");
                                         std::string mesh_src = obj.value("mesh_source", "Box Generator");
                                         std::string shape_type = obj.value("shape_type", "Box");
+                                        std::string origin_mode = obj.value("origin_mode", "Center");
                                         std::string bc_cond = obj.value("boundary_condition", "Free");
 
                                         if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
                                             float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                            if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2)) * 0.5;
+                                            if (radius <= 0.0f) radius = static_cast<float>(get_json_double(obj, "size_x", 0.2)) * 0.5f;
                                             float inner_radius = static_cast<float>(get_json_double(obj, "inner_radius", 0.0));
                                             float height = static_cast<float>(get_json_double(obj, "height", 0.2));
                                             if (height <= 0.0f) height = static_cast<float>(get_json_double(obj, "size_z", 0.2));
-                                            fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                                            float cyl_start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5f * height);
+                                            fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
                                         } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                                             std::vector<Blast::FEMNode3D<float>> nodes;
                                             std::vector<Blast::FEMElement3D<float>> elements;
@@ -10675,23 +12151,26 @@ int main() {
                                             float scale_x = static_cast<float>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                                             float scale_y = static_cast<float>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                                             float scale_z = static_cast<float>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                                            loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams);
-                                            fem->setNodesAndElements(nodes, elements, obj_mat);
+                                            loadAndTransformLSDynaMesh<float>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &fem->getMaterialTables());
+                                            fem->setNodesAndElements(nodes, elements, fem->getMaterialTables());
+                                            const auto& mat_tables = fem->getMaterialTables();
                                             std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                                             for (const auto& t : trusses) {
+                                                const auto& t_mat = (t.mat_id >= 0 && t.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[t.mat_id] : obj_mat;
                                                 if (rebar_form == "TimoshenkoBeam3D") {
                                                     float d_eq = std::sqrt(4.0f * t.A / 3.141592653589793f);
-                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                    fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, t_mat, t.failure_strain, t.lsdyna_id);
                                                 } else {
-                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, obj_mat, t.failure_strain, t.lsdyna_id);
+                                                    fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, t_mat, t.failure_strain, t.lsdyna_id);
                                                 }
                                             }
                                             for (const auto& b : beams) {
+                                                const auto& b_mat = (b.mat_id >= 0 && b.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[b.mat_id] : obj_mat;
                                                 if (rebar_form == "AxialTruss1D") {
                                                     float a_eq = 0.25f * 3.141592653589793f * b.d * b.d;
-                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                    fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, b_mat, b.failure_strain, b.lsdyna_id);
                                                 } else {
-                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, obj_mat, b.failure_strain, b.lsdyna_id);
+                                                    fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, b_mat, b.failure_strain, b.lsdyna_id);
                                                 }
                                             }
                                             char log_buf[256];
@@ -10699,28 +12178,55 @@ int main() {
                                                      nodes.size(), elements.size(), trusses.size(), beams.size(), rebar_form.c_str());
                                             emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
                                         } else {
-                                            fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, pos_x, pos_y, pos_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                                            float start_x = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_x : (pos_x - 0.5f * lx);
+                                            float start_y = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_y : (pos_y - 0.5f * ly);
+                                            float start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - 0.5f * lz);
+                                            fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
                                         }
                                     }
                                 }
+                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+                                ingestStandaloneBeams<decltype(fem), float>(fem, msg, rebar_form);
                                 fem->setErosionCriteria(erosion);
+                                fem->setLysmerParams(fem_lysmer);
 
                                 auto coupler = std::make_unique<Blast::FEMFSICoupler3D<float>>();
                                 coupler->attachSolvers(global_solver_3d.get(), fem.get());
+                                configureFEMFSICouplerCPU<decltype(coupler), float>(coupler, msg);
                                 global_fem_solvers_float[model_id] = std::move(fem);
                                 global_fem_fsi_couplers_float[model_id] = std::move(coupler);
                             }
                         }
 
+                        // Prime d_geom with FEM surface facet rasterization BEFORE init_gauges().
+                        // Without this, setGauges() sees all-zero geometry and snaps probes
+                        // to wrong cells (e.g. into solid wall interior). The coupler normally
+                        // rasterizes on the very first timestep, but setGauges must run at init
+                        // time with real geometry to position probes correctly.
+                        if (global_fem_fsi_couplers_cuda_float.count(model_id) &&
+                            global_fem_fsi_couplers_cuda_float[model_id]) {
+                            global_fem_fsi_couplers_cuda_float[model_id]->primeInitialGeometry();
+                        } else if (!global_fem_fsi_couplers_cuda_float.empty()) {
+                            global_fem_fsi_couplers_cuda_float.begin()->second->primeInitialGeometry();
+                        } else if (global_fem_fsi_couplers_cuda_double.count(model_id) &&
+                                   global_fem_fsi_couplers_cuda_double[model_id]) {
+                            global_fem_fsi_couplers_cuda_double[model_id]->primeInitialGeometry();
+                        } else if (!global_fem_fsi_couplers_cuda_double.empty()) {
+                            global_fem_fsi_couplers_cuda_double.begin()->second->primeInitialGeometry();
+                        }
+
                         init_gauges(msg);
-                        emit_kernel_log("SYSTEM", "3D Coupled FV-FEM Solver Initialized", 0.0, "3d");
+                        emit_kernel_log("SYSTEM", "3D Coupled Multi-Physics Solver (CFD + MPM + FEM) Initialized", 0.0, "3d");
                         emit_telemetry_3d(0.0, false);
+                        emit_telemetry_fem_3d(0.0, false);
 
                         nlohmann::json prog_report;
                         prog_report["type"] = "progress";
                         prog_report["percent"] = 100;
                         prog_report["scope"] = "3d";
                         prog_report["mode"] = "INIT_FEM_FSI_3D";
+                        prog_report["sim_time"] = 0.0;
+                        prog_report["step"] = 0;
                         {
                             std::lock_guard<std::mutex> lock(cout_mutex);
                             std::cout << prog_report.dump() << std::endl;
@@ -10816,12 +12322,16 @@ int main() {
                     }
                 } else if (command == "STEP_3D") {
                     if (sim3d_init_in_progress.load()) {
-                        emit_kernel_log("WARNING", "Cannot step simulation: 3D initialization is in progress.", 0.0, "3d");
+                        std::lock_guard<std::mutex> lock(g_pending_exec_3d_mutex);
+                        g_pending_exec_3d.has_pending = true;
+                        g_pending_exec_3d.command = "STEP_3D";
+                        g_pending_exec_3d.msg = msg;
+                        emit_kernel_log("INFO", "Received STEP_3D during 3D initialization. Queued for execution upon init completion.", 0.0, "3d");
                         continue;
                     }
                     if (!global_solver_3d) continue;
                     init_gauges(msg);
-                    int steps = msg.at("steps").get<int>();
+                    int steps = msg.value("steps", 1);
                     global_cfl_3d = msg.value("cfl", 0.6);
                     if (msg.contains("endtime")) global_endtime_3d = msg.value("endtime", 1.0);
                     global_exec_until_end_3d = false;
@@ -10837,7 +12347,11 @@ int main() {
                     }
                 } else if (command == "EXEC_ALL_3D") {
                     if (sim3d_init_in_progress.load()) {
-                        emit_kernel_log("WARNING", "Cannot run simulation: 3D initialization is in progress.", 0.0, "3d");
+                        std::lock_guard<std::mutex> lock(g_pending_exec_3d_mutex);
+                        g_pending_exec_3d.has_pending = true;
+                        g_pending_exec_3d.command = "EXEC_ALL_3D";
+                        g_pending_exec_3d.msg = msg;
+                        emit_kernel_log("INFO", "Received EXEC_ALL_3D during 3D initialization. Queued for execution upon init completion.", 0.0, "3d");
                         continue;
                     }
                     if (!global_solver_3d) continue;
@@ -10858,15 +12372,24 @@ int main() {
                     sim3d_paused = false;
                 } else if (command == "TERMINATE_3D") {
                     sim3d_terminate = true;
+                    {
+                        std::lock_guard<std::mutex> lock(g_pending_exec_3d_mutex);
+                        g_pending_exec_3d.has_pending = false;
+                    }
                     while (sim3d_running.load() || sim3d_init_in_progress.load()) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
                     global_solver_3d.reset();
                     global_t3d = 0.0;
+                    global_dt_3d = 0.0;
                     global_wallclock_3d = 0.0;
                     step_progress_3d = 0;
                 } else if (command == "INIT_3D") {
                     sim3d_terminate = true;
+                    {
+                        std::lock_guard<std::mutex> lock(g_pending_exec_3d_mutex);
+                        g_pending_exec_3d.has_pending = false;
+                    }
                     while (sim3d_running.load() || sim3d_init_in_progress.load()) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
@@ -10876,6 +12399,7 @@ int main() {
                     sim3d_init_in_progress = true;
                     global_step_3d = 0;
                     global_t3d = 0.0;
+                    global_dt_3d = 0.0;
                     global_wallclock_3d = 0.0;
 
                     global_slices_3d.clear();
@@ -10996,7 +12520,7 @@ int main() {
                         } else if (global_solver_mpm_3d || global_solver_mpm_3d_cuda) {
                             emit_telemetry_mpm_3d(global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getSimTime() : global_solver_mpm_3d->getSimTime(), false, -1, false);
                         } else if (!global_fem_solvers_cuda_float.empty() || !global_fem_solvers_cuda_double.empty() || !global_fem_solvers_float.empty() || !global_fem_solvers_double.empty()) {
-                            emit_telemetry_fem_3d(0.0, false);
+                            emit_telemetry_fem_3d(-1.0, false, -1);
                         }
                     } else if (command == "REFRESH_STATE" || command == "REFRESH" || command == "POLL_STATE") {
                         if (global_solver) {
@@ -11010,12 +12534,11 @@ int main() {
                         }
                         if (global_solver_3d) {
                             emit_telemetry_3d(global_t3d, false, global_step_3d.load());
-                        }
-                        if (global_solver_mpm_3d || global_solver_mpm_3d_cuda) {
+                        } else if (global_solver_mpm_3d || global_solver_mpm_3d_cuda) {
                             emit_telemetry_mpm_3d(global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getSimTime() : global_solver_mpm_3d->getSimTime(), false, global_step_fsi_3d.load());
                         }
                         if (!global_fem_solvers_cuda_float.empty() || !global_fem_solvers_cuda_double.empty() || !global_fem_solvers_float.empty() || !global_fem_solvers_double.empty()) {
-                            emit_telemetry_fem_3d(0.0, false, global_step_fem_fsi_3d.load());
+                            emit_telemetry_fem_3d(-1.0, false, global_step_fem_fsi_3d.load());
                         }
                     }
                 } else if (command == "WRITE_VTK") {
@@ -11037,7 +12560,10 @@ int main() {
         }
     });
     stdin_listener_thread.join();
-    while (sim_running.load() || sim2d_running.load() || sim3d_running.load() || sim_mpm_3d_running.load() || sim_fem_3d_running.load()) {
+    while (sim_running.load() || sim2d_running.load() || sim3d_running.load() ||
+           sim_mpm_running.load() || sim_mpm_3d_running.load() ||
+           sim_fem_3d_running.load() || sim_fsi_running.load() ||
+           sim_fsi_3d_running.load() || sim_fem_fsi_3d_running.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 

@@ -46,6 +46,7 @@ template <typename RealType, bool IsMultiMaterial>
 void CFDSolverImpl<RealType, IsMultiMaterial>::setInitialConditionTNT(double explosive_radius, double high_rho, double ambient_rho, double ambient_p) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
+    this->charge_radius = explosive_radius;
     for (int i = 0; i < n_cells; ++i) {
         double r_left = i * dr;
         double r_right = (i + 1) * dr;
@@ -78,6 +79,7 @@ template <typename RealType, bool IsMultiMaterial>
 void CFDSolverImpl<RealType, IsMultiMaterial>::setInitialConditionIdealGas(double explosive_radius, double high_rho, double detonation_energy, double ambient_rho, double ambient_p) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
+    this->charge_radius = explosive_radius;
     double p_high = (gamma - 1.0) * high_rho * detonation_energy;
     for (int i = 0; i < n_cells; ++i) {
         double r_left = i * dr;
@@ -104,6 +106,7 @@ template <typename RealType, bool IsMultiMaterial>
 void CFDSolverImpl<RealType, IsMultiMaterial>::setInitialConditionRoseTNT(double explosive_radius, double high_rho, double chemical_energy, double ambient_rho, double ambient_p, double det_vel) {
     this->ambient_rho = ambient_rho;
     this->ambient_p = ambient_p;
+    this->charge_radius = explosive_radius;
     this->currentTime = explosive_radius / det_vel;
     double p_high = (gamma - 1.0) * high_rho * chemical_energy;
     for (int i = 0; i < n_cells; ++i) {

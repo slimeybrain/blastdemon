@@ -1,5 +1,5 @@
 import { STAGE_THEMES, type Node, type PanelType, type StageThemeId } from './types.js';
-import { StateManager, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, resolveResourcePath, getSliceAxisLabel } from './state-manager.js';
+import { StateManager, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, resolveResourcePath, getSliceAxisLabel, getLSDynaDeckMeta } from './state-manager.js';
 
 function getFocusedQuantityAndRange(vpNode: any): { quantity: string, min: number, max: number } {
     const slices = vpNode.parameters.slices || [];
@@ -11,6 +11,44 @@ function getFocusedQuantityAndRange(vpNode: any): { quantity: string, min: numbe
     const ranges = vpNode.parameters.quantity_ranges || {};
     const range = ranges[qty] || ranges[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
     return { quantity: qty, min: range[0], max: range[1] };
+}
+
+export interface DiscoveredFEMPart {
+    id: string;
+    nodeId: string;
+    name: string;
+    type: 'solid' | 'beam' | 'shell' | 'rebar' | 'general';
+    numElements: number;
+    visible: boolean;
+    renderMode: 'solid' | 'wireframe' | 'both';
+    opacity: number;
+    color?: string;
+    isLine: boolean;
+    bounds?: [number, number, number, number, number, number];
+    x: number;
+    y: number;
+    z: number;
+    sizeX: number;
+    sizeY: number;
+    sizeZ: number;
+    shapeType?: string;
+    originMode?: string;
+    nx?: number;
+    ny?: number;
+    nz?: number;
+    radius?: number;
+    innerRadius?: number;
+    height?: number;
+}
+
+function isMarineHarbourMPMActive(harbourNode: any): boolean {
+    if (!harbourNode || harbourNode.type !== 'MarineHarbourDomain') return false;
+    const waterMode = String(harbourNode.parameters?.water_discretization_mode || 'Spherical_MPM_Sleeve');
+    if (waterMode === 'Pure_FV' || waterMode === 'Pure FV') return false;
+    const bedType = String(harbourNode.parameters?.seabed_mesh_type || 'Hybrid_MPM_Crater_FEM_FarField');
+    const hasWaterMPM = (Number(harbourNode.parameters?.nearfield_sleeve_radius ?? 2.5) > 0);
+    const hasBedMPM = (bedType !== 'Pure_FV' && bedType !== 'Pure FV' && bedType !== 'Pure_Hex8_FEM' && bedType !== 'Pure Hex8 FEM');
+    return hasWaterMPM || hasBedMPM;
 }
 
 export class Telemetry3DViewport {
@@ -33,6 +71,8 @@ export class Telemetry3DViewport {
     private themeChangeListener: ((e: any) => void) | null = null;
 
     // Overlay Elements
+    private topControlsBar: HTMLElement | null = null;
+    private activeDrawerTab: 'parts' | 'matrix' | 'colorbars' | 'view' = 'parts';
     private controlsOverlay: HTMLElement | null = null;
     private floatOpenBtn: HTMLElement | null = null;
     private bottomViewDock: HTMLElement | null = null;
@@ -257,10 +297,20 @@ export class Telemetry3DViewport {
                 if (p.colormap !== undefined) workerData.colormap = p.colormap;
                 if (p.quantity !== undefined) workerData.focusedQuantity = p.quantity;
                 if (p.focusedQuantity !== undefined) workerData.focusedQuantity = p.focusedQuantity;
-                if (p.min_val !== undefined && p.max_val !== undefined) {
-                    workerData.minVal = Number(p.min_val);
-                    workerData.maxVal = Number(p.max_val);
-                }
+                if (p.min_val !== undefined || p.minVal !== undefined) workerData.minVal = Number(p.min_val ?? p.minVal);
+                if (p.max_val !== undefined || p.maxVal !== undefined) workerData.maxVal = Number(p.max_val ?? p.maxVal);
+                if (p.autoScale !== undefined || p.auto_scale !== undefined) workerData.autoScale = Boolean(p.autoScale ?? p.auto_scale);
+                if (p.logScale !== undefined || p.log_scale !== undefined) workerData.logScale = Boolean(p.logScale ?? p.log_scale);
+                if (p.lock_quantity_ranges !== undefined || p.lockQuantityRanges !== undefined) workerData.lockQuantityRanges = Boolean(p.lock_quantity_ranges ?? p.lockQuantityRanges);
+                if (p.mpm_lock_quantity_range !== undefined || p.mpmLockQuantityRange !== undefined) workerData.mpmLockQuantityRange = Boolean(p.mpm_lock_quantity_range ?? p.mpmLockQuantityRange);
+                if (p.fem_lock_quantity_range !== undefined || p.femLockQuantityRange !== undefined) workerData.femLockQuantityRange = Boolean(p.fem_lock_quantity_range ?? p.femLockQuantityRange);
+                if (p.beam_lock_quantity_range !== undefined || p.beamLockQuantityRange !== undefined) workerData.beamLockQuantityRange = Boolean(p.beam_lock_quantity_range ?? p.beamLockQuantityRange);
+                if (p.stl_lock_quantity_range !== undefined || p.stlLockQuantityRange !== undefined) workerData.stlLockQuantityRange = Boolean(p.stl_lock_quantity_range ?? p.stlLockQuantityRange);
+                if (p.obstacles_lock_quantity_range !== undefined || p.obstaclesLockQuantityRange !== undefined) workerData.obstaclesLockQuantityRange = Boolean(p.obstacles_lock_quantity_range ?? p.obstaclesLockQuantityRange);
+                if (p.quantity_ranges !== undefined || p.quantityRanges !== undefined) workerData.quantityRanges = p.quantity_ranges ?? p.quantityRanges;
+                if (p.quantity_auto_scales !== undefined || p.quantityAutoScales !== undefined) workerData.quantityAutoScales = p.quantity_auto_scales ?? p.quantityAutoScales;
+                if (p.quantity_log_scales !== undefined || p.quantityLogScales !== undefined) workerData.quantityLogScales = p.quantity_log_scales ?? p.quantityLogScales;
+                if (p.quantity_colormaps !== undefined || p.quantityColormaps !== undefined) workerData.quantityColormaps = p.quantity_colormaps ?? p.quantityColormaps;
 
                 // Check for charge or MPM geometry updates
                 const changedNode = targetModel?.nodes.find((n: any) => n.id === nodeId);
@@ -280,59 +330,51 @@ export class Telemetry3DViewport {
                             rot_z: Number(changedNode.parameters.rot_z ?? changedNode.parameters.charge_rot_z ?? 0.0),
                             visible: changedNode.parameters.visible !== false && !changedNode.parameters.hidden
                         };
-                    } else if (['MPMObject3D', 'MPMObject2D'].includes(changedNode.type)) {
-                        const mpmNodes = targetModel?.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D') || [];
-                        workerData.mpmObjects = mpmNodes.map((n: any) => ({
-                            id: n.id,
-                            shape: n.parameters.shape_type || 'Box',
-                            shape_type: n.parameters.shape_type || 'Box',
-                            pos_x: Number(n.parameters.pos_x ?? 0.0),
-                            pos_y: Number(n.parameters.pos_y ?? 0.0),
-                            pos_z: Number(n.parameters.pos_z ?? 0.0),
-                            x: Number(n.parameters.pos_x ?? 0.0),
-                            y: Number(n.parameters.pos_y ?? 0.0),
-                            z: Number(n.parameters.pos_z ?? 0.0),
-                            rot_x: Number(n.parameters.rot_x ?? 0.0),
-                            rot_y: Number(n.parameters.rot_y ?? 0.0),
-                            rot_z: Number(n.parameters.rot_z ?? 0.0),
-                            origin_mode: n.parameters.origin_mode || 'CAD Origin',
-                            size_x: Number(n.parameters.size_x ?? 0.2),
-                            size_y: Number(n.parameters.size_y ?? 0.2),
-                            size_z: Number(n.parameters.size_z ?? 0.2),
-                            radius: Number(n.parameters.radius ?? 0.1),
-                            inner_radius: Number(n.parameters.inner_radius ?? 0.0),
-                            height: Number(n.parameters.height ?? 0.2),
-                            scale_x: Number(n.parameters.scale_x ?? 1.0),
-                            scale_y: Number(n.parameters.scale_y ?? 1.0),
-                            scale_z: Number(n.parameters.scale_z ?? 1.0),
-                            stl_file: n.parameters.stl_file || '',
-                            visible: n.parameters.visible !== false && !n.parameters.hidden
-                        }));
+                        if (targetModel?.nodes.some((n: any) => n.type === 'MarineHarbourDomain')) {
+                            workerData.mpmObjects = this.getDiscoveredMPMObjects(targetModel);
+                        }
+                    } else if (['MPMObject3D', 'MPMObject2D', 'MarineHarbourDomain'].includes(changedNode.type)) {
+                        workerData.mpmObjects = this.getDiscoveredMPMObjects(targetModel);
+                        if (changedNode.type === 'MarineHarbourDomain' && !isMarineHarbourMPMActive(changedNode)) {
+                            this.worker.postMessage({ type: 'clearMPM' });
+                            workerData.showMPMParticles = false;
+                        }
                     } else if (['FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D'].includes(changedNode.type)) {
-                        const femObjNodes = targetModel?.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D') || [];
-                        workerData.femObjects = femObjNodes.map((n: any) => ({
-                            id: n.id,
-                            type: n.type,
-                            name: n.parameters?.name || n.id,
-                            visible: n.parameters.visible !== false && !n.parameters.hidden,
-                            shape: n.parameters?.shape_type || 'Box',
-                            shape_type: n.parameters?.shape_type || 'Box',
-                            mesh_source: n.parameters?.mesh_source || 'Box Generator',
-                            x: Number(n.parameters?.pos_x ?? 0.0),
-                            y: Number(n.parameters?.pos_y ?? 0.0),
-                            z: Number(n.parameters?.pos_z ?? 0.0),
-                            pos_x: Number(n.parameters?.pos_x ?? 0.0),
-                            pos_y: Number(n.parameters?.pos_y ?? 0.0),
-                            pos_z: Number(n.parameters?.pos_z ?? 0.0),
-                            size_x: Number(n.parameters?.size_x ?? n.parameters?.lx ?? 0.2),
-                            size_y: Number(n.parameters?.size_y ?? n.parameters?.ly ?? 0.2),
-                            size_z: Number(n.parameters?.size_z ?? n.parameters?.lz ?? 0.2),
-                            radius: Number(n.parameters?.radius ?? 0.1),
-                            height: Number(n.parameters?.height ?? 0.2),
-                            rot_x: Number(n.parameters?.rot_x ?? 0.0),
-                            rot_y: Number(n.parameters?.rot_y ?? 0.0),
-                            rot_z: Number(n.parameters?.rot_z ?? 0.0),
-                            k_file: n.parameters?.k_file || ''
+                        const discovered = this.getDiscoveredFEMParts();
+                        workerData.femObjects = discovered.map(p => ({
+                            id: p.id,
+                            node_id: p.nodeId,
+                            type: p.isLine ? 'FEMBeam3D' : 'FEMObject3D',
+                            part_type: p.isLine ? 'beam' : 'solid',
+                            name: p.name,
+                            visible: p.visible,
+                            render_mode: p.renderMode,
+                            opacity: p.opacity,
+                            color: p.color,
+                            shape: p.shapeType || 'Box',
+                            shape_type: p.shapeType || 'Box',
+                            mesh_source: (p.shapeType === 'Cylinder' ? 'Cylinder Generator' : (p.shapeType === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')),
+                            origin_mode: p.originMode || 'Center',
+                            x: p.x,
+                            y: p.y,
+                            z: p.z,
+                            pos_x: p.x,
+                            pos_y: p.y,
+                            pos_z: p.z,
+                            size_x: p.sizeX,
+                            size_y: p.sizeY,
+                            size_z: p.sizeZ,
+                            radius: p.radius ?? 0.1,
+                            inner_radius: p.innerRadius ?? 0.0,
+                            height: p.height ?? 0.2,
+                            nx: p.nx ?? 10,
+                            ny: p.ny ?? 10,
+                            nz: p.nz ?? 10,
+                            rot_x: 0.0,
+                            rot_y: 0.0,
+                            rot_z: 0.0,
+                            is_line: p.isLine,
+                            bounds: p.bounds
                         }));
                     } else if (changedNode.type === 'STLGeometry') {
                         workerData.stlTransform = {
@@ -869,16 +911,22 @@ export class Telemetry3DViewport {
             net.onMessage(this.netCallback);
         }
 
-        const cachedConfig = this.stateManager.getTelemetry(this.panelId + "-config-3d");
+        const currentModelId = this.getCurrentModelId();
+        const cachedConfig = (currentModelId ? this.stateManager.getTelemetry(currentModelId + "-config-3d") : null)
+            || (this.viewportNodeId ? this.stateManager.getTelemetry(this.viewportNodeId + "-config-3d") : null);
         if (cachedConfig) {
-            this.updateTelemetry(cachedConfig);
+            this.updateTelemetry(cachedConfig, currentModelId || undefined);
         }
 
         this.stateListener = () => this.syncControls();
         this.stateManager.onStateChange(this.stateListener);
 
         this.modelStatusListener = (modelId: string, status: any) => {
-            if (status === 'PAUSED' || status === 'INITIALIZED' || status === 'TERMINATED') {
+            if (status === 'UNINITIALIZED' || status === 'INCOMPLETE') {
+                this.resetSimulationData(modelId);
+                this.dispatchFEMObjectsToWorker();
+                this.syncControls(false);
+            } else if (status === 'PAUSED' || status === 'INITIALIZED' || status === 'TERMINATED') {
                 if (this.workerTimer) {
                     clearTimeout(this.workerTimer);
                     this.workerTimer = null;
@@ -888,6 +936,11 @@ export class Telemetry3DViewport {
             }
         };
         this.stateManager.onModelStatusChange(this.modelStatusListener);
+
+        this.buildColorbarContainer();
+        this.buildTopControlsBar();
+        this.buildControlsOverlay();
+        this.buildBottomControlsDock();
         this.syncControls();
     }
 
@@ -1018,44 +1071,15 @@ export class Telemetry3DViewport {
             }
         });
 
-        let hoverRafId: number | null = null;
-        let lastHoverClientX = -9999;
-        let lastHoverClientY = -9999;
-        this.canvas.addEventListener('mousemove', (e) => {
-            if (isDragging) return;
-            if (Math.abs(e.clientX - lastHoverClientX) < 2 && Math.abs(e.clientY - lastHoverClientY) < 2) return;
-            lastHoverClientX = e.clientX;
-            lastHoverClientY = e.clientY;
-
-            if (hoverRafId !== null) return;
-            hoverRafId = requestAnimationFrame(() => {
-                hoverRafId = null;
-                const rect = this.canvas.getBoundingClientRect();
-                const dpr = window.devicePixelRatio || 1;
-                const mouseX = (e.clientX - rect.left) * dpr;
-                const mouseY = (e.clientY - rect.top) * dpr;
-                this.worker.postMessage({
-                    type: 'hoverObject',
-                    data: {
-                        mouseX,
-                        mouseY,
-                        screenX: e.clientX,
-                        screenY: e.clientY
-                    }
-                });
-            });
-        });
-
+        // Mouse-over / hover selection in the 3D viewport is disabled per user preference.
+        // Explicit click selection remains active via pickObject on mouseup.
         this.canvas.addEventListener('mouseleave', () => {
-            if (hoverRafId !== null) {
-                cancelAnimationFrame(hoverRafId);
-                hoverRafId = null;
-            }
             this.worker.postMessage({
                 type: 'hoverObject',
                 data: { clear: true }
             });
             this.hideHoverBadge();
+            this.canvas.style.cursor = 'default';
         });
 
         this.canvas.addEventListener('wheel', (e) => {
@@ -1135,6 +1159,8 @@ export class Telemetry3DViewport {
             if (hit) {
                 const targetModel = this.getTargetModel();
                 let matchedNode: any = null;
+                let matchedChildId: string | undefined = undefined;
+                let pickedLabel = label;
                 if (targetModel && targetModel.nodes) {
                     if (objectType === 'Slice') {
                         matchedNode = this.getSlicesCarrierNode() || this.getViewportNode();
@@ -1171,13 +1197,23 @@ export class Telemetry3DViewport {
                                           (objectId !== undefined && !isNaN(Number(objectId)) ? femObjNodes[Math.round(Number(objectId))] : null) ||
                                           femObjNodes[0] ||
                                           targetModel.nodes.find((n: any) => n.type === 'FEMDomain3D') || null;
-                        } else if (objectType === 'MPMObject3D') {
-                            const mpmObjNodes = targetModel.nodes.filter((n: any) => n.type === 'MPMObject3D');
-                            matchedNode = targetModel.nodes.find((n: any) => n.id === objectId) ||
-                                          (objectId !== undefined && !isNaN(Number(objectId)) ? mpmObjNodes[Math.round(Number(objectId))] : null) ||
-                                          targetModel.nodes.find((n: any) => n.type === 'MPMObject3D' && String(n.parameters?.object_id) === String(objectId)) ||
-                                          mpmObjNodes[0] ||
-                                          targetModel.nodes.find((n: any) => n.type === 'MPMDomain3D') || null;
+                        } else if (objectType === 'MPMObject3D' || objectType === 'MPMObject2D') {
+                            const discovered = this.getDiscoveredMPMObjects(targetModel);
+                            const matchedDisc = discovered.find((d: any) => d.id === objectId) ||
+                                                (objectId !== undefined && !isNaN(Number(objectId)) ? discovered[Math.round(Number(objectId))] : null);
+                            if (matchedDisc) {
+                                matchedNode = targetModel.nodes.find((n: any) => n.id === matchedDisc.node_id) || null;
+                                matchedChildId = matchedDisc.child_id;
+                                if (matchedDisc.name) pickedLabel = matchedDisc.name;
+                            } else {
+                                const mpmObjNodes = targetModel.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
+                                matchedNode = targetModel.nodes.find((n: any) => n.id === objectId) ||
+                                              (objectId !== undefined && !isNaN(Number(objectId)) ? mpmObjNodes[Math.round(Number(objectId))] : null) ||
+                                              targetModel.nodes.find((n: any) => (n.type === 'MPMObject3D' || n.type === 'MPMObject2D') && String(n.parameters?.object_id) === String(objectId)) ||
+                                              mpmObjNodes[0] ||
+                                              targetModel.nodes.find((n: any) => n.type === 'MarineHarbourDomain') ||
+                                              targetModel.nodes.find((n: any) => n.type === 'MPMDomain3D') || null;
+                            }
                         } else if (objectType === 'STLGeometry') {
                             matchedNode = targetModel.nodes.find((n: any) => n.id === objectId) ||
                                           targetModel.nodes.find((n: any) => n.type === 'STLGeometry') ||
@@ -1198,7 +1234,7 @@ export class Telemetry3DViewport {
                     this.stateManager.setSelectedNode(matchedNode.id);
                 }
 
-                const selLabel = label || (objectType === 'Obstacle' ? 'Immersed Obstacle' : objectType);
+                const selLabel = pickedLabel || (objectType === 'Obstacle' ? 'Immersed Obstacle' : objectType);
                 const chip = this.getOrCreateHudChip();
                 chip.textContent = `🎯 ${selLabel}`;
                 chip.classList.add('is-selected');
@@ -1215,7 +1251,8 @@ export class Telemetry3DViewport {
                         sliceIndex,
                         gaugeIndex,
                         label: selLabel,
-                        nodeId: matchedNode?.id
+                        nodeId: matchedNode?.id,
+                        childId: matchedChildId
                     });
                     if (tc.setSelectedObjectDetails) {
                         tc.setSelectedObjectDetails({
@@ -1224,8 +1261,17 @@ export class Telemetry3DViewport {
                             sliceIndex,
                             gaugeIndex,
                             label: selLabel,
-                            nodeId: matchedNode?.id
+                            nodeId: matchedNode?.id,
+                            childId: matchedChildId
                         });
+                    }
+                }
+                const pb = (window as any).pipelineBrowser;
+                if (pb) {
+                    if (matchedChildId) {
+                        pb.setSelectedChildId?.(matchedChildId);
+                    } else {
+                        pb.setSelectedChildId?.(null);
                     }
                 }
             } else {
@@ -1666,14 +1712,21 @@ export class Telemetry3DViewport {
             <option value="100.0">0.01 FPS (100.0s)</option>
             <option value="1000.0">0.001 FPS (1000.0s)</option>
         `;
-        this.selectOptionByNumericValue(rateSel, vpNode ? (vpNode.parameters.refresh_rate ?? 0.5) : 0.5);
+        const targetModel = this.getTargetModel();
+        const initialRate = targetModel ? this.stateManager.getModelRefreshRate(targetModel.id) : (vpNode ? (vpNode.parameters.refresh_rate ?? 0.5) : 0.5);
+        this.selectOptionByNumericValue(rateSel, initialRate);
         this.bindEditingEvents(rateSel, () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const val = Number(rateSel.value);
-                this.stateManager.updateNodeParametersInPlace(vp.id, { refresh_rate: val });
-                this.sendView3DConfig();
+            const val = Number(rateSel.value);
+            const m = this.getTargetModel();
+            if (m) {
+                this.stateManager.setModelRefreshRate(m.id, val);
+            } else {
+                const vp = this.getViewportNode();
+                if (vp) {
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { refresh_rate: val });
+                }
             }
+            this.sendView3DConfig();
         });
         rateRow.appendChild(rateSel);
 
@@ -1914,7 +1967,8 @@ export class Telemetry3DViewport {
             { id: 'viridis', name: 'Viridis', grad: 'linear-gradient(to right, #440154, #3b528b, #21908d, #5dc963, #fde725)' },
             { id: 'coolwarm', name: 'CoolWarm', grad: 'linear-gradient(to right, #3b4cc0, #88b0f3, #ddd, #f49a7b, #b40426)' },
             { id: 'cividis', name: 'Cividis', grad: 'linear-gradient(to right, #002051, #395276, #678685, #9eb980, #fdea45)' },
-            { id: 'grayscale', name: 'Gray', grad: 'linear-gradient(to right, #000000, #ffffff)' }
+            { id: 'grayscale', name: 'Gray', grad: 'linear-gradient(to right, #000000, #ffffff)' },
+            { id: 'materials', name: 'Materials / Phase', grad: 'linear-gradient(to right, #38bdf8 0% 16.67%, #0284c7 16.67% 33.33%, #d97706 33.33% 50%, #f97316 50% 66.67%, #ef4444 66.67% 83.33%, #a855f7 83.33% 100%)' }
         ];
 
         this.showPopover(targetEl, (popover) => {
@@ -3061,6 +3115,7 @@ export class Telemetry3DViewport {
         const qCmaps = vpNode.parameters.quantity_colormaps ? { ...vpNode.parameters.quantity_colormaps } : {};
         qCmaps[cQty] = cmap;
         qCmaps[qty] = cmap;
+        if (cQty === 'velocity') qCmaps['speed'] = cmap;
         if (cQty === 'peak_overpressure') qCmaps['overpressure'] = cmap;
         if (cQty === 'peak_impulse') qCmaps['impulse'] = cmap;
         if (cQty === 'plastic_strain') qCmaps['plasticStrain'] = cmap;
@@ -3118,6 +3173,7 @@ export class Telemetry3DViewport {
         const qLogScales = vpNode.parameters.quantity_log_scales ? { ...vpNode.parameters.quantity_log_scales } : {};
         qLogScales[cQty] = logV;
         qLogScales[qty] = logV;
+        if (cQty === 'velocity') qLogScales['speed'] = logV;
         if (cQty === 'peak_overpressure') qLogScales['overpressure'] = logV;
         if (cQty === 'peak_impulse') qLogScales['impulse'] = logV;
         if (cQty === 'plastic_strain') qLogScales['plasticStrain'] = logV;
@@ -3175,6 +3231,7 @@ export class Telemetry3DViewport {
         const qAutoScales = vpNode.parameters.quantity_auto_scales ? { ...vpNode.parameters.quantity_auto_scales } : {};
         qAutoScales[cQty] = autoV;
         qAutoScales[qty] = autoV;
+        if (cQty === 'velocity') qAutoScales['speed'] = autoV;
         if (cQty === 'peak_overpressure') qAutoScales['overpressure'] = autoV;
         if (cQty === 'peak_impulse') qAutoScales['impulse'] = autoV;
         if (cQty === 'plastic_strain') qAutoScales['plasticStrain'] = autoV;
@@ -3233,6 +3290,7 @@ export class Telemetry3DViewport {
         const qRanges = vpNode.parameters.quantity_ranges ? { ...vpNode.parameters.quantity_ranges } : {};
         qRanges[cQty] = [minV, maxV];
         qRanges[qty] = [minV, maxV];
+        if (cQty === 'velocity') qRanges['speed'] = [minV, maxV];
         if (cQty === 'peak_overpressure') qRanges['overpressure'] = [minV, maxV];
         if (cQty === 'peak_impulse') qRanges['impulse'] = [minV, maxV];
         if (cQty === 'plastic_strain') qRanges['plasticStrain'] = [minV, maxV];
@@ -3241,6 +3299,7 @@ export class Telemetry3DViewport {
         const qAutoScales = vpNode.parameters.quantity_auto_scales ? { ...vpNode.parameters.quantity_auto_scales } : {};
         qAutoScales[cQty] = autoV;
         qAutoScales[qty] = autoV;
+        if (cQty === 'velocity') qAutoScales['speed'] = autoV;
         if (cQty === 'peak_overpressure') qAutoScales['overpressure'] = autoV;
         if (cQty === 'peak_impulse') qAutoScales['impulse'] = autoV;
         if (cQty === 'plastic_strain') qAutoScales['plasticStrain'] = autoV;
@@ -3250,6 +3309,7 @@ export class Telemetry3DViewport {
         if (logV !== undefined) {
             qLogScales[cQty] = logV;
             qLogScales[qty] = logV;
+            if (cQty === 'velocity') qLogScales['speed'] = logV;
             if (cQty === 'peak_overpressure') qLogScales['overpressure'] = logV;
             if (cQty === 'peak_impulse') qLogScales['impulse'] = logV;
             if (cQty === 'plastic_strain') qLogScales['plasticStrain'] = logV;
@@ -3271,7 +3331,15 @@ export class Telemetry3DViewport {
             }
         });
 
-        const updates: any = { quantity_ranges: qRanges, quantity_auto_scales: qAutoScales, slices };
+        const updates: any = { 
+            quantity_ranges: qRanges, 
+            quantity_auto_scales: qAutoScales, 
+            slices,
+            min_val: minV,
+            max_val: maxV,
+            auto_scale: autoV,
+            autoScale: autoV
+        };
         if (logV !== undefined) {
             updates.quantity_log_scales = qLogScales;
         }
@@ -3310,6 +3378,7 @@ export class Telemetry3DViewport {
         if (!this.latestQuantityRanges) this.latestQuantityRanges = {};
         this.latestQuantityRanges[cQty] = [minV, maxV];
         this.latestQuantityRanges[qty] = [minV, maxV];
+        if (cQty === 'velocity') this.latestQuantityRanges['speed'] = [minV, maxV];
 
         this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
         const stlNode = this.getGeometryNode();
@@ -3325,6 +3394,9 @@ export class Telemetry3DViewport {
         this.worker.postMessage({
             type: 'setConfig',
             data: {
+                minVal: minV,
+                maxVal: maxV,
+                autoScale: autoV,
                 quantityRanges: qRanges,
                 quantityAutoScales: qAutoScales,
                 quantityLogScales: qLogScales,
@@ -4011,7 +4083,7 @@ export class Telemetry3DViewport {
 
         const tdLayer = document.createElement('td');
         tdLayer.style.padding = '3px 4px';
-        tdLayer.innerHTML = '🎯 <b>Triggers / Detonators</b>';
+        tdLayer.innerHTML = '🎯 <b>Detonators</b>';
         tr.appendChild(tdLayer);
 
         const appendToggleCol = (text: string, id: string, init: boolean, onChange: (v: boolean) => void) => {
@@ -4480,14 +4552,74 @@ export class Telemetry3DViewport {
         parent.appendChild(tr);
     }
 
-    private getColormapCssGradient(cmapId: string, direction: 'to top' | 'to right' = 'to top'): string {
+    private sampleColormapRGB(v: number, cmapName: string): [number, number, number] {
+        const val = Math.max(0.0, Math.min(1.0, v));
+        switch (cmapName) {
+            case 'plasma': {
+                const r = Math.min(1.0, Math.pow(val, 0.5));
+                const g = Math.pow(val, 2.0) * 0.85;
+                const b = Math.cos(val * Math.PI * 0.5);
+                return [r, g, b];
+            }
+            case 'viridis': {
+                const r = Math.max(0.0, Math.min(1.0, -1.8 * val * val + 2.0 * val));
+                const g = Math.max(0.0, Math.min(1.0, 0.2 + 0.8 * Math.sin(val * Math.PI)));
+                const b = Math.max(0.0, Math.min(1.0, Math.cos(val * Math.PI * 0.5)));
+                return [r, g, b];
+            }
+            case 'coolwarm': {
+                const r = Math.min(1.0, 0.23 + 1.5 * val);
+                const g = Math.min(1.0, 1.0 - Math.abs(val - 0.5) * 1.2);
+                const b = Math.min(1.0, 1.7 - 1.5 * val);
+                return [r, g, b];
+            }
+            case 'grayscale':
+                return [val, val, val];
+            case 'materials':
+            case 'material':
+            case 'phase': {
+                const id = Math.floor(val * 5.0 + 0.5);
+                if (id < 0.5) return [0.53, 0.81, 0.98]; // Air
+                if (id < 1.5) return [0.05, 0.45, 0.85]; // Water
+                if (id < 2.5) return [0.85, 0.58, 0.25]; // Soil
+                if (id < 3.5) return [1.00, 0.50, 0.00]; // HE Solid
+                if (id < 4.5) return [0.95, 0.15, 0.15]; // Det Products
+                return [0.58, 0.20, 0.92];               // FEM Solid / Obstacle
+            }
+            case 'rainbow':
+            default: {
+                const r = Math.max(0.0, Math.min(1.0, 1.5 - Math.abs(val * 4.0 - 3.0)));
+                const g = Math.max(0.0, Math.min(1.0, 1.5 - Math.abs(val * 4.0 - 2.0)));
+                const b = Math.max(0.0, Math.min(1.0, 1.5 - Math.abs(val * 4.0 - 1.0)));
+                return [r, g, b];
+            }
+        }
+    }
+
+    private getColormapCssGradient(cmapId: string, direction: 'to top' | 'to right' = 'to top', contourLevels: number = 0): string {
+        if (cmapId === 'materials' || cmapId === 'material' || cmapId === 'phase') {
+            return `linear-gradient(${direction}, #38bdf8 0% 16.67%, #0284c7 16.67% 33.33%, #d97706 33.33% 50%, #f97316 50% 66.67%, #ef4444 66.67% 83.33%, #a855f7 83.33% 100%)`;
+        }
+        if (contourLevels > 1) {
+            const stops: string[] = [];
+            for (let i = 0; i < contourLevels; i++) {
+                const normVal = (i + 0.5) / contourLevels;
+                const [r, g, b] = this.sampleColormapRGB(normVal, cmapId);
+                const color = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+                const p0 = (i / contourLevels * 100).toFixed(2);
+                const p1 = ((i + 1) / contourLevels * 100).toFixed(2);
+                stops.push(`${color} ${p0}%`, `${color} ${p1}%`);
+            }
+            return `linear-gradient(${direction}, ${stops.join(', ')})`;
+        }
         const cmapGradients: Record<string, string> = {
             rainbow: '#0000ff, #00ffff, #00ff00, #ffff00, #ff0000',
             plasma: '#0d0887, #6a00a8, #b12a90, #e16462, #fca636, #f0f921',
             viridis: '#440154, #3b528b, #21908d, #5dc963, #fde725',
             coolwarm: '#3b4cc0, #88b0f3, #ddd, #f49a7b, #b40426',
             cividis: '#002051, #395276, #678685, #9eb980, #fdea45',
-            grayscale: '#000000, #ffffff'
+            grayscale: '#000000, #ffffff',
+            materials: '#38bdf8 0% 16.67%, #0284c7 16.67% 33.33%, #d97706 33.33% 50%, #f97316 50% 66.67%, #ef4444 66.67% 83.33%, #a855f7 83.33% 100%'
         };
         const stops = cmapGradients[cmapId] || cmapGradients.rainbow;
         return `linear-gradient(${direction}, ${stops})`;
@@ -4529,249 +4661,90 @@ export class Telemetry3DViewport {
         this.container.appendChild(container);
     }
 
-    private createColorbarCard(spec: {
-        id: string;
-        title: string;
-        quantity: string;
+    private populateColorbarTicks(ticksCol: HTMLElement, spec: {
         colormap: string;
-        autoScale: boolean;
-        logScale: boolean;
-        isLocked?: boolean;
+        quantity: string;
         minVal: number;
         maxVal: number;
-        onToggleOff: () => void;
-        onToggleAuto: () => void;
-        onToggleLog: () => void;
-        onToggleLock?: () => void;
-        onSelectColormap: (anchorEl: HTMLElement) => void;
+        logScale: boolean;
         onSetMinMax: (min: number, max: number) => void;
-        onSelectQuantity: (anchorEl: HTMLElement) => void;
-    }): HTMLElement {
-        const card = document.createElement('div');
-        card.id = this.getElId(`viewport-colorbar-card-${spec.id}`);
-        card.className = 'viewport-colorbar-card';
-        card.style.background = 'rgba(14, 15, 19, 0.88)';
-        card.style.backdropFilter = 'blur(12px)';
-        card.style.border = '1px solid rgba(255, 255, 255, 0.14)';
-        card.style.borderRadius = '6px';
-        card.style.padding = '5px 6px';
-        card.style.display = 'flex';
-        card.style.flexDirection = 'column';
-        card.style.gap = '3px';
-        card.style.color = '#e2e8f0';
-        card.style.fontFamily = 'system-ui, -apple-system, sans-serif';
-        card.style.fontSize = '9px';
-        card.style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.55)';
-        card.style.userSelect = 'none';
-        card.style.boxSizing = 'border-box';
-        card.style.pointerEvents = 'auto';
-        card.style.width = 'fit-content';
+    }) {
+        ticksCol.innerHTML = '';
+        const isMaterials = spec.colormap === 'materials' || spec.colormap === 'material' || spec.colormap === 'phase' || spec.quantity === 'materials' || spec.quantity === 'material' || spec.quantity === 'phase';
+        ticksCol.dataset.isMaterials = isMaterials ? 'true' : 'false';
 
-        // 1. Top Header Row (Title + Close Button)
-        const topRow = document.createElement('div');
-        topRow.style.display = 'flex';
-        topRow.style.alignItems = 'center';
-        topRow.style.justifyContent = 'space-between';
-        topRow.style.gap = '6px';
+        if (isMaterials) {
+            const materialLabels = [
+                { id: 5, name: 'FEM Solid', color: '#c084fc' },
+                { id: 4, name: 'Det Products', color: '#f87171' },
+                { id: 3, name: 'Solid HE', color: '#fb923c' },
+                { id: 2, name: 'Seabed Soil', color: '#fbbf24' },
+                { id: 1, name: 'Seawater', color: '#38bdf8' },
+                { id: 0, name: 'Air', color: '#7dd3fc' }
+            ];
+            for (const m of materialLabels) {
+                const tickRow = document.createElement('div');
+                tickRow.style.display = 'flex';
+                tickRow.style.alignItems = 'center';
+                tickRow.style.gap = '5px';
+                tickRow.style.height = '16px';
 
-        const titleSpan = document.createElement('span');
-        titleSpan.className = 'viewport-colorbar-title';
-        titleSpan.style.fontWeight = '700';
-        titleSpan.style.color = '#38bdf8';
-        titleSpan.style.cursor = 'pointer';
-        titleSpan.style.fontSize = '8.5px';
-        titleSpan.style.letterSpacing = '0.3px';
-        titleSpan.style.whiteSpace = 'nowrap';
-        titleSpan.textContent = spec.title;
-        titleSpan.title = `${spec.title} (Click to change quantity)`;
-        titleSpan.onclick = (e) => {
-            e.stopPropagation();
-            spec.onSelectQuantity(titleSpan);
-        };
-        topRow.appendChild(titleSpan);
+                const tickLine = document.createElement('div');
+                tickLine.style.width = '4px';
+                tickLine.style.height = '1.5px';
+                tickLine.style.background = m.color;
+                tickLine.style.flexShrink = '0';
+                tickLine.style.marginRight = '2px';
+                tickRow.appendChild(tickLine);
 
-        const closeBtn = document.createElement('span');
-        closeBtn.className = 'viewport-colorbar-close-btn';
-        closeBtn.style.fontSize = '9px';
-        closeBtn.style.fontWeight = 'bold';
-        closeBtn.style.color = '#94a3b8';
-        closeBtn.style.cursor = 'pointer';
-        closeBtn.style.padding = '0 2px';
-        closeBtn.style.lineHeight = '1';
-        closeBtn.style.flexShrink = '0';
-        closeBtn.textContent = '✕';
-        closeBtn.title = 'Close color bar';
-        closeBtn.onmouseenter = () => closeBtn.style.color = '#ef4444';
-        closeBtn.onmouseleave = () => closeBtn.style.color = '#94a3b8';
-        closeBtn.onclick = (e) => {
-            e.stopPropagation();
-            spec.onToggleOff();
-        };
-        topRow.appendChild(closeBtn);
-        card.appendChild(topRow);
+                const label = document.createElement('span');
+                label.textContent = `${m.id}: ${m.name}`;
+                label.style.fontSize = '8px';
+                label.style.fontFamily = "'JetBrains Mono', monospace";
+                label.style.color = m.color;
+                label.style.lineHeight = '14px';
+                label.style.whiteSpace = 'nowrap';
+                label.style.fontWeight = '500';
+                tickRow.appendChild(label);
 
-        // 2. Control Badges Row (Auto, Log, Colormap)
-        const badgesRow = document.createElement('div');
-        badgesRow.style.display = 'flex';
-        badgesRow.style.alignItems = 'center';
-        badgesRow.style.gap = '3px';
-        badgesRow.style.marginBottom = '1px';
-
-        // Auto badge
-        const autoBadge = document.createElement('span');
-        autoBadge.className = 'viewport-colorbar-auto-badge';
-        autoBadge.style.fontSize = '7.5px';
-        autoBadge.style.fontWeight = '700';
-        autoBadge.style.padding = '1px 3px';
-        autoBadge.style.borderRadius = '2px';
-        autoBadge.style.cursor = 'pointer';
-        autoBadge.style.lineHeight = '1.1';
-        autoBadge.style.minWidth = '28px';
-        autoBadge.style.textAlign = 'center';
-        autoBadge.style.display = 'inline-block';
-        autoBadge.style.boxSizing = 'border-box';
-        autoBadge.textContent = spec.autoScale ? 'AUTO' : 'MAN';
-        autoBadge.style.background = spec.autoScale ? 'rgba(0, 173, 255, 0.2)' : 'rgba(245, 158, 11, 0.2)';
-        autoBadge.style.color = spec.autoScale ? '#38bdf8' : '#fbbf24';
-        autoBadge.style.border = spec.autoScale ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid rgba(245, 158, 11, 0.35)';
-        autoBadge.title = 'Click to toggle Auto / Manual scale';
-        autoBadge.onclick = (e) => {
-            e.stopPropagation();
-            spec.onToggleAuto();
-        };
-        badgesRow.appendChild(autoBadge);
-
-        // Log badge
-        const logBadge = document.createElement('span');
-        logBadge.className = 'viewport-colorbar-log-badge';
-        logBadge.style.fontSize = '7.5px';
-        logBadge.style.fontWeight = '700';
-        logBadge.style.padding = '1px 3px';
-        logBadge.style.borderRadius = '2px';
-        logBadge.style.cursor = 'pointer';
-        logBadge.style.lineHeight = '1.1';
-        logBadge.style.minWidth = '24px';
-        logBadge.style.textAlign = 'center';
-        logBadge.style.display = 'inline-block';
-        logBadge.style.boxSizing = 'border-box';
-        logBadge.textContent = spec.logScale ? 'LOG' : 'LIN';
-        logBadge.style.background = spec.logScale ? 'rgba(168, 85, 247, 0.2)' : 'rgba(255, 255, 255, 0.08)';
-        logBadge.style.color = spec.logScale ? '#c084fc' : '#94a3b8';
-        logBadge.style.border = spec.logScale ? '1px solid rgba(168, 85, 247, 0.35)' : '1px solid rgba(255, 255, 255, 0.15)';
-        logBadge.title = 'Click to toggle Linear / Logarithmic scale';
-        logBadge.onclick = (e) => {
-            e.stopPropagation();
-            spec.onToggleLog();
-        };
-        badgesRow.appendChild(logBadge);
-
-        // Colormap badge
-        const cmapBadge = document.createElement('span');
-        cmapBadge.className = 'viewport-colorbar-cmap-badge';
-        cmapBadge.style.fontSize = '7.5px';
-        cmapBadge.style.fontWeight = '700';
-        cmapBadge.style.padding = '1px 3px';
-        cmapBadge.style.borderRadius = '2px';
-        cmapBadge.style.cursor = 'pointer';
-        cmapBadge.style.lineHeight = '1.1';
-        cmapBadge.style.background = 'rgba(255, 255, 255, 0.08)';
-        cmapBadge.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-        cmapBadge.style.color = '#f1f5f9';
-        cmapBadge.style.whiteSpace = 'nowrap';
-        cmapBadge.textContent = spec.colormap.toUpperCase();
-        cmapBadge.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
-        cmapBadge.onclick = (e) => {
-            e.stopPropagation();
-            spec.onSelectColormap(cmapBadge);
-        };
-        badgesRow.appendChild(cmapBadge);
-
-        // Lock / Unified Range badge
-        const lockBadge = document.createElement('span');
-        lockBadge.className = 'viewport-colorbar-lock-badge';
-        lockBadge.style.fontSize = '7.5px';
-        lockBadge.style.fontWeight = '700';
-        lockBadge.style.padding = '1px 3px';
-        lockBadge.style.borderRadius = '2px';
-        lockBadge.style.cursor = 'pointer';
-        lockBadge.style.lineHeight = '1.1';
-        lockBadge.style.minWidth = '24px';
-        lockBadge.style.textAlign = 'center';
-        lockBadge.style.display = 'inline-block';
-        lockBadge.style.boxSizing = 'border-box';
-        lockBadge.textContent = spec.isLocked ? '🔒 UNIFIED' : '🔓 INDEP';
-        lockBadge.style.background = spec.isLocked ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)';
-        lockBadge.style.color = spec.isLocked ? '#34d399' : '#f87171';
-        lockBadge.style.border = spec.isLocked ? '1px solid rgba(52, 211, 153, 0.35)' : '1px solid rgba(239, 68, 68, 0.35)';
-        lockBadge.title = spec.isLocked
-            ? 'Unified Field Range: ALL slices, CAD models, and obstacles displaying this quantity share the same range. Click to unlock.'
-            : 'Independent Range: This object uses an independent min/max range. Click to lock to unified range.';
-        lockBadge.onclick = (e) => {
-            e.stopPropagation();
-            spec.onToggleLock?.();
-        };
-        badgesRow.appendChild(lockBadge);
-        card.appendChild(badgesRow);
-
-        // 3. Main Body (Gradient Bar + Ticks)
-        const bodyRow = document.createElement('div');
-        bodyRow.style.display = 'flex';
-        bodyRow.style.alignItems = 'stretch';
-        bodyRow.style.gap = '4px';
-
-        // Gradient Bar using exact colormap defined for this object!
-        const gradBar = document.createElement('div');
-        gradBar.className = 'viewport-colorbar-grad-bar';
-        gradBar.style.width = '10px';
-        gradBar.style.height = '120px';
-        gradBar.style.borderRadius = '2px';
-        gradBar.style.border = '1px solid rgba(255, 255, 255, 0.2)';
-        gradBar.style.boxShadow = 'inset 0 0 3px rgba(0,0,0,0.5)';
-        gradBar.style.cursor = 'pointer';
-        gradBar.style.background = this.getColormapCssGradient(spec.colormap, 'to top');
-        gradBar.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
-        gradBar.onclick = (e) => {
-            e.stopPropagation();
-            spec.onSelectColormap(gradBar);
-        };
-        bodyRow.appendChild(gradBar);
-
-        // Ticks Container
-        const ticksCol = document.createElement('div');
-        ticksCol.className = 'viewport-colorbar-ticks-col';
-        ticksCol.style.display = 'flex';
-        ticksCol.style.flexDirection = 'column';
-        ticksCol.style.justifyContent = 'space-between';
-        ticksCol.style.height = '120px';
-        ticksCol.style.minWidth = '0';
-        ticksCol.style.flex = '1';
+                ticksCol.appendChild(tickRow);
+            }
+            return;
+        }
 
         const numTicks = 5;
         let displayMinVal = spec.minVal;
-        const displayMaxVal = spec.maxVal;
-        if (spec.logScale && displayMinVal <= 0 && displayMaxVal > 0) {
-            displayMinVal = displayMaxVal / 1000000.0;
+        let displayMaxVal = spec.maxVal;
+        if (displayMaxVal <= displayMinVal) {
+            displayMaxVal = displayMinVal + 1.0;
+        }
+        if (spec.logScale) {
+            if (displayMaxVal <= 0) displayMaxVal = 1.0;
+            if (displayMinVal <= 0) displayMinVal = displayMaxVal / 1000000.0;
         }
         const rangeSpan = Math.abs(displayMaxVal - displayMinVal);
 
         for (let i = 0; i < numTicks; i++) {
             const t = (numTicks - 1 - i) / (numTicks - 1);
-            let val = displayMinVal + t * (displayMaxVal - displayMinVal);
+            let val: number;
             if (spec.logScale && displayMinVal > 0 && displayMaxVal > displayMinVal) {
                 val = displayMinVal * Math.pow(displayMaxVal / displayMinVal, t);
+            } else {
+                val = displayMinVal + t * (displayMaxVal - displayMinVal);
             }
 
             const tickRow = document.createElement('div');
             tickRow.style.display = 'flex';
             tickRow.style.alignItems = 'center';
-            tickRow.style.gap = '2.5px';
+            tickRow.style.gap = '5px';
             tickRow.style.height = '14px';
 
             const tickLine = document.createElement('div');
-            tickLine.style.width = '3px';
-            tickLine.style.height = '1px';
-            tickLine.style.background = 'rgba(255,255,255,0.35)';
+            tickLine.style.width = '4px';
+            tickLine.style.height = '1.5px';
+            tickLine.style.background = 'rgba(255,255,255,0.45)';
             tickLine.style.flexShrink = '0';
+            tickLine.style.marginRight = '2px';
             tickRow.appendChild(tickLine);
 
             if (i === 0 || i === numTicks - 1) {
@@ -4834,6 +4807,322 @@ export class Telemetry3DViewport {
 
             ticksCol.appendChild(tickRow);
         }
+    }
+
+    private createColorbarCard(spec: {
+        id: string;
+        title: string;
+        quantity: string;
+        colormap: string;
+        autoScale: boolean;
+        logScale: boolean;
+        isLocked?: boolean;
+        minVal: number;
+        maxVal: number;
+        contourLevels?: number;
+        smoothContours?: boolean;
+        onToggleOff: () => void;
+        onToggleAuto: () => void;
+        onToggleLog: () => void;
+        onToggleLock?: () => void;
+        onSelectColormap: (anchorEl: HTMLElement) => void;
+        onSetMinMax: (min: number, max: number) => void;
+        onSelectQuantity: (anchorEl: HTMLElement) => void;
+        onSetContourLevels?: (levels: number) => void;
+        onToggleSmooth?: (smooth: boolean) => void;
+    }): HTMLElement {
+        const card = document.createElement('div');
+        card.id = this.getElId(`viewport-colorbar-card-${spec.id}`);
+        card.className = 'viewport-colorbar-card';
+        card.style.background = 'rgba(14, 15, 19, 0.88)';
+        card.style.backdropFilter = 'blur(12px)';
+        card.style.border = '1px solid rgba(255, 255, 255, 0.14)';
+        card.style.borderRadius = '6px';
+        card.style.padding = '5px 6px';
+        card.style.display = 'flex';
+        card.style.flexDirection = 'column';
+        card.style.gap = '3px';
+        card.style.color = '#e2e8f0';
+        card.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+        card.style.fontSize = '9px';
+        card.style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.55)';
+        card.style.userSelect = 'none';
+        card.style.boxSizing = 'border-box';
+        card.style.pointerEvents = 'auto';
+        card.style.width = 'fit-content';
+
+        // 1. Top Header Row (Title + Drag Handle + Close Button)
+        const topRow = document.createElement('div');
+        topRow.style.display = 'flex';
+        topRow.style.alignItems = 'center';
+        topRow.style.justifyContent = 'space-between';
+        topRow.style.gap = '6px';
+        topRow.style.cursor = 'grab';
+        topRow.title = 'Drag to reposition card';
+
+        const leftHeader = document.createElement('div');
+        leftHeader.style.display = 'flex';
+        leftHeader.style.alignItems = 'center';
+        leftHeader.style.gap = '3px';
+
+        const dragHandle = document.createElement('span');
+        dragHandle.innerHTML = '⋮⋮';
+        dragHandle.style.color = '#64748b';
+        dragHandle.style.fontSize = '9px';
+        dragHandle.style.cursor = 'grab';
+        dragHandle.title = 'Drag to reposition';
+        leftHeader.appendChild(dragHandle);
+
+        const titleSpan = document.createElement('span');
+        titleSpan.className = 'viewport-colorbar-title';
+        titleSpan.style.fontWeight = '700';
+        titleSpan.style.color = '#38bdf8';
+        titleSpan.style.cursor = 'pointer';
+        titleSpan.style.fontSize = '8.5px';
+        titleSpan.style.letterSpacing = '0.3px';
+        titleSpan.style.whiteSpace = 'nowrap';
+        titleSpan.textContent = spec.title;
+        titleSpan.title = `${spec.title} (Click to change quantity)`;
+        titleSpan.onclick = (e) => {
+            e.stopPropagation();
+            spec.onSelectQuantity(titleSpan);
+        };
+        leftHeader.appendChild(titleSpan);
+        topRow.appendChild(leftHeader);
+
+        const closeBtn = document.createElement('span');
+        closeBtn.className = 'viewport-colorbar-close-btn';
+        closeBtn.style.fontSize = '9px';
+        closeBtn.style.fontWeight = 'bold';
+        closeBtn.style.color = '#94a3b8';
+        closeBtn.style.cursor = 'pointer';
+        closeBtn.style.padding = '0 2px';
+        closeBtn.style.lineHeight = '1';
+        closeBtn.style.flexShrink = '0';
+        closeBtn.textContent = '✕';
+        closeBtn.title = 'Close color bar';
+        closeBtn.onmouseenter = () => closeBtn.style.color = '#ef4444';
+        closeBtn.onmouseleave = () => closeBtn.style.color = '#94a3b8';
+        closeBtn.onclick = (e) => {
+            e.stopPropagation();
+            spec.onToggleOff();
+        };
+        topRow.appendChild(closeBtn);
+
+        // Draggable Card Drag Handler
+        topRow.onmousedown = (e: MouseEvent) => {
+            if (e.target === closeBtn || e.target === titleSpan) return;
+            e.preventDefault();
+            const startX = e.clientX;
+            const startY = e.clientY;
+            const origLeft = card.offsetLeft;
+            const origTop = card.offsetTop;
+
+            const onMouseMove = (moveEv: MouseEvent) => {
+                const dx = moveEv.clientX - startX;
+                const dy = moveEv.clientY - startY;
+                card.style.position = 'absolute';
+                card.style.left = `${origLeft + dx}px`;
+                card.style.top = `${origTop + dy}px`;
+            };
+
+            const onMouseUp = () => {
+                window.removeEventListener('mousemove', onMouseMove);
+                window.removeEventListener('mouseup', onMouseUp);
+            };
+
+            window.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('mouseup', onMouseUp);
+        };
+
+        card.appendChild(topRow);
+
+        // 2. Badges Row (Auto, Log, Colormap, Lock, Levels)
+        const badgesRow = document.createElement('div');
+        badgesRow.style.display = 'flex';
+        badgesRow.style.alignItems = 'center';
+        badgesRow.style.gap = '3px';
+        badgesRow.style.marginTop = '1px';
+
+        // Auto/Manual badge
+        const autoBadge = document.createElement('span');
+        autoBadge.className = 'viewport-colorbar-auto-badge';
+        autoBadge.style.fontSize = '7.5px';
+        autoBadge.style.fontWeight = '700';
+        autoBadge.style.padding = '1px 3px';
+        autoBadge.style.borderRadius = '2px';
+        autoBadge.style.cursor = 'pointer';
+        autoBadge.style.lineHeight = '1.1';
+        autoBadge.style.minWidth = '24px';
+        autoBadge.style.textAlign = 'center';
+        autoBadge.style.display = 'inline-block';
+        autoBadge.style.boxSizing = 'border-box';
+        autoBadge.textContent = spec.autoScale ? 'AUTO' : 'MAN';
+        autoBadge.style.background = spec.autoScale ? 'rgba(56, 189, 248, 0.2)' : 'rgba(245, 158, 11, 0.2)';
+        autoBadge.style.color = spec.autoScale ? '#38bdf8' : '#fbbf24';
+        autoBadge.style.border = spec.autoScale ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid rgba(245, 158, 11, 0.35)';
+        autoBadge.title = 'Click to toggle Auto / Manual range';
+        autoBadge.onclick = (e) => {
+            e.stopPropagation();
+            spec.onToggleAuto();
+        };
+        badgesRow.appendChild(autoBadge);
+
+        // Log badge
+        const logBadge = document.createElement('span');
+        logBadge.className = 'viewport-colorbar-log-badge';
+        logBadge.style.fontSize = '7.5px';
+        logBadge.style.fontWeight = '700';
+        logBadge.style.padding = '1px 3px';
+        logBadge.style.borderRadius = '2px';
+        logBadge.style.cursor = 'pointer';
+        logBadge.style.lineHeight = '1.1';
+        logBadge.style.minWidth = '24px';
+        logBadge.style.textAlign = 'center';
+        logBadge.style.display = 'inline-block';
+        logBadge.style.boxSizing = 'border-box';
+        logBadge.textContent = spec.logScale ? 'LOG' : 'LIN';
+        logBadge.style.background = spec.logScale ? 'rgba(168, 85, 247, 0.2)' : 'rgba(255, 255, 255, 0.08)';
+        logBadge.style.color = spec.logScale ? '#c084fc' : '#94a3b8';
+        logBadge.style.border = spec.logScale ? '1px solid rgba(168, 85, 247, 0.35)' : '1px solid rgba(255, 255, 255, 0.15)';
+        logBadge.title = 'Click to toggle Linear / Logarithmic scale';
+        logBadge.onclick = (e) => {
+            e.stopPropagation();
+            spec.onToggleLog();
+        };
+        badgesRow.appendChild(logBadge);
+
+        // Colormap badge
+        const cmapBadge = document.createElement('span');
+        cmapBadge.className = 'viewport-colorbar-cmap-badge';
+        cmapBadge.style.fontSize = '7.5px';
+        cmapBadge.style.fontWeight = '700';
+        cmapBadge.style.padding = '1px 3px';
+        cmapBadge.style.borderRadius = '2px';
+        cmapBadge.style.cursor = 'pointer';
+        cmapBadge.style.lineHeight = '1.1';
+        cmapBadge.style.background = 'rgba(255, 255, 255, 0.08)';
+        cmapBadge.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+        cmapBadge.style.color = '#f1f5f9';
+        cmapBadge.style.whiteSpace = 'nowrap';
+        cmapBadge.textContent = spec.colormap.toUpperCase();
+        cmapBadge.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
+        cmapBadge.onclick = (e) => {
+            e.stopPropagation();
+            spec.onSelectColormap(cmapBadge);
+        };
+        badgesRow.appendChild(cmapBadge);
+
+        // Contour Levels badge
+        if (spec.contourLevels !== undefined || spec.onSetContourLevels) {
+            const levelsBadge = document.createElement('span');
+            levelsBadge.className = 'viewport-colorbar-levels-badge';
+            levelsBadge.style.fontSize = '7.5px';
+            levelsBadge.style.fontWeight = '700';
+            levelsBadge.style.padding = '1px 3px';
+            levelsBadge.style.borderRadius = '2px';
+            levelsBadge.style.cursor = 'pointer';
+            levelsBadge.style.lineHeight = '1.1';
+            levelsBadge.style.minWidth = '24px';
+            levelsBadge.style.textAlign = 'center';
+            levelsBadge.style.display = 'inline-block';
+            levelsBadge.style.boxSizing = 'border-box';
+            const isSmooth = Boolean(spec.smoothContours || (spec.contourLevels !== undefined && spec.contourLevels <= 1));
+            const curLevels = spec.contourLevels ?? 10;
+            levelsBadge.textContent = isSmooth ? 'SMOOTH' : `${curLevels} BANDS`;
+            levelsBadge.style.background = isSmooth ? 'rgba(255, 255, 255, 0.08)' : 'rgba(56, 189, 248, 0.2)';
+            levelsBadge.style.color = isSmooth ? '#94a3b8' : '#38bdf8';
+            levelsBadge.style.border = isSmooth ? '1px solid rgba(255, 255, 255, 0.15)' : '1px solid rgba(56, 189, 248, 0.35)';
+            levelsBadge.title = isSmooth
+                ? 'Smooth (Continuous Gradient). Left-click to select banded levels, right-click to toggle.'
+                : `${curLevels} Discrete Contour Bands. Left-click to cycle levels, right-click for smooth.`;
+            levelsBadge.onclick = (e) => {
+                e.stopPropagation();
+                const levelsCycle = [0, 5, 8, 10, 12, 16, 20, 24, 32];
+                const curIdx = isSmooth ? 0 : levelsCycle.indexOf(curLevels);
+                const nextLevels = levelsCycle[(curIdx + 1) % levelsCycle.length];
+                if (nextLevels === 0) {
+                    spec.onToggleSmooth?.(true);
+                    spec.onSetContourLevels?.(0);
+                } else {
+                    spec.onToggleSmooth?.(false);
+                    spec.onSetContourLevels?.(nextLevels);
+                }
+            };
+            levelsBadge.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const newSmooth = !isSmooth;
+                spec.onToggleSmooth?.(newSmooth);
+                if (!newSmooth && curLevels <= 1) {
+                    spec.onSetContourLevels?.(10);
+                }
+            };
+            badgesRow.appendChild(levelsBadge);
+        }
+
+        // Lock / Unified Range badge
+        const lockBadge = document.createElement('span');
+        lockBadge.className = 'viewport-colorbar-lock-badge';
+        lockBadge.style.fontSize = '7.5px';
+        lockBadge.style.fontWeight = '700';
+        lockBadge.style.padding = '1px 3px';
+        lockBadge.style.borderRadius = '2px';
+        lockBadge.style.cursor = 'pointer';
+        lockBadge.style.lineHeight = '1.1';
+        lockBadge.style.minWidth = '24px';
+        lockBadge.style.textAlign = 'center';
+        lockBadge.style.display = (spec.onToggleLock && spec.isLocked !== undefined) ? 'inline-block' : 'none';
+        lockBadge.style.boxSizing = 'border-box';
+        lockBadge.textContent = spec.isLocked ? '🔒 UNIFIED' : '🔓 INDEP';
+        lockBadge.style.background = spec.isLocked ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)';
+        lockBadge.style.color = spec.isLocked ? '#34d399' : '#f87171';
+        lockBadge.style.border = spec.isLocked ? '1px solid rgba(52, 211, 153, 0.35)' : '1px solid rgba(239, 68, 68, 0.35)';
+        lockBadge.title = spec.isLocked
+            ? 'Unified Field Range: ALL slices, CAD models, and obstacles displaying this quantity share the same range. Click to unlock.'
+            : 'Independent Range: This object uses an independent min/max range. Click to lock to unified range.';
+        lockBadge.onclick = (e) => {
+            e.stopPropagation();
+            spec.onToggleLock?.();
+        };
+        badgesRow.appendChild(lockBadge);
+        card.appendChild(badgesRow);
+
+        // 3. Main Body (Gradient Bar + Ticks)
+        const bodyRow = document.createElement('div');
+        bodyRow.style.display = 'flex';
+        bodyRow.style.alignItems = 'stretch';
+        bodyRow.style.gap = '4px';
+
+        // Gradient Bar using exact colormap defined for this object!
+        const gradBar = document.createElement('div');
+        gradBar.className = 'viewport-colorbar-grad-bar';
+        gradBar.style.width = '10px';
+        gradBar.style.height = '120px';
+        gradBar.style.borderRadius = '2px';
+        gradBar.style.border = '1px solid rgba(255, 255, 255, 0.2)';
+        gradBar.style.boxShadow = 'inset 0 0 3px rgba(0,0,0,0.5)';
+        gradBar.style.cursor = 'pointer';
+        const effectiveLevels = (spec.smoothContours || (spec.contourLevels !== undefined && spec.contourLevels <= 1)) ? 0 : (spec.contourLevels ?? 10);
+        gradBar.style.background = this.getColormapCssGradient(spec.colormap, 'to top', effectiveLevels);
+        gradBar.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
+        gradBar.onclick = (e) => {
+            e.stopPropagation();
+            spec.onSelectColormap(gradBar);
+        };
+        bodyRow.appendChild(gradBar);
+
+        // Ticks Container
+        const ticksCol = document.createElement('div');
+        ticksCol.className = 'viewport-colorbar-ticks-col';
+        ticksCol.style.display = 'flex';
+        ticksCol.style.flexDirection = 'column';
+        ticksCol.style.justifyContent = 'space-between';
+        ticksCol.style.height = '120px';
+        ticksCol.style.minWidth = '0';
+        ticksCol.style.flex = '1';
+
+        this.populateColorbarTicks(ticksCol, spec);
 
         bodyRow.appendChild(ticksCol);
         card.appendChild(bodyRow);
@@ -4850,6 +5139,8 @@ export class Telemetry3DViewport {
         isLocked?: boolean;
         minVal: number;
         maxVal: number;
+        contourLevels?: number;
+        smoothContours?: boolean;
         onToggleOff: () => void;
         onToggleAuto: () => void;
         onToggleLog: () => void;
@@ -4857,6 +5148,8 @@ export class Telemetry3DViewport {
         onSelectColormap: (anchorEl: HTMLElement) => void;
         onSetMinMax: (min: number, max: number) => void;
         onSelectQuantity: (anchorEl: HTMLElement) => void;
+        onSetContourLevels?: (levels: number) => void;
+        onToggleSmooth?: (smooth: boolean) => void;
     }) {
         const titleSpan = card.querySelector('.viewport-colorbar-title') as HTMLElement;
         if (titleSpan) {
@@ -4912,8 +5205,44 @@ export class Telemetry3DViewport {
             };
         }
 
+        const levelsBadge = card.querySelector('.viewport-colorbar-levels-badge') as HTMLElement;
+        if (levelsBadge && (spec.contourLevels !== undefined || spec.onSetContourLevels)) {
+            const isSmooth = Boolean(spec.smoothContours || (spec.contourLevels !== undefined && spec.contourLevels <= 1));
+            const curLevels = spec.contourLevels ?? 10;
+            levelsBadge.textContent = isSmooth ? 'SMOOTH' : `${curLevels} BANDS`;
+            levelsBadge.style.background = isSmooth ? 'rgba(255, 255, 255, 0.08)' : 'rgba(56, 189, 248, 0.2)';
+            levelsBadge.style.color = isSmooth ? '#94a3b8' : '#38bdf8';
+            levelsBadge.style.border = isSmooth ? '1px solid rgba(255, 255, 255, 0.15)' : '1px solid rgba(56, 189, 248, 0.35)';
+            levelsBadge.title = isSmooth
+                ? 'Smooth (Continuous Gradient). Left-click to select banded levels, right-click to toggle.'
+                : `${curLevels} Discrete Contour Bands. Left-click to cycle levels, right-click for smooth.`;
+            levelsBadge.onclick = (e) => {
+                e.stopPropagation();
+                const levelsCycle = [0, 5, 8, 10, 12, 16, 20, 24, 32];
+                const curIdx = isSmooth ? 0 : levelsCycle.indexOf(curLevels);
+                const nextLevels = levelsCycle[(curIdx + 1) % levelsCycle.length];
+                if (nextLevels === 0) {
+                    spec.onToggleSmooth?.(true);
+                    spec.onSetContourLevels?.(0);
+                } else {
+                    spec.onToggleSmooth?.(false);
+                    spec.onSetContourLevels?.(nextLevels);
+                }
+            };
+            levelsBadge.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const newSmooth = !isSmooth;
+                spec.onToggleSmooth?.(newSmooth);
+                if (!newSmooth && curLevels <= 1) {
+                    spec.onSetContourLevels?.(10);
+                }
+            };
+        }
+
         const lockBadge = card.querySelector('.viewport-colorbar-lock-badge') as HTMLElement;
         if (lockBadge) {
+            lockBadge.style.display = (spec.onToggleLock && spec.isLocked !== undefined) ? 'inline-block' : 'none';
             const expectedText = spec.isLocked ? '🔒 UNIFIED' : '🔓 INDEP';
             lockBadge.textContent = expectedText;
             lockBadge.style.background = spec.isLocked ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)';
@@ -4927,7 +5256,8 @@ export class Telemetry3DViewport {
 
         const gradBar = card.querySelector('.viewport-colorbar-grad-bar') as HTMLElement;
         if (gradBar) {
-            const expectedGrad = this.getColormapCssGradient(spec.colormap, 'to top');
+            const effectiveLevels = (spec.smoothContours || (spec.contourLevels !== undefined && spec.contourLevels <= 1)) ? 0 : (spec.contourLevels ?? 10);
+            const expectedGrad = this.getColormapCssGradient(spec.colormap, 'to top', effectiveLevels);
             gradBar.style.background = expectedGrad;
             gradBar.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
             gradBar.onclick = (e) => {
@@ -4936,65 +5266,82 @@ export class Telemetry3DViewport {
             };
         }
 
-        const numTicks = 5;
-        let displayMinVal = spec.minVal;
-        const displayMaxVal = spec.maxVal;
-        if (spec.logScale && displayMinVal <= 0 && displayMaxVal > 0) {
-            displayMinVal = displayMaxVal / 1000000.0;
-        }
-        const rangeSpan = Math.abs(displayMaxVal - displayMinVal);
-
-        const maxInput = card.querySelector('input[data-tick-role="max"]') as HTMLInputElement;
-        if (maxInput) {
-            if (maxInput.dataset.editing !== 'true' && document.activeElement !== maxInput) {
-                maxInput.value = this.formatRangeValue(spec.maxVal, rangeSpan);
+        const ticksCol = card.querySelector('.viewport-colorbar-ticks-col') as HTMLElement;
+        const isMaterials = spec.colormap === 'materials' || spec.colormap === 'material' || spec.colormap === 'phase' || spec.quantity === 'materials' || spec.quantity === 'material' || spec.quantity === 'phase';
+        if (ticksCol) {
+            const wasMaterials = ticksCol.dataset.isMaterials === 'true';
+            if (wasMaterials !== isMaterials) {
+                this.populateColorbarTicks(ticksCol, spec);
             }
-            maxInput.onfocus = () => {
-                maxInput.dataset.editing = 'true';
-                maxInput.value = String(spec.maxVal);
-                maxInput.select();
-            };
-            maxInput.onblur = () => {
-                delete maxInput.dataset.editing;
-                const newV = Number(maxInput.value);
-                if (!isNaN(newV) && maxInput.value.trim() !== '') {
-                    spec.onSetMinMax(spec.minVal, newV);
-                } else {
+        }
+
+        if (!isMaterials) {
+            const numTicks = 5;
+            let displayMinVal = spec.minVal;
+            let displayMaxVal = spec.maxVal;
+            if (displayMaxVal <= displayMinVal) {
+                displayMaxVal = displayMinVal + 1.0;
+            }
+            if (spec.logScale) {
+                if (displayMaxVal <= 0) displayMaxVal = 1.0;
+                if (displayMinVal <= 0) displayMinVal = displayMaxVal / 1000000.0;
+            }
+            const rangeSpan = Math.abs(displayMaxVal - displayMinVal);
+
+            const maxInput = card.querySelector('input[data-tick-role="max"]') as HTMLInputElement;
+            if (maxInput) {
+                if (maxInput.dataset.editing !== 'true' && document.activeElement !== maxInput) {
                     maxInput.value = this.formatRangeValue(spec.maxVal, rangeSpan);
                 }
-            };
-        }
-
-        const minInput = card.querySelector('input[data-tick-role="min"]') as HTMLInputElement;
-        if (minInput) {
-            if (minInput.dataset.editing !== 'true' && document.activeElement !== minInput) {
-                minInput.value = this.formatRangeValue(spec.minVal, rangeSpan);
+                maxInput.onfocus = () => {
+                    maxInput.dataset.editing = 'true';
+                    maxInput.value = String(spec.maxVal);
+                    maxInput.select();
+                };
+                maxInput.onblur = () => {
+                    delete maxInput.dataset.editing;
+                    const newV = Number(maxInput.value);
+                    if (!isNaN(newV) && maxInput.value.trim() !== '') {
+                        spec.onSetMinMax(spec.minVal, newV);
+                    } else {
+                        maxInput.value = this.formatRangeValue(spec.maxVal, rangeSpan);
+                    }
+                };
             }
-            minInput.onfocus = () => {
-                minInput.dataset.editing = 'true';
-                minInput.value = String(spec.minVal);
-                minInput.select();
-            };
-            minInput.onblur = () => {
-                delete minInput.dataset.editing;
-                const newV = Number(minInput.value);
-                if (!isNaN(newV) && minInput.value.trim() !== '') {
-                    spec.onSetMinMax(newV, spec.maxVal);
-                } else {
+
+            const minInput = card.querySelector('input[data-tick-role="min"]') as HTMLInputElement;
+            if (minInput) {
+                if (minInput.dataset.editing !== 'true' && document.activeElement !== minInput) {
                     minInput.value = this.formatRangeValue(spec.minVal, rangeSpan);
                 }
-            };
-        }
-
-        for (let i = 1; i < numTicks - 1; i++) {
-            const t = (numTicks - 1 - i) / (numTicks - 1);
-            let val = displayMinVal + t * (displayMaxVal - displayMinVal);
-            if (spec.logScale && displayMinVal > 0 && displayMaxVal > displayMinVal) {
-                val = displayMinVal * Math.pow(displayMaxVal / displayMinVal, t);
+                minInput.onfocus = () => {
+                    minInput.dataset.editing = 'true';
+                    minInput.value = String(spec.minVal);
+                    minInput.select();
+                };
+                minInput.onblur = () => {
+                    delete minInput.dataset.editing;
+                    const newV = Number(minInput.value);
+                    if (!isNaN(newV) && minInput.value.trim() !== '') {
+                        spec.onSetMinMax(newV, spec.maxVal);
+                    } else {
+                        minInput.value = this.formatRangeValue(spec.minVal, rangeSpan);
+                    }
+                };
             }
-            const label = card.querySelector(`span[data-tick-role="intermediate"][data-tick-index="${i}"]`) as HTMLElement;
-            if (label) {
-                label.textContent = this.formatRangeValue(val, rangeSpan);
+
+            for (let i = 1; i < numTicks - 1; i++) {
+                const t = (numTicks - 1 - i) / (numTicks - 1);
+                let val: number;
+                if (spec.logScale && displayMinVal > 0 && displayMaxVal > displayMinVal) {
+                    val = displayMinVal * Math.pow(displayMaxVal / displayMinVal, t);
+                } else {
+                    val = displayMinVal + t * (displayMaxVal - displayMinVal);
+                }
+                const label = card.querySelector(`span[data-tick-role="intermediate"][data-tick-index="${i}"]`) as HTMLElement;
+                if (label) {
+                    label.textContent = this.formatRangeValue(val, rangeSpan);
+                }
             }
         }
     }
@@ -5082,13 +5429,17 @@ export class Telemetry3DViewport {
             isLocked: boolean;
             minVal: number;
             maxVal: number;
+            contourLevels?: number;
+            smoothContours?: boolean;
             onToggleOff: () => void;
             onToggleAuto: () => void;
             onToggleLog: () => void;
-            onToggleLock: () => void;
+            onToggleLock?: (() => void) | undefined;
             onSelectColormap: (anchorEl: HTMLElement) => void;
             onSetMinMax: (min: number, max: number) => void;
             onSelectQuantity: (anchorEl: HTMLElement) => void;
+            onSetContourLevels?: (levels: number) => void;
+            onToggleSmooth?: (smooth: boolean) => void;
         }> = [];
 
         const isGloballyLocked = params.lock_quantity_ranges !== false;
@@ -5120,10 +5471,7 @@ export class Telemetry3DViewport {
                 const defaultSliceRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
                 let minVal = slice.min_val ?? defaultSliceRange[0];
                 let maxVal = slice.max_val ?? defaultSliceRange[1];
-                if (sliceIsLocked) {
-                    minVal = defaultSliceRange[0];
-                    maxVal = defaultSliceRange[1];
-                } else if (autoScale && this.latestSliceRanges && this.latestSliceRanges[idx]) {
+                if (autoScale && this.latestSliceRanges && this.latestSliceRanges[idx]) {
                     minVal = this.latestSliceRanges[idx].min;
                     maxVal = this.latestSliceRanges[idx].max;
                 } else if (autoScale && this.latestEmpiricalRange) {
@@ -5132,6 +5480,9 @@ export class Telemetry3DViewport {
                         minVal = this.latestEmpiricalRange.min;
                         maxVal = this.latestEmpiricalRange.max;
                     }
+                } else if (sliceIsLocked) {
+                    minVal = defaultSliceRange[0];
+                    maxVal = defaultSliceRange[1];
                 }
                 specs.push({
                     id: `slice-${idx}`,
@@ -5143,6 +5494,14 @@ export class Telemetry3DViewport {
                     isLocked: sliceIsLocked,
                     minVal: minVal,
                     maxVal: maxVal,
+                    contourLevels: slice.contour_levels ?? params.sliceContourLevels ?? 10,
+                    smoothContours: slice.smooth_contours ?? params.sliceSmoothContours ?? false,
+                    onSetContourLevels: (lvl: number) => {
+                        this.updateSliceProperty(idx, { contour_levels: lvl, smooth_contours: lvl <= 1 });
+                    },
+                    onToggleSmooth: (smooth: boolean) => {
+                        this.updateSliceProperty(idx, { smooth_contours: smooth });
+                    },
                     onToggleOff: () => {
                         this.updateSliceProperty(idx, { show_colorbar: false });
                     },
@@ -5222,12 +5581,12 @@ export class Telemetry3DViewport {
             const defaultObsRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
             let minVal = params.obstacles_min_val ?? defaultObsRange[0];
             let maxVal = params.obstacles_max_val ?? defaultObsRange[1];
-            if (obsIsLocked) {
-                minVal = defaultObsRange[0];
-                maxVal = defaultObsRange[1];
-            } else if (autoScale && this.latestObstaclesRange) {
+            if (autoScale && this.latestObstaclesRange) {
                 minVal = this.latestObstaclesRange.min;
                 maxVal = this.latestObstaclesRange.max;
+            } else if (obsIsLocked) {
+                minVal = defaultObsRange[0];
+                maxVal = defaultObsRange[1];
             }
             specs.push({
                 id: 'obstacles',
@@ -5241,7 +5600,20 @@ export class Telemetry3DViewport {
                 maxVal: maxVal,
                 onToggleOff: () => {
                     this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_show_colorbar: false });
+                    const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
+                    if (activeModel) {
+                        activeModel.nodes
+                            .filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'CSGObstacle3D' || n.type === 'ObstacleBox3D' || n.type === 'ObstacleCylinder3D' || n.type === 'ObstacleSphere3D')
+                            .forEach(n => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { showColorbar: false, obstacles_show_colorbar: false });
+                            });
+                    }
                     this.syncControls(false);
+                    const tc = (window as any).transportController;
+                    if (tc) {
+                        tc.syncStateFromViewport?.();
+                        tc.requestTabRender?.();
+                    }
                 },
                 onToggleAuto: () => {
                     if (obsIsLocked) {
@@ -5341,12 +5713,12 @@ export class Telemetry3DViewport {
             const defaultStlRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
             let minVal = params.stl_min_val ?? defaultStlRange[0];
             let maxVal = params.stl_max_val ?? defaultStlRange[1];
-            if (stlIsLocked) {
-                minVal = defaultStlRange[0];
-                maxVal = defaultStlRange[1];
-            } else if (autoScale && this.latestSTLRange) {
+            if (autoScale && this.latestSTLRange) {
                 minVal = this.latestSTLRange.min;
                 maxVal = this.latestSTLRange.max;
+            } else if (stlIsLocked) {
+                minVal = defaultStlRange[0];
+                maxVal = defaultStlRange[1];
             }
             specs.push({
                 id: 'stl',
@@ -5360,7 +5732,20 @@ export class Telemetry3DViewport {
                 maxVal: maxVal,
                 onToggleOff: () => {
                     this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_show_colorbar: false });
+                    const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
+                    if (activeModel) {
+                        activeModel.nodes
+                            .filter((n: any) => n.type === 'STLGeometry3D' || n.type === 'CADImporter3D' || n.type === 'STLGeometry')
+                            .forEach(n => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { showColorbar: false, stl_show_colorbar: false });
+                            });
+                    }
                     this.syncControls(false);
+                    const tc = (window as any).transportController;
+                    if (tc) {
+                        tc.syncStateFromViewport?.();
+                        tc.requestTabRender?.();
+                    }
                 },
                 onToggleAuto: () => {
                     if (stlIsLocked) {
@@ -5484,7 +5869,7 @@ export class Telemetry3DViewport {
 
         // 4. MPM Particles
         const targetModel = this.getTargetModel();
-        const hasMPM = Boolean(targetModel?.nodes?.some((n: any) => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D') || this.latestMPMRange);
+        const hasMPM = Boolean(targetModel?.nodes?.some((n: any) => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || (n.type === 'MarineHarbourDomain' && isMarineHarbourMPMActive(n))) || this.latestMPMRange);
         if ((params.mpmParticleShowColorbar === true || (params.mpmParticleShowColorbar !== false && hasMPM)) && params.showMPMParticles !== false) {
             const rawQty = params.mpmParticleQuantity || 'vonMises';
             const qty = canonicalizeQuantity(rawQty);
@@ -5495,13 +5880,13 @@ export class Telemetry3DViewport {
             const defaultRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 500000000.0];
             let minVal = params.mpmParticleMinVal ?? defaultRange[0];
             let maxVal = params.mpmParticleMaxVal ?? defaultRange[1];
-            if (mpmIsLocked) {
-                minVal = defaultRange[0];
-                maxVal = defaultRange[1];
-            } else if (autoScale && (this.latestMPMRange || this.latestEmpiricalRange)) {
+            if (autoScale && (this.latestMPMRange || this.latestEmpiricalRange)) {
                 const r = this.latestMPMRange || this.latestEmpiricalRange!;
                 minVal = r.min;
                 maxVal = r.max;
+            } else if (mpmIsLocked) {
+                minVal = defaultRange[0];
+                maxVal = defaultRange[1];
             }
             specs.push({
                 id: 'mpm',
@@ -5513,9 +5898,35 @@ export class Telemetry3DViewport {
                 isLocked: mpmIsLocked,
                 minVal: minVal,
                 maxVal: maxVal,
+                contourLevels: params.mpmContourLevels ?? 10,
+                smoothContours: params.mpmSmoothContours ?? false,
+                onSetContourLevels: (lvl: number) => {
+                    const sm = lvl <= 1;
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmContourLevels: lvl, mpmSmoothContours: sm });
+                    this.worker.postMessage({ type: 'setConfig', data: { mpmContourLevels: lvl, mpmSmoothContours: sm } });
+                    this.syncControls(false);
+                },
+                onToggleSmooth: (smooth: boolean) => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmSmoothContours: smooth });
+                    this.worker.postMessage({ type: 'setConfig', data: { mpmSmoothContours: smooth } });
+                    this.syncControls(false);
+                },
                 onToggleOff: () => {
                     this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleShowColorbar: false });
+                    const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
+                    if (activeModel) {
+                        activeModel.nodes
+                            .filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMDomain3D')
+                            .forEach(n => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { showColorbar: false, mpmParticleShowColorbar: false });
+                            });
+                    }
                     this.syncControls(false);
+                    const tc = (window as any).transportController;
+                    if (tc) {
+                        tc.syncStateFromViewport?.();
+                        tc.requestTabRender?.();
+                    }
                 },
                 onToggleAuto: () => {
                     if (mpmIsLocked) {
@@ -5604,7 +6015,11 @@ export class Telemetry3DViewport {
         }
 
         // 5. FEM Mesh
-        if (params.femShowColorbar === true && params.showFEMMesh !== false) {
+        const state = this.stateManager.getCurrentState();
+        const nodes = state?.nodes || [];
+        const hasFEMNodes = nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMFSICoupler3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D');
+        const showFEMColorbar = (params.femShowColorbar === true) || (params.femShowColorbar !== false && (hasFEMNodes || this.latestFEMRange !== undefined || params.show_colorbar === true));
+        if (showFEMColorbar && params.showFEMMesh !== false) {
             const rawQty = params.femQuantity || 'vonMises';
             const qty = canonicalizeQuantity(rawQty);
             const femIsLocked = (params.lock_quantity_ranges !== false) && (params.fem_lock_quantity_range !== false);
@@ -5614,13 +6029,13 @@ export class Telemetry3DViewport {
             const defaultRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, (qty === 'plastic_strain' ? 1.0 : 500000000.0)];
             let minVal = params.femMinVal ?? defaultRange[0];
             let maxVal = params.femMaxVal ?? defaultRange[1];
-            if (femIsLocked) {
-                minVal = defaultRange[0];
-                maxVal = defaultRange[1];
-            } else if (autoScale && (this.latestFEMRange || this.latestEmpiricalRange)) {
+            if (autoScale && (this.latestFEMRange || this.latestEmpiricalRange)) {
                 const r = this.latestFEMRange || this.latestEmpiricalRange!;
                 minVal = r.min;
                 maxVal = r.max;
+            } else if (femIsLocked) {
+                minVal = defaultRange[0];
+                maxVal = defaultRange[1];
             }
             specs.push({
                 id: 'fem',
@@ -5632,9 +6047,35 @@ export class Telemetry3DViewport {
                 isLocked: femIsLocked,
                 minVal: minVal,
                 maxVal: maxVal,
+                contourLevels: params.femContourLevels ?? 10,
+                smoothContours: params.femSmoothContours ?? false,
+                onSetContourLevels: (lvl: number) => {
+                    const sm = lvl <= 1;
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { femContourLevels: lvl, femSmoothContours: sm });
+                    this.worker.postMessage({ type: 'setConfig', data: { femContourLevels: lvl, femSmoothContours: sm } });
+                    this.syncControls(false);
+                },
+                onToggleSmooth: (smooth: boolean) => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { femSmoothContours: smooth });
+                    this.worker.postMessage({ type: 'setConfig', data: { femSmoothContours: smooth } });
+                    this.syncControls(false);
+                },
                 onToggleOff: () => {
                     this.stateManager.updateNodeParametersInPlace(vpNode.id, { femShowColorbar: false });
+                    const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
+                    if (activeModel) {
+                        activeModel.nodes
+                            .filter((n: any) => n.type === 'FEMObject3D' || n.type === 'FEMDomain3D' || n.type === 'LSDynaImporter3D')
+                            .forEach(n => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { showColorbar: false, femShowColorbar: false });
+                            });
+                    }
                     this.syncControls(false);
+                    const tc = (window as any).transportController;
+                    if (tc) {
+                        tc.syncStateFromViewport?.();
+                        tc.requestTabRender?.();
+                    }
                 },
                 onToggleAuto: () => {
                     if (femIsLocked) {
@@ -5723,7 +6164,8 @@ export class Telemetry3DViewport {
         }
 
         // 6. Beams / 1D Elements
-        if (params.beamShowColorbar === true && (params.showBeams !== false && params.showRebar !== false)) {
+        const showBeamColorbar = (params.beamShowColorbar === true) || (params.beamShowColorbar !== false && (hasFEMNodes || params.show_colorbar === true));
+        if (showBeamColorbar && (params.showBeams !== false && params.showRebar !== false)) {
             const rawQty = params.beamQuantity || 'plasticStrain';
             const qty = canonicalizeQuantity(rawQty);
             const beamIsLocked = (params.lock_quantity_ranges !== false) && (params.beam_lock_quantity_range !== false);
@@ -5733,13 +6175,13 @@ export class Telemetry3DViewport {
             const defaultRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, (qty === 'plastic_strain' ? 0.05 : (qty === 'momentOrForce' ? 1000.0 : 500000000.0))];
             let minVal = params.beamMinVal ?? defaultRange[0];
             let maxVal = params.beamMaxVal ?? defaultRange[1];
-            if (beamIsLocked) {
-                minVal = defaultRange[0];
-                maxVal = defaultRange[1];
-            } else if (autoScale && (this.latestBeamRange || this.latestEmpiricalRange)) {
+            if (autoScale && (this.latestBeamRange || this.latestEmpiricalRange)) {
                 const r = this.latestBeamRange || this.latestEmpiricalRange!;
                 minVal = r.min;
                 maxVal = r.max;
+            } else if (beamIsLocked) {
+                minVal = defaultRange[0];
+                maxVal = defaultRange[1];
             }
             specs.push({
                 id: 'beam',
@@ -5751,9 +6193,35 @@ export class Telemetry3DViewport {
                 isLocked: beamIsLocked,
                 minVal: minVal,
                 maxVal: maxVal,
+                contourLevels: params.beamContourLevels ?? 10,
+                smoothContours: params.beamSmoothContours ?? false,
+                onSetContourLevels: (lvl: number) => {
+                    const sm = lvl <= 1;
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamContourLevels: lvl, beamSmoothContours: sm });
+                    this.worker.postMessage({ type: 'setConfig', data: { beamContourLevels: lvl, beamSmoothContours: sm } });
+                    this.syncControls(false);
+                },
+                onToggleSmooth: (smooth: boolean) => {
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamSmoothContours: smooth });
+                    this.worker.postMessage({ type: 'setConfig', data: { beamSmoothContours: smooth } });
+                    this.syncControls(false);
+                },
                 onToggleOff: () => {
                     this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamShowColorbar: false });
+                    const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
+                    if (activeModel) {
+                        activeModel.nodes
+                            .filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D')
+                            .forEach(n => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { showColorbar: false, beamShowColorbar: false });
+                            });
+                    }
                     this.syncControls(false);
+                    const tc = (window as any).transportController;
+                    if (tc) {
+                        tc.syncStateFromViewport?.();
+                        tc.requestTabRender?.();
+                    }
                 },
                 onToggleAuto: () => {
                     if (beamIsLocked) {
@@ -5847,6 +6315,17 @@ export class Telemetry3DViewport {
             return;
         }
 
+        const qtyCounts: Record<string, number> = {};
+        specs.forEach(s => {
+            qtyCounts[s.quantity] = (qtyCounts[s.quantity] || 0) + 1;
+        });
+        specs.forEach(s => {
+            if ((qtyCounts[s.quantity] || 0) <= 1) {
+                s.onToggleLock = undefined;
+                s.isLocked = false;
+            }
+        });
+
         this.colorbarContainer.style.display = 'flex';
         const activeCardIds = new Set<string>();
         specs.forEach(spec => {
@@ -5874,8 +6353,8 @@ export class Telemetry3DViewport {
         }
         const state = this.stateManager.getCurrentState();
         if (state) {
-            const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'CFDSolver3D');
-            const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain3D');
+            const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
+            const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain');
             const xmin = Number(mpmMesh?.parameters['xmin'] ?? mpmMesh?.parameters['x_min'] ?? 0);
             const xmax = Number(mpmMesh?.parameters['xmax'] ?? mpmMesh?.parameters['x_max'] ?? 1);
             const nx = Number(mpmMesh?.parameters['nx'] ?? 0);
@@ -5886,7 +6365,7 @@ export class Telemetry3DViewport {
                 cellSize = Number(mpmMesh?.parameters['cell_size'] ?? mpmMesh?.parameters['dx'] ?? 0.001);
             }
             const mpmObjects = state.nodes.filter(n => n.type === 'MPMObject3D');
-            let maxPpc = Number(mpmDomain?.parameters['ppc'] ?? mpmMesh?.parameters['ppc'] ?? 8);
+            let maxPpc = Number(mpmDomain?.parameters['nearfield_ppc'] ?? mpmDomain?.parameters['ppc'] ?? mpmMesh?.parameters['ppc'] ?? 8);
             for (const obj of mpmObjects) {
                 if (obj.parameters['ppc'] != null) {
                     maxPpc = Math.max(maxPpc, Number(obj.parameters['ppc']));
@@ -6408,7 +6887,7 @@ export class Telemetry3DViewport {
         if (state) {
             const femNodes = state.nodes.filter(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
             if (femNodes.length > 0) {
-                femCountText = `<span style="font-size: 8px; color: #00ff66; font-weight: normal; margin-left: 4px;">(Hex Mesh)</span>`;
+                femCountText = `<span style="font-size: 8px; color: #00ff66; font-weight: normal; margin-left: 4px;">(Structural FEA Mesh)</span>`;
             }
         }
         tdLayer.innerHTML = `🏗️ <b>FEM Mesh</b>${femCountText}`;
@@ -6520,7 +6999,7 @@ export class Telemetry3DViewport {
         };
         cmapWrap.appendChild(cmapPill);
 
-        const initCbShow = vpNode ? (vpNode.parameters.femShowColorbar === true) : false;
+        const initCbShow = vpNode ? (vpNode.parameters.femShowColorbar !== false) : true;
         const cbToggleBtn = this.createToggleBtn('viewport-fem-cb-btn', '🎨', initCbShow, (v) => {
             const vp = this.getViewportNode();
             if (vp) {
@@ -6531,6 +7010,34 @@ export class Telemetry3DViewport {
         cbToggleBtn.style.width = '20px';
         cbToggleBtn.title = 'Toggle Color Bar for FEM Mesh in 3D Viewport';
         cmapWrap.appendChild(cbToggleBtn);
+
+        const initLevels = vpNode ? (vpNode.parameters.femContourLevels ?? 10) : 10;
+        const lvlPill = document.createElement('div');
+        lvlPill.id = this.getElId('viewport-fem-lvl-pill');
+        lvlPill.style.fontSize = '8.5px';
+        lvlPill.style.fontWeight = '700';
+        lvlPill.style.padding = '2px 4px';
+        lvlPill.style.borderRadius = '3px';
+        lvlPill.style.cursor = 'pointer';
+        lvlPill.style.background = initLevels > 1 ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.08)';
+        lvlPill.style.border = initLevels > 1 ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid rgba(255, 255, 255, 0.15)';
+        lvlPill.style.color = initLevels > 1 ? '#38bdf8' : '#94a3b8';
+        lvlPill.textContent = initLevels > 1 ? `${initLevels}L` : 'CONT';
+        lvlPill.title = `FEM Contour Levels: ${initLevels > 1 ? initLevels + ' discrete bands' : 'Continuous'}. Click to cycle.`;
+        lvlPill.onclick = (e) => {
+            e.stopPropagation();
+            const levelsCycle = [0, 5, 8, 10, 12, 16, 20, 32];
+            const vp = this.getViewportNode();
+            const curLvl = vp?.parameters.femContourLevels ?? 10;
+            const curIdx = levelsCycle.indexOf(curLvl);
+            const nextLvl = levelsCycle[(curIdx + 1) % levelsCycle.length];
+            if (vp) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femContourLevels: nextLvl });
+                this.worker.postMessage({ type: 'setConfig', data: { femContourLevels: nextLvl } });
+                this.syncControls(true);
+            }
+        };
+        cmapWrap.appendChild(lvlPill);
 
         tdCmap.appendChild(cmapWrap);
         tr.appendChild(tdCmap);
@@ -6851,6 +7358,8 @@ export class Telemetry3DViewport {
         radSel.innerHTML = `
             <option value="0.002">Ø4mm</option>
             <option value="0.004">Ø8mm</option>
+            <option value="0.004765">Ø9.53mm (Kim 2022)</option>
+            <option value="0.005">Ø10mm (HD10)</option>
             <option value="0.006">Ø12mm</option>
             <option value="0.008">Ø16mm</option>
             <option value="0.010">Ø20mm</option>
@@ -6986,9 +7495,9 @@ export class Telemetry3DViewport {
     private getActiveLayerContext(vpNode: any): { layer: string, quantity: string, colormap: string } {
         const state = this.stateManager.getCurrentState();
         const nodes = state?.nodes || [];
-        const hasFEM = nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMFSICoupler3D');
-        const hasMPM = nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D');
-        const hasCFD = nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
+        const hasFEM = nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMFSICoupler3D' || n.type === 'MarineHarbourDomain');
+        const hasMPM = nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || (n.type === 'MarineHarbourDomain' && isMarineHarbourMPMActive(n)));
+        const hasCFD = nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D' || n.type === 'MarineHarbourDomain');
         const slices = vpNode?.parameters?.slices || [];
         const anySliceEnabled = slices.some((s: any) => s.enabled !== false);
 
@@ -7048,7 +7557,7 @@ export class Telemetry3DViewport {
         if (!net || !net.isConnected()) return;
 
         const doSend = () => {
-            let targetModelId = this.getCurrentModelId() || vpNode.id;
+            let targetModelId = this.getCurrentModelId() || this.stateManager.getActiveModelId() || vpNode.id;
 
             const showObstacles = vpNode.parameters.show_obstacles !== false;
             const obstaclesQuantity = vpNode.parameters.obstacles_quantity || 'pressure';
@@ -7096,10 +7605,11 @@ export class Telemetry3DViewport {
                 });
             }
 
+            const persistentRate = targetModelId ? this.stateManager.getModelRefreshRate(targetModelId) : Number(vpNode.parameters.refresh_rate ?? 0.5);
             net.send({
                 command: "VIEW3D_CONFIG",
                 modelId: targetModelId,
-                refresh_rate: Number(vpNode.parameters.refresh_rate ?? 2.0),
+                refresh_rate: persistentRate,
                 slices: fullSlices
             });
         };
@@ -7280,10 +7790,6 @@ export class Telemetry3DViewport {
             detonator_y: posY,
             detonator_z: posZ,
             detonator_radius: radius,
-            trigger_x: posX,
-            trigger_y: posY,
-            trigger_z: posZ,
-            trigger_radius: radius,
             det_x: posX,
             det_y: posY,
             det_z: posZ,
@@ -7329,20 +7835,16 @@ export class Telemetry3DViewport {
         if (!targetModel) return null;
 
         const solverNode = this.getSolverNode();
-        if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'MPMDomain3D' || solverNode.type === 'FEMDomain3D')) {
+        if (solverNode && (solverNode.type === 'CFDSolver3D' || solverNode.type === 'MPMDomain3D' || solverNode.type === 'FEMDomain3D' || solverNode.type === 'MarineHarbourDomain')) {
             const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'mesh');
             if (connToSolver) {
-                let currNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
-                let depth = 0;
-                while (currNode && currNode.type === 'RefinementMesh3D' && depth < 20) {
-                    const parentConn = targetModel.connections.find((c: any) => c.toNode === currNode.id && c.toPort === 'parent_mesh');
-                    if (!parentConn) break;
-                    currNode = targetModel.nodes.find((n: any) => n.id === parentConn.fromNode);
-                    depth++;
-                }
+                const currNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
                 if (currNode && (currNode.type === 'DomainMesh3D' || currNode.type === 'DomainMesh2D' || currNode.type === 'DomainMesh')) {
                     return currNode;
                 }
+            }
+            if (solverNode.type === 'MarineHarbourDomain' && solverNode.parameters?.xmin !== undefined && solverNode.parameters?.xmax !== undefined) {
+                return solverNode;
             }
         }
         // Fallback to explicit DomainMesh in targetModel
@@ -7354,6 +7856,8 @@ export class Telemetry3DViewport {
         if (mpmDomain && mpmDomain.parameters?.xmin !== undefined && mpmDomain.parameters?.xmax !== undefined) return mpmDomain;
         const femDomain = targetModel.nodes.find((n: any) => n.type === 'FEMDomain3D');
         if (femDomain && femDomain.parameters?.xmin !== undefined && femDomain.parameters?.xmax !== undefined) return femDomain;
+        const marineHarbour = targetModel.nodes.find((n: any) => n.type === 'MarineHarbourDomain');
+        if (marineHarbour && marineHarbour.parameters?.xmin !== undefined && marineHarbour.parameters?.xmax !== undefined) return marineHarbour;
 
         return null;
     }
@@ -7361,10 +7865,11 @@ export class Telemetry3DViewport {
     public isIdealGas(): boolean {
         const targetModel = this.getTargetModel();
         if (!targetModel || !targetModel.nodes) return false;
-        const cfd = targetModel.nodes.find((n: any) => ['CFDSolver3D', 'CFDSolver2D', 'CFDSolver1D'].includes(n.type));
+        const cfd = targetModel.nodes.find((n: any) => ['CFDSolver3D', 'CFDSolver2D', 'CFDSolver1D', 'MarineHarbourDomain'].includes(n.type));
         if (cfd) {
+            if (cfd.type === 'MarineHarbourDomain') return false;
             if (cfd.parameters?.init_mode === 'Ideal Gas' || cfd.parameters?.is_ideal_gas === true) return true;
-            if (['Multi-Material JWL', 'From1D', 'From2D', 'JWL'].includes(cfd.parameters?.init_mode)) return false;
+            if (['Multi-Material JWL', 'From1D', 'From2D', 'JWL', 'Hydrostatic_Stratified_3D'].includes(cfd.parameters?.init_mode)) return false;
         }
         const mat = targetModel.nodes.find((n: any) => ['Material', 'ExplosiveMaterial'].includes(n.type));
         if (mat) {
@@ -7409,7 +7914,7 @@ export class Telemetry3DViewport {
                 }
             }
         }
-        return targetModel.nodes.find((n: any) => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D') || null;
+        return targetModel.nodes.find((n: any) => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D' || n.type === 'MarineHarbourDomain') || null;
     }
 
     private addSlice() {
@@ -7563,6 +8068,23 @@ export class Telemetry3DViewport {
         updateChipStyle('gauges', vpNode.parameters.show_gauges !== false);
         updateChipStyle('lighting', vpNode.parameters.lightingEnabled !== false);
 
+        const colorbarsShown = (vpNode.parameters.femShowColorbar === true)
+            || (vpNode.parameters.mpmParticleShowColorbar === true)
+            || (vpNode.parameters.stl_show_colorbar === true)
+            || (vpNode.parameters.obstacles_show_colorbar === true)
+            || (vpNode.parameters.slices || []).some((s: any) => s.show_colorbar === true);
+        updateChipStyle('colorbars', colorbarsShown);
+
+        const topModelBadge = document.getElementById(this.getElId('viewport-top-model-badge'));
+        if (topModelBadge) {
+            const m = this.getTargetModel();
+            topModelBadge.innerHTML = `🧊 ${m?.name || '3D Viewport'}`;
+        }
+        const topProjBtn = document.getElementById(this.getElId('viewport-top-proj-btn'));
+        if (topProjBtn) {
+            topProjBtn.innerHTML = this.usePerspective ? '👁️ Persp' : '📐 Ortho';
+        }
+
         const activeCtx = this.getActiveLayerContext(vpNode);
         const dockQtySel = document.getElementById(this.getElId('viewport-dock-qty-sel')) as HTMLSelectElement;
         if (dockQtySel && dockQtySel.dataset.editing !== 'true' && document.activeElement !== dockQtySel) {
@@ -7576,7 +8098,8 @@ export class Telemetry3DViewport {
 
         // 1. Sync Render Settings & Global Refresh Rates
 
-        const rateVal = Number(vpNode.parameters.refresh_rate ?? 2.0);
+        const currentTargetModel = this.getTargetModel();
+        const rateVal = currentTargetModel ? this.stateManager.getModelRefreshRate(currentTargetModel.id) : Number(vpNode.parameters.refresh_rate ?? 0.5);
 
         const rateSelMatrix = document.getElementById(this.getElId('viewport-refresh-rate-sel-matrix')) as HTMLSelectElement;
         if (rateSelMatrix && rateSelMatrix.dataset.editing !== 'true' && document.activeElement !== rateSelMatrix) {
@@ -7667,15 +8190,40 @@ export class Telemetry3DViewport {
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-mpm-auto-btn')), vpNode.parameters.mpmParticleAutoScale !== false);
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-mpm-log-btn')), vpNode.parameters.mpmParticleLogScale === true);
 
+        const mpmSizePill = document.getElementById(this.getElId('viewport-mpm-size-btn')) as HTMLButtonElement;
+        if (mpmSizePill) {
+            const curDiam = Number(vpNode.parameters.mpmParticleDiameter ?? 0);
+            const curSize = Number(vpNode.parameters.mpmParticleSize ?? 4.0);
+            if (curDiam > 0) {
+                mpmSizePill.textContent = `Ø ${formatSIDiameter(curDiam)} ▾`;
+            } else {
+                mpmSizePill.textContent = `Pt ${curSize}px ▾`;
+            }
+        }
+        const mpmQtyPill = document.getElementById(this.getElId('viewport-mpm-qty-pill'));
+        if (mpmQtyPill) {
+            const curQty = vpNode.parameters.mpmParticleQuantity || 'vonMises';
+            mpmQtyPill.textContent = `${curQty} ▾`;
+        }
+
         // FEM Mesh Table Row Sync
         const femMeshCb = document.getElementById(this.getElId('viewport-fem-mesh-cb')) as HTMLInputElement;
         if (femMeshCb && document.activeElement !== femMeshCb) femMeshCb.checked = vpNode.parameters.showFEMMesh !== false;
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-fem-sol-btn')), vpNode.parameters.femSolid !== false);
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-fem-wir-btn')), vpNode.parameters.femWireframe !== false);
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-fem-res-btn')), vpNode.parameters.femResults !== false);
-        this.syncToggleBtnState(document.getElementById(this.getElId('viewport-fem-cb-btn')), vpNode.parameters.femShowColorbar === true);
+        this.syncToggleBtnState(document.getElementById(this.getElId('viewport-fem-cb-btn')), vpNode.parameters.femShowColorbar !== false);
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-fem-auto-btn')), vpNode.parameters.femAutoScale !== false);
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-fem-log-btn')), vpNode.parameters.femLogScale === true);
+
+        const femLvlPill = document.getElementById(this.getElId('viewport-fem-lvl-pill'));
+        if (femLvlPill) {
+            const curLvl = vpNode.parameters.femContourLevels ?? 10;
+            femLvlPill.textContent = curLvl > 1 ? `${curLvl}L` : 'CONT';
+            femLvlPill.style.background = curLvl > 1 ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.08)';
+            femLvlPill.style.color = curLvl > 1 ? '#38bdf8' : '#94a3b8';
+            femLvlPill.style.border = curLvl > 1 ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid rgba(255, 255, 255, 0.15)';
+        }
 
         // Beams Table Row Sync
         const beamMeshCb = document.getElementById(this.getElId('viewport-beam-mesh-cb')) as HTMLInputElement;
@@ -7683,7 +8231,7 @@ export class Telemetry3DViewport {
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-beam-sol-btn')), vpNode.parameters.beamSolid !== false);
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-beam-wir-btn')), vpNode.parameters.beamWireframe !== false);
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-beam-res-btn')), vpNode.parameters.femResults !== false);
-        this.syncToggleBtnState(document.getElementById(this.getElId('viewport-beam-cb-btn')), vpNode.parameters.femShowColorbar === true);
+        this.syncToggleBtnState(document.getElementById(this.getElId('viewport-beam-cb-btn')), vpNode.parameters.beamShowColorbar !== false);
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-beam-auto-btn')), vpNode.parameters.beamAutoScale !== false);
 
         if (postToWorker) {
@@ -7697,43 +8245,20 @@ export class Telemetry3DViewport {
             // Use model-scoped solver/domain nodes to avoid bleeding from other models
             const solverNode3D = this.getSolverNode();
             const domainMesh3DNode = this.getMeshNode();
-            // Resolve the root DomainMesh3D by walking up any RefinementMesh3D chain
-            let domainMesh3D: any = domainMesh3DNode;
-            if (domainMesh3D && domainMesh3D.type !== 'DomainMesh3D') domainMesh3D = null;
-            if (!domainMesh3D && domainMesh3DNode) {
-                // domainMesh3DNode may be a RefinementMesh3D — walk up to the root
-                const allModels = this.stateManager.getAllModels();
-                let targetModel: any = null;
-                const currentModelId = this.getCurrentModelId();
-                if (currentModelId) targetModel = allModels.find((m: any) => m.id === currentModelId) || null;
-                if (!targetModel) {
-                    const vpNode2 = this.getViewportNode();
-                    for (const m of Object.values(allModels) as any[]) {
-                        if (m.nodes.some((n: any) => n.id === vpNode2?.id)) { targetModel = m; break; }
-                    }
-                }
-                if (targetModel) {
-                    let curr: any = domainMesh3DNode;
-                    let depth = 0;
-                    while (curr && curr.type === 'RefinementMesh3D' && depth < 20) {
-                        const pc = targetModel.connections.find((c: any) => c.toNode === curr.id && c.toPort === 'parent_mesh');
-                        if (!pc) break;
-                        curr = targetModel.nodes.find((n: any) => n.id === pc.fromNode);
-                        depth++;
-                    }
-                    if (curr && curr.type === 'DomainMesh3D') domainMesh3D = curr;
-                }
+            let domainMesh3D: any = (domainMesh3DNode && (domainMesh3DNode.type === 'DomainMesh3D' || domainMesh3DNode.type === 'MarineHarbourDomain' || domainMesh3DNode.type === 'MPMDomain3D' || domainMesh3DNode.type === 'FEMDomain3D')) ? domainMesh3DNode : null;
+            if (!domainMesh3D && solverNode3D && (solverNode3D.type === 'MarineHarbourDomain' || solverNode3D.type === 'MPMDomain3D' || solverNode3D.type === 'FEMDomain3D')) {
+                domainMesh3D = solverNode3D;
             }
-            const xmin = Number(domainMesh3D?.parameters.xmin ?? domainMesh3D?.parameters.x_min ?? 0.0);
-            const xmax = Number(domainMesh3D?.parameters.xmax ?? domainMesh3D?.parameters.x_max ?? 1.0);
-            const ymin = Number(domainMesh3D?.parameters.ymin ?? domainMesh3D?.parameters.y_min ?? 0.0);
-            const ymax = Number(domainMesh3D?.parameters.ymax ?? domainMesh3D?.parameters.y_max ?? 1.0);
-            const zmin = Number(domainMesh3D?.parameters.zmin ?? domainMesh3D?.parameters.z_min ?? 0.0);
-            const zmax = Number(domainMesh3D?.parameters.zmax ?? domainMesh3D?.parameters.z_max ?? 1.0);
-            const cellSize = Number(domainMesh3D?.parameters.cell_size ?? domainMesh3D?.parameters.dx ?? 0.01);
-            const nx = Number(domainMesh3D?.parameters.nx ?? Math.max(1, Math.round((xmax - xmin) / cellSize)));
-            const ny = Number(domainMesh3D?.parameters.ny ?? Math.max(1, Math.round((ymax - ymin) / cellSize)));
-            const nz = Number(domainMesh3D?.parameters.nz ?? Math.max(1, Math.round((zmax - zmin) / cellSize)));
+            let xmin = Number(domainMesh3D?.parameters.xmin ?? domainMesh3D?.parameters.x_min ?? 0.0);
+            let xmax = Number(domainMesh3D?.parameters.xmax ?? domainMesh3D?.parameters.x_max ?? 1.0);
+            let ymin = Number(domainMesh3D?.parameters.ymin ?? domainMesh3D?.parameters.y_min ?? 0.0);
+            let ymax = Number(domainMesh3D?.parameters.ymax ?? domainMesh3D?.parameters.y_max ?? 1.0);
+            let zmin = Number(domainMesh3D?.parameters.zmin ?? domainMesh3D?.parameters.z_min ?? 0.0);
+            let zmax = Number(domainMesh3D?.parameters.zmax ?? domainMesh3D?.parameters.z_max ?? 1.0);
+            let cellSize = Number(domainMesh3D?.parameters.cell_size ?? domainMesh3D?.parameters.dx ?? 0.01);
+            let nx = Number(domainMesh3D?.parameters.nx ?? Math.max(1, Math.round((xmax - xmin) / cellSize)));
+            let ny = Number(domainMesh3D?.parameters.ny ?? Math.max(1, Math.round((ymax - ymin) / cellSize)));
+            let nz = Number(domainMesh3D?.parameters.nz ?? Math.max(1, Math.round((zmax - zmin) / cellSize)));
 
             // Resolve the charge node via connections from the model-scoped solver or standalone node in model
             const currentModelId = this.getCurrentModelId();
@@ -7774,76 +8299,50 @@ export class Telemetry3DViewport {
                     ? modelState?.nodes.find((n: any) => n.id === detConn.fromNode)
                     : (modelState?.nodes.find((n: any) => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || null);
                 if (detNode) {
-                    chargeParams.det_x = Number(detNode.parameters.trigger_x ?? detNode.parameters.detonator_x ?? detNode.parameters.det_x ?? detNode.parameters.x ?? cx);
-                    chargeParams.det_y = Number(detNode.parameters.trigger_y ?? detNode.parameters.detonator_y ?? detNode.parameters.det_y ?? detNode.parameters.y ?? cy);
-                    chargeParams.det_z = Number(detNode.parameters.trigger_z ?? detNode.parameters.detonator_z ?? detNode.parameters.det_z ?? detNode.parameters.z ?? cz);
+                    chargeParams.det_x = Number(detNode.parameters.detonator_x ?? detNode.parameters.det_x ?? detNode.parameters.trigger_x ?? detNode.parameters.x ?? cx);
+                    chargeParams.det_y = Number(detNode.parameters.detonator_y ?? detNode.parameters.det_y ?? detNode.parameters.trigger_y ?? detNode.parameters.y ?? cy);
+                    chargeParams.det_z = Number(detNode.parameters.detonator_z ?? detNode.parameters.det_z ?? detNode.parameters.trigger_z ?? detNode.parameters.z ?? cz);
                 }
             }
 
-            const mpmObjectNodes = modelState?.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D') || [];
-            const mpmObjects = mpmObjectNodes.map((n: any) => {
-                const geom = this.extractObjectGeometryData(n);
-                const isSTL = (geom?.shape_type === 'STL' || n.parameters?.shape_type === 'STL');
-                const isCADOrigin = (geom?.origin_mode === 'CAD Origin' || n.parameters?.origin_mode === 'CAD Origin' || !n.parameters?.origin_mode);
-                const defPos = (isSTL && isCADOrigin) ? 0.0 : 0.5;
-                return {
-                    id: n.id,
-                    shape: geom?.shape || (isSTL ? 'STL' : 'Box'),
-                    shape_type: geom?.shape_type || (isSTL ? 'STL' : 'Box'),
-                    x: geom?.x ?? defPos,
-                    y: geom?.y ?? defPos,
-                    z: geom?.z ?? defPos,
-                    pos_x: geom?.pos_x ?? defPos,
-                    pos_y: geom?.pos_y ?? defPos,
-                    pos_z: geom?.pos_z ?? defPos,
-                    size_x: geom?.size_x ?? 0.2,
-                    size_y: geom?.size_y ?? 0.2,
-                    size_z: geom?.size_z ?? 0.2,
-                    radius: geom?.radius ?? 0.1,
-                    inner_radius: geom?.inner_radius ?? 0.0,
-                    height: geom?.height ?? 0.2,
-                    scale_x: geom?.scale_x ?? 1.0,
-                    scale_y: geom?.scale_y ?? 1.0,
-                    scale_z: geom?.scale_z ?? 1.0,
-                    rot_x: geom?.rot_x ?? 0.0,
-                    rot_y: geom?.rot_y ?? 0.0,
-                    rot_z: geom?.rot_z ?? 0.0,
-                    origin_mode: geom?.origin_mode || n.parameters?.origin_mode || 'CAD Origin',
-                    stl_file: geom?.stl_file || n.parameters?.stl_file || '',
-                    visible: n.parameters?.visible !== false && !n.parameters?.hidden
-                };
-            });
+            const mpmObjects = this.getDiscoveredMPMObjects(modelState);
 
-            const femObjectNodes = modelState?.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D') || [];
-            const femObjects = femObjectNodes.map((n: any) => {
-                const isSTL = (n.parameters?.shape_type === 'STL' || n.parameters?.mesh_source === 'STL Geometry');
-                const isCADOrigin = (n.parameters?.origin_mode === 'CAD Origin' || !n.parameters?.origin_mode);
-                const defPos = (isSTL && isCADOrigin) ? 0.0 : 0.5;
-                return {
-                    id: n.id,
-                    type: n.type,
-                    name: n.parameters?.name || n.id,
-                    visible: n.parameters?.visible !== false && !n.parameters?.hidden,
-                    shape: n.parameters?.shape_type || 'Box',
-                    shape_type: n.parameters?.shape_type || 'Box',
-                    mesh_source: n.parameters?.mesh_source || 'Box Generator',
-                    x: Number(n.parameters?.pos_x ?? defPos),
-                    y: Number(n.parameters?.pos_y ?? defPos),
-                    z: Number(n.parameters?.pos_z ?? defPos),
-                    pos_x: Number(n.parameters?.pos_x ?? defPos),
-                    pos_y: Number(n.parameters?.pos_y ?? defPos),
-                    pos_z: Number(n.parameters?.pos_z ?? defPos),
-                    size_x: Number(n.parameters?.size_x ?? n.parameters?.lx ?? 0.2),
-                    size_y: Number(n.parameters?.size_y ?? n.parameters?.ly ?? 0.2),
-                    size_z: Number(n.parameters?.size_z ?? n.parameters?.lz ?? 0.2),
-                    radius: Number(n.parameters?.radius ?? 0.1),
-                    height: Number(n.parameters?.height ?? 0.2),
-                    rot_x: Number(n.parameters?.rot_x ?? 0.0),
-                    rot_y: Number(n.parameters?.rot_y ?? 0.0),
-                    rot_z: Number(n.parameters?.rot_z ?? 0.0),
-                    k_file: n.parameters?.k_file || ''
-                };
-            });
+            const discoveredParts = this.getDiscoveredFEMParts();
+            const femObjects = discoveredParts.map(p => ({
+                id: p.id,
+                node_id: p.nodeId,
+                type: p.isLine ? 'FEMBeam3D' : 'FEMObject3D',
+                part_type: p.isLine ? 'beam' : 'solid',
+                name: p.name,
+                visible: p.visible,
+                render_mode: p.renderMode,
+                opacity: p.opacity,
+                color: p.color,
+                shape: p.shapeType || 'Box',
+                shape_type: p.shapeType || 'Box',
+                mesh_source: (p.shapeType === 'Cylinder' ? 'Cylinder Generator' : (p.shapeType === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')),
+                origin_mode: p.originMode || 'Center',
+                x: p.x,
+                y: p.y,
+                z: p.z,
+                pos_x: p.x,
+                pos_y: p.y,
+                pos_z: p.z,
+                size_x: p.sizeX,
+                size_y: p.sizeY,
+                size_z: p.sizeZ,
+                radius: p.radius ?? 0.1,
+                inner_radius: p.innerRadius ?? 0.0,
+                height: p.height ?? 0.2,
+                nx: p.nx ?? 10,
+                ny: p.ny ?? 10,
+                nz: p.nz ?? 10,
+                rot_x: 0.0,
+                rot_y: 0.0,
+                rot_z: 0.0,
+                is_line: p.isLine,
+                bounds: p.bounds
+            }));
 
             const detonatorNodes = modelState?.nodes.filter((n: any) => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || [];
             let detonatorsList = detonatorNodes.map((n: any) => ({
@@ -7867,6 +8366,32 @@ export class Telemetry3DViewport {
 
             const submeshes: any[] = [];
 
+            if (!domainMesh3D && femObjects.length > 0) {
+                let minX = Infinity, maxX = -Infinity;
+                let minY = Infinity, maxY = -Infinity;
+                let minZ = Infinity, maxZ = -Infinity;
+                for (const o of femObjects) {
+                    const hx = (Number(o.size_x) || 0.2) * 0.5;
+                    const hy = (Number(o.size_y) || 0.2) * 0.5;
+                    const hz = (Number(o.size_z) || 0.2) * 0.5;
+                    minX = Math.min(minX, o.x - hx);
+                    maxX = Math.max(maxX, o.x + hx);
+                    minY = Math.min(minY, o.y - hy);
+                    maxY = Math.max(maxY, o.y + hy);
+                    minZ = Math.min(minZ, o.z - hz);
+                    maxZ = Math.max(maxZ, o.z + hz);
+                }
+                if (isFinite(minX) && isFinite(maxX) && maxX > minX) {
+                    xmin = minX; xmax = maxX;
+                    ymin = minY; ymax = maxY;
+                    zmin = minZ; zmax = maxZ;
+                    cellSize = Math.max(0.001, (xmax - xmin) / 64.0);
+                    nx = Math.max(1, Math.round((xmax - xmin) / cellSize));
+                    ny = Math.max(1, Math.round((ymax - ymin) / cellSize));
+                    nz = Math.max(1, Math.round((zmax - zmin) / cellSize));
+                }
+            }
+
             if (postToWorker) {
                 const cfgData: any = {
                     xmin,
@@ -7882,6 +8407,15 @@ export class Telemetry3DViewport {
                     ny,
                     nz,
                     quantityColormaps: qCmaps,
+                    quantityRanges: vpNode.parameters.quantity_ranges,
+                    quantityAutoScales: vpNode.parameters.quantity_auto_scales,
+                    quantityLogScales: vpNode.parameters.quantity_log_scales,
+                    lockQuantityRanges: vpNode.parameters.lock_quantity_ranges !== false,
+                    mpmLockQuantityRange: vpNode.parameters.mpm_lock_quantity_range !== false,
+                    femLockQuantityRange: vpNode.parameters.fem_lock_quantity_range !== false,
+                    beamLockQuantityRange: vpNode.parameters.beam_lock_quantity_range !== false,
+                    stlLockQuantityRange: vpNode.parameters.stl_lock_quantity_range !== false,
+                    obstaclesLockQuantityRange: vpNode.parameters.obstacles_lock_quantity_range !== false,
                     showGauges,
                     gaugeSize,
                     gaugeOpacity,
@@ -7930,9 +8464,11 @@ export class Telemetry3DViewport {
                         visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden
                     } : undefined,
                     submeshes: submeshes,
-                    ppc: Number(modelState?.nodes.find((n: any) => n.type === 'MPMObject3D')?.parameters['ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D')?.parameters['ppc'] ?? 8),
+                    ppc: Number(modelState?.nodes.find((n: any) => n.type === 'MPMObject3D')?.parameters['ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain')?.parameters['nearfield_ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain')?.parameters['ppc'] ?? 8),
                     showMPMParticles: vpNode.parameters.showMPMParticles !== false,
-                    mpmParticleDiameter: (vpNode.parameters.mpmParticleDiameter && vpNode.parameters.mpmParticleDiameter > 0) ? vpNode.parameters.mpmParticleDiameter : this.getAutoParticleDiameter(),
+                    mpmParticleDiameter: (vpNode.parameters.mpmParticleDiameter !== undefined && vpNode.parameters.mpmParticleDiameter !== null)
+                        ? Number(vpNode.parameters.mpmParticleDiameter)
+                        : this.getAutoParticleDiameter(),
                     mpmParticleSize: vpNode.parameters.mpmParticleSize ?? 4.0,
                     mpmParticleQuantity: vpNode.parameters.mpmParticleQuantity || 'vonMises',
                     mpmParticleColormap: vpNode.parameters.mpmParticleColormap || 'rainbow',
@@ -7959,8 +8495,17 @@ export class Telemetry3DViewport {
                     femColormap: vpNode.parameters.femColormap || 'rainbow',
                     femAutoScale: vpNode.parameters.femAutoScale !== false,
                     femLogScale: vpNode.parameters.femLogScale === true,
-                    femOpacity: vpNode.parameters.femOpacity ?? 1.0
+                    femOpacity: vpNode.parameters.femOpacity ?? 1.0,
+                    femContourLevels: vpNode.parameters.femContourLevels ?? 10
                 };
+                if (vpNode.parameters.min_val !== undefined) cfgData.minVal = Number(vpNode.parameters.min_val);
+                if (vpNode.parameters.max_val !== undefined) cfgData.maxVal = Number(vpNode.parameters.max_val);
+                if (vpNode.parameters.auto_scale !== undefined || vpNode.parameters.autoScale !== undefined) {
+                    cfgData.autoScale = Boolean(vpNode.parameters.auto_scale ?? vpNode.parameters.autoScale);
+                }
+                if (vpNode.parameters.log_scale !== undefined || vpNode.parameters.logScale !== undefined) {
+                    cfgData.logScale = Boolean(vpNode.parameters.log_scale ?? vpNode.parameters.logScale);
+                }
                 if (vpNode.parameters.obstacles_min_val !== undefined) cfgData.obstaclesMinVal = vpNode.parameters.obstacles_min_val;
                 if (vpNode.parameters.obstacles_max_val !== undefined) cfgData.obstaclesMaxVal = vpNode.parameters.obstacles_max_val;
                 if (vpNode.parameters.mpmParticleMinVal !== undefined) cfgData.mpmParticleMinVal = vpNode.parameters.mpmParticleMinVal;
@@ -8370,10 +8915,24 @@ export class Telemetry3DViewport {
                 const femObjNodes = targetModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
                 const mpmObjNodes = targetModel.nodes.filter((n: any) => n.type === 'MPMObject3D');
                 const mpmDomain = targetModel.nodes.find((n: any) => n.type === 'MPMDomain3D');
-                if (mpmDomain && mpmDomain.parameters?.cell_size) {
+                const marineDomain = targetModel.nodes.find((n: any) => n.type === 'MarineHarbourDomain');
+                if (marineDomain) {
+                    if (marineDomain.parameters?.cell_size) cellSize = Number(marineDomain.parameters.cell_size);
+                    if (marineDomain.parameters?.xmin !== undefined && marineDomain.parameters?.xmax !== undefined) {
+                        xmin = Number(marineDomain.parameters.xmin);
+                        xmax = Number(marineDomain.parameters.xmax);
+                        ymin = Number(marineDomain.parameters.ymin ?? 0.0);
+                        ymax = Number(marineDomain.parameters.ymax ?? 1.0);
+                        zmin = Number(marineDomain.parameters.zmin ?? 0.0);
+                        zmax = Number(marineDomain.parameters.zmax ?? 1.0);
+                        dimX = xmax - xmin;
+                        dimY = ymax - ymin;
+                        dimZ = zmax - zmin;
+                    }
+                } else if (mpmDomain && mpmDomain.parameters?.cell_size) {
                     cellSize = Number(mpmDomain.parameters.cell_size);
                 }
-                if (mpmDomain && mpmDomain.parameters?.xmin !== undefined && mpmDomain.parameters?.xmax !== undefined) {
+                if (!marineDomain && mpmDomain && mpmDomain.parameters?.xmin !== undefined && mpmDomain.parameters?.xmax !== undefined) {
                     xmin = Number(mpmDomain.parameters.xmin);
                     xmax = Number(mpmDomain.parameters.xmax);
                     ymin = Number(mpmDomain.parameters.ymin ?? 0.0);
@@ -8410,12 +8969,21 @@ export class Telemetry3DViewport {
                             objMinY = py - rad; objMaxY = py + rad;
                             objMinZ = pz - rad; objMaxZ = pz + rad;
                         } else {
-                            const lx = Number(obj.parameters?.size_x ?? obj.parameters?.length ?? 0.1);
-                            const ly = Number(obj.parameters?.size_y ?? obj.parameters?.length ?? 0.1);
-                            const lz = Number(obj.parameters?.size_z ?? obj.parameters?.height ?? 0.1);
-                            objMinX = px; objMaxX = px + lx;
-                            objMinY = py; objMaxY = py + ly;
-                            objMinZ = pz; objMaxZ = pz + lz;
+                            const kFile = obj.parameters?.k_file || '';
+                            const deck = getLSDynaDeckMeta(kFile);
+                            const sf = Number(obj.parameters?.scale_factor ?? 1.0);
+                            if (deck) {
+                                objMinX = deck.bounds[0] * sf; objMaxX = deck.bounds[1] * sf;
+                                objMinY = deck.bounds[2] * sf; objMaxY = deck.bounds[3] * sf;
+                                objMinZ = deck.bounds[4] * sf; objMaxZ = deck.bounds[5] * sf;
+                            } else {
+                                const lx = Number(obj.parameters?.size_x ?? obj.parameters?.length ?? 0.1);
+                                const ly = Number(obj.parameters?.size_y ?? obj.parameters?.length ?? 0.1);
+                                const lz = Number(obj.parameters?.size_z ?? obj.parameters?.height ?? 0.1);
+                                objMinX = px; objMaxX = px + lx;
+                                objMinY = py; objMaxY = py + ly;
+                                objMinZ = pz; objMaxZ = pz + lz;
+                            }
                         }
 
                         minX = Math.min(minX, objMinX);
@@ -8521,7 +9089,9 @@ export class Telemetry3DViewport {
         configData.zmin = zmin;
         configData.zmax = zmax;
 
-        const cachedConfig = this.stateManager.getTelemetry(vpNode.id + "-config-3d");
+        const currentModelId = this.getCurrentModelId();
+        const cachedConfig = (vpNode ? this.stateManager.getTelemetry(vpNode.id + "-config-3d") : null)
+            || (currentModelId ? this.stateManager.getTelemetry(currentModelId + "-config-3d") : null);
         if (cachedConfig) {
             this.hasTelemetryGrid = true;
             configData.dx = cachedConfig.dx ?? cellSize;
@@ -8548,8 +9118,8 @@ export class Telemetry3DViewport {
     }
 
     public getCurrentModelId(): string | null {
+        const allModels = this.stateManager.getAllModels();
         if (this.viewportNodeId) {
-            const allModels = this.stateManager.getAllModels();
             const matchedModel = allModels.find(m => m.id === this.viewportNodeId);
             if (matchedModel) return matchedModel.id;
             for (const m of allModels) {
@@ -8557,10 +9127,12 @@ export class Telemetry3DViewport {
                     return m.id;
                 }
             }
-            return this.viewportNodeId;
         }
         const ws = this.stateManager.getActiveWorkspace();
-        return ws ? ws.activeModelId : null;
+        if (ws && ws.activeModelId && allModels.some(m => m.id === ws.activeModelId)) {
+            return ws.activeModelId;
+        }
+        return this.stateManager.getActiveModelId();
     }
 
     public isGridBoxEnabled(vpNode: any): boolean {
@@ -8583,8 +9155,8 @@ export class Telemetry3DViewport {
         const model = this.getCurrentModel();
         if (model) {
             const hasFEM = model.nodes.some((n: any) => n.type === 'FEMDomain3D');
-            const hasCFD = model.nodes.some((n: any) => n.type === 'CFDSolver3D');
-            const hasMPM = model.nodes.some((n: any) => n.type === 'MPMDomain3D');
+            const hasCFD = model.nodes.some((n: any) => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
+            const hasMPM = model.nodes.some((n: any) => n.type === 'MPMDomain3D' || (n.type === 'MarineHarbourDomain' && isMarineHarbourMPMActive(n)));
             return hasFEM && !hasCFD && !hasMPM;
         }
         return false;
@@ -8594,15 +9166,8 @@ export class Telemetry3DViewport {
         if (this.container && !this.container.isConnected && this.container.offsetWidth === 0) return;
         if (modelId) {
             const currentId = this.getCurrentModelId();
-            if (this.viewportNodeId) {
-                if (currentId && currentId !== modelId && this.viewportNodeId !== modelId) {
-                    return;
-                }
-            } else {
-                const activeWs = this.stateManager.getActiveWorkspace();
-                if (activeWs && activeWs.modelIds && !activeWs.modelIds.includes(modelId)) {
-                    return;
-                }
+            if (currentId && currentId !== modelId) {
+                return;
             }
         }
         const magic = buffer.byteLength >= 4 ? new DataView(buffer).getUint32(0, true) : 0;
@@ -8638,24 +9203,16 @@ export class Telemetry3DViewport {
 
     public resetSimulationData(modelId?: string) {
         if (modelId) {
-            if (this.viewportNodeId) {
-                if (this.getCurrentModelId() !== modelId && this.viewportNodeId !== modelId) return;
-            } else {
-                const activeWs = this.stateManager.getActiveWorkspace();
-                if (activeWs && activeWs.modelIds && !activeWs.modelIds.includes(modelId)) return;
-            }
+            const currentId = this.getCurrentModelId();
+            if (currentId && currentId !== modelId) return;
         }
         this.worker.postMessage({ type: 'resetSimulationData' });
     }
 
     public updateTelemetry(data: any, modelId?: string) {
         if (modelId) {
-            if (this.viewportNodeId) {
-                if (this.getCurrentModelId() !== modelId && this.viewportNodeId !== modelId) return;
-            } else {
-                const activeWs = this.stateManager.getActiveWorkspace();
-                if (activeWs && activeWs.modelIds && !activeWs.modelIds.includes(modelId)) return;
-            }
+            const currentId = this.getCurrentModelId();
+            if (currentId && currentId !== modelId) return;
         }
         if (data && (data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_FEM_3D')) {
             this.hasTelemetryGrid = true;
@@ -8663,10 +9220,12 @@ export class Telemetry3DViewport {
             const ymin = data.ymin ?? 0.0;
             const zmin = data.zmin ?? 0.0;
             const dx = data.dx ?? data.cell_size ?? 0.01;
+            const dy = data.dy ?? dx;
+            const dz = data.dz ?? dx;
             const nx = data.nx ?? 64;
             const ny = data.ny ?? 64;
             const nz = data.nz ?? 64;
-            const gridKey = `${xmin}_${ymin}_${zmin}_${dx}_${nx}_${ny}_${nz}`;
+            const gridKey = `${xmin}_${ymin}_${zmin}_${dx}_${dy}_${dz}_${nx}_${ny}_${nz}`;
             if (gridKey !== this.lastTelemetryGridKey) {
                 this.lastTelemetryGridKey = gridKey;
                 this.worker.postMessage({
@@ -8676,9 +9235,11 @@ export class Telemetry3DViewport {
                         ymin,
                         zmin,
                         xmax: xmin + nx * dx,
-                        ymax: ymin + ny * dx,
-                        zmax: zmin + nz * dx,
+                        ymax: ymin + ny * dy,
+                        zmax: zmin + nz * dz,
                         dx,
+                        dy,
+                        dz,
                         nx,
                         ny,
                         nz
@@ -8701,6 +9262,9 @@ export class Telemetry3DViewport {
         }
         if (this.overlayCanvas && this.overlayCanvas.parentNode !== this.container) {
             this.container.appendChild(this.overlayCanvas);
+        }
+        if (this.topControlsBar && this.topControlsBar.parentNode !== this.container) {
+            this.container.appendChild(this.topControlsBar);
         }
         if (this.controlsOverlay && this.controlsOverlay.parentNode !== this.container) {
             this.container.appendChild(this.controlsOverlay);
@@ -8870,11 +9434,12 @@ export class Telemetry3DViewport {
                             stride: 1
                         });
                     }
+                    const persistentRate = targetModelId ? this.stateManager.getModelRefreshRate(targetModelId) : Number(vp.parameters.refresh_rate ?? 0.5);
                     net.send({
                         command: "VIEW3D_CONFIG",
                         modelId: targetModelId,
                         slices: slices,
-                        refresh_rate: Number(vp.parameters.refresh_rate ?? 0.5)
+                        refresh_rate: persistentRate
                     });
                 }
                 this.syncControls(true);
@@ -8977,11 +9542,12 @@ export class Telemetry3DViewport {
                             stride: 1
                         });
                     }
+                    const persistentRate = targetModelId ? this.stateManager.getModelRefreshRate(targetModelId) : Number(vp.parameters.refresh_rate ?? 0.5);
                     net.send({
                         command: "VIEW3D_CONFIG",
                         modelId: targetModelId,
                         slices: slices,
-                        refresh_rate: Number(vp.parameters.refresh_rate ?? 0.5)
+                        refresh_rate: persistentRate
                     });
                 }
                 this.syncControls(true);
@@ -9294,6 +9860,7 @@ export class Telemetry3DViewport {
         this.worker.terminate();
         this.canvas.remove();
         if (this.overlayCanvas) this.overlayCanvas.remove();
+        if (this.topControlsBar) this.topControlsBar.remove();
         if (this.controlsOverlay) this.controlsOverlay.remove();
         if (this.bottomViewDock) this.bottomViewDock.remove();
         if (this.floatOpenBtn) this.floatOpenBtn.remove();
@@ -9353,398 +9920,1359 @@ export class Telemetry3DViewport {
         return sep;
     }
 
-    private buildFloatingViewHUD() {
-        // Floating top HUD replaced by single-level bottom view dock
+    public getDiscoveredFEMParts(): DiscoveredFEMPart[] {
+        const targetModel = this.getTargetModel();
+        if (!targetModel) return [];
+        const vpNode = this.getViewportNode();
+        const visOverrides = (vpNode?.parameters?.fem_part_visibility || {}) as Record<string, boolean>;
+        const modeOverrides = (vpNode?.parameters?.fem_part_render_mode || {}) as Record<string, 'solid' | 'wireframe' | 'both'>;
+        const opacityOverrides = (vpNode?.parameters?.fem_part_opacity || {}) as Record<string, number>;
+
+        const parts: DiscoveredFEMPart[] = [];
+        const nodes = targetModel.nodes || [];
+
+        for (const n of nodes) {
+            if (!['FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D'].includes(n.type)) continue;
+
+            const kFile = String(n.parameters?.k_file || '');
+            const deck = getLSDynaDeckMeta(kFile);
+            const scaleFactor = Number(n.parameters?.scale_factor ?? 1.0);
+            const nodeName = n.parameters?.name || n.id;
+
+            // Check if node has explicit sub-parts in parameters (e.g. fem_parts)
+            if (Array.isArray(n.parameters?.fem_parts) && n.parameters.fem_parts.length > 0) {
+                for (let pIdx = 0; pIdx < n.parameters.fem_parts.length; pIdx++) {
+                    const p = n.parameters.fem_parts[pIdx];
+                    const partId = `${n.id}_part_${p.id || pIdx}`;
+                    const isLine = p.is_line === true || p.type === 'beam' || p.type === 'rebar';
+                    const partVis = visOverrides[partId] ?? (p.visible !== false && n.parameters?.visible !== false);
+                    const partMode = modeOverrides[partId] ?? (p.render_mode || (isLine ? 'solid' : 'both'));
+                    const partOpacity = opacityOverrides[partId] ?? (p.opacity ?? 1.0);
+                    const isSelfPart = (n.parameters.fem_parts.length === 1 || p.node_id === n.id || p.id === n.id);
+                    const partNx = isSelfPart ? Number(n.parameters?.nx ?? p.nx ?? 10) : Number(p.nx ?? n.parameters?.nx ?? 10);
+                    const partNy = isSelfPart ? Number(n.parameters?.ny ?? p.ny ?? 10) : Number(p.ny ?? n.parameters?.ny ?? 10);
+                    const partNz = isSelfPart ? Number(n.parameters?.nz ?? p.nz ?? 10) : Number(p.nz ?? n.parameters?.nz ?? 10);
+                    const partSizeX = isSelfPart ? Number(n.parameters?.size_x ?? p.size_x ?? 0.2) : Number(p.size_x ?? n.parameters?.size_x ?? 0.2);
+                    const partSizeY = isSelfPart ? Number(n.parameters?.size_y ?? p.size_y ?? 0.2) : Number(p.size_y ?? n.parameters?.size_y ?? 0.2);
+                    const partSizeZ = isSelfPart ? Number(n.parameters?.size_z ?? p.size_z ?? 0.2) : Number(p.size_z ?? n.parameters?.size_z ?? 0.2);
+                    const partPosX = isSelfPart ? Number(n.parameters?.pos_x ?? p.pos_x ?? 0) : Number(p.pos_x ?? n.parameters?.pos_x ?? 0);
+                    const partPosY = isSelfPart ? Number(n.parameters?.pos_y ?? p.pos_y ?? 0) : Number(p.pos_y ?? n.parameters?.pos_y ?? 0);
+                    const partPosZ = isSelfPart ? Number(n.parameters?.pos_z ?? p.pos_z ?? 0) : Number(p.pos_z ?? n.parameters?.pos_z ?? 0);
+
+                    parts.push({
+                        id: partId,
+                        nodeId: n.id,
+                        name: p.name || `${nodeName} - Part ${pIdx + 1}`,
+                        type: isLine ? 'beam' : (p.type || 'solid'),
+                        shapeType: String(p.shape_type || n.parameters?.shape_type || (isLine ? 'Beam' : 'Box')),
+                        originMode: String(p.origin_mode || n.parameters?.origin_mode || 'Center'),
+                        numElements: Number(p.num_elements || (partNx * partNy * partNz)),
+                        nx: partNx,
+                        ny: partNy,
+                        nz: partNz,
+                        radius: Number(p.radius ?? n.parameters?.radius ?? 0.1),
+                        innerRadius: Number(p.inner_radius ?? n.parameters?.inner_radius ?? 0.0),
+                        height: Number(p.height ?? n.parameters?.height ?? 0.2),
+                        visible: partVis,
+                        renderMode: partMode,
+                        opacity: partOpacity,
+                        color: p.color,
+                        isLine: isLine,
+                        x: partPosX,
+                        y: partPosY,
+                        z: partPosZ,
+                        sizeX: partSizeX,
+                        sizeY: partSizeY,
+                        sizeZ: partSizeZ
+                    });
+                }
+                continue;
+            }
+
+            // If LS-DYNA deck with both solids and beams
+            if (deck && deck.numSolidElements > 0 && deck.numBeamElements > 0) {
+                const b = deck.bounds;
+                const sizeX = (b[1] - b[0]) * scaleFactor;
+                const sizeY = (b[3] - b[2]) * scaleFactor;
+                const sizeZ = (b[5] - b[4]) * scaleFactor;
+                const posX = (b[0] + b[1]) * 0.5 * scaleFactor;
+                const posY = (b[2] + b[3]) * 0.5 * scaleFactor;
+                const posZ = (b[4] + b[5]) * 0.5 * scaleFactor;
+
+                // Part 1: Solid elements (e.g. Concrete)
+                const solidPartId = `${n.id}_solids`;
+                const solidVis = visOverrides[solidPartId] ?? (n.parameters?.visible !== false && !n.parameters?.hidden);
+                const solidMode = modeOverrides[solidPartId] ?? 'both';
+                const solidOpacity = opacityOverrides[solidPartId] ?? 1.0;
+                parts.push({
+                    id: solidPartId,
+                    nodeId: n.id,
+                    name: `${nodeName} (Solids / Concrete)`,
+                    type: 'solid',
+                    numElements: deck.numSolidElements,
+                    visible: solidVis,
+                    renderMode: solidMode,
+                    opacity: solidOpacity,
+                    color: '#60a5fa',
+                    isLine: false,
+                    bounds: [b[0]*scaleFactor, b[1]*scaleFactor, b[2]*scaleFactor, b[3]*scaleFactor, b[4]*scaleFactor, b[5]*scaleFactor],
+                    x: posX, y: posY, z: posZ,
+                    sizeX, sizeY, sizeZ
+                });
+
+                // Part 2: Beam elements (e.g. Rebar Cage)
+                const beamPartId = `${n.id}_beams`;
+                const beamVis = visOverrides[beamPartId] ?? (n.parameters?.visible !== false && !n.parameters?.hidden);
+                const beamMode = modeOverrides[beamPartId] ?? 'solid';
+                const beamOpacity = opacityOverrides[beamPartId] ?? 1.0;
+                parts.push({
+                    id: beamPartId,
+                    nodeId: n.id,
+                    name: `${nodeName} (Rebar Cage / 1D Beams)`,
+                    type: 'beam',
+                    numElements: deck.numBeamElements,
+                    visible: beamVis,
+                    renderMode: beamMode,
+                    opacity: beamOpacity,
+                    color: '#f59e0b',
+                    isLine: true,
+                    bounds: [b[0]*scaleFactor, b[1]*scaleFactor, b[2]*scaleFactor, b[3]*scaleFactor, b[4]*scaleFactor, b[5]*scaleFactor],
+                    x: posX, y: posY, z: posZ,
+                    sizeX, sizeY, sizeZ
+                });
+                continue;
+            }
+
+            // Standard single part
+            const isLineNode = (n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D');
+            const defaultMode: 'solid' | 'wireframe' | 'both' = isLineNode ? 'solid' : 'both';
+            let numElem = 0;
+            if (deck) {
+                numElem = deck.totalElements;
+            } else if (n.parameters?.num_elements) {
+                numElem = Number(n.parameters.num_elements);
+            } else {
+                const nx = Number(n.parameters?.nx ?? 10);
+                const ny = Number(n.parameters?.ny ?? 10);
+                const nz = Number(n.parameters?.nz ?? 10);
+                numElem = nx * ny * nz;
+            }
+
+            let sizeX = Number(n.parameters?.size_x ?? n.parameters?.lx ?? 1.0);
+            let sizeY = Number(n.parameters?.size_y ?? n.parameters?.ly ?? 1.0);
+            let sizeZ = Number(n.parameters?.size_z ?? n.parameters?.lz ?? 1.0);
+            let posX = Number(n.parameters?.pos_x ?? 0.0);
+            let posY = Number(n.parameters?.pos_y ?? 0.0);
+            let posZ = Number(n.parameters?.pos_z ?? 0.0);
+            if (deck) {
+                const b = deck.bounds;
+                sizeX = (b[1] - b[0]) * scaleFactor;
+                sizeY = (b[3] - b[2]) * scaleFactor;
+                sizeZ = (b[5] - b[4]) * scaleFactor;
+                posX = (b[0] + b[1]) * 0.5 * scaleFactor;
+                posY = (b[2] + b[3]) * 0.5 * scaleFactor;
+                posZ = (b[4] + b[5]) * 0.5 * scaleFactor;
+            }
+
+            const partId = n.id;
+            const partVis = visOverrides[partId] ?? (n.parameters?.visible !== false && !n.parameters?.hidden);
+            const partMode = modeOverrides[partId] ?? defaultMode;
+            const partOpacity = opacityOverrides[partId] ?? 1.0;
+
+            parts.push({
+                id: partId,
+                nodeId: n.id,
+                name: nodeName,
+                type: isLineNode ? 'beam' : 'solid',
+                shapeType: String(n.parameters?.shape_type || (isLineNode ? 'Beam' : 'Box')),
+                originMode: String(n.parameters?.origin_mode || 'Center'),
+                numElements: numElem,
+                nx: Number(n.parameters?.nx ?? 10),
+                ny: Number(n.parameters?.ny ?? 10),
+                nz: Number(n.parameters?.nz ?? 10),
+                radius: Number(n.parameters?.radius ?? 0.1),
+                innerRadius: Number(n.parameters?.inner_radius ?? 0.0),
+                height: Number(n.parameters?.height ?? 0.2),
+                visible: partVis,
+                renderMode: partMode,
+                opacity: partOpacity,
+                color: isLineNode ? '#f59e0b' : '#38bdf8',
+                isLine: isLineNode,
+                x: posX, y: posY, z: posZ,
+                sizeX, sizeY, sizeZ
+            });
+        }
+
+        return parts;
     }
 
-    private buildBottomControlsDock() {
-        this.bottomViewDock = document.createElement('div');
-        this.bottomViewDock.style.position = 'absolute';
-        this.bottomViewDock.style.bottom = '8px';
-        this.bottomViewDock.style.left = '8px';
-        this.bottomViewDock.style.right = '8px';
-        this.bottomViewDock.style.display = 'flex';
-        this.bottomViewDock.style.flexWrap = 'wrap';
-        this.bottomViewDock.style.alignItems = 'center';
-        this.bottomViewDock.style.justifyContent = 'space-between';
-        this.bottomViewDock.style.gap = '4px 6px';
-        this.bottomViewDock.style.background = 'rgba(16, 16, 19, 0.90)';
-        this.bottomViewDock.style.backdropFilter = 'blur(14px)';
-        this.bottomViewDock.style.border = '1px solid rgba(255, 255, 255, 0.12)';
-        this.bottomViewDock.style.borderRadius = '6px';
-        this.bottomViewDock.style.padding = '4px 8px';
-        this.bottomViewDock.style.zIndex = '12';
-        this.bottomViewDock.style.boxShadow = '0 6px 20px rgba(0, 0, 0, 0.6)';
-        this.bottomViewDock.style.color = '#e0e0e0';
-        this.bottomViewDock.style.fontFamily = 'system-ui, -apple-system, sans-serif';
-        this.bottomViewDock.style.fontSize = '10.5px';
-        this.bottomViewDock.style.pointerEvents = 'auto';
-        this.container.appendChild(this.bottomViewDock);
-
-        // Group 1: Camera & View Presets
-        const cameraGroup = document.createElement('div');
-        cameraGroup.style.display = 'flex';
-        cameraGroup.style.alignItems = 'center';
-        cameraGroup.style.gap = '3px';
-
-        const resetBtn = document.createElement('button');
-        resetBtn.innerHTML = '🏠 Reset';
-        this.applyButtonStyle(resetBtn);
-        resetBtn.style.padding = '2px 6px';
-        resetBtn.title = 'Reset view angle & zoom';
-        resetBtn.onclick = () => {
-            this.worker.postMessage({
-                type: 'setView',
-                data: { pitch: 0.42, yaw: 2.356, distance: 1.35, targetX: 0.0, targetY: 0.0, targetZ: 0.0 }
-            });
-        };
-        cameraGroup.appendChild(resetBtn);
-
-        const projBtn = document.createElement('button');
-        projBtn.id = this.getElId('viewport-dock-proj-btn');
-        projBtn.innerHTML = this.usePerspective ? '👁️ Persp' : '📐 Ortho';
-        this.applyButtonStyle(projBtn);
-        projBtn.style.padding = '2px 6px';
-        projBtn.title = 'Toggle Perspective / Orthographic projection';
-        projBtn.onclick = () => this.setProjection(!this.usePerspective);
-        cameraGroup.appendChild(projBtn);
-
-        const views = [
-            { name: 'Top', val: 'top' },
-            { name: 'Bottom', val: 'bottom' },
-            { name: 'Front', val: 'front' },
-            { name: 'Back', val: 'back' },
-            { name: 'Left', val: 'left' },
-            { name: 'Right', val: 'right' },
-            { name: 'Iso', val: 'iso' }
-        ];
-        views.forEach(v => {
-            const btn = document.createElement('button');
-            btn.innerHTML = v.name;
-            this.applyButtonStyle(btn);
-            btn.style.padding = '2px 5px';
-            btn.onclick = () => this.alignCamera(v.val);
-            cameraGroup.appendChild(btn);
-        });
-
-        this.bottomViewDock.appendChild(cameraGroup);
-
-        // Separator
-        this.bottomViewDock.appendChild(this.createDockSeparator());
-
-        // Group 2: Quick Toggle Chips
-        const layerGroup = document.createElement('div');
-        layerGroup.style.display = 'flex';
-        layerGroup.style.alignItems = 'center';
-        layerGroup.style.gap = '3px';
-
-        const createToggleChip = (idSuffix: string, label: string, title: string, onClick: (active: boolean) => void) => {
-            const btn = document.createElement('button');
-            btn.id = this.getElId(`viewport-chip-${idSuffix}`);
-            btn.innerHTML = label;
-            btn.title = title;
-            this.applyButtonStyle(btn);
-            btn.style.padding = '2px 6px';
-            btn.onclick = () => {
-                const vpNode = this.getViewportNode();
-                if (!vpNode) return;
-                const curState = btn.dataset.active === 'true';
-                onClick(!curState);
+    public getDiscoveredMPMObjects(targetModel?: any): any[] {
+        const model = targetModel || this.getTargetModel();
+        if (!model) return [];
+        const mpmNodes = model.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D') || [];
+        const mpmObjects: any[] = mpmNodes.map((n: any) => {
+            const geom = this.extractObjectGeometryData(n);
+            const isSTL = (geom?.shape_type === 'STL' || n.parameters?.shape_type === 'STL');
+            const isCADOrigin = (geom?.origin_mode === 'CAD Origin' || n.parameters?.origin_mode === 'CAD Origin' || !n.parameters?.origin_mode);
+            const defPos = (isSTL && isCADOrigin) ? 0.0 : 0.5;
+            return {
+                id: n.id,
+                node_id: n.id,
+                shape: geom?.shape || (isSTL ? 'STL' : 'Box'),
+                shape_type: geom?.shape_type || (isSTL ? 'STL' : 'Box'),
+                pos_x: geom?.pos_x ?? defPos,
+                pos_y: geom?.pos_y ?? defPos,
+                pos_z: geom?.pos_z ?? defPos,
+                x: geom?.pos_x ?? defPos,
+                y: geom?.pos_y ?? defPos,
+                z: geom?.pos_z ?? defPos,
+                size_x: geom?.size_x ?? 0.2,
+                size_y: geom?.size_y ?? 0.2,
+                size_z: geom?.size_z ?? 0.2,
+                radius: geom?.radius ?? 0.1,
+                inner_radius: geom?.inner_radius ?? 0.0,
+                height: geom?.height ?? 0.2,
+                scale_x: geom?.scale_x ?? 1.0,
+                scale_y: geom?.scale_y ?? 1.0,
+                scale_z: geom?.scale_z ?? 1.0,
+                rot_x: geom?.rot_x ?? 0.0,
+                rot_y: geom?.rot_y ?? 0.0,
+                rot_z: geom?.rot_z ?? 0.0,
+                origin_mode: geom?.origin_mode || n.parameters?.origin_mode || 'CAD Origin',
+                stl_file: geom?.stl_file || n.parameters?.stl_file || '',
+                visible: n.parameters?.visible !== false && !n.parameters?.hidden
             };
-            return btn;
-        };
+        });
 
-        layerGroup.appendChild(createToggleChip('slices', '🥞 Slices', 'Toggle Slices', (active) => {
-            this.setLayerVisibility('slices', active);
-        }));
+        const harbourNode = model.nodes.find((n: any) => n.type === 'MarineHarbourDomain');
+        if (harbourNode && isMarineHarbourMPMActive(harbourNode)) {
+            const chgNode = model.nodes.find((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D');
+            const chgX = Number(chgNode?.parameters?.x ?? chgNode?.parameters?.charge_x ?? 0.0);
+            const chgY = Number(chgNode?.parameters?.y ?? chgNode?.parameters?.charge_y ?? 0.0);
+            const chgZ = Number(chgNode?.parameters?.z ?? chgNode?.parameters?.charge_z ?? 0.0);
+            const chgR = Number(chgNode?.parameters?.radius ?? chgNode?.parameters?.charge_radius ?? 0.1);
 
-        layerGroup.appendChild(createToggleChip('fem', '🏗️ FEM', 'Toggle FEM Mesh', (active) => {
-            this.setLayerVisibility('fem', active);
-        }));
+            const waterMode = harbourNode.parameters?.water_discretization_mode || 'Spherical_MPM_Sleeve';
+            const isPureFV = (waterMode === 'Pure_FV' || waterMode === 'Pure FV');
+            const sleeveR = Number(harbourNode.parameters?.nearfield_sleeve_radius ?? 2.5);
+            const waterZ = Number(harbourNode.parameters?.water_surface_z ?? 10.0);
+            const seabedZ = Number(harbourNode.parameters?.seabed_surface_z ?? 2.0);
 
-        layerGroup.appendChild(createToggleChip('beams', '📐 Beams (1D)', 'Toggle Beams / 1D Line Elements', (active) => {
-            this.setLayerVisibility('beams', active);
-        }));
+            if (!isPureFV && sleeveR > 0) {
+                const hasWaterSleeve = mpmObjects.some(o =>
+                    (o.material_name && String(o.material_name).toLowerCase().includes('water')) ||
+                    (o.name && String(o.name).toLowerCase().includes('sleeve')) ||
+                    (o.material_model === 'TaitWater')
+                );
+                if (!hasWaterSleeve) {
+                    const isCylinder = waterMode === 'Full_Column_MPM_Cylinder';
+                    const cylHeight = Math.max(0.1, waterZ - seabedZ);
+                    const cylPosZ = seabedZ + 0.5 * cylHeight;
+                    const isWaterVisible = (harbourNode.parameters?.show_water_sleeve !== false) &&
+                                           (harbourNode.parameters?.visible !== false && !harbourNode.parameters?.hidden);
+                    mpmObjects.push({
+                        id: `${harbourNode.id}_water_sleeve`,
+                        node_id: harbourNode.id,
+                        child_id: 'water_sleeve',
+                        name: isCylinder ? 'Water Column MPM Cylinder' : 'Nearfield Water Sleeve',
+                        shape: isCylinder ? 'Cylinder' : 'Sphere',
+                        shape_type: isCylinder ? 'Cylinder' : 'Sphere',
+                        pos_x: chgX,
+                        pos_y: chgY,
+                        pos_z: isCylinder ? cylPosZ : chgZ,
+                        x: chgX,
+                        y: chgY,
+                        z: isCylinder ? cylPosZ : chgZ,
+                        radius: sleeveR,
+                        inner_radius: isCylinder ? 0.0 : chgR,
+                        height: isCylinder ? cylHeight : undefined,
+                        size_x: sleeveR * 2,
+                        size_y: sleeveR * 2,
+                        size_z: isCylinder ? cylHeight : sleeveR * 2,
+                        rot_x: 0, rot_y: 0, rot_z: 0,
+                        scale_x: 1, scale_y: 1, scale_z: 1,
+                        origin_mode: 'Center',
+                        visible: isWaterVisible
+                    });
+                }
+            }
 
-        layerGroup.appendChild(createToggleChip('mpm', '✨ MPM', 'Toggle MPM Particles', (active) => {
-            this.setLayerVisibility('mpm', active);
-        }));
+            const vpNode = this.getViewportNode();
+            const slices = vpNode?.parameters?.slices || [];
+            const anySliceEnabled = slices.some((s: any) => s.enabled !== false);
+            const bedType = harbourNode.parameters?.seabed_mesh_type || 'Hybrid_MPM_Crater_FEM_FarField';
+            const isPureBed = (bedType === 'Pure_Hex8_FEM' || bedType === 'Pure Hex8 FEM' || bedType === 'Pure_FV' || bedType === 'Pure FV');
+            if (!isPureBed && !anySliceEnabled) {
+                const hasSoilMpm = mpmObjects.some(o =>
+                    (o.material_name && String(o.material_name).toLowerCase().includes('soil')) ||
+                    (o.name && String(o.name).toLowerCase().includes('seabed')) ||
+                    (o.material_model === 'DruckerPrager' || o.material_model === 'MohrCoulomb' || o.material_model === 'Drucker-Prager' || o.material_model === 'Mohr-Coulomb')
+                );
+                if (!hasSoilMpm) {
+                    const isFullDomain = (bedType === 'Full_Domain_MPM' || bedType === 'Pure_MPM');
+                    const meshNode = model.nodes.find((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+                    const xmin = Number(meshNode?.parameters?.xmin ?? meshNode?.parameters?.x_min ?? -20.0);
+                    const xmax = Number(meshNode?.parameters?.xmax ?? meshNode?.parameters?.x_max ?? 20.0);
+                    const ymin = Number(meshNode?.parameters?.ymin ?? meshNode?.parameters?.y_min ?? -20.0);
+                    const ymax = Number(meshNode?.parameters?.ymax ?? meshNode?.parameters?.y_max ?? 20.0);
+                    const zmin = Number(meshNode?.parameters?.zmin ?? meshNode?.parameters?.z_min ?? 0.0);
 
-        layerGroup.appendChild(createToggleChip('stl', '📐 STL', 'Toggle STL Geometry', (active) => {
-            this.setLayerVisibility('stl', active);
-        }));
+                    let boxX = chgX;
+                    let boxY = chgY;
+                    let sizeX = Number(harbourNode.parameters?.crater_bed_width ?? Math.max(5.0, 2.0 * sleeveR));
+                    let sizeY = sizeX;
+                    let sizeZ = Number(harbourNode.parameters?.crater_bed_depth ?? Math.max(3.0, sleeveR));
+                    let boxZ = seabedZ - 0.5 * sizeZ;
 
-        layerGroup.appendChild(createToggleChip('obstacles', '🧱 Obs', 'Toggle Obstacles', (active) => {
-            this.setLayerVisibility('obstacles', active);
-        }));
-
-        layerGroup.appendChild(createToggleChip('charge', '💥 Chg', 'Toggle Explosive Charge', (active) => {
-            this.setLayerVisibility('charge', active);
-        }));
-
-        layerGroup.appendChild(createToggleChip('detonator', '🎯 Det', 'Toggle Detonator Points', (active) => {
-            this.setLayerVisibility('detonator', active);
-        }));
-
-        layerGroup.appendChild(createToggleChip('grid', '🌐 Grid', 'Toggle Domain Grid', (active) => {
-            this.setLayerVisibility('grid', active);
-        }));
-
-        layerGroup.appendChild(createToggleChip('gauges', '📍 Gauges', 'Toggle Virtual Gauges', (active) => {
-            this.setLayerVisibility('gauges', active);
-        }));
-
-        layerGroup.appendChild(createToggleChip('lighting', '💡 Light', 'Toggle Lighting & AO', (active) => {
-            this.setLayerVisibility('lighting', active);
-        }));
-
-        this.bottomViewDock.appendChild(layerGroup);
-
-        // Separator
-        this.bottomViewDock.appendChild(this.createDockSeparator());
-
-        // Group 3: Quantity & Colormap
-        const qtyGroup = document.createElement('div');
-        qtyGroup.style.display = 'flex';
-        qtyGroup.style.alignItems = 'center';
-        qtyGroup.style.gap = '4px';
-
-        const qtyLabel = document.createElement('span');
-        qtyLabel.innerHTML = 'Qty:';
-        qtyLabel.style.color = '#aaa';
-        qtyGroup.appendChild(qtyLabel);
-
-        const qtySel = document.createElement('select');
-        qtySel.id = this.getElId('viewport-dock-qty-sel');
-        this.applySelectStyle(qtySel);
-        qtySel.style.width = '85px';
-        const isIdealDock = this.isIdealGas();
-        const dockSpeciesOpts = !isIdealDock ? `
-            <option value="species1">Species 1</option>
-            <option value="species2">Species 2</option>
-            <option value="species3">Species 3</option>` : '';
-        qtySel.innerHTML = `
-            <option value="pressure">Pressure</option>
-            <option value="density">Density</option>
-            <option value="velocity">Velocity</option>
-            <option value="energy">Energy</option>
-            <option value="peak_overpressure">Peak Overpressure</option>
-            <option value="peak_impulse">Peak Impulse</option>
-            <option value="vonMises">von Mises</option>
-            <option value="plastic_strain">Plastic Strain</option>
-            <option value="damage">Damage</option>${dockSpeciesOpts}
-            <option value="has_failed">Failure</option>
-            <option value="object_id">Object ID</option>
-        `;
-        this.bindEditingEvents(qtySel, () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const qty = qtySel.value;
-                const slices = (vp.parameters.slices || []).map((s: any) => ({ ...s, quantities: [qty] }));
-                const mpmQ = qty === 'plasticStrain' ? 'plastic_strain' : qty;
-                const femQ = qty === 'plastic_strain' ? 'plasticStrain' : qty;
-                this.stateManager.updateNodeParametersInPlace(vp.id, {
-                    slices,
-                    mpmParticleQuantity: mpmQ,
-                    femQuantity: femQ,
-                    stl_quantity: qty
-                });
-                this.worker.postMessage({
-                    type: 'setConfig',
-                    data: {
-                        mpmParticleQuantity: mpmQ,
-                        femQuantity: femQ,
-                        stlQuantity: qty
+                    if (isFullDomain) {
+                        sizeX = Math.max(0.1, xmax - xmin);
+                        sizeY = Math.max(0.1, ymax - ymin);
+                        sizeZ = Math.max(0.1, seabedZ - zmin);
+                        boxX = 0.5 * (xmin + xmax);
+                        boxY = 0.5 * (ymin + ymax);
+                        boxZ = zmin + 0.5 * sizeZ;
                     }
-                });
-                this.updateSlices(slices);
-                this.syncControls(true);
+
+                    const isSoilVisible = (harbourNode.parameters?.show_soil_mpm !== false) &&
+                                          (harbourNode.parameters?.visible !== false && !harbourNode.parameters?.hidden);
+                    mpmObjects.push({
+                        id: `${harbourNode.id}_seabed_soil`,
+                        node_id: harbourNode.id,
+                        child_id: 'seabed_soil',
+                        name: isFullDomain ? 'Full Domain Seabed' : 'Seabed Crater Bed',
+                        shape: 'Box',
+                        shape_type: 'Box',
+                        pos_x: boxX,
+                        pos_y: boxY,
+                        pos_z: boxZ,
+                        x: boxX,
+                        y: boxY,
+                        z: boxZ,
+                        size_x: sizeX,
+                        size_y: sizeY,
+                        size_z: sizeZ,
+                        radius: 0.1,
+                        inner_radius: 0.0,
+                        height: sizeZ,
+                        rot_x: 0, rot_y: 0, rot_z: 0,
+                        scale_x: 1, scale_y: 1, scale_z: 1,
+                        origin_mode: 'Center',
+                        visible: isSoilVisible
+                    });
+                }
+            }
+        }
+
+        return mpmObjects;
+    }
+
+    public dispatchMPMObjectsToWorker(): void {
+        const mpmObjects = this.getDiscoveredMPMObjects();
+        this.worker.postMessage({
+            type: 'setConfig',
+            data: { mpmObjects }
+        });
+        this.worker.postMessage({ type: 'requestRender' });
+    }
+
+    public setPartVisibility(partId: string, visible: boolean) {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return;
+        const current = { ...(vpNode.parameters.fem_part_visibility || {}) };
+        current[partId] = visible;
+        this.stateManager.updateNodeParametersInPlace(vpNode.id, { fem_part_visibility: current });
+        this.dispatchFEMObjectsToWorker();
+        this.syncControls(false);
+    }
+
+    public setPartRenderMode(partId: string, mode: 'solid' | 'wireframe' | 'both') {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return;
+        const current = { ...(vpNode.parameters.fem_part_render_mode || {}) };
+        current[partId] = mode;
+        this.stateManager.updateNodeParametersInPlace(vpNode.id, { fem_part_render_mode: current });
+        this.dispatchFEMObjectsToWorker();
+        this.syncControls(false);
+    }
+
+    public setPartOpacity(partId: string, opacity: number) {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return;
+        const current = { ...(vpNode.parameters.fem_part_opacity || {}) };
+        current[partId] = opacity;
+        this.stateManager.updateNodeParametersInPlace(vpNode.id, { fem_part_opacity: current });
+        this.dispatchFEMObjectsToWorker();
+        this.syncControls(false);
+    }
+
+    public soloPart(partId: string) {
+        const parts = this.getDiscoveredFEMParts();
+        const vpNode = this.getViewportNode();
+        if (!vpNode || parts.length === 0) return;
+
+        const currentlySoloed = parts.every(p => (p.id === partId ? p.visible : !p.visible));
+        const nextVis: Record<string, boolean> = {};
+
+        if (currentlySoloed) {
+            for (const p of parts) nextVis[p.id] = true;
+        } else {
+            for (const p of parts) nextVis[p.id] = (p.id === partId);
+        }
+        this.stateManager.updateNodeParametersInPlace(vpNode.id, { fem_part_visibility: nextVis });
+        this.dispatchFEMObjectsToWorker();
+        this.syncControls(false);
+    }
+
+    public dispatchFEMObjectsToWorker() {
+        const parts = this.getDiscoveredFEMParts();
+        const femObjectsData = parts.map(p => ({
+            id: p.id,
+            node_id: p.nodeId,
+            name: p.name,
+            type: p.isLine ? 'FEMBeam3D' : 'FEMObject3D',
+            part_type: p.isLine ? 'beam' : 'solid',
+            is_line: p.isLine,
+            visible: p.visible,
+            render_mode: p.renderMode,
+            opacity: p.opacity,
+            color: p.color,
+            shape: p.shapeType || 'Box',
+            shape_type: p.shapeType || 'Box',
+            mesh_source: (p.shapeType === 'Cylinder' ? 'Cylinder Generator' : (p.shapeType === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')),
+            origin_mode: p.originMode || 'Center',
+            x: p.x,
+            y: p.y,
+            z: p.z,
+            pos_x: p.x,
+            pos_y: p.y,
+            pos_z: p.z,
+            size_x: p.sizeX,
+            size_y: p.sizeY,
+            size_z: p.sizeZ,
+            radius: p.radius ?? 0.1,
+            inner_radius: p.innerRadius ?? 0.0,
+            height: p.height ?? 0.2,
+            nx: p.nx ?? 10,
+            ny: p.ny ?? 10,
+            nz: p.nz ?? 10,
+            rot_x: 0.0,
+            rot_y: 0.0,
+            rot_z: 0.0,
+            bounds: p.bounds
+        }));
+
+        this.worker.postMessage({
+            type: 'setConfig',
+            data: {
+                femObjects: femObjectsData
             }
         });
-        qtyGroup.appendChild(qtySel);
 
-        const cmapLabel = document.createElement('span');
-        cmapLabel.innerHTML = 'Map:';
-        cmapLabel.style.color = '#aaa';
-        qtyGroup.appendChild(cmapLabel);
-
-        const cmapSel = document.createElement('select');
-        cmapSel.id = this.getElId('viewport-dock-cmap-sel');
-        this.applySelectStyle(cmapSel);
-        cmapSel.style.width = '80px';
-        cmapSel.innerHTML = `
-            <option value="rainbow">Rainbow</option>
-            <option value="plasma">Plasma</option>
-            <option value="viridis">Viridis</option>
-            <option value="inferno">Inferno</option>
-            <option value="magma">Magma</option>
-            <option value="coolwarm">Coolwarm</option>
-            <option value="cividis">Cividis</option>
-            <option value="grayscale">Grayscale</option>
-        `;
-        this.bindEditingEvents(cmapSel, () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const cmap = cmapSel.value;
-                const slices = (vp.parameters.slices || []).map((s: any) => ({ ...s, colormap: cmap }));
-                this.stateManager.updateNodeParametersInPlace(vp.id, {
-                    colormap: cmap,
-                    slices,
-                    mpmParticleColormap: cmap,
-                    femColormap: cmap,
-                    stl_colormap: cmap
-                });
-                this.worker.postMessage({
-                    type: 'setConfig',
-                    data: {
-                        colormap: cmap,
-                        mpmParticleColormap: cmap,
-                        femColormap: cmap,
-                        stlColormap: cmap
-                    }
-                });
-                this.updateSlices(slices);
-                this.syncControls(true);
+        const currentModelId = this.getCurrentModelId();
+        const modelStatus = currentModelId ? this.stateManager.getModelStatus(currentModelId) : null;
+        if (modelStatus !== 'UNINITIALIZED' && modelStatus !== 'INCOMPLETE') {
+            const latest = (window as any).playbackBuffer?.getLatestFrame();
+            if (latest && latest.femBuffer) {
+                this.pushFrame(latest.femBuffer, latest.modelId);
             }
-        });
-        qtyGroup.appendChild(cmapSel);
+        }
+    }
 
-        const bgLabel = document.createElement('span');
-        bgLabel.innerHTML = 'Bg:';
-        bgLabel.style.color = '#aaa';
-        bgLabel.style.marginLeft = '2px';
-        qtyGroup.appendChild(bgLabel);
+    public buildTopControlsBar() {
+        if (this.topControlsBar) return;
+        const bar = document.createElement('div');
+        bar.id = this.getElId('viewport-top-controls-bar');
+        bar.style.position = 'absolute';
+        bar.style.top = '8px';
+        bar.style.left = '8px';
+        bar.style.right = '8px';
+        bar.style.display = 'flex';
+        bar.style.alignItems = 'center';
+        bar.style.justifyContent = 'space-between';
+        bar.style.gap = '6px';
+        bar.style.padding = '4px 8px';
+        bar.style.background = 'rgba(16, 18, 24, 0.88)';
+        bar.style.backdropFilter = 'blur(14px)';
+        bar.style.border = '1px solid rgba(255, 255, 255, 0.12)';
+        bar.style.borderRadius = '6px';
+        bar.style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.5)';
+        bar.style.zIndex = '14';
+        bar.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+        bar.style.fontSize = '10.5px';
+        bar.style.color = '#e0e0e0';
+        bar.style.userSelect = 'none';
 
-        const bgSel = document.createElement('select');
-        bgSel.id = this.getElId('viewport-dock-bg-sel');
-        this.applySelectStyle(bgSel);
-        bgSel.style.width = '125px';
-        bgSel.title = 'Change 3D Viewport Background Theme (Light / Dark Modes)';
+        // Left group: Model Title & Status Badge
+        const leftGroup = document.createElement('div');
+        leftGroup.style.display = 'flex';
+        leftGroup.style.alignItems = 'center';
+        leftGroup.style.gap = '8px';
 
-        const lightThemes = STAGE_THEMES.filter(t => t.group === 'light');
-        const darkThemes = STAGE_THEMES.filter(t => t.group === 'dark');
+        const modelBadge = document.createElement('span');
+        modelBadge.id = this.getElId('viewport-top-model-badge');
+        modelBadge.style.fontWeight = '700';
+        modelBadge.style.color = '#38bdf8';
+        modelBadge.style.letterSpacing = '0.3px';
+        const targetModel = this.getTargetModel();
+        modelBadge.innerHTML = `🧊 ${targetModel?.name || '3D Viewport'}`;
+        leftGroup.appendChild(modelBadge);
 
-        const dockLightGroup = document.createElement('optgroup');
-        dockLightGroup.label = 'Light Themes (Particle Contrast)';
-        lightThemes.forEach(t => {
-            const opt = document.createElement('option');
-            opt.value = t.id;
-            opt.textContent = `${t.icon} ${t.label}`;
-            if (t.id === this.activeThemeId) opt.selected = true;
-            dockLightGroup.appendChild(opt);
-        });
-        bgSel.appendChild(dockLightGroup);
+        bar.appendChild(leftGroup);
 
-        const dockDarkGroup = document.createElement('optgroup');
-        dockDarkGroup.label = 'Dark Studio Themes';
-        darkThemes.forEach(t => {
-            const opt = document.createElement('option');
-            opt.value = t.id;
-            opt.textContent = `${t.icon} ${t.label}`;
-            if (t.id === this.activeThemeId) opt.selected = true;
-            dockDarkGroup.appendChild(opt);
-        });
-        bgSel.appendChild(dockDarkGroup);
-
-        this.bindEditingEvents(bgSel, () => {
-            const themeId = bgSel.value as StageThemeId;
-            this.setViewportTheme(themeId);
-        });
-        qtyGroup.appendChild(bgSel);
-
-        this.bottomViewDock.appendChild(qtyGroup);
-
-        // Separator
-        this.bottomViewDock.appendChild(this.createDockSeparator());
-
-        // Group 4: Refresh Rate & Details
+        // Right group: Master Drawer Toggles & Quick Actions
         const rightGroup = document.createElement('div');
         rightGroup.style.display = 'flex';
         rightGroup.style.alignItems = 'center';
-        rightGroup.style.gap = '4px';
+        rightGroup.style.gap = '6px';
 
-        const rateSel = document.createElement('select');
-        rateSel.id = this.getElId('viewport-refresh-rate-sel-dock');
-        this.applySelectStyle(rateSel);
-        rateSel.style.width = '100px';
-        rateSel.innerHTML = `
-            <option value="0.016">60 FPS (Max)</option>
-            <option value="0.033">30 FPS</option>
-            <option value="0.05">20 FPS</option>
-            <option value="0.1">10 FPS</option>
-            <option value="0.2">5 FPS</option>
-            <option value="0.5">2 FPS (Default)</option>
-            <option value="1.0">1 FPS</option>
-            <option value="2.0">0.5 FPS</option>
-            <option value="5.0">0.2 FPS</option>
-            <option value="10.0">0.1 FPS</option>
-            <option value="20.0">0.05 FPS</option>
-            <option value="50.0">0.02 FPS</option>
-            <option value="100.0">0.01 FPS</option>
-            <option value="1000.0">0.001 FPS</option>
-        `;
-        const vpNode = this.getViewportNode();
-        this.selectOptionByNumericValue(rateSel, vpNode ? (vpNode.parameters.refresh_rate ?? 0.5) : 0.5);
-        this.bindEditingEvents(rateSel, () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { refresh_rate: Number(rateSel.value) });
-                this.sendView3DConfig();
+        // 1. Colorbars Manager button
+        const cbBtn = document.createElement('button');
+        cbBtn.id = this.getElId('viewport-top-cb-btn');
+        cbBtn.innerHTML = '🎨 Colorbars';
+        this.applyButtonStyle(cbBtn);
+        cbBtn.style.padding = '2px 8px';
+        cbBtn.style.fontSize = '10px';
+        cbBtn.style.background = 'rgba(168, 85, 247, 0.18)';
+        cbBtn.style.border = '1px solid rgba(168, 85, 247, 0.4)';
+        cbBtn.style.color = '#c084fc';
+        cbBtn.title = 'Open Colorbar Manager (colormaps, ranges, linear/log, unified lock)';
+        cbBtn.onclick = () => this.openDrawerTab('colorbars');
+        rightGroup.appendChild(cbBtn);
+
+        // 2. FEM Parts & Components button
+        const partsBtn = document.createElement('button');
+        partsBtn.id = this.getElId('viewport-top-parts-btn');
+        partsBtn.innerHTML = '🧩 Parts & Mesh';
+        this.applyButtonStyle(partsBtn);
+        partsBtn.style.padding = '2px 8px';
+        partsBtn.style.fontSize = '10px';
+        partsBtn.style.background = 'rgba(56, 189, 248, 0.18)';
+        partsBtn.style.border = '1px solid rgba(56, 189, 248, 0.4)';
+        partsBtn.style.color = '#38bdf8';
+        partsBtn.title = 'Manage Structural FEA Components, Rebar Cages, and Visibility';
+        partsBtn.onclick = () => this.openDrawerTab('parts');
+        rightGroup.appendChild(partsBtn);
+
+        // 3. Display & Layer Matrix button
+        const matrixBtn = document.createElement('button');
+        matrixBtn.id = this.getElId('viewport-top-matrix-btn');
+        matrixBtn.innerHTML = '⚡ Display Matrix ▾';
+        this.applyButtonStyle(matrixBtn);
+        matrixBtn.style.padding = '2px 8px';
+        matrixBtn.style.fontSize = '10px';
+        matrixBtn.style.fontWeight = 'bold';
+        matrixBtn.style.background = 'rgba(16, 185, 129, 0.18)';
+        matrixBtn.style.border = '1px solid rgba(52, 211, 153, 0.4)';
+        matrixBtn.style.color = '#34d399';
+        matrixBtn.title = 'Open Full Display & Layer Matrix Controls Drawer';
+        matrixBtn.onclick = () => this.toggleDrawer();
+        rightGroup.appendChild(matrixBtn);
+
+        bar.appendChild(rightGroup);
+        this.topControlsBar = bar;
+        this.container.appendChild(bar);
+    }
+
+    public openDrawerTab(tab: 'parts' | 'matrix' | 'colorbars' | 'view') {
+        this.activeDrawerTab = tab;
+        this.isOpen = true;
+        if (!this.controlsOverlay) {
+            this.buildControlsOverlay();
+        }
+        if (this.controlsOverlay) {
+            this.controlsOverlay.style.display = 'flex';
+            this.renderDrawerContent();
+        }
+    }
+
+    public toggleDrawer() {
+        this.isOpen = !this.isOpen;
+        if (!this.controlsOverlay) {
+            this.buildControlsOverlay();
+        }
+        if (this.controlsOverlay) {
+            this.controlsOverlay.style.display = this.isOpen ? 'flex' : 'none';
+            if (this.isOpen) {
+                this.renderDrawerContent();
+            }
+        }
+    }
+
+    public buildControlsOverlay() {
+        if (this.controlsOverlay) return;
+        const overlay = document.createElement('div');
+        overlay.id = this.getElId('viewport-controls-overlay');
+        overlay.style.position = 'absolute';
+        overlay.style.top = '44px';
+        overlay.style.right = '8px';
+        overlay.style.bottom = '48px';
+        overlay.style.width = '480px';
+        overlay.style.maxWidth = 'calc(100% - 16px)';
+        overlay.style.display = this.isOpen ? 'flex' : 'none';
+        overlay.style.flexDirection = 'column';
+        overlay.style.background = 'rgba(14, 16, 22, 0.95)';
+        overlay.style.backdropFilter = 'blur(18px)';
+        overlay.style.border = '1px solid rgba(255, 255, 255, 0.14)';
+        overlay.style.borderRadius = '8px';
+        overlay.style.boxShadow = '0 12px 40px rgba(0, 0, 0, 0.75)';
+        overlay.style.zIndex = '20';
+        overlay.style.color = '#e2e8f0';
+        overlay.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+        overlay.style.fontSize = '11px';
+        overlay.style.overflow = 'hidden';
+
+        // 1. Overlay Header with Tabs & Close button
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.alignItems = 'center';
+        header.style.justifyContent = 'space-between';
+        header.style.padding = '6px 10px';
+        header.style.borderBottom = '1px solid rgba(255, 255, 255, 0.1)';
+        header.style.background = 'rgba(0, 0, 0, 0.3)';
+
+        const tabsRow = document.createElement('div');
+        tabsRow.style.display = 'flex';
+        tabsRow.style.alignItems = 'center';
+        tabsRow.style.gap = '4px';
+
+        const tabDefs: { id: 'parts' | 'matrix' | 'colorbars' | 'view', label: string, icon: string }[] = [
+            { id: 'parts', label: 'FEM Parts', icon: '🧩' },
+            { id: 'matrix', label: 'Layers Matrix', icon: '⚡' },
+            { id: 'colorbars', label: 'Colorbars', icon: '🎨' },
+            { id: 'view', label: 'View & Scene', icon: '🎥' }
+        ];
+
+        tabDefs.forEach(t => {
+            const tabBtn = document.createElement('button');
+            tabBtn.id = this.getElId(`viewport-drawer-tab-${t.id}`);
+            tabBtn.innerHTML = `${t.icon} ${t.label}`;
+            this.applyButtonStyle(tabBtn);
+            tabBtn.style.padding = '3px 8px';
+            tabBtn.style.fontSize = '10px';
+            tabBtn.onclick = () => {
+                this.activeDrawerTab = t.id;
+                this.renderDrawerContent();
+            };
+            tabsRow.appendChild(tabBtn);
+        });
+        header.appendChild(tabsRow);
+
+        const closeBtn = document.createElement('button');
+        closeBtn.innerHTML = '✕';
+        this.applyButtonStyle(closeBtn);
+        closeBtn.style.padding = '2px 8px';
+        closeBtn.style.fontSize = '12px';
+        closeBtn.title = 'Close drawer';
+        closeBtn.onclick = () => {
+            this.isOpen = false;
+            overlay.style.display = 'none';
+        };
+        header.appendChild(closeBtn);
+        overlay.appendChild(header);
+
+        // 2. Drawer Body (Scrollable container)
+        const body = document.createElement('div');
+        body.id = this.getElId('viewport-drawer-body');
+        body.style.flex = '1';
+        body.style.overflowY = 'auto';
+        body.style.overflowX = 'hidden';
+        body.style.padding = '8px 10px';
+        body.style.display = 'flex';
+        body.style.flexDirection = 'column';
+        body.style.gap = '8px';
+        overlay.appendChild(body);
+
+        this.controlsOverlay = overlay;
+        this.container.appendChild(overlay);
+        this.renderDrawerContent();
+    }
+
+    public renderDrawerContent() {
+        if (!this.controlsOverlay) return;
+        const body = document.getElementById(this.getElId('viewport-drawer-body'));
+        if (!body) return;
+        body.innerHTML = '';
+
+        // Update active tab button styles
+        const tabDefs = ['parts', 'matrix', 'colorbars', 'view'];
+        tabDefs.forEach(tabId => {
+            const btn = document.getElementById(this.getElId(`viewport-drawer-tab-${tabId}`));
+            if (btn) {
+                const isActive = (this.activeDrawerTab === tabId);
+                btn.style.background = isActive ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.05)';
+                btn.style.border = isActive ? '1px solid #38bdf8' : '1px solid rgba(255, 255, 255, 0.12)';
+                btn.style.color = isActive ? '#ffffff' : '#94a3b8';
+                btn.style.fontWeight = isActive ? 'bold' : 'normal';
             }
         });
-        rightGroup.appendChild(rateSel);
 
-        const refreshDockBtn = document.createElement('button');
-        refreshDockBtn.innerHTML = '🔄 Refresh';
-        refreshDockBtn.title = 'Manual Telemetry Refresh: Request current state from solver and plot in 3D viewport';
-        this.applyButtonStyle(refreshDockBtn);
-        refreshDockBtn.onclick = () => {
-            this.sendView3DConfig();
-            const latest = (window as any).playbackBuffer?.getLatestFrame();
-            if (latest) {
-                if (latest.sliceBuffer) {
-                    this.pushFrame(latest.sliceBuffer, latest.modelId);
-                } else if (latest.buffer && latest.buffer !== latest.mpmBuffer && latest.buffer !== latest.femBuffer) {
-                    this.pushFrame(latest.buffer, latest.modelId);
-                }
-                if (latest.mpmBuffer) {
-                    this.pushFrame(latest.mpmBuffer, latest.modelId);
-                }
-                if (latest.femBuffer) {
-                    this.pushFrame(latest.femBuffer, latest.modelId);
-                }
-            }
+        if (this.activeDrawerTab === 'parts') {
+            this.renderFEMPartsTab(body);
+        } else if (this.activeDrawerTab === 'matrix') {
+            this.buildUnifiedControlsTable(body);
+        } else if (this.activeDrawerTab === 'colorbars') {
+            this.renderColorbarsManagerTab(body);
+        } else if (this.activeDrawerTab === 'view') {
+            this.renderViewSceneTab(body);
+        }
+    }
+
+    private renderFEMPartsTab(parent: HTMLElement) {
+        const parts = this.getDiscoveredFEMParts();
+
+        // 1. Tab Header with Stats & Batch Actions
+        const headerCard = document.createElement('div');
+        headerCard.style.background = 'rgba(255, 255, 255, 0.03)';
+        headerCard.style.border = '1px solid rgba(255, 255, 255, 0.08)';
+        headerCard.style.borderRadius = '6px';
+        headerCard.style.padding = '6px 8px';
+        headerCard.style.display = 'flex';
+        headerCard.style.flexDirection = 'column';
+        headerCard.style.gap = '6px';
+
+        const topRow = document.createElement('div');
+        topRow.style.display = 'flex';
+        topRow.style.justifyContent = 'space-between';
+        topRow.style.alignItems = 'center';
+
+        const countBadge = document.createElement('span');
+        countBadge.style.fontWeight = 'bold';
+        countBadge.style.color = '#38bdf8';
+        countBadge.innerHTML = `🧩 Structural Parts (${parts.length})`;
+        topRow.appendChild(countBadge);
+
+        const actionsRow = document.createElement('div');
+        actionsRow.style.display = 'flex';
+        actionsRow.style.gap = '4px';
+
+        const showAllBtn = document.createElement('button');
+        showAllBtn.innerHTML = '👁️ Show All';
+        this.applyButtonStyle(showAllBtn);
+        showAllBtn.style.padding = '2px 5px';
+        showAllBtn.style.fontSize = '9px';
+        showAllBtn.onclick = () => {
+            const vp = this.getViewportNode();
+            if (!vp) return;
+            const nextVis: Record<string, boolean> = {};
+            for (const p of parts) nextVis[p.id] = true;
+            this.stateManager.updateNodeParametersInPlace(vp.id, { fem_part_visibility: nextVis });
+            this.dispatchFEMObjectsToWorker();
+            this.renderDrawerContent();
         };
-        rightGroup.appendChild(refreshDockBtn);
+        actionsRow.appendChild(showAllBtn);
 
-        // Badge
-        const badge = document.getElementById(this.getElId('viewport-renderer-badge')) || document.createElement('span');
-        badge.id = this.getElId('viewport-renderer-badge');
-        badge.innerHTML = 'WebGL2';
-        badge.style.fontSize = '8.5px';
-        badge.style.padding = '1px 5px';
-        badge.style.borderRadius = '3px';
-        badge.style.border = '1px solid rgba(255,255,255,0.15)';
-        badge.style.fontWeight = 'bold';
-        badge.style.color = '#00adff';
-        badge.style.background = 'rgba(0,173,255,0.1)';
-        rightGroup.appendChild(badge);
-
-        // Side panel toggle
-        const panelToggleBtn = document.createElement('button');
-        panelToggleBtn.id = this.getElId('viewport-panel-toggle-btn');
-        panelToggleBtn.innerHTML = '⚡ Matrix';
-        this.applyButtonStyle(panelToggleBtn);
-        panelToggleBtn.style.padding = '2px 6px';
-        panelToggleBtn.title = 'Toggle Detailed Slice & Layer Matrix Panel';
-        panelToggleBtn.onclick = () => {
-            this.isOpen = !this.isOpen;
-            if (this.controlsOverlay) this.controlsOverlay.style.display = this.isOpen ? 'flex' : 'none';
-            if (this.floatOpenBtn) this.floatOpenBtn.style.display = 'none';
+        const hideAllBtn = document.createElement('button');
+        hideAllBtn.innerHTML = '🙈 Hide All';
+        this.applyButtonStyle(hideAllBtn);
+        hideAllBtn.style.padding = '2px 5px';
+        hideAllBtn.style.fontSize = '9px';
+        hideAllBtn.onclick = () => {
+            const vp = this.getViewportNode();
+            if (!vp) return;
+            const nextVis: Record<string, boolean> = {};
+            for (const p of parts) nextVis[p.id] = false;
+            this.stateManager.updateNodeParametersInPlace(vp.id, { fem_part_visibility: nextVis });
+            this.dispatchFEMObjectsToWorker();
+            this.renderDrawerContent();
         };
-        rightGroup.appendChild(panelToggleBtn);
+        actionsRow.appendChild(hideAllBtn);
 
-        this.bottomViewDock.appendChild(rightGroup);
+        const allSolidBtn = document.createElement('button');
+        allSolidBtn.innerHTML = '🧱 Solid';
+        this.applyButtonStyle(allSolidBtn);
+        allSolidBtn.style.padding = '2px 5px';
+        allSolidBtn.style.fontSize = '9px';
+        allSolidBtn.onclick = () => {
+            const vp = this.getViewportNode();
+            if (!vp) return;
+            const nextMode: Record<string, any> = {};
+            for (const p of parts) nextMode[p.id] = 'solid';
+            this.stateManager.updateNodeParametersInPlace(vp.id, { fem_part_render_mode: nextMode });
+            this.dispatchFEMObjectsToWorker();
+            this.renderDrawerContent();
+        };
+        actionsRow.appendChild(allSolidBtn);
+
+        const allWireBtn = document.createElement('button');
+        allWireBtn.innerHTML = '📐 Wire';
+        this.applyButtonStyle(allWireBtn);
+        allWireBtn.style.padding = '2px 5px';
+        allWireBtn.style.fontSize = '9px';
+        allWireBtn.onclick = () => {
+            const vp = this.getViewportNode();
+            if (!vp) return;
+            const nextMode: Record<string, any> = {};
+            for (const p of parts) nextMode[p.id] = 'wireframe';
+            this.stateManager.updateNodeParametersInPlace(vp.id, { fem_part_render_mode: nextMode });
+            this.dispatchFEMObjectsToWorker();
+            this.renderDrawerContent();
+        };
+        actionsRow.appendChild(allWireBtn);
+
+        topRow.appendChild(actionsRow);
+        headerCard.appendChild(topRow);
+        parent.appendChild(headerCard);
+
+        if (parts.length === 0) {
+            const emptyMsg = document.createElement('div');
+            emptyMsg.style.padding = '20px 10px';
+            emptyMsg.style.textAlign = 'center';
+            emptyMsg.style.color = '#94a3b8';
+            emptyMsg.style.fontSize = '10px';
+            emptyMsg.innerHTML = 'No structural FEM parts detected in current model.<br><br>Add an <b>FEMObject3D</b>, <b>FEMBeam3D</b>, or <b>LSDynaImporter3D</b> node to load structural components.';
+            parent.appendChild(emptyMsg);
+            return;
+        }
+
+        // 2. Part Cards List
+        const list = document.createElement('div');
+        list.style.display = 'flex';
+        list.style.flexDirection = 'column';
+        list.style.gap = '6px';
+
+        for (const p of parts) {
+            const card = document.createElement('div');
+            card.style.background = 'rgba(255, 255, 255, 0.025)';
+            card.style.border = p.visible ? '1px solid rgba(56, 189, 248, 0.25)' : '1px solid rgba(255, 255, 255, 0.08)';
+            card.style.borderRadius = '6px';
+            card.style.padding = '6px 8px';
+            card.style.display = 'flex';
+            card.style.flexDirection = 'column';
+            card.style.gap = '6px';
+
+            // Top Row: Eye, Name, Badges, Solo
+            const row1 = document.createElement('div');
+            row1.style.display = 'flex';
+            row1.style.alignItems = 'center';
+            row1.style.justifyContent = 'space-between';
+            row1.style.gap = '6px';
+
+            const leftBox = document.createElement('div');
+            leftBox.style.display = 'flex';
+            leftBox.style.alignItems = 'center';
+            leftBox.style.gap = '6px';
+            leftBox.style.minWidth = '0';
+
+            const eyeBtn = document.createElement('button');
+            eyeBtn.innerHTML = p.visible ? '👁️' : '🙈';
+            eyeBtn.title = p.visible ? 'Hide Part' : 'Show Part';
+            this.applyButtonStyle(eyeBtn);
+            eyeBtn.style.padding = '2px 4px';
+            eyeBtn.style.fontSize = '10px';
+            eyeBtn.style.background = p.visible ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255,255,255,0.05)';
+            eyeBtn.onclick = () => {
+                this.setPartVisibility(p.id, !p.visible);
+                this.renderDrawerContent();
+            };
+            leftBox.appendChild(eyeBtn);
+
+            const nameSpan = document.createElement('span');
+            nameSpan.style.fontWeight = '600';
+            nameSpan.style.fontSize = '10.5px';
+            nameSpan.style.color = p.visible ? (p.color || '#e2e8f0') : '#64748b';
+            nameSpan.style.whiteSpace = 'nowrap';
+            nameSpan.style.overflow = 'hidden';
+            nameSpan.style.textOverflow = 'ellipsis';
+            nameSpan.textContent = p.name;
+            leftBox.appendChild(nameSpan);
+
+            const elemBadge = document.createElement('span');
+            elemBadge.style.fontSize = '8.5px';
+            elemBadge.style.padding = '1px 4px';
+            elemBadge.style.borderRadius = '3px';
+            elemBadge.style.background = 'rgba(255, 255, 255, 0.06)';
+            elemBadge.style.color = '#94a3b8';
+            elemBadge.textContent = `${p.numElements.toLocaleString()} ${p.isLine ? 'beams' : 'elements'}`;
+            leftBox.appendChild(elemBadge);
+
+            row1.appendChild(leftBox);
+
+            const soloBtn = document.createElement('button');
+            soloBtn.innerHTML = 'SOLO';
+            this.applyButtonStyle(soloBtn);
+            soloBtn.style.padding = '1px 5px';
+            soloBtn.style.fontSize = '8.5px';
+            soloBtn.style.fontWeight = 'bold';
+            soloBtn.title = 'Isolate this part (hide all other parts)';
+            soloBtn.onclick = () => {
+                this.soloPart(p.id);
+                this.renderDrawerContent();
+            };
+            row1.appendChild(soloBtn);
+            card.appendChild(row1);
+
+            // Bottom Row: Render Mode (Solid/Wire/Both) & Opacity
+            const row2 = document.createElement('div');
+            row2.style.display = 'flex';
+            row2.style.alignItems = 'center';
+            row2.style.justifyContent = 'space-between';
+            row2.style.gap = '8px';
+
+            const modeGroup = document.createElement('div');
+            modeGroup.style.display = 'flex';
+            modeGroup.style.alignItems = 'center';
+            modeGroup.style.gap = '2px';
+
+            const modeLabel = document.createElement('span');
+            modeLabel.style.fontSize = '9px';
+            modeLabel.style.color = '#888';
+            modeLabel.style.marginRight = '2px';
+            modeLabel.textContent = 'Mode:';
+            modeGroup.appendChild(modeLabel);
+
+            const modes: { id: 'solid' | 'wireframe' | 'both', label: string }[] = [
+                { id: 'solid', label: 'Solid' },
+                { id: 'wireframe', label: 'Wire' },
+                { id: 'both', label: 'Both' }
+            ];
+            modes.forEach(m => {
+                const btn = document.createElement('button');
+                btn.textContent = m.label;
+                this.applyButtonStyle(btn);
+                btn.style.padding = '1px 5px';
+                btn.style.fontSize = '8.5px';
+                const isSelected = (p.renderMode === m.id);
+                btn.style.background = isSelected ? 'rgba(56, 189, 248, 0.3)' : 'rgba(255,255,255,0.05)';
+                btn.style.borderColor = isSelected ? '#38bdf8' : 'rgba(255,255,255,0.12)';
+                btn.style.color = isSelected ? '#ffffff' : '#94a3b8';
+                btn.onclick = () => {
+                    this.setPartRenderMode(p.id, m.id);
+                    this.renderDrawerContent();
+                };
+                modeGroup.appendChild(btn);
+            });
+            row2.appendChild(modeGroup);
+
+            // Opacity slider
+            const opacityGroup = document.createElement('div');
+            opacityGroup.style.display = 'flex';
+            opacityGroup.style.alignItems = 'center';
+            opacityGroup.style.gap = '4px';
+
+            const opLabel = document.createElement('span');
+            opLabel.style.fontSize = '9px';
+            opLabel.style.color = '#888';
+            opLabel.textContent = `Opacity: ${(p.opacity * 100).toFixed(0)}%`;
+            opacityGroup.appendChild(opLabel);
+
+            const opSlider = document.createElement('input');
+            opSlider.type = 'range';
+            opSlider.min = '0.05';
+            opSlider.max = '1.0';
+            opSlider.step = '0.05';
+            opSlider.value = String(p.opacity);
+            opSlider.style.width = '65px';
+            opSlider.oninput = () => {
+                const val = Number(opSlider.value);
+                opLabel.textContent = `Opacity: ${(val * 100).toFixed(0)}%`;
+                this.setPartOpacity(p.id, val);
+            };
+            opacityGroup.appendChild(opSlider);
+            row2.appendChild(opacityGroup);
+
+            card.appendChild(row2);
+            list.appendChild(card);
+        }
+
+        parent.appendChild(list);
+    }
+
+    private renderColorbarsManagerTab(parent: HTMLElement) {
+        const vpNode = this.getViewportNode();
+        if (!vpNode) return;
+        const params = vpNode.parameters || {};
+
+        // 1. Master Controls Header
+        const headerCard = document.createElement('div');
+        headerCard.style.background = 'rgba(255, 255, 255, 0.03)';
+        headerCard.style.border = '1px solid rgba(255, 255, 255, 0.08)';
+        headerCard.style.borderRadius = '6px';
+        headerCard.style.padding = '6px 8px';
+        headerCard.style.display = 'flex';
+        headerCard.style.justifyContent = 'space-between';
+        headerCard.style.alignItems = 'center';
+
+        const title = document.createElement('span');
+        title.style.fontWeight = 'bold';
+        title.style.color = '#c084fc';
+        title.innerHTML = '🎨 Colorbar Overlay Manager';
+        headerCard.appendChild(title);
+
+        const actionsRow = document.createElement('div');
+        actionsRow.style.display = 'flex';
+        actionsRow.style.gap = '4px';
+
+        const showAllBtn = document.createElement('button');
+        showAllBtn.innerHTML = '👁️ Show All';
+        this.applyButtonStyle(showAllBtn);
+        showAllBtn.style.padding = '2px 6px';
+        showAllBtn.style.fontSize = '9px';
+        showAllBtn.onclick = () => {
+            this.setAllColorbarsVisible(true);
+            this.renderDrawerContent();
+        };
+        actionsRow.appendChild(showAllBtn);
+
+        const hideAllBtn = document.createElement('button');
+        hideAllBtn.innerHTML = '🙈 Hide All';
+        this.applyButtonStyle(hideAllBtn);
+        hideAllBtn.style.padding = '2px 6px';
+        hideAllBtn.style.fontSize = '9px';
+        hideAllBtn.onclick = () => {
+            this.setAllColorbarsVisible(false);
+            this.renderDrawerContent();
+        };
+        actionsRow.appendChild(hideAllBtn);
+
+        const lockAllBtn = document.createElement('button');
+        const isGloballyLocked = params.lock_quantity_ranges !== false;
+        lockAllBtn.innerHTML = isGloballyLocked ? '🔒 Unified Range' : '🔓 Indep Range';
+        this.applyButtonStyle(lockAllBtn);
+        lockAllBtn.style.padding = '2px 6px';
+        lockAllBtn.style.fontSize = '9px';
+        lockAllBtn.style.background = isGloballyLocked ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)';
+        lockAllBtn.style.borderColor = isGloballyLocked ? '#10b981' : '#ef4444';
+        lockAllBtn.style.color = isGloballyLocked ? '#34d399' : '#f87171';
+        lockAllBtn.onclick = () => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { lock_quantity_ranges: !isGloballyLocked });
+            this.worker.postMessage({ type: 'setConfig', data: { lockQuantityRanges: !isGloballyLocked } });
+            this.syncControls(false);
+            this.renderDrawerContent();
+        };
+        actionsRow.appendChild(lockAllBtn);
+
+        headerCard.appendChild(actionsRow);
+        parent.appendChild(headerCard);
+
+        // 2. Individual Colorbar Rows
+        const list = document.createElement('div');
+        list.style.display = 'flex';
+        list.style.flexDirection = 'column';
+        list.style.gap = '6px';
+
+        const renderItem = (name: string, isShown: boolean, onToggleShown: (shown: boolean) => void, qty: string, onSelectQty: (q: string) => void, cmap: string, onSelectCmap: (c: string) => void, minVal: number, maxVal: number, onSetMinMax: (min: number, max: number) => void, autoScale: boolean, onToggleAuto: () => void, logScale: boolean, onToggleLog: () => void) => {
+            const card = document.createElement('div');
+            card.style.background = 'rgba(255, 255, 255, 0.025)';
+            card.style.border = isShown ? '1px solid rgba(168, 85, 247, 0.35)' : '1px solid rgba(255, 255, 255, 0.08)';
+            card.style.borderRadius = '6px';
+            card.style.padding = '6px 8px';
+            card.style.display = 'flex';
+            card.style.flexDirection = 'column';
+            card.style.gap = '5px';
+
+            // Row 1: Checkbox, Name, Badges (Auto, Log)
+            const r1 = document.createElement('div');
+            r1.style.display = 'flex';
+            r1.style.alignItems = 'center';
+            r1.style.justifyContent = 'space-between';
+
+            const left = document.createElement('div');
+            left.style.display = 'flex';
+            left.style.alignItems = 'center';
+            left.style.gap = '6px';
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = isShown;
+            cb.style.cursor = 'pointer';
+            cb.onchange = () => {
+                onToggleShown(cb.checked);
+                this.renderDrawerContent();
+            };
+            left.appendChild(cb);
+
+            const nameEl = document.createElement('span');
+            nameEl.style.fontWeight = 'bold';
+            nameEl.style.fontSize = '10px';
+            nameEl.style.color = isShown ? '#ffffff' : '#888';
+            nameEl.textContent = name;
+            left.appendChild(nameEl);
+
+            r1.appendChild(left);
+
+            const badges = document.createElement('div');
+            badges.style.display = 'flex';
+            badges.style.gap = '3px';
+
+            const autoBtn = document.createElement('button');
+            autoBtn.innerHTML = autoScale ? 'AUTO' : 'MAN';
+            this.applyButtonStyle(autoBtn);
+            autoBtn.style.padding = '1px 5px';
+            autoBtn.style.fontSize = '8px';
+            autoBtn.style.background = autoScale ? 'rgba(0,173,255,0.2)' : 'rgba(245,158,11,0.2)';
+            autoBtn.style.borderColor = autoScale ? '#00adff' : '#f59e0b';
+            autoBtn.style.color = autoScale ? '#38bdf8' : '#fbbf24';
+            autoBtn.onclick = () => {
+                onToggleAuto();
+                this.renderDrawerContent();
+            };
+            badges.appendChild(autoBtn);
+
+            const logBtn = document.createElement('button');
+            logBtn.innerHTML = logScale ? 'LOG' : 'LIN';
+            this.applyButtonStyle(logBtn);
+            logBtn.style.padding = '1px 5px';
+            logBtn.style.fontSize = '8px';
+            logBtn.style.background = logScale ? 'rgba(168,85,247,0.2)' : 'rgba(255,255,255,0.05)';
+            logBtn.style.borderColor = logScale ? '#a855f7' : 'rgba(255,255,255,0.12)';
+            logBtn.style.color = logScale ? '#c084fc' : '#94a3b8';
+            logBtn.onclick = () => {
+                onToggleLog();
+                this.renderDrawerContent();
+            };
+            badges.appendChild(logBtn);
+
+            r1.appendChild(badges);
+            card.appendChild(r1);
+
+            // Row 2: Colormap Selector & Min / Max inputs
+            const r2 = document.createElement('div');
+            r2.style.display = 'flex';
+            r2.style.alignItems = 'center';
+            r2.style.justifyContent = 'space-between';
+            r2.style.gap = '6px';
+
+            const cmapSelect = document.createElement('select');
+            this.applySelectStyle(cmapSelect);
+            cmapSelect.style.width = '80px';
+            cmapSelect.style.fontSize = '9px';
+            const cmaps = ['rainbow', 'viridis', 'plasma', 'inferno', 'turbo', 'coolwarm', 'jet', 'grayscale'];
+            cmaps.forEach(c => {
+                const opt = document.createElement('option');
+                opt.value = c;
+                opt.textContent = c.toUpperCase();
+                if (c === cmap) opt.selected = true;
+                cmapSelect.appendChild(opt);
+            });
+            cmapSelect.onchange = () => {
+                onSelectCmap(cmapSelect.value);
+                this.renderDrawerContent();
+            };
+            r2.appendChild(cmapSelect);
+
+            const minMaxGroup = document.createElement('div');
+            minMaxGroup.style.display = 'flex';
+            minMaxGroup.style.alignItems = 'center';
+            minMaxGroup.style.gap = '3px';
+
+            const minIn = document.createElement('input');
+            minIn.type = 'text';
+            minIn.value = this.formatRangeValue(minVal, Math.abs(maxVal - minVal));
+            minIn.style.width = '52px';
+            minIn.style.fontSize = '8.5px';
+            minIn.style.background = 'rgba(0,0,0,0.4)';
+            minIn.style.border = '1px solid rgba(255,255,255,0.15)';
+            minIn.style.borderRadius = '2px';
+            minIn.style.color = '#38bdf8';
+            minIn.style.padding = '1px 3px';
+            minIn.onfocus = () => { minIn.value = String(minVal); minIn.select(); };
+            minIn.onblur = () => {
+                const n = Number(minIn.value);
+                if (!isNaN(n)) onSetMinMax(n, maxVal);
+            };
+            minIn.onkeydown = (e) => { if (e.key === 'Enter') minIn.blur(); };
+            minMaxGroup.appendChild(minIn);
+
+            const toSpan = document.createElement('span');
+            toSpan.style.color = '#64748b';
+            toSpan.style.fontSize = '8.5px';
+            toSpan.textContent = '→';
+            minMaxGroup.appendChild(toSpan);
+
+            const maxIn = document.createElement('input');
+            maxIn.type = 'text';
+            maxIn.value = this.formatRangeValue(maxVal, Math.abs(maxVal - minVal));
+            maxIn.style.width = '52px';
+            maxIn.style.fontSize = '8.5px';
+            maxIn.style.background = 'rgba(0,0,0,0.4)';
+            maxIn.style.border = '1px solid rgba(255,255,255,0.15)';
+            maxIn.style.borderRadius = '2px';
+            maxIn.style.color = '#38bdf8';
+            maxIn.style.padding = '1px 3px';
+            maxIn.onfocus = () => { maxIn.value = String(maxVal); maxIn.select(); };
+            maxIn.onblur = () => {
+                const n = Number(maxIn.value);
+                if (!isNaN(n)) onSetMinMax(minVal, n);
+            };
+            maxIn.onkeydown = (e) => { if (e.key === 'Enter') maxIn.blur(); };
+            minMaxGroup.appendChild(maxIn);
+
+            r2.appendChild(minMaxGroup);
+            card.appendChild(r2);
+
+            list.appendChild(card);
+        };
+
+        // Render CFD Slices
+        const slices = params.slices || [];
+        slices.forEach((s: any, idx: number) => {
+            const qty = s.quantities?.[0] || 'pressure';
+            const isShown = s.show_colorbar === true;
+            const cmap = s.colormap || 'rainbow';
+            const autoScale = s.auto_scale !== false;
+            const logScale = s.log_scale === true;
+            const minV = s.min_val ?? 0.0;
+            const maxV = s.max_val ?? 1.0;
+            renderItem(`🥞 Slice #${idx + 1} (${qty})`, isShown, (show) => {
+                this.updateSliceProperty(idx, { show_colorbar: show });
+            }, qty, (q) => {
+                this.updateSliceProperty(idx, { quantities: [q] });
+            }, cmap, (c) => {
+                this.updateSliceProperty(idx, { colormap: c });
+            }, minV, maxV, (minN, maxN) => {
+                this.updateSliceProperty(idx, { auto_scale: false, min_val: minN, max_val: maxN });
+            }, autoScale, () => {
+                this.updateSliceProperty(idx, { auto_scale: !autoScale });
+            }, logScale, () => {
+                this.updateSliceProperty(idx, { log_scale: !logScale });
+            });
+        });
+
+        // Render FEM Mesh
+        const femQty = params.femQuantity || 'vonMises';
+        const femShown = params.femShowColorbar === true;
+        const femCmap = params.femColormap || 'rainbow';
+        const femAuto = params.femAutoScale !== false;
+        const femLog = params.femLogScale === true;
+        const femMin = params.femMinVal ?? 0.0;
+        const femMax = params.femMaxVal ?? 500000000.0;
+        renderItem(`🏗️ FEM Solid Mesh (${femQty})`, femShown, (show) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femShowColorbar: show });
+            this.syncControls(false);
+        }, femQty, (q) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femQuantity: q });
+            this.worker.postMessage({ type: 'setConfig', data: { femQuantity: q } });
+            this.syncControls(false);
+        }, femCmap, (c) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femColormap: c });
+            this.worker.postMessage({ type: 'setConfig', data: { femColormap: c } });
+            this.syncControls(false);
+        }, femMin, femMax, (minN, maxN) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femAutoScale: false, femMinVal: minN, femMaxVal: maxN });
+            this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: false, femMinVal: minN, femMaxVal: maxN } });
+            this.syncControls(false);
+        }, femAuto, () => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femAutoScale: !femAuto });
+            this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: !femAuto } });
+            this.syncControls(false);
+        }, femLog, () => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femLogScale: !femLog });
+            this.worker.postMessage({ type: 'setConfig', data: { femLogScale: !femLog } });
+            this.syncControls(false);
+        });
+
+        // Render MPM Particles
+        const mpmQty = params.mpmParticleQuantity || 'velocity';
+        const mpmShown = params.mpmParticleShowColorbar === true;
+        const mpmCmap = params.mpmParticleColormap || 'rainbow';
+        const mpmAuto = params.mpmParticleAutoScale !== false;
+        const mpmLog = params.mpmParticleLogScale === true;
+        const mpmMin = params.mpmParticleMinVal ?? 0.0;
+        const mpmMax = params.mpmParticleMaxVal ?? 1000.0;
+        renderItem(`✨ MPM Particles (${mpmQty})`, mpmShown, (show) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleShowColorbar: show });
+            this.syncControls(false);
+        }, mpmQty, (q) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleQuantity: q });
+            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleQuantity: q } });
+            this.syncControls(false);
+        }, mpmCmap, (c) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleColormap: c });
+            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleColormap: c } });
+            this.syncControls(false);
+        }, mpmMin, mpmMax, (minN, maxN) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleAutoScale: false, mpmParticleMinVal: minN, mpmParticleMaxVal: maxN });
+            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleAutoScale: false, mpmParticleMinVal: minN, mpmParticleMaxVal: maxN } });
+            this.syncControls(false);
+        }, mpmAuto, () => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleAutoScale: !mpmAuto });
+            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleAutoScale: !mpmAuto } });
+            this.syncControls(false);
+        }, mpmLog, () => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleLogScale: !mpmLog });
+            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleLogScale: !mpmLog } });
+            this.syncControls(false);
+        });
+
+        // Render CAD / STL Mesh
+        const stlQty = params.stl_quantity || 'pressure';
+        const stlShown = params.stl_show_colorbar === true;
+        const stlCmap = params.stl_colormap || 'rainbow';
+        const stlAuto = params.stl_auto_scale !== false;
+        const stlLog = params.stl_log_scale === true;
+        const stlMin = params.stl_min_val ?? 0.0;
+        const stlMax = params.stl_max_val ?? 1.0;
+        renderItem(`📐 CAD / STL Mesh (${stlQty})`, stlShown, (show) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_show_colorbar: show });
+            this.syncControls(false);
+        }, stlQty, (q) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_quantity: q });
+            this.worker.postMessage({ type: 'setConfig', data: { stlQuantity: q } });
+            this.syncControls(false);
+        }, stlCmap, (c) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_colormap: c });
+            this.worker.postMessage({ type: 'setConfig', data: { stlColormap: c } });
+            this.syncControls(false);
+        }, stlMin, stlMax, (minN, maxN) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_auto_scale: false, stl_min_val: minN, max_val: maxN });
+            this.worker.postMessage({ type: 'setConfig', data: { stlAutoScale: false, stlMinVal: minN, stlMaxVal: maxN } });
+            this.syncControls(false);
+        }, stlAuto, () => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_auto_scale: !stlAuto });
+            this.worker.postMessage({ type: 'setConfig', data: { stlAutoScale: !stlAuto } });
+            this.syncControls(false);
+        }, stlLog, () => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_log_scale: !stlLog });
+            this.worker.postMessage({ type: 'setConfig', data: { stlLogScale: !stlLog } });
+            this.syncControls(false);
+        });
+
+        // Render Obstacles Mesh
+        const obsQty = params.obstacles_quantity || 'pressure';
+        const obsShown = params.obstacles_show_colorbar === true;
+        const obsCmap = params.obstacles_colormap || 'rainbow';
+        const obsAuto = params.obstacles_auto_scale !== false;
+        const obsLog = params.obstacles_log_scale === true;
+        const obsMin = params.obstacles_min_val ?? 0.0;
+        const obsMax = params.obstacles_max_val ?? 1.0;
+        renderItem(`🧱 Obstacles Mesh (${obsQty})`, obsShown, (show) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_show_colorbar: show });
+            this.syncControls(false);
+        }, obsQty, (q) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_quantity: q });
+            this.worker.postMessage({ type: 'setConfig', data: { obstaclesQuantity: q } });
+            this.syncControls(false);
+        }, obsCmap, (c) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_colormap: c });
+            this.worker.postMessage({ type: 'setConfig', data: { obstaclesColormap: c } });
+            this.syncControls(false);
+        }, obsMin, obsMax, (minN, maxN) => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_auto_scale: false, obstacles_min_val: minN, obstacles_max_val: maxN });
+            this.worker.postMessage({ type: 'setConfig', data: { obstaclesAutoScale: false, obstaclesMinVal: minN, obstaclesMaxVal: maxN } });
+            this.syncControls(false);
+        }, obsAuto, () => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_auto_scale: !obsAuto });
+            this.worker.postMessage({ type: 'setConfig', data: { obstaclesAutoScale: !obsAuto } });
+            this.syncControls(false);
+        }, obsLog, () => {
+            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_log_scale: !obsLog });
+            this.worker.postMessage({ type: 'setConfig', data: { obstaclesLogScale: !obsLog } });
+            this.syncControls(false);
+        });
+
+        parent.appendChild(list);
+    }
+
+    private renderViewSceneTab(parent: HTMLElement) {
+        this.buildCameraViewCard(parent);
+    }
+
+    private buildBottomControlsDock() {
+        // Floating HUD dock permanently removed — all controls are in the dedicated Transport Bar
+        if (this.bottomViewDock) {
+            this.bottomViewDock.remove();
+            this.bottomViewDock = null;
+        }
     }
 
     private buildCameraViewCard(parent: HTMLElement) {
@@ -9959,46 +11487,164 @@ export class Telemetry3DViewport {
         this.syncControls(true);
     }
 
-    public setColormap(colormap: string, min?: number, max?: number): void {
+    public setColormap(colormap: string, min?: number, max?: number, targetLayer?: string): void {
         const vp = this.getViewportNode();
         if (!vp) return;
         const cmap = colormap.toLowerCase();
-        const slices = (vp.parameters.slices || []).map((s: any) => ({ ...s, colormap: cmap }));
-        const updates: any = {
-            colormap: cmap,
-            slices,
-            mpmParticleColormap: cmap,
-            femColormap: cmap,
-            stl_colormap: cmap
-        };
-        if (min !== undefined && max !== undefined) {
-            updates.min_val = min;
-            updates.max_val = max;
-            updates.mpmParticleMinVal = min;
-            updates.mpmParticleMaxVal = max;
-            updates.femMinVal = min;
-            updates.femMaxVal = max;
+        const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
+        const hasCFD = activeModel?.nodes.some((n: any) => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MarineHarbourDomain');
+        const hasFEM = activeModel?.nodes.some((n: any) => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'MarineHarbourDomain');
+        const hasMPM = activeModel?.nodes.some((n: any) => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || (n.type === 'MarineHarbourDomain' && isMarineHarbourMPMActive(n)));
+
+        let target = targetLayer;
+        if (!target) {
+            if (hasCFD) target = 'cfd';
+            else if (hasFEM) target = 'fem';
+            else if (hasMPM) target = 'mpm';
+            else target = 'cfd';
         }
-        this.stateManager.updateNodeParametersInPlace(vp.id, updates);
-        this.worker.postMessage({
-            type: 'setConfig',
-            data: {
-                colormap: cmap,
-                mpmParticleColormap: cmap,
-                femColormap: cmap,
-                stlColormap: cmap,
-                ...(min !== undefined && max !== undefined ? { 
-                    minVal: min, maxVal: max,
-                    mpmParticleMinVal: min, mpmParticleMaxVal: max,
-                    femMinVal: min, femMaxVal: max
-                } : {})
+
+        const updates: any = {};
+        const workerData: any = {};
+
+        if (target === 'fem') {
+            updates.femColormap = cmap;
+            workerData.femColormap = cmap;
+            if (min !== undefined && max !== undefined) {
+                updates.femMinVal = min;
+                updates.femMaxVal = max;
+                updates.femAutoScale = false;
+                workerData.femMinVal = min;
+                workerData.femMaxVal = max;
+                workerData.femAutoScale = false;
             }
-        });
-        this.updateSlices(slices);
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'FEMObject3D' || n.type === 'FEMDomain3D' || n.type === 'LSDynaImporter3D')
+                    .forEach((n: any) => {
+                        const nodeUp: any = { colormap: cmap, femColormap: cmap };
+                        if (min !== undefined && max !== undefined) {
+                            nodeUp.min_val = min;
+                            nodeUp.max_val = max;
+                            nodeUp.femMinVal = min;
+                            nodeUp.femMaxVal = max;
+                            nodeUp.autoScale = false;
+                            nodeUp.femAutoScale = false;
+                        }
+                        this.stateManager.updateNodeParametersInPlace(n.id, nodeUp);
+                    });
+            }
+        } else if (target === 'mpm') {
+            updates.mpmParticleColormap = cmap;
+            workerData.mpmParticleColormap = cmap;
+            if (min !== undefined && max !== undefined) {
+                updates.mpmParticleMinVal = min;
+                updates.mpmParticleMaxVal = max;
+                updates.mpmParticleAutoScale = false;
+                workerData.mpmParticleMinVal = min;
+                workerData.mpmParticleMaxVal = max;
+                workerData.mpmParticleAutoScale = false;
+            }
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMDomain3D')
+                    .forEach((n: any) => {
+                        const nodeUp: any = { colormap: cmap, mpmParticleColormap: cmap };
+                        if (min !== undefined && max !== undefined) {
+                            nodeUp.min_val = min;
+                            nodeUp.max_val = max;
+                            nodeUp.mpmParticleMinVal = min;
+                            nodeUp.mpmParticleMaxVal = max;
+                            nodeUp.autoScale = false;
+                            nodeUp.mpmParticleAutoScale = false;
+                        }
+                        this.stateManager.updateNodeParametersInPlace(n.id, nodeUp);
+                    });
+            }
+        } else if (target === 'beams') {
+            updates.beamColormap = cmap;
+            workerData.beamColormap = cmap;
+            if (min !== undefined && max !== undefined) {
+                updates.beamMinVal = min;
+                updates.beamMaxVal = max;
+                updates.beamAutoScale = false;
+                workerData.beamMinVal = min;
+                workerData.beamMaxVal = max;
+                workerData.beamAutoScale = false;
+            }
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { colormap: cmap, beamColormap: cmap });
+                    });
+            }
+        } else if (target === 'stl') {
+            updates.stl_colormap = cmap;
+            workerData.stlColormap = cmap;
+            if (min !== undefined && max !== undefined) {
+                updates.stl_min_val = min;
+                updates.stl_max_val = max;
+                updates.stl_auto_scale = false;
+                workerData.stlMinVal = min;
+                workerData.stlMaxVal = max;
+            }
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'STLGeometry3D' || n.type === 'CADImporter3D' || n.type === 'STLGeometry')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { colormap: cmap, stl_colormap: cmap });
+                    });
+            }
+        } else if (target === 'obstacles') {
+            updates.obstacles_colormap = cmap;
+            workerData.obstaclesColormap = cmap;
+            if (min !== undefined && max !== undefined) {
+                updates.obstacles_min_val = min;
+                updates.obstacles_max_val = max;
+                updates.obstacles_auto_scale = false;
+                workerData.obstaclesMinVal = min;
+                workerData.obstaclesMaxVal = max;
+            }
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'CSGObstacle3D' || n.type === 'ObstacleBox3D' || n.type === 'ObstacleCylinder3D' || n.type === 'ObstacleSphere3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { colormap: cmap, obstacles_colormap: cmap });
+                    });
+            }
+        } else {
+            // CFD / Slices / Global
+            const slices = (vp.parameters.slices || []).map((s: any) => ({ ...s, colormap: cmap }));
+            updates.colormap = cmap;
+            updates.slices = slices;
+            workerData.colormap = cmap;
+            workerData.slices = slices;
+            if (min !== undefined && max !== undefined) {
+                updates.min_val = min;
+                updates.max_val = max;
+                workerData.minVal = min;
+                workerData.maxVal = max;
+            }
+            this.updateSlices(slices);
+        }
+
+        this.stateManager.updateNodeParametersInPlace(vp.id, updates);
+        if (Object.keys(workerData).length > 0) {
+            this.worker.postMessage({
+                type: 'setConfig',
+                data: workerData
+            });
+        }
         this.syncControls(true);
+        const tc = (window as any).transportController;
+        if (tc) {
+            tc.syncStateFromViewport?.();
+            tc.requestTabRender?.();
+        }
     }
 
-    public setQuantity(quantity: string): void {
+    public setQuantity(quantity: string, targetLayer?: string): void {
         const vp = this.getViewportNode();
         if (!vp) return;
         let q = quantity;
@@ -10008,36 +11654,105 @@ export class Telemetry3DViewport {
         else if (q === 'von_mises') q = 'vonMises';
         else if (q === 'plastic_strain') q = 'plasticStrain';
 
-        const sIdx = this.stateManager.getSelectedSliceIndex();
-        const currentSlices = [...(vp.parameters.slices || [])];
-        let updatedSlices = currentSlices;
+        const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
+        const hasCFD = activeModel?.nodes.some((n: any) => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MarineHarbourDomain');
+        const hasFEM = activeModel?.nodes.some((n: any) => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'MarineHarbourDomain');
+        const hasMPM = activeModel?.nodes.some((n: any) => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || (n.type === 'MarineHarbourDomain' && isMarineHarbourMPMActive(n)));
 
-        if (sIdx !== null && sIdx !== undefined && currentSlices[sIdx]) {
-            currentSlices[sIdx] = { ...currentSlices[sIdx], quantities: [q], quantity: q };
-            updatedSlices = currentSlices;
-        } else {
-            updatedSlices = currentSlices.map((s: any) => ({ ...s, quantities: [q], quantity: q }));
+        let target = targetLayer;
+        if (!target) {
+            if (hasCFD) target = 'cfd';
+            else if (hasFEM) target = 'fem';
+            else if (hasMPM) target = 'mpm';
+            else target = 'cfd';
         }
 
-        const mpmQ = q === 'plasticStrain' ? 'plastic_strain' : q;
-        const femQ = q === 'plastic_strain' ? 'plasticStrain' : q;
-        this.stateManager.updateNodeParametersInPlace(vp.id, {
-            slices: updatedSlices,
-            focusedQuantity: q,
-            mpmParticleQuantity: mpmQ,
-            femQuantity: femQ,
-            stl_quantity: q
-        });
-        this.worker.postMessage({
-            type: 'setConfig',
-            data: {
-                mpmParticleQuantity: mpmQ,
-                femQuantity: femQ,
-                stlQuantity: q
+        const updates: any = {};
+        const workerData: any = {};
+
+        if (target === 'fem') {
+            const femQ = q === 'plastic_strain' ? 'plasticStrain' : q;
+            updates.femQuantity = femQ;
+            workerData.femQuantity = femQ;
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'FEMObject3D' || n.type === 'FEMDomain3D' || n.type === 'LSDynaImporter3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { quantity: femQ, femQuantity: femQ });
+                    });
             }
-        });
-        this.updateSlices(updatedSlices);
+        } else if (target === 'mpm') {
+            const mpmQ = q === 'plasticStrain' ? 'plastic_strain' : q;
+            updates.mpmParticleQuantity = mpmQ;
+            workerData.mpmParticleQuantity = mpmQ;
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMDomain3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { quantity: mpmQ, mpmParticleQuantity: mpmQ });
+                    });
+            }
+        } else if (target === 'beams') {
+            const beamQ = q === 'plastic_strain' ? 'plasticStrain' : q;
+            updates.beamQuantity = beamQ;
+            workerData.beamQuantity = beamQ;
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { quantity: beamQ, beamQuantity: beamQ });
+                    });
+            }
+        } else if (target === 'stl') {
+            updates.stl_quantity = q;
+            workerData.stlQuantity = q;
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'STLGeometry3D' || n.type === 'CADImporter3D' || n.type === 'STLGeometry')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { quantity: q, stl_quantity: q });
+                    });
+            }
+        } else if (target === 'obstacles') {
+            updates.obstacles_quantity = q;
+            workerData.obstaclesQuantity = q;
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'CSGObstacle3D' || n.type === 'ObstacleBox3D' || n.type === 'ObstacleCylinder3D' || n.type === 'ObstacleSphere3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { quantity: q, obstacles_quantity: q });
+                    });
+            }
+        } else {
+            // CFD / Slices
+            const sIdx = this.stateManager.getSelectedSliceIndex();
+            const currentSlices = [...(vp.parameters.slices || [])];
+            let updatedSlices = currentSlices;
+
+            if (sIdx !== null && sIdx !== undefined && currentSlices[sIdx]) {
+                currentSlices[sIdx] = { ...currentSlices[sIdx], quantities: [q], quantity: q };
+                updatedSlices = currentSlices;
+            } else {
+                updatedSlices = currentSlices.map((s: any) => ({ ...s, quantities: [q], quantity: q }));
+            }
+            updates.slices = updatedSlices;
+            updates.focusedQuantity = q;
+            this.updateSlices(updatedSlices);
+        }
+
+        this.stateManager.updateNodeParametersInPlace(vp.id, updates);
+        if (Object.keys(workerData).length > 0) {
+            this.worker.postMessage({
+                type: 'setConfig',
+                data: workerData
+            });
+        }
         this.syncControls(true);
+        const tc = (window as any).transportController;
+        if (tc) {
+            tc.syncStateFromViewport?.();
+            tc.requestTabRender?.();
+        }
     }
 
     public setLayerVisibility(layer: string, active: boolean): void {
@@ -10045,6 +11760,8 @@ export class Telemetry3DViewport {
         if (!vp) return;
         const updates: any = {};
         const workerData: any = {};
+        const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
+
         if (layer === 'slices') {
             const currentSlices = vp.parameters.slices || [];
             const slices = currentSlices.map((s: any) => ({ ...s, enabled: active }));
@@ -10061,6 +11778,13 @@ export class Telemetry3DViewport {
             }
             workerData.showFEMMesh = active;
             Object.assign(workerData, updates);
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'FEMObject3D' || n.type === 'FEMDomain3D' || n.type === 'LSDynaImporter3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, showFEMMesh: active });
+                    });
+            }
         } else if (layer === 'beams') {
             updates.showBeams = active;
             updates.showRebar = active;
@@ -10073,15 +11797,43 @@ export class Telemetry3DViewport {
             workerData.showBeams = active;
             workerData.showRebar = active;
             Object.assign(workerData, updates);
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active });
+                    });
+            }
         } else if (layer === 'mpm') {
             updates.showMPMParticles = active;
             workerData.showMPMParticles = active;
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMDomain3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, showMPMParticles: active });
+                    });
+            }
         } else if (layer === 'stl') {
             updates.show_stl = active;
             workerData.showSTL = active;
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'STLGeometry3D' || n.type === 'CADImporter3D' || n.type === 'STLGeometry')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_stl: active });
+                    });
+            }
         } else if (layer === 'obstacles') {
             updates.show_obstacles = active;
             workerData.showObstacles = active;
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'CSGObstacle3D' || n.type === 'ObstacleBox3D' || n.type === 'ObstacleCylinder3D' || n.type === 'ObstacleSphere3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_obstacles: active });
+                    });
+            }
         } else if (layer === 'charge') {
             updates.show_charge = active;
             workerData.showCharge = active;
@@ -10089,6 +11841,13 @@ export class Telemetry3DViewport {
             updates.show_detonators = active;
             updates.show_detonator = active;
             workerData.showDetonators = active;
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'DetonatorPoint3D' || n.type === 'DetonatorLine3D' || n.type === 'DetonatorPlane3D' || n.type === 'Detonator')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_detonator: active });
+                    });
+            }
         } else if (layer === 'grid') {
             updates.show_grid = active;
             workerData.showGrid = active;
@@ -10105,36 +11864,132 @@ export class Telemetry3DViewport {
             updates.aoEnabled = active;
             workerData.lightingEnabled = active;
             workerData.aoEnabled = active;
+        } else if (layer === 'colorbars') {
+            this.setAllColorbarsVisible(active);
+            return;
         }
         this.stateManager.updateNodeParametersInPlace(vp.id, updates);
         if (Object.keys(workerData).length > 0) {
             this.worker.postMessage({ type: 'setConfig', data: workerData });
         }
         this.syncControls(true);
+        const tc = (window as any).transportController;
+        if (tc) {
+            tc.syncStateFromViewport?.();
+            tc.requestTabRender?.();
+        }
+    }
+
+    public setAllColorbarsVisible(visible: boolean): void {
+        const vp = this.getViewportNode();
+        if (!vp) return;
+        const currentSlices = vp.parameters.slices || [];
+        const slices = currentSlices.map((s: any) => ({ ...s, show_colorbar: visible }));
+        this.stateManager.updateNodeParametersInPlace(vp.id, {
+            slices,
+            femShowColorbar: visible,
+            mpmParticleShowColorbar: visible,
+            stl_show_colorbar: visible,
+            obstacles_show_colorbar: visible
+        });
+        this.syncControls(false);
     }
 
     public setRefreshRate(rate: number): void {
         const vp = this.getViewportNode();
-        if (vp) {
+        const targetModel = this.getTargetModel();
+        if (targetModel) {
+            this.stateManager.setModelRefreshRate(targetModel.id, rate);
+        } else if (vp) {
             this.stateManager.updateNodeParametersInPlace(vp.id, { refresh_rate: rate });
-            this.sendView3DConfig();
         }
+        this.sendView3DConfig();
+        this.syncControls(true);
     }
 
     public setShadingConfig(config: any): void {
         const vp = this.getViewportNode();
         if (vp) {
             const expandedConfig = { ...config };
-            if (config.autoScale !== undefined) {
-                expandedConfig.mpmParticleAutoScale = config.autoScale;
-                expandedConfig.femAutoScale = config.autoScale;
+            // Component-specific keys must never be cloned across modalities/components!
+            // Synchronize aliases within the same component only.
+            if (config.minVal !== undefined && config.min_val === undefined) {
+                expandedConfig.min_val = Number(config.minVal);
             }
-            if (config.logScale !== undefined || config.useLogScale !== undefined) {
-                const ls = config.logScale ?? config.useLogScale;
-                expandedConfig.mpmParticleLogScale = ls;
-                expandedConfig.femLogScale = ls;
-                expandedConfig.useLogScale = ls;
+            if (config.maxVal !== undefined && config.max_val === undefined) {
+                expandedConfig.max_val = Number(config.maxVal);
             }
+            if (config.autoScale !== undefined && config.auto_scale === undefined) {
+                expandedConfig.auto_scale = config.autoScale;
+            }
+            if (config.logScale !== undefined && config.log_scale === undefined) {
+                expandedConfig.log_scale = config.logScale;
+            }
+            if (config.useLogScale !== undefined && config.log_scale === undefined) {
+                expandedConfig.log_scale = config.useLogScale;
+            }
+            if (config.showColorbar !== undefined && config.show_colorbar === undefined) {
+                expandedConfig.show_colorbar = Boolean(config.showColorbar);
+            }
+            if (config.showMeshLines !== undefined && config.wireframe === undefined) {
+                expandedConfig.wireframe = Boolean(config.showMeshLines);
+                expandedConfig.cell_edges = Boolean(config.showMeshLines);
+            }
+
+            // Numeric contour levels per component
+            if (config.sliceContourLevels !== undefined) {
+                expandedConfig.sliceContourLevels = Number(config.sliceContourLevels);
+            }
+            if (config.sliceSmoothContours !== undefined) {
+                expandedConfig.sliceSmoothContours = Boolean(config.sliceSmoothContours);
+            }
+            if (config.femContourLevels !== undefined) {
+                expandedConfig.femContourLevels = Number(config.femContourLevels);
+            }
+            if (config.femSmoothContours !== undefined) {
+                expandedConfig.femSmoothContours = Boolean(config.femSmoothContours);
+            }
+            if (config.beamContourLevels !== undefined) {
+                expandedConfig.beamContourLevels = Number(config.beamContourLevels);
+            }
+            if (config.beamSmoothContours !== undefined) {
+                expandedConfig.beamSmoothContours = Boolean(config.beamSmoothContours);
+            }
+            if (config.mpmContourLevels !== undefined) {
+                expandedConfig.mpmContourLevels = Number(config.mpmContourLevels);
+            }
+            if (config.mpmSmoothContours !== undefined) {
+                expandedConfig.mpmSmoothContours = Boolean(config.mpmSmoothContours);
+            }
+            if (config.contourLevels !== undefined) {
+                if (config.sliceContourLevels === undefined && config.femContourLevels === undefined && config.beamContourLevels === undefined && config.mpmContourLevels === undefined) {
+                    expandedConfig.sliceContourLevels = Number(config.contourLevels);
+                }
+            }
+            if (config.smoothContours !== undefined) {
+                if (config.sliceSmoothContours === undefined && config.femSmoothContours === undefined && config.beamSmoothContours === undefined && config.mpmSmoothContours === undefined) {
+                    expandedConfig.sliceSmoothContours = Boolean(config.smoothContours);
+                }
+            }
+            if (config.mpmParticleDiameter !== undefined) {
+                expandedConfig.mpmParticleDiameter = Number(config.mpmParticleDiameter);
+            }
+            if (config.mpmParticleSize !== undefined) {
+                expandedConfig.mpmParticleSize = Number(config.mpmParticleSize);
+            }
+            if (config.mpmParticleRenderMode !== undefined) {
+                expandedConfig.mpmParticleRenderMode = config.mpmParticleRenderMode;
+            }
+            if (config.mpmParticleWireframe !== undefined) {
+                expandedConfig.mpmParticleRenderMode = config.mpmParticleWireframe ? 'points' : 'spheres';
+            }
+            if (config.mpmParticleOpacity !== undefined) {
+                expandedConfig.mpmParticleOpacity = Number(config.mpmParticleOpacity);
+            }
+            if (config.show_water_sleeve !== undefined || config.show_soil_mpm !== undefined || config.mpmObjects !== undefined) {
+                expandedConfig.mpmObjects = config.mpmObjects || this.getDiscoveredMPMObjects();
+            }
+
             this.stateManager.updateNodeParametersInPlace(vp.id, expandedConfig);
             this.worker.postMessage({ type: 'setConfig', data: expandedConfig });
             this.syncControls(true);

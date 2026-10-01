@@ -104,6 +104,16 @@ vec3 colormap_grayscale(float t) {
     return vec3(t, t, t);
 }
 
+vec3 colormap_materials(float t) {
+    float id = floor(t * 5.0 + 0.5);
+    if (id < 0.5) return vec3(0.53, 0.81, 0.98); // Air (Sky Blue)
+    if (id < 1.5) return vec3(0.05, 0.45, 0.85); // Water (Ocean Blue)
+    if (id < 2.5) return vec3(0.85, 0.58, 0.25); // Soil (Sand Amber)
+    if (id < 3.5) return vec3(1.00, 0.50, 0.00); // HE Solid (Warning Orange)
+    if (id < 4.5) return vec3(0.95, 0.15, 0.15); // Detonation Products (Crimson Fire)
+    return vec3(0.58, 0.20, 0.92);               // FEM Solid / Obstacle (Purple)
+}
+
 
 void main() {
     if (uIsWireframe > 0) {
@@ -164,6 +174,7 @@ void main() {
     else if (uColormap == 3) color = colormap_coolwarm(t);
     else if (uColormap == 4) color = colormap_cividis(t);
     else if (uColormap == 5) color = colormap_grayscale(t);
+    else if (uColormap == 6) color = colormap_materials(t);
     else color = colormap_rainbow(t);
     
     vec4 finalColor = vec4(color, uAlpha);
@@ -181,6 +192,26 @@ void main() {
         
         vec3 lit = finalColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
         finalColor = vec4(lit * ao, finalColor.a);
+    }
+
+    if (uColormap == 6) {
+        vec2 dUV = 1.0 / max(vSliceSize, vec2(1.0));
+        float raw_c = raw;
+        float raw_r = texture(uTexture, vTexCoord + vec2(dUV.x, 0.0)).r;
+        float raw_l = texture(uTexture, vTexCoord - vec2(dUV.x, 0.0)).r;
+        float raw_u = texture(uTexture, vTexCoord + vec2(0.0, dUV.y)).r;
+        float raw_d = texture(uTexture, vTexCoord - vec2(0.0, dUV.y)).r;
+        float id_c = floor(raw_c + 0.5);
+        bool is_interface = (id_c != floor(raw_r + 0.5) || id_c != floor(raw_l + 0.5) ||
+                             id_c != floor(raw_u + 0.5) || id_c != floor(raw_d + 0.5));
+        if (is_interface) {
+            vec2 cellFract = fract(vTexCoord * vSliceSize);
+            vec2 distToBoundary = min(cellFract, vec2(1.0) - cellFract);
+            float minD = min(distToBoundary.x, distToBoundary.y);
+            // Softened seam: thin boundary indicator, not a thick solid line.
+            float lineAlpha = 1.0 - smoothstep(0.0, 0.30, minD);
+            finalColor = vec4(mix(finalColor.rgb, vec3(0.04, 0.06, 0.10), lineAlpha * 0.45), finalColor.a);
+        }
     }
 
     if (uShowCellEdges) {
@@ -298,6 +329,16 @@ vec3 colormap_grayscale(float t) {
     return vec3(t, t, t);
 }
 
+vec3 colormap_materials(float t) {
+    float id = floor(t * 5.0 + 0.5);
+    if (id < 0.5) return vec3(0.53, 0.81, 0.98); // Air (Sky Blue)
+    if (id < 1.5) return vec3(0.05, 0.45, 0.85); // Water (Ocean Blue)
+    if (id < 2.5) return vec3(0.85, 0.58, 0.25); // Soil (Sand Amber)
+    if (id < 3.5) return vec3(1.00, 0.50, 0.00); // HE Solid (Warning Orange)
+    if (id < 4.5) return vec3(0.95, 0.15, 0.15); // Detonation Products (Crimson Fire)
+    return vec3(0.58, 0.20, 0.92);               // FEM Solid / Obstacle (Purple)
+}
+
 
 void main() {
     if (uIsWireframe > 0) {
@@ -362,6 +403,7 @@ void main() {
     else if (uColormap == 3) color = colormap_coolwarm(t);
     else if (uColormap == 4) color = colormap_cividis(t);
     else if (uColormap == 5) color = colormap_grayscale(t);
+    else if (uColormap == 6) color = colormap_materials(t);
     else color = colormap_rainbow(t);
     
     vec4 finalColor = vec4(color, uAlpha);
@@ -382,6 +424,25 @@ void main() {
         
         vec3 lit = finalColor.rgb * (uAmbientLevel + 0.7 * diff) + vec3(1.0) * (uSpecularLevel * spec);
         finalColor = vec4(lit * ao, finalColor.a);
+    }
+
+    if (uColormap == 6) {
+        vec2 dUV = 1.0 / max(vSliceSize, vec2(1.0));
+        float raw_c = raw;
+        float raw_r = texture2D(uTexture, vTexCoord + vec2(dUV.x, 0.0)).r;
+        float raw_l = texture2D(uTexture, vTexCoord - vec2(dUV.x, 0.0)).r;
+        float raw_u = texture2D(uTexture, vTexCoord + vec2(0.0, dUV.y)).r;
+        float raw_d = texture2D(uTexture, vTexCoord - vec2(0.0, dUV.y)).r;
+        float id_c = floor(raw_c + 0.5);
+        bool is_interface = (id_c != floor(raw_r + 0.5) || id_c != floor(raw_l + 0.5) ||
+                             id_c != floor(raw_u + 0.5) || id_c != floor(raw_d + 0.5));
+        if (is_interface) {
+            vec2 cellFract = fract(vTexCoord * vSliceSize);
+            vec2 distToBoundary = min(cellFract, vec2(1.0) - cellFract);
+            float minD = min(distToBoundary.x, distToBoundary.y);
+            float lineAlpha = 1.0 - smoothstep(0.0, 0.30, minD);
+            finalColor = vec4(mix(finalColor.rgb, vec3(0.04, 0.06, 0.10), lineAlpha * 0.45), finalColor.a);
+        }
     }
 
     if (uShowCellEdges) {
@@ -411,6 +472,9 @@ function getColormapIndex(name?: string): number {
         case 'coolwarm': return 3;
         case 'cividis': return 4;
         case 'grayscale': return 5;
+        case 'materials':
+        case 'material':
+        case 'phase': return 6;
         case 'rainbow':
         default: return 2;
     }
@@ -473,8 +537,17 @@ function canonicalizeQuantity(q: string | undefined | null): string {
 }
 
 const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
-    pressure: [101325.0, 101325.0 * 100.0],
-    density: [1.2, 100.0],
+    // Pressure range now covers full water-column + seabed hydrostatics.
+    // Old upper bound (100 atm = 10.1 MPa) was less than typical seabed
+    // pressure at even 10 m depth (~0.2 MPa) + geostatic overburden.
+    // Pinning everything above 100 atm to t=1 (blue) produced the solid
+    // blue seabed line. New range [1 atm, 1000 atm] keeps the water
+    // column comfortably within the colormap.
+    pressure: [101325.0, 101325.0 * 1000.0],
+    // Density range now spans air through seabed soil (2200 kg/m3).
+    // Old upper bound (100 kg/m3) is far below water (1000) and soil
+    // (1800-2200), so every water/soil cell mapped to t=1 (blue).
+    density: [1.2, 2500.0],
     velocity: [0.0, 1000.0],
     energy: [200000.0, 10000000.0],
     species1: [0.0, 1.0],

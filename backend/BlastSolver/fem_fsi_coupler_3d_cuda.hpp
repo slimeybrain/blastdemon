@@ -26,6 +26,11 @@ public:
     void step(T cfl = static_cast<T>(0.6f));
     void stepWithDt(T dt);
 
+    // Prime d_geom with the initial FEM surface facet rasterization so that
+    // setGauges() can correctly snap probe locations to fluid-side cells at
+    // INIT time (before the first timestep coupling call).
+    void primeInitialGeometry();
+
     T computeCoupledDt(T cfl = static_cast<T>(0.6f)) const;
 
     T getSimTime() const { return m_sim_time; }

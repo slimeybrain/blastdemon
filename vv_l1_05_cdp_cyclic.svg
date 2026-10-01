@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; fill: #c9d1d9; }
+    .title { font-size: 16px; font-weight: 600; fill: #f0f6fc; }
+    .axis-label { font-size: 12px; fill: #8b949e; }
+    .tick { font-size: 10px; fill: #8b949e; }
+    .grid { stroke: #30363d; stroke-width: 1; stroke-dasharray: 4,4; }
+    .axis-line { stroke: #484f58; stroke-width: 1.5; }
+    .exact-curve { fill: none; stroke: #58a6ff; stroke-width: 2.5; }
+    .num-curve { fill: none; stroke: #f0883e; stroke-width: 2.0; stroke-dasharray: 6,3; }
+    .corridor-yellow { fill: rgba(210, 153, 34, 0.18); }
+    .corridor-green { fill: rgba(46, 160, 67, 0.30); }
+  </style>
+  <rect width="800" height="450" fill="#0d1117" rx="8"/>
+  <text x="400" y="30" text-anchor="middle" class="title">VV-L1-05: CDP Tensile Softening and Damage Evolution vs. Strain</text>
+  <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
+  <text x="67" y="394" text-anchor="end" class="tick">-1.31</text>
+  <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
+  <text x="67" y="326" text-anchor="end" class="tick">1.84</text>
+  <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
+  <text x="67" y="258" text-anchor="end" class="tick">5</text>
+  <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
+  <text x="67" y="190" text-anchor="end" class="tick">8.15</text>
+  <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
+  <text x="67" y="122" text-anchor="end" class="tick">11.3</text>
+  <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
+  <text x="67" y="54" text-anchor="end" class="tick">14.5</text>
+  <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
+  <text x="75" y="408" text-anchor="middle" class="tick">0</text>
+  <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
+  <text x="213" y="408" text-anchor="middle" class="tick">0.3</text>
+  <line x1="351" y1="50" x2="351" y2="390" class="grid"/>
+  <text x="351" y="408" text-anchor="middle" class="tick">0.6</text>
+  <line x1="489" y1="50" x2="489" y2="390" class="grid"/>
+  <text x="489" y="408" text-anchor="middle" class="tick">0.9</text>
+  <line x1="627" y1="50" x2="627" y2="390" class="grid"/>
+  <text x="627" y="408" text-anchor="middle" class="tick">1.2</text>
+  <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
+  <text x="765" y="408" text-anchor="middle" class="tick">1.5</text>
+  <path class="corridor-yellow" d="M 75 362 L 98 325 L 121 288 L 144 254 L 167 223 L 190 195 L 213 170 L 236 148 L 259 128 L 282 111 L 305 96.2 L 328 84.4 L 351 75.3 L 374 68.9 L 397 65.2 L 420 64.2 L 443 65.8 L 466 70.2 L 489 77.2 L 512 86.9 L 535 99.4 L 558 114 L 581 132 L 604 153 L 627 176 L 650 202 L 673 230 L 696 261 L 719 295 L 742 332 L 765 351 L 765 352 L 742 335 L 719 302 L 696 271 L 673 243 L 650 217 L 627 194 L 604 173 L 581 154 L 558 138 L 535 124 L 512 113 L 489 104 L 466 97.9 L 443 94 L 420 92.5 L 397 93.4 L 374 96.8 L 351 103 L 328 111 L 305 121 L 282 135 L 259 150 L 236 168 L 213 188 L 190 211 L 167 236 L 144 264 L 121 295 L 98 328 L 75 362 Z"/>
+  <path class="corridor-green" d="M 75 362 L 98 326 L 121 291 L 144 258 L 167 228 L 190 202 L 213 177 L 236 156 L 259 137 L 282 120 L 305 106 L 328 94.9 L 351 86.2 L 374 80.1 L 397 76.5 L 420 75.5 L 443 77.1 L 466 81.3 L 489 88.1 L 512 97.4 L 535 109 L 558 124 L 581 141 L 604 161 L 627 183 L 650 208 L 673 235 L 696 265 L 719 298 L 742 333 L 765 351 L 765 351 L 742 334 L 719 299 L 696 267 L 673 238 L 650 211 L 627 186 L 604 165 L 581 145 L 558 129 L 535 114 L 512 103 L 489 93.5 L 466 86.8 L 443 82.7 L 420 81.2 L 397 82.1 L 374 85.6 L 351 91.7 L 328 100 L 305 111 L 282 125 L 259 141 L 236 160 L 213 181 L 190 205 L 167 231 L 144 260 L 121 292 L 98 327 L 75 362 Z"/>
+  <path class="exact-curve" d="M 75 362 L 98 327 L 121 291 L 144 259 L 167 230 L 190 203 L 213 179 L 236 158 L 259 139 L 282 123 L 305 109 L 328 97.6 L 351 88.9 L 374 82.8 L 397 79.3 L 420 78.3 L 443 79.9 L 466 84.1 L 489 90.8 L 512 100 L 535 112 L 558 126 L 581 143 L 604 163 L 627 185 L 650 209 L 673 237 L 696 266 L 719 299 L 742 333 L 765 351 "/>
+  <path class="num-curve" d="M 75 362 L 98 327 L 121 291 L 144 259 L 167 230 L 190 203 L 213 179 L 236 158 L 259 139 L 282 123 L 305 109 L 328 97.6 L 351 88.9 L 374 82.8 L 397 79.3 L 420 78.3 L 443 79.9 L 466 84.1 L 489 90.8 L 512 100 L 535 112 L 558 126 L 581 143 L 604 163 L 627 185 L 650 209 L 673 237 L 696 266 L 719 299 L 742 333 L 765 351 "/>
+  <circle cx="75" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="98" cy="327" r="3.5" fill="#f0883e"/>
+  <circle cx="121" cy="291" r="3.5" fill="#f0883e"/>
+  <circle cx="144" cy="259" r="3.5" fill="#f0883e"/>
+  <circle cx="167" cy="230" r="3.5" fill="#f0883e"/>
+  <circle cx="190" cy="203" r="3.5" fill="#f0883e"/>
+  <circle cx="213" cy="179" r="3.5" fill="#f0883e"/>
+  <circle cx="236" cy="158" r="3.5" fill="#f0883e"/>
+  <circle cx="259" cy="139" r="3.5" fill="#f0883e"/>
+  <circle cx="282" cy="123" r="3.5" fill="#f0883e"/>
+  <circle cx="305" cy="109" r="3.5" fill="#f0883e"/>
+  <circle cx="328" cy="97.6" r="3.5" fill="#f0883e"/>
+  <circle cx="351" cy="88.9" r="3.5" fill="#f0883e"/>
+  <circle cx="374" cy="82.8" r="3.5" fill="#f0883e"/>
+  <circle cx="397" cy="79.3" r="3.5" fill="#f0883e"/>
+  <circle cx="420" cy="78.3" r="3.5" fill="#f0883e"/>
+  <circle cx="443" cy="79.9" r="3.5" fill="#f0883e"/>
+  <circle cx="466" cy="84.1" r="3.5" fill="#f0883e"/>
+  <circle cx="489" cy="90.8" r="3.5" fill="#f0883e"/>
+  <circle cx="512" cy="100" r="3.5" fill="#f0883e"/>
+  <circle cx="535" cy="112" r="3.5" fill="#f0883e"/>
+  <circle cx="558" cy="126" r="3.5" fill="#f0883e"/>
+  <circle cx="581" cy="143" r="3.5" fill="#f0883e"/>
+  <circle cx="604" cy="163" r="3.5" fill="#f0883e"/>
+  <circle cx="627" cy="185" r="3.5" fill="#f0883e"/>
+  <circle cx="650" cy="209" r="3.5" fill="#f0883e"/>
+  <circle cx="673" cy="237" r="3.5" fill="#f0883e"/>
+  <circle cx="696" cy="266" r="3.5" fill="#f0883e"/>
+  <circle cx="719" cy="299" r="3.5" fill="#f0883e"/>
+  <circle cx="742" cy="333" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="351" r="3.5" fill="#f0883e"/>
+  <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
+  <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
+  <text x="400" y="435" text-anchor="middle" class="axis-label">Axial Strain eps (millistrain)</text>
+  <text x="20" y="225" text-anchor="middle" transform="rotate(-90 20 225)" class="axis-label">Tensile Stress sigma_xx (MPa)</text>
+  <rect x="570" y="55" width="195" height="85" fill="#161b22" stroke="#30363d" rx="4"/>
+  <line x1="580" y1="73" x2="605" y2="73" stroke="#58a6ff" stroke-width="2.5"/>
+  <text x="612" y="77" font-size="11">Analytical / Exact</text>
+  <line x1="580" y1="93" x2="605" y2="93" stroke="#f0883e" stroke-width="2.0" stroke-dasharray="4,2"/>
+  <circle cx="592" cy="93" r="3" fill="#f0883e"/>
+  <text x="612" y="97" font-size="11">Numerical Result</text>
+  <rect x="580" y="107" width="25" height="10" fill="rgba(46,160,67,0.5)"/>
+  <text x="612" y="116" font-size="10">Acceptance Corridor ±1%</text>
+  <rect x="580" y="123" width="25" height="10" fill="rgba(210,153,34,0.3)"/>
+  <text x="612" y="132" font-size="10">Tolerance Corridor ±5%</text>
+</svg>

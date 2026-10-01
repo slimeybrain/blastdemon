@@ -123,6 +123,7 @@ export class WorkspaceManager {
         this._initializing = true;
         this.buildStage();
         this._initializing = false;
+        this.syncVirtualViewports();
     }
 
     public triggerResize(): void {
@@ -321,10 +322,14 @@ export class WorkspaceManager {
 
         const lightGroup = document.createElement('optgroup');
         lightGroup.label = 'Light Themes (Particle Contrast)';
+        lightGroup.style.backgroundColor = '#141822';
+        lightGroup.style.color = '#94a3b8';
         lightThemes.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t.id;
             opt.textContent = `${t.icon} ${t.label}`;
+            opt.style.backgroundColor = '#141822';
+            opt.style.color = '#e2e8f0';
             if (t.id === this.activeTheme) opt.selected = true;
             lightGroup.appendChild(opt);
         });
@@ -332,10 +337,14 @@ export class WorkspaceManager {
 
         const darkGroup = document.createElement('optgroup');
         darkGroup.label = 'Dark Studio Themes';
+        darkGroup.style.backgroundColor = '#141822';
+        darkGroup.style.color = '#94a3b8';
         darkThemes.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t.id;
             opt.textContent = `${t.icon} ${t.label}`;
+            opt.style.backgroundColor = '#141822';
+            opt.style.color = '#e2e8f0';
             if (t.id === this.activeTheme) opt.selected = true;
             darkGroup.appendChild(opt);
         });
@@ -384,7 +393,9 @@ export class WorkspaceManager {
         for (let i = 0; i < paneCount; i++) {
             const savedPane = this.savedOptions?.panes?.[i];
             const paneInitialType = savedPane?.viewType || ((i === 0) ? smartViewType : (defaultTypes[i % defaultTypes.length] || smartViewType));
-            const paneModelId = savedPane?.modelId !== undefined ? savedPane.modelId : activeModelId;
+            const paneModelId = (this.activePreset === '1x1' || savedPane?.modelId === undefined || !allModels.some(m => m.id === savedPane.modelId))
+                ? activeModelId
+                : savedPane.modelId;
             const paneViewId = savedPane?.viewId || null;
             const pane = this.createViewportPane(i, paneModelId, paneInitialType, paneViewId);
             this.panes.push(pane);
@@ -432,6 +443,8 @@ export class WorkspaceManager {
             const opt = document.createElement('option');
             opt.value = m.id;
             opt.textContent = `📦 ${m.name}`;
+            opt.style.backgroundColor = '#141822';
+            opt.style.color = '#e2e8f0';
             if (m.id === initialModelId) opt.selected = true;
             modelSelect.appendChild(opt);
         });
@@ -452,6 +465,8 @@ export class WorkspaceManager {
             const opt = document.createElement('option');
             opt.value = t.id;
             opt.textContent = t.label;
+            opt.style.backgroundColor = '#141822';
+            opt.style.color = '#e2e8f0';
             if (t.id === initialViewType) opt.selected = true;
             typeSelect.appendChild(opt);
         });
@@ -510,6 +525,10 @@ export class WorkspaceManager {
             this.mountViewInstance(pane);
             this.updatePaneViewSelector(pane);
             this.saveStageOptions();
+            if (pane.modelId) {
+                this.stateManager.setActiveModel(pane.modelId);
+            }
+            this.updateStageTitle();
         });
 
         typeSelect.addEventListener('change', () => {
@@ -588,6 +607,8 @@ export class WorkspaceManager {
             const opt = document.createElement('option');
             opt.value = v.id;
             opt.textContent = `👁️ ${v.name}`;
+            opt.style.backgroundColor = '#141822';
+            opt.style.color = '#e2e8f0';
             if (v.id === selectedId) opt.selected = true;
             pane.viewSelect!.appendChild(opt);
         });
@@ -595,6 +616,8 @@ export class WorkspaceManager {
         const newOpt = document.createElement('option');
         newOpt.value = '__save_new__';
         newOpt.textContent = '➕ Save Current View...';
+        newOpt.style.backgroundColor = '#141822';
+        newOpt.style.color = '#38bdf8';
         pane.viewSelect.appendChild(newOpt);
     }
 
@@ -656,15 +679,19 @@ export class WorkspaceManager {
                 pane.instance.setGridVisible(this.showStudioGrid);
             }
             // Replay cached STL and Obstacles geometry if available
-            const cachedSTL = (modelId ? this.stlGeometries.get(modelId) : null) || this.stlGeometries.get('default');
+            const cachedSTL = modelId ? this.stlGeometries.get(modelId) : null;
             if (cachedSTL && pane.instance) {
-                pane.instance.setSTLGeometry?.(cachedSTL.vertices, modelId || undefined, cachedSTL.meshId);
+                pane.instance.setSTLGeometry?.(cachedSTL.vertices, modelId, cachedSTL.meshId);
+            } else if (pane.instance) {
+                pane.instance.setSTLGeometry?.(null, modelId || undefined);
             }
-            const cachedObs = (modelId ? this.obstacleGeometries.get(modelId) : null) || this.obstacleGeometries.get('default');
+            const cachedObs = modelId ? this.obstacleGeometries.get(modelId) : null;
             if (cachedObs && pane.instance) {
-                pane.instance.setObstaclesGeometry?.(cachedObs.vertices, cachedObs.cells, modelId || undefined, cachedObs.meshId);
+                pane.instance.setObstaclesGeometry?.(cachedObs.vertices, cachedObs.cells, modelId, cachedObs.meshId);
+            } else if (pane.instance) {
+                pane.instance.setObstaclesGeometry?.(null, null, modelId || undefined);
             }
-            const latestFrame = this.playbackBuffer.getLatestFrameForModel(modelId);
+            const latestFrame = modelId ? this.playbackBuffer.getLatestFrameForModel(modelId) : null;
             if (latestFrame && pane.instance) {
                 if (latestFrame.sliceBuffer) {
                     pane.instance.pushFrame(latestFrame.sliceBuffer, latestFrame.modelId);
@@ -677,6 +704,8 @@ export class WorkspaceManager {
                 if (latestFrame.femBuffer) {
                     pane.instance.pushFrame(latestFrame.femBuffer, latestFrame.modelId);
                 }
+            } else if (pane.instance) {
+                pane.instance.resetSimulationData?.(modelId || undefined);
             }
             if (modelId) {
                 const views = this.stateManager.getModelViews(modelId);
@@ -1030,8 +1059,8 @@ export class WorkspaceManager {
 
         this.panes.forEach(pane => {
             const paneModelId = pane.modelId || activeModelId;
-            const matchesModel = !paneModelId || !frame.modelId || paneModelId === frame.modelId;
-            if (!matchesModel) return;
+            if (frame.modelId && paneModelId && frame.modelId !== paneModelId) return;
+            if (pane.modelId && !frame.modelId) return;
 
             try {
                 if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
@@ -1065,8 +1094,7 @@ export class WorkspaceManager {
      */
     public updateTelemetry(data: any, modelId?: string): void {
         this.panes.forEach(pane => {
-            const matchesModel = !pane.modelId || !modelId || pane.modelId === modelId;
-            if (!matchesModel) return;
+            if (modelId && pane.modelId && modelId !== pane.modelId) return;
             if (pane.viewType === '3D_VIEWPORT' && pane.instance && typeof pane.instance.updateTelemetry === 'function') {
                 pane.instance.updateTelemetry(data, modelId);
             }
@@ -1078,6 +1106,9 @@ export class WorkspaceManager {
         this.panes.forEach(p => {
             if (p.id === paneId) {
                 p.container.style.boxShadow = 'inset 0 0 0 2px #00adff';
+                if (p.modelId && p.modelId !== this.stateManager.getActiveWorkspace()?.activeModelId) {
+                    this.stateManager.setActiveModel(p.modelId);
+                }
             } else {
                 p.container.style.boxShadow = 'none';
             }
@@ -1243,9 +1274,11 @@ export class WorkspaceManager {
      * Set STL geometry on all active 3D viewports and cache for model.
      */
     public setSTLGeometry(vertices: Float32Array | null, modelId?: string, meshId: string = 'default'): void {
-        const key = modelId || 'default';
-        this.stlGeometries.set(key, { vertices, meshId });
+        if (modelId) {
+            this.stlGeometries.set(modelId, { vertices, meshId });
+        }
         this.panes.forEach(pane => {
+            if (modelId && pane.modelId && modelId !== pane.modelId) return;
             if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                 pane.instance.setSTLGeometry?.(vertices, modelId, meshId);
             }
@@ -1256,9 +1289,11 @@ export class WorkspaceManager {
      * Set obstacle geometry on all active 3D viewports and cache for model.
      */
     public setObstaclesGeometry(vertices: Float32Array | null, cells: Int32Array | null, modelId?: string, meshId: string = 'default'): void {
-        const key = modelId || 'default';
-        this.obstacleGeometries.set(key, { vertices, cells, meshId });
+        if (modelId) {
+            this.obstacleGeometries.set(modelId, { vertices, cells, meshId });
+        }
         this.panes.forEach(pane => {
+            if (modelId && pane.modelId && modelId !== pane.modelId) return;
             if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                 pane.instance.setObstaclesGeometry?.(vertices, cells, modelId, meshId);
             }
@@ -1270,6 +1305,7 @@ export class WorkspaceManager {
      */
     public resetSimulationData(modelId?: string): void {
         this.panes.forEach(pane => {
+            if (modelId && pane.modelId && modelId !== pane.modelId) return;
             if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                 pane.instance.resetSimulationData?.(modelId);
             }
@@ -1306,19 +1342,40 @@ export class WorkspaceManager {
         this.updateStageTitle();
 
         this.panes.forEach(pane => {
-            this.updatePaneModelSelector(pane);
-            if (pane.modelId !== activeModelId) {
-                if (this.activePreset === '1x1' || !pane.modelId) {
+            if (this.activePreset === '1x1' || !pane.modelId || !allModels.some(m => m.id === pane.modelId)) {
+                if (pane.modelId !== activeModelId) {
                     pane.modelId = activeModelId;
+                    pane.viewId = null;
                     if (this.activePreset === '1x1') {
                         const smartType = this.detectSmartViewType(model);
                         pane.viewType = smartType;
                         pane.typeSelect.value = smartType;
                     }
                     this.mountViewInstance(pane);
+                    this.saveStageOptions();
                 }
-            } else {
-                this.updatePaneViewSelector(pane);
+            }
+            this.updatePaneModelSelector(pane);
+            this.updatePaneViewSelector(pane);
+        });
+    }
+
+    public broadcastResourceData(data: any): void {
+        this.panes.forEach(pane => {
+            if (pane.viewType === 'RESOURCE_MONITOR' && pane.instance) {
+                if (typeof pane.instance.updateMetrics === 'function') {
+                    pane.instance.updateMetrics(data);
+                }
+            }
+        });
+    }
+
+    public resetAllResourceManagers(): void {
+        this.panes.forEach(pane => {
+            if (pane.viewType === 'RESOURCE_MONITOR' && pane.instance) {
+                if (typeof pane.instance.resetMetrics === 'function') {
+                    pane.instance.resetMetrics();
+                }
             }
         });
     }

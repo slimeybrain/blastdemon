@@ -39,7 +39,11 @@ struct CFDSliceSnapshot3D {
     bool has_p = false, has_rho = false, has_vel = false, has_E = false;
     bool has_reacted = false, has_unreacted = false, has_air = false;
     bool has_solid = false, has_overpressure = false, has_impulse = false;
+    bool has_temp = false, has_afterburn_rate = false, has_fuel_density = false;
+    bool has_materials = false, has_water = false, has_soil = false;
     std::vector<float> p, rho, vel, E, reacted, unreacted, air, solid, overpressure, impulse;
+    std::vector<float> temp, afterburn_rate, fuel_density;
+    std::vector<float> materials, water, soil;
 };
 
 struct CFDVolumeSnapshot3D {
@@ -55,7 +59,11 @@ struct CFDVolumeSnapshot3D {
     bool has_p = false, has_rho = false, has_vel = false, has_E = false;
     bool has_reacted = false, has_unreacted = false, has_air = false;
     bool has_solid = false, has_overpressure = false, has_impulse = false;
+    bool has_temp = false, has_afterburn_rate = false, has_fuel_density = false;
+    bool has_materials = false, has_water = false, has_soil = false;
     std::vector<float> p, rho, vel, E, reacted, unreacted, air, solid, overpressure, impulse;
+    std::vector<float> temp, afterburn_rate, fuel_density;
+    std::vector<float> materials, water, soil;
 };
 
 void export_vtu_slice_3d(const std::string& filename, const CFDSolver3D& solver, const Slice3D& slice, const std::string& format,
@@ -77,10 +85,45 @@ void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver
 
 void export_vtu_volume_3d_snapshot(const std::string& filename, const CFDVolumeSnapshot3D& snap, const std::string& format = "Binary");
 
+void export_vts_cfd_3d_snapshot(const std::string& filename, const CFDVolumeSnapshot3D& snap, const std::string& format = "Binary");
+
 namespace Blast {
 template <typename T> class FEMSolver3D;
 struct MPMParticle3D;
 }
+
+struct FEMVTKSnapshot3D {
+    int num_points = 0;
+    int num_cells = 0;
+    std::vector<float> points;          // 3 * num_points
+    std::vector<float> disp;            // 3 * num_points
+    std::vector<float> vel;             // 3 * num_points
+    std::vector<int32_t> connectivity;  // connectivity array
+    std::vector<int32_t> offsets;       // num_cells
+    std::vector<uint8_t> types;         // num_cells
+    std::vector<int32_t> material_id;   // num_cells
+    std::vector<int32_t> part_id;       // num_cells
+    std::vector<int32_t> element_type;  // num_cells (0 = Solid Hex8, 1 = Truss, 2 = Beam)
+    std::vector<float> von_mises;       // num_cells
+    std::vector<float> plastic_strain;  // num_cells
+    std::vector<float> pressure;        // num_cells
+    std::vector<float> temperature;     // num_cells
+    std::vector<float> damage;          // num_cells
+    bool has_vel = true;
+    bool has_disp = true;
+    bool has_stress = true;
+    bool has_strain = true;
+    bool has_pressure = true;
+    bool has_temp = true;
+    bool has_damage = true;
+};
+
+void export_vtu_fem_3d_snapshot(const std::string& filename, const FEMVTKSnapshot3D& snap, const std::string& format = "Binary");
+
+template <typename T>
+FEMVTKSnapshot3D create_fem_snapshot(const Blast::FEMSolver3D<T>& solver,
+                                     bool has_stress = true, bool has_strain = true, bool has_pressure = true,
+                                     bool has_temp = true, bool has_damage = true, bool has_vel = true, bool has_disp = true);
 
 template <typename T>
 void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>& solver, const std::string& format = "Binary",
@@ -95,6 +138,8 @@ struct MPMVTKSnapshot3D {
     bool has_strain = true;
     bool has_damage = true;
     bool has_temp = true;
+    bool has_pressure = true;
+    bool has_material_id = true;
     std::vector<float> points;      // 3 * num_particles
     std::vector<float> vel;         // 3 * num_particles
     std::vector<float> von_mises;   // num_particles
@@ -103,9 +148,12 @@ struct MPMVTKSnapshot3D {
     std::vector<float> damage;      // num_particles
     std::vector<float> temp;        // num_particles
     std::vector<float> obj_id;      // num_particles
+    std::vector<float> material_id; // num_particles
 };
 
 void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapshot3D& snap, const std::string& format = "Binary");
+
+void export_vtp_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapshot3D& snap, const std::string& format = "Binary");
 
 void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPMParticle3D>& particles, const std::string& format = "Binary",
                        bool has_vel = true, bool has_disp = true, bool has_stress = true,
@@ -156,6 +204,16 @@ std::vector<Triangle> subdivide_triangles_to_cell_size(const std::vector<Triangl
 void clear_vtu_mesh_cache();
 
 void append_pvd_timestep(const std::string& pvd_filename, double sim_time, const std::string& relative_vtu_path, const std::string& part = "0");
+
+struct MultiBlockEntry {
+    int index = 0;
+    std::string name;
+    std::string relative_filepath;
+};
+
+void export_vtm_multiblock(const std::string& vtm_filename, const std::vector<MultiBlockEntry>& blocks);
+
+void append_pvd_multiblock_timestep(const std::string& pvd_filename, double sim_time, const std::string& relative_vtm_path, const std::string& part = "0");
 
 #endif
 

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; fill: #c9d1d9; }
+    .title { font-size: 16px; font-weight: 600; fill: #f0f6fc; }
+    .axis-label { font-size: 12px; fill: #8b949e; }
+    .tick { font-size: 10px; fill: #8b949e; }
+    .grid { stroke: #30363d; stroke-width: 1; stroke-dasharray: 4,4; }
+    .axis-line { stroke: #484f58; stroke-width: 1.5; }
+    .exact-curve { fill: none; stroke: #58a6ff; stroke-width: 2.5; }
+    .num-curve { fill: none; stroke: #f0883e; stroke-width: 2.0; stroke-dasharray: 6,3; }
+    .corridor-yellow { fill: rgba(210, 153, 34, 0.18); }
+    .corridor-green { fill: rgba(46, 160, 67, 0.30); }
+  </style>
+  <rect width="800" height="450" fill="#0d1117" rx="8"/>
+  <text x="400" y="30" text-anchor="middle" class="title">VV-L4-05: Submerged Containment Vessel Acoustic Pulse Propagation (MPa vs Distance)</text>
+  <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
+  <text x="67" y="394" text-anchor="end" class="tick">-1.11</text>
+  <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
+  <text x="67" y="326" text-anchor="end" class="tick">3.16</text>
+  <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
+  <text x="67" y="258" text-anchor="end" class="tick">7.43</text>
+  <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
+  <text x="67" y="190" text-anchor="end" class="tick">11.7</text>
+  <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
+  <text x="67" y="122" text-anchor="end" class="tick">16</text>
+  <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
+  <text x="67" y="54" text-anchor="end" class="tick">20.2</text>
+  <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
+  <text x="75" y="408" text-anchor="middle" class="tick">0.5</text>
+  <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
+  <text x="213" y="408" text-anchor="middle" class="tick">2.4</text>
+  <line x1="351" y1="50" x2="351" y2="390" class="grid"/>
+  <text x="351" y="408" text-anchor="middle" class="tick">4.3</text>
+  <line x1="489" y1="50" x2="489" y2="390" class="grid"/>
+  <text x="489" y="408" text-anchor="middle" class="tick">6.2</text>
+  <line x1="627" y1="50" x2="627" y2="390" class="grid"/>
+  <text x="627" y="408" text-anchor="middle" class="tick">8.1</text>
+  <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
+  <text x="765" y="408" text-anchor="middle" class="tick">10</text>
+  <path class="corridor-yellow" d="M 75 63.6 L 111 228 L 148 280 L 184 305 L 257 329 L 329 341 L 402 348 L 474 352 L 547 355 L 620 358 L 692 360 L 765 361 L 765 362 L 692 361 L 620 359 L 547 357 L 474 354 L 402 350 L 329 344 L 257 333 L 184 312 L 148 289 L 111 242 L 75 93 Z"/>
+  <path class="corridor-green" d="M 75 75.4 L 111 234 L 148 284 L 184 308 L 257 331 L 329 342 L 402 349 L 474 353 L 547 356 L 620 358 L 692 360 L 765 361 L 765 362 L 692 360 L 620 359 L 547 356 L 474 353 L 402 349 L 329 343 L 257 332 L 184 309 L 148 285 L 111 237 L 75 81.3 Z"/>
+  <path class="exact-curve" d="M 75 78.3 L 111 235 L 148 285 L 184 308 L 257 331 L 329 343 L 402 349 L 474 353 L 547 356 L 620 358 L 692 360 L 765 361 "/>
+  <path class="num-curve" d="M 75 83.6 L 111 238 L 148 286 L 184 310 L 257 332 L 329 343 L 402 349 L 474 354 L 547 357 L 620 359 L 692 360 L 765 362 "/>
+  <circle cx="75" cy="83.6" r="3.5" fill="#f0883e"/>
+  <circle cx="111" cy="238" r="3.5" fill="#f0883e"/>
+  <circle cx="148" cy="286" r="3.5" fill="#f0883e"/>
+  <circle cx="184" cy="310" r="3.5" fill="#f0883e"/>
+  <circle cx="257" cy="332" r="3.5" fill="#f0883e"/>
+  <circle cx="329" cy="343" r="3.5" fill="#f0883e"/>
+  <circle cx="402" cy="349" r="3.5" fill="#f0883e"/>
+  <circle cx="474" cy="354" r="3.5" fill="#f0883e"/>
+  <circle cx="547" cy="357" r="3.5" fill="#f0883e"/>
+  <circle cx="620" cy="359" r="3.5" fill="#f0883e"/>
+  <circle cx="692" cy="360" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="362" r="3.5" fill="#f0883e"/>
+  <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
+  <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
+  <text x="400" y="435" text-anchor="middle" class="axis-label">Radial Distance from Vessel Center R (m)</text>
+  <text x="20" y="225" text-anchor="middle" transform="rotate(-90 20 225)" class="axis-label">Peak Acoustic Overpressure P (MPa)</text>
+  <rect x="570" y="55" width="195" height="85" fill="#161b22" stroke="#30363d" rx="4"/>
+  <line x1="580" y1="73" x2="605" y2="73" stroke="#58a6ff" stroke-width="2.5"/>
+  <text x="612" y="77" font-size="11">Analytical / Exact</text>
+  <line x1="580" y1="93" x2="605" y2="93" stroke="#f0883e" stroke-width="2.0" stroke-dasharray="4,2"/>
+  <circle cx="592" cy="93" r="3" fill="#f0883e"/>
+  <text x="612" y="97" font-size="11">Numerical Result</text>
+  <rect x="580" y="107" width="25" height="10" fill="rgba(46,160,67,0.5)"/>
+  <text x="612" y="116" font-size="10">Acceptance Corridor ±1%</text>
+  <rect x="580" y="123" width="25" height="10" fill="rgba(210,153,34,0.3)"/>
+  <text x="612" y="132" font-size="10">Tolerance Corridor ±5%</text>
+</svg>

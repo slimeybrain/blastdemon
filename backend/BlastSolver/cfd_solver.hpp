@@ -48,6 +48,12 @@ public:
 
     virtual const std::vector<double>& getGeomV() const = 0;
     virtual const std::vector<double>& getGeomA() const = 0;
+
+    virtual void setChargeRadius(double r) { charge_radius = r; }
+    virtual double getChargeRadius() const { return charge_radius; }
+
+protected:
+    double charge_radius = 0.05;
 };
 
 template <typename RealType, bool IsMultiMaterial>

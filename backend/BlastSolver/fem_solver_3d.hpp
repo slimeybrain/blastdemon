@@ -2,6 +2,7 @@
 #define FEM_SOLVER_3D_HPP
 
 #include "mpm_solver_3d.hpp"
+#include "cfd_eos_water.hpp"
 #include <vector>
 #include <array>
 #include <memory>
@@ -31,6 +32,11 @@ enum class FEMHourglassModel {
     FlanaganBelytschkoStiffness,
     FlanaganBelytschkoViscous,
     KosloffFrazier
+};
+
+enum class FEMContactSearchMethod {
+    HierarchicalOctaveGrid, // Multi-Level Octave Spatial Hash Grid
+    LinearBVH              // GPU Linear Bounding Volume Hierarchy with 30-Bit Morton Codes
 };
 
 template <typename T>
@@ -200,6 +206,20 @@ struct FEMEnergyTracker {
     }
 };
 
+struct LysmerBoundaryParams {
+    bool enabled{false};
+    float rho{2000.0f};           // Soil/rock bulk density (kg/m^3)
+    float c_p{2000.0f};           // Compressional P-wave velocity (m/s)
+    float c_s{1000.0f};           // Shear S-wave velocity (m/s)
+    float normal_relaxation{1.0f}; // Dimensionless dashpot efficiency factor
+    float shear_relaxation{1.0f};
+    bool filter_box{false};       // If true, apply only on outer boundaries within box tolerance
+    float x_min{-1e9f}, x_max{1e9f};
+    float y_min{-1e9f}, y_max{1e9f};
+    float z_min{-1e9f}, z_max{1e9f};
+    float tol{1.0e-3f};
+};
+
 template <typename T>
 struct SpatialHashBucket3D {
     int start_index{0};
@@ -208,6 +228,9 @@ struct SpatialHashBucket3D {
 
 template <typename T>
 HD_FEM_FUNC inline T computeDilatationalWaveSpeed(const MaterialTable3D& mat) {
+    if (mat.material_model == MPMMaterialModel::TaitWater) {
+        return static_cast<T>(mat.tait_c0 > 0.0f ? mat.tait_c0 : 1482.0f);
+    }
     T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
     T nu = static_cast<T>(mat.poissons_ratio);
     T density = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
@@ -312,18 +335,31 @@ public:
     void setErosionCriteria(const FEMErosionCriteria<T>& criteria) {
         m_erosion_criteria = criteria;
         for (auto& mat : m_material_tables) {
+            bool is_concrete = (mat.material_model == Blast::MPMMaterialModel::RHTConcrete ||
+                                mat.material_model == Blast::MPMMaterialModel::KCConcrete ||
+                                mat.material_model == Blast::MPMMaterialModel::CSCMConcrete);
             if (criteria.enable_strain_erosion) {
                 mat.enable_strain_erosion = true;
                 if (criteria.failure_strain > static_cast<T>(0.0f)) {
-                    mat.erosion_strain = static_cast<float>(criteria.failure_strain);
-                    mat.failure_strain = static_cast<float>(criteria.failure_strain);
+                    if (is_concrete) {
+                        if (criteria.failure_strain >= static_cast<T>(0.02f)) {
+                            mat.erosion_strain = static_cast<float>(criteria.failure_strain);
+                        } else if (mat.erosion_strain < 0.02f) {
+                            mat.erosion_strain = 0.10f;
+                        }
+                    } else {
+                        mat.erosion_strain = static_cast<float>(criteria.failure_strain);
+                        mat.failure_strain = static_cast<float>(criteria.failure_strain);
+                    }
                 }
             }
             if (criteria.enable_stress_erosion) {
                 mat.enable_stress_erosion = true;
                 if (criteria.tensile_failure_stress > static_cast<T>(0.0f)) {
                     mat.erosion_stress = static_cast<float>(criteria.tensile_failure_stress);
-                    mat.tensile_failure_stress = static_cast<float>(criteria.tensile_failure_stress);
+                    if (!is_concrete) {
+                        mat.tensile_failure_stress = static_cast<float>(criteria.tensile_failure_stress);
+                    }
                 }
             }
             if (criteria.enable_timestep_erosion) {
@@ -337,9 +373,11 @@ public:
     void setContactPenaltyScale(T scale) { m_contact_penalty_scale = scale; }
     void setFrictionCoefficients(T mu_static, T mu_kinetic) { m_friction_static = mu_static; m_friction_kinetic = mu_kinetic; }
     void setContactDamping(T damping) { m_contact_damping = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), damping)); }
+    void setContactSearchMethod(FEMContactSearchMethod method) { m_contact_search_method = method; }
     
     FEMIntegrationScheme getIntegrationScheme() const { return m_integration_scheme; }
     FEMHourglassModel getHourglassModel() const { return m_hourglass_model; }
+    FEMContactSearchMethod getContactSearchMethod() const { return m_contact_search_method; }
     T getHourglassCoeff() const { return m_hourglass_coeff; }
     T getContactPenaltyScale() const { return m_contact_penalty_scale; }
     T getFrictionStatic() const { return m_friction_static; }
@@ -367,6 +405,7 @@ public:
     }
 
     void setNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const MaterialTable3D& mat);
+    void setNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const std::vector<MaterialTable3D>& materials);
     void appendNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const MaterialTable3D& mat);
 
     // Rebar Truss & 3D Beam Mesh Direct Loaders
@@ -433,6 +472,11 @@ public:
     MPMSolver3D* getMPMSolver() const { return m_mpm_solver; }
     void convertElementToMPMParticles(const FEMElement3D<T>& elem, std::vector<MPMParticle3D>& out_particles, const float* v_cluster_com = nullptr) const;
 
+    // Lysmer-Kuhlemeyer Absorbing Boundary Condition
+    void setLysmerParams(const LysmerBoundaryParams& params) { m_lysmer_params = params; }
+    const LysmerBoundaryParams& getLysmerParams() const { return m_lysmer_params; }
+    void applyLysmerDashpots(T dt);
+
     // CUDA Stream Accessor
     void* getCudaStream() const { return m_cuda_stream; }
 
@@ -488,6 +532,7 @@ private:
     T m_friction_static{0.3f};
     T m_friction_kinetic{0.2f};
     T m_contact_damping{0.20f};
+    FEMContactSearchMethod m_contact_search_method{FEMContactSearchMethod::HierarchicalOctaveGrid};
     int m_next_part_id{1};
 
     // Core Data Containers
@@ -511,7 +556,7 @@ private:
     // Multi-Physics Solver References
     MPMSolver3D* m_mpm_solver{nullptr};
     std::shared_ptr<MPMSolver3D> m_mpm_solver_ref{nullptr};
-
+    LysmerBoundaryParams m_lysmer_params;
     void* m_cuda_stream{nullptr};
 };
 

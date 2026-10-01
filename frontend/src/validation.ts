@@ -44,11 +44,13 @@ export function isParameterRelevant(node: Node, key: string): boolean {
     if (!node || !node.parameters) return true;
 
     // Parameters that are system paths/hashes/collections/internal properties which can be empty or managed separately
-    if (['output_dir', 'vtk_dir', 'gauges', 'slices', 'stl_file', 'geometry_hash', 'primitives', 'k_file'].includes(key)) {
+    if (['output_dir', 'vtk_dir', 'gauges', 'slices', 'stl_file', 'geometry_hash', 'primitives', 'k_file', 'ambient_air_material', 'explosive_charge', 'target_domain', 'ambient_air_target', 'source_model_id', 'target_solver', 'remap', 'material', 'external_file_path', 'connected_detonators'].includes(key)) {
         return false;
     }
 
-    if (node.type === 'FEMDomain3D') {
+    if (node.type === 'VirtualGauges') {
+        if (key === 'external_file_path' && node.parameters?.source_mode !== 'external_file') return false;
+    } else if (node.type === 'FEMDomain3D') {
         const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
         if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && ['hourglass_model', 'hourglass_coeff'].includes(key)) return false;
     } else if (node.type === 'FEMObject3D') {
@@ -92,8 +94,9 @@ export function isParameterRelevant(node: Node, key: string): boolean {
             if (['charge_radius', 'charge_height', 'charge_aspect_ratio'].includes(key)) return false;
         }
     } else if (node.type === 'Material') {
+        if (key === 'ambient_air_target') return false;
         const matModel = node.parameters['material_model'] || 'Hypoelastic';
-        const airKeys = ['gamma', 'atm_pressure', 'atm_temperature'];
+        const airKeys = ['gamma', 'atm_pressure', 'atm_temperature', 'ambient_o2_fraction'];
         const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
         const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
         const concreteBaseKeys = ['fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension'];
@@ -125,8 +128,8 @@ export function isParameterRelevant(node: Node, key: string): boolean {
         const dim = node.parameters['dimension'] || '1D';
         if (dim === '1D' && ['y_min_bc', 'y_max_bc', 'z_min_bc', 'z_max_bc'].includes(key)) return false;
         if (dim === '2D' && ['z_min_bc', 'z_max_bc'].includes(key)) return false;
-    } else if (node.type === 'CFDSolver3D') {
-        if (['stl_file', 'geometry_hash', 'mesh_type', 'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size'].includes(key)) return false;
+    } else if (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') {
+        if (['stl_file', 'geometry_hash', 'mesh_type', 'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size', 'ambient_air_material', 'explosive_charge', 'remap'].includes(key)) return false;
     }
 
     return true;
@@ -142,6 +145,8 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         nodeStatus[node.id] = { state: 'valid', messages: [] };
     });
 
+    const msgSeverityMap = new Map<string, 'error' | 'warning'>();
+
     const addMessage = (nodeId: string, stateType: 'error' | 'warning', msg: string) => {
         const current = nodeStatus[nodeId];
         if (!current) return;
@@ -151,6 +156,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             current.state = 'warning';
         }
         current.messages.push(msg);
+        msgSeverityMap.set(`${nodeId}:::${msg}`, stateType);
     };
 
     // --- 1. CFD Solver 1D Validation ---
@@ -163,14 +169,48 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
 
         const painterConn = state.connections.find(c => c.toNode === solver1D.id && c.toPort === 'in');
-        if (!painterConn) {
-            addMessage(solver1D.id, 'error', "CFD Solver is not connected to the Initializer (ThePainter).");
-        } else {
+        if (painterConn) {
             const painterNode = state.nodes.find(n => n.id === painterConn.fromNode);
             if (!painterNode || painterNode.type !== 'ThePainter') {
                 const connKey = `${painterConn.fromNode}:${painterConn.fromPort}->${painterConn.toNode}:${painterConn.toPort}`;
                 flawedConnections.set(connKey, "CFD Solver 'Initial State' port must be connected to the Initializer (ThePainter).");
                 addMessage(solver1D.id, 'error', "CFD Solver 'Initial State' port must be connected to the Initializer (ThePainter).");
+            }
+        } else {
+            // Direct 1D CFD Solver connections (following 2D/3D architecture)
+            const meshConn = state.connections.find(c => c.toNode === solver1D.id && c.toPort === 'mesh');
+            if (!meshConn) {
+                addMessage(solver1D.id, 'error', "1D CFD Solver has no Grid Mesh wired. Connect a DomainMesh to port 'mesh'.");
+            } else {
+                const mNode = state.nodes.find(n => n.id === meshConn.fromNode);
+                if (!mNode || mNode.type !== 'DomainMesh') {
+                    addMessage(solver1D.id, 'error', "Only a DomainMesh node can be connected to the 1D CFD Solver 'mesh' port.");
+                }
+            }
+
+            const airConn = state.connections.find(c => c.toNode === solver1D.id && c.toPort === 'air');
+            if (!airConn) {
+                addMessage(solver1D.id, 'error', "1D CFD Solver has no Ambient Air Material wired. Connect an Air Material to port 'air'.");
+            } else {
+                const aNode = state.nodes.find(n => n.id === airConn.fromNode);
+                if (!aNode || !isAirMaterial(aNode)) {
+                    addMessage(solver1D.id, 'error', "Only an Air (Ideal Gas) Material can be connected to the 'air' port.");
+                }
+            }
+
+            const chargeConn = state.connections.find(c => c.toNode === solver1D.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
+            if (!chargeConn) {
+                addMessage(solver1D.id, 'warning', "No Explosive Charge connected to 1D CFD Solver. Simulation will run with ambient air only.");
+            } else {
+                const cNode = state.nodes.find(n => n.id === chargeConn.fromNode);
+                if (!cNode || cNode.type !== 'Charge1D') {
+                    addMessage(solver1D.id, 'error', "Only a Charge1D node can be connected to the 1D CFD Solver 'charge' port.");
+                } else {
+                    const matConn = state.connections.find(c => (c.toNode === cNode.id && c.toPort === 'material') || (c.fromNode === cNode.id && c.fromPort === 'material'));
+                    if (!matConn) {
+                        addMessage(cNode.id, 'error', "Charge1D has no explosive Material assigned. Connect a JWL or Ideal Gas Material.");
+                    }
+                }
             }
         }
     });
@@ -498,16 +538,26 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
 
         // Air connection check
-        const airConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'air');
-        if (!airConn3D) {
+        const airConn3D = state.connections.find(c => 
+            (c.toNode === solver3D.id && (c.toPort === 'air' || c.toPort === 'ambient_air' || c.toPort === 'gas')) ||
+            (c.fromNode === solver3D.id && (c.fromPort === 'air' || c.fromPort === 'ambient_air' || c.fromPort === 'gas'))
+        );
+        let airNode: Node | undefined = undefined;
+        if (airConn3D) {
+            const airId = airConn3D.toNode === solver3D.id ? airConn3D.fromNode : airConn3D.toNode;
+            airNode = state.nodes.find(n => n.id === airId);
+        } else if (solver3D.parameters?.ambient_air_material) {
+            airNode = state.nodes.find(n => n.id === solver3D.parameters.ambient_air_material);
+        }
+
+        if (!airNode) {
             addMessage(solver3D.id, 'error', "No Air node connected to CFD Solver 3D. A Material node (configured as Air) is required.");
-        } else {
-            const fromNode = state.nodes.find(n => n.id === airConn3D.fromNode);
-            if (!fromNode || !isAirMaterial(fromNode)) {
+        } else if (!isAirMaterial(airNode)) {
+            if (airConn3D) {
                 const connKey = `${airConn3D.fromNode}:${airConn3D.fromPort}->${airConn3D.toNode}:${airConn3D.toPort}`;
                 flawedConnections.set(connKey, "Only a Material node configured as Air can be connected to the Air input of CFD Solver 3D.");
-                addMessage(solver3D.id, 'error', "Only a Material node configured as Air can be connected to the Air input of CFD Solver 3D.");
             }
+            addMessage(solver3D.id, 'error', "Only a Material node configured as Air can be connected to the Air input of CFD Solver 3D.");
         }
 
         const initMode3D = solver3D.parameters?.init_mode || 'From1D';
@@ -568,45 +618,77 @@ export function validateSimulationState(state: SimulationState): ValidationResul
 
         } else if (initMode3D === 'Multi-Material JWL') {
             // Charge 3D connection check
-            const chargeConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'charge');
-            if (!chargeConn3D) {
+            const chargeConn3D = state.connections.find(c => 
+                (c.toNode === solver3D.id && (c.toPort === 'charge' || c.toPort === 'explosive')) ||
+                (c.fromNode === solver3D.id && (c.fromPort === 'charge' || c.fromPort === 'explosive'))
+            );
+            let chargeNode3D: Node | undefined = undefined;
+            if (chargeConn3D) {
+                const chgId = chargeConn3D.toNode === solver3D.id ? chargeConn3D.fromNode : chargeConn3D.toNode;
+                chargeNode3D = state.nodes.find(n => n.id === chgId);
+            } else if (solver3D.parameters?.explosive_charge) {
+                chargeNode3D = state.nodes.find(n => n.id === solver3D.parameters.explosive_charge);
+            }
+
+            if (!chargeNode3D) {
                 addMessage(solver3D.id, 'error', "No Charge node connected to CFD Solver 3D. A Charge3D node is required for Multi-Material JWL mode.");
-            } else {
-                const chargeNode3D = state.nodes.find(n => n.id === chargeConn3D.fromNode);
-                if (!chargeNode3D || chargeNode3D.type !== 'Charge3D') {
+            } else if (chargeNode3D.type !== 'Charge3D') {
+                if (chargeConn3D) {
                     const connKey = `${chargeConn3D.fromNode}:${chargeConn3D.fromPort}->${chargeConn3D.toNode}:${chargeConn3D.toPort}`;
                     flawedConnections.set(connKey, "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
-                    addMessage(solver3D.id, 'error', "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+                }
+                addMessage(solver3D.id, 'error', "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+            } else {
+                const matConn = state.connections.find(c => 
+                    (c.toNode === chargeNode3D!.id && (c.toPort === 'material' || c.toPort === 'mat' || c.toPort === 'in')) ||
+                    (c.fromNode === chargeNode3D!.id && (c.fromPort === 'material' || c.fromPort === 'mat' || c.fromPort === 'out'))
+                );
+                let matNode: Node | undefined = undefined;
+                if (matConn) {
+                    const mId = matConn.toNode === chargeNode3D!.id ? matConn.fromNode : matConn.toNode;
+                    matNode = state.nodes.find(n => n.id === mId);
+                } else if (chargeNode3D!.parameters?.material) {
+                    matNode = state.nodes.find(n => n.id === chargeNode3D!.parameters.material);
+                }
+
+                if (!matNode) {
+                    addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
+                } else if (matNode.type !== 'Material') {
+                    if (matConn) {
+                        const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
+                        flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
+                    }
+                    addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
                 } else {
-                    const matConn = state.connections.find(c => c.toNode === chargeNode3D.id && c.toPort === 'material');
-                    if (!matConn) {
-                        addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
-                    } else {
-                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || matNode.type !== 'Material') {
-                            const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
-                            flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
-                            addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
-                        } else {
-                            if (!isJWLMaterial(matNode)) {
-                                addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in JWL mode requires a 'JWL Detonation Gas' material connected to the Charge node.");
-                            }
-                        }
+                    if (!isJWLMaterial(matNode)) {
+                        addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in JWL mode requires a 'JWL Detonation Gas' material connected to the Charge node.");
                     }
                 }
             }
 
             // Detonator connection check
-            const detConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'detonator');
-            if (!detConn3D) {
-                addMessage(solver3D.id, 'error', "No Detonator node connected to CFD Solver 3D. A DetonatorLocation3D node is required for Multi-Material JWL mode.");
+            const detConn3D = state.connections.find(c => 
+                (c.toNode === solver3D.id && (c.toPort === 'detonator' || c.toPort === 'trigger')) ||
+                (c.fromNode === solver3D.id && (c.fromPort === 'detonator' || c.fromPort === 'trigger'))
+            );
+            let detNode3D: Node | undefined = undefined;
+            if (detConn3D) {
+                const dId = detConn3D.toNode === solver3D.id ? detConn3D.fromNode : detConn3D.toNode;
+                detNode3D = state.nodes.find(n => n.id === dId);
+            } else if (solver3D.parameters?.connected_detonators) {
+                detNode3D = state.nodes.find(n => n.id === solver3D.parameters.connected_detonators);
             } else {
-                const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
-                if (!detNode3D || detNode3D.type !== 'DetonatorLocation3D') {
+                detNode3D = state.nodes.find(n => n.type === 'DetonatorLocation3D');
+            }
+
+            if (!detNode3D) {
+                addMessage(solver3D.id, 'error', "No Detonator node connected to CFD Solver 3D. A DetonatorLocation3D node is required for Multi-Material JWL mode.");
+            } else if (detNode3D.type !== 'DetonatorLocation3D') {
+                if (detConn3D) {
                     const connKey = `${detConn3D.fromNode}:${detConn3D.fromPort}->${detConn3D.toNode}:${detConn3D.toPort}`;
                     flawedConnections.set(connKey, "Only DetonatorLocation3D node can be connected to the Detonator input of CFD Solver 3D.");
-                    addMessage(solver3D.id, 'error', "Only DetonatorLocation3D node can be connected to the Detonator input of CFD Solver 3D.");
                 }
+                addMessage(solver3D.id, 'error', "Only DetonatorLocation3D node can be connected to the Detonator input of CFD Solver 3D.");
             }
 
             // Ignored inputs warning
@@ -624,30 +706,50 @@ export function validateSimulationState(state: SimulationState): ValidationResul
 
         } else if (initMode3D === 'Ideal Gas') {
             // Charge 3D connection check
-            const chargeConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'charge');
-            if (!chargeConn3D) {
+            const chargeConn3D = state.connections.find(c => 
+                (c.toNode === solver3D.id && (c.toPort === 'charge' || c.toPort === 'explosive')) ||
+                (c.fromNode === solver3D.id && (c.fromPort === 'charge' || c.fromPort === 'explosive'))
+            );
+            let chargeNode3D: Node | undefined = undefined;
+            if (chargeConn3D) {
+                const chgId = chargeConn3D.toNode === solver3D.id ? chargeConn3D.fromNode : chargeConn3D.toNode;
+                chargeNode3D = state.nodes.find(n => n.id === chgId);
+            } else if (solver3D.parameters?.explosive_charge) {
+                chargeNode3D = state.nodes.find(n => n.id === solver3D.parameters.explosive_charge);
+            }
+
+            if (!chargeNode3D) {
                 addMessage(solver3D.id, 'error', "No Charge node connected to CFD Solver 3D. A Charge3D node is required for Ideal Gas mode.");
-            } else {
-                const chargeNode3D = state.nodes.find(n => n.id === chargeConn3D.fromNode);
-                if (!chargeNode3D || chargeNode3D.type !== 'Charge3D') {
+            } else if (chargeNode3D.type !== 'Charge3D') {
+                if (chargeConn3D) {
                     const connKey = `${chargeConn3D.fromNode}:${chargeConn3D.fromPort}->${chargeConn3D.toNode}:${chargeConn3D.toPort}`;
                     flawedConnections.set(connKey, "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
-                    addMessage(solver3D.id, 'error', "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+                }
+                addMessage(solver3D.id, 'error', "Only Charge3D node can be connected to the Charge input of CFD Solver 3D.");
+            } else {
+                const matConn = state.connections.find(c => 
+                    (c.toNode === chargeNode3D!.id && (c.toPort === 'material' || c.toPort === 'mat' || c.toPort === 'in')) ||
+                    (c.fromNode === chargeNode3D!.id && (c.fromPort === 'material' || c.fromPort === 'mat' || c.fromPort === 'out'))
+                );
+                let matNode: Node | undefined = undefined;
+                if (matConn) {
+                    const mId = matConn.toNode === chargeNode3D!.id ? matConn.fromNode : matConn.toNode;
+                    matNode = state.nodes.find(n => n.id === mId);
+                } else if (chargeNode3D!.parameters?.material) {
+                    matNode = state.nodes.find(n => n.id === chargeNode3D!.parameters.material);
+                }
+
+                if (!matNode) {
+                    addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
+                } else if (matNode.type !== 'Material') {
+                    if (matConn) {
+                        const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
+                        flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
+                    }
+                    addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
                 } else {
-                    const matConn = state.connections.find(c => c.toNode === chargeNode3D.id && c.toPort === 'material');
-                    if (!matConn) {
-                        addMessage(chargeNode3D.id, 'error', "No Material connected to Charge 3D.");
-                    } else {
-                        const matNode = state.nodes.find(n => n.id === matConn.fromNode);
-                        if (!matNode || matNode.type !== 'Material') {
-                            const connKey = `${matConn.fromNode}:${matConn.fromPort}->${matConn.toNode}:${matConn.toPort}`;
-                            flawedConnections.set(connKey, "Only Material node can be connected to the Material input of Charge 3D.");
-                            addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
-                        } else {
-                            if (!isIdealGasChargeMaterial(matNode)) {
-                                addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in Ideal Gas mode requires an 'Ideal Gas' material connected to the Charge node.");
-                            }
-                        }
+                    if (!isIdealGasChargeMaterial(matNode)) {
+                        addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in Ideal Gas mode requires an 'Ideal Gas' material connected to the Charge node.");
                     }
                 }
             }
@@ -661,6 +763,19 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     const connectedNode = state.nodes.find(n => n.id === conn.fromNode);
                     if (connectedNode) {
                         addMessage(connectedNode.id, 'warning', `This node is ignored because the connected CFD Solver 3D Init Mode is 'Ideal Gas'.`);
+                    }
+                }
+            });
+        } else if (initMode3D === 'Hydrostatic_Stratified_3D') {
+            // Remap input is ignored in Hydrostatic_Stratified_3D mode (closed-form 3-zone equilibrium)
+            const ignoredPorts = ['remap'];
+            ignoredPorts.forEach(port => {
+                const conn = state.connections.find(c => c.toNode === solver3D.id && c.toPort === port);
+                if (conn) {
+                    addMessage(solver3D.id, 'warning', `Input connected to '${port}' port is ignored when Init Mode is 'Hydrostatic_Stratified_3D'.`);
+                    const connectedNode = state.nodes.find(n => n.id === conn.fromNode);
+                    if (connectedNode) {
+                        addMessage(connectedNode.id, 'warning', `This node is ignored because the connected CFD Solver 3D Init Mode is 'Hydrostatic_Stratified_3D'.`);
                     }
                 }
             });
@@ -802,27 +917,44 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
 
         if (node.type === 'FEMDomain3D') {
-            const meshConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'mesh');
-            if (meshConn) {
-                const meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
-                if (meshNode && meshNode.type !== 'DomainMesh3D') {
-                    addMessage(node.id, 'error', "Only DomainMesh3D can be connected to the Hex Mesh input of FEM Domain 3D.");
-                }
+            const hasStructuralConn = state.connections.some(c =>
+                c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'parts' || c.toPort === 'elements' || c.toPort === 'in')
+            );
+            if (!hasStructuralConn) {
+                addMessage(node.id, 'error', "No structural mesh connected to 3D FEM Domain. Connect an LSDynaImporter3D, FEMObject3D, FEMBeam3D, or FEMRebar3D node to the 'Structural Mesh / Parts' input.");
             }
-            const objConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'objects');
-            if (!objConn) {
-                addMessage(node.id, 'error', "No FEM Object connected to FEM Domain 3D. At least one FEM Object 3D or LS-DYNA Importer node is required.");
+        }
+
+        if (node.type === 'LSDynaImporter3D') {
+            const kFile = String(node.parameters['k_file'] || '').trim();
+            if (!kFile) {
+                addMessage(node.id, 'warning', "No LS-DYNA keyword file specified (*.k / *.key).");
+            }
+            const outConn = state.connections.find(c => c.fromNode === node.id);
+            if (!outConn) {
+                addMessage(node.id, 'warning', "LS-DYNA Importer is not connected to a 3D FEM Domain node.");
             }
         }
 
         if (node.type === 'FEMObject3D') {
-            const matConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'material');
-            if (!matConn) {
-                addMessage(node.id, 'error', "No Material connected to FEM Object 3D.");
+            const matConn = state.connections.find(c => 
+                (c.toNode === node.id && (c.toPort === 'material' || c.toPort === 'mat' || c.toPort === 'in')) ||
+                (c.fromNode === node.id && (c.fromPort === 'material' || c.fromPort === 'mat' || c.fromPort === 'out'))
+            );
+            const domainConns = state.connections.filter(c => 
+                ((c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'parts' || c.toPort === 'elements' || c.toPort === 'in')) ||
+                 (c.toNode === node.id && (c.fromPort === 'mesh' || c.fromPort === 'objects' || c.fromPort === 'parts' || c.fromPort === 'elements' || c.fromPort === 'out')))
+            );
+            const domainHasMat = domainConns.some(dc => {
+                const targetDomainId = dc.fromNode === node.id ? dc.toNode : dc.fromNode;
+                return state.connections.some(c2 => (c2.toNode === targetDomainId || c2.fromNode === targetDomainId) && (c2.toPort === 'material' || c2.fromPort === 'material' || c2.toPort === 'mat' || c2.fromPort === 'mat'));
+            });
+            if (!matConn && !domainHasMat && !node.parameters?.['material']) {
+                addMessage(node.id, 'warning', "No Material connected to FEM Object 3D or target FEM Domain.");
             }
-            const outConn = state.connections.find(c => c.fromNode === node.id);
+            const outConn = state.connections.find(c => c.fromNode === node.id || c.toNode === node.id);
             if (!outConn) {
-                addMessage(node.id, 'warning', "FEM Object 3D is not connected to a FEM Domain 3D node.");
+                addMessage(node.id, 'warning', "FEM Object 3D is not connected to a 3D FEM Domain node.");
             }
             const meshSource = node.parameters['mesh_source'] || 'Box Generator';
             const shape = node.parameters['shape_type'] || 'Box';
@@ -871,23 +1003,81 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
+        if (node.type === 'MarineHarbourDomain') {
+            const waterZ = Number(node.parameters?.water_surface_z ?? 10.0);
+            const seabedZ = Number(node.parameters?.seabed_surface_z ?? 2.0);
+            const sleeveR = Number(node.parameters?.nearfield_sleeve_radius ?? 2.5);
+
+            if (isNaN(waterZ)) addMessage(node.id, 'error', "Water surface elevation must be a valid number.");
+            if (isNaN(seabedZ)) addMessage(node.id, 'error', "Seabed mudline elevation must be a valid number.");
+            if (seabedZ >= waterZ) {
+                addMessage(node.id, 'error', `Seabed mudline elevation (z = ${seabedZ} m) must be strictly below water surface elevation (z = ${waterZ} m).`);
+            }
+            if (isNaN(sleeveR) || sleeveR <= 0) {
+                addMessage(node.id, 'error', "Near-field MPM water sleeve radius must be greater than 0.");
+            }
+
+            const meshConn = state.connections.find(c => (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in')) || (c.fromNode === node.id && c.fromPort === 'mesh'));
+            if (!meshConn) {
+                addMessage(node.id, 'error', "No background grid connected to Marine Harbour Domain. A DomainMesh3D node is required.");
+            } else {
+                const otherId = meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode;
+                const meshNode = state.nodes.find(n => n.id === otherId);
+                if (!meshNode || meshNode.type !== 'DomainMesh3D') {
+                    addMessage(node.id, 'error', "Only DomainMesh3D node can be connected to the Mesh input of Marine Harbour Domain.");
+                } else {
+                    const seabedMeshType = node.parameters?.seabed_mesh_type || 'Hybrid_MPM_Crater_FEM_FarField';
+                    const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                    const zmax = Number(meshNode.parameters?.zmax ?? (zmin + 1.0));
+                    if (seabedMeshType === 'Pure_FV' && zmin >= seabedZ) {
+                        addMessage(node.id, 'warning', `Seabed Foundation is set to Pure Eulerian FV, but the background grid (DomainMesh3D) does not extend below the mudline (zmin = ${zmin} m >= seabed mudline = ${seabedZ} m). No seabed grid cells exist in the computational domain; the bottom boundary will act as a rigid reflecting wall. Extend DomainMesh3D zmin below ${seabedZ} m to simulate shock penetration into the seabed.`);
+                    }
+                    if (zmax <= waterZ) {
+                        addMessage(node.id, 'warning', `Water surface elevation (z = ${waterZ} m) is at or above the top boundary of DomainMesh3D (zmax = ${zmax} m). No atmospheric air cells exist above the water column.`);
+                    }
+                }
+            }
+
+            const airConn = state.connections.find(c => 
+                (c.toNode === node.id && (c.toPort === 'air' || c.toPort === 'ambient_air')) || 
+                (c.fromNode === node.id && (c.fromPort === 'air' || c.fromPort === 'ambient_air'))
+            );
+            if (!airConn && !node.parameters?.['ambient_air_material']) {
+                addMessage(node.id, 'warning', "No atmospheric air material connected to Marine Harbour Domain (air port). Ideal Gas air will default to standard sea-level thermodynamics.");
+            }
+
+            const waterConn = state.connections.find(c => 
+                (c.toNode === node.id && (c.toPort === 'water' || c.toPort === 'seawater')) || 
+                (c.fromNode === node.id && (c.fromPort === 'water' || c.fromPort === 'seawater'))
+            );
+            if (!waterConn && !node.parameters?.['seawater_material']) {
+                addMessage(node.id, 'warning', "No seawater material connected to Marine Harbour Domain (water port). Tait seawater will default to standard ocean salinity.");
+            }
+        }
+
         if (node.type === 'MPMObject2D') {
-            const matConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'material');
-            if (!matConn) {
+            const matConn = state.connections.find(c => 
+                (c.toNode === node.id && (c.toPort === 'material' || c.toPort === 'mat' || c.toPort === 'in')) ||
+                (c.fromNode === node.id && (c.fromPort === 'material' || c.fromPort === 'mat' || c.fromPort === 'out'))
+            );
+            if (!matConn && !node.parameters?.['material']) {
                 addMessage(node.id, 'error', "No Material connected to MPM Object 2D. A Material or Solid Material node is required.");
             }
-            const outConn = state.connections.find(c => c.fromNode === node.id);
+            const outConn = state.connections.find(c => c.fromNode === node.id || c.toNode === node.id);
             if (!outConn) {
                 addMessage(node.id, 'warning', "MPM Object 2D is not connected to an MPM Domain 2D node.");
             }
         }
 
         if (node.type === 'MPMObject3D') {
-            const matConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'material');
-            if (!matConn) {
+            const matConn = state.connections.find(c => 
+                (c.toNode === node.id && (c.toPort === 'material' || c.toPort === 'mat' || c.toPort === 'in')) ||
+                (c.fromNode === node.id && (c.fromPort === 'material' || c.fromPort === 'mat' || c.fromPort === 'out'))
+            );
+            if (!matConn && !node.parameters?.['material']) {
                 addMessage(node.id, 'error', "No Material connected to MPM Object 3D. A Material or Solid Material node is required.");
             }
-            const outConn = state.connections.find(c => c.fromNode === node.id);
+            const outConn = state.connections.find(c => c.fromNode === node.id || c.toNode === node.id);
             if (!outConn) {
                 addMessage(node.id, 'warning', "MPM Object 3D is not connected to an MPM Domain 3D node.");
             }
@@ -960,7 +1150,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     n.type === 'TriggerLocation'
                 );
                 if (!hasDetonator) {
-                    addMessage(node.id, 'warning', "JWL Programmed Burn requires at least one Detonator / Trigger node in the model to initiate detonation wavefront.");
+                    addMessage(node.id, 'warning', "JWL Programmed Burn requires at least one Detonator node in the model to initiate detonation wavefront.");
                 }
             } else if (matModel === 'Lee-Tarver Ignition & Growth') {
                 const rho = Number(node.parameters?.density ?? node.parameters?.rho ?? 1850);
@@ -982,7 +1172,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     n.type === 'TriggerLocation'
                 );
                 if (!hasDetonator) {
-                    addMessage(node.id, 'warning', "Lee-Tarver Ignition & Growth requires at least one Detonator / Trigger node in the model to initiate detonation wavefront.");
+                    addMessage(node.id, 'warning', "Lee-Tarver Ignition & Growth requires at least one Detonator node in the model to initiate detonation wavefront.");
                 }
             } else if (matType === 'Ideal Gas Charge') {
                 const ideal_gamma = Number(node.parameters?.ideal_gamma ?? 1.4);
@@ -1011,7 +1201,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                         n.type === 'TriggerLocation'
                     );
                     if (!hasDetonator) {
-                        addMessage(node.id, 'warning', "CREST Reactive Burn requires at least one Detonator / Trigger node in the model to initiate detonation wavefront.");
+                        addMessage(node.id, 'warning', "CREST Reactive Burn requires at least one Detonator node in the model to initiate detonation wavefront.");
                     }
                 } else if (matModel !== 'RHT Concrete' && matModel !== 'Karagozian & Case (K&C)' && matModel !== 'CSCM Concrete') {
                     const E = Number(node.parameters?.youngs_modulus ?? 200e9);
@@ -1069,7 +1259,10 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
 
         if (node.type === 'DetonatorLocation') {
-            const detConn = state.connections.find(c => c.fromNode === node.id && c.fromPort === 'detonator');
+            const detConn = state.connections.find(c => 
+                (c.fromNode === node.id && (c.toPort === 'detonator' || c.toPort === 'trigger')) ||
+                (c.toNode === node.id && (c.fromPort === 'detonator' || c.fromPort === 'trigger'))
+            );
             const det_radius = Number(node.parameters?.detonator_radius !== undefined ? node.parameters.detonator_radius : (node.parameters.explosive_radius ?? 0.001));
             const det_z = Number(node.parameters?.detonator_z !== undefined ? node.parameters.detonator_z : (node.parameters.explosive_z ?? 0.0));
             const det_r = Number(node.parameters?.detonator_r !== undefined ? node.parameters.detonator_r : (node.parameters.explosive_r ?? 0.0));
@@ -1078,44 +1271,61 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 addMessage(node.id, 'error', "Detonator radius must be greater than 0.");
             }
 
-            // Cross-validation with connected mesh
-            if (detConn) {
-                const connectedSolver = state.nodes.find(n => n.id === detConn.toNode);
-                if (connectedSolver && (connectedSolver.type === 'CFDSolver2D' || connectedSolver.type === 'MPMDomain2D')) {
-                    const meshConn2D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
-                    if (meshConn2D) {
-                        const meshNode = state.nodes.find(n => n.id === meshConn2D.fromNode);
-                        if (meshNode && meshNode.type === 'DomainMesh2D') {
-                            const max_r = Number(meshNode.parameters?.max_r ?? 1.0);
-                            const max_z = Number(meshNode.parameters?.max_z ?? 1.0);
+            const targetSolverId = detConn 
+                ? (detConn.fromNode === node.id ? detConn.toNode : detConn.fromNode)
+                : (node.parameters?.target_domain || '');
+            const connectedSolver = targetSolverId ? state.nodes.find(n => n.id === targetSolverId) : null;
 
-                            if (det_z < 0 || det_z > max_z) {
-                                addMessage(node.id, 'warning', `Detonator position (z = ${det_z}) is outside the mesh domain [0, ${max_z}].`);
-                            }
-                            if (det_r < 0 || det_r > max_r) {
-                                addMessage(node.id, 'warning', `Detonator position (r = ${det_r}) is outside the mesh domain [0, ${max_r}].`);
-                            }
-                            if (det_radius > max_r) {
-                                addMessage(node.id, 'warning', `Detonator radius (${det_radius}) exceeds mesh max R (${max_r}).`);
-                            }
-                        }
+            if (!connectedSolver) {
+                addMessage(node.id, 'warning', "DetonatorLocation is not connected to a solver domain or explosive charge.");
+            } else if (connectedSolver.type === 'CFDSolver2D' || connectedSolver.type === 'MPMDomain2D') {
+                const meshConn2D = state.connections.find(c => 
+                    (c.toNode === connectedSolver.id && (c.toPort === 'mesh' || c.toPort === 'in')) ||
+                    (c.fromNode === connectedSolver.id && (c.fromPort === 'mesh' || c.fromPort === 'in'))
+                );
+                const meshId = meshConn2D ? (meshConn2D.toNode === connectedSolver.id ? meshConn2D.fromNode : meshConn2D.toNode) : (connectedSolver.parameters?.mesh || '');
+                const meshNode = meshId ? state.nodes.find(n => n.id === meshId) : null;
+                if (meshNode && meshNode.type === 'DomainMesh2D') {
+                    const max_r = Number(meshNode.parameters?.max_r ?? 1.0);
+                    const max_z = Number(meshNode.parameters?.max_z ?? 1.0);
+
+                    if (det_z < 0 || det_z > max_z) {
+                        addMessage(node.id, 'warning', `Detonator position (z = ${det_z}) is outside the mesh domain [0, ${max_z}].`);
+                    }
+                    if (det_r < 0 || det_r > max_r) {
+                        addMessage(node.id, 'warning', `Detonator position (r = ${det_r}) is outside the mesh domain [0, ${max_r}].`);
+                    }
+                    if (det_radius > max_r) {
+                        addMessage(node.id, 'warning', `Detonator radius (${det_radius}) exceeds mesh max R (${max_r}).`);
                     }
                 }
             }
         }
 
         if (node.type === 'DetonatorLocation3D') {
-            const detConn = state.connections.find(c => c.fromNode === node.id && c.fromPort === 'detonator');
+            const detConn = state.connections.find(c => 
+                (c.fromNode === node.id && (c.toPort === 'detonator' || c.toPort === 'trigger')) ||
+                (c.toNode === node.id && (c.fromPort === 'detonator' || c.fromPort === 'trigger'))
+            );
             const detX = Number(node.parameters?.detonator_x ?? 0.5);
             const detY = Number(node.parameters?.detonator_y ?? 0.5);
             const detZ = Number(node.parameters?.detonator_z ?? 0.5);
 
-            // Cross-validation with connected or solver mesh
-            const connectedSolver = detConn ? state.nodes.find(n => n.id === detConn.toNode) :
-                state.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D');
-            if (connectedSolver && (connectedSolver.type === 'CFDSolver3D' || connectedSolver.type === 'MPMDomain3D')) {
-                const meshConn3D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
-                const meshNode = meshConn3D ? state.nodes.find(n => n.id === meshConn3D.fromNode) : state.nodes.find(n => n.type === 'DomainMesh3D');
+            // Cross-validation with connected or targeted solver
+            const targetSolverId = detConn 
+                ? (detConn.fromNode === node.id ? detConn.toNode : detConn.fromNode) 
+                : (node.parameters?.target_domain || '');
+            const connectedSolver = targetSolverId ? state.nodes.find(n => n.id === targetSolverId) : null;
+
+            if (!connectedSolver) {
+                addMessage(node.id, 'warning', "DetonatorLocation3D is not connected to a solver domain or explosive charge. Click to assign target domain.");
+            } else if (connectedSolver.type === 'CFDSolver3D' || connectedSolver.type === 'MPMDomain3D' || connectedSolver.type === 'MarineHarbourDomain') {
+                const meshConn3D = state.connections.find(c => 
+                    (c.toNode === connectedSolver.id && (c.toPort === 'mesh' || c.toPort === 'in')) ||
+                    (c.fromNode === connectedSolver.id && (c.fromPort === 'mesh' || c.fromPort === 'in'))
+                );
+                const meshId = meshConn3D ? (meshConn3D.toNode === connectedSolver.id ? meshConn3D.fromNode : meshConn3D.toNode) : (connectedSolver.parameters?.mesh || '');
+                const meshNode = meshId ? state.nodes.find(n => n.id === meshId) : null;
                 if (meshNode && meshNode.type === 'DomainMesh3D') {
                     const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
                     const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
@@ -1144,16 +1354,43 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
 
             // Connection checks
-            const inConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
-            if (!inConn) {
-                addMessage(node.id, 'error', "Remap node is not connected to a 1D CFD Solver.");
-            } else {
-                const fromNode = state.nodes.find(n => n.id === inConn.fromNode);
-                if (!fromNode || fromNode.type !== 'CFDSolver') {
-                    const connKey = `${inConn.fromNode}:${inConn.fromPort}->${inConn.toNode}:${inConn.toPort}`;
-                    flawedConnections.set(connKey, "Only 1D CFD Solver can be connected to the input of this Remap node.");
-                    addMessage(node.id, 'error', "Only 1D CFD Solver can be connected to the input of this Remap node.");
+            const globalSM = (typeof window !== 'undefined' && (window as any).stateManager) ? (window as any).stateManager : null;
+            let hasValidUpstream = false;
+
+            if (node.parameters?.source_model_id && globalSM) {
+                const allModels = globalSM.getAllModels?.() || [];
+                const src = allModels.find((m: any) => m.id === node.parameters.source_model_id);
+                if (src && src.nodes.some((n: any) => n.type === 'CFDSolver')) {
+                    hasValidUpstream = true;
                 }
+            }
+
+            if (!hasValidUpstream && globalSM) {
+                const ws = globalSM.getActiveWorkspace?.();
+                if (ws && ws.connections) {
+                    const wsConn = ws.connections.find((c: any) => c.toNode === node.id);
+                    if (wsConn) {
+                        const allModels = globalSM.getAllModels?.() || [];
+                        const fromModel = allModels.find((m: any) => m.nodes.some((n: any) => n.id === wsConn.fromNode));
+                        if (fromModel && fromModel.nodes.some((n: any) => n.type === 'CFDSolver')) {
+                            hasValidUpstream = true;
+                        }
+                    }
+                }
+            }
+
+            if (!hasValidUpstream) {
+                const inConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
+                if (inConn) {
+                    const fromNode = state.nodes.find(n => n.id === inConn.fromNode);
+                    if (fromNode && fromNode.type === 'CFDSolver') {
+                        hasValidUpstream = true;
+                    }
+                }
+            }
+
+            if (!hasValidUpstream) {
+                addMessage(node.id, 'error', "Remap node has no upstream source specified. Select a Source Model in the Inspector or wire an upstream 1D CFD Solver.");
             }
         }
 
@@ -1164,16 +1401,43 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
 
             // Connection checks
-            const inConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
-            if (!inConn) {
-                addMessage(node.id, 'error', "Remap 2D->3D node is not connected to a 2D CFD Solver.");
-            } else {
-                const fromNode = state.nodes.find(n => n.id === inConn.fromNode);
-                if (!fromNode || fromNode.type !== 'CFDSolver2D') {
-                    const connKey = `${inConn.fromNode}:${inConn.fromPort}->${inConn.toNode}:${inConn.toPort}`;
-                    flawedConnections.set(connKey, "Only 2D CFD Solver (CFDSolver2D) can be connected to the input of Remap 2D->3D node.");
-                    addMessage(node.id, 'error', "Only 2D CFD Solver (CFDSolver2D) can be connected to the input of Remap 2D->3D node.");
+            const globalSM = (typeof window !== 'undefined' && (window as any).stateManager) ? (window as any).stateManager : null;
+            let hasValidUpstream = false;
+
+            if (node.parameters?.source_model_id && globalSM) {
+                const allModels = globalSM.getAllModels?.() || [];
+                const src = allModels.find((m: any) => m.id === node.parameters.source_model_id);
+                if (src && src.nodes.some((n: any) => n.type === 'CFDSolver2D')) {
+                    hasValidUpstream = true;
                 }
+            }
+
+            if (!hasValidUpstream && globalSM) {
+                const ws = globalSM.getActiveWorkspace?.();
+                if (ws && ws.connections) {
+                    const wsConn = ws.connections.find((c: any) => c.toNode === node.id);
+                    if (wsConn) {
+                        const allModels = globalSM.getAllModels?.() || [];
+                        const fromModel = allModels.find((m: any) => m.nodes.some((n: any) => n.id === wsConn.fromNode));
+                        if (fromModel && fromModel.nodes.some((n: any) => n.type === 'CFDSolver2D')) {
+                            hasValidUpstream = true;
+                        }
+                    }
+                }
+            }
+
+            if (!hasValidUpstream) {
+                const inConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
+                if (inConn) {
+                    const fromNode = state.nodes.find(n => n.id === inConn.fromNode);
+                    if (fromNode && fromNode.type === 'CFDSolver2D') {
+                        hasValidUpstream = true;
+                    }
+                }
+            }
+
+            if (!hasValidUpstream) {
+                addMessage(node.id, 'error', "Remap 2D->3D node has no upstream source specified. Select a Source Model in the Inspector or wire an upstream 2D CFD Solver.");
             }
 
             // Cross-validation with 2D mesh dimensions
@@ -1234,24 +1498,32 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
 
             // Cross-validation with connected mesh
-            const chargeConn = state.connections.find(c => c.fromNode === node.id && c.fromPort === 'out');
-            if (chargeConn) {
-                const connectedSolver = state.nodes.find(n => n.id === chargeConn.toNode);
-                if (connectedSolver && connectedSolver.type === 'CFDSolver3D') {
-                    const meshConn3D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
-                    if (meshConn3D) {
-                        const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
-                        if (meshNode && meshNode.type === 'DomainMesh3D') {
-                            const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
-                            const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
-                            const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
-                            const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
-                            const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
-                            const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+            const chargeConn = state.connections.find(c => 
+                (c.fromNode === node.id && (c.toPort === 'charge' || c.toPort === 'explosive' || c.toPort === 'out' || c.toPort === 'in')) ||
+                (c.toNode === node.id && (c.fromPort === 'charge' || c.fromPort === 'explosive' || c.fromPort === 'out' || c.fromPort === 'in'))
+            );
+            const targetSolverId = chargeConn 
+                ? (chargeConn.fromNode === node.id ? chargeConn.toNode : chargeConn.fromNode)
+                : (node.parameters?.target_domain || '');
+            if (targetSolverId) {
+                const connectedSolver = state.nodes.find(n => n.id === targetSolverId);
+                if (connectedSolver && (connectedSolver.type === 'CFDSolver3D' || connectedSolver.type === 'MarineHarbourDomain' || connectedSolver.type === 'MPMDomain3D')) {
+                    const meshConn3D = state.connections.find(c => 
+                        (c.toNode === connectedSolver.id && (c.toPort === 'mesh' || c.toPort === 'in')) ||
+                        (c.fromNode === connectedSolver.id && (c.fromPort === 'mesh' || c.fromPort === 'in'))
+                    );
+                    const meshId = meshConn3D ? (meshConn3D.toNode === connectedSolver.id ? meshConn3D.fromNode : meshConn3D.toNode) : (connectedSolver.parameters?.mesh || '');
+                    const meshNode = meshId ? state.nodes.find(n => n.id === meshId) : null;
+                    if (meshNode && meshNode.type === 'DomainMesh3D') {
+                        const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                        const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                        const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                        const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                        const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                        const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
 
-                            if (cx < xmin || cx > xmax || cy < ymin || cy > ymax || cz < zmin || cz > zmax) {
-                                addMessage(node.id, 'warning', `Charge center (${cx}, ${cy}, ${cz}) is outside the mesh domain.`);
-                            }
+                        if (cx < xmin || cx > xmax || cy < ymin || cy > ymax || cz < zmin || cz > zmax) {
+                            addMessage(node.id, 'warning', `Charge center (${cx}, ${cy}, ${cz}) is outside the mesh domain.`);
                         }
                     }
                 }
@@ -1357,7 +1629,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             } else {
                 connList.forEach(conn => {
                     const fromNode = state.nodes.find(n => n.id === conn.fromNode);
-                    const solverTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'MPMDomain3D', 'FSICoupler2D', 'FSICoupler3D', 'FEMDomain3D', 'FEMFSICoupler3D'];
+                    const solverTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'MPMDomain3D', 'FSICoupler2D', 'FSICoupler3D', 'FEMDomain3D', 'FEMFSICoupler3D', 'MarineHarbourDomain'];
                     if (!fromNode || !solverTypes.includes(fromNode.type)) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, "TelemetryText must be connected to a solver or coupler source.");
@@ -1372,19 +1644,19 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             } else {
                 const fromNode = state.nodes.find(n => n.id === conn.fromNode);
                 if (node.type === 'Telemetry3DViewport') {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler3D' && fromNode.type !== 'FEMDomain3D' && fromNode.type !== 'FEMFSICoupler3D')) {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler3D' && fromNode.type !== 'FEMDomain3D' && fromNode.type !== 'FEMFSICoupler3D' && fromNode.type !== 'MarineHarbourDomain')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, `${node.type} requires a 3D Solver or Coupler source.`);
                         addMessage(node.id, 'error', `${node.type} requires a 3D Solver or Coupler source.`);
                     }
                 } else if (node.type === 'TelemetryGraph' || node.type === 'VirtualGauges') {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler2D' && fromNode.type !== 'FSICoupler3D' && fromNode.type !== 'FEMDomain3D' && fromNode.type !== 'FEMFSICoupler3D')) {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler2D' && fromNode.type !== 'FSICoupler3D' && fromNode.type !== 'FEMDomain3D' && fromNode.type !== 'FEMFSICoupler3D' && fromNode.type !== 'MarineHarbourDomain')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, `${node.type} must be connected to a solver.`);
                         addMessage(node.id, 'error', `${node.type} must be connected to a solver.`);
                     }
                 } else {
-                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler2D' && fromNode.type !== 'FSICoupler3D' && fromNode.type !== 'FEMDomain3D' && fromNode.type !== 'FEMFSICoupler3D')) {
+                    if (!fromNode || (fromNode.type !== 'CFDSolver' && fromNode.type !== 'CFDSolver2D' && fromNode.type !== 'CFDSolver3D' && fromNode.type !== 'MPMDomain2D' && fromNode.type !== 'MPMDomain3D' && fromNode.type !== 'FSICoupler2D' && fromNode.type !== 'FSICoupler3D' && fromNode.type !== 'FEMDomain3D' && fromNode.type !== 'FEMFSICoupler3D' && fromNode.type !== 'MarineHarbourDomain')) {
                         const connKey = `${conn.fromNode}:${conn.fromPort}->${conn.toNode}:${conn.toPort}`;
                         flawedConnections.set(connKey, "Telemetry/Output must be connected to a solver.");
                         addMessage(node.id, 'error', "Telemetry/Output must be connected to a solver.");
@@ -1426,9 +1698,17 @@ export function validateSimulationState(state: SimulationState): ValidationResul
 
 
     // Generic validation check for missing/not-provided parameters
+    const connectionAndSystemKeys = new Set([
+        'output_dir', 'vtk_dir', 'gauges', 'slices', 'stl_file', 'geometry_hash', 'primitives', 'k_file',
+        'ambient_air_material', 'explosive_charge', 'target_domain', 'ambient_air_target', 'source_model_id',
+        'target_solver', 'remap', 'material', 'external_file_path', 'connected_detonators', 'seawater_material'
+    ]);
     state.nodes.forEach(node => {
         if (node.parameters) {
             for (const [key, value] of Object.entries(node.parameters)) {
+                if (connectionAndSystemKeys.has(key)) {
+                    continue;
+                }
                 if (!isParameterRelevant(node, key)) {
                     continue;
                 }
@@ -1448,7 +1728,8 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         const status = nodeStatus[node.id];
         if (status && status.state !== 'valid') {
             status.messages.forEach(msg => {
-                const prefix = status.state === 'error' ? 'Error' : 'Warning';
+                const itemSeverity = msgSeverityMap.get(`${node.id}:::${msg}`) || status.state;
+                const prefix = itemSeverity === 'error' ? 'Error' : 'Warning';
                 globalWarnings.push(`[${node.type} "${node.id}"] ${prefix}: ${msg}`);
             });
         }

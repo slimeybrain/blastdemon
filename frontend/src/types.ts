@@ -1,4 +1,4 @@
-export type NodeType = 'DomainMesh' | 'Material' | 'Charge1D' | 'Charge2D' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph' | 'DomainMesh2D' | 'DetonatorLocation' | 'TriggerLocation' | 'RemapNode' | 'Remap1DTo2DNode' | 'Remap1DTo3DNode' | 'Remap2DTo3DNode' | 'CFDSolver2D' | 'TelemetryContour' | 'VTKOutput' | 'HardwareConfig' | 'VirtualGauges' | 'DomainMesh3D' | 'Charge3D' | 'CFDSolver3D' | 'Telemetry3DViewport' | 'DetonatorLocation3D' | 'TriggerLocation3D' | 'STLGeometry' | 'PrimitiveGeometry3D' | 'Obstacle3D' | 'Obstacle' | 'MPMDomain2D' | 'MPMObject2D' | 'FSICoupler2D' | 'RefinementMesh3D' | 'MPMDomain3D' | 'MPMObject3D' | 'FSICoupler3D' | 'FEMDomain3D' | 'FEMObject3D' | 'FEMBeam3D' | 'FEMRebar3D' | 'LSDynaImporter3D' | 'FEMFSICoupler3D';
+export type NodeType = 'DomainMesh' | 'Material' | 'Charge1D' | 'Charge2D' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph' | 'DomainMesh2D' | 'DetonatorLocation' | 'TriggerLocation' | 'RemapNode' | 'Remap1DTo2DNode' | 'Remap1DTo3DNode' | 'Remap2DTo3DNode' | 'CFDSolver2D' | 'TelemetryContour' | 'VTKOutput' | 'HardwareConfig' | 'VirtualGauges' | 'VirtualGauges3D' | 'DomainMesh3D' | 'Charge3D' | 'CFDSolver3D' | 'Telemetry3DViewport' | 'DetonatorLocation3D' | 'TriggerLocation3D' | 'STLGeometry' | 'PrimitiveGeometry3D' | 'Obstacle3D' | 'Obstacle' | 'MPMDomain2D' | 'MPMObject2D' | 'FSICoupler2D' | 'MPMDomain3D' | 'MPMObject3D' | 'FSICoupler3D' | 'FEMDomain3D' | 'FEMObject3D' | 'FEMBeam3D' | 'FEMRebar3D' | 'LSDynaImporter3D' | 'FEMFSICoupler3D' | 'MarineHarbourDomain';
 
 
 export interface Port {
@@ -30,7 +30,7 @@ export interface Connection {
 export type SimulationStatus = 'UNINITIALIZED' | 'INITIALIZED' | 'RUNNING' | 'PAUSED' | 'TERMINATED' | 'ERROR' | 'INCOMPLETE';
 
 export type LayoutDirection = 'horizontal' | 'vertical';
-export type PanelType = 'MENU_BAR' | 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT' | 'NODE_VIEWER' | 'EXECUTION_MANAGER' | 'RESOURCE_MANAGER' | 'TELEMETRY_CONTOUR' | 'TELEMETRY_3D' | 'COMPARE_MODELS' | 'PIPELINE_BROWSER' | 'PROPERTY_GRID' | 'VIEWPORT' | 'TRANSPORT_BAR' | 'CLUSTER_MANAGER' | 'MULTI_VIEW_STAGE';
+export type PanelType = 'MENU_BAR' | 'OUTLINER' | 'NODE_GRAPH' | 'PROPERTIES' | 'TELEMETRY_GRAPH' | 'TELEMETRY_TEXT' | 'NODE_VIEWER' | 'EXECUTION_MANAGER' | 'RESOURCE_MANAGER' | 'TELEMETRY_CONTOUR' | 'TELEMETRY_3D' | 'COMPARE_MODELS' | 'PIPELINE_BROWSER' | 'PROPERTY_GRID' | 'VIEWPORT' | 'TRANSPORT_BAR' | 'CLUSTER_MANAGER' | 'MULTI_VIEW_STAGE' | 'VV_MANUAL';
 
 export interface SplitNode {
     type: 'split';
@@ -85,6 +85,7 @@ export interface ModelViewToggles {
     show_obstacles?: boolean;
     obstacles_opacity?: number;
     refresh_rate?: number;
+    fps?: number;
 }
 
 export interface ModelViewConfig {
@@ -156,6 +157,8 @@ export interface Model {
     connections: Connection[];
     views?: ModelViewConfig[];
     activeViewId?: string | null;
+    refresh_rate?: number;
+    fps?: number;
 }
 
 export interface Workspace {

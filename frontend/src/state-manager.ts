@@ -1,5 +1,6 @@
 import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection, NodeType, Port, ModelViewConfig, ModelViewCamera, ModelViewSlice, ModelViewToggles } from './types.js';
 import { MPM_MATERIAL_PRESETS, getPresetsForConstitutiveModel, getDefaultPresetForModel } from './mpm-presets.js';
+import { isAirMaterialNode } from './serialization.js';
 
 export function syncMPMMaterialParameters(node: Node, parameters: Record<string, any>, updatedKey?: string): void {
     if (node.type !== 'Material' && (node.type as any) !== 'MPMMaterialSteel' && (node.type as any) !== 'MPMMaterial' && (node.type as any) !== 'MaterialSteel') {
@@ -68,7 +69,36 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         if (parameters['jwl_omega'] === undefined) parameters['jwl_omega'] = 0.35;
         if (!parameters['composition']) parameters['composition'] = 'TNT';
 
-        const jwlKeys = ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'];
+        if (parameters['afterburn_enabled'] === undefined) {
+            if (currentPreset && MPM_MATERIAL_PRESETS[currentPreset]?.afterburn_enabled !== undefined) {
+                parameters['afterburn_enabled'] = MPM_MATERIAL_PRESETS[currentPreset].afterburn_enabled;
+                parameters['afterburn_energy'] = MPM_MATERIAL_PRESETS[currentPreset].afterburn_energy ?? 0.0;
+                parameters['afterburn_fuel_fraction'] = MPM_MATERIAL_PRESETS[currentPreset].afterburn_fuel_fraction ?? 0.0;
+                parameters['afterburn_stoich_ratio'] = MPM_MATERIAL_PRESETS[currentPreset].afterburn_stoich_ratio ?? 0.0;
+                parameters['afterburn_ignition_temp'] = MPM_MATERIAL_PRESETS[currentPreset].afterburn_ignition_temp ?? 600.0;
+                parameters['afterburn_tau_chem'] = MPM_MATERIAL_PRESETS[currentPreset].afterburn_tau_chem ?? 1.0e-5;
+                parameters['afterburn_c_edc'] = MPM_MATERIAL_PRESETS[currentPreset].afterburn_c_edc ?? 0.15;
+                parameters['afterburn_tau_expansion'] = MPM_MATERIAL_PRESETS[currentPreset].afterburn_tau_expansion ?? 0.0;
+                parameters['afterburn_ambient_o2_fraction'] = MPM_MATERIAL_PRESETS[currentPreset].afterburn_ambient_o2_fraction ?? 0.233;
+            } else {
+                parameters['afterburn_enabled'] = false;
+                parameters['afterburn_energy'] = 0.0;
+                parameters['afterburn_fuel_fraction'] = 0.0;
+                parameters['afterburn_stoich_ratio'] = 0.0;
+                parameters['afterburn_ignition_temp'] = 600.0;
+                parameters['afterburn_tau_chem'] = 1.0e-5;
+                parameters['afterburn_c_edc'] = 0.15;
+                parameters['afterburn_tau_expansion'] = 0.0;
+                parameters['afterburn_ambient_o2_fraction'] = 0.233;
+            }
+        }
+
+        const jwlKeys = [
+            'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
+            'afterburn_enabled', 'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
+            'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
+            'afterburn_ambient_o2_fraction'
+        ];
         if (updatedKey && jwlKeys.includes(updatedKey)) {
             parameters['preset'] = 'Custom';
         }
@@ -172,7 +202,10 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'transfer_scheme', 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
             'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+            'soil_friction_angle', 'soil_cohesion', 'k0_earth_pressure',
             'failure_strain', 'tensile_failure_stress',
+            'enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress',
+            'enable_timestep_erosion', 'timestep_erosion_factor',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
             'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
@@ -185,6 +218,9 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
             'det_vel', 'detonation_energy', 'burn_zone_cells', 'tau_burn_min',
             'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
+            'afterburn_enabled', 'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
+            'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
+            'afterburn_ambient_o2_fraction',
             'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_G2', 'lt_e', 'lt_g', 'lt_z',
             'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
             'directional_crack_band', 'nonlocal_radius',
@@ -210,6 +246,100 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         if (!parameters['product_model']) parameters['product_model'] = 'Davis Detonation Product';
     }
 
+    // Ensure active pillar defaults are populated when switching or customizing
+    const isEnergetic = ['JWL Programmed Burn', 'Lee-Tarver Ignition & Growth', 'CREST Reactive Burn', 'Davis Reactive Burn'].includes(modelName);
+    if (isEnergetic) {
+        const solid = parameters['solid_model'] || (modelName.includes('CREST') || modelName.includes('Davis') ? 'Davis Solid Reactant' : 'Mie-Grüneisen Shock Reactant');
+        if (solid.includes('Davis')) {
+            if (parameters['davis_c0'] === undefined) parameters['davis_c0'] = 2050.0;
+            if (parameters['davis_s1'] === undefined) parameters['davis_s1'] = 2.12;
+            if (parameters['davis_gamma0'] === undefined) parameters['davis_gamma0'] = 0.65;
+            if (parameters['davis_cv'] === undefined) parameters['davis_cv'] = 1000.0;
+            if (parameters['davis_t0'] === undefined) parameters['davis_t0'] = 293.0;
+            if (parameters['davis_rho0'] === undefined) parameters['davis_rho0'] = parameters['density'] || 1895.0;
+        } else {
+            if (parameters['mg_c0'] === undefined) parameters['mg_c0'] = 2500.0;
+            if (parameters['mg_s'] === undefined) parameters['mg_s'] = 1.5;
+            if (parameters['mg_gamma0'] === undefined) parameters['mg_gamma0'] = 1.0;
+        }
+
+        const burn = parameters['burn_model'] || (modelName === 'Lee-Tarver Ignition & Growth' ? 'Lee-Tarver 3-Stage ODE' : (modelName === 'CREST Reactive Burn' ? 'CREST Shock Entropy Kinetics' : 'Programmed Wavefront Burn'));
+        if (burn.includes('Lee-Tarver')) {
+            if (parameters['det_vel'] === undefined) parameters['det_vel'] = 6930.0;
+            if (parameters['detonation_energy'] === undefined) parameters['detonation_energy'] = 4.29e6;
+            if (parameters['lt_I'] === undefined) parameters['lt_I'] = 44.0;
+            if (parameters['lt_a'] === undefined) parameters['lt_a'] = 0.667;
+            if (parameters['lt_b'] === undefined) parameters['lt_b'] = 0.667;
+            if (parameters['lt_x'] === undefined) parameters['lt_x'] = 7.0;
+            if (parameters['lt_G1'] === undefined) parameters['lt_G1'] = 8.5e-6;
+            if (parameters['lt_c'] === undefined) parameters['lt_c'] = 0.667;
+            if (parameters['lt_d'] === undefined) parameters['lt_d'] = 0.333;
+            if (parameters['lt_y'] === undefined) parameters['lt_y'] = 2.0;
+            if (parameters['lt_G2'] === undefined) parameters['lt_G2'] = 400.0e-6;
+            if (parameters['lt_e'] === undefined) parameters['lt_e'] = 0.333;
+            if (parameters['lt_g'] === undefined) parameters['lt_g'] = 0.667;
+            if (parameters['lt_z'] === undefined) parameters['lt_z'] = 3.0;
+            if (parameters['lt_F_ig_max'] === undefined) parameters['lt_F_ig_max'] = 0.02;
+            if (parameters['lt_F_G1_max'] === undefined) parameters['lt_F_G1_max'] = 0.50;
+            if (parameters['lt_F_G2_min'] === undefined) parameters['lt_F_G2_min'] = 0.50;
+        } else if (burn.includes('CREST')) {
+            if (parameters['crest_b1'] === undefined) parameters['crest_b1'] = 1.2e7;
+            if (parameters['crest_c1'] === undefined) parameters['crest_c1'] = 0.67;
+            if (parameters['crest_m1'] === undefined) parameters['crest_m1'] = 2.5;
+            if (parameters['crest_b2'] === undefined) parameters['crest_b2'] = 3.5e6;
+            if (parameters['crest_c2'] === undefined) parameters['crest_c2'] = 0.50;
+            if (parameters['crest_c3'] === undefined) parameters['crest_c3'] = 0.67;
+            if (parameters['crest_m2'] === undefined) parameters['crest_m2'] = 1.5;
+            if (parameters['crest_s0'] === undefined) parameters['crest_s0'] = 100.0;
+            if (parameters['crest_s_threshold'] === undefined) parameters['crest_s_threshold'] = 45.0;
+        } else {
+            if (parameters['det_vel'] === undefined) parameters['det_vel'] = 6930.0;
+            if (parameters['detonation_energy'] === undefined) parameters['detonation_energy'] = 4.29e6;
+            if (parameters['burn_zone_cells'] === undefined) parameters['burn_zone_cells'] = 4;
+            if (parameters['tau_burn_min'] === undefined) parameters['tau_burn_min'] = 1.0e-7;
+        }
+
+        const prod = parameters['product_model'] || (modelName.includes('CREST') || modelName.includes('Davis') ? 'Davis Detonation Product' : 'JWL Product Gas');
+        if (prod.includes('Davis')) {
+            if (parameters['davis_a'] === undefined) parameters['davis_a'] = 2.85;
+            if (parameters['davis_b'] === undefined) parameters['davis_b'] = 1.10;
+            if (parameters['davis_k'] === undefined) parameters['davis_k'] = 1.35;
+            if (parameters['davis_vc'] === undefined) parameters['davis_vc'] = 0.65;
+            if (parameters['davis_pc'] === undefined) parameters['davis_pc'] = 12.5e9;
+            if (parameters['davis_q_det'] === undefined) parameters['davis_q_det'] = parameters['detonation_energy'] || 3.90e6;
+        } else {
+            if (parameters['jwl_A'] === undefined) parameters['jwl_A'] = 373.77e9;
+            if (parameters['jwl_B'] === undefined) parameters['jwl_B'] = 3.747e9;
+            if (parameters['jwl_R1'] === undefined) parameters['jwl_R1'] = 4.15;
+            if (parameters['jwl_R2'] === undefined) parameters['jwl_R2'] = 0.90;
+            if (parameters['jwl_omega'] === undefined) parameters['jwl_omega'] = 0.35;
+            if (parameters['detonation_energy'] === undefined) parameters['detonation_energy'] = 4.29e6;
+            if (parameters['afterburn_enabled'] === undefined) {
+                if (presetName && MPM_MATERIAL_PRESETS[presetName]?.afterburn_enabled !== undefined) {
+                    parameters['afterburn_enabled'] = MPM_MATERIAL_PRESETS[presetName].afterburn_enabled;
+                    parameters['afterburn_energy'] = MPM_MATERIAL_PRESETS[presetName].afterburn_energy ?? 0.0;
+                    parameters['afterburn_fuel_fraction'] = MPM_MATERIAL_PRESETS[presetName].afterburn_fuel_fraction ?? 0.0;
+                    parameters['afterburn_stoich_ratio'] = MPM_MATERIAL_PRESETS[presetName].afterburn_stoich_ratio ?? 0.0;
+                    parameters['afterburn_ignition_temp'] = MPM_MATERIAL_PRESETS[presetName].afterburn_ignition_temp ?? 600.0;
+                    parameters['afterburn_tau_chem'] = MPM_MATERIAL_PRESETS[presetName].afterburn_tau_chem ?? 1.0e-5;
+                    parameters['afterburn_c_edc'] = MPM_MATERIAL_PRESETS[presetName].afterburn_c_edc ?? 0.15;
+                    parameters['afterburn_tau_expansion'] = MPM_MATERIAL_PRESETS[presetName].afterburn_tau_expansion ?? 0.0;
+                    parameters['afterburn_ambient_o2_fraction'] = MPM_MATERIAL_PRESETS[presetName].afterburn_ambient_o2_fraction ?? 0.233;
+                } else {
+                    parameters['afterburn_enabled'] = false;
+                    parameters['afterburn_energy'] = 0.0;
+                    parameters['afterburn_fuel_fraction'] = 0.0;
+                    parameters['afterburn_stoich_ratio'] = 0.0;
+                    parameters['afterburn_ignition_temp'] = 600.0;
+                    parameters['afterburn_tau_chem'] = 1.0e-5;
+                    parameters['afterburn_c_edc'] = 0.15;
+                    parameters['afterburn_tau_expansion'] = 0.0;
+                    parameters['afterburn_ambient_o2_fraction'] = 0.233;
+                }
+            }
+        }
+    }
+
     if (parameters['transfer_scheme'] === undefined) parameters['transfer_scheme'] = 'BSpline';
     if (parameters['enable_heterogeneity'] === undefined) parameters['enable_heterogeneity'] = false;
     if (parameters['weibull_modulus'] === undefined) parameters['weibull_modulus'] = 0.0;
@@ -222,23 +352,282 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
     if (parameters['jc_d5'] === undefined) parameters['jc_d5'] = 0.0;
 }
 
-export function syncFEMObjectParameters(node: Node, parameters: Record<string, any>, _updatedKey?: string): void {
+export function syncFEMObjectParameters(
+    node: Node,
+    parameters: Record<string, any>,
+    updatedKey?: string,
+    model?: { nodes: Node[], connections: Connection[] } | null
+): void {
+    if (node.type === 'FEMDomain3D' || node.type === 'FEMFSICoupler3D') {
+        const setup = parameters['fem_setup'];
+        if (setup && typeof setup === 'object' && Array.isArray(setup.parts) && model && model.nodes) {
+            for (const part of setup.parts) {
+                const targetNode = (part.node_id ? model.nodes.find(n => n.id === part.node_id) : null)
+                    || model.nodes.find(n => n.id === part.id || n.parameters?.name === part.name)
+                    || (setup.parts.length === 1 ? model.nodes.find(n => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D') : null);
+                if (targetNode && targetNode.type === 'FEMObject3D') {
+                    if (updatedKey === 'fem_setup') {
+                        if (part.nx !== undefined) targetNode.parameters['nx'] = Math.max(1, Math.min(100, Number(part.nx)));
+                        if (part.ny !== undefined) targetNode.parameters['ny'] = Math.max(1, Math.min(100, Number(part.ny)));
+                        if (part.nz !== undefined) targetNode.parameters['nz'] = Math.max(1, Math.min(100, Number(part.nz)));
+                        if (part.size_x !== undefined) targetNode.parameters['size_x'] = Number(part.size_x);
+                        if (part.size_y !== undefined) targetNode.parameters['size_y'] = Number(part.size_y);
+                        if (part.size_z !== undefined) targetNode.parameters['size_z'] = Number(part.size_z);
+                        if (part.pos_x !== undefined) targetNode.parameters['pos_x'] = Number(part.pos_x);
+                        if (part.pos_y !== undefined) targetNode.parameters['pos_y'] = Number(part.pos_y);
+                        if (part.pos_z !== undefined) targetNode.parameters['pos_z'] = Number(part.pos_z);
+                        if (part.radius !== undefined) targetNode.parameters['radius'] = Number(part.radius);
+                        if (part.inner_radius !== undefined) targetNode.parameters['inner_radius'] = Number(part.inner_radius);
+                        if (part.height !== undefined) targetNode.parameters['height'] = Number(part.height);
+                        if (part.origin_mode) targetNode.parameters['origin_mode'] = part.origin_mode;
+                        if (part.shape_type) targetNode.parameters['shape_type'] = part.shape_type;
+                    } else {
+                        // Canvas node is the SSOT: sync FROM targetNode INTO part so part never clobbers user edits!
+                        if (targetNode.parameters['nx'] !== undefined) part.nx = Math.max(1, Math.min(100, Number(targetNode.parameters['nx'])));
+                        else if (part.nx !== undefined) targetNode.parameters['nx'] = Math.max(1, Math.min(100, Number(part.nx)));
+
+                        if (targetNode.parameters['ny'] !== undefined) part.ny = Math.max(1, Math.min(100, Number(targetNode.parameters['ny'])));
+                        else if (part.ny !== undefined) targetNode.parameters['ny'] = Math.max(1, Math.min(100, Number(part.ny)));
+
+                        if (targetNode.parameters['nz'] !== undefined) part.nz = Math.max(1, Math.min(100, Number(targetNode.parameters['nz'])));
+                        else if (part.nz !== undefined) targetNode.parameters['nz'] = Math.max(1, Math.min(100, Number(part.nz)));
+
+                        if (targetNode.parameters['size_x'] !== undefined) part.size_x = Number(targetNode.parameters['size_x']);
+                        else if (part.size_x !== undefined) targetNode.parameters['size_x'] = Number(part.size_x);
+
+                        if (targetNode.parameters['size_y'] !== undefined) part.size_y = Number(targetNode.parameters['size_y']);
+                        else if (part.size_y !== undefined) targetNode.parameters['size_y'] = Number(part.size_y);
+
+                        if (targetNode.parameters['size_z'] !== undefined) part.size_z = Number(targetNode.parameters['size_z']);
+                        else if (part.size_z !== undefined) targetNode.parameters['size_z'] = Number(part.size_z);
+
+                        if (targetNode.parameters['pos_x'] !== undefined) part.pos_x = Number(targetNode.parameters['pos_x']);
+                        else if (part.pos_x !== undefined) targetNode.parameters['pos_x'] = Number(part.pos_x);
+
+                        if (targetNode.parameters['pos_y'] !== undefined) part.pos_y = Number(targetNode.parameters['pos_y']);
+                        else if (part.pos_y !== undefined) targetNode.parameters['pos_y'] = Number(part.pos_y);
+
+                        if (targetNode.parameters['pos_z'] !== undefined) part.pos_z = Number(targetNode.parameters['pos_z']);
+                        else if (part.pos_z !== undefined) targetNode.parameters['pos_z'] = Number(part.pos_z);
+
+                        if (targetNode.parameters['radius'] !== undefined) part.radius = Number(targetNode.parameters['radius']);
+                        else if (part.radius !== undefined) targetNode.parameters['radius'] = Number(part.radius);
+
+                        if (targetNode.parameters['inner_radius'] !== undefined) part.inner_radius = Number(targetNode.parameters['inner_radius']);
+                        else if (part.inner_radius !== undefined) targetNode.parameters['inner_radius'] = Number(part.inner_radius);
+
+                        if (targetNode.parameters['height'] !== undefined) part.height = Number(targetNode.parameters['height']);
+                        else if (part.height !== undefined) targetNode.parameters['height'] = Number(part.height);
+
+                        if (targetNode.parameters['origin_mode']) part.origin_mode = targetNode.parameters['origin_mode'];
+                        else if (part.origin_mode) targetNode.parameters['origin_mode'] = part.origin_mode;
+
+                        if (targetNode.parameters['shape_type']) part.shape_type = targetNode.parameters['shape_type'];
+                        else if (part.shape_type) targetNode.parameters['shape_type'] = part.shape_type;
+                    }
+                }
+            }
+        }
+        if (Array.isArray(parameters['fem_parts']) && model && model.nodes) {
+            for (const part of parameters['fem_parts']) {
+                const targetNode = (part.node_id ? model.nodes.find(n => n.id === part.node_id) : null)
+                    || model.nodes.find(n => n.id === part.id || n.parameters?.name === part.name)
+                    || (parameters['fem_parts'].length === 1 ? model.nodes.find(n => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D') : null);
+                if (targetNode && targetNode.type === 'FEMObject3D') {
+                    if (updatedKey === 'fem_parts') {
+                        if (part.nx !== undefined) targetNode.parameters['nx'] = Math.max(1, Math.min(100, Number(part.nx)));
+                        if (part.ny !== undefined) targetNode.parameters['ny'] = Math.max(1, Math.min(100, Number(part.ny)));
+                        if (part.nz !== undefined) targetNode.parameters['nz'] = Math.max(1, Math.min(100, Number(part.nz)));
+                        if (part.size_x !== undefined) targetNode.parameters['size_x'] = Number(part.size_x);
+                        if (part.size_y !== undefined) targetNode.parameters['size_y'] = Number(part.size_y);
+                        if (part.size_z !== undefined) targetNode.parameters['size_z'] = Number(part.size_z);
+                        if (part.pos_x !== undefined) targetNode.parameters['pos_x'] = Number(part.pos_x);
+                        if (part.pos_y !== undefined) targetNode.parameters['pos_y'] = Number(part.pos_y);
+                        if (part.pos_z !== undefined) targetNode.parameters['pos_z'] = Number(part.pos_z);
+                        if (part.radius !== undefined) targetNode.parameters['radius'] = Number(part.radius);
+                        if (part.inner_radius !== undefined) targetNode.parameters['inner_radius'] = Number(part.inner_radius);
+                        if (part.height !== undefined) targetNode.parameters['height'] = Number(part.height);
+                        if (part.origin_mode) targetNode.parameters['origin_mode'] = part.origin_mode;
+                        if (part.shape_type) targetNode.parameters['shape_type'] = part.shape_type;
+                    } else {
+                        if (targetNode.parameters['nx'] !== undefined) part.nx = Math.max(1, Math.min(100, Number(targetNode.parameters['nx'])));
+                        else if (part.nx !== undefined) targetNode.parameters['nx'] = Math.max(1, Math.min(100, Number(part.nx)));
+
+                        if (targetNode.parameters['ny'] !== undefined) part.ny = Math.max(1, Math.min(100, Number(targetNode.parameters['ny'])));
+                        else if (part.ny !== undefined) targetNode.parameters['ny'] = Math.max(1, Math.min(100, Number(part.ny)));
+
+                        if (targetNode.parameters['nz'] !== undefined) part.nz = Math.max(1, Math.min(100, Number(targetNode.parameters['nz'])));
+                        else if (part.nz !== undefined) targetNode.parameters['nz'] = Math.max(1, Math.min(100, Number(part.nz)));
+
+                        if (targetNode.parameters['size_x'] !== undefined) part.size_x = Number(targetNode.parameters['size_x']);
+                        else if (part.size_x !== undefined) targetNode.parameters['size_x'] = Number(part.size_x);
+
+                        if (targetNode.parameters['size_y'] !== undefined) part.size_y = Number(targetNode.parameters['size_y']);
+                        else if (part.size_y !== undefined) targetNode.parameters['size_y'] = Number(part.size_y);
+
+                        if (targetNode.parameters['size_z'] !== undefined) part.size_z = Number(targetNode.parameters['size_z']);
+                        else if (part.size_z !== undefined) targetNode.parameters['size_z'] = Number(part.size_z);
+
+                        if (targetNode.parameters['pos_x'] !== undefined) part.pos_x = Number(targetNode.parameters['pos_x']);
+                        else if (part.pos_x !== undefined) targetNode.parameters['pos_x'] = Number(part.pos_x);
+
+                        if (targetNode.parameters['pos_y'] !== undefined) part.pos_y = Number(targetNode.parameters['pos_y']);
+                        else if (part.pos_y !== undefined) targetNode.parameters['pos_y'] = Number(part.pos_y);
+
+                        if (targetNode.parameters['pos_z'] !== undefined) part.pos_z = Number(targetNode.parameters['pos_z']);
+                        else if (part.pos_z !== undefined) targetNode.parameters['pos_z'] = Number(part.pos_z);
+
+                        if (targetNode.parameters['radius'] !== undefined) part.radius = Number(targetNode.parameters['radius']);
+                        else if (part.radius !== undefined) targetNode.parameters['radius'] = Number(part.radius);
+
+                        if (targetNode.parameters['inner_radius'] !== undefined) part.inner_radius = Number(targetNode.parameters['inner_radius']);
+                        else if (part.inner_radius !== undefined) targetNode.parameters['inner_radius'] = Number(part.inner_radius);
+
+                        if (targetNode.parameters['height'] !== undefined) part.height = Number(targetNode.parameters['height']);
+                        else if (part.height !== undefined) targetNode.parameters['height'] = Number(part.height);
+
+                        if (targetNode.parameters['origin_mode']) part.origin_mode = targetNode.parameters['origin_mode'];
+                        else if (part.origin_mode) targetNode.parameters['origin_mode'] = part.origin_mode;
+
+                        if (targetNode.parameters['shape_type']) part.shape_type = targetNode.parameters['shape_type'];
+                        else if (part.shape_type) targetNode.parameters['shape_type'] = part.shape_type;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     if (node.type !== 'FEMObject3D') {
         return;
     }
 
-    if (!parameters['mesh_source']) {
-        parameters['mesh_source'] = 'Box Generator';
+    if (updatedKey === 'shape_type' || (!parameters['mesh_source'] && parameters['shape_type'])) {
+        const shape = parameters['shape_type'];
+        if (shape === 'Cylinder') {
+            parameters['mesh_source'] = 'Cylinder Generator';
+        } else if (shape === 'LS-DYNA File' || shape === 'LS-DYNA Keyword File' || parameters['k_file']) {
+            parameters['mesh_source'] = 'LS-DYNA Keyword File';
+            parameters['shape_type'] = 'LS-DYNA File';
+        } else if (shape === 'Plate' || shape === 'Shell') {
+            parameters['mesh_source'] = 'Plate Generator';
+        } else {
+            parameters['mesh_source'] = 'Box Generator';
+        }
+    } else {
+        const src = parameters['mesh_source'];
+        if (src === 'Cylinder Generator') {
+            parameters['shape_type'] = 'Cylinder';
+        } else if (src === 'LS-DYNA Keyword File' || parameters['k_file'] || parameters['shape_type'] === 'LS-DYNA File') {
+            parameters['shape_type'] = 'LS-DYNA File';
+            parameters['mesh_source'] = 'LS-DYNA Keyword File';
+        } else if (src === 'Plate Generator') {
+            parameters['shape_type'] = 'Plate';
+        } else if (parameters['shape_type'] === 'Cylinder') {
+            parameters['mesh_source'] = 'Cylinder Generator';
+        } else if (parameters['shape_type'] === 'Plate' || parameters['shape_type'] === 'Shell') {
+            parameters['mesh_source'] = 'Plate Generator';
+        } else if (parameters['shape_type'] === 'LS-DYNA File' || parameters['k_file']) {
+            parameters['mesh_source'] = 'LS-DYNA Keyword File';
+            parameters['shape_type'] = 'LS-DYNA File';
+        } else {
+            parameters['mesh_source'] = 'Box Generator';
+            parameters['shape_type'] = 'Box';
+        }
     }
 
-    const src = parameters['mesh_source'];
-    if (src === 'Cylinder Generator') {
-        parameters['shape_type'] = 'Cylinder';
-    } else if (src === 'LS-DYNA Keyword File') {
-        parameters['shape_type'] = 'LS-DYNA File';
-    } else {
-        parameters['mesh_source'] = 'Box Generator';
-        parameters['shape_type'] = 'Box';
+    if (parameters['nx'] !== undefined) parameters['nx'] = Math.max(1, Math.min(100, parseInt(parameters['nx'], 10) || 1));
+    if (parameters['ny'] !== undefined) parameters['ny'] = Math.max(1, Math.min(100, parseInt(parameters['ny'], 10) || 1));
+    if (parameters['nz'] !== undefined) parameters['nz'] = Math.max(1, Math.min(100, parseInt(parameters['nz'], 10) || 1));
+
+    // Bidirectional sync with embedded fem_setup configuration
+    const syncPartWithParams = (p: any, fromPartToNode: boolean) => {
+        if (!p) return;
+        if (fromPartToNode) {
+            if (p.nx !== undefined) parameters['nx'] = Number(p.nx);
+            if (p.ny !== undefined) parameters['ny'] = Number(p.ny);
+            if (p.nz !== undefined) parameters['nz'] = Number(p.nz);
+            if (p.size_x !== undefined) parameters['size_x'] = Number(p.size_x);
+            if (p.size_y !== undefined) parameters['size_y'] = Number(p.size_y);
+            if (p.size_z !== undefined) parameters['size_z'] = Number(p.size_z);
+            if (p.pos_x !== undefined) parameters['pos_x'] = Number(p.pos_x);
+            if (p.pos_y !== undefined) parameters['pos_y'] = Number(p.pos_y);
+            if (p.pos_z !== undefined) parameters['pos_z'] = Number(p.pos_z);
+            if (p.radius !== undefined) parameters['radius'] = Number(p.radius);
+            if (p.inner_radius !== undefined) parameters['inner_radius'] = Number(p.inner_radius);
+            if (p.height !== undefined) parameters['height'] = Number(p.height);
+            if (p.origin_mode) parameters['origin_mode'] = p.origin_mode;
+            if (p.shape_type) parameters['shape_type'] = p.shape_type;
+        } else {
+            if (parameters['nx'] !== undefined) p.nx = Number(parameters['nx']);
+            if (parameters['ny'] !== undefined) p.ny = Number(parameters['ny']);
+            if (parameters['nz'] !== undefined) p.nz = Number(parameters['nz']);
+            if (parameters['size_x'] !== undefined) p.size_x = Number(parameters['size_x']);
+            if (parameters['size_y'] !== undefined) p.size_y = Number(parameters['size_y']);
+            if (parameters['size_z'] !== undefined) p.size_z = Number(parameters['size_z']);
+            if (parameters['pos_x'] !== undefined) p.pos_x = Number(parameters['pos_x']);
+            if (parameters['pos_y'] !== undefined) p.pos_y = Number(parameters['pos_y']);
+            if (parameters['pos_z'] !== undefined) p.pos_z = Number(parameters['pos_z']);
+            if (parameters['radius'] !== undefined) p.radius = Number(parameters['radius']);
+            if (parameters['inner_radius'] !== undefined) p.inner_radius = Number(parameters['inner_radius']);
+            if (parameters['height'] !== undefined) p.height = Number(parameters['height']);
+            if (parameters['origin_mode']) p.origin_mode = parameters['origin_mode'];
+            if (parameters['shape_type']) p.shape_type = parameters['shape_type'];
+
+            const shape = p.shape_type || 'Box';
+            if (shape === 'Box') {
+                const nx = p.nx ?? 10;
+                const ny = p.ny ?? 10;
+                const nz = p.nz ?? 10;
+                p.num_elements = nx * ny * nz;
+                p.num_nodes = (nx + 1) * (ny + 1) * (nz + 1);
+                const isCAD = p.origin_mode === 'CAD Origin' || p.origin_mode === 'Min Corner';
+                const sx = isCAD ? (p.pos_x ?? 0) : ((p.pos_x ?? 0) - 0.5 * (p.size_x ?? 1));
+                const sy = isCAD ? (p.pos_y ?? 0) : ((p.pos_y ?? 0) - 0.5 * (p.size_y ?? 1));
+                const sz = isCAD ? (p.pos_z ?? 0) : ((p.pos_z ?? 0) - 0.5 * (p.size_z ?? 1));
+                p.bounds = [sx, sx + (p.size_x ?? 1), sy, sy + (p.size_y ?? 1), sz, sz + (p.size_z ?? 1)];
+            } else if (shape === 'Plate') {
+                const nx = p.nx ?? 10;
+                const ny = p.ny ?? 10;
+                p.num_elements = nx * ny;
+                p.num_nodes = (nx + 1) * (ny + 1);
+            }
+        }
+    };
+
+    if (parameters['fem_setup'] && typeof parameters['fem_setup'] === 'object' && Array.isArray(parameters['fem_setup'].parts)) {
+        const parts = parameters['fem_setup'].parts;
+        const matchingPart = parts.find((pt: any) => pt.node_id === node.id || pt.id === node.id || pt.name === node.parameters?.name || pt.name === node.id) || (parts.length === 1 ? parts[0] : null);
+        if (matchingPart) {
+            syncPartWithParams(matchingPart, updatedKey === 'fem_setup');
+        }
+    }
+
+    if (Array.isArray(parameters['fem_parts'])) {
+        const matchingPart = parameters['fem_parts'].find((pt: any) => pt.node_id === node.id || pt.id === node.id || pt.name === node.parameters?.name || pt.name === node.id) || (parameters['fem_parts'].length === 1 ? parameters['fem_parts'][0] : null);
+        if (matchingPart) {
+            syncPartWithParams(matchingPart, false);
+        }
+    }
+
+    if (model && model.nodes) {
+        for (const otherNode of model.nodes) {
+            if (otherNode.id !== node.id && (otherNode.type === 'FEMDomain3D' || otherNode.type === 'FEMFSICoupler3D')) {
+                const setup = otherNode.parameters?.['fem_setup'];
+                if (setup && typeof setup === 'object' && Array.isArray(setup.parts)) {
+                    const matchingPart = setup.parts.find((pt: any) => pt.node_id === node.id || pt.id === node.id || pt.name === node.parameters?.name || pt.name === node.id) || (setup.parts.length === 1 ? setup.parts[0] : null);
+                    if (matchingPart) {
+                        syncPartWithParams(matchingPart, false);
+                    }
+                }
+                if (Array.isArray(otherNode.parameters?.['fem_parts'])) {
+                    const matchingPart = otherNode.parameters['fem_parts'].find((pt: any) => pt.node_id === node.id || pt.id === node.id || pt.name === node.parameters?.name || pt.name === node.id) || (otherNode.parameters['fem_parts'].length === 1 ? otherNode.parameters['fem_parts'][0] : null);
+                    if (matchingPart) {
+                        syncPartWithParams(matchingPart, false);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -252,19 +641,38 @@ export function isExplosiveMaterialNode(node: Node | undefined): boolean {
     const comp = String(node.parameters?.composition || '').toLowerCase();
     const preset = String(node.parameters?.preset || '').toLowerCase();
     const name = String((node as any).name || node.parameters?.name || node.id || '').toLowerCase();
-    const explosiveNames = ['tnt', 'c-4', 'c4', 'comp b', 'composition b', 'petn', 'hmx', 'rdx', 'pbx', 'anfo', 'ammonal', 'tritonal', 'pentolite', 'semtex', 'tetryl', 'emulsion', 'nitromethane', 'nm', 'explosive', 'davis', 'crest'];
+    const explosiveNames = ['tnt', 'c-4', 'c4', 'comp b', 'composition b', 'petn', 'hmx', 'rdx', 'pbx', 'anfo', 'ammonal', 'tritonal', 'pentolite', 'semtex', 'tetryl', 'emulsion', 'nitromethane', 'nm', 'explosive', 'davis', 'crest', 'charge', 'jwl', 'detonation'];
     if (explosiveNames.some(e => comp.includes(e) || preset.includes(e) || name.includes(e))) {
         return true;
     }
     return false;
 }
 
+export function isWaterMaterialNode(node: Node | undefined): boolean {
+    if (!node || node.type !== 'Material') return false;
+    const model = String(node.parameters?.material_model || '');
+    const type = String(node.parameters?.material_type || '');
+    const preset = String(node.parameters?.preset || '').toLowerCase();
+    const name = String((node as any).name || node.parameters?.name || node.id || '').toLowerCase();
+    return model === 'Tait Water' || type === 'Fluid' || preset.includes('water') || preset.includes('seawater') || name.includes('water') || name.includes('seawater');
+}
+
+export function isSeabedMaterialNode(node: Node | undefined): boolean {
+    if (!node || node.type !== 'Material') return false;
+    if (isAirMaterialNode(node) || isWaterMaterialNode(node) || isExplosiveMaterialNode(node)) return false;
+    const model = String(node.parameters?.material_model || '').toLowerCase();
+    const preset = String(node.parameters?.preset || '').toLowerCase();
+    const name = String((node as any).name || node.parameters?.name || node.id || '').toLowerCase();
+    const geoTerms = ['seabed', 'soil', 'sand', 'clay', 'silt', 'rock', 'basalt', 'granite', 'limestone', 'sandstone', 'shale', 'gravel', 'permafrost', 'sediment', 'geotechnical', 'foundation', 'drucker', 'coulomb'];
+    return geoTerms.some(t => model.includes(t) || preset.includes(t) || name.includes(t));
+}
+
 export function isSolidMaterialNode(node: Node | undefined): boolean {
     if (!node || node.type !== 'Material') return false;
     const type = node.parameters?.material_type;
     const model = node.parameters?.material_model;
-    if (type === 'Air' || type === 'JWL Charge' || type === 'Ideal Gas Charge') return false;
-    if (model === 'Ideal Gas' || model === 'JWL Detonation Gas' || model === 'Ideal Gas Charge') return false;
+    if (type === 'Air' || type === 'JWL Charge' || type === 'Ideal Gas Charge' || type === 'Fluid') return false;
+    if (model === 'Ideal Gas' || model === 'JWL Detonation Gas' || model === 'Ideal Gas Charge' || model === 'Tait Water') return false;
     return true;
 }
 
@@ -355,6 +763,7 @@ export const DISPLAY_ONLY_KEYS = new Set([
     // Slices
     'slices', 'focusedSliceIndex', 'selectedSliceIndex', 'selected_slice',
     'selected_slice_index', 'active_slice_index', 'slice_plane', 'slice_offset', 'slice_axis',
+    'sliceContourLevels', 'sliceSmoothContours',
 
     // Grid & Meshes
     'show_grid', 'show_grid_box', 'grid_meshlines', 'grid_opacity', 'cell_edges',
@@ -380,16 +789,20 @@ export const DISPLAY_ONLY_KEYS = new Set([
     'showMPMParticles', 'mpmParticleRenderMode', 'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleQuantity', 'mpmParticleColormap',
     'mpmParticleAutoScale', 'mpmParticleLogScale', 'mpmParticleShowColorbar',
     'mpmParticleOpacity', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleWireframe',
+    'mpmContourLevels', 'mpmSmoothContours',
+
+    // Marine Harbour Domain Visibility Toggles (display-only — NEVER physical)
+    'show_water_sleeve', 'show_soil_mpm',
 
     // FEM Display
     'showFEMMesh', 'femSolid', 'femWireframe', 'femResults', 'femQuantity',
     'femColormap', 'femOpacity', 'femLighting', 'femAutoScale', 'femLogScale',
-    'femShowColorbar', 'femMinVal', 'femMaxVal',
+    'femShowColorbar', 'femMinVal', 'femMaxVal', 'femContourLevels', 'femSmoothContours',
 
     // Beams & Rebar Display
     'showBeams', 'showRebar', 'beamSolid', 'beamWireframe', 'rebarSolid', 'rebarWireframe',
     'beamOpacity', 'rebarOpacity', 'beamRadius', 'rebarRadius', 'beamQuantity', 'beamColormap',
-    'beamAutoScale', 'beamLogScale', 'beamMinVal', 'beamMaxVal',
+    'beamAutoScale', 'beamLogScale', 'beamMinVal', 'beamMaxVal', 'beamContourLevels', 'beamSmoothContours',
 
     // Charge Display
     'show_charge', 'charge_solid', 'charge_wireframe', 'charge_lighting', 'charge_opacity', 'chargeColor', 'charge_color',
@@ -561,6 +974,8 @@ export function prepareModelSavePayload(model: Model, targetFilePath: string): P
         id: model.id,
         name: model.name,
         filename: targetFilePath,
+        refresh_rate: model.refresh_rate ?? 0.5,
+        fps: model.fps ?? StateManager.rateToFps(model.refresh_rate ?? 0.5),
         nodes: clonedNodes,
         connections: clonedConnections,
         views: model.views ? JSON.parse(JSON.stringify(model.views)) : undefined,
@@ -569,6 +984,8 @@ export function prepareModelSavePayload(model: Model, targetFilePath: string): P
 
     const modelJson = JSON.stringify({
         name: clonedModel.name,
+        refresh_rate: clonedModel.refresh_rate,
+        fps: clonedModel.fps,
         nodes: clonedModel.nodes,
         connections: clonedModel.connections,
         views: clonedModel.views,
@@ -700,12 +1117,24 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         cscm_D2: 3.0e-17,
         directional_crack_band: false,
         nonlocal_radius: 0.0,
+        // Tait Water & Shock Fluid EOS
+        tait_gamma: 7.15,
+        tait_B: 3.039e8,
+        tait_rho0: 1000.0,
+        tait_c0: 1482.0,
+        tait_p_cav: 0.0,
+        tait_p0: 101325.0,
+        tait_viscosity: 1.002e-3,
+        tait_gruneisen: 0.28,
+        tait_variant: 0,
+        tait_variant_str: 'Isentropic',
         // Ideal Gas CFD
         atm_pressure: 101325.0,
         atm_temperature: 288.15,
         gamma: 1.4,
         ambient_p: 101325.0,
         ambient_rho: 1.225,
+        ambient_o2_fraction: 0.233,
         // JWL CFD
         composition: 'TNT',
         rho: 1630,
@@ -736,15 +1165,27 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         lt_F_G2_min: 0.30,
         ideal_gamma: 1.4,
         ideal_rho_0: 1630,
-        ideal_e_0: 4290000
+        ideal_e_0: 4290000,
+        // Afterburn & Aerobic Combustion
+        afterburn_enabled: false,
+        afterburn_energy: 0.0,
+        afterburn_fuel_fraction: 0.0,
+        afterburn_stoich_ratio: 0.0,
+        afterburn_ignition_temp: 600.0,
+        afterburn_tau_chem: 1.0e-5,
+        afterburn_c_edc: 0.15,
+        afterburn_tau_expansion: 0.0,
+        afterburn_ambient_o2_fraction: 0.233
     },
     'Charge1D': {
         material: '',
+        target_domain: '',
         charge_mass: 0.853479,
         charge_radius: 0.05
     },
     'Charge2D': {
         material: '',
+        target_domain: '',
         charge_shape: 'Sphere',
         charge_mass: 0.853479,
         charge_radius: 0.05,
@@ -789,6 +1230,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         qty_impulse: true
     },
     'CFDSolver': {
+        ambient_air_material: '',
+        explosive_charge: '',
         init_mode: 'Multi-Material JWL',
         cfl: 0.6,
         endtime: 1.0,
@@ -822,24 +1265,11 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         detonator_z: 0.1,
         detonator_radius: 0.001
     },
-    'TriggerLocation': {
-        trigger_r: 0.0,
-        trigger_z: 0.1,
-        trigger_radius: 0.001
-    },
     'DetonatorLocation3D': {
         detonator_x: 0.5,
         detonator_y: 0.5,
         detonator_z: 0.5,
         detonator_radius: 0.01,
-        visible: true,
-        hidden: false
-    },
-    'TriggerLocation3D': {
-        trigger_x: 0.5,
-        trigger_y: 0.5,
-        trigger_z: 0.5,
-        trigger_radius: 0.01,
         visible: true,
         hidden: false
     },
@@ -865,6 +1295,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         voxelization_method: 'watertight_floodfill'
     },
     'RemapNode': {
+        source_model_id: '',
+        target_solver: '',
         explosive_r: 0.0,
         explosive_z: 0.1,
         remap_radius: 0.5,
@@ -872,6 +1304,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         trigger_val: 0.0
     },
     'Remap1DTo2DNode': {
+        source_model_id: '',
+        target_solver: '',
         explosive_r: 0.0,
         explosive_z: 0.1,
         remap_radius: 0.5,
@@ -879,6 +1313,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         trigger_val: 0.0
     },
     'Remap1DTo3DNode': {
+        source_model_id: '',
+        target_solver: '',
         explosive_x: 0.5,
         explosive_y: 0.5,
         explosive_z: 0.5,
@@ -887,6 +1323,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         trigger_val: 0.0
     },
     'Remap2DTo3DNode': {
+        source_model_id: '',
+        target_solver: '',
         explosive_x: 0.5,
         explosive_y: 0.5,
         explosive_z: 0.5,
@@ -899,6 +1337,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         precision: 'single'
     },
     'CFDSolver2D': {
+        ambient_air_material: '',
+        explosive_charge: '',
         init_mode: 'From1D',
         cfl: 0.6,
         endtime: 1.0,
@@ -920,6 +1360,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         max_y: 1,
         downsample_stride: 1,
         refresh_rate: 0.5,
+        fps: 2,
         interpolate: true
     },
     'VTKOutput': {
@@ -984,6 +1425,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     },
     'Charge3D': {
         material: '',
+        target_domain: '',
         charge_shape: 'Sphere',
         charge_mass: 6.8277,
         charge_x: 0.5, charge_y: 0.5, charge_z: 0.5,
@@ -998,6 +1440,9 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         hidden: false
     },
     'CFDSolver3D': {
+        name: 'CFD Solver 3D',
+        ambient_air_material: '',
+        explosive_charge: '',
         cfl: 0.6,
         endtime: 1.0,
         device: 'cpu',
@@ -1037,7 +1482,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
             object_id: 'rainbow',
             temperature: 'rainbow',
             displacement: 'rainbow',
-            momentOrForce: 'rainbow'
+            momentOrForce: 'rainbow',
+            materials: 'materials'
         },
         quantity_ranges: {
             pressure: [101325.0, 1013250.0],
@@ -1048,6 +1494,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
             species2: [0.0, 1.0],
             species3: [0.0, 1.0],
             solid: [0.0, 1.0],
+            materials: [0.0, 5.0],
             overpressure: [0.0, 101325.0 * 99.0],
             impulse: [0.0, 10000.0],
             peak_overpressure: [0.0, 101325.0 * 99.0],
@@ -1068,7 +1515,10 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         quantity_auto_scales: {},
         lock_quantity_ranges: true,
         refresh_rate: 0.5,
+        fps: 2,
         slices: [],
+        sliceContourLevels: 10,
+        sliceSmoothContours: false,
         log_scale: false,
         auto_scale: true,
         min_val: 101325.0,
@@ -1104,6 +1554,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         mpmParticleOpacity: 1.0,
         mpmParticleMinVal: 0.0,
         mpmParticleMaxVal: 500000000.0,
+        mpmContourLevels: 10,
+        mpmSmoothContours: false,
         // FEM Mesh Defaults
         showFEMMesh: true,
         femSolid: true,
@@ -1113,7 +1565,9 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         femColormap: 'rainbow',
         femAutoScale: true,
         femLogScale: false,
-        femShowColorbar: false,
+        femShowColorbar: true,
+        femContourLevels: 10,
+        femSmoothContours: false,
         femOpacity: 1.0,
         femMinVal: 0.0,
         // Beams & 1D Elements Defaults
@@ -1126,6 +1580,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         beamAutoScale: true,
         beamLogScale: false,
         beamShowColorbar: false,
+        beamContourLevels: 10,
+        beamSmoothContours: false,
         beamMinVal: 0.0,
         beamMaxVal: 0.05,
         show_stl: true,
@@ -1258,9 +1714,16 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'FEMDomain3D': {
         device: 'cpu',
         precision: 'single',
+        rebar_formulation: 'TimoshenkoBeam3D',
+        failure_strain: 0.20,
+        tensile_failure_stress: 400.0e6,
+        timestep_erosion_factor: 0.10,
+        min_volume_ratio: 0.02,
+        enable_strain_erosion: true,
         integration_scheme: 'OnePointFB',
-        hourglass_model: 'FlanaganBelytschkoStiffness',
+        hourglass_model: 'FlanaganBelytschkoViscous',
         hourglass_coeff: 0.10,
+        contact_search_method: 'Hierarchical Octave Hash Grid',
         contact_penalty_scale: 0.1,
         friction_static: 0.3,
         friction_kinetic: 0.2,
@@ -1286,6 +1749,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'FEMObject3D': {
         material: '',
         shape_type: 'Box',
+        mesh_source: 'Box Generator',
+        origin_mode: 'Center',
         boundary_condition: 'Free',
         pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
         size_x: 1.0, size_y: 1.0, size_z: 1.0,
@@ -1338,6 +1803,39 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         erosion_venting: true,
         vacuum_density: 1.0e-6,
         vacuum_pressure: 1.0e-2
+    },
+    'MarineHarbourDomain': {
+        name: 'Marine Harbour Domain',
+        mesh: '',
+        ambient_air_material: '',
+        seawater_material: '',
+        seabed_foundation: '',
+        explosive_charge: '',
+        connected_detonators: '',
+        undex_coupling_method: 'ZonalHybrid_MPM_FV_FEM',
+        water_discretization_mode: 'Spherical_MPM_Sleeve',
+        init_mode: 'Hydrostatic_Stratified_3D',
+        flux_scheme: 'AUSM+',
+        space_time_scheme: 'ADER-2 (2nd-Order Space/Time)',
+        spatial_order: 2,
+        temporal_order: 4,
+        gravity_z: -9.81,
+        water_surface_z: 10.0,
+        seabed_surface_z: 2.0,
+        k0_earth_pressure: 0.50,
+        nearfield_sleeve_radius: 2.5,
+        nearfield_ppc: 8,
+        vertical_sleeve_breach: false,
+        weber_breakup_threshold: 12.0,
+        seabed_mesh_type: 'Hybrid_MPM_Crater_FEM_FarField',
+        crater_bed_width: 5.0,
+        crater_bed_depth: 3.0,
+        show_water_sleeve: true,
+        show_soil_mpm: true,
+        device: 'gpu',
+        precision: 'single',
+        cfl: 0.6,
+        endtime: 0.5
     },
     'ThePainter': {},
     'TelemetryText': {
@@ -1398,6 +1896,7 @@ export class StateManager {
         cumCommsS?: number;
     }> = new Map();
     private modelStatusListeners: ((modelId: string, status: SimulationStatus) => void)[] = [];
+    private modelTelemetryListeners: ((modelId: string, step: number, simTime: number) => void)[] = [];
     private inPlaceParameterListeners: ((nodeId: string, parameters: Record<string, any>) => void)[] = [];
     private saveTimeout: any = null;
     private clipboardModel: Model | null = null;
@@ -1416,6 +1915,8 @@ export class StateManager {
             id: defaultModelId,
             name: 'Default Model',
             filename: null,
+            refresh_rate: 0.5,
+            fps: 2,
             nodes: initialState ? JSON.parse(JSON.stringify(initialState.nodes)) : [],
             connections: initialState ? JSON.parse(JSON.stringify(initialState.connections)) : []
         };
@@ -1454,6 +1955,37 @@ export class StateManager {
     public isModelComplete(modelId: string): { complete: boolean; missingGrid: boolean; reason?: string } {
         const model = this.appState.models[modelId];
         if (!model || !model.nodes) return { complete: true, missingGrid: false };
+
+        const cfdSolvers = model.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
+        const mpmDomains = model.nodes.filter(n => n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D');
+        const femDomains = model.nodes.filter(n => n.type === 'FEMDomain3D');
+        const couplers = model.nodes.filter(n => n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
+        const harbourDomains = model.nodes.filter(n => n.type === 'MarineHarbourDomain');
+
+        const totalSolvers = cfdSolvers.length + mpmDomains.length + femDomains.length + couplers.length + harbourDomains.length;
+        if (totalSolvers === 0) {
+            return {
+                complete: false,
+                missingGrid: false,
+                reason: "No active physics solver domain found in this model graph. Please add and wire an appropriate solver domain node (e.g. FEMDomain3D for solid mechanics, FEMFSICoupler3D for blast-structure coupling, MarineHarbourDomain for UNDEX, or CFDSolver3D for gas dynamics)."
+            };
+        }
+
+        // Marine Harbour Domain: Background grid (DomainMesh3D) is strictly mandatory
+        const harbourDomain = model.nodes.find(n => n.type === 'MarineHarbourDomain');
+        if (harbourDomain) {
+            const hasMeshConn = (model.connections || []).some(c =>
+                (c.toNode === harbourDomain.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+                (c.fromNode === harbourDomain.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            );
+            if (!hasMeshConn) {
+                return {
+                    complete: false,
+                    missingGrid: true,
+                    reason: "No background grid connected. A DomainMesh3D node must be defined and connected to Marine Harbour Domain."
+                };
+            }
+        }
 
         // 1. MPM 3D: Background grid (DomainMesh3D) is strictly mandatory
         const mpmDomain3D = model.nodes.find(n => n.type === 'MPMDomain3D');
@@ -1541,18 +2073,104 @@ export class StateManager {
             }
         }
 
-        // 5. FEM Domain 3D: DomainMesh3D is mandatory
+        // 5. FEM Domain 3D: Structural mesh / parts connection is mandatory
         const femDomain3D = model.nodes.find(n => n.type === 'FEMDomain3D');
         if (femDomain3D) {
-            const hasMeshConn = (model.connections || []).some(c =>
-                (c.toNode === femDomain3D.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
-                (c.fromNode === femDomain3D.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+            const hasObjConn = (model.connections || []).some(c =>
+                (c.toNode === femDomain3D.id && (c.toPort === 'objects' || c.toPort === 'mesh' || c.toPort === 'parts' || c.toPort === 'elements' || c.toPort === 'in')) ||
+                (c.fromNode === femDomain3D.id && (c.fromPort === 'objects' || c.fromPort === 'mesh' || c.fromPort === 'parts' || c.fromPort === 'elements'))
             );
-            if (!hasMeshConn) {
+            if (!hasObjConn) {
                 return {
                     complete: false,
-                    missingGrid: true,
-                    reason: "No background grid connected. A DomainMesh3D node must be defined and connected to FEM Domain 3D."
+                    missingGrid: false,
+                    reason: "No structural mesh connected to 3D Explicit FEM Solver Domain. Connect an LSDynaImporter3D, FEMObject3D, FEMBeam3D, or FEMRebar3D node to the 'Structural Mesh / Parts' port."
+                };
+            }
+        }
+
+        // 6. FEM FSI Coupler 3D: Must have CFD Solver connected to 'cfd' and FEM Domain connected to 'fem'
+        const femFsiCoupler3D = model.nodes.find(n => n.type === 'FEMFSICoupler3D');
+        if (femFsiCoupler3D) {
+            const hasCfd = (model.connections || []).some(c =>
+                c.toNode === femFsiCoupler3D.id && (c.toPort === 'cfd' || c.toPort === 'cfd_solver')
+            );
+            const hasFem = (model.connections || []).some(c =>
+                c.toNode === femFsiCoupler3D.id && (c.toPort === 'fem' || c.toPort === 'fem_domain' || c.toPort === 'fem_solver')
+            );
+            if (!hasCfd || !hasFem) {
+                return {
+                    complete: false,
+                    missingGrid: false,
+                    reason: "FEM FSI Coupler 3D requires both a CFD Solver 3D connected to port 'cfd' and an FEM Domain 3D connected to port 'fem'."
+                };
+            }
+        }
+
+        // 7. FSI Coupler 3D: Must have CFD Solver connected to 'cfd' and MPM Domain connected to 'mpm'
+        const fsiCoupler3D = model.nodes.find(n => n.type === 'FSICoupler3D');
+        if (fsiCoupler3D) {
+            const hasCfd = (model.connections || []).some(c =>
+                c.toNode === fsiCoupler3D.id && (c.toPort === 'cfd' || c.toPort === 'cfd_solver')
+            );
+            const hasMpm = (model.connections || []).some(c =>
+                c.toNode === fsiCoupler3D.id && (c.toPort === 'mpm' || c.toPort === 'mpm_domain')
+            );
+            if (!hasCfd || !hasMpm) {
+                return {
+                    complete: false,
+                    missingGrid: false,
+                    reason: "FSI Coupler 3D requires both a CFD Solver 3D connected to port 'cfd' and an MPM Domain 3D connected to port 'mpm'."
+                };
+            }
+        }
+
+        // 8. FSI Coupler 2D: Must have CFD Solver 2D connected to 'cfd' and MPM Domain 2D connected to 'mpm'
+        const fsiCoupler2D = model.nodes.find(n => n.type === 'FSICoupler2D');
+        if (fsiCoupler2D) {
+            const hasCfd = (model.connections || []).some(c =>
+                c.toNode === fsiCoupler2D.id && (c.toPort === 'cfd' || c.toPort === 'cfd_solver')
+            );
+            const hasMpm = (model.connections || []).some(c =>
+                c.toNode === fsiCoupler2D.id && (c.toPort === 'mpm' || c.toPort === 'mpm_domain')
+            );
+            if (!hasCfd || !hasMpm) {
+                return {
+                    complete: false,
+                    missingGrid: false,
+                    reason: "FSI Coupler 2D requires both a CFD Solver 2D connected to port 'cfd' and an MPM Domain 2D connected to port 'mpm'."
+                };
+            }
+        }
+
+        // 9. Remap Nodes: Must have an upstream source specified (via source_model_id or incoming wire)
+        const remapNodes = model.nodes.filter(n =>
+            n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode' ||
+            n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode'
+        );
+        for (const remapNode of remapNodes) {
+            let hasSource = false;
+            if (remapNode.parameters?.source_model_id) {
+                const srcModel = this.appState.models[remapNode.parameters.source_model_id];
+                if (srcModel) {
+                    hasSource = true;
+                }
+            }
+            if (!hasSource) {
+                const ws = this.getActiveWorkspace();
+                if (ws && ws.connections) {
+                    hasSource = ws.connections.some(c => c.toNode === remapNode.id);
+                }
+            }
+            if (!hasSource && model.connections) {
+                hasSource = model.connections.some(c => c.toNode === remapNode.id && c.toPort === 'in');
+            }
+            if (!hasSource) {
+                const remapTypeLabel = remapNode.type === 'Remap2DTo3DNode' ? '2D ➔ 3D Remap' : (remapNode.type === 'Remap1DTo3DNode' ? '1D ➔ 3D Remap' : '1D ➔ 2D Remap');
+                return {
+                    complete: false,
+                    missingGrid: false,
+                    reason: `Remap node (${remapTypeLabel}) has no upstream source specified. Please select a Source Model in the Inspector or wire an upstream solver to it before running.`
                 };
             }
         }
@@ -1592,6 +2210,17 @@ export class StateManager {
                 this.modelTelemetryTiming.delete(modelId);
             }
 
+            if (effectiveStatus === 'UNINITIALIZED' || effectiveStatus === 'INCOMPLETE') {
+                this.telemetryStore.delete(modelId + "-fem-mesh");
+                this.telemetryStore.delete("latest-fem-mesh");
+                this.telemetryStore.delete(modelId + "-binary");
+                this.telemetryStore.delete("latest-binary");
+                const pb = (window as any).playbackBuffer;
+                if (pb && typeof pb.clear === 'function') {
+                    try { pb.clear(modelId); } catch (e) {}
+                }
+            }
+
             if (effectiveStatus === 'PAUSED' && oldStatus === 'RUNNING') {
                 this.pushTelemetry('Simulation Interrupted/Paused', undefined, modelId);
             } else if (effectiveStatus === 'TERMINATED') {
@@ -1625,8 +2254,27 @@ export class StateManager {
         return this.modelSimTimes.get(modelId) || 0.0;
     }
 
+    onModelTelemetry(listener: (modelId: string, step: number, simTime: number) => void): () => void {
+        this.modelTelemetryListeners.push(listener);
+        return () => {
+            this.modelTelemetryListeners = this.modelTelemetryListeners.filter(l => l !== listener);
+        };
+    }
+
+    private notifyModelTelemetry(modelId: string): void {
+        const step = this.getModelStep(modelId);
+        const simTime = this.getModelSimTime(modelId);
+        this.modelTelemetryListeners.forEach(l => {
+            try { l(modelId, step, simTime); } catch (e) { console.error(e); }
+        });
+    }
+
     setModelSimTime(modelId: string, simTime: number): void {
-        this.modelSimTimes.set(modelId, simTime);
+        const old = this.modelSimTimes.get(modelId);
+        if (old !== simTime) {
+            this.modelSimTimes.set(modelId, simTime);
+            this.notifyModelTelemetry(modelId);
+        }
     }
 
     getModelStep(modelId?: string): number {
@@ -1641,14 +2289,24 @@ export class StateManager {
     }
 
     setModelStep(modelId: string, step: number): void {
+        let changed = false;
         if (step > 0) {
-            this.modelSteps.set(modelId, step);
+            if (this.modelSteps.get(modelId) !== step) {
+                this.modelSteps.set(modelId, step);
+                changed = true;
+            }
         } else if (step === 0) {
             const current = this.modelSteps.get(modelId) ?? 0;
             const status = this.getModelStatus(modelId);
             if (status === 'UNINITIALIZED' || status === 'INITIALIZED' || current === 0) {
-                this.modelSteps.set(modelId, 0);
+                if (this.modelSteps.get(modelId) !== 0) {
+                    this.modelSteps.set(modelId, 0);
+                    changed = true;
+                }
             }
+        }
+        if (changed) {
+            this.notifyModelTelemetry(modelId);
         }
     }
 
@@ -1922,6 +2580,17 @@ export class StateManager {
         };
     }
 
+    public static rateToFps(rate: number): number {
+        if (rate <= 0.0165) return 60;
+        if (rate <= 0.0335) return 30;
+        if (rate <= 0.055) return 20;
+        if (rate <= 0.105) return 10;
+        if (rate <= 0.205) return 5;
+        if (rate <= 0.505) return 2;
+        if (rate <= 1.05) return 1;
+        return Number((1.0 / rate).toFixed(3));
+    }
+
     // Model management
     createModel(name?: string): Model {
         const modelId = `model-${Math.random().toString(36).substr(2, 9)}`;
@@ -1929,6 +2598,8 @@ export class StateManager {
             id: modelId,
             name: name || `Model ${Object.keys(this.appState.models).length + 1}`,
             filename: null,
+            refresh_rate: 0.5,
+            fps: 2,
             nodes: [],
             connections: []
         };
@@ -1939,7 +2610,86 @@ export class StateManager {
         activeWs.activeModelId = modelId;
 
         this.pushAppState(this.appState);
-        return newModel;
+        return this.appState.models[modelId];
+    }
+
+    /**
+     * Gets the authoritative telemetry streaming refresh rate (in seconds) for a model.
+     * Checks model.refresh_rate, then viewport/contour node parameters, then view toggles, defaulting to 0.5s (2 FPS).
+     */
+    getModelRefreshRate(modelId: string): number {
+        const model = this.appState.models[modelId];
+        if (!model) return 0.5;
+        if (model.refresh_rate !== undefined && !isNaN(Number(model.refresh_rate)) && Number(model.refresh_rate) > 0) {
+            return Number(model.refresh_rate);
+        }
+        const vp = model.nodes.find(n => n.type === 'Telemetry3DViewport');
+        if (vp?.parameters?.refresh_rate !== undefined && !isNaN(Number(vp.parameters.refresh_rate)) && Number(vp.parameters.refresh_rate) > 0) {
+            return Number(vp.parameters.refresh_rate);
+        }
+        const contour = model.nodes.find(n => n.type === 'TelemetryContour');
+        if (contour?.parameters?.refresh_rate !== undefined && !isNaN(Number(contour.parameters.refresh_rate)) && Number(contour.parameters.refresh_rate) > 0) {
+            return Number(contour.parameters.refresh_rate);
+        }
+        if (model.views && model.views.length > 0) {
+            const activeView = model.views.find(v => v.id === model.activeViewId) || model.views[0];
+            if (activeView?.toggles?.refresh_rate !== undefined && !isNaN(Number(activeView.toggles.refresh_rate)) && Number(activeView.toggles.refresh_rate) > 0) {
+                return Number(activeView.toggles.refresh_rate);
+            }
+        }
+        return 0.5;
+    }
+
+    /**
+     * Gets the target streaming FPS for a model.
+     */
+    getModelFps(modelId: string): number {
+        const rate = this.getModelRefreshRate(modelId);
+        return StateManager.rateToFps(rate);
+    }
+
+    /**
+     * Sets and persists the telemetry streaming refresh rate (in seconds) and FPS for a specific model.
+     * Updates model.refresh_rate, model.fps, attached Telemetry3DViewport / TelemetryContour node parameters,
+     * and any active view toggles.
+     */
+    setModelRefreshRate(modelId: string, rate: number): void {
+        const model = this.appState.models[modelId];
+        if (!model) return;
+        const validRate = (typeof rate === 'number' && !isNaN(rate) && rate > 0) ? rate : 0.5;
+        const fps = StateManager.rateToFps(validRate);
+        model.refresh_rate = validRate;
+        model.fps = fps;
+
+        // Update Telemetry3DViewport node in this model
+        const vpNode = model.nodes.find(n => n.type === 'Telemetry3DViewport');
+        if (vpNode) {
+            vpNode.parameters = vpNode.parameters || {};
+            vpNode.parameters.refresh_rate = validRate;
+            vpNode.parameters.fps = fps;
+            this.notifyInPlaceParameterListeners(vpNode.id, { refresh_rate: validRate, fps });
+        }
+
+        // Update TelemetryContour node in this model
+        const contourNode = model.nodes.find(n => n.type === 'TelemetryContour');
+        if (contourNode) {
+            contourNode.parameters = contourNode.parameters || {};
+            contourNode.parameters.refresh_rate = validRate;
+            contourNode.parameters.fps = fps;
+            this.notifyInPlaceParameterListeners(contourNode.id, { refresh_rate: validRate, fps });
+        }
+
+        // Update active view toggles if present
+        if (model.views && model.views.length > 0) {
+            const activeView = model.views.find(v => v.id === model.activeViewId) || model.views[0];
+            if (activeView) {
+                activeView.toggles = activeView.toggles || {};
+                activeView.toggles.refresh_rate = validRate;
+                activeView.toggles.fps = fps;
+            }
+        }
+
+        this.saveWorkspaceDebounced();
     }
 
     setModelFilename(modelId: string, filename: string): void {
@@ -1987,6 +2737,9 @@ export class StateManager {
             const isUsed = this.appState.workspaces.some(w => w.modelIds.includes(modelId));
             if (!isUsed) {
                 delete this.appState.models[modelId];
+            }
+            if (typeof window !== 'undefined') {
+                (window as any).playbackBuffer?.clear(modelId);
             }
             this.pushAppState(this.appState);
         }
@@ -2121,6 +2874,7 @@ export class StateManager {
             'TelemetryContour': 'node-contour',
             'VTKOutput': 'node-vtk',
             'VirtualGauges': 'node-gauges',
+            'VirtualGauges3D': 'node-gauges',
             'DomainMesh3D': 'node-mesh3d',
             'Charge3D': 'node-charge3d',
             'CFDSolver3D': 'node-solver3d',
@@ -2133,7 +2887,6 @@ export class StateManager {
             'MPMObject3D': 'node-mpm-obj3d',
             'FSICoupler2D': 'node-fsi-coupler',
             'FSICoupler3D': 'node-fsi-coupler3d',
-            'RefinementMesh3D': 'node-refinement3d',
             'FEMDomain3D': 'node-fem-domain3d',
             'FEMObject3D': 'node-fem-obj3d',
             'FEMBeam3D': 'node-fem-beam3d',
@@ -2141,7 +2894,8 @@ export class StateManager {
             'Obstacle': 'node-obstacle',
             'Obstacle3D': 'node-obstacle3d',
             'LSDynaImporter3D': 'node-lsdyna-importer3d',
-            'FEMFSICoupler3D': 'node-fem-fsi-coupler3d'
+            'FEMFSICoupler3D': 'node-fem-fsi-coupler3d',
+            'MarineHarbourDomain': 'node-marine-harbour'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
 
@@ -2205,8 +2959,12 @@ export class StateManager {
             id: newModelId,
             name: newModelName,
             filename: this.clipboardModel.filename ? `${this.clipboardModel.filename.replace(/\.[^/.]+$/, "")}_copy.json` : null,
+            refresh_rate: this.clipboardModel.refresh_rate ?? 0.5,
+            fps: this.clipboardModel.fps ?? StateManager.rateToFps(this.clipboardModel.refresh_rate ?? 0.5),
             nodes: duplicatedNodes,
-            connections: duplicatedConnections
+            connections: duplicatedConnections,
+            views: this.clipboardModel.views ? JSON.parse(JSON.stringify(this.clipboardModel.views)) : undefined,
+            activeViewId: this.clipboardModel.activeViewId || undefined
         };
 
         this.appState.models[newModelId] = newModel;
@@ -2232,7 +2990,7 @@ export class StateManager {
 
         this.pushAppState(this.appState);
 
-        return newModel;
+        return this.appState.models[newModel.id] || newModel;
     }
 
     // Core state sync and history
@@ -2377,7 +3135,10 @@ export class StateManager {
         });
 
         // Cross-model connections within the workspace
-        const wsConnections: Connection[] = [];
+        // Preserve existing cross-model connections from ws.connections
+        const wsConnections: Connection[] = (ws.connections || []).filter(conn =>
+            allWorkspaceNodeIds.has(conn.fromNode) && allWorkspaceNodeIds.has(conn.toNode)
+        );
         newState.connections.forEach(conn => {
             if (allWorkspaceNodeIds.has(conn.fromNode) && allWorkspaceNodeIds.has(conn.toNode)) {
                 // Check if it's already an internal connection of any model
@@ -2399,6 +3160,32 @@ export class StateManager {
             }
         });
 
+        // Ensure all remap nodes with explicit source_model_id have their cross-model connection in ws.connections
+        ws.modelIds.forEach(mId => {
+            const m = appStateCopy.models[mId];
+            if (!m) return;
+            m.nodes.forEach(n => {
+                if (['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(n.type) && n.parameters?.source_model_id) {
+                    const srcModel = appStateCopy.models[n.parameters.source_model_id];
+                    if (srcModel) {
+                        const is2D = n.type === 'Remap2DTo3DNode';
+                        const srcSolver = srcModel.nodes.find(sn => is2D ? sn.type === 'CFDSolver2D' : sn.type === 'CFDSolver');
+                        if (srcSolver) {
+                            const exists = wsConnections.some(c => c.fromNode === srcSolver.id && c.toNode === n.id);
+                            if (!exists) {
+                                wsConnections.push({
+                                    fromNode: srcSolver.id,
+                                    fromPort: 'telemetry',
+                                    toNode: n.id,
+                                    toPort: 'in'
+                                });
+                            }
+                        }
+                    }
+                }
+            });
+        });
+
         ws.connections = wsConnections;
 
         this.pushAppState(appStateCopy, autoSave);
@@ -2409,6 +3196,15 @@ export class StateManager {
             this.pushState(state);
         } else {
             this.pushState(state, false);
+        }
+    }
+
+    public notifyChange(): void {
+        const state = this.getCurrentState();
+        if (state) {
+            this.pushState(state);
+        } else {
+            this.notifyListeners();
         }
     }
 
@@ -2446,14 +3242,34 @@ export class StateManager {
             if (node) {
                 targetModelId = model.id;
                 const merged = { ...node.parameters, ...parameters };
-                const updatedKey = Object.keys(parameters).find(k => k === 'material_model' || k === 'preset' || k === 'composition' || k === 'charge_mass' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
+                const updatedKey = Object.keys(parameters).find(k => k === 'solid_model' || k === 'burn_model' || k === 'product_model' || k === 'material_model' || k === 'preset' || k === 'composition' || k === 'charge_mass' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
                 syncMPMMaterialParameters(node, merged, updatedKey);
-                syncFEMObjectParameters(node, merged, updatedKey);
+                syncFEMObjectParameters(node, merged, updatedKey, model);
                 syncQuantityRanges(node, parameters, merged);
                 node.parameters = merged;
                 syncCoupledHardwareParameters(model, node, updatedKey);
                 console.log("[DEBUG] Node parameters updated in memory. New parameters:", node.parameters);
+                
+                if (parameters['refresh_rate'] !== undefined) {
+                    const r = Number(parameters['refresh_rate']);
+                    if (!isNaN(r) && r > 0) {
+                        model.refresh_rate = r;
+                        model.fps = StateManager.rateToFps(r);
+                    }
+                } else if (parameters['viewport_refresh_rate'] !== undefined) {
+                    const r = Number(parameters['viewport_refresh_rate']);
+                    if (!isNaN(r) && r > 0) {
+                        model.refresh_rate = r;
+                        model.fps = StateManager.rateToFps(r);
+                    }
+                } else if (parameters['fps'] !== undefined) {
+                    const f = Number(parameters['fps']);
+                    if (!isNaN(f) && f > 0) {
+                        model.fps = f;
+                        model.refresh_rate = Number((1.0 / f).toFixed(4));
+                    }
+                }
                 
                 if (node.type === 'Material') {
                     const dependentConns = model.connections.filter(c => c.fromNode === node.id && c.toPort === 'material');
@@ -2543,15 +3359,38 @@ export class StateManager {
             if (node) {
                 targetModelId = model.id;
                 const merged = { ...node.parameters, ...parameters };
-                const updatedKey = Object.keys(parameters).find(k => k === 'material_model' || k === 'preset' || k === 'composition' || k === 'charge_mass' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
+                const updatedKey = Object.keys(parameters).find(k => k === 'solid_model' || k === 'burn_model' || k === 'product_model' || k === 'material_model' || k === 'preset' || k === 'composition' || k === 'charge_mass' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
                 syncExplosiveParameters(node, merged, model, updatedKey);
                 syncMPMMaterialParameters(node, merged, updatedKey);
-                syncFEMObjectParameters(node, merged, updatedKey);
+                syncFEMObjectParameters(node, merged, updatedKey, model);
                 syncQuantityRanges(node, parameters, merged);
                 
                 for (const [key, value] of Object.entries(merged)) {
                     if (node.parameters[key] !== value) {
                         node.parameters[key] = value;
+                        changed = true;
+                    }
+                }
+
+                if (parameters['refresh_rate'] !== undefined) {
+                    const r = Number(parameters['refresh_rate']);
+                    if (!isNaN(r) && r > 0 && model.refresh_rate !== r) {
+                        model.refresh_rate = r;
+                        model.fps = StateManager.rateToFps(r);
+                        changed = true;
+                    }
+                } else if (parameters['viewport_refresh_rate'] !== undefined) {
+                    const r = Number(parameters['viewport_refresh_rate']);
+                    if (!isNaN(r) && r > 0 && model.refresh_rate !== r) {
+                        model.refresh_rate = r;
+                        model.fps = StateManager.rateToFps(r);
+                        changed = true;
+                    }
+                } else if (parameters['fps'] !== undefined) {
+                    const f = Number(parameters['fps']);
+                    if (!isNaN(f) && f > 0 && model.fps !== f) {
+                        model.fps = f;
+                        model.refresh_rate = Number((1.0 / f).toFixed(4));
                         changed = true;
                     }
                 }
@@ -2857,8 +3696,102 @@ export class StateManager {
         return this.focusedViewportPanelId;
     }
 
+    public normalizeGaugesTelemetry(rawGh: any): any {
+        if (!rawGh || typeof rawGh !== 'object') return null;
+
+        let times: number[] = [];
+        let values: Record<string, number[][]> = {};
+        let list: any[] = [];
+
+        if (Array.isArray(rawGh)) {
+            list = rawGh;
+            rawGh.forEach((item: any, idx: number) => {
+                const gId = item.id || `G${idx + 1}`;
+                if (item.times && Array.isArray(item.times) && times.length === 0) {
+                    times = item.times;
+                }
+                if (item.channel_values && Array.isArray(item.channel_values)) {
+                    values[gId] = item.channel_values;
+                    values[String(idx)] = item.channel_values;
+                }
+            });
+        } else if (rawGh.values && typeof rawGh.values === 'object') {
+            times = Array.isArray(rawGh.times) ? rawGh.times : [];
+            values = { ...rawGh.values };
+            Object.entries(rawGh.values).forEach(([id, chVals], idx) => {
+                list.push({
+                    id: id,
+                    channel_values: chVals,
+                    times: times
+                });
+                values[String(idx)] = chVals as number[][];
+                values['G' + (idx + 1)] = chVals as number[][];
+            });
+        } else if (rawGh.gauges_history) {
+            return this.normalizeGaugesTelemetry(rawGh.gauges_history);
+        }
+
+        const normalized: any = {
+            solverTracked: true,
+            times: times,
+            gauge_times: times,
+            values: values,
+            gauges_history: list
+        };
+
+        // Populate array indexing directly on the object for array-based consumers
+        list.forEach((item, idx) => {
+            normalized[idx] = item;
+            if (item.id) {
+                normalized[item.id] = item;
+            }
+        });
+        normalized.length = list.length;
+
+        return normalized;
+    }
+
     getTelemetry(nodeId: string): any {
-        return this.telemetryStore.get(nodeId);
+        let val = this.telemetryStore.get(nodeId);
+        if (!val && nodeId.endsWith("-binary")) {
+            const baseId = nodeId.slice(0, -7);
+            const raw = this.telemetryStore.get(baseId);
+            if (raw instanceof ArrayBuffer) {
+                val = raw;
+            }
+        }
+        if (!val) {
+            const activeModel = this.getActiveModel();
+            const node = activeModel?.nodes.find(n => n.id === nodeId);
+            if (node && (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') && activeModel) {
+                val = this.telemetryStore.get(activeModel.id + "-gauges");
+            }
+        }
+        return val;
+    }
+
+    public setBinaryTelemetry(nodeId: string, buffer: ArrayBuffer, modelId?: string): void {
+        this.telemetryStore.set(nodeId + "-binary", buffer);
+        this.telemetryStore.set(nodeId, buffer);
+        if (modelId) {
+            this.telemetryStore.set(modelId + "-binary", buffer);
+        }
+    }
+
+    public getLatestFEMBuffer(modelId?: string): ArrayBuffer | null {
+        if (modelId) {
+            const b = this.telemetryStore.get(modelId + "-fem-mesh");
+            if (b instanceof ArrayBuffer && b.byteLength >= 24) return b;
+        }
+        const bLatest = this.telemetryStore.get("latest-fem-mesh");
+        if (bLatest instanceof ArrayBuffer && bLatest.byteLength >= 24) return bLatest;
+
+        const pb = (window as any).playbackBuffer;
+        if (pb && typeof pb.getLatestFEMBuffer === 'function') {
+            const pbBuf = pb.getLatestFEMBuffer(modelId);
+            if (pbBuf instanceof ArrayBuffer && pbBuf.byteLength >= 24) return pbBuf;
+        }
+        return null;
     }
 
     addPendingSteps(steps: number): void {
@@ -3244,7 +4177,10 @@ export class StateManager {
             }
 
             if (data.type === 'resource_pulse') {
-                return `[${timestamp}] [RESOURCES] CPU: ${data.metrics?.cpu?.toFixed(1)}%, RAM: ${data.metrics?.ram?.toFixed(1)}%`;
+                const cpuVal = data.cpu ?? data.metrics?.cpu ?? 0;
+                const ramVal = data.ram_alloc ? (data.ram_alloc / (1024 * 1024)).toFixed(0) + 'MB' : (data.metrics?.ram !== undefined ? data.metrics.ram.toFixed(1) + '%' : '0MB');
+                const vramVal = data.vram_blastdaemon ? (data.vram_blastdaemon / (1024 * 1024)).toFixed(0) + 'MB' : (data.vram_alloc ? (data.vram_alloc / (1024 * 1024)).toFixed(0) + 'MB' : '0MB');
+                return `[${timestamp}] [RESOURCES] CPU: ${Number(cpuVal).toFixed(1)}%, RAM: ${ramVal}, VRAM: ${vramVal}`;
             }
 
             return `[${timestamp}] [JSON] ${JSON.stringify(data, null, 2)}`;
@@ -3268,12 +4204,12 @@ export class StateManager {
             nodeId = nodeIdOrData;
             data = optionalData;
         } else if (typeof nodeIdOrData === 'string') {
-            const solverNode = nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
+            const solverNode = nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
         } else {
-            const solverNode = nodes.find(n => n.id === 'node-solver') || nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
+            const solverNode = nodes.find(n => n.id === 'node-solver') || nodes.find(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
             if (!solverNode) return;
             nodeId = solverNode.id;
             data = nodeIdOrData;
@@ -3281,9 +4217,17 @@ export class StateManager {
 
         if (!nodeId) return;
 
+        if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
+            const normalizedGauges = this.normalizeGaugesTelemetry(data.gauges_history);
+            data.gauges_history = normalizedGauges;
+            if (modelId) {
+                this.telemetryStore.set(modelId + "-gauges", normalizedGauges);
+            }
+        }
+
         const targetNode = nodes.find(n => n.id === nodeId);
         let telemetryToStore = data;
-        if ((targetNode?.type === 'TelemetryText' || targetNode?.type === 'CFDSolver' || targetNode?.type === 'CFDSolver2D' || targetNode?.type === 'CFDSolver3D' || targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'MPMDomain3D' || targetNode?.type === 'FSICoupler2D' || targetNode?.type === 'FSICoupler3D' || targetNode?.type === 'FEMDomain3D' || targetNode?.type === 'FEMFSICoupler3D') && !(data instanceof ArrayBuffer)) {
+        if ((targetNode?.type === 'TelemetryText' || targetNode?.type === 'CFDSolver' || targetNode?.type === 'CFDSolver2D' || targetNode?.type === 'CFDSolver3D' || targetNode?.type === 'MarineHarbourDomain' || targetNode?.type === 'MPMDomain2D' || targetNode?.type === 'MPMDomain3D' || targetNode?.type === 'FSICoupler2D' || targetNode?.type === 'FSICoupler3D' || targetNode?.type === 'FEMDomain3D' || targetNode?.type === 'FEMFSICoupler3D') && !(data instanceof ArrayBuffer)) {
             if (data && typeof data === 'object' && (data.type === 'progress' || data.type === 'progress_2d' || data.type === 'resource_pulse')) {
                  // Skip
             } else {
@@ -3296,6 +4240,12 @@ export class StateManager {
         }
 
         this.telemetryStore.set(nodeId, telemetryToStore);
+        if (data instanceof ArrayBuffer) {
+            this.telemetryStore.set(nodeId + "-binary", data);
+            if (modelId) {
+                this.telemetryStore.set(modelId + "-binary", data);
+            }
+        }
         this.notifyTelemetryUpdate(nodeId, telemetryToStore);
 
         const telemetryConnections = connections.filter(e => e.fromNode === nodeId);
@@ -3314,7 +4264,7 @@ export class StateManager {
                          this.telemetryStore.set(connectedNode.id, data);
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
-                } else if (connectedNode.type === 'VirtualGauges') {
+                } else if (connectedNode.type === 'VirtualGauges' || connectedNode.type === 'VirtualGauges3D') {
                     if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
                          this.telemetryStore.set(connectedNode.id, data.gauges_history);
                          this.notifyTelemetryUpdate(connectedNode.id, data.gauges_history);
@@ -3324,6 +4274,9 @@ export class StateManager {
                          this.telemetryStore.set(connectedNode.id, data);
                          if (data && (data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_FEM_3D')) {
                              this.telemetryStore.set(connectedNode.id + "-config-3d", data);
+                             if (modelId) {
+                                 this.telemetryStore.set(modelId + "-config-3d", data);
+                             }
                          }
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
@@ -3361,6 +4314,15 @@ export class StateManager {
 
         // Cache binary particle/mesh/contour frames in telemetry store for Telemetry3DViewport and TelemetryContour nodes
         if (data instanceof ArrayBuffer) {
+            if (data.byteLength >= 4) {
+                const magic = new DataView(data).getUint32(0, true);
+                if (magic === 0x46454d33) {
+                    if (modelId) {
+                        this.telemetryStore.set(modelId + "-fem-mesh", data);
+                    }
+                    this.telemetryStore.set("latest-fem-mesh", data);
+                }
+            }
             const visualNodes = nodes.filter(n => n.type === 'Telemetry3DViewport' || n.type === 'TelemetryContour');
             visualNodes.forEach(vNode => {
                 this.telemetryStore.set(vNode.id, data);
@@ -3396,19 +4358,14 @@ export class StateManager {
             });
         }
 
-        // Also check for virtual gauge nodes connected to the solver in the reverse direction (VirtualGauges3D -> CFDSolver3D)
-        const reverseGaugeConnections = connections.filter(e => e.toNode === nodeId);
-        reverseGaugeConnections.forEach(connection => {
-            const connectedNode = nodes.find(n => n.id === connection.fromNode);
-            if (connectedNode && !updatedNodeIds.has(connectedNode.id)) {
-                if (connectedNode.type === 'VirtualGauges') {
-                    if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
-                         this.telemetryStore.set(connectedNode.id, data.gauges_history);
-                         this.notifyTelemetryUpdate(connectedNode.id, data.gauges_history);
-                    }
-                }
-            }
-        });
+        // Ensure virtual gauge telemetry is broadcast to all VirtualGauges nodes in the active model
+        if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
+            const gaugeNodes = nodes.filter(n => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D');
+            gaugeNodes.forEach(gaugeNode => {
+                this.telemetryStore.set(gaugeNode.id, data.gauges_history);
+                this.notifyTelemetryUpdate(gaugeNode.id, data.gauges_history);
+            });
+        }
     }
 
     private notifyListeners(): void {
@@ -3616,8 +4573,15 @@ export class StateManager {
                     }
                     const layoutStr = JSON.stringify(ws.layout);
                     const isOldSplit = layoutStr.includes('split-main');
+                    if (!hasPanelType(ws.layout, 'TRANSPORT_BAR')) {
+                        const res = attachTransportBarToLayout(ws.layout, ws.id);
+                        if (res.attached) {
+                            ws.layout = res.root;
+                            anyChanged = true;
+                        }
+                    }
                     const hasViewportPanel = hasPanelType(ws.layout, 'VIEWPORT') || hasPanelType(ws.layout, 'MULTI_VIEW_STAGE');
-                    if (isOldSplit || !hasPanelType(ws.layout, 'PIPELINE_BROWSER') || !hasViewportPanel || !hasPanelType(ws.layout, 'TRANSPORT_BAR') || !hasPanelType(ws.layout, 'MENU_BAR')) {
+                    if (isOldSplit || !hasPanelType(ws.layout, 'PIPELINE_BROWSER') || !hasViewportPanel || !hasPanelType(ws.layout, 'MENU_BAR')) {
                         ws.layout = createDefaultWorkstationLayout(ws.id);
                         anyChanged = true;
                     } else if (normalizeLayoutPanels(ws.layout)) {
@@ -3794,12 +4758,20 @@ export class StateManager {
             m.nodes.forEach(n => tempExistingIds.add(n.id));
         });
 
+        // Auto-heal Material parameters (ensuring guaranteed afterburn & EOS defaults)
+        for (const node of model.nodes) {
+            if (node.type === 'Material') {
+                syncMPMMaterialParameters(node, node.parameters);
+            }
+        }
+
 
 
         // 5. Ensure 3D simulation models have a Telemetry3DViewport node
         const has3DEntities = model.nodes.some(n => 
             n.type === 'DomainMesh3D' || 
             n.type === 'CFDSolver3D' || 
+            n.type === 'MarineHarbourDomain' ||
             n.type === 'MPMDomain3D' || 
             n.type === 'MPMObject3D' || 
             n.type === 'FEMDomain3D' || 
@@ -3825,7 +4797,7 @@ export class StateManager {
 
             const hasVpConn = model.connections.some(c => c.toNode === vpNode!.id);
             if (!hasVpConn) {
-                const sourceNode = model.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'DomainMesh3D');
+                const sourceNode = model.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'DomainMesh3D');
                 if (sourceNode) {
                     model.connections.push({
                         fromNode: sourceNode.id,
@@ -3840,14 +4812,14 @@ export class StateManager {
 
         // 6. Auto-heal Trigger / Detonator connections
         const detNodes = model.nodes.filter(n => ['DetonatorLocation3D', 'DetonatorLocation', 'TriggerLocation3D', 'TriggerLocation'].includes(n.type));
-        const solverNodes = model.nodes.filter(n => ['MPMDomain3D', 'CFDSolver3D', 'MPMDomain2D', 'CFDSolver2D'].includes(n.type));
+        const solverNodes = model.nodes.filter(n => ['MPMDomain3D', 'CFDSolver3D', 'MPMDomain2D', 'CFDSolver2D', 'MarineHarbourDomain'].includes(n.type));
         for (const det of detNodes) {
             const isDet3D = det.type === 'DetonatorLocation3D' || det.type === 'TriggerLocation3D';
-            const compatibleSolvers = solverNodes.filter(s => isDet3D ? (s.type === 'MPMDomain3D' || s.type === 'CFDSolver3D') : (s.type === 'MPMDomain2D' || s.type === 'CFDSolver2D'));
+            const compatibleSolvers = solverNodes.filter(s => isDet3D ? (s.type === 'MPMDomain3D' || s.type === 'CFDSolver3D' || s.type === 'MarineHarbourDomain') : (s.type === 'MPMDomain2D' || s.type === 'CFDSolver2D'));
             if (compatibleSolvers.length > 0) {
                 const isConnected = model.connections.some(c => c.fromNode === det.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
                 if (!isConnected) {
-                    const targetSolver = compatibleSolvers.find(s => s.type === 'MPMDomain3D' || s.type === 'MPMDomain2D') || compatibleSolvers[0];
+                    const targetSolver = compatibleSolvers.find(s => s.type === 'MPMDomain3D' || s.type === 'MPMDomain2D' || s.type === 'MarineHarbourDomain') || compatibleSolvers[0];
                     model.connections.push({
                         fromNode: det.id,
                         fromPort: 'detonator',
@@ -3860,12 +4832,34 @@ export class StateManager {
         }
 
         // 7. Auto-heal Background Grid connections
-        const meshNodes = model.nodes.filter(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh2D');
+        let meshNodes = model.nodes.filter(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh');
+        const has3DSolver = model.nodes.some(n => ['CFDSolver3D', 'MPMDomain3D', 'MarineHarbourDomain', 'FEMDomain3D'].includes(n.type));
+        const has3DMesh = meshNodes.some(n => n.type === 'DomainMesh3D');
+        if (has3DSolver && !has3DMesh) {
+            const solver = model.nodes.find(n => ['MarineHarbourDomain', 'CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D'].includes(n.type))!;
+            const newMeshId = this.getUniqueNodeId('DomainMesh3D', tempExistingIds);
+            tempExistingIds.add(newMeshId);
+            const newMesh: Node = {
+                id: newMeshId,
+                type: 'DomainMesh3D',
+                x: solver.x ? solver.x - 320 : 100,
+                y: solver.y ? solver.y : 100,
+                displayMode: 'expanded',
+                inputs: this.getDefaultInputs('DomainMesh3D'),
+                outputs: this.getDefaultOutputs('DomainMesh3D'),
+                parameters: { ...this.getDefaultParameters('DomainMesh3D'), name: 'Domain Mesh 3D' }
+            };
+            model.nodes.push(newMesh);
+            meshNodes.push(newMesh);
+            changed = true;
+        }
+
         for (const mesh of meshNodes) {
             const isMesh3D = mesh.type === 'DomainMesh3D';
+            const isMesh2D = mesh.type === 'DomainMesh2D';
             const targetSolvers = model.nodes.filter(s => isMesh3D 
-                ? ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D'].includes(s.type)
-                : ['MPMDomain2D', 'CFDSolver2D'].includes(s.type));
+                ? ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MarineHarbourDomain'].includes(s.type)
+                : (isMesh2D ? ['MPMDomain2D', 'CFDSolver2D'].includes(s.type) : s.type === 'CFDSolver'));
             for (const solver of targetSolvers) {
                 const isConnected = model.connections.some(c => c.fromNode === mesh.id && c.toNode === solver.id && c.toPort === 'mesh');
                 if (!isConnected) {
@@ -4002,22 +4996,370 @@ export class StateManager {
                     changed = true;
                 }
             }
+
+            const matConn = model.connections.find(c => (c.toNode === obj.id || c.fromNode === obj.id) && (c.toPort === 'material' || c.fromPort === 'material'));
+            if (!matConn) {
+                const matNodes = model.nodes.filter(n => n.type === 'Material');
+                let targetMat = null;
+
+                // 1. Check if object already specifies a valid material parameter
+                if (obj.parameters?.material) {
+                    targetMat = matNodes.find(m => m.id === obj.parameters.material) || null;
+                }
+
+                // 2. Match by name if possible (e.g. Seabed -> Material_Seabed)
+                if (!targetMat) {
+                    const objBaseName = ((obj as any).name || obj.parameters?.name || obj.id || '').toLowerCase().trim();
+                    if (objBaseName) {
+                        targetMat = matNodes.find(m => {
+                            const matBaseName = ((m as any).name || m.parameters?.name || m.parameters?.preset || m.id).toLowerCase().trim();
+                            return matBaseName.includes(objBaseName) || objBaseName.includes(matBaseName);
+                        }) || null;
+                    }
+                }
+
+                // 3. Fallback: find any non-air, non-explosive solid material
+                if (!targetMat) {
+                    targetMat = matNodes.find(m => !isAirMaterialNode(m) && !isExplosiveMaterialNode(m) && m.parameters?.material_model !== 'Ideal Gas' && m.parameters?.material_model !== 'JWL Detonation Gas') || null;
+                }
+
+                if (targetMat) {
+                    model.connections.push({
+                        fromNode: targetMat.id,
+                        fromPort: 'out',
+                        toNode: obj.id,
+                        toPort: 'material'
+                    });
+                    if (!obj.parameters) obj.parameters = {};
+                    obj.parameters['material'] = targetMat.id;
+                    changed = true;
+                }
+            }
         }
 
-        // 9. Auto-heal Charge connections for CFD
+        // 9. Auto-heal Charge connections for CFD (1D, 2D, 3D unified)
         const chargeNodes = model.nodes.filter(n => ['Charge3D', 'Charge2D', 'Charge1D'].includes(n.type));
         for (const charge of chargeNodes) {
-            const cfdSolver = model.nodes.find(s => ['CFDSolver3D', 'CFDSolver2D', 'CFDSolver'].includes(s.type));
-            if (cfdSolver) {
-                const isConnected = model.connections.some(c => c.fromNode === charge.id && c.toNode === cfdSolver.id && c.toPort === 'charge');
+            const is3D = charge.type === 'Charge3D';
+            const is2D = charge.type === 'Charge2D';
+            const targetSolver = model.nodes.find(s => is3D 
+                ? (s.type === 'CFDSolver3D' || s.type === 'MarineHarbourDomain')
+                : (is2D ? s.type === 'CFDSolver2D' : s.type === 'CFDSolver'));
+            if (targetSolver) {
+                const isConnected = model.connections.some(c => (c.fromNode === charge.id && c.toNode === targetSolver.id && (c.toPort === 'charge' || c.toPort === 'explosive')) ||
+                    (c.toNode === charge.id && c.fromNode === targetSolver.id && (c.fromPort === 'charge' || c.fromPort === 'explosive')));
                 if (!isConnected) {
                     model.connections.push({
                         fromNode: charge.id,
                         fromPort: 'out',
-                        toNode: cfdSolver.id,
+                        toNode: targetSolver.id,
                         toPort: 'charge'
                     });
                     changed = true;
+                }
+            }
+
+            // Auto-heal explosive Material connection for the charge
+            const matConn = model.connections.find(c => (c.toNode === charge.id || c.fromNode === charge.id) && (c.toPort === 'material' || c.fromPort === 'material'));
+            let validMatConn = false;
+            if (matConn) {
+                const otherId = matConn.toNode === charge.id ? matConn.fromNode : matConn.toNode;
+                const connectedMat = model.nodes.find(n => n.id === otherId);
+                if (connectedMat && isExplosiveMaterialNode(connectedMat)) {
+                    validMatConn = true;
+                    charge.parameters['material'] = connectedMat.id;
+                } else {
+                    // Stale or invalid material connection (e.g. connected to water or air) - disconnect it!
+                    model.connections = model.connections.filter(c => c !== matConn);
+                    changed = true;
+                }
+            }
+            if (!validMatConn) {
+                const matNodes = model.nodes.filter(n => n.type === 'Material');
+                let expMat = charge.parameters?.material ? matNodes.find(m => m.id === charge.parameters.material && isExplosiveMaterialNode(m)) : null;
+                if (!expMat) {
+                    expMat = matNodes.find(m => isExplosiveMaterialNode(m) || m.parameters?.material_model === 'JWL Detonation Gas' || m.parameters?.material_type === 'JWL Charge' || m.parameters?.material_type === 'Ideal Gas Charge') || null;
+                }
+                if (expMat) {
+                    model.connections.push({
+                        fromNode: expMat.id,
+                        fromPort: 'material',
+                        toNode: charge.id,
+                        toPort: 'material'
+                    });
+                    charge.parameters['material'] = expMat.id;
+                    changed = true;
+                }
+            }
+        }
+
+        // 9b. Auto-heal Ambient Air connections for CFD (1D, 2D, 3D unified)
+        const airNodes = model.nodes.filter(n => n.type === 'Material' && (isAirMaterialNode(n) || n.parameters?.material_type === 'Air' || (n.parameters?.material_model === 'Ideal Gas' && n.parameters?.material_type !== 'Ideal Gas Charge')));
+        const cfdSolvers = model.nodes.filter(s => ['CFDSolver3D', 'CFDSolver2D', 'CFDSolver', 'MarineHarbourDomain'].includes(s.type));
+        for (const solver of cfdSolvers) {
+            const hasAirConn = model.connections.some(c => (c.toNode === solver.id && (c.toPort === 'air' || c.toPort === 'ambient_air')) || (c.fromNode === solver.id && (c.fromPort === 'air' || c.fromPort === 'ambient_air')));
+            if (!hasAirConn && airNodes.length > 0) {
+                const airMat = airNodes[0];
+                model.connections.push({
+                    fromNode: airMat.id,
+                    fromPort: 'out',
+                    toNode: solver.id,
+                    toPort: 'air'
+                });
+                changed = true;
+            }
+        }
+
+        // 9b-2. Auto-heal Seawater, Seabed, and Charge connections for Marine Harbour Domain
+        const harbourDomains = model.nodes.filter(s => s.type === 'MarineHarbourDomain');
+        for (const harbour of harbourDomains) {
+            // Seawater
+            const waterConn = model.connections.find(c => (c.toNode === harbour.id && (c.toPort === 'water' || c.toPort === 'seawater')) || (c.fromNode === harbour.id && (c.fromPort === 'water' || c.fromPort === 'seawater')));
+            let validWaterConn = false;
+            if (waterConn) {
+                const otherId = waterConn.toNode === harbour.id ? waterConn.fromNode : waterConn.toNode;
+                const connectedWater = model.nodes.find(n => n.id === otherId);
+                if (connectedWater && isWaterMaterialNode(connectedWater)) {
+                    validWaterConn = true;
+                    if (!harbour.parameters) harbour.parameters = {};
+                    harbour.parameters['seawater_material'] = connectedWater.id;
+                } else {
+                    model.connections = model.connections.filter(c => c !== waterConn);
+                    changed = true;
+                }
+            }
+            if (!validWaterConn) {
+                const waterMat = model.nodes.find(n => n.type === 'Material' && isWaterMaterialNode(n));
+                if (waterMat) {
+                    model.connections.push({
+                        fromNode: waterMat.id,
+                        fromPort: 'out',
+                        toNode: harbour.id,
+                        toPort: 'water'
+                    });
+                    if (!harbour.parameters) harbour.parameters = {};
+                    harbour.parameters['seawater_material'] = waterMat.id;
+                    changed = true;
+                }
+            }
+
+            // Seabed
+            const seabedConn = model.connections.find(c => (c.toNode === harbour.id && c.toPort === 'seabed') || (c.fromNode === harbour.id && c.fromPort === 'seabed'));
+            let validSeabedConn = false;
+            if (seabedConn) {
+                const otherId = seabedConn.toNode === harbour.id ? seabedConn.fromNode : seabedConn.toNode;
+                const connectedSeabed = model.nodes.find(n => n.id === otherId);
+                if (connectedSeabed && (isSeabedMaterialNode(connectedSeabed) || (isSolidMaterialNode(connectedSeabed) && !isAirMaterialNode(connectedSeabed) && !isWaterMaterialNode(connectedSeabed) && !isExplosiveMaterialNode(connectedSeabed)))) {
+                    validSeabedConn = true;
+                    if (!harbour.parameters) harbour.parameters = {};
+                    harbour.parameters['seabed_foundation'] = connectedSeabed.id;
+                } else {
+                    model.connections = model.connections.filter(c => c !== seabedConn);
+                    changed = true;
+                }
+            }
+            if (!validSeabedConn) {
+                const seabedMat = model.nodes.find(n => n.type === 'Material' && isSeabedMaterialNode(n)) ||
+                                  model.nodes.find(n => n.type === 'Material' && !isAirMaterialNode(n) && !isWaterMaterialNode(n) && !isExplosiveMaterialNode(n));
+                if (seabedMat) {
+                    model.connections.push({
+                        fromNode: seabedMat.id,
+                        fromPort: 'out',
+                        toNode: harbour.id,
+                        toPort: 'seabed'
+                    });
+                    if (!harbour.parameters) harbour.parameters = {};
+                    harbour.parameters['seabed_foundation'] = seabedMat.id;
+                    changed = true;
+                }
+            }
+
+            // Charge
+            const hasChargeConn = model.connections.some(c => (c.toNode === harbour.id && (c.toPort === 'charge' || c.toPort === 'explosive')) || (c.fromNode === harbour.id && (c.fromPort === 'charge' || c.fromPort === 'explosive')));
+            if (!hasChargeConn) {
+                const chargeNode = model.nodes.find(n => n.type === 'Charge3D');
+                if (chargeNode) {
+                    model.connections.push({
+                        fromNode: chargeNode.id,
+                        fromPort: 'out',
+                        toNode: harbour.id,
+                        toPort: 'charge'
+                    });
+                    if (!harbour.parameters) harbour.parameters = {};
+                    harbour.parameters['explosive_charge'] = chargeNode.id;
+                    changed = true;
+                }
+            }
+        }
+
+        // 9c. Sync pipeline connection parameters for Solvers, Charges, and Materials
+        for (const solver of cfdSolvers) {
+            if (solver.parameters['ambient_air_material'] === undefined) {
+                solver.parameters['ambient_air_material'] = '';
+            }
+            if (solver.parameters['explosive_charge'] === undefined) {
+                solver.parameters['explosive_charge'] = '';
+            }
+            const airConn = model.connections.find(c => (c.toNode === solver.id && (c.toPort === 'air' || c.toPort === 'ambient_air')) || (c.fromNode === solver.id && (c.fromPort === 'air' || c.fromPort === 'ambient_air')));
+            if (airConn && !solver.parameters['ambient_air_material']) {
+                solver.parameters['ambient_air_material'] = airConn.toNode === solver.id ? airConn.fromNode : airConn.toNode;
+                changed = true;
+            }
+            const chgConn = model.connections.find(c => (c.toNode === solver.id && (c.toPort === 'charge' || c.toPort === 'explosive')) || (c.fromNode === solver.id && (c.fromPort === 'charge' || c.fromPort === 'explosive')));
+            if (chgConn && !solver.parameters['explosive_charge']) {
+                solver.parameters['explosive_charge'] = chgConn.toNode === solver.id ? chgConn.fromNode : chgConn.toNode;
+                changed = true;
+            }
+        }
+        for (const charge of chargeNodes) {
+            if (charge.parameters['target_domain'] === undefined) {
+                charge.parameters['target_domain'] = '';
+            }
+            const targetConn = model.connections.find(c => (c.fromNode === charge.id && (c.toPort === 'charge' || c.toPort === 'explosive')) || (c.toNode === charge.id && (c.fromPort === 'charge' || c.fromPort === 'explosive')));
+            if (targetConn && !charge.parameters['target_domain']) {
+                charge.parameters['target_domain'] = targetConn.fromNode === charge.id ? targetConn.toNode : targetConn.fromNode;
+                changed = true;
+            }
+        }
+        for (const mat of model.nodes.filter(n => n.type === 'Material')) {
+            if (isAirMaterialNode(mat)) {
+                if (mat.parameters['ambient_air_target'] === undefined) {
+                    mat.parameters['ambient_air_target'] = '';
+                }
+                const airConn = model.connections.find(c => (c.fromNode === mat.id && (c.toPort === 'air' || c.toPort === 'ambient_air')) || (c.toNode === mat.id && (c.fromPort === 'air' || c.fromPort === 'ambient_air')));
+                if (airConn && !mat.parameters['ambient_air_target']) {
+                    mat.parameters['ambient_air_target'] = airConn.toNode === mat.id ? airConn.fromNode : airConn.toNode;
+                    changed = true;
+                }
+            } else {
+                if ('ambient_air_target' in mat.parameters) {
+                    delete mat.parameters['ambient_air_target'];
+                    changed = true;
+                }
+            }
+        }
+
+        // 10. Auto-heal FSI Coupler connections
+        const femFsiCouplers = model.nodes.filter(n => n.type === 'FEMFSICoupler3D');
+        for (const coupler of femFsiCouplers) {
+            const cfdSolver = model.nodes.find(s => s.type === 'CFDSolver3D');
+            if (cfdSolver) {
+                const hasCfd = model.connections.some(c => c.toNode === coupler.id && (c.toPort === 'cfd' || c.toPort === 'cfd_solver'));
+                if (!hasCfd) {
+                    model.connections.push({
+                        fromNode: cfdSolver.id,
+                        fromPort: 'telemetry',
+                        toNode: coupler.id,
+                        toPort: 'cfd'
+                    });
+                    changed = true;
+                }
+            }
+            const femDomain = model.nodes.find(s => s.type === 'FEMDomain3D');
+            if (femDomain) {
+                const hasFem = model.connections.some(c => c.toNode === coupler.id && (c.toPort === 'fem' || c.toPort === 'fem_domain' || c.toPort === 'fem_solver'));
+                if (!hasFem) {
+                    model.connections.push({
+                        fromNode: femDomain.id,
+                        fromPort: 'fem_out',
+                        toNode: coupler.id,
+                        toPort: 'fem'
+                    });
+                    changed = true;
+                }
+            }
+        }
+
+        const mpmFsiCouplers3D = model.nodes.filter(n => n.type === 'FSICoupler3D');
+        for (const coupler of mpmFsiCouplers3D) {
+            const cfdSolver = model.nodes.find(s => s.type === 'CFDSolver3D');
+            if (cfdSolver) {
+                const hasCfd = model.connections.some(c => c.toNode === coupler.id && (c.toPort === 'cfd' || c.toPort === 'cfd_solver'));
+                if (!hasCfd) {
+                    model.connections.push({
+                        fromNode: cfdSolver.id,
+                        fromPort: 'telemetry',
+                        toNode: coupler.id,
+                        toPort: 'cfd'
+                    });
+                    changed = true;
+                }
+            }
+            const mpmDomain = model.nodes.find(s => s.type === 'MPMDomain3D');
+            if (mpmDomain) {
+                const hasMpm = model.connections.some(c => c.toNode === coupler.id && (c.toPort === 'mpm' || c.toPort === 'mpm_domain'));
+                if (!hasMpm) {
+                    model.connections.push({
+                        fromNode: mpmDomain.id,
+                        fromPort: 'mpm_out',
+                        toNode: coupler.id,
+                        toPort: 'mpm'
+                    });
+                    changed = true;
+                }
+            }
+        }
+
+        const mpmFsiCouplers2D = model.nodes.filter(n => n.type === 'FSICoupler2D');
+        for (const coupler of mpmFsiCouplers2D) {
+            const cfdSolver = model.nodes.find(s => s.type === 'CFDSolver2D');
+            if (cfdSolver) {
+                const hasCfd = model.connections.some(c => c.toNode === coupler.id && (c.toPort === 'cfd' || c.toPort === 'cfd_solver'));
+                if (!hasCfd) {
+                    model.connections.push({
+                        fromNode: cfdSolver.id,
+                        fromPort: 'telemetry',
+                        toNode: coupler.id,
+                        toPort: 'cfd'
+                    });
+                    changed = true;
+                }
+            }
+            const mpmDomain = model.nodes.find(s => s.type === 'MPMDomain2D');
+            if (mpmDomain) {
+                const hasMpm = model.connections.some(c => c.toNode === coupler.id && (c.toPort === 'mpm' || c.toPort === 'mpm_domain'));
+                if (!hasMpm) {
+                    model.connections.push({
+                        fromNode: mpmDomain.id,
+                        fromPort: 'mpm_out',
+                        toNode: coupler.id,
+                        toPort: 'mpm'
+                    });
+                    changed = true;
+                }
+            }
+        }
+
+        // 11. Auto-heal CAD Geometry & Obstacle connections
+        const geomNodes = model.nodes.filter(n => ['STLGeometry', 'PrimitiveGeometry3D', 'Obstacle3D', 'Obstacle'].includes(n.type));
+        for (const geom of geomNodes) {
+            const isGeom3D = geom.type === 'STLGeometry' || geom.type === 'PrimitiveGeometry3D' || geom.type === 'Obstacle3D';
+            if (isGeom3D) {
+                // If there is an MPMObject3D with shape_type STL without an stl connection, connect it
+                const mpmStlObj = model.nodes.find(n => n.type === 'MPMObject3D' && n.parameters?.shape_type === 'STL' && !model.connections.some(c => c.toNode === n.id && c.toPort === 'stl'));
+                if (mpmStlObj && geom.type === 'STLGeometry') {
+                    model.connections.push({
+                        fromNode: geom.id,
+                        fromPort: 'stl',
+                        toNode: mpmStlObj.id,
+                        toPort: 'stl'
+                    });
+                    changed = true;
+                    continue;
+                }
+                // Otherwise connect to CFDSolver3D if present
+                const cfdSolver = model.nodes.find(s => s.type === 'CFDSolver3D');
+                if (cfdSolver) {
+                    const isConnected = model.connections.some(c => c.fromNode === geom.id && c.toNode === cfdSolver.id && c.toPort === 'stl');
+                    if (!isConnected) {
+                        model.connections.push({
+                            fromNode: geom.id,
+                            fromPort: 'stl',
+                            toNode: cfdSolver.id,
+                            toPort: 'stl'
+                        });
+                        changed = true;
+                    }
                 }
             }
         }
@@ -4098,6 +5440,31 @@ export class StateManager {
         } else if (!model.activeViewId || !model.views.some(v => v.id === model.activeViewId)) {
             model.activeViewId = model.views[0].id;
             changed = true;
+        }
+
+        if (model.refresh_rate === undefined || model.refresh_rate === null || isNaN(Number(model.refresh_rate)) || Number(model.refresh_rate) <= 0) {
+            const vpNode = model.nodes.find(n => n.type === 'Telemetry3DViewport');
+            const contourNode = model.nodes.find(n => n.type === 'TelemetryContour');
+            const activeView = model.views?.find(v => v.id === model.activeViewId) || model.views?.[0];
+            const candidateRate = vpNode?.parameters?.refresh_rate ?? contourNode?.parameters?.refresh_rate ?? activeView?.toggles?.refresh_rate ?? 0.5;
+            model.refresh_rate = Number(candidateRate) || 0.5;
+            model.fps = StateManager.rateToFps(model.refresh_rate);
+            changed = true;
+        }
+        if (model.fps === undefined || model.fps === null || isNaN(Number(model.fps)) || Number(model.fps) <= 0) {
+            model.fps = StateManager.rateToFps(model.refresh_rate ?? 0.5);
+            changed = true;
+        }
+        if (model.views && model.views.length > 0) {
+            const activeView = model.views.find(v => v.id === model.activeViewId) || model.views[0];
+            if (activeView) {
+                activeView.toggles = activeView.toggles || {};
+                if (activeView.toggles.refresh_rate !== model.refresh_rate || activeView.toggles.fps !== model.fps) {
+                    activeView.toggles.refresh_rate = model.refresh_rate;
+                    activeView.toggles.fps = model.fps;
+                    changed = true;
+                }
+            }
         }
 
         return changed;
@@ -4209,9 +5576,66 @@ export class StateManager {
             if ((node.type as any) === 'MPMMaterialSteel' || (node.type as any) === 'MPMMaterial' || (node.type as any) === 'MaterialSteel') {
                 node.type = 'Material';
             }
+            if (node.type === 'RemapNode') {
+                node.type = 'Remap1DTo2DNode';
+            }
+            if (node.type === 'TriggerLocation') {
+                node.type = 'DetonatorLocation';
+            }
+            if (node.type === 'TriggerLocation3D') {
+                node.type = 'DetonatorLocation3D';
+            }
+            if (node.type === 'DetonatorLocation') {
+                if (node.parameters) {
+                    if (node.parameters.trigger_r !== undefined && node.parameters.detonator_r === undefined) {
+                        node.parameters.detonator_r = node.parameters.trigger_r;
+                    }
+                    if (node.parameters.trigger_z !== undefined && node.parameters.detonator_z === undefined) {
+                        node.parameters.detonator_z = node.parameters.trigger_z;
+                    }
+                    if (node.parameters.trigger_radius !== undefined && node.parameters.detonator_radius === undefined) {
+                        node.parameters.detonator_radius = node.parameters.trigger_radius;
+                    }
+                    delete node.parameters.trigger_r;
+                    delete node.parameters.trigger_z;
+                    delete node.parameters.trigger_radius;
+                    delete node.parameters.trigger_time;
+                }
+            }
+            if (node.type === 'DetonatorLocation3D') {
+                if (node.parameters) {
+                    if (node.parameters.trigger_x !== undefined && node.parameters.detonator_x === undefined) {
+                        node.parameters.detonator_x = node.parameters.trigger_x;
+                    }
+                    if (node.parameters.trigger_y !== undefined && node.parameters.detonator_y === undefined) {
+                        node.parameters.detonator_y = node.parameters.trigger_y;
+                    }
+                    if (node.parameters.trigger_z !== undefined && node.parameters.detonator_z === undefined) {
+                        node.parameters.detonator_z = node.parameters.trigger_z;
+                    }
+                    if (node.parameters.trigger_radius !== undefined && node.parameters.detonator_radius === undefined) {
+                        node.parameters.detonator_radius = node.parameters.trigger_radius;
+                    }
+                    delete node.parameters.trigger_x;
+                    delete node.parameters.trigger_y;
+                    delete node.parameters.trigger_z;
+                    delete node.parameters.trigger_radius;
+                    delete node.parameters.trigger_time;
+                }
+            }
+            if (node.type === 'Obstacle') {
+                node.type = 'Obstacle3D';
+            }
             node.inputs = this.getDefaultInputs(node.type);
             node.outputs = this.getDefaultOutputs(node.type);
         });
+
+        if (stateObj && stateObj.connections) {
+            stateObj.connections.forEach(c => {
+                if (c.toPort === 'trigger') c.toPort = 'detonator';
+                if (c.fromPort === 'trigger') c.fromPort = 'detonator';
+            });
+        }
 
         // Auto-heal: re-route CFDSolver3D.mesh connections that point to a RefinementMesh3D
         // (old scene format). Trace back to the DomainMesh3D and re-wire directly.
@@ -4225,12 +5649,12 @@ export class StateManager {
                 if (meshConnIdx === -1) continue;
                 const meshConn = model.connections[meshConnIdx];
                 const srcNode = model.nodes.find(n => n.id === meshConn.fromNode);
-                if (!srcNode || srcNode.type !== 'RefinementMesh3D') continue;
+                if (!srcNode || (srcNode.type as string) !== 'RefinementMesh3D') continue;
 
                 // Trace the parent_mesh chain to find the DomainMesh3D root
                 let curr: Node | undefined = srcNode;
                 let depth = 0;
-                while (curr && curr.type === 'RefinementMesh3D' && depth < 20) {
+                while (curr && (curr.type as string) === 'RefinementMesh3D' && depth < 20) {
                     const parentConn = model.connections.find(c => c.toNode === curr!.id && c.toPort === 'parent_mesh');
                     if (!parentConn) break;
                     curr = model.nodes.find(n => n.id === parentConn.fromNode);
@@ -4297,6 +5721,11 @@ export class StateManager {
                 if (node.parameters['rot_y'] === undefined) node.parameters['rot_y'] = 0.0;
                 if (node.parameters['rot_z'] === undefined) node.parameters['rot_z'] = 0.0;
             }
+            if (node.type === 'Material') {
+                if (!isAirMaterialNode(node)) {
+                    delete node.parameters['ambient_air_target'];
+                }
+            }
             if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
                 delete node.parameters['time_step'];
             }
@@ -4332,15 +5761,17 @@ export class StateManager {
                 delete node.parameters['timestep_erosion_factor'];
                 delete node.parameters['length'];
 
-                // Migrate mesh_source -> shape_type
-                if (node.parameters['mesh_source']) {
+                // Sync mesh_source <-> shape_type and ensure origin_mode
+                if (node.parameters['mesh_source'] && !node.parameters['shape_type']) {
                     const src = node.parameters['mesh_source'];
                     if (src === 'LS-DYNA Keyword File') node.parameters['shape_type'] = 'LS-DYNA File';
                     else if (src === 'Cylinder Generator') node.parameters['shape_type'] = 'Cylinder';
                     else if (src === 'Box Generator') node.parameters['shape_type'] = 'Box';
-                    delete node.parameters['mesh_source'];
                 }
                 if (!node.parameters['shape_type']) node.parameters['shape_type'] = 'Box';
+                const st = node.parameters['shape_type'];
+                node.parameters['mesh_source'] = st === 'Cylinder' ? 'Cylinder Generator' : (st === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator');
+                if (!node.parameters['origin_mode']) node.parameters['origin_mode'] = 'Center';
             }
             if (node.type === 'DomainMesh') {
                 delete node.parameters['dimension'];
@@ -4479,7 +5910,7 @@ export class StateManager {
             }
             syncExplosiveParameters(node, node.parameters, model);
             syncMPMMaterialParameters(node, node.parameters);
-            syncFEMObjectParameters(node, node.parameters);
+            syncFEMObjectParameters(node, node.parameters, undefined, model);
         });
     }
 
@@ -4505,7 +5936,12 @@ export class StateManager {
     getDefaultInputs(type: NodeType): Port[] {
         switch (type) {
             case 'ThePainter': return [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Charge' }];
-            case 'CFDSolver': return [{ id: 'in', label: 'Initial State' }];
+            case 'CFDSolver': return [
+                { id: 'mesh', label: 'Mesh' },
+                { id: 'air', label: 'Air' },
+                { id: 'charge', label: 'Charge' },
+                { id: 'in', label: 'Initial State (Legacy)' }
+            ];
             case 'TelemetryText': return [
                 { id: 'in', label: 'Stream 1' },
                 { id: 'in_2', label: 'Stream 2' }
@@ -4513,10 +5949,11 @@ export class StateManager {
             case 'TelemetryGraph': return [{ id: 'in', label: 'Data Stream' }];
             case 'CFDSolver2D': return [
                 { id: 'mesh', label: 'Mesh' },
-                { id: 'detonator', label: 'Detonator' },
-                { id: 'explosive', label: 'Charge' },
-                { id: 'hardware', label: 'Hardware' },
                 { id: 'air', label: 'Air' },
+                { id: 'charge', label: 'Charge' },
+                { id: 'explosive', label: 'Charge (Legacy)' },
+                { id: 'detonator', label: 'Detonator' },
+                { id: 'hardware', label: 'Hardware' },
                 { id: 'remap', label: 'Remap' }
             ];
             case 'Charge1D':
@@ -4540,7 +5977,6 @@ export class StateManager {
                 { id: 'gauges', label: 'Gauges' },
                 { id: 'remap', label: 'Remap' }
             ];
-            case 'RefinementMesh3D': return [{ id: 'parent_mesh', label: 'Parent Mesh' }];
             case 'Charge3D': return [{ id: 'material', label: 'Material' }];
             case 'Telemetry3DViewport': return [{ id: 'in', label: 'Data Stream' }];
             case 'MPMDomain2D': return [{ id: 'mesh', label: 'Grid' }, { id: 'detonator', label: 'Detonator' }, { id: 'objects', label: 'MPM Objects' }];
@@ -4549,10 +5985,19 @@ export class StateManager {
             case 'MPMObject3D': return [{ id: 'material', label: 'Material' }, { id: 'stl', label: 'STL Geometry' }];
             case 'FSICoupler2D': return [{ id: 'cfd', label: 'CFD Solver' }, { id: 'mpm', label: 'MPM Solver' }];
             case 'FSICoupler3D': return [{ id: 'cfd', label: 'CFD Solver 3D' }, { id: 'mpm', label: 'MPM Solver 3D' }];
-            case 'FEMDomain3D': return [{ id: 'mesh', label: 'Hex Mesh' }, { id: 'objects', label: 'FEM Objects' }];
+            case 'FEMDomain3D': return [{ id: 'mesh', label: 'Structural Mesh / Parts' }, { id: 'material', label: 'Material' }];
             case 'FEMObject3D': return [{ id: 'material', label: 'Material' }, { id: 'importer', label: 'LS-DYNA File' }];
-            case 'LSDynaImporter3D': return [];
+            case 'FEMBeam3D':
+            case 'FEMRebar3D': return [{ id: 'material', label: 'Material' }];
+            case 'LSDynaImporter3D': return [{ id: 'material', label: 'Material' }];
             case 'FEMFSICoupler3D': return [{ id: 'cfd', label: 'CFD Solver 3D' }, { id: 'fem', label: 'FEM Solver 3D' }];
+            case 'MarineHarbourDomain': return [
+                { id: 'mesh', label: 'Domain Mesh' },
+                { id: 'air', label: 'Atmospheric Air' },
+                { id: 'water', label: 'Seawater Column' },
+                { id: 'charge', label: 'Explosive Charge' },
+                { id: 'seabed', label: 'Seabed Foundation' }
+            ];
             default: return [];
         }
     }
@@ -4569,7 +6014,7 @@ export class StateManager {
             case 'DetonatorLocation':
             case 'DetonatorLocation3D':
             case 'TriggerLocation':
-            case 'TriggerLocation3D': return [{ id: 'detonator', label: 'Trigger Spec' }];
+            case 'TriggerLocation3D': return [{ id: 'detonator', label: 'Detonator Spec' }];
             case 'RemapNode':
             case 'Remap1DTo2DNode':
             case 'Remap1DTo3DNode':
@@ -4577,7 +6022,6 @@ export class StateManager {
             case 'HardwareConfig': return [{ id: 'hardware', label: 'Hardware Spec' }];
             case 'CFDSolver2D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'DomainMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];
-            case 'RefinementMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];
             case 'Charge3D': return [{ id: 'out', label: 'Charge Spec' }];
             case 'CFDSolver3D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'VirtualGauges': return [{ id: 'out', label: 'Gauges Spec' }];
@@ -4589,10 +6033,15 @@ export class StateManager {
             case 'FSICoupler3D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'FEMDomain3D': return [{ id: 'telemetry', label: 'Telemetry' }, { id: 'fem_out', label: 'FEM State' }];
             case 'FEMObject3D': return [{ id: 'out', label: 'Object Spec' }];
-            case 'LSDynaImporter3D': return [{ id: 'out', label: 'Mesh Spec' }];
+            case 'FEMBeam3D':
+            case 'FEMRebar3D': return [{ id: 'out', label: 'Beam Spec' }];
+            case 'LSDynaImporter3D': return [{ id: 'out', label: 'Structural Mesh' }];
             case 'FEMFSICoupler3D': return [{ id: 'telemetry', label: 'Telemetry' }];
+            case 'MarineHarbourDomain': return [{ id: 'telemetry', label: 'Telemetry' }, { id: 'undex_out', label: 'UNDEX State' }];
             case 'STLGeometry':
-            case 'PrimitiveGeometry3D': return [{ id: 'stl', label: 'STL Geometry' }];
+            case 'PrimitiveGeometry3D':
+            case 'Obstacle3D':
+            case 'Obstacle': return [{ id: 'stl', label: 'Obstacle Mesh' }];
             default: return [];
         }
     }
@@ -4657,7 +6106,7 @@ export function createDefaultWorkstationLayout(suffix: string = ''): LayoutNode 
                 type: 'split',
                 id: `split-right${s}`,
                 direction: 'vertical',
-                ratio: 0.85,
+                ratio: 0.82,
                 firstChild: {
                     type: 'panel',
                     id: `panel-stage${s}`,
@@ -4675,6 +6124,50 @@ export function createDefaultWorkstationLayout(suffix: string = ''): LayoutNode 
     };
 }
 
+export function attachTransportBarToLayout(node: LayoutNode, wsId: string): { root: LayoutNode; attached: boolean } {
+    if (!node) return { root: node, attached: false };
+    if (hasPanelType(node, 'TRANSPORT_BAR')) {
+        return { root: node, attached: false };
+    }
+
+    function wrapViewport(current: LayoutNode): { node: LayoutNode; wrapped: boolean } {
+        if (!current) return { node: current, wrapped: false };
+        if (current.type === 'panel' && (current.panelType === 'VIEWPORT' || (current.panelType as any) === 'MULTI_VIEW_STAGE')) {
+            const s = wsId ? `-${wsId}` : '';
+            const splitNode: SplitNode = {
+                type: 'split',
+                id: `split-right${s}`,
+                direction: 'vertical',
+                ratio: 0.82,
+                firstChild: current,
+                secondChild: {
+                    type: 'panel',
+                    id: `panel-transport${s}`,
+                    panelType: 'TRANSPORT_BAR',
+                    targetNodeId: null
+                }
+            };
+            return { node: splitNode, wrapped: true };
+        }
+        if (current.type === 'split') {
+            const left = wrapViewport(current.firstChild);
+            if (left.wrapped) {
+                current.firstChild = left.node;
+                return { node: current, wrapped: true };
+            }
+            const right = wrapViewport(current.secondChild);
+            if (right.wrapped) {
+                current.secondChild = right.node;
+                return { node: current, wrapped: true };
+            }
+        }
+        return { node: current, wrapped: false };
+    }
+
+    const res = wrapViewport(node);
+    return { root: res.node, attached: res.wrapped };
+}
+
 function normalizeLayoutPanels(node: LayoutNode): boolean {
     if (!node) return false;
     let changed = false;
@@ -4690,7 +6183,8 @@ function normalizeLayoutPanels(node: LayoutNode): boolean {
     return changed;
 }
 
-function hasPanelType(node: LayoutNode, type: PanelType): boolean {
+export function hasPanelType(node: LayoutNode, type: PanelType): boolean {
+    if (!node) return false;
     if (node.type === 'panel') {
         return node.panelType === type;
     }
@@ -4732,7 +6226,9 @@ export function canonicalizeQuantity(q: string | undefined | null): string {
     if (s === 'has_failed' || s === 'failure' || s === 'failed') return 'has_failed';
     if (s === 'cluster_id' || s === 'cluster' || s === 'fragment_id' || s === 'fragments') return 'cluster_id';
     if (s === 'object_id' || s === 'obj_id' || s === 'object') return 'object_id';
-    if (s === 'pressure' || s === 'density' || s === 'velocity' || s === 'energy' || s === 'solid' || s === 'amr_level') return s;
+    if (s === 'velocity' || s === 'speed' || s === 'vel') return 'velocity';
+    if (s === 'materials' || s === 'material' || s === 'phase') return 'materials';
+    if (s === 'pressure' || s === 'density' || s === 'energy' || s === 'solid' || s === 'amr_level') return s;
     return s;
 }
 
@@ -4740,11 +6236,13 @@ export const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     pressure: [101325.0, 101325.0 * 100.0],
     density: [1.2, 100.0],
     velocity: [0.0, 1000.0],
+    speed: [0.0, 1000.0],
     energy: [200000.0, 10000000.0],
     species1: [0.0, 1.0],
     species2: [0.0, 1.0],
     species3: [0.0, 1.0],
     solid: [0.0, 1.0],
+    materials: [0.0, 5.0],
     overpressure: [0.0, 101325.0 * 99.0],
     impulse: [0.0, 10000.0],
     peak_overpressure: [0.0, 101325.0 * 99.0],
@@ -4780,6 +6278,7 @@ function syncQuantityRanges(node: Node, parameters: Record<string, any>, merged:
         const currentMax = parameters.max_val !== undefined ? parameters.max_val : merged.max_val;
         merged.quantity_ranges[cQty] = [currentMin, currentMax];
         merged.quantity_ranges[rawQty] = [currentMin, currentMax];
+        if (cQty === 'velocity') merged.quantity_ranges['speed'] = [currentMin, currentMax];
         if (cQty === 'peak_overpressure') merged.quantity_ranges['overpressure'] = [currentMin, currentMax];
         if (cQty === 'peak_impulse') merged.quantity_ranges['impulse'] = [currentMin, currentMax];
         if (cQty === 'plastic_strain') merged.quantity_ranges['plasticStrain'] = [currentMin, currentMax];
@@ -4983,17 +6482,6 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
     }
 }
 
-export function calculateRefinementMeshInfo(_node?: Node, _state?: SimulationState) {
-    return {
-        subNx: 0, subNy: 0, subNz: 0,
-        subTotalCells: 0,
-        parentTotalCells: 0,
-        allSubgridCells: 0,
-        newTotalCells: 0,
-        hasParent: false
-    };
-}
-
 export interface MeshCounts {
     dimension: string;
     n_cells: number;
@@ -5048,20 +6536,28 @@ export function resolveMeshCounts(node: Node, state?: SimulationState): MeshCoun
         const volume = dim_x * dim_y * dim_z;
 
         return { dimension: '3D', n_cells: totalCells, nr: 0, nz, nx, ny, totalCells, cellSize, xmin, xmax, ymin, ymax, zmin, zmax, dim_x, dim_y, dim_z, volume };
-    } else if (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D' || node.type === 'FEMDomain3D') {
+    } else if (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D' || node.type === 'MarineHarbourDomain') {
         let meshNode: Node | undefined;
         if (state) {
-            const meshConn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in'));
-            if (meshConn) meshNode = state.nodes.find(n => n.id === meshConn.fromNode);
+            const meshConn = state.connections.find(c => 
+                (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in')) ||
+                (c.fromNode === node.id && c.fromPort === 'mesh')
+            );
+            if (meshConn) {
+                meshNode = state.nodes.find(n => n.id === (meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode));
+            }
+            if (!meshNode && node.parameters?.mesh) {
+                meshNode = state.nodes.find(n => n.id === node.parameters.mesh);
+            }
             if (!meshNode) {
-                const targetMeshType = (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D') ? 'DomainMesh3D' : ((node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') ? 'DomainMesh2D' : 'DomainMesh');
+                const targetMeshType = (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'MarineHarbourDomain') ? 'DomainMesh3D' : ((node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') ? 'DomainMesh2D' : 'DomainMesh');
                 meshNode = state.nodes.find(n => n.type === targetMeshType);
             }
         }
         if (meshNode) {
             return resolveMeshCounts(meshNode, state);
         }
-        return { dimension: (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D') ? '3D' : ((node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') ? '2D' : '1D'), n_cells: 0, nr: 0, nz: 0, nx: 0, ny: 0, totalCells: 0, cellSize: 0.001, dim_x: 0, dim_y: 0, dim_z: 0, volume: 0 };
+        return { dimension: (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'MarineHarbourDomain') ? '3D' : ((node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') ? '2D' : '1D'), n_cells: 0, nr: 0, nz: 0, nx: 0, ny: 0, totalCells: 0, cellSize: 0.001, dim_x: 0, dim_y: 0, dim_z: 0, volume: 0 };
     }
     return { dimension: '3D', n_cells: 0, nr: 0, nz: 0, nx: 0, ny: 0, totalCells: 0, cellSize: 0.001, dim_x: 0, dim_y: 0, dim_z: 0, volume: 0 };
 }
@@ -5308,9 +6804,8 @@ export function getMeshDisplayHTML(node: Node, state?: SimulationState): string 
         const vol = counts.volume;
 
         const isMPM = node.type === 'MPMDomain3D';
-        const isFEM = node.type === 'FEMDomain3D';
-        const title = isMPM ? '📐 MPM Background Grid Specification' : (isFEM ? '📐 FEM Hex Background Grid' : '📐 3D Cartesian Grid Specification');
-        const memLine = (!isMPM && !isFEM) ? `<div>Est. CFD State ${mem.isCpu ? 'RAM (CPU)' : 'VRAM'}: <b style="color: #4ec9b0;">${mem.formattedMemory}</b> <span style="font-size: 10px; color: #94a3b8;">(${mem.schemeShort} · ${mem.matShort} · ${mem.precShort} · ${mem.fluxShort})</span></div>` : '';
+        const title = isMPM ? '📐 MPM Background Grid Specification' : '📐 3D Cartesian Grid Specification';
+        const memLine = !isMPM ? `<div>Est. CFD State ${mem.isCpu ? 'RAM (CPU)' : 'VRAM'}: <b style="color: #4ec9b0;">${mem.formattedMemory}</b> <span style="font-size: 10px; color: #94a3b8;">(${mem.schemeShort} · ${mem.matShort} · ${mem.precShort} · ${mem.fluxShort})</span></div>` : '';
 
         return `<div style="background: rgba(56, 189, 248, 0.08); border: 1px solid #38bdf8; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
                `<div style="color: #38bdf8; font-weight: bold; margin-bottom: 2px;">${title}</div>` +
@@ -5358,6 +6853,26 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
     const nodes = model?.nodes || state?.nodes || [];
     const connections = model?.connections || state?.connections || [];
 
+    if (node && node.type === 'MarineHarbourDomain') {
+        const meshConn = connections.find(c => c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in'));
+        if (meshConn) {
+            const meshNode = nodes.find(n => n.id === meshConn.fromNode);
+            if (meshNode && meshNode.type === 'DomainMesh3D') {
+                return resolveDomain3DBounds(meshNode, state, model);
+            }
+        }
+        if (node.parameters?.xmin !== undefined && node.parameters?.xmax !== undefined) {
+            xmin = Number(node.parameters.xmin ?? 0.0);
+            xmax = Number(node.parameters.xmax ?? 1.0);
+            ymin = Number(node.parameters.ymin ?? 0.0);
+            ymax = Number(node.parameters.ymax ?? 1.0);
+            zmin = Number(node.parameters.zmin ?? 0.0);
+            zmax = Number(node.parameters.zmax ?? 1.0);
+            cellSize = Number(node.parameters.cell_size ?? node.parameters.dx ?? 0.01);
+            return { xmin, xmax, ymin, ymax, zmin, zmax, dim_x: Math.max(1e-5, xmax - xmin), dim_y: Math.max(1e-5, ymax - ymin), dim_z: Math.max(1e-5, zmax - zmin), cellSize };
+        }
+    }
+
     // Check upstream connection from node if provided
     if (node) {
         const incoming = connections.filter(c => c.toNode === node.id);
@@ -5366,13 +6881,16 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
             if (upNode && upNode.type === 'DomainMesh3D') {
                 return resolveDomain3DBounds(upNode, state, model);
             }
-            if (upNode && (upNode.type === 'CFDSolver3D' || upNode.type === 'MPMDomain3D' || upNode.type === 'FEMDomain3D')) {
+            if (upNode && (upNode.type === 'CFDSolver3D' || upNode.type === 'MPMDomain3D' || upNode.type === 'FEMDomain3D' || upNode.type === 'MarineHarbourDomain')) {
                 const solverMeshConn = connections.find(c => c.toNode === upNode.id && (c.toPort === 'mesh' || c.toPort === 'in'));
                 if (solverMeshConn) {
                     const meshNode = nodes.find(n => n.id === solverMeshConn.fromNode);
                     if (meshNode && meshNode.type === 'DomainMesh3D') {
                         return resolveDomain3DBounds(meshNode, state, model);
                     }
+                }
+                if (upNode.type === 'MarineHarbourDomain' && upNode.parameters?.xmin !== undefined && upNode.parameters?.xmax !== undefined) {
+                    return resolveDomain3DBounds(upNode, state, model);
                 }
             }
         }
@@ -5382,6 +6900,28 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
     const meshNode3D = nodes.find(n => n.type === 'DomainMesh3D');
     if (meshNode3D) {
         return resolveDomain3DBounds(meshNode3D, state, model);
+    }
+
+    // Search model/state for MarineHarbourDomain
+    const harbourDomain = nodes.find(n => n.type === 'MarineHarbourDomain');
+    if (harbourDomain) {
+        const meshConn = connections.find(c => c.toNode === harbourDomain.id && (c.toPort === 'mesh' || c.toPort === 'in'));
+        if (meshConn) {
+            const meshNode = nodes.find(n => n.id === meshConn.fromNode);
+            if (meshNode && meshNode.type === 'DomainMesh3D') {
+                return resolveDomain3DBounds(meshNode, state, model);
+            }
+        }
+        if (harbourDomain.parameters?.xmin !== undefined && harbourDomain.parameters?.xmax !== undefined) {
+            xmin = Number(harbourDomain.parameters.xmin ?? 0.0);
+            xmax = Number(harbourDomain.parameters.xmax ?? 1.0);
+            ymin = Number(harbourDomain.parameters.ymin ?? 0.0);
+            ymax = Number(harbourDomain.parameters.ymax ?? 1.0);
+            zmin = Number(harbourDomain.parameters.zmin ?? 0.0);
+            zmax = Number(harbourDomain.parameters.zmax ?? 1.0);
+            cellSize = Number(harbourDomain.parameters.cell_size ?? harbourDomain.parameters.dx ?? 0.01);
+            return { xmin, xmax, ymin, ymax, zmin, zmax, dim_x: Math.max(1e-5, xmax - xmin), dim_y: Math.max(1e-5, ymax - ymin), dim_z: Math.max(1e-5, zmax - zmin), cellSize };
+        }
     }
 
     // Search model/state for MPMDomain3D
@@ -5605,12 +7145,70 @@ export function getMPMObjectVolume(node: Node, state?: SimulationState): { volum
 
     return { volume: Math.max(1e-9, volume), isStlEstimated };
 }
+export interface LSDynaDeckMeta {
+    fileName: string;
+    numSolidElements: number;
+    numBeamElements: number;
+    totalElements: number;
+    numNodes: number;
+    bounds: [number, number, number, number, number, number]; // [minX, maxX, minY, maxY, minZ, maxZ]
+    nominalDx: number;
+    nominalDy: number;
+    nominalDz: number;
+    volume: number;
+    vramMB: number;
+    rebarDiameter?: number;
+}
+
+export const KNOWN_KEYWORD_DECKS: Record<string, LSDynaDeckMeta> = {
+    'concrete_cubicle_30mm.k': {
+        fileName: 'concrete_cubicle_30mm.k',
+        numSolidElements: 199792,
+        numBeamElements: 45164,
+        totalElements: 244956,
+        numNodes: 248814,
+        bounds: [0.0, 3.00, 0.0, 2.66, 0.0, 3.60],
+        nominalDx: 0.03,
+        nominalDy: 0.03,
+        nominalDz: 0.03,
+        volume: 7.5412,
+        vramMB: 258.92,
+        rebarDiameter: 0.00953
+    },
+    'concrete_cubicle_20mm.k': {
+        fileName: 'concrete_cubicle_20mm.k',
+        numSolidElements: 867292,
+        numBeamElements: 67768,
+        totalElements: 935060,
+        numNodes: 975336,
+        bounds: [0.0, 3.00, 0.0, 2.66, 0.0, 3.60],
+        nominalDx: 0.02,
+        nominalDy: 0.02,
+        nominalDz: 0.02,
+        volume: 7.5412,
+        vramMB: 846.50,
+        rebarDiameter: 0.00953
+    }
+};
+
+export function getLSDynaDeckMeta(filePath: string): LSDynaDeckMeta | undefined {
+    if (!filePath) return undefined;
+    const base = filePath.split('/').pop() || filePath;
+    if (KNOWN_KEYWORD_DECKS[base]) return KNOWN_KEYWORD_DECKS[base];
+    if (KNOWN_KEYWORD_DECKS[filePath]) return KNOWN_KEYWORD_DECKS[filePath];
+    for (const [k, v] of Object.entries(KNOWN_KEYWORD_DECKS)) {
+        if (filePath.endsWith(k) || base === k) return v;
+    }
+    return undefined;
+}
 
 export interface FEMCounts {
     shapeType: string;
     meshSource: string;
     numElements: number;
     numNodes: number;
+    numSolids?: number;
+    numBeams?: number;
     dx: number;
     dy: number;
     dz: number;
@@ -5625,11 +7223,15 @@ export interface FEMCounts {
     totalVramMB: number;
     kFile: string;
     scaleFactor: number;
+    bounds?: [number, number, number, number, number, number];
+    rebarDiameter?: number;
 }
 
 export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts {
     let numElements = 0;
     let numNodes = 0;
+    let numSolids = 0;
+    let numBeams = 0;
     let totalElements = 0;
     let totalNodes = 0;
     let objCount = 0;
@@ -5644,6 +7246,8 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
     let maxDebrisParticles = 0;
     let kFile = '';
     let scaleFactor = 1.0;
+    let bounds: [number, number, number, number, number, number] | undefined = undefined;
+    let rebarDiameter: number | undefined = undefined;
 
     if (node.type === 'FEMObject3D') {
         meshSource = String(node.parameters['mesh_source'] || 'Box Generator');
@@ -5655,6 +7259,7 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
             const nz = Math.max(1, Number(node.parameters['nz'] ?? 10));
             numElements = nr * ntheta * nz;
             numNodes = (nr + 1) * ntheta * (nz + 1);
+            numSolids = numElements;
 
             const r = Number(node.parameters['radius'] ?? 0.1);
             const h = Number(node.parameters['height'] ?? 0.2);
@@ -5662,6 +7267,14 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
             dx = r / nr;
             dy = r / nr;
             dz = h / nz;
+
+            const px = Number(node.parameters['pos_x'] ?? 0.0);
+            const py = Number(node.parameters['pos_y'] ?? 0.0);
+            const pz = Number(node.parameters['pos_z'] ?? 0.0);
+            const originMode = String(node.parameters['origin_mode'] || 'Center');
+            const isCADOrigin = originMode === 'CAD Origin' || originMode === 'Min Corner';
+            const startZ = isCADOrigin ? pz : (pz - 0.5 * h);
+            bounds = [px - r, px + r, py - r, py + r, startZ, startZ + h];
         } else if (shapeType === 'LS-DYNA File' || meshSource === 'LS-DYNA Keyword File') {
             if (node.parameters['k_file']) {
                 kFile = String(node.parameters['k_file']);
@@ -5672,10 +7285,34 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
                     if (impNode) kFile = String(impNode.parameters['k_file'] || '');
                 }
             }
-            numElements = 8000;
-            numNodes = 9261;
-            volume = 0.008;
-            dx = 0.02; dy = 0.02; dz = 0.02;
+            scaleFactor = Number(node.parameters['scale_factor'] ?? 1.0);
+            const deck = getLSDynaDeckMeta(kFile);
+            if (deck) {
+                numSolids = deck.numSolidElements;
+                numBeams = deck.numBeamElements;
+                numElements = deck.totalElements;
+                numNodes = deck.numNodes;
+                dx = deck.nominalDx * scaleFactor;
+                dy = deck.nominalDy * scaleFactor;
+                dz = deck.nominalDz * scaleFactor;
+                volume = deck.volume * Math.pow(scaleFactor, 3);
+                vramMB = deck.vramMB;
+                if (deck.rebarDiameter) {
+                    rebarDiameter = deck.rebarDiameter * scaleFactor;
+                }
+                bounds = [
+                    deck.bounds[0] * scaleFactor, deck.bounds[1] * scaleFactor,
+                    deck.bounds[2] * scaleFactor, deck.bounds[3] * scaleFactor,
+                    deck.bounds[4] * scaleFactor, deck.bounds[5] * scaleFactor
+                ];
+            } else {
+                numElements = 8000;
+                numNodes = 9261;
+                numSolids = 8000;
+                volume = 0.008 * Math.pow(scaleFactor, 3);
+                dx = 0.02 * scaleFactor; dy = 0.02 * scaleFactor; dz = 0.02 * scaleFactor;
+                vramMB = (numElements * 1024 + numNodes * 128) / (1024 * 1024);
+            }
         } else {
             // Box
             const nx = Math.max(1, Number(node.parameters['nx'] ?? 10));
@@ -5683,14 +7320,25 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
             const nz = Math.max(1, Number(node.parameters['nz'] ?? 10));
             numElements = nx * ny * nz;
             numNodes = (nx + 1) * (ny + 1) * (nz + 1);
+            numSolids = numElements;
 
-            const sx = Number(node.parameters['size_x'] ?? 0.2);
-            const sy = Number(node.parameters['size_y'] ?? 0.2);
-            const sz = Number(node.parameters['size_z'] ?? 0.2);
+            const sx = Number(node.parameters['size_x'] ?? 1.0);
+            const sy = Number(node.parameters['size_y'] ?? 1.0);
+            const sz = Number(node.parameters['size_z'] ?? 1.0);
             volume = sx * sy * sz;
             dx = sx / nx;
             dy = sy / ny;
             dz = sz / nz;
+
+            const px = Number(node.parameters['pos_x'] ?? 0.0);
+            const py = Number(node.parameters['pos_y'] ?? 0.0);
+            const pz = Number(node.parameters['pos_z'] ?? 0.0);
+            const originMode = String(node.parameters['origin_mode'] || 'Center');
+            const isCADOrigin = originMode === 'CAD Origin' || originMode === 'Min Corner';
+            const startX = isCADOrigin ? px : (px - 0.5 * sx);
+            const startY = isCADOrigin ? py : (py - 0.5 * sy);
+            const startZ = isCADOrigin ? pz : (pz - 0.5 * sz);
+            bounds = [startX, startX + sx, startY, startY + sy, startZ, startZ + sz];
         }
 
         const bytesPerElement = 1024;
@@ -5700,14 +7348,33 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
         totalVramMB = vramMB;
     } else if (node.type === 'FEMDomain3D') {
         if (state) {
-            const objConns = state.connections.filter(c => c.toNode === node.id && c.toPort === 'objects');
+            const objConns = state.connections.filter(c => c.toNode === node.id && (c.toPort === 'objects' || c.toPort === 'mesh' || c.toPort === 'parts' || c.toPort === 'elements' || c.toPort === 'in'));
             objCount = objConns.length;
             for (const conn of objConns) {
                 const objNode = state.nodes.find(n => n.id === conn.fromNode);
-                if (objNode && objNode.type === 'FEMObject3D') {
+                if (objNode && (objNode.type === 'FEMObject3D' || objNode.type === 'LSDynaImporter3D' || objNode.type === 'FEMBeam3D' || objNode.type === 'FEMRebar3D')) {
                     const objCounts = resolveFEMCounts(objNode, state);
-                    totalElements += objCounts.numElements;
-                    totalNodes += objCounts.numNodes;
+                    totalElements += (objCounts.totalElements || objCounts.numElements);
+                    totalNodes += (objCounts.totalNodes || objCounts.numNodes);
+                    numSolids += (objCounts.numSolids || 0);
+                    numBeams += (objCounts.numBeams || 0);
+                    if (objCounts.rebarDiameter && !rebarDiameter) {
+                        rebarDiameter = objCounts.rebarDiameter;
+                    }
+                }
+            }
+            if (objCount === 0) {
+                const modelStructuralNodes = state.nodes.filter(n => n.id !== node.id && (n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D'));
+                objCount = modelStructuralNodes.length;
+                for (const objNode of modelStructuralNodes) {
+                    const objCounts = resolveFEMCounts(objNode, state);
+                    totalElements += (objCounts.totalElements || objCounts.numElements);
+                    totalNodes += (objCounts.totalNodes || objCounts.numNodes);
+                    numSolids += (objCounts.numSolids || 0);
+                    numBeams += (objCounts.numBeams || 0);
+                    if (objCounts.rebarDiameter && !rebarDiameter) {
+                        rebarDiameter = objCounts.rebarDiameter;
+                    }
                 }
             }
         }
@@ -5722,12 +7389,58 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
     } else if (node.type === 'LSDynaImporter3D') {
         kFile = String(node.parameters['k_file'] || '');
         scaleFactor = Number(node.parameters['scale_factor'] ?? 1.0);
-        totalElements = 8000;
-        totalNodes = 9261;
-        numElements = 8000;
-        numNodes = 9261;
-        vramMB = (8000 * 1024 + 9261 * 128) / (1024 * 1024);
-        totalVramMB = vramMB;
+        shapeType = 'LS-DYNA File';
+        meshSource = 'LS-DYNA Keyword File';
+        const deck = getLSDynaDeckMeta(kFile);
+        if (deck) {
+            numSolids = deck.numSolidElements;
+            numBeams = deck.numBeamElements;
+            totalElements = deck.totalElements;
+            totalNodes = deck.numNodes;
+            numElements = deck.totalElements;
+            numNodes = deck.numNodes;
+            dx = deck.nominalDx * scaleFactor;
+            dy = deck.nominalDy * scaleFactor;
+            dz = deck.nominalDz * scaleFactor;
+            volume = deck.volume * Math.pow(scaleFactor, 3);
+            vramMB = deck.vramMB;
+            totalVramMB = deck.vramMB;
+            if (deck.rebarDiameter) {
+                rebarDiameter = deck.rebarDiameter * scaleFactor;
+            }
+            bounds = [
+                deck.bounds[0] * scaleFactor, deck.bounds[1] * scaleFactor,
+                deck.bounds[2] * scaleFactor, deck.bounds[3] * scaleFactor,
+                deck.bounds[4] * scaleFactor, deck.bounds[5] * scaleFactor
+            ];
+        } else {
+            totalElements = 8000;
+            totalNodes = 9261;
+            numElements = 8000;
+            numNodes = 9261;
+            numSolids = 8000;
+            vramMB = (8000 * 1024 + 9261 * 128) / (1024 * 1024);
+            totalVramMB = vramMB;
+        }
+        if (node.parameters['rebar_diameter'] !== undefined && Number(node.parameters['rebar_diameter']) > 0) {
+            rebarDiameter = Number(node.parameters['rebar_diameter']);
+        }
+        const setup = node.parameters['fem_setup'];
+        if (setup && Array.isArray(setup.parts)) {
+            const bp = setup.parts.find((p: any) => p.section_type === 'Beam3D' || p.section_type === 'Truss1D');
+            if (bp?.section_properties?.diameter) {
+                rebarDiameter = Number(bp.section_properties.diameter);
+            }
+        }
+    } else if (node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D') {
+        numElements = 1;
+        totalElements = 1;
+        numBeams = 1;
+        numNodes = 2;
+        totalNodes = 2;
+        vramMB = 0.001;
+        totalVramMB = 0.001;
+        rebarDiameter = Number(node.parameters['radius'] ?? (node.type === 'FEMRebar3D' ? 0.004765 : 0.01)) * 2;
     }
 
     return {
@@ -5735,6 +7448,8 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
         meshSource,
         numElements,
         numNodes,
+        numSolids,
+        numBeams,
         dx,
         dy,
         dz,
@@ -5748,7 +7463,9 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
         maxDebrisParticles,
         totalVramMB,
         kFile,
-        scaleFactor
+        scaleFactor,
+        bounds,
+        rebarDiameter
     };
 }
 
@@ -5894,8 +7611,8 @@ export function getFEMDisplayHTML(node: Node, state?: SimulationState): string {
     if (node.type === 'FEMObject3D') {
         const counts = resolveFEMCounts(node, state);
         return `<div style="background: rgba(34, 197, 94, 0.08); border: 1px solid #22c55e; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
-               `<div style="color: #4ade80; font-weight: bold; margin-bottom: 3px;">🧱 3D FEM Hex8 Structural Mesh Spec</div>` +
-               `<div>Discretized Elements: <b style="color: #fff;">${counts.numElements.toLocaleString()} Hex8</b></div>` +
+               `<div style="color: #4ade80; font-weight: bold; margin-bottom: 3px;">🧱 3D FEM Structural Mesh Spec</div>` +
+               `<div>Discretized Elements: <b style="color: #fff;">${counts.numElements.toLocaleString()} elements</b></div>` +
                `<div>Nodal Vertices: <b style="color: #4ade80;">${counts.numNodes.toLocaleString()} nodes</b></div>` +
                `<div>Element Dimensions: <b>${((counts.dx ?? 0.01) * 1000).toFixed(2)} × ${((counts.dy ?? 0.01) * 1000).toFixed(2)} × ${((counts.dz ?? 0.01) * 1000).toFixed(2)} mm</b></div>` +
                `<div>Discretized Volume: <b>${(counts.volume ?? 0.001).toFixed(6)} m³</b> | VRAM: <b>${(counts.vramMB ?? 0).toFixed(2)} MB</b></div>` +
@@ -5906,27 +7623,45 @@ export function getFEMDisplayHTML(node: Node, state?: SimulationState): string {
         if (counts.convertToMpm) {
             debrisInfo = `<div>Debris Particle Conversion: <b style="color: #eab308;">${counts.mpmParticlesPerElem} pts/elem</b> (Max: ${counts.maxDebrisParticles.toLocaleString()} particles)</div>`;
         }
+        const breakdown = (counts.numSolids || counts.numBeams)
+            ? ` (<span style="color: #fff;">${(counts.numSolids ?? 0).toLocaleString()} solids</span>, <span style="color: #38bdf8;">${(counts.numBeams ?? 0).toLocaleString()} beams</span>)`
+            : '';
+        const rebarLine = (counts.numBeams && counts.numBeams > 0)
+            ? `<div>Rebar Reinforcement: <b style="color: #f59e0b;">Ø${((counts.rebarDiameter ?? 0.00953) * 1000).toFixed(2)} mm</b> (${counts.numBeams.toLocaleString()} beams)</div>`
+            : '';
         return `<div style="background: rgba(34, 197, 94, 0.08); border: 1px solid #22c55e; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
-               `<div style="color: #4ade80; font-weight: bold; margin-bottom: 3px;">🏛️ 3D FEM Structural Domain Status</div>` +
-               `<div>Connected Bodies: <b style="color: #fff;">${counts.objCount}</b> (${counts.totalElements.toLocaleString()} total Hex8 elements)</div>` +
+               `<div style="color: #4ade80; font-weight: bold; margin-bottom: 3px;">🏛️ 3D Explicit FEM Solver Domain</div>` +
+               `<div>Connected Bodies: <b style="color: #fff;">${counts.objCount}</b> (${counts.totalElements.toLocaleString()} elements${breakdown})</div>` +
+               rebarLine +
                `<div>Structural Nodes: <b style="color: #4ade80;">~${counts.totalNodes.toLocaleString()} nodes</b></div>` +
                debrisInfo +
                `<div>Est. FEM VRAM: <b style="color: #38bdf8;">${counts.totalVramMB.toFixed(2)} MB</b></div>` +
                `</div>`;
     } else if (node.type === 'LSDynaImporter3D') {
+        const counts = resolveFEMCounts(node, state);
         const kFile = String(node.parameters['k_file'] || 'None specified');
         const fileName = kFile.split('/').pop();
+        const dimStr = counts.bounds 
+            ? `${(counts.bounds[1] - counts.bounds[0]).toFixed(2)} × ${(counts.bounds[3] - counts.bounds[2]).toFixed(2)} × ${(counts.bounds[5] - counts.bounds[4]).toFixed(2)} m`
+            : `${((counts.dx ?? 0.03) * 100).toFixed(1)} cm grid`;
+        const rebarLine = (counts.numBeams && counts.numBeams > 0)
+            ? `<div>Rebar Reinforcement: <b style="color: #f59e0b;">Ø${((counts.rebarDiameter ?? 0.00953) * 1000).toFixed(2)} mm (${(counts.rebarDiameter ?? 0.00953).toFixed(5)} m)</b> · <span style="color:#38bdf8;">${counts.numBeams.toLocaleString()} beams</span></div>`
+            : '';
         return `<div style="background: rgba(34, 197, 94, 0.08); border: 1px solid #22c55e; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
                `<div style="color: #4ade80; font-weight: bold; margin-bottom: 3px;">📑 LS-DYNA Keyword Mesh Deck</div>` +
                `<div style="color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Deck: <b>${fileName}</b></div>` +
-               `<div>Scale Factor: <b>${Number(node.parameters['scale_factor'] ?? 1.0)}x</b></div>` +
+               `<div>Discretized Elements: <b style="color: #fff;">${counts.totalElements.toLocaleString()}</b> (<span style="color:#4ade80;">${(counts.numSolids ?? 0).toLocaleString()} solids</span> | <span style="color:#38bdf8;">${(counts.numBeams ?? 0).toLocaleString()} beams</span>)</div>` +
+               rebarLine +
+               `<div>Keyword Nodal Points: <b style="color: #4ade80;">${counts.totalNodes.toLocaleString()} nodes</b></div>` +
+               `<div>Bounding Enclosure: <b>${dimStr}</b> (dx: ${((counts.dx ?? 0.03) * 1000).toFixed(1)} mm)</div>` +
+               `<div>Scale Factor: <b>${Number(node.parameters['scale_factor'] ?? 1.0)}x</b> | VRAM: <b>${counts.totalVramMB.toFixed(2)} MB</b></div>` +
                `</div>`;
     }
     return '';
 }
 
 export function resolveGeometryCounts(node: Node, _state?: SimulationState) {
-    if (node.type === 'STLGeometry') {
+    if (node.type === 'STLGeometry' || node.type === 'Obstacle3D') {
         const stlFile = String(node.parameters['stl_file'] || '');
         const meta = getSTLGeometryMeta(stlFile);
         const sx = Math.abs(Number(node.parameters['scale_x'] ?? 1.0)) || 1.0;
@@ -5941,7 +7676,7 @@ export function resolveGeometryCounts(node: Node, _state?: SimulationState) {
             rawBounds[2] * sy, rawBounds[3] * sy,
             rawBounds[4] * sz, rawBounds[5] * sz
         ];
-        return { stlFile, triangleCount, volume, bounds };
+        return { stlFile, triangleCount, volume, bounds, scaleStr: `${sx} × ${sy} × ${sz}` };
     } else if (node.type === 'PrimitiveGeometry3D') {
         const primitives = Array.isArray(node.parameters['primitives']) ? node.parameters['primitives'] : [];
         const count = primitives.length;
@@ -5969,6 +7704,15 @@ export function getGeometryDisplayHTML(node: Node, state?: SimulationState): str
                `<div>Bounding Box: <b>${(dx * 1000).toFixed(1)} × ${(dy * 1000).toFixed(1)} × ${(dz * 1000).toFixed(1)} mm</b></div>` +
                `<div>Watertight Volume: <b>${((counts.volume ?? 0.001) * 1e6).toFixed(2)} cm³</b></div>` +
                `</div>`;
+    } else if (node.type === 'Obstacle3D') {
+        const counts = resolveGeometryCounts(node, state);
+        const fileName = (counts.stlFile || 'No file selected').split('/').pop();
+        return `<div style="background: rgba(234, 179, 8, 0.08); border: 1px solid #eab308; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
+               `<div style="color: #facc15; font-weight: bold; margin-bottom: 3px;">🚧 3D Rigid Obstacle (STL)</div>` +
+               `<div style="color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Mesh: <b>${fileName}</b></div>` +
+               `<div>Surface Triangles: <b style="color: #fff;">${(counts.triangleCount ?? 0).toLocaleString()} tris</b></div>` +
+               `<div>Scale: <b>${counts.scaleStr || '1.0 × 1.0 × 1.0'}</b></div>` +
+               `</div>`;
     } else if (node.type === 'PrimitiveGeometry3D') {
         const counts = resolveGeometryCounts(node, state);
         return `<div style="background: rgba(234, 179, 8, 0.08); border: 1px solid #eab308; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
@@ -5992,10 +7736,10 @@ export function resolveCouplerCounts(node: Node, state?: SimulationState) {
             fluidCells = meshCounts.totalCells;
         }
 
-        const femNodes = state.nodes.filter(n => n.type === 'FEMObject3D');
+        const femNodes = state.nodes.filter(n => n.type === 'FEMObject3D' || n.type === 'FEMDomain3D' || n.type === 'LSDynaImporter3D');
         femNodes.forEach(n => {
             const femCounts = resolveFEMCounts(n, state);
-            solidElements += femCounts.numElements;
+            solidElements += (femCounts.totalElements || femCounts.numElements);
         });
 
         const mpmNodes = state.nodes.filter(n => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
@@ -6011,17 +7755,41 @@ export function resolveCouplerCounts(node: Node, state?: SimulationState) {
 export function getCouplerDisplayHTML(node: Node, state?: SimulationState): string {
     const counts = resolveCouplerCounts(node, state);
     if (node.type === 'FEMFSICoupler3D') {
+        const cfdConn = state?.connections.find(c => c.toNode === node.id && (c.toPort === 'cfd' || c.toPort === 'cfd_solver'));
+        const cfdNode = cfdConn ? state?.nodes.find(n => n.id === cfdConn.fromNode) : null;
+        const femConn = state?.connections.find(c => c.toNode === node.id && (c.toPort === 'fem' || c.toPort === 'fem_domain' || c.toPort === 'fem_solver'));
+        const femNode = femConn ? state?.nodes.find(n => n.id === femConn.fromNode) : null;
+
+        const cfdLabel = cfdNode
+            ? `<b style="color: #38bdf8;">${(cfdNode as any).name || cfdNode.parameters?.name || cfdNode.type} [${cfdNode.id.substring(0, 8)}]</b>`
+            : `<span style="color: #f87171;">⚠️ Unwired (Select in Properties)</span>`;
+        const femLabel = femNode
+            ? `<b style="color: #4ade80;">${(femNode as any).name || femNode.parameters?.name || femNode.type} [${femNode.id.substring(0, 8)}]</b>`
+            : `<span style="color: #f87171;">⚠️ Unwired (Select in Properties)</span>`;
+
         return `<div style="background: rgba(14, 165, 233, 0.08); border: 1px solid #0ea5e9; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
                `<div style="color: #38bdf8; font-weight: bold; margin-bottom: 3px;">🌊 FSI Coupling Infrastructure (Eulerian CFD ⇄ Lagrangian FEM)</div>` +
-               `<div>Fluid Discretization: <b style="color: #fff;">${counts.fluidCells.toLocaleString()} Eulerian cells</b></div>` +
-               `<div>Structural Discretization: <b style="color: #4ade80;">${counts.solidElements.toLocaleString()} Hex8 solid elements</b></div>` +
-               `<div>Coupling Mode: <b>Conservative SAT Cut-Cell Aperture</b></div>` +
+               `<div>Eulerian CFD Solver: ${cfdLabel} (${counts.fluidCells.toLocaleString()} fluid cells)</div>` +
+               `<div>Lagrangian FEM Solver: ${femLabel} (${counts.solidElements.toLocaleString()} solid Hex8 elements)</div>` +
+               `<div>Coupling Mode: <b>Conservative SAT Cut-Cell Aperture · 2x2 Gauss Quadrature</b></div>` +
                `</div>`;
     } else if (node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D') {
+        const cfdConn = state?.connections.find(c => c.toNode === node.id && (c.toPort === 'cfd' || c.toPort === 'cfd_solver'));
+        const cfdNode = cfdConn ? state?.nodes.find(n => n.id === cfdConn.fromNode) : null;
+        const mpmConn = state?.connections.find(c => c.toNode === node.id && (c.toPort === 'mpm' || c.toPort === 'mpm_domain'));
+        const mpmNode = mpmConn ? state?.nodes.find(n => n.id === mpmConn.fromNode) : null;
+
+        const cfdLabel = cfdNode
+            ? `<b style="color: #38bdf8;">${(cfdNode as any).name || cfdNode.parameters?.name || cfdNode.type} [${cfdNode.id.substring(0, 8)}]</b>`
+            : `<span style="color: #f87171;">⚠️ Unwired (Select in Properties)</span>`;
+        const mpmLabel = mpmNode
+            ? `<b style="color: #c084fc;">${(mpmNode as any).name || mpmNode.parameters?.name || mpmNode.type} [${mpmNode.id.substring(0, 8)}]</b>`
+            : `<span style="color: #f87171;">⚠️ Unwired (Select in Properties)</span>`;
+
         return `<div style="background: rgba(14, 165, 233, 0.08); border: 1px solid #0ea5e9; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
                `<div style="color: #38bdf8; font-weight: bold; margin-bottom: 3px;">🌊 FSI Coupling Infrastructure (Eulerian CFD ⇄ Lagrangian MPM)</div>` +
-               `<div>Fluid Discretization: <b style="color: #fff;">${counts.fluidCells.toLocaleString()} cells</b></div>` +
-               `<div>Structure Discretization: <b style="color: #c084fc;">${counts.solidParticles.toLocaleString()} MPM particles</b></div>` +
+               `<div>Eulerian CFD Solver: ${cfdLabel} (${counts.fluidCells.toLocaleString()} cells)</div>` +
+               `<div>Lagrangian MPM Domain: ${mpmLabel} (${counts.solidParticles.toLocaleString()} MPM particles)</div>` +
                `</div>`;
     }
     return '';
@@ -6144,7 +7912,7 @@ export function getMaterialDisplayHTML(node: Node, state?: SimulationState): str
             detonatorWarning = `
             <div style="margin-top: 5px; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; border-radius: 3px; padding: 4px 6px; color: #fca5a5; font-size: 10px; display: flex; align-items: center; gap: 5px; line-height: 1.25;">
                 <span style="font-size: 12px; flex-shrink: 0;">⚠️</span>
-                <div><b>Detonator Required:</b> Connect a TriggerLocation / Detonator node to initiate detonation wavefront.</div>
+                <div><b>Detonator Required:</b> Connect a DetonatorLocation node to initiate detonation wavefront.</div>
             </div>`;
         }
     }

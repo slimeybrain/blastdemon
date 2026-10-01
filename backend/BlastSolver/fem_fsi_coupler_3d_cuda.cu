@@ -186,6 +186,8 @@ __global__ void kernel_rasterize_fem_facets_to_geom_3d(
     int kmax = max(0, min(nz - 1, static_cast<int>(ceilf((static_cast<float>(facet.bbox_max[2]) - zmin) / dz))));
 
     float half_dx = 0.5f * dx;
+    float plane_d = fnx * v0.x + fny * v0.y + fnz * v0.z;
+    float r_box = half_dx * (fabsf(fnx) + fabsf(fny) + fabsf(fnz));
 
     for (int k = kmin; k <= kmax; ++k) {
         float cz = zmin + (k + 0.5f) * dz;
@@ -193,6 +195,9 @@ __global__ void kernel_rasterize_fem_facets_to_geom_3d(
             float cy = ymin + (j + 0.5f) * dy;
             for (int i = imin; i <= imax; ++i) {
                 float cx = xmin + (i + 0.5f) * dx;
+                float dist_to_plane = fabsf(fnx * cx + fny * cy + fnz * cz - plane_d);
+                if (dist_to_plane > r_box) continue;
+
                 Point3D cell_center = { cx, cy, cz };
 
                 if (tri_box_overlap(cell_center, half_dx, triA) || tri_box_overlap(cell_center, half_dx, triB)) {
@@ -473,6 +478,36 @@ void FEMFSICoupler3DCUDA<T>::attachSolvers(CFDSolver3D* fv_solver, FEMSolver3DCU
     if (m_fem_solver) {
         m_stream = static_cast<cudaStream_t>(m_fem_solver->getStream());
     }
+}
+
+template <typename T>
+void FEMFSICoupler3DCUDA<T>::primeInitialGeometry() {
+    // Run a geometry-only coupling pass so that d_geom is populated before
+    // init_gauges() calls setGauges(), which downloads d_geom from the device
+    // to snap probe coordinates to genuine fluid-side cells.
+    // We deliberately do NOT advance FEM or CFD state here (dt = 0 equivalent).
+    if (!m_fv_solver || !m_fem_solver) return;
+
+    int num_nodes  = static_cast<int>(m_fem_solver->getNodeCount());
+    int num_facets = static_cast<int>(m_fem_solver->getSurfaceFacetCount());
+    if (num_facets <= 0) return;
+
+    FEMNode3D<T>* d_nodes  = m_fem_solver->getNodesDevice();
+    FEMFacet3D<T>* d_facets = m_fem_solver->getSurfaceFacetsDevice();
+    if (!d_nodes || !d_facets) return;
+
+    // Zero external forces so the geometry prime doesn't leave stale forces
+    if (num_nodes > 0) {
+        launch_zero_fem_ext_forces_3d<T>(d_nodes, num_nodes, m_stream);
+    }
+
+    // Delegate to the CFD solver's full FSI coupling stub, which allocates
+    // d_geom, zeroes it, rasterizes surface facets, and records the uncovering
+    // mask (but skips extrapolation because has_prev_mask is false at t=0).
+    m_fv_solver->coupleFSIWithFEMGPU(m_fem_solver);
+
+    // Synchronise so the host-side setGauges() cudaMemcpy sees valid data.
+    cudaDeviceSynchronize();
 }
 
 template <typename T>

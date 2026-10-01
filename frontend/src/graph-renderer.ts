@@ -1,12 +1,13 @@
 import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
-import { StateManager, calculateRefinementMeshInfo, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, getMaterialDisplayHTML, isExplosiveMaterialNode, syncMPMMaterialParameters, getCompatibleMaterialsForNode } from './state-manager.js';
+import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, getMaterialDisplayHTML, isExplosiveMaterialNode, syncMPMMaterialParameters, getCompatibleMaterialsForNode } from './state-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getCategorizedPresetsForModel, getDefaultPresetForModel } from './mpm-presets.js';
 import { EXPLOSIVE_PRESETS } from './property-grid.js';
-import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover, getSolverScope, getSolverBadgeHTML, getParamKeysForNode, shouldSkipNodeParameter, getNodeSectionInfo } from './parameter-definitions.js';
+import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover, getSolverScope, getSolverBadgeHTML, getParamKeysForNode, shouldSkipNodeParameter, getNodeSectionInfo, PARAMETER_DEFINITIONS, resolveModelContext } from './parameter-definitions.js';
+import { FEMSetupModal } from './fem-setup-modal.js';
 
 const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
     pressure: [101325.0, 101325.0 * 100.0],
@@ -518,12 +519,13 @@ export class GraphRenderer {
                     vp.updateTelemetry(data);
                 }
             }
-        } else if (node.type === 'VirtualGauges' && data) {
+        } else if ((node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') && data) {
             const canvas = nodeEl.querySelector('canvas') as HTMLCanvasElement;
             if (canvas) {
                 const gauges = node.parameters?.gauges || [];
                 const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
                 const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
+                this.drawGaugesChart(canvas, data, gauges, currentChannel, has2D, node.id);
             }
         }
     }
@@ -860,31 +862,47 @@ export class GraphRenderer {
         const toType = toNode.type;
 
         switch (toType) {
+            case 'MarineHarbourDomain':
+                if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
+                if (toPortId === 'air') return fromType === 'Material';
+                if (toPortId === 'water') return fromType === 'Material';
+                if (toPortId === 'charge' || toPortId === 'explosive') return fromType === 'Charge3D';
+                if (toPortId === 'seabed') return fromType === 'Material';
+                if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation3D' || fromType === 'TriggerLocation3D';
+                if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D' || fromType === 'Obstacle3D';
+                if (toPortId === 'gauges') return fromType === 'VirtualGauges';
+                if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo3DNode' || fromType === 'Remap2DTo3DNode';
+                if (toPortId === 'elements' || toPortId === 'objects' || toPortId === 'parts') return fromType === 'FEMObject3D' || fromType === 'FEMBeam3D' || fromType === 'FEMRebar3D';
+                return false;
             case 'CFDSolver3D':
                 // mesh port only accepts the root DomainMesh3D; subgrids hang off the domain via parent_mesh
                 if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
                 if (toPortId === 'air') return fromType === 'Material';
-                if (toPortId === 'charge') return fromType === 'Charge3D';
+                if (toPortId === 'charge' || toPortId === 'explosive') return fromType === 'Charge3D';
                 if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation3D' || fromType === 'TriggerLocation3D';
-                if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D';
+                if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D' || fromType === 'Obstacle3D';
                 if (toPortId === 'gauges') return fromType === 'VirtualGauges';
                 if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo3DNode' || fromType === 'Remap2DTo3DNode';
                 return false;
-            case 'RefinementMesh3D':
-                if (toPortId === 'parent_mesh') return fromType === 'DomainMesh3D' || fromType === 'RefinementMesh3D';
+            case 'FEMBeam3D':
+            case 'FEMRebar3D':
+                if (toPortId === 'material') return fromType === 'Material';
                 return false;
             case 'Charge3D':
                 if (toPortId === 'material') return fromType === 'Material';
                 return false;
             case 'Telemetry3DViewport':
-                if (toPortId === 'in') return fromType === 'CFDSolver3D' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler3D' || fromType === 'FEMDomain3D' || fromType === 'FEMFSICoupler3D';
+                if (toPortId === 'in') return fromType === 'CFDSolver3D' || fromType === 'MarineHarbourDomain' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler3D' || fromType === 'FEMDomain3D' || fromType === 'FEMFSICoupler3D';
                 return false;
             case 'ThePainter':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh';
                 if (toPortId === 'air') return fromType === 'Material';
-                if (toPortId === 'explosive') return fromType === 'Charge1D';
+                if (toPortId === 'explosive' || toPortId === 'charge') return fromType === 'Charge1D';
                 return false;
             case 'CFDSolver':
+                if (toPortId === 'mesh') return fromType === 'DomainMesh';
+                if (toPortId === 'air') return fromType === 'Material';
+                if (toPortId === 'charge' || toPortId === 'explosive') return fromType === 'Charge1D';
                 if (toPortId === 'in') return fromType === 'ThePainter';
                 return false;
             case 'CFDSolver2D':
@@ -893,7 +911,7 @@ export class GraphRenderer {
                 if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo2DNode';
                 if (toPortId === 'hardware') return fromType === 'HardwareConfig';
                 if (toPortId === 'air') return fromType === 'Material';
-                if (toPortId === 'explosive') return fromType === 'Charge2D' || fromType === 'Charge1D';
+                if (toPortId === 'charge' || toPortId === 'explosive') return fromType === 'Charge2D' || fromType === 'Charge1D';
                 if (toPortId === 'ideal_gas') return fromType === 'Charge2D' || fromType === 'Charge1D';
                 return false;
             case 'Charge1D':
@@ -909,11 +927,11 @@ export class GraphRenderer {
                 if (toPortId === 'in') return fromType === 'CFDSolver2D';
                 return false;
             case 'VirtualGauges':
-                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D';
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MarineHarbourDomain';
                 return false;
             case 'TelemetryText':
             case 'TelemetryGraph':
-                return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain2D' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler2D' || fromType === 'FSICoupler3D' || fromType === 'FEMDomain3D' || fromType === 'FEMFSICoupler3D';
+                return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MarineHarbourDomain' || fromType === 'MPMDomain2D' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler2D' || fromType === 'FSICoupler3D' || fromType === 'FEMDomain3D' || fromType === 'FEMFSICoupler3D';
             case 'MPMDomain2D':
                 if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
                 if (toPortId === 'objects') return fromType === 'MPMObject2D';
@@ -929,33 +947,37 @@ export class GraphRenderer {
                 return false;
             case 'MPMObject3D':
                 if (toPortId === 'material') return fromType === 'Material';
-                if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D';
+                if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D' || fromType === 'Obstacle3D';
                 return false;
             case 'FSICoupler2D':
                 if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver2D';
                 if (toPortId === 'mpm_domain' || toPortId === 'mpm') return fromType === 'MPMDomain2D';
                 return false;
             case 'FSICoupler3D':
-                if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver3D';
+                if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver3D' || fromType === 'MarineHarbourDomain';
                 if (toPortId === 'mpm_domain' || toPortId === 'mpm') return fromType === 'MPMDomain3D';
                 return false;
             case 'FEMDomain3D':
-                if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
-                if (toPortId === 'objects') return fromType === 'FEMObject3D' || fromType === 'LSDynaImporter3D';
+                if (toPortId === 'mesh' || toPortId === 'objects' || toPortId === 'parts' || toPortId === 'in') {
+                    return fromType === 'FEMObject3D' || fromType === 'LSDynaImporter3D' || fromType === 'FEMBeam3D' || fromType === 'FEMRebar3D';
+                }
+                if (toPortId === 'material') return fromType === 'Material';
                 return false;
             case 'FEMObject3D':
                 if (toPortId === 'material') return fromType === 'Material';
                 if (toPortId === 'importer') return fromType === 'LSDynaImporter3D';
                 return false;
-            case 'LSDynaImporter3D': return false;
+            case 'LSDynaImporter3D':
+                if (toPortId === 'material') return fromType === 'Material';
+                return false;
             case 'FEMFSICoupler3D':
-                if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver3D';
+                if (toPortId === 'cfd_solver' || toPortId === 'cfd') return fromType === 'CFDSolver3D' || fromType === 'MarineHarbourDomain';
                 if (toPortId === 'fem_domain' || toPortId === 'fem' || toPortId === 'fem_solver') return fromType === 'FEMDomain3D';
                 return false;
             case 'TelemetryContour':
                 return fromType === 'CFDSolver2D' || fromType === 'MPMDomain2D' || fromType === 'FSICoupler2D';
             case 'VTKOutput':
-                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MPMDomain3D' || fromType === 'FEMDomain3D' || fromType === 'FSICoupler3D' || fromType === 'FEMFSICoupler3D';
+                if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MarineHarbourDomain' || fromType === 'MPMDomain3D' || fromType === 'FEMDomain3D' || fromType === 'FSICoupler3D' || fromType === 'FEMFSICoupler3D';
                 return false;
             default:
                 return false;
@@ -1025,7 +1047,7 @@ export class GraphRenderer {
                     const fromNode = state.nodes.find(n => n.id === fromNodeId);
                     const targetNode = state.nodes.find(n => n.id === toNodeId);
                     if (fromNode && targetNode && this.isConnectionCompatible(fromNode, fromPortId, targetNode, toPortId)) {
-                        const isMultiInput = ((targetNode.type === 'MPMDomain2D' || targetNode.type === 'MPMDomain3D' || targetNode.type === 'FEMDomain3D') && (toPortId === 'objects' || toPortId === 'detonator'))
+                        const isMultiInput = ((targetNode.type === 'MPMDomain2D' || targetNode.type === 'MPMDomain3D' || targetNode.type === 'FEMDomain3D') && (toPortId === 'objects' || toPortId === 'mesh' || toPortId === 'parts' || toPortId === 'detonator'))
                             || targetNode.type === 'TelemetryText'
                             || targetNode.type === 'TelemetryContour';
 
@@ -1055,6 +1077,20 @@ export class GraphRenderer {
                             if (toPortId === 'material' && targetNode) {
                                 targetNode.parameters['material'] = fromNodeId;
                                 this.stateManager.updateNodeParametersInPlace(targetNode.id, { material: fromNodeId });
+                            } else if (toPortId === 'air' && targetNode) {
+                                targetNode.parameters['ambient_air_material'] = fromNodeId;
+                                this.stateManager.updateNodeParametersInPlace(targetNode.id, { ambient_air_material: fromNodeId });
+                                if (fromNode && fromNode.type === 'Material') {
+                                    fromNode.parameters['ambient_air_target'] = toNodeId;
+                                    this.stateManager.updateNodeParametersInPlace(fromNode.id, { ambient_air_target: toNodeId });
+                                }
+                            } else if ((toPortId === 'charge' || toPortId === 'explosive') && targetNode) {
+                                targetNode.parameters['explosive_charge'] = fromNodeId;
+                                this.stateManager.updateNodeParametersInPlace(targetNode.id, { explosive_charge: fromNodeId });
+                                if (fromNode && (fromNode.type === 'Charge1D' || fromNode.type === 'Charge2D' || fromNode.type === 'Charge3D')) {
+                                    fromNode.parameters['target_domain'] = toNodeId;
+                                    this.stateManager.updateNodeParametersInPlace(fromNode.id, { target_domain: toNodeId });
+                                }
                             }
                             const owningModel = this.stateManager.getModelForNode(toNodeId) || this.stateManager.getActiveModel();
                             if (owningModel) {
@@ -1396,7 +1432,6 @@ export class GraphRenderer {
                 name: '2D Simulation',
                 items: [
                     { label: 'Domain Mesh 2D', type: 'DomainMesh2D' },
-                    { label: 'Trigger Location', type: 'TriggerLocation' },
                     { label: 'Detonator Location', type: 'DetonatorLocation' },
                     { label: 'Remapper (1D -> 2D)', type: 'Remap1DTo2DNode' },
                     { label: '2D Charge', type: 'Charge2D' },
@@ -1407,26 +1442,26 @@ export class GraphRenderer {
                 name: '3D Simulation',
                 items: [
                     { label: 'Domain Mesh 3D', type: 'DomainMesh3D' },
-                    { label: 'Trigger Location 3D', type: 'TriggerLocation3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: 'Remapper (1D -> 3D)', type: 'Remap1DTo3DNode' },
                     { label: 'Remapper (2D -> 3D)', type: 'Remap2DTo3DNode' },
                     { label: '3D Charge', type: 'Charge3D' },
-                    { label: 'CFD Solver 3D', type: 'CFDSolver3D' }
+                    { label: 'CFD Solver 3D', type: 'CFDSolver3D' },
+                    { label: 'Marine Harbour Domain', type: 'MarineHarbourDomain' }
                 ]
             },
             {
                 name: 'Geometry & Obstacles',
                 items: [
                     { label: 'STL Geometry 3D', type: 'STLGeometry' },
-                    { label: 'Primitive Geometry 3D', type: 'PrimitiveGeometry3D' }
+                    { label: 'Primitive Geometry 3D', type: 'PrimitiveGeometry3D' },
+                    { label: '3D CSG Obstacle', type: 'Obstacle3D' }
                 ]
             },
             {
                 name: 'MPM Simulation (2D)',
                 items: [
                     { label: 'MPM Domain 2D', type: 'MPMDomain2D' },
-                    { label: 'Trigger Location', type: 'TriggerLocation' },
                     { label: 'Detonator Location', type: 'DetonatorLocation' },
                     { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' }
                 ]
@@ -1435,7 +1470,6 @@ export class GraphRenderer {
                 name: 'MPM Simulation (3D)',
                 items: [
                     { label: 'MPM Domain 3D', type: 'MPMDomain3D' },
-                    { label: 'Trigger Location 3D', type: 'TriggerLocation3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: 'MPM Object 3D (Box)', type: 'MPMObject3D', defaultParams: { shape_type: 'Box' } },
                     { label: 'MPM Object 3D (Sphere)', type: 'MPMObject3D', defaultParams: { shape_type: 'Sphere' } },
@@ -1446,9 +1480,11 @@ export class GraphRenderer {
             {
                 name: 'FEM Structural (3D)',
                 items: [
-                    { label: 'FEM Domain 3D (Hex8 Explicit)', type: 'FEMDomain3D' },
-                    { label: 'FEM Object 3D (Box Mesh)', type: 'FEMObject3D', defaultParams: { mesh_source: 'Box Generator' } },
-                    { label: 'LS-DYNA Importer (.k / .key)', type: 'LSDynaImporter3D' }
+                    { label: '3D Explicit FEM Solver Domain', type: 'FEMDomain3D' },
+                    { label: '3D FEM Structural Body', type: 'FEMObject3D', defaultParams: { mesh_source: 'Box Generator' } },
+                    { label: '3D FEM Beam Framework', type: 'FEMBeam3D' },
+                    { label: '3D FEM Rebar Reinforcement', type: 'FEMRebar3D' },
+                    { label: 'LS-DYNA Keyword Deck (*.k)', type: 'LSDynaImporter3D' }
                 ]
             },
             {
@@ -1605,10 +1641,10 @@ export class GraphRenderer {
         const activeModelState = activeModelId ? this.stateManager.getSimulationState(activeModelId) : null;
         const targetNodes = activeModelState ? activeModelState.nodes : state.nodes;
 
-        const existingCFDSolver = targetNodes.find(n => ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D'].includes(n.type));
+        const existingCFDSolver = targetNodes.find(n => ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(n.type));
         const existingMPMDomain = targetNodes.find(n => n.type === 'MPMDomain2D');
 
-        if (['CFDSolver', 'CFDSolver2D', 'CFDSolver3D'].includes(type) && existingCFDSolver) {
+        if (['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(type) && existingCFDSolver) {
             alert(`You can only have one CFD Solver per model canvas. Please create a 'New Model' from the top menu for a separate simulation.`);
             return;
         }
@@ -1765,7 +1801,7 @@ export class GraphRenderer {
             case 'DetonatorLocation':
             case 'DetonatorLocation3D':
             case 'TriggerLocation':
-            case 'TriggerLocation3D': return 'TRIGGER';
+            case 'TriggerLocation3D': return 'DETONATOR';
             case 'RemapNode':
             case 'Remap1DTo2DNode': return 'REMAP 1D->2D';
             case 'Remap1DTo3DNode': return 'REMAP 1D->3D';
@@ -1779,7 +1815,9 @@ export class GraphRenderer {
             case 'CFDSolver3D':     return 'SOLVER3D';
             case 'Telemetry3DViewport': return 'VIEW3D';
             case 'STLGeometry':
-            case 'PrimitiveGeometry3D': return 'STL';
+            case 'PrimitiveGeometry3D':
+            case 'Obstacle3D':
+            case 'Obstacle': return 'STL';
             case 'MPMDomain2D':      return 'MPM2D';
             case 'MPMDomain3D':      return 'MPM3D';
             case 'MPMObject2D':      return 'MPM OBJ';
@@ -1787,6 +1825,7 @@ export class GraphRenderer {
             case 'FSICoupler2D':     return 'FSI 2D';
             case 'FSICoupler3D':     return 'FSI 3D';
             case 'FEMDomain3D':      return 'FEM3D';
+            case 'MarineHarbourDomain': return 'UNDEX3D';
             case 'FEMObject3D':      return 'FEM OBJ';
             case 'LSDynaImporter3D': return 'DYNA.K';
             case 'FEMFSICoupler3D':  return 'FEM-FSI';
@@ -1809,8 +1848,8 @@ export class GraphRenderer {
             case 'DomainMesh2D':      return 'Domain Mesh 2D';
             case 'DetonatorLocation': return 'Detonator Location';
             case 'DetonatorLocation3D': return 'Detonator Location 3D';
-            case 'TriggerLocation':   return 'Trigger Location';
-            case 'TriggerLocation3D': return 'Trigger Location 3D';
+            case 'TriggerLocation':   return 'Detonator Location';
+            case 'TriggerLocation3D': return 'Detonator Location 3D';
             case 'RemapNode':
             case 'Remap1DTo2DNode':   return 'Remapper (1D -> 2D)';
             case 'Remap1DTo3DNode':   return 'Remapper (1D -> 3D)';
@@ -1822,18 +1861,21 @@ export class GraphRenderer {
             case 'DomainMesh3D':      return 'Domain Mesh 3D';
             case 'Charge3D':          return 'Charge (3D)';
             case 'CFDSolver3D':       return 'CFD Solver 3D';
+            case 'MarineHarbourDomain': return 'Marine Harbour Domain';
             case 'Telemetry3DViewport': return 'Telemetry - 3D Viewport';
             case 'STLGeometry':       return 'STL Geometry 3D';
             case 'PrimitiveGeometry3D': return 'Primitive Geometry 3D';
+            case 'Obstacle3D':        return '3D CSG Obstacle';
+            case 'Obstacle':          return '3D CSG Obstacle';
             case 'MPMDomain2D':      return 'MPM Domain 2D';
             case 'MPMDomain3D':      return 'MPM Domain 3D';
             case 'MPMObject2D':      return 'MPM Object 2D';
             case 'MPMObject3D':      return 'MPM Object 3D';
             case 'FSICoupler2D':     return 'FSI Coupler 2D';
             case 'FSICoupler3D':     return 'FSI Coupler 3D';
-            case 'FEMDomain3D':      return 'FEM Domain 3D (Hex8 Explicit)';
-            case 'FEMObject3D':      return 'FEM Object 3D';
-            case 'LSDynaImporter3D': return 'LS-DYNA Importer (.k)';
+            case 'FEMDomain3D':      return '3D Explicit FEM Solver Domain';
+            case 'FEMObject3D':      return '3D FEM Structural Body';
+            case 'LSDynaImporter3D': return 'LS-DYNA Keyword Deck (*.k)';
             case 'FEMFSICoupler3D':  return 'FEM-CFD FSI Coupler 3D';
             default: return type;
         }
@@ -1949,6 +1991,33 @@ export class GraphRenderer {
                     const collapseBtn = document.createElement('button');
                     collapseBtn.className = 'node-collapse-btn';
                     buttonGroup.appendChild(collapseBtn);
+
+                    const isFEMNode = node.type === 'FEMObject3D' || node.type === 'FEMDomain3D' || node.type === 'LSDynaImporter3D' || node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D' || node.type === 'FEMFSICoupler3D' || !!node.parameters?.['fem_setup'];
+                    if (isFEMNode) {
+                        const femHeaderBtn = document.createElement('button');
+                        femHeaderBtn.className = 'node-fem-header-btn';
+                        femHeaderBtn.innerHTML = '⚡ Setup';
+                        femHeaderBtn.title = 'Open FEM Model Setup & Preprocessor (Parts, Sets, Formulations, Materials, BCs, Contacts)';
+                        femHeaderBtn.style.background = 'linear-gradient(135deg, #1d4ed8, #2563eb)';
+                        femHeaderBtn.style.color = '#fff';
+                        femHeaderBtn.style.border = '1px solid #60a5fa';
+                        femHeaderBtn.style.borderRadius = '3px';
+                        femHeaderBtn.style.fontSize = '9px';
+                        femHeaderBtn.style.fontWeight = 'bold';
+                        femHeaderBtn.style.padding = '1px 6px';
+                        femHeaderBtn.style.cursor = 'pointer';
+                        femHeaderBtn.style.boxShadow = '0 0 6px rgba(59,130,246,0.5)';
+                        femHeaderBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            const targetModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                            if (targetModel) {
+                                new FEMSetupModal(this.stateManager, node, targetModel, () => {
+                                    this.render();
+                                });
+                            }
+                        };
+                        buttonGroup.appendChild(femHeaderBtn);
+                    }
 
                     header.appendChild(buttonGroup);
 
@@ -2152,8 +2221,10 @@ export class GraphRenderer {
                 const valStatus = valResults.nodeStatus[node.id] || { state: 'valid', messages: [] };
                 const modelStatus = modelId ? this.stateManager.getModelStatus(modelId) : 'UNINITIALIZED';
                 const isSolverNode = node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D' || 
+                                     node.type === 'MarineHarbourDomain' ||
                                      node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || 
-                                     node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D';
+                                     node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' ||
+                                     node.type === 'FEMDomain3D' || node.type === 'FEMFSICoupler3D';
                 const hasRuntimeError = isSolverNode && modelStatus === 'ERROR';
 
                 nodeEl.classList.toggle('has-error', valStatus.state === 'error' || hasRuntimeError);
@@ -2252,7 +2323,7 @@ export class GraphRenderer {
                                 detWarningChip.style.color = '#fca5a5';
                                 detWarningChip.style.border = '1px solid #ef4444';
                                 detWarningChip.textContent = '⚠️ NO DET';
-                                detWarningChip.title = 'Missing Detonator / Trigger: Energetic material requires a detonation trigger node in the model!';
+                                detWarningChip.title = 'Missing Detonator: Energetic material requires a DetonatorLocation node in the model!';
                                 header.appendChild(detWarningChip);
                             } else {
                                 detWarningChip.style.display = 'inline-block';
@@ -2730,6 +2801,22 @@ export class GraphRenderer {
                 if (node) {
                     node.parameters['material'] = '';
                 }
+            } else if (portId === 'air') {
+                const node = state.nodes.find(n => n.id === nodeId);
+                if (node) {
+                    node.parameters['ambient_air_material'] = '';
+                    node.parameters['ambient_air_target'] = '';
+                }
+            } else if (portId === 'charge' || portId === 'explosive') {
+                const node = state.nodes.find(n => n.id === nodeId);
+                if (node) {
+                    node.parameters['explosive_charge'] = '';
+                    node.parameters['target_domain'] = '';
+                }
+            }
+            const owningModel = this.stateManager.getModelForNode(nodeId) || this.stateManager.getActiveModel();
+            if (owningModel) {
+                this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
             }
             this.stateManager.pushState(state);
 
@@ -2907,7 +2994,7 @@ export class GraphRenderer {
 
     private getPortColorClass(nodeType: string, portId: string): string {
         if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || portId === 'mesh') return 'domain';
-        if (nodeType === 'STLGeometry' || portId === 'stl') return 'domain';
+        if (nodeType === 'STLGeometry' || nodeType === 'PrimitiveGeometry3D' || nodeType === 'Obstacle3D' || portId === 'stl') return 'domain';
         if (nodeType === 'Charge1D' || nodeType === 'Charge2D' || portId === 'explosive') return 'explosive';
         if (portId === 'ideal_gas') return 'material';
         if (nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D' || nodeType === 'TriggerLocation' || nodeType === 'TriggerLocation3D' || portId === 'detonator' || portId === 'trigger') return 'detonator';
@@ -3501,9 +3588,9 @@ export class GraphRenderer {
                     const detNode = detConn ? state.nodes.find(n => n.id === detConn.fromNode && (n.type === 'DetonatorLocation' || n.type === 'TriggerLocation')) : null;
                     if (detNode) {
                         detonatorInfo = {
-                            r: Number(detNode.parameters?.trigger_r ?? detNode.parameters?.detonator_r ?? 0.0),
-                            z: Number(detNode.parameters?.trigger_z ?? detNode.parameters?.detonator_z ?? 0.0),
-                            radius: Number(detNode.parameters?.trigger_radius ?? detNode.parameters?.detonator_radius ?? 0.001),
+                            r: Number(detNode.parameters?.detonator_r ?? detNode.parameters?.trigger_r ?? 0.0),
+                            z: Number(detNode.parameters?.detonator_z ?? detNode.parameters?.trigger_z ?? 0.0),
+                            radius: Number(detNode.parameters?.detonator_radius ?? detNode.parameters?.trigger_radius ?? 0.001),
                             max_r: max_r,
                             max_z: max_z
                         };
@@ -4220,11 +4307,39 @@ export class GraphRenderer {
         const conn = state?.connections.find(c => c.toNode === node.id);
         const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
         const is3D = sourceNode 
-            ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D') 
-            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
+            ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'MarineHarbourDomain' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D') 
+            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
+        let isCoupledModel = false;
+        const allModels = this.stateManager.getAllModels();
+        for (const m of allModels) {
+            if (m.nodes && m.nodes.some(n => n.id === node.id)) {
+                isCoupledModel = m.nodes.some(n => n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
+                break;
+            }
+        }
+        if (!isCoupledModel) {
+            const activeModel = this.stateManager.getActiveModel();
+            if (activeModel && activeModel.nodes && activeModel.nodes.some(n => n.id === node.id)) {
+                isCoupledModel = activeModel.nodes.some(n => n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
+            }
+        }
+
+        const ctx = resolveModelContext(state, is3D, isCoupledModel);
+        const paramKeys = getParamKeysForNode(node.type, node.parameters, is3D, isCoupledModel);
+        const visibleKeys = paramKeys.filter(key => {
+            let value = node.parameters[key];
+            if (key === 'ambient_air_material' || key === 'explosive_charge' || key === 'target_domain' || key === 'ambient_air_target' || key === 'source_model_id' || key === 'target_solver' || key === 'seawater_material' || key === 'water_material' || key === 'seabed_foundation' || key === 'connected_detonators' || key === 'water_target') {
+                value = value ?? '';
+            }
+            if (value === undefined || value === null) return false;
+            return !shouldSkipNodeParameter(key, node.type, node.parameters, is3D, ctx);
+        });
+        const visibleKeysFingerprint = JSON.stringify(visibleKeys);
+
         let form = container.querySelector('.node-params-form') as HTMLFormElement;
         if (form) {
             let needsRebuild = false;
+            if (form.dataset.renderedVisibleKeys !== visibleKeysFingerprint) needsRebuild = true;
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
                 if (form.dataset.renderedDimension !== dim.toString()) needsRebuild = true;
@@ -4307,7 +4422,7 @@ export class GraphRenderer {
                     form.dataset.renderedIs3D !== is3D.toString()) {
                     needsRebuild = true;
                 }
-            } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver') {
+            } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MarineHarbourDomain') {
                 const initMode = node.parameters['init_mode'] || 'Multi-Material JWL';
                 if (form.dataset.renderedInitMode !== initMode.toString()) needsRebuild = true;
             }
@@ -4406,6 +4521,50 @@ export class GraphRenderer {
         form.className = 'node-params-form';
         form.style.padding = '4px 8px';
         form.onsubmit = (e) => e.preventDefault();
+        form.dataset.renderedVisibleKeys = visibleKeysFingerprint;
+
+        const isFEMNode = node.type === 'FEMObject3D' || node.type === 'FEMDomain3D' || node.type === 'LSDynaImporter3D' || node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D' || node.type === 'FEMFSICoupler3D' || !!node.parameters?.['fem_setup'];
+        if (isFEMNode) {
+            const btnWrap = document.createElement('div');
+            btnWrap.className = 'node-fem-btn-wrapper';
+            btnWrap.style.margin = '4px 0 8px 0';
+            btnWrap.style.width = '100%';
+
+            const setupBtn = document.createElement('button');
+            setupBtn.type = 'button';
+            setupBtn.className = 'node-fem-setup-btn';
+            setupBtn.style.width = '100%';
+            setupBtn.style.padding = '8px 10px';
+            setupBtn.style.background = 'linear-gradient(135deg, #1e40af, #2563eb)';
+            setupBtn.style.border = '1px solid #60a5fa';
+            setupBtn.style.borderRadius = '5px';
+            setupBtn.style.color = '#ffffff';
+            setupBtn.style.fontWeight = '700';
+            setupBtn.style.fontSize = '10.5px';
+            setupBtn.style.letterSpacing = '0.5px';
+            setupBtn.style.cursor = 'pointer';
+            setupBtn.style.display = 'flex';
+            setupBtn.style.alignItems = 'center';
+            setupBtn.style.justifyContent = 'center';
+            setupBtn.style.gap = '6px';
+            setupBtn.style.boxShadow = '0 2px 8px rgba(37,99,235,0.45)';
+            setupBtn.innerHTML = '<span style="font-size:12px;">⚡</span> <span>Open FEM Model Setup...</span>';
+            setupBtn.title = 'Open interactive 3D assembly window to edit components, sets, formulations, materials, boundary conditions, and contacts';
+            setupBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const targetModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                if (targetModel) {
+                    new FEMSetupModal(this.stateManager, node, targetModel, () => {
+                        this.renderNodeParameters(node, container);
+                        const state = this.stateManager.getCurrentState();
+                        if (state) this.stateManager.pushState(state);
+                    });
+                }
+            };
+            btnWrap.appendChild(setupBtn);
+            form.appendChild(btnWrap);
+        }
 
         if (node.type === 'DomainMesh') {
             const dim = node.parameters['dimension'] || '1D';
@@ -4484,7 +4643,7 @@ export class GraphRenderer {
             form.dataset.renderedTriggerType = triggerType.toString();
             form.dataset.renderedRoiEnabled = roiEnabled.toString();
             form.dataset.renderedIs3D = is3D.toString();
-        } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver') {
+        } else if (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MarineHarbourDomain') {
             const initMode = node.parameters['init_mode'] || 'Multi-Material JWL';
             form.dataset.renderedInitMode = initMode.toString();
         }
@@ -4493,28 +4652,11 @@ export class GraphRenderer {
             syncMPMMaterialParameters(node, node.parameters);
         }
 
-        // In coupled simulations, the Coupler node is the single source of truth for CFL and endtime.
-        // Suppress redundant CFL/endtime fields on sub-domain nodes.
-        let isCoupledModel = false;
-        const allModels = this.stateManager.getAllModels();
-        for (const m of allModels) {
-            if (m.nodes && m.nodes.some(n => n.id === node.id)) {
-                isCoupledModel = m.nodes.some(n => n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
-                break;
-            }
-        }
-        if (!isCoupledModel) {
-            const activeModel = this.stateManager.getActiveModel();
-            if (activeModel && activeModel.nodes && activeModel.nodes.some(n => n.id === node.id)) {
-                isCoupledModel = activeModel.nodes.some(n => n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
-            }
-        }
 
-        const paramKeys = getParamKeysForNode(node.type, node.parameters, is3D, isCoupledModel);
         
         const nType: string = node.type;
         let gridInfoDiv: HTMLDivElement | null = null;
-        if (nType === 'DomainMesh' || nType === 'DomainMesh2D' || nType === 'DomainMesh3D' || nType === 'RefinementMesh3D' || nType === 'CFDSolver' || nType === 'CFDSolver2D' || nType === 'CFDSolver3D') {
+        if (nType === 'DomainMesh' || nType === 'DomainMesh2D' || nType === 'DomainMesh3D' || nType === 'CFDSolver' || nType === 'CFDSolver2D' || nType === 'CFDSolver3D' || nType === 'MarineHarbourDomain') {
             const state = this.stateManager.getCurrentState();
             const info = document.createElement('div');
             info.className = 'grid-info-display';
@@ -4543,7 +4685,7 @@ export class GraphRenderer {
         }
 
         let geomInfoDiv: HTMLDivElement | null = null;
-        if (nType === 'STLGeometry' || nType === 'PrimitiveGeometry3D') {
+        if (nType === 'STLGeometry' || nType === 'PrimitiveGeometry3D' || nType === 'Obstacle3D') {
             const info = document.createElement('div');
             info.className = 'geom-info-display';
             info.innerHTML = getGeometryDisplayHTML(node, state ?? undefined);
@@ -4579,6 +4721,32 @@ export class GraphRenderer {
 
         for (const key of paramKeys) {
             let value = node.parameters[key];
+            if (value === undefined || value === null) {
+                if (node.type === 'Material') {
+                    if (key === 'afterburn_enabled') {
+                        const preset = node.parameters['preset'];
+                        const presetVal = preset && MPM_MATERIAL_PRESETS[preset]?.afterburn_enabled;
+                        value = node.parameters['afterburn_enabled'] = (presetVal !== undefined ? presetVal : false);
+                    } else if (key.startsWith('afterburn_')) {
+                        const preset = node.parameters['preset'];
+                        const presetVal = preset && (MPM_MATERIAL_PRESETS[preset] as any)?.[key];
+                        if (presetVal !== undefined) {
+                            value = node.parameters[key] = presetVal;
+                        } else {
+                            const def = (NODE_DEFAULT_PARAMETERS['Material'] as any)?.[key];
+                            if (def !== undefined) value = node.parameters[key] = def;
+                        }
+                    } else {
+                        const def = (NODE_DEFAULT_PARAMETERS['Material'] as any)?.[key];
+                        if (def !== undefined) value = node.parameters[key] = def;
+                    }
+                } else {
+                    const defVal = (NODE_DEFAULT_PARAMETERS[node.type] as any)?.[key];
+                    if (defVal !== undefined) {
+                        value = node.parameters[key] = defVal;
+                    }
+                }
+            }
             if (key === 'space_time_scheme') {
                 if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
                     value = node.parameters['space_time_scheme'] ?? 'Leapfrog';
@@ -4593,8 +4761,11 @@ export class GraphRenderer {
                     }
                 }
             }
+            if (key === 'ambient_air_material' || key === 'explosive_charge' || key === 'target_domain' || key === 'ambient_air_target' || key === 'source_model_id' || key === 'target_solver' || key === 'seawater_material' || key === 'water_material' || key === 'seabed_foundation' || key === 'connected_detonators' || key === 'water_target') {
+                value = value ?? '';
+            }
             if (value === undefined || value === null) continue;
-            if (shouldSkipNodeParameter(key, node.type, node.parameters, is3D)) continue;
+            if (shouldSkipNodeParameter(key, node.type, node.parameters, is3D, ctx)) continue;
 
             const sectionInfo = getNodeSectionInfo(key, node.type, node.parameters, is3D);
             if (sectionInfo) {
@@ -4765,6 +4936,8 @@ export class GraphRenderer {
                 'filter_level': ['All', 'Metrics Only', 'Logs Only'],
                 'timestamp_mode': ['None', 'Relative', 'Clock'],
                 'material_model': getConstitutiveModels(),
+                'tait_variant_str': ['Isentropic', 'CaloricGruneisen', 'ShockHugoniot'],
+                'tait_variant': ['0: Isentropic (Cole 1948)', '1: Caloric Grüneisen (Near-Field)', '2: Shock Hugoniot Reference'],
                 'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
                 'burn_model': ['Programmed Wavefront Burn', 'Lee-Tarver 3-Stage ODE', 'CREST Shock Entropy Kinetics'],
                 'product_model': ['JWL Product Gas', 'Davis Detonation Product'],
@@ -4775,22 +4948,22 @@ export class GraphRenderer {
                 'mesh_type': ['regular', 'amr'],
 
                 'dimension': ['1D', '2D', '3D'],
-                'x_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-                'x_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-                'y_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-                'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-                'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-                'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-                'left_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-                'right_bc': ['Reflecting', 'Transmitting', 'Terminate'],
-                'bc_x_min': ['Reflecting', 'Transmitting', 'Terminate'],
-                'bc_x_max': ['Reflecting', 'Transmitting', 'Terminate'],
-                'bc_y_min': ['Reflecting', 'Transmitting', 'Terminate'],
-                'bc_y_max': ['Reflecting', 'Transmitting', 'Terminate'],
-                'bc_r_min': ['Reflecting', 'Transmitting', 'Terminate'],
-                'bc_r_max': ['Reflecting', 'Transmitting', 'Terminate'],
-                'bc_z_min': ['Reflecting', 'Transmitting', 'Terminate'],
-                'bc_z_max': ['Reflecting', 'Transmitting', 'Terminate'],
+                'x_min_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'x_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'y_min_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'left_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'right_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'bc_x_min': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'bc_x_max': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'bc_y_min': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'bc_y_max': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'bc_r_min': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'bc_r_max': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'bc_z_min': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'bc_z_max': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
                 'coordinate_system': ['Axisymmetric', 'Cartesian'],
                 'telemetry_mode': ['Enabled', 'Throttled (1 Hz)', 'Throttled (0.2 Hz)', 'Disabled'],
                 'enable_gauges': ['Enabled', 'Disabled'],
@@ -4799,13 +4972,16 @@ export class GraphRenderer {
                 'precision': ['double', 'single'],
                 'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
                 'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
+                'contact_search_method': ['Hierarchical Octave Hash Grid', 'Linear BVH (Morton Code)'],
                 'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
                 'fsi_algorithm': ['CutCellPenalty', 'ImmersedBoundary', 'DirectMassCoupled'],
                 'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
                 'stl_outside_domain': ['nan', 'zero', 'omit'],
                 // Explosive composition — JWL parameter sets (Ideal Gas uses its own node)
-                'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Nitromethane', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
-                'init_mode': node.type === 'CFDSolver3D' ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
+                'undex_coupling_method': ['LocalCurvedDAA', 'HighFidelityCFD', 'ZonalHybrid_MPM_FV_FEM'],
+                'seabed_mesh_type': ['Pure_FV', 'Hybrid_MPM_Crater_FEM_FarField', 'Full_Domain_MPM', 'Local_Crater_MPM', 'Pure_Hex8_FEM', 'Pure_MPM'],
+                'water_discretization_mode': ['Pure_FV', 'Spherical_MPM_Sleeve', 'Full_Column_MPM_Cylinder'],
+                'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
                 'temporal_order': ['1', '2', '3'],
@@ -4827,12 +5003,12 @@ export class GraphRenderer {
                 'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
                 'smooth_plastic_strain': ['Enabled', 'Disabled'],
                 'enable_sdf_barrier': ['Enabled', 'Disabled'],
-                'contact_method': ['Single-Velocity', 'Sub-Grid DEM', 'Multi-Velocity (Bardenhagen)'],
+                'contact_method': ['Single-Velocity', 'Discrete Element (DEM)', 'Multi-Velocity (Bardenhagen)'],
                 'enable_dem_contact': ['Disabled', 'Enabled'],
                 'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
                 'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
                 'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
-                'origin_mode': ['CAD Origin', 'Center'],
+                'origin_mode': node.type === 'FEMObject3D' ? ['Center', 'CAD Origin'] : ['CAD Origin', 'Center'],
                 'anisotropy_axis': ['X', 'Y', 'Z', 'Custom'],
                 'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
                 'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
@@ -4867,6 +5043,12 @@ export class GraphRenderer {
                         };
                     })
                 ];
+                if (currentMatId && !options.some(o => o.value === currentMatId)) {
+                    options.push({
+                        value: currentMatId,
+                        label: `Material [${currentMatId.substring(0, 6)}]`
+                    });
+                }
                 inputEl = this.createCustomDropdown(
                     options,
                     currentMatId,
@@ -4876,8 +5058,479 @@ export class GraphRenderer {
                     },
                     key
                 );
-            } else if (typeof value === 'boolean') {
-                const isEnableKey = key.startsWith('enable_') || key.startsWith('smooth_');
+            } else if ((key === 'seawater_material' || key === 'water_material') && (node.type === 'MarineHarbourDomain' || node.type === 'CFDSolver3D')) {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const matNodes = candidateNodes.filter(n => n.type === 'Material');
+
+                let currentMatId = node.parameters[key] || '';
+                if (!currentMatId && state) {
+                    const conn = state.connections.find(c => (c.toNode === node.id && (c.toPort === 'water' || c.toPort === 'fluid')) || (c.fromNode === node.id && (c.fromPort === 'water' || c.fromPort === 'fluid')));
+                    if (conn) currentMatId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
+                }
+
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...matNodes.map(mat => {
+                        const matModel = mat.parameters?.material_model || 'Material';
+                        const preset = mat.parameters?.preset;
+                        const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                        return {
+                            value: mat.id,
+                            label: `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 6)}] (${matSummary})`
+                        };
+                    })
+                ];
+                if (currentMatId && !options.some(o => o.value === currentMatId)) {
+                    options.push({
+                        value: currentMatId,
+                        label: `Water Material [${currentMatId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentMatId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { [key]: newVal, seawater_material: newVal, water_material: newVal });
+                        this.syncWaterConnection(node.id, newVal);
+                    },
+                    key
+                );
+            } else if (key === 'seabed_foundation' && (node.type === 'MarineHarbourDomain' || node.type === 'CFDSolver3D')) {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const matNodes = candidateNodes.filter(n => n.type === 'Material');
+
+                let currentMatId = node.parameters['seabed_foundation'] || '';
+                if (!currentMatId && state) {
+                    const conn = state.connections.find(c => (c.toNode === node.id && (c.toPort === 'seabed' || c.toPort === 'soil')) || (c.fromNode === node.id && (c.fromPort === 'seabed' || c.fromPort === 'soil')));
+                    if (conn) currentMatId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
+                }
+
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...matNodes.map(mat => {
+                        const matModel = mat.parameters?.material_model || 'Material';
+                        const preset = mat.parameters?.preset;
+                        const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                        return {
+                            value: mat.id,
+                            label: `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 6)}] (${matSummary})`
+                        };
+                    })
+                ];
+                if (currentMatId && !options.some(o => o.value === currentMatId)) {
+                    options.push({
+                        value: currentMatId,
+                        label: `Seabed Material [${currentMatId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentMatId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { seabed_foundation: newVal });
+                        this.syncSeabedConnection(node.id, newVal);
+                    },
+                    key
+                );
+            } else if (key === 'connected_detonators' && ['Charge1D', 'Charge2D', 'Charge3D'].includes(node.type)) {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const detNodes = candidateNodes.filter(n => node.type === 'Charge3D'
+                    ? (n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D')
+                    : (n.type === 'DetonatorLocation' || n.type === 'TriggerLocation'));
+
+                let currentDetId = node.parameters['connected_detonators'] || '';
+                if (!currentDetId && state) {
+                    const conn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
+                    if (conn) currentDetId = conn.fromNode;
+                }
+
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...detNodes.map(det => ({
+                        value: det.id,
+                        label: `${det.parameters?.name || det.type} [${det.id.substring(0, 6)}]`
+                    }))
+                ];
+                if (currentDetId && !options.some(o => o.value === currentDetId)) {
+                    options.push({
+                        value: currentDetId,
+                        label: `Detonator [${currentDetId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentDetId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { connected_detonators: newVal });
+                        this.syncDetonatorConnection(node.id, newVal);
+                    },
+                    key
+                );
+            } else if (key === 'target_domain' && (node.type === 'MPMObject2D' || node.type === 'MPMObject3D' || node.type === 'FEMObject3D' || node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D' || node.type === 'LSDynaImporter3D')) {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const is3D = node.type.endsWith('3D');
+                const targetDomains = candidateNodes.filter(n => is3D
+                    ? ['MPMDomain3D', 'MarineHarbourDomain', 'CFDSolver3D'].includes(n.type)
+                    : ['MPMDomain2D', 'CFDSolver2D'].includes(n.type));
+
+                let currentDomainId = node.parameters['target_domain'] || '';
+                if (!currentDomainId && state) {
+                    const conn = state.connections.find(c => (c.fromNode === node.id && c.toPort === 'in') || (c.toNode === node.id && c.fromPort === 'in'));
+                    if (conn) currentDomainId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
+                }
+
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...targetDomains.map(d => ({
+                        value: d.id,
+                        label: `${(d as any).name || d.parameters?.name || d.type} [${d.id.substring(0, 6)}]`
+                    }))
+                ];
+                if (currentDomainId && !options.some(o => o.value === currentDomainId)) {
+                    options.push({
+                        value: currentDomainId,
+                        label: `Target Domain [${currentDomainId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentDomainId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { target_domain: newVal });
+                        if (state) {
+                            state.connections = state.connections.filter(c => !(c.fromNode === node.id && c.toPort === 'in'));
+                            if (newVal) {
+                                state.connections.push({
+                                    fromNode: node.id,
+                                    fromPort: 'out',
+                                    toNode: newVal,
+                                    toPort: 'in'
+                                });
+                            }
+                            if (owningModel) {
+                                this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+                            }
+                            this.stateManager.pushState(state);
+                            this.render();
+                        }
+                    },
+                    key
+                );
+            } else if (key === 'target_domain' && (node.type === 'Charge3D' || node.type === 'Charge2D' || node.type === 'Charge1D' || node.type === 'DetonatorLocation' || node.type === 'DetonatorLocation3D' || node.type === 'TriggerLocation' || node.type === 'TriggerLocation3D')) {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const isCharge = node.type.startsWith('Charge');
+                const targetSolvers = candidateNodes.filter(n => {
+                    if (node.type === 'Charge1D') return n.type === 'CFDSolver';
+                    if (node.type === 'Charge2D') return n.type === 'CFDSolver2D';
+                    if (node.type === 'Charge3D') return n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain';
+                    const is3D = node.type === 'DetonatorLocation3D' || node.type === 'TriggerLocation3D';
+                    return is3D ? ['MPMDomain3D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(n.type) : ['MPMDomain2D', 'CFDSolver2D', 'CFDSolver'].includes(n.type);
+                });
+
+                const targetPort = isCharge ? 'charge' : 'detonator';
+                let currentSolverId = node.parameters['target_domain'] || '';
+                if (!currentSolverId && state) {
+                    const conn = state.connections.find(c => c.fromNode === node.id && (c.toPort === targetPort || c.toPort === 'explosive' || c.toPort === 'trigger' || c.toPort === 'detonator'));
+                    if (conn) currentSolverId = conn.toNode;
+                }
+
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...targetSolvers.map(solver => ({
+                        value: solver.id,
+                        label: `${(solver as any).name || solver.parameters?.name || solver.type} [${solver.id.substring(0, 6)}]`
+                    }))
+                ];
+                if (currentSolverId && !options.some(o => o.value === currentSolverId)) {
+                    options.push({
+                        value: currentSolverId,
+                        label: `Target Domain [${currentSolverId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentSolverId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { target_domain: newVal });
+                        this.syncTargetDomainConnection(node.id, node.type, newVal);
+                    },
+                    key
+                );
+            } else if (key === 'ambient_air_material' && ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(node.type)) {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const matNodes = candidateNodes.filter(n => n.type === 'Material');
+
+                let currentMatId = node.parameters['ambient_air_material'] || '';
+                if (!currentMatId && state) {
+                    const conn = state.connections.find(c => (c.toNode === node.id && c.toPort === 'air') || (c.fromNode === node.id && c.fromPort === 'air'));
+                    if (conn) currentMatId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
+                }
+
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...matNodes.map(mat => {
+                        const matModel = mat.parameters?.material_model || 'Material';
+                        const preset = mat.parameters?.preset;
+                        const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                        return {
+                            value: mat.id,
+                            label: `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 6)}] (${matSummary})`
+                        };
+                    })
+                ];
+                if (currentMatId && !options.some(o => o.value === currentMatId)) {
+                    options.push({
+                        value: currentMatId,
+                        label: `Air Material [${currentMatId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentMatId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { ambient_air_material: newVal });
+                        this.syncAirConnection(node.id, newVal);
+                    },
+                    key
+                );
+            } else if (key === 'explosive_charge' && ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(node.type)) {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const chargeNodes = candidateNodes.filter(n => {
+                    if (node.type === 'CFDSolver') return n.type === 'Charge1D';
+                    if (node.type === 'CFDSolver2D') return n.type === 'Charge2D';
+                    if (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') return n.type === 'Charge3D';
+                    return ['Charge1D', 'Charge2D', 'Charge3D'].includes(n.type);
+                });
+
+                let currentChgId = node.parameters['explosive_charge'] || '';
+                if (!currentChgId && state) {
+                    const conn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
+                    if (conn) currentChgId = conn.fromNode;
+                }
+
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...chargeNodes.map(chg => ({
+                        value: chg.id,
+                        label: `${(chg as any).name || chg.parameters?.name || chg.type} [${chg.id.substring(0, 6)}] (${chg.parameters?.charge_mass ?? '0.85'} kg)`
+                    }))
+                ];
+                if (currentChgId && !options.some(o => o.value === currentChgId)) {
+                    options.push({
+                        value: currentChgId,
+                        label: `Explosive Charge [${currentChgId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentChgId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { explosive_charge: newVal });
+                        this.syncExplosiveChargeConnection(node.id, newVal);
+                    },
+                    key
+                );
+            } else if (key === 'ambient_air_target' && node.type === 'Material') {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const cfdSolvers = candidateNodes.filter(n => ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(n.type));
+
+                let currentSolverId = node.parameters['ambient_air_target'] || '';
+                if (!currentSolverId && state) {
+                    const conn = state.connections.find(c => (c.fromNode === node.id && c.toPort === 'air') || (c.toNode === node.id && c.fromPort === 'air'));
+                    if (conn) currentSolverId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
+                }
+
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...cfdSolvers.map(solver => ({
+                        value: solver.id,
+                        label: `${(solver as any).name || solver.parameters?.name || solver.type} [${solver.id.substring(0, 6)}]`
+                    }))
+                ];
+                if (currentSolverId && !options.some(o => o.value === currentSolverId)) {
+                    options.push({
+                        value: currentSolverId,
+                        label: `Target Domain [${currentSolverId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentSolverId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { ambient_air_target: newVal });
+                        this.syncAmbientAirTargetConnection(node.id, newVal);
+                    },
+                    key
+                );
+            } else if (key === 'water_target' && node.type === 'Material') {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const waterDomains = candidateNodes.filter(n => ['MarineHarbourDomain', 'CFDSolver3D'].includes(n.type));
+
+                let currentDomainId = node.parameters['water_target'] || '';
+                if (!currentDomainId && state) {
+                    const conn = state.connections.find(c => (c.fromNode === node.id && (c.toPort === 'water' || c.toPort === 'fluid')) || (c.toNode === node.id && (c.fromPort === 'water' || c.fromPort === 'fluid')));
+                    if (conn) currentDomainId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
+                }
+
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...waterDomains.map(d => ({
+                        value: d.id,
+                        label: `${(d as any).name || d.parameters?.name || d.type} [${d.id.substring(0, 6)}]`
+                    }))
+                ];
+                if (currentDomainId && !options.some(o => o.value === currentDomainId)) {
+                    options.push({
+                        value: currentDomainId,
+                        label: `Target Domain [${currentDomainId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentDomainId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { water_target: newVal });
+                        this.syncWaterTargetConnection(node.id, newVal);
+                    },
+                    key
+                );
+            } else if (key === 'source_model_id' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(node.type)) {
+                const allModels = this.stateManager.getAllModels();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const is2Dto3D = node.type === 'Remap2DTo3DNode';
+                const sourceDim = is2Dto3D ? '2D' : '1D';
+
+                const candidateModels = allModels.filter(m => {
+                    if (owningModel && m.id === owningModel.id) return false;
+                    return m.nodes.some(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
+                });
+
+                let currentModelId = node.parameters['source_model_id'] || '';
+
+                const options = [
+                    { value: '', label: '⚡ Auto-Detect Upstream' },
+                    ...candidateModels.map(m => ({
+                        value: m.id,
+                        label: `[${sourceDim}] ${m.name || m.id}`
+                    }))
+                ];
+                if (currentModelId && !options.some(o => o.value === currentModelId)) {
+                    options.push({
+                        value: currentModelId,
+                        label: `[${sourceDim}] Model [${currentModelId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentModelId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { source_model_id: newVal });
+                        const ws = this.stateManager.getActiveWorkspace();
+                        if (ws && ws.connections) {
+                            ws.connections = ws.connections.filter(c => c.toNode !== node.id);
+                            if (newVal) {
+                                const srcM = allModels.find(m => m.id === newVal);
+                                const srcSolver = srcM?.nodes.find(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
+                                if (srcSolver) {
+                                    ws.connections.push({
+                                        fromNode: srcSolver.id,
+                                        fromPort: 'telemetry',
+                                        toNode: node.id,
+                                        toPort: 'in'
+                                    });
+                                }
+                            }
+                        }
+                        if (owningModel) {
+                            this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+                        }
+                        const state = this.stateManager.getCurrentState();
+                        if (state) {
+                            this.stateManager.pushState(state);
+                        }
+                    },
+                    key
+                );
+            } else if (key === 'target_solver' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(node.type)) {
+                const state = this.stateManager.getCurrentState();
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+                const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode';
+                const targetSolvers = candidateNodes.filter(n => is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D');
+
+                let currentSolverId = node.parameters['target_solver'] || '';
+                if (!currentSolverId && state) {
+                    const conn = state.connections.find(c => (c.fromNode === node.id && (c.toPort === 'remap' || c.toPort === 'in')) || (c.toNode === node.id && c.toPort === 'remap'));
+                    if (conn) currentSolverId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
+                }
+
+                const options = [
+                    { value: '', label: '(None / Disconnected)' },
+                    ...targetSolvers.map(s => ({
+                        value: s.id,
+                        label: `${(s as any).name || s.parameters?.name || s.type} [${s.id.substring(0, 6)}]`
+                    }))
+                ];
+                if (currentSolverId && !options.some(o => o.value === currentSolverId)) {
+                    options.push({
+                        value: currentSolverId,
+                        label: `Target Solver [${currentSolverId.substring(0, 6)}]`
+                    });
+                }
+
+                inputEl = this.createCustomDropdown(
+                    options,
+                    currentSolverId,
+                    (newVal) => {
+                        this.stateManager.updateNodeParameters(node.id, { target_solver: newVal });
+                        if (state) {
+                            state.connections = state.connections.filter(c => !(c.fromNode === node.id && (c.toPort === 'remap' || c.toPort === 'in')));
+                            if (newVal) {
+                                state.connections.push({
+                                    fromNode: node.id,
+                                    fromPort: 'remap',
+                                    toNode: newVal,
+                                    toPort: 'remap'
+                                });
+                            }
+                            if (owningModel) {
+                                this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+                            }
+                            this.stateManager.pushState(state);
+                        }
+                    },
+                    key
+                );
+            } else if (typeof value === 'boolean' || key === 'afterburn_enabled') {
+                const isEnableKey = key.startsWith('enable_') || key.startsWith('smooth_') || key.endsWith('_enabled');
                 inputEl = this.createCustomDropdown(
                     [
                         { value: 'true', label: isEnableKey ? 'Enabled' : 'True' },
@@ -4889,7 +5542,8 @@ export class GraphRenderer {
                     },
                     key
                 );
-            } else if (dropdowns[key] || key === 'preset') {
+            } else if (dropdowns[key] || PARAMETER_DEFINITIONS[key]?.allowedValues || key === 'preset') {
+                const allowedList = dropdowns[key] || (PARAMETER_DEFINITIONS[key]?.allowedValues as string[] | undefined);
                 let options: { value: string; label: string; category?: string }[];
                 if (key === 'preset') {
                     const matType = node.parameters['material_type'];
@@ -4914,8 +5568,8 @@ export class GraphRenderer {
                             });
                         });
                     });
-                } else {
-                    options = dropdowns[key].map(opt => {
+                } else if (allowedList) {
+                    options = allowedList.map(opt => {
                         let label = opt;
                         if (key === 'font_size') {
                             label = `${opt}px`;
@@ -4944,9 +5598,11 @@ export class GraphRenderer {
                         }
                         return { value: opt, label: label };
                     });
+                } else {
+                    options = [];
                 }
-                let selectedVal = String(value ?? (dropdowns[key] ? dropdowns[key][0] : ''));
-                if (dropdowns[key] && dropdowns[key].includes('Enabled') && dropdowns[key].includes('Disabled')) {
+                let selectedVal = String(value ?? (allowedList ? allowedList[0] : ''));
+                if (allowedList && allowedList.includes('Enabled') && allowedList.includes('Disabled')) {
                     if (value === true || value === 'true' || value === 'Enabled') selectedVal = 'Enabled';
                     else if (value === false || value === 'false' || value === 'Disabled') selectedVal = 'Disabled';
                 }
@@ -4984,7 +5640,7 @@ export class GraphRenderer {
                             'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
                             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
                             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'endtime',
-                            'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
+                            'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate', 'fps',
                             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride', 'tessellation_max_edge',
                             'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
                             // 2D CFD keys
@@ -5018,19 +5674,25 @@ export class GraphRenderer {
                             'mg_gamma0', 'mg_c0', 'mg_s',
                             'ppc',
                             'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
-                            'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
                             'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
+                            'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
                             // FEM keys
-                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
-                            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
-                            'rebarRadius', 'viewport_refresh_rate',
-                            'femMinVal', 'femMaxVal', 'femOpacity', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
+                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
+                            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
+                            'rebarRadius', 'viewport_refresh_rate', 'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
+                            'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
                             // Concrete Core & Models (RHT, K&C, CSCM)
                             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
                             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
                             'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
                             'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+                            // Hyperelastic, CDP, and Hill48 Keys
+                            'yeoh_c10', 'yeoh_c20', 'yeoh_c30', 'mr_c10', 'mr_c01', 'k_bulk',
+                            'cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch',
+                            'hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0',
+                            // Tait Water & Shock Fluid Keys
+                            'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant',
                             // Davis & CREST Reactive Burn
                             'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
                             'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
@@ -5042,9 +5704,18 @@ export class GraphRenderer {
                             'lt_G1', 'lt_c', 'lt_d', 'lt_y',
                             'lt_G2', 'lt_e', 'lt_g', 'lt_z',
                             'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
+                            // Afterburn & Aerobic Combustion
+                            'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
+                            'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
+                            'afterburn_ambient_o2_fraction', 'ambient_o2_fraction',
                             // VTK ROI & Strides
                             'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
                             'nonlocal_radius', 'opacity',
+                            // Lysmer-Kuhlemeyer Absorbing Boundaries
+                            'lysmer_rho', 'lysmer_cp', 'lysmer_cs', 'lysmer_normal_relaxation', 'lysmer_shear_relaxation',
+                            'lysmer_x_min', 'lysmer_x_max', 'lysmer_y_min', 'lysmer_y_max', 'lysmer_z_min', 'lysmer_z_max', 'lysmer_tol',
+                            // Zonal MPM-to-FV Water Handoff Sleeve & Symplectic Multi-Rate Subcycling
+                            'hybrid_sleeve_radius', 'hybrid_overlap_thickness', 'hybrid_subcycles', 'hybrid_macro_dt',
                             // Virtual Gauges Massive & External Dataset Keys
                             'sampling_stride_steps', 'external_probe_count',
                             'external_bounds_min_x', 'external_bounds_max_x',
@@ -5054,7 +5725,13 @@ export class GraphRenderer {
                             'font_size', 'buffer_capacity',
                             // Camera & Viewport Navigation Keys
                             'camera_fov', 'camera_pitch', 'camera_yaw', 'camera_distance',
-                            'target_x', 'target_y', 'target_z'
+                            'target_x', 'target_y', 'target_z',
+                            // Marine Blast & UNDEX Zonal Keys
+                            'water_surface_z', 'seabed_surface_z', 'gravity_z', 'k0_earth_pressure', 'nearfield_sleeve_radius', 'nearfield_ppc', 'weber_breakup_threshold',
+                            'soil_density', 'soil_friction_angle', 'soil_cohesion', 'crater_bed_width', 'crater_bed_depth',
+                            'friction_angle', 'cohesion', 'dilation_angle', 'tensile_cutoff',
+                            'soil_c0', 'seabed_c0', 'soil_gamma', 'seabed_gamma', 'soil_s', 'seabed_s', 'soil_gruneisen', 'seabed_gruneisen', 'soil_p_cav', 'seabed_p_cav', 'soil_eos_variant',
+                            'dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus'
                         ];
 
                         let castValue: any = newVal;
@@ -5531,9 +6208,15 @@ export class GraphRenderer {
                                     }
                                 }
                             }
-                        } else if (node.type === 'Material') {
+                        } else if (node.type === 'Material' && !['preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
                             updates['preset'] = 'Custom';
                             updates['provenance'] = 'user';
+                        } else if (node.type === 'FEMObject3D' && (key === 'shape_type' || key === 'mesh_source')) {
+                            if (key === 'shape_type') {
+                                updates['mesh_source'] = newVal === 'Cylinder' ? 'Cylinder Generator' : (newVal === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator');
+                            } else if (key === 'mesh_source') {
+                                updates['shape_type'] = newVal === 'Cylinder Generator' ? 'Cylinder' : (newVal === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box');
+                            }
                         } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && newVal === 'STL') || (key === 'origin_mode' && newVal === 'CAD Origin'))) {
                             if (key === 'shape_type' && newVal === 'STL') {
                                 updates['origin_mode'] = node.parameters['origin_mode'] || 'CAD Origin';
@@ -5590,13 +6273,13 @@ export class GraphRenderer {
                         updates['ambient_rho'] = Number(newVal);
                         updates['preset'] = 'Custom';
                         updates['provenance'] = 'user';
-                    } else if (node.type === 'Material') {
+                    } else if (node.type === 'Material' && !['preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
                         updates['preset'] = 'Custom';
                         updates['provenance'] = 'user';
                     }
                     
-                    const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'cfl';
-                    const isDynamicEndtime = (node.type === 'CFDSolver3D' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'endtime';
+                    const isDynamicCfl = (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'cfl';
+                    const isDynamicEndtime = (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver' || node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') && key === 'endtime';
                     if (isDynamicCfl || isDynamicEndtime) {
                         this.stateManager.updateNodeParametersInPlace(node.id, updates);
                         const net = (window as any).networkManager;
@@ -5610,7 +6293,7 @@ export class GraphRenderer {
                                 }
                             }
                             let scope = "1d";
-                            if (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') scope = "3d";
+                            if (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain' || node.type === 'MPMDomain3D' || node.type === 'FEMDomain3D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D') scope = "3d";
                             else if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D' || node.type === 'FSICoupler2D') scope = "2d";
                             if (isDynamicCfl) {
                                 net.send({
@@ -5735,10 +6418,27 @@ export class GraphRenderer {
             container.classList.add(dataKey);
         }
 
+        const normalize = (s: string) => String(s || '').toLowerCase().replace(/[\s_\-]/g, '');
+        const normCurrent = normalize(currentValue);
+
+        let currentOpt = options.find(opt => opt.value === currentValue || normalize(opt.value) === normCurrent);
+        if (!currentOpt && currentValue !== '' && currentValue !== 'undefined' && currentValue !== 'null') {
+            currentOpt = {
+                value: currentValue,
+                label: currentValue
+            };
+            options.push(currentOpt);
+        }
+
+        if (options.length === 0) {
+            options.push({ value: '', label: '(None / Disconnected)' });
+        }
+
+        const selectedValue = currentOpt ? currentOpt.value : (options[0]?.value ?? '');
+
         const trigger = document.createElement('div');
         trigger.className = 'custom-select-trigger';
-        const currentOpt = options.find(opt => opt.value === currentValue);
-        trigger.textContent = currentOpt ? currentOpt.label : currentValue;
+        trigger.textContent = currentOpt ? currentOpt.label : (options[0]?.label ?? '(None)');
         container.appendChild(trigger);
 
         const optionsDiv = document.createElement('div');
@@ -5767,7 +6467,7 @@ export class GraphRenderer {
             optDiv.className = 'custom-select-option';
             optDiv.dataset.value = opt.value;
             optDiv.textContent = opt.label;
-            if (opt.value === currentValue) {
+            if (opt.value === selectedValue || normalize(opt.value) === normCurrent) {
                 optDiv.classList.add('selected');
             }
 
@@ -6531,13 +7231,24 @@ export class GraphRenderer {
                     select.style.padding = '1px';
 
                     const opts = activePrim.type === 'cylinder' ? ['X', 'Y', 'Z'] : ['+X', '-X', '+Y', '-Y'];
+                    let matched = false;
                     opts.forEach(o => {
                         const opt = document.createElement('option');
                         opt.value = o;
                         opt.text = o;
-                        if (o === value) opt.selected = true;
+                        if (o === value) {
+                            opt.selected = true;
+                            matched = true;
+                        }
                         select.appendChild(opt);
                     });
+                    if (!matched && value) {
+                        const customOpt = document.createElement('option');
+                        customOpt.value = String(value);
+                        customOpt.text = String(value);
+                        customOpt.selected = true;
+                        select.appendChild(customOpt);
+                    }
                     select.onchange = () => {
                         updatePrimVal(key, select.value);
                     };
@@ -6596,7 +7307,7 @@ export class GraphRenderer {
     private renderVirtualGaugesContent(node: Node, container: HTMLElement): void {
         const state = this.stateManager.getCurrentState();
         const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
-        const is3D = state?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D') || false;
+        const is3D = state?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') || false;
         const gauges = node.parameters?.gauges || [];
 
         const setupKeyInterceptors = (input: HTMLInputElement) => {
@@ -7660,10 +8371,19 @@ export class GraphRenderer {
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
+        if (canvas.width <= 0 || canvas.height <= 0) {
+            canvas.width = canvas.clientWidth || 300;
+            canvas.height = canvas.clientHeight || 160;
+        }
+
         const width = canvas.width;
         const height = canvas.height;
 
         ctx.clearRect(0, 0, width, height);
+
+        if (history && (history.gauges_history || Array.isArray(history)) && (!history.times || !history.values)) {
+            history = this.stateManager.normalizeGaugesTelemetry(history);
+        }
 
         // If no data
         if (!history || !history.times || history.times.length === 0 || gauges.length === 0) {
@@ -7701,8 +8421,8 @@ export class GraphRenderer {
         const startIdx = zoomedOrPanned ? Math.max(0, Math.floor(activeMinX)) : 0;
         const endIdx = zoomedOrPanned ? Math.min(times.length - 1, Math.ceil(activeMaxX)) : times.length - 1;
 
-        gauges.filter(g => g.plot !== false).forEach(g => {
-            const gData = values[g.id || g.name];
+        gauges.filter(g => g.plot !== false).forEach((g, gIdx) => {
+            const gData = values[g.id] || values[g.name] || (g.id ? values[g.id.toUpperCase()] : undefined) || (g.id ? values[g.id.toLowerCase()] : undefined) || values[gIdx] || values[String(gIdx)] || values['G' + (gIdx + 1)] || values['g' + (gIdx + 1)];
             if (gData && gData[channel]) {
                 const arr = gData[channel];
                 const limit = Math.min(arr.length - 1, endIdx);
@@ -7812,7 +8532,7 @@ export class GraphRenderer {
         // Draw curves
         const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#a78bfa', '#2dd4bf'];
         gauges.filter(g => g.plot !== false).forEach((g, gIdx) => {
-            const gData = values[g.id || g.name];
+            const gData = values[g.id] || values[g.name] || (g.id ? values[g.id.toUpperCase()] : undefined) || (g.id ? values[g.id.toLowerCase()] : undefined) || values[gIdx] || values[String(gIdx)] || values['G' + (gIdx + 1)] || values['g' + (gIdx + 1)];
             if (gData && gData[channel]) {
                 const arr = gData[channel];
                 ctx.strokeStyle = colors[gIdx % colors.length];
@@ -7911,6 +8631,214 @@ export class GraphRenderer {
         const targetModel = this.stateManager.getModelForNode(nodeId) || this.stateManager.getActiveModel();
         if (targetModel) {
             this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
+        }
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private syncTargetDomainConnection(nodeId: string, nodeType: string, targetSolverId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        const isCharge = nodeType.startsWith('Charge');
+        const targetPort = isCharge ? 'charge' : 'detonator';
+
+        state.connections = state.connections.filter(c => 
+            !(c.fromNode === nodeId && (c.toPort === 'charge' || c.toPort === 'explosive' || c.toPort === 'detonator' || c.toPort === 'trigger'))
+        );
+
+        if (targetSolverId) {
+            state.connections.push({
+                fromNode: nodeId,
+                fromPort: targetPort,
+                toNode: targetSolverId,
+                toPort: targetPort
+            });
+        }
+
+        const owningModel = this.stateManager.getModelForNode(nodeId) || this.stateManager.getActiveModel();
+        if (owningModel) {
+            this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+        }
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private syncAirConnection(solverId: string, matId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c => 
+            !(c.toNode === solverId && c.toPort === 'air') &&
+            !(c.fromNode === solverId && c.fromPort === 'air')
+        );
+
+        if (matId) {
+            state.connections.push({
+                fromNode: matId,
+                fromPort: 'air',
+                toNode: solverId,
+                toPort: 'air'
+            });
+        }
+
+        const owningModel = this.stateManager.getModelForNode(solverId) || this.stateManager.getActiveModel();
+        if (owningModel) {
+            this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+        }
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private syncExplosiveChargeConnection(solverId: string, chargeId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c => 
+            !(c.toNode === solverId && (c.toPort === 'charge' || c.toPort === 'explosive'))
+        );
+
+        if (chargeId) {
+            state.connections.push({
+                fromNode: chargeId,
+                fromPort: 'charge',
+                toNode: solverId,
+                toPort: 'charge'
+            });
+        }
+
+        const owningModel = this.stateManager.getModelForNode(solverId) || this.stateManager.getActiveModel();
+        if (owningModel) {
+            this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+        }
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private syncAmbientAirTargetConnection(matId: string, solverId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c => 
+            !(c.fromNode === matId && c.toPort === 'air') &&
+            !(c.toNode === matId && c.fromPort === 'air')
+        );
+
+        if (solverId) {
+            state.connections.push({
+                fromNode: matId,
+                fromPort: 'air',
+                toNode: solverId,
+                toPort: 'air'
+            });
+        }
+
+        const owningModel = this.stateManager.getModelForNode(matId) || this.stateManager.getActiveModel();
+        if (owningModel) {
+            this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+        }
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private syncWaterConnection(solverId: string, matId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c =>
+            !(c.toNode === solverId && (c.toPort === 'water' || c.toPort === 'fluid')) &&
+            !(c.fromNode === solverId && (c.fromPort === 'water' || c.fromPort === 'fluid'))
+        );
+
+        if (matId) {
+            state.connections.push({
+                fromNode: matId,
+                fromPort: 'out',
+                toNode: solverId,
+                toPort: 'water'
+            });
+        }
+
+        const owningModel = this.stateManager.getModelForNode(solverId) || this.stateManager.getActiveModel();
+        if (owningModel) {
+            this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+        }
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private syncSeabedConnection(solverId: string, matId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c =>
+            !(c.toNode === solverId && (c.toPort === 'seabed' || c.toPort === 'soil')) &&
+            !(c.fromNode === solverId && (c.fromPort === 'seabed' || c.fromPort === 'soil'))
+        );
+
+        if (matId) {
+            state.connections.push({
+                fromNode: matId,
+                fromPort: 'out',
+                toNode: solverId,
+                toPort: 'seabed'
+            });
+        }
+
+        const owningModel = this.stateManager.getModelForNode(solverId) || this.stateManager.getActiveModel();
+        if (owningModel) {
+            this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+        }
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private syncDetonatorConnection(chargeId: string, detId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c =>
+            !(c.toNode === chargeId && (c.toPort === 'detonator' || c.toPort === 'trigger'))
+        );
+
+        if (detId) {
+            state.connections.push({
+                fromNode: detId,
+                fromPort: 'detonator',
+                toNode: chargeId,
+                toPort: 'detonator'
+            });
+        }
+
+        const owningModel = this.stateManager.getModelForNode(chargeId) || this.stateManager.getActiveModel();
+        if (owningModel) {
+            this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+        }
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private syncWaterTargetConnection(matId: string, solverId: string): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        state.connections = state.connections.filter(c =>
+            !(c.fromNode === matId && (c.toPort === 'water' || c.toPort === 'fluid')) &&
+            !(c.toNode === matId && (c.fromPort === 'water' || c.fromPort === 'fluid'))
+        );
+
+        if (solverId) {
+            state.connections.push({
+                fromNode: matId,
+                fromPort: 'out',
+                toNode: solverId,
+                toPort: 'water'
+            });
+        }
+
+        const owningModel = this.stateManager.getModelForNode(matId) || this.stateManager.getActiveModel();
+        if (owningModel) {
+            this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
         }
         this.stateManager.pushState(state);
         this.render();

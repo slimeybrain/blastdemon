@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; fill: #c9d1d9; }
+    .title { font-size: 16px; font-weight: 600; fill: #f0f6fc; }
+    .axis-label { font-size: 12px; fill: #8b949e; }
+    .tick { font-size: 10px; fill: #8b949e; }
+    .grid { stroke: #30363d; stroke-width: 1; stroke-dasharray: 4,4; }
+    .axis-line { stroke: #484f58; stroke-width: 1.5; }
+    .exact-curve { fill: none; stroke: #58a6ff; stroke-width: 2.5; }
+    .num-curve { fill: none; stroke: #f0883e; stroke-width: 2.0; stroke-dasharray: 6,3; }
+    .corridor-yellow { fill: rgba(210, 153, 34, 0.18); }
+    .corridor-green { fill: rgba(46, 160, 67, 0.30); }
+  </style>
+  <rect width="800" height="450" fill="#0d1117" rx="8"/>
+  <text x="400" y="30" text-anchor="middle" class="title">VV-L1-06: Hill48 Orthotropic Yield Anisotropy vs. Rolling Angle (0 to 90 deg)</text>
+  <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
+  <text x="67" y="394" text-anchor="end" class="tick">395</text>
+  <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
+  <text x="67" y="326" text-anchor="end" class="tick">401</text>
+  <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
+  <text x="67" y="258" text-anchor="end" class="tick">407</text>
+  <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
+  <text x="67" y="190" text-anchor="end" class="tick">412</text>
+  <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
+  <text x="67" y="122" text-anchor="end" class="tick">418</text>
+  <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
+  <text x="67" y="54" text-anchor="end" class="tick">424</text>
+  <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
+  <text x="75" y="408" text-anchor="middle" class="tick">0</text>
+  <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
+  <text x="213" y="408" text-anchor="middle" class="tick">18</text>
+  <line x1="351" y1="50" x2="351" y2="390" class="grid"/>
+  <text x="351" y="408" text-anchor="middle" class="tick">36</text>
+  <line x1="489" y1="50" x2="489" y2="390" class="grid"/>
+  <text x="489" y="408" text-anchor="middle" class="tick">54</text>
+  <line x1="627" y1="50" x2="627" y2="390" class="grid"/>
+  <text x="627" y="408" text-anchor="middle" class="tick">72</text>
+  <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
+  <text x="765" y="408" text-anchor="middle" class="tick">90</text>
+  <path class="corridor-yellow" d="M 75 97.6 L 113 99.4 L 152 105 L 190 112 L 228 120 L 267 126 L 305 128 L 343 125 L 382 115 L 420 97.6 L 458 72.2 L 497 39.9 L 535 2.35 L 573 -38.1 L 612 -78.3 L 650 -115 L 688 -144 L 727 -163 L 765 -169 L 765 326 L 727 332 L 688 349 L 650 375 L 612 408 L 573 445 L 535 481 L 497 515 L 458 545 L 420 568 L 382 583 L 343 592 L 305 595 L 267 593 L 228 587 L 190 580 L 152 574 L 113 569 L 75 568 Z"/>
+  <path class="corridor-green" d="M 75 286 L 113 287 L 152 292 L 190 299 L 228 307 L 267 313 L 305 315 L 343 312 L 382 303 L 420 286 L 458 261 L 497 230 L 535 194 L 573 155 L 612 116 L 650 81.3 L 688 53.3 L 727 35.1 L 765 28.8 L 765 128 L 727 134 L 688 152 L 650 179 L 612 214 L 573 252 L 535 290 L 497 325 L 458 356 L 420 380 L 382 396 L 343 406 L 305 408 L 267 406 L 228 400 L 190 393 L 152 386 L 113 381 L 75 380 Z"/>
+  <path class="exact-curve" d="M 75 333 L 113 334 L 152 339 L 190 346 L 228 353 L 267 359 L 305 362 L 343 359 L 382 349 L 420 333 L 458 308 L 497 278 L 535 242 L 573 203 L 612 165 L 650 130 L 688 103 L 727 84.6 L 765 78.3 "/>
+  <path class="num-curve" d="M 75 333 L 113 334 L 152 339 L 190 346 L 228 353 L 267 359 L 305 362 L 343 359 L 382 349 L 420 333 L 458 308 L 497 278 L 535 242 L 573 203 L 612 165 L 650 130 L 688 103 L 727 84.6 L 765 78.3 "/>
+  <circle cx="75" cy="333" r="3.5" fill="#f0883e"/>
+  <circle cx="113" cy="334" r="3.5" fill="#f0883e"/>
+  <circle cx="152" cy="339" r="3.5" fill="#f0883e"/>
+  <circle cx="190" cy="346" r="3.5" fill="#f0883e"/>
+  <circle cx="228" cy="353" r="3.5" fill="#f0883e"/>
+  <circle cx="267" cy="359" r="3.5" fill="#f0883e"/>
+  <circle cx="305" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="343" cy="359" r="3.5" fill="#f0883e"/>
+  <circle cx="382" cy="349" r="3.5" fill="#f0883e"/>
+  <circle cx="420" cy="333" r="3.5" fill="#f0883e"/>
+  <circle cx="458" cy="308" r="3.5" fill="#f0883e"/>
+  <circle cx="497" cy="278" r="3.5" fill="#f0883e"/>
+  <circle cx="535" cy="242" r="3.5" fill="#f0883e"/>
+  <circle cx="573" cy="203" r="3.5" fill="#f0883e"/>
+  <circle cx="612" cy="165" r="3.5" fill="#f0883e"/>
+  <circle cx="650" cy="130" r="3.5" fill="#f0883e"/>
+  <circle cx="688" cy="103" r="3.5" fill="#f0883e"/>
+  <circle cx="727" cy="84.6" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="78.3" r="3.5" fill="#f0883e"/>
+  <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
+  <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
+  <text x="400" y="435" text-anchor="middle" class="axis-label">Tensile Axis Angle Relative to Rolling Direction (deg)</text>
+  <text x="20" y="225" text-anchor="middle" transform="rotate(-90 20 225)" class="axis-label">Yield Strength sigma_y (MPa)</text>
+  <rect x="570" y="55" width="195" height="85" fill="#161b22" stroke="#30363d" rx="4"/>
+  <line x1="580" y1="73" x2="605" y2="73" stroke="#58a6ff" stroke-width="2.5"/>
+  <text x="612" y="77" font-size="11">Analytical / Exact</text>
+  <line x1="580" y1="93" x2="605" y2="93" stroke="#f0883e" stroke-width="2.0" stroke-dasharray="4,2"/>
+  <circle cx="592" cy="93" r="3" fill="#f0883e"/>
+  <text x="612" y="97" font-size="11">Numerical Result</text>
+  <rect x="580" y="107" width="25" height="10" fill="rgba(46,160,67,0.5)"/>
+  <text x="612" y="116" font-size="10">Acceptance Corridor ±1%</text>
+  <rect x="580" y="123" width="25" height="10" fill="rgba(210,153,34,0.3)"/>
+  <text x="612" y="132" font-size="10">Tolerance Corridor ±5%</text>
+</svg>

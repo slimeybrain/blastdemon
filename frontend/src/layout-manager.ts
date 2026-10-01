@@ -12,6 +12,8 @@ import { WorkspaceManager } from './workspace-manager.js';
 import { PlaybackRingBuffer } from './playback-buffer.js';
 import { ClusterNodeManager } from './ClusterNodeManager.js';
 import { TransportController } from './transport-controller.js';
+import { VVManualPanel } from './panels/vv_manual_panel.js';
+import { FEMSetupModal } from './fem-setup-modal.js';
 
 export class LayoutManager {
     private container: HTMLElement;
@@ -21,6 +23,25 @@ export class LayoutManager {
     private lastActiveModelId: string | null = null;
     private collapseState: Map<string, { collapsed: boolean; orientation: 'h' | 'v' }> = new Map();
     private transportControllerFactory?: (container: HTMLElement) => TransportController;
+    private activePanelId: string | null = null;
+
+    public getActivePanelId(): string | null {
+        return this.activePanelId;
+    }
+
+    public setActivePanel(panelId: string): void {
+        if (this.activePanelId === panelId) return;
+        this.activePanelId = panelId;
+        const allPanels = this.container.querySelectorAll('.panel');
+        allPanels.forEach(p => {
+            const htmlP = p as HTMLElement;
+            if (htmlP.dataset.panelId === panelId || htmlP.parentElement?.dataset.panelId === panelId) {
+                htmlP.classList.add('panel-active');
+            } else {
+                htmlP.classList.remove('panel-active');
+            }
+        });
+    }
 
     public setTransportControllerFactory(factory: (container: HTMLElement) => TransportController): void {
         this.transportControllerFactory = factory;
@@ -42,14 +63,19 @@ export class LayoutManager {
         this.components.forEach(comp => {
             if (comp.type === 'RESOURCE_MANAGER') {
                 comp.instance.updateMetrics(data);
+            } else if (comp.type === 'VIEWPORT' && comp.instance && typeof comp.instance.broadcastResourceData === 'function') {
+                comp.instance.broadcastResourceData(data);
             }
         });
+        window.dispatchEvent(new CustomEvent('blastdemon-resource-pulse', { detail: data }));
     }
 
     public resetAllResourceManagers(): void {
         this.components.forEach(comp => {
             if (comp.type === 'RESOURCE_MANAGER') {
                 comp.instance.resetMetrics();
+            } else if (comp.type === 'VIEWPORT' && comp.instance && typeof comp.instance.resetAllResourceManagers === 'function') {
+                comp.instance.resetAllResourceManagers();
             }
         });
     }
@@ -397,6 +423,14 @@ export class LayoutManager {
         parent.dataset.panelType = node.panelType;
         const panelEl = document.createElement('div');
         panelEl.className = 'panel';
+        panelEl.dataset.panelId = node.id;
+        panelEl.tabIndex = -1;
+        panelEl.addEventListener('pointerdown', () => {
+            this.setActivePanel(node.id);
+        }, { passive: true });
+        if (this.activePanelId === node.id) {
+            panelEl.classList.add('panel-active');
+        }
         panelEl.style.display = 'flex';
         panelEl.style.flexDirection = 'column';
         panelEl.style.flex = '1';
@@ -566,7 +600,8 @@ export class LayoutManager {
                                   node.panelType === 'MULTI_VIEW_STAGE' ||
                                   node.panelType === 'TELEMETRY_3D' ||
                                   node.panelType === 'PIPELINE_BROWSER' ||
-                                  node.panelType === 'PROPERTY_GRID';
+                                  node.panelType === 'PROPERTY_GRID' ||
+                                  node.panelType === 'TRANSPORT_BAR';
         if (!hasInternalScroll && node.panelType !== 'MENU_BAR') {
             content.classList.add('scrollable');
         }
@@ -758,7 +793,7 @@ export class LayoutManager {
 
         const select = document.createElement('select');
         select.className = 'header-select';
-        const types: PanelType[] = ['PIPELINE_BROWSER', 'VIEWPORT', 'PROPERTY_GRID', 'TRANSPORT_BAR', 'OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER', 'RESOURCE_MANAGER', 'TELEMETRY_3D', 'CLUSTER_MANAGER', 'COMPARE_MODELS'];
+        const types: PanelType[] = ['PIPELINE_BROWSER', 'VIEWPORT', 'PROPERTY_GRID', 'TRANSPORT_BAR', 'OUTLINER', 'NODE_GRAPH', 'PROPERTIES', 'NODE_VIEWER', 'EXECUTION_MANAGER', 'RESOURCE_MANAGER', 'TELEMETRY_3D', 'CLUSTER_MANAGER', 'COMPARE_MODELS', 'VV_MANUAL'];
         types.forEach(t => {
             const opt = document.createElement('option');
             opt.value = t;
@@ -1065,10 +1100,24 @@ export class LayoutManager {
             case 'COMPARE_MODELS':
                 this.renderCompareModels(node, container);
                 break;
+            case 'VV_MANUAL':
+                this.renderVVManual(node, container);
+                break;
             default:
                 container.innerHTML = `<div style="padding:10px">Panel: ${node.panelType}</div>`;
         }
 
+    }
+
+    private renderVVManual(node: PanelNode, container: HTMLElement): void {
+        let comp = this.components.get(node.id);
+        if (!comp) {
+            const panel = new VVManualPanel(container);
+            comp = { type: 'VV_MANUAL', instance: panel, container };
+            this.components.set(node.id, comp);
+        } else {
+            comp.container = container;
+        }
     }
 
     private renderPipelineBrowser(node: PanelNode, container: HTMLElement): void {
@@ -1454,6 +1503,12 @@ class MenuBarComponent {
             </div>
         `;
 
+        let femMenuHTML = `
+            <div class="menu-item" id="btn-fem-setup" title="Open FEM Preprocessor & Model Setup">
+                <span class="menu-title" style="color: #60a5fa; font-weight: bold; display: flex; align-items: center; gap: 4px; cursor: pointer; padding: 2px 8px; border-radius: 4px; background: rgba(37, 99, 235, 0.15); border: 1px solid rgba(96, 165, 250, 0.3);">⚡ FEM Setup</span>
+            </div>
+        `;
+
         let tabsHTML = `<div class="workspace-tabs-container">`;
         workspaces.forEach((ws) => {
             const isActive = ws.id === activeWs.id;
@@ -1477,6 +1532,7 @@ class MenuBarComponent {
             <div id="global-menu-bar">
                 ${fileMenuHTML}
                 ${wsMenuHTML}
+                ${femMenuHTML}
                 ${tabsHTML}
             </div>
         `;
@@ -1555,6 +1611,30 @@ class MenuBarComponent {
         if (addBtn) {
             addBtn.addEventListener('click', () => {
                 this.stateManager.createWorkspace();
+            });
+        }
+
+        const femBtn = this.container.querySelector('#btn-fem-setup');
+        if (femBtn) {
+            femBtn.addEventListener('click', () => {
+                const activeModel = this.stateManager.getActiveModel();
+                if (!activeModel) return;
+                const femNode = activeModel.nodes.find(n => 
+                    n.type === 'LSDynaImporter3D' || 
+                    n.type === 'FEMObject3D' || 
+                    n.type === 'FEMDomain3D' || 
+                    n.type === 'FEMBeam3D' || 
+                    n.type === 'FEMRebar3D' || 
+                    n.type === 'FEMFSICoupler3D' ||
+                    !!n.parameters?.['fem_setup']
+                );
+                if (femNode) {
+                    new FEMSetupModal(this.stateManager, femNode, activeModel, () => {
+                        this.stateManager.notifyChange();
+                    });
+                } else {
+                    CustomDialog.alert("No FEM model node found in the active model. Please select or add an 'LS-DYNA Keyword Deck (*.k)' or 'FEM 3D Object' node to your pipeline.");
+                }
             });
         }
     }

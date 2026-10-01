@@ -51,7 +51,29 @@ enum class MPMMaterialModel {
     CSCMConcrete = 5,
     CRESTReactiveBurn = 6,
     JWLProgrammedBurn = 7,
-    LeeTarverIgnitionGrowth = 8
+    LeeTarverIgnitionGrowth = 8,
+    HyperelasticYeoh = 9,
+    HyperelasticMooneyRivlin = 10,
+    ConcreteDamagePlasticity = 11,
+    Hill48Orthotropic = 12,
+    TaitWater = 13,
+    DruckerPragerSoil = 14
+};
+
+enum class SolidReactantEOS : int {
+    MieGruneisen = 0,
+    DavisSolid = 1
+};
+
+enum class ReactionKinetics : int {
+    ProgrammedBurn = 0,
+    LeeTarverODE = 1,
+    CRESTEntropy = 2
+};
+
+enum class DetonationProductEOS : int {
+    JWLProductGas = 0,
+    DavisProduct = 1
 };
 
 struct MPMParticle2D {
@@ -69,6 +91,11 @@ struct MPMParticle2D {
 
     // Material Model Selector
     MPMMaterialModel material_model{MPMMaterialModel::Hypoelastic};
+
+    // Three-Pillar Energetic Material Architecture
+    SolidReactantEOS solid_model{SolidReactantEOS::MieGruneisen};
+    ReactionKinetics burn_model{ReactionKinetics::ProgrammedBurn};
+    DetonationProductEOS product_model{DetonationProductEOS::JWLProductGas};
 
     // Baseline Material Properties (Solid Continuum J2 Elastoplasticity & Fracture/Failure)
     float density{7850.0f};               // kg/m^3 (e.g. 7850)
@@ -171,6 +198,33 @@ struct MPMParticle2D {
     float t_arrival{1.0e10f};    // Programmed detonation arrival time (s)
     float v_min{1.0f};           // Minimum relative volume
     float s_shock{0.0f};         // Latched shock entropy
+
+    // Davis Solid Reactant EOS Parameters
+    float davis_c0{2050.0f};             // Bulk sound speed (m/s)
+    float davis_s1{2.12f};               // Hugoniot Us-Up slope
+    float davis_gamma0{0.65f};           // Grüneisen gamma
+    float davis_cv{1000.0f};             // Specific heat capacity (J/(kg K))
+    float davis_t0{293.0f};              // Reference room temperature (K)
+    float davis_rho0{1895.0f};           // Unreacted solid reference density (kg/m^3)
+
+    // Davis Product Gas EOS Parameters
+    float davis_a{2.85f};                // High-density exponent parameter
+    float davis_b{1.10f};                // Transition curvature exponent
+    float davis_k{1.35f};                // Low-density adiabatic exponent
+    float davis_vc{0.65f};               // Characteristic relative transition volume
+    float davis_pc{12.5e9f};             // Characteristic transition pressure (Pa)
+    float davis_q_det{3.90e6f};          // Specific heat of reaction / detonation energy (J/kg)
+
+    // CREST Reaction Kinetics Rate Law Parameters
+    float crest_b1{1.2e7f};              // Hot-spot ignition rate constant (1/s)
+    float crest_c1{0.67f};               // Hot-spot unreacted power exponent
+    float crest_m1{2.5f};                // Hot-spot entropy power exponent
+    float crest_b2{3.5e6f};              // Main grain-growth rate constant (1/s)
+    float crest_c2{0.50f};               // Growth reacted power exponent
+    float crest_c3{0.67f};               // Growth unreacted power exponent
+    float crest_m2{1.5f};                // Growth entropy power exponent
+    float crest_s0{100.0f};              // Reference entropy scale (J/(kg K))
+    float crest_s_threshold{45.0f};      // Shock entropy ignition threshold (J/(kg K))
 
     // JWL Product Gas EOS & Programmed Burn Parameters
     float jwl_A{373.77e9f};              // High pressure coefficient A (Pa)

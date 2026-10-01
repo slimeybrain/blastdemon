@@ -16,6 +16,8 @@ export class ResourceManager {
     private panelId: string;
 
     private history = {
+        cpu_sys: [] as number[],
+        cpu_bd: [] as number[],
         cpu: [] as number[],
         ram_sys: [] as number[],
         ram_bd: [] as number[],
@@ -27,6 +29,8 @@ export class ResourceManager {
     private historyLimit = 60; // 30 seconds of history at 500ms intervals
 
     private smoothed = {
+        cpu_sys: 0,
+        cpu_bd: 0,
         cpu: 0,
         ram_sys_pct: 0,
         ram_bd_pct: 0,
@@ -61,11 +65,16 @@ export class ResourceManager {
         <!-- CPU Card -->
         <div class="resource-card" id="${this.panelId}-card-cpu">
             <div class="resource-header">
-                <span class="resource-label">CPU</span>
+                <span class="resource-label" title="Overall CPU usage (Host System & BlastDaemon)">CPU</span>
                 <span class="resource-value" id="${this.panelId}-cpu-val" style="color: #38bdf8;">0%</span>
             </div>
             <div class="resource-bar-track">
                 <div class="resource-bar-fill" id="${this.panelId}-cpu-fill" style="width: 0%; background: #38bdf8;"></div>
+                <div class="resource-bar-fill-inner" id="${this.panelId}-cpu-fill-inner" style="width: 0%; background: #7dd3fc;"></div>
+            </div>
+            <div class="resource-subtext">
+                <span>BD: <strong id="${this.panelId}-cpu-bd-val" style="color: #7dd3fc;">0%</strong></span>
+                <span>Sys: <strong id="${this.panelId}-cpu-sys-val" style="color: #38bdf8;">0%</strong></span>
             </div>
             <div class="sparkline-container">
                 <canvas class="sparkline-canvas" id="${this.panelId}-cpu-canvas"></canvas>
@@ -75,7 +84,7 @@ export class ResourceManager {
         <!-- RAM Card -->
         <div class="resource-card" id="${this.panelId}-card-ram">
             <div class="resource-header">
-                <span class="resource-label">RAM</span>
+                <span class="resource-label" title="Host System RAM usage (with BlastDaemon allocated memory)">RAM</span>
                 <span class="resource-value" id="${this.panelId}-ram-val" style="color: #10b981;">0%</span>
             </div>
             <div class="resource-bar-track">
@@ -94,11 +103,15 @@ export class ResourceManager {
         <!-- GPU Card -->
         <div class="resource-card" id="${this.panelId}-card-gpu">
             <div class="resource-header">
-                <span class="resource-label">GPU</span>
+                <span class="resource-label" title="GPU compute engine utilization">GPU</span>
                 <span class="resource-value" id="${this.panelId}-gpu-val" style="color: #00f0ff;">0%</span>
             </div>
             <div class="resource-bar-track">
                 <div class="resource-bar-fill" id="${this.panelId}-gpu-fill" style="width: 0%; background: #00f0ff;"></div>
+            </div>
+            <div class="resource-subtext">
+                <span>Core: <strong id="${this.panelId}-gpu-core-val" style="color: #00f0ff;">0%</strong></span>
+                <span>Temp: <strong id="${this.panelId}-gpu-temp-sub-val" style="color: #ef4444;">0°C</strong></span>
             </div>
             <div class="sparkline-container">
                 <canvas class="sparkline-canvas" id="${this.panelId}-gpu-canvas"></canvas>
@@ -108,7 +121,7 @@ export class ResourceManager {
         <!-- VRAM Card -->
         <div class="resource-card" id="${this.panelId}-card-vram">
             <div class="resource-header">
-                <span class="resource-label">VRAM</span>
+                <span class="resource-label" title="GPU VRAM allocation (Host System & BlastDaemon)">VRAM</span>
                 <span class="resource-value" id="${this.panelId}-vram-val" style="color: #f59e0b;">0%</span>
             </div>
             <div class="resource-bar-track">
@@ -127,11 +140,15 @@ export class ResourceManager {
         <!-- Temp Card -->
         <div class="resource-card" id="${this.panelId}-card-temp">
             <div class="resource-header">
-                <span class="resource-label">TEMP</span>
+                <span class="resource-label" title="GPU core temperature">TEMP</span>
                 <span class="resource-value" id="${this.panelId}-temp-val" style="color: #ef4444;">0°C</span>
             </div>
             <div class="resource-bar-track">
                 <div class="resource-bar-fill" id="${this.panelId}-temp-fill" style="width: 0%; background: #ef4444;"></div>
+            </div>
+            <div class="resource-subtext">
+                <span>Status: <strong id="${this.panelId}-temp-status-val" style="color: #10b981;">Nominal</strong></span>
+                <span>Target: <strong style="color: #64748b;">&lt; 80°C</strong></span>
             </div>
             <div class="sparkline-container">
                 <canvas class="sparkline-canvas" id="${this.panelId}-temp-canvas"></canvas>
@@ -142,6 +159,9 @@ export class ResourceManager {
 
     public updateMetrics(data: {
         cpu: number;
+        cpu_cores?: number;
+        cpu_system?: number;
+        num_cores?: number;
         ram_alloc: number;
         ram_system?: number;
         ram_total: number;
@@ -151,7 +171,10 @@ export class ResourceManager {
         vram_total: number;
         gpu_temp: number;
     }) {
-        const cpu_pct = data.cpu;
+        const cpu_bd_pct = data.cpu;
+        const cpu_cores = data.cpu_cores !== undefined ? data.cpu_cores : (cpu_bd_pct * (data.num_cores || 1));
+        const cpu_sys_pct = data.cpu_system !== undefined && data.cpu_system > 0 ? data.cpu_system : cpu_bd_pct;
+
         const ram_total_mb = data.ram_total > 0 ? data.ram_total / (1024 * 1024) : 16384;
         const ram_alloc_mb = data.ram_alloc / (1024 * 1024);
         const ram_system_bytes = data.ram_system !== undefined ? data.ram_system : data.ram_alloc;
@@ -171,7 +194,9 @@ export class ResourceManager {
         const temp_val = data.gpu_temp;
 
         // Apply EMA smoothing
-        this.smoothed.cpu = this.smoothed.cpu * (1 - this.alpha) + cpu_pct * this.alpha;
+        this.smoothed.cpu_sys = this.smoothed.cpu_sys * (1 - this.alpha) + cpu_sys_pct * this.alpha;
+        this.smoothed.cpu_bd = this.smoothed.cpu_bd * (1 - this.alpha) + cpu_bd_pct * this.alpha;
+        this.smoothed.cpu = this.smoothed.cpu_sys;
         this.smoothed.ram_sys_pct = this.smoothed.ram_sys_pct * (1 - this.alpha) + ram_sys_pct * this.alpha;
         this.smoothed.ram_bd_pct = this.smoothed.ram_bd_pct * (1 - this.alpha) + ram_bd_pct * this.alpha;
         this.smoothed.gpu = this.smoothed.gpu * (1 - this.alpha) + gpu_pct * this.alpha;
@@ -184,7 +209,9 @@ export class ResourceManager {
             arr.push(val);
             if (arr.length > this.historyLimit) arr.shift();
         };
-        updateHistory(this.history.cpu, cpu_pct);
+        updateHistory(this.history.cpu_sys, cpu_sys_pct);
+        updateHistory(this.history.cpu_bd, cpu_bd_pct);
+        updateHistory(this.history.cpu, cpu_sys_pct);
         updateHistory(this.history.ram_sys, ram_sys_pct);
         updateHistory(this.history.ram_bd, ram_bd_pct);
         updateHistory(this.history.gpu, gpu_pct);
@@ -220,24 +247,32 @@ export class ResourceManager {
         };
 
         // Render CPU
-        setBarWidth('cpu-fill', this.smoothed.cpu);
-        setTextValue('cpu-val', `${Math.round(this.smoothed.cpu)}%`);
-        toggleStress('cpu', this.smoothed.cpu, 85);
-        this.drawSparkline('cpu-canvas', this.history.cpu, '#38bdf8');
+        setBarWidth('cpu-fill', this.smoothed.cpu_sys);
+        setBarWidth('cpu-fill-inner', this.smoothed.cpu_bd);
+        setTextValue('cpu-val', `${Math.round(this.smoothed.cpu_sys)}%`);
+        const coreStr = (cpu_cores / 100).toFixed(1);
+        const bdCpuPctStr = cpu_bd_pct < 1.0 && cpu_bd_pct > 0.05 ? cpu_bd_pct.toFixed(1) : Math.round(cpu_bd_pct);
+        setTextValue('cpu-bd-val', `${bdCpuPctStr}% (${coreStr}c)`);
+        setTextValue('cpu-sys-val', `${Math.round(this.smoothed.cpu_sys)}%`);
+        toggleStress('cpu', this.smoothed.cpu_sys, 85);
+        this.drawSparkline('cpu-canvas', this.history.cpu_sys, '#38bdf8', this.history.cpu_bd, '#7dd3fc');
 
         // Render RAM
         setBarWidth('ram-fill', this.smoothed.ram_sys_pct);
         setBarWidth('ram-fill-inner', this.smoothed.ram_bd_pct);
         const formatRAM = (mb: number) => mb < 1024 ? `${Math.round(mb)}MB` : `${(mb / 1024).toFixed(1)}GB`;
         setTextValue('ram-val', `${Math.round(this.smoothed.ram_sys_pct)}%`);
-        setTextValue('ram-bd-val', formatRAM(ram_alloc_mb));
-        setTextValue('ram-sys-val', formatRAM(ram_sys_mb));
+        const ramBdPctStr = ram_bd_pct < 1.0 && ram_bd_pct > 0.05 ? ram_bd_pct.toFixed(1) : Math.round(ram_bd_pct);
+        setTextValue('ram-bd-val', `${formatRAM(ram_alloc_mb)} (${ramBdPctStr}%)`);
+        setTextValue('ram-sys-val', `${formatRAM(ram_sys_mb)} (${Math.round(this.smoothed.ram_sys_pct)}%)`);
         toggleStress('ram', this.smoothed.ram_sys_pct, 85);
         this.drawSparkline('ram-canvas', this.history.ram_sys, '#10b981', this.history.ram_bd, '#34d399');
 
         // Render GPU
         setBarWidth('gpu-fill', this.smoothed.gpu);
         setTextValue('gpu-val', `${Math.round(this.smoothed.gpu)}%`);
+        setTextValue('gpu-core-val', `${Math.round(this.smoothed.gpu)}%`);
+        setTextValue('gpu-temp-sub-val', `${Math.round(this.smoothed.temp)}°C`);
         toggleStress('gpu', this.smoothed.gpu, 85);
         this.drawSparkline('gpu-canvas', this.history.gpu, '#00f0ff');
 
@@ -246,14 +281,21 @@ export class ResourceManager {
         setBarWidth('vram-fill-inner', this.smoothed.vram_bd_pct);
         const formatVRAM = (mb: number) => vram_total_mb > 0 ? (mb < 1024 ? `${Math.round(mb)}MB` : `${(mb / 1024).toFixed(1)}GB`) : '0MB';
         setTextValue('vram-val', vram_total_mb > 0 ? `${Math.round(this.smoothed.vram_sys_pct)}%` : '0%');
-        setTextValue('vram-bd-val', vram_total_mb > 0 ? formatVRAM(vram_bd_mb) : '0MB');
-        setTextValue('vram-sys-val', vram_total_mb > 0 ? formatVRAM(vram_alloc_mb) : '0MB');
+        const vramBdPctStr = vram_bd_pct < 1.0 && vram_bd_pct > 0.05 ? vram_bd_pct.toFixed(1) : Math.round(vram_bd_pct);
+        setTextValue('vram-bd-val', vram_total_mb > 0 ? `${formatVRAM(vram_bd_mb)} (${vramBdPctStr}%)` : '0MB (0%)');
+        setTextValue('vram-sys-val', vram_total_mb > 0 ? `${formatVRAM(vram_alloc_mb)} (${Math.round(this.smoothed.vram_sys_pct)}%)` : '0MB (0%)');
         toggleStress('vram', this.smoothed.vram_sys_pct, 85);
         this.drawSparkline('vram-canvas', this.history.vram_sys, '#f59e0b', this.history.vram_bd, '#fbbf24');
 
         // Render Temp
         setBarWidth('temp-fill', Math.min(100, this.smoothed.temp));
         setTextValue('temp-val', `${Math.round(this.smoothed.temp)}°C`);
+        const isStressed = this.smoothed.temp >= 80;
+        const statusEl = this.container.querySelector<HTMLElement>(`#${this.panelId}-temp-status-val`);
+        if (statusEl) {
+            statusEl.innerText = isStressed ? 'Throttling' : (this.smoothed.temp >= 70 ? 'Warm' : 'Nominal');
+            statusEl.style.color = isStressed ? '#ef4444' : (this.smoothed.temp >= 70 ? '#f59e0b' : '#10b981');
+        }
         toggleStress('temp', this.smoothed.temp, 80);
         this.drawSparkline('temp-canvas', this.history.temp, '#ef4444');
     }
@@ -353,8 +395,33 @@ export class ResourceManager {
     }
 
     public resetMetrics(): void {
+        this.smoothed = {
+            cpu_sys: 0,
+            cpu_bd: 0,
+            cpu: 0,
+            ram_sys_pct: 0,
+            ram_bd_pct: 0,
+            gpu: 0,
+            vram_sys_pct: 0,
+            vram_bd_pct: 0,
+            temp: 0
+        };
+        this.history = {
+            cpu_sys: [],
+            cpu_bd: [],
+            cpu: [],
+            ram_sys: [],
+            ram_bd: [],
+            gpu: [],
+            vram_sys: [],
+            vram_bd: [],
+            temp: []
+        };
         this.updateMetrics({
             cpu: 0,
+            cpu_cores: 0,
+            cpu_system: 0,
+            num_cores: 1,
             ram_alloc: 0,
             ram_system: 0,
             ram_total: 0,

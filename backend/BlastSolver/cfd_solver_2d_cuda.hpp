@@ -75,6 +75,12 @@ public:
     virtual double getAmbientP() const = 0;
 
     virtual void exportVTK(const std::string& filename) = 0;
+
+    virtual void setChargeRadius(double r) { charge_radius = r; }
+    virtual double getChargeRadius() const { return charge_radius; }
+
+protected:
+    double charge_radius = 0.05;
 };
 
 struct GPUGauge2D {

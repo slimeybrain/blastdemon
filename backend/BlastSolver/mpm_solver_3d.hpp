@@ -7,10 +7,12 @@
 #include "constitutive_jwl.hpp"
 #include "constitutive_lee_tarver.hpp"
 #include "VTKWriter.hpp"
+#include "cfd_eos_water.hpp"
 #include <vector>
 #include <string>
 #include <cmath>
 #include <array>
+#include <functional>
 
 namespace Blast {
 
@@ -28,6 +30,11 @@ enum class MPMContactMethod : int {
 
 struct MaterialTable3D {
     MPMMaterialModel material_model{MPMMaterialModel::Hypoelastic};
+
+    // Three-Pillar Energetic Material Architecture
+    SolidReactantEOS solid_model{SolidReactantEOS::MieGruneisen};
+    ReactionKinetics burn_model{ReactionKinetics::ProgrammedBurn};
+    DetonationProductEOS product_model{DetonationProductEOS::JWLProductGas};
 
     // Baseline Material Properties
     float density{7850.0f};               // kg/m^3
@@ -174,6 +181,29 @@ struct MaterialTable3D {
     bool directional_crack_band{true};   // Bažant crack band angle normalization against mesh bias
     float nonlocal_radius{0.05f};         // Non-local damage interaction radius (m) (0.05m for concrete, 0.0 for metals)
 
+    // Hyperelastic Material Parameters (Yeoh & Mooney-Rivlin)
+    float yeoh_c10{0.57e6f};             // Pa
+    float yeoh_c20{-0.047e6f};           // Pa
+    float yeoh_c30{0.0033e6f};           // Pa
+    float mr_c10{0.40e6f};               // Pa
+    float mr_c01{0.10e6f};               // Pa
+    float k_bulk{1.0e8f};                // Pa (Volumetric bulk modulus)
+
+    // Concrete Damage Plasticity (CDP) Parameters
+    float cdp_f_t0{3.5e6f};              // Uniaxial initial tensile yield (Pa)
+    float cdp_f_c0{35.0e6f};             // Uniaxial initial compressive yield (Pa)
+    float cdp_g_f{120.0f};               // Tensile fracture energy (N/m)
+    float cdp_l_ch{0.05f};               // Characteristic crack band length (m)
+
+    // Hill48 Orthotropic Plasticity Parameters
+    float hill_F{0.35f};
+    float hill_G{0.45f};
+    float hill_H{0.55f};
+    float hill_L{1.50f};
+    float hill_M{1.50f};
+    float hill_N{1.60f};
+    float hill_sigma_y0{400.0e6f};       // Reference yield stress (Pa)
+
     // Per-Material Transfer Scheme Override
     int transfer_scheme{-1};             // -1 = Inherit domain default, otherwise MPMTransferScheme
 
@@ -192,6 +222,24 @@ struct MaterialTable3D {
     float jc_d3{-2.12f};                  // Johnson-Cook damage parameter D3
     float jc_d4{0.002f};                  // Johnson-Cook damage parameter D4
     float jc_d5{0.61f};                   // Johnson-Cook damage parameter D5
+
+    // Tait Water / Fluid Parameters
+    float tait_gamma{7.15f};             // Tait adiabatic exponent
+    float tait_B{3.039e8f};              // Tait bulk constant (Pa)
+    float tait_rho0{1000.0f};            // Reference density (kg/m^3)
+    float tait_c0{1482.0f};              // Reference sound speed (m/s)
+    float tait_p_cav{0.0f};              // Cavitation pressure limit (Pa)
+    float tait_p0{0.0f};                 // Ambient reference pressure (Pa, 0.0 for gauge, 101325.0 for absolute)
+    float tait_viscosity{1.002e-3f};     // Dynamic shear viscosity (Pa s)
+    int   tait_variant{0};               // 0 = Isentropic, 1 = Caloric Gruneisen, 2 = Shock Hugoniot
+    float tait_gruneisen{0.28f};         // Gruneisen parameter Gamma
+
+    // Drucker-Prager Soil & Geomaterial Parameters
+    float dp_cohesion{20.0e3f};          // Cohesion c (Pa)
+    float dp_friction_angle{30.0f};      // Friction angle phi (degrees)
+    float dp_dilatancy_angle{0.0f};      // Dilatancy angle psi (degrees)
+    float dp_tensile_cutoff{10.0e3f};    // Tensile stress cutoff (Pa)
+    float dp_hardening_modulus{0.0f};    // Plastic hardening modulus H (Pa)
 };
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
@@ -283,6 +331,8 @@ struct MPMParticle3D {
     float m;            // Mass
     float V0;           // Initial volume
     float V;            // Current volume
+    float rho{0.0f};    // Current density
+    float J{1.0f};      // Relative volume deformation ratio (V / V0)
 
     // Dynamic State Variables
     float e_int{0.0f};           // Specific internal energy (J/kg)
@@ -310,16 +360,26 @@ struct alignas(32) MPMGridNode3D {
     float f_ext[3]{0.0f, 0.0f, 0.0f};     // External force (FSI coupling) (12B)
     float f_int[3]{0.0f, 0.0f, 0.0f};     // Internal stress force (12B)
     float plastic_strain{0.0f}; // Interpolated plastic strain for smoothing (4B)
+    float m_solid{0.0f};        // Solid mass excluding fluid TaitWater (4B)
 
     static constexpr float MIN_MASS = 1.0e-11f;
     float v(int i) const { return m > MIN_MASS ? p[i] / m : 0.0f; }
 };
 
 enum class MPMBoundaryCondition3D {
-    Sticky,     // No-slip (v = 0)
-    FreeSlip,   // Normal velocity v_n = 0, tangential free
-    Reflecting, // Symmetric velocity reflection
-    Terminate   // Outflow / particle absorption
+    Sticky,        // No-slip (v = 0)
+    FreeSlip,      // Normal velocity v_n = 0, tangential free
+    Reflecting,    // Symmetric velocity reflection
+    Terminate,     // Outflow / particle absorption
+    LysmerDashpot  // Lysmer-Kuhlemeyer viscous absorbing boundary
+};
+
+struct LysmerDashpotParams {
+    float rho{2000.0f};           // Soil/rock bulk density (kg/m^3)
+    float c_p{2000.0f};           // Compressional / P-wave velocity (m/s)
+    float c_s{1000.0f};           // Shear / S-wave velocity (m/s)
+    float normal_relaxation{1.0f}; // Dimensionless dashpot efficiency factor
+    float shear_relaxation{1.0f};
 };
 
 class MPMSolver3D {
@@ -329,7 +389,7 @@ public:
 
     // Initialization & Grid Setup
     void initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f);
-    void setDomainGeometry(float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f);
+    void setDomainGeometry(float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f, int nx = 32, int ny = 32, int nz = 32);
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
     void setTimeScheme(MPMTimeIntegrationScheme scheme) { m_time_scheme = scheme; }
@@ -343,6 +403,19 @@ public:
     void setBoundaryConditions(MPMBoundaryCondition3D x_min, MPMBoundaryCondition3D x_max,
                                MPMBoundaryCondition3D y_min, MPMBoundaryCondition3D y_max,
                                MPMBoundaryCondition3D z_min, MPMBoundaryCondition3D z_max);
+    void setLysmerParams(const LysmerDashpotParams& params) { m_lysmer_params = params; }
+    const LysmerDashpotParams& getLysmerParams() const { return m_lysmer_params; }
+
+    // Gravity & Stratified Initial Condition
+    void setGravity(float gx, float gy, float gz) {
+        m_gravity[0] = gx;
+        m_gravity[1] = gy;
+        m_gravity[2] = gz;
+        m_has_gravity = (gx != 0.0f || gy != 0.0f || gz != 0.0f);
+    }
+    bool hasGravity() const { return m_has_gravity; }
+    const float* getGravity() const { return m_gravity; }
+    void applyStratifiedInitialCondition(const Blast::Stratified3DParams& strat);
 
     // Object Adders (3D Primitives)
     void addBoxObject(int obj_id, float pos_x, float pos_y, float pos_z,
@@ -356,7 +429,7 @@ public:
                       MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
                       float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
 
-    void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius,
+    void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius, float inner_radius,
                          float vel_x, float vel_y, float vel_z,
                          float angular_vel_x, float angular_vel_y, float angular_vel_z,
                          float density, float E, float nu,
@@ -365,6 +438,18 @@ public:
                          MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                          MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
                          float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
+
+    void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius,
+                         float vel_x, float vel_y, float vel_z,
+                         float angular_vel_x, float angular_vel_y, float angular_vel_z,
+                         float density, float E, float nu,
+                         float yield_stress, float hardening, float failure_strain = 0.25f,
+                         float tensile_failure_stress = 600.0e6f, int ppc = 8,
+                         MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
+                         MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
+                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f) {
+        addSphereObject(obj_id, pos_x, pos_y, pos_z, radius, 0.0f, vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+    }
 
     void addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
                            float radius, float inner_radius, float height,
@@ -440,6 +525,40 @@ public:
     double getSimTime() const { return m_sim_time; }
     int getStepCount() const { return m_step_count; }
 
+    void setGridNodeVelocity(size_t node_idx, float vx, float vy, float vz) {
+        if (node_idx >= m_grid.size()) return;
+        if (m_grid[node_idx].m <= MPMGridNode3D::MIN_MASS) {
+            m_grid[node_idx].m = 0.001f;
+        }
+        m_grid[node_idx].p[0] = m_grid[node_idx].m * vx;
+        m_grid[node_idx].p[1] = m_grid[node_idx].m * vy;
+        m_grid[node_idx].p[2] = m_grid[node_idx].m * vz;
+        m_grid[node_idx].f_int[0] = 0.0f;
+        m_grid[node_idx].f_int[1] = 0.0f;
+        m_grid[node_idx].f_int[2] = 0.0f;
+        m_grid[node_idx].f_ext[0] = 0.0f;
+        m_grid[node_idx].f_ext[1] = 0.0f;
+        m_grid[node_idx].f_ext[2] = 0.0f;
+        for (int m = 0; m < m_num_materials; ++m) {
+            if (m < static_cast<int>(m_mat_fields.size())) {
+                if (m_mat_fields[m].m[node_idx] <= MPMGridNode3D::MIN_MASS) {
+                    m_mat_fields[m].m[node_idx] = m_grid[node_idx].m;
+                }
+                m_mat_fields[m].p[0][node_idx] = m_mat_fields[m].m[node_idx] * vx;
+                m_mat_fields[m].p[1][node_idx] = m_mat_fields[m].m[node_idx] * vy;
+                m_mat_fields[m].p[2][node_idx] = m_mat_fields[m].m[node_idx] * vz;
+                m_mat_fields[m].v[0][node_idx] = vx;
+                m_mat_fields[m].v[1][node_idx] = vy;
+                m_mat_fields[m].v[2][node_idx] = vz;
+                m_mat_fields[m].f_int[0][node_idx] = 0.0f;
+                m_mat_fields[m].f_int[1][node_idx] = 0.0f;
+                m_mat_fields[m].f_int[2][node_idx] = 0.0f;
+            }
+        }
+    }
+
+    void setGridKinematicsCallback(std::function<void(float dt)> cb) { m_grid_kinematics_callback = std::move(cb); }
+
     // Discrete Element (DEM) Contact & Non-Penetration Pipeline
     void setDemContact(bool enable, float friction = 0.20f, float restitution = 0.0f, float scale = 1.0f,
                        MPMDEMContactMode mode = MPMDEMContactMode::GasSolidOnly, float v_threshold = 1.0f) {
@@ -476,6 +595,9 @@ public:
     float getSdfBarrierSkin() const { return 0.0f; }
 
     void particleToGrid();
+    void storeFSIForces();
+    void restoreFSIForces();
+    void clearFSIForces();
     void evaluateDEMContact(float dt);
     void updateFragmentClusters();
     void initMaterialHeterogeneity(int obj_id);
@@ -511,6 +633,8 @@ private:
     float m_xmin{0.0f};
     float m_ymin{0.0f};
     float m_zmin{0.0f};
+    float m_gravity[3]{0.0f, 0.0f, 0.0f};
+    bool m_has_gravity{false};
 
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};
@@ -532,6 +656,7 @@ private:
     MPMBoundaryCondition3D m_bc_y_max{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_z_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_z_max{MPMBoundaryCondition3D::Sticky};
+    LysmerDashpotParams m_lysmer_params;
 
     struct MPMGatheredKinematics3D {
         float target_v[3]{0.0f, 0.0f, 0.0f};
@@ -561,12 +686,14 @@ private:
     std::vector<MaterialTable3D> m_material_tables;
     std::vector<MPMGridNode3D> m_grid;
     std::vector<MPMParticle3D> m_particles;
+    std::vector<float> m_f_ext_fsi;
 
     float m_last_dt{0.0f};
     float m_last_cfl{0.3f};
     mutable float m_last_v_max{0.0f};
     double m_sim_time{0.0};
     int m_step_count{0};
+    std::function<void(float dt)> m_grid_kinematics_callback;
 };
 
 } // namespace Blast

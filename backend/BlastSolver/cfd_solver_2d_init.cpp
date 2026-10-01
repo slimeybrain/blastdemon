@@ -96,6 +96,7 @@ void CFDSolver2DImpl<RealType>::setInitialConditionTNT(double explosive_z, doubl
     this->det_x = explosive_r;
     this->det_y = 0.0;
     this->det_z = explosive_z;
+    this->charge_radius = explosive_radius;
 
     // Allocate all tiles that contain the explosive
     for (int i = 0; i < nr_cells; ++i) {
@@ -226,6 +227,7 @@ void CFDSolver2DImpl<RealType>::setInitialConditionTNTCylinder(double explosive_
     this->det_x = explosive_r;
     this->det_y = 0.0;
     this->det_z = explosive_z + height / 2.0; // Top of the cylinder
+    this->charge_radius = radius;
 
     for (int i = 0; i < nr_cells; ++i) {
         for (int j = 0; j < nz_cells; ++j) {

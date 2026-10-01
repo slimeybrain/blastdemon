@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; fill: #c9d1d9; }
+    .title { font-size: 16px; font-weight: 600; fill: #f0f6fc; }
+    .axis-label { font-size: 12px; fill: #8b949e; }
+    .tick { font-size: 10px; fill: #8b949e; }
+    .grid { stroke: #30363d; stroke-width: 1; stroke-dasharray: 4,4; }
+    .axis-line { stroke: #484f58; stroke-width: 1.5; }
+    .exact-curve { fill: none; stroke: #58a6ff; stroke-width: 2.5; }
+    .num-curve { fill: none; stroke: #f0883e; stroke-width: 2.0; stroke-dasharray: 6,3; }
+    .corridor-yellow { fill: rgba(210, 153, 34, 0.18); }
+    .corridor-green { fill: rgba(46, 160, 67, 0.30); }
+  </style>
+  <rect width="800" height="450" fill="#0d1117" rx="8"/>
+  <text x="400" y="30" text-anchor="middle" class="title">VV-L3-11: Zonal MPM-to-FV Water Handoff Pressure Profile (MPa vs X)</text>
+  <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
+  <text x="67" y="394" text-anchor="end" class="tick">-0.226</text>
+  <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
+  <text x="67" y="326" text-anchor="end" class="tick">0.0766</text>
+  <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
+  <text x="67" y="258" text-anchor="end" class="tick">0.379</text>
+  <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
+  <text x="67" y="190" text-anchor="end" class="tick">0.682</text>
+  <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
+  <text x="67" y="122" text-anchor="end" class="tick">0.985</text>
+  <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
+  <text x="67" y="54" text-anchor="end" class="tick">1.29</text>
+  <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
+  <text x="75" y="408" text-anchor="middle" class="tick">0.005</text>
+  <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
+  <text x="213" y="408" text-anchor="middle" class="tick">0.083</text>
+  <line x1="351" y1="50" x2="351" y2="390" class="grid"/>
+  <text x="351" y="408" text-anchor="middle" class="tick">0.161</text>
+  <line x1="489" y1="50" x2="489" y2="390" class="grid"/>
+  <text x="489" y="408" text-anchor="middle" class="tick">0.239</text>
+  <line x1="627" y1="50" x2="627" y2="390" class="grid"/>
+  <text x="627" y="408" text-anchor="middle" class="tick">0.317</text>
+  <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
+  <text x="765" y="408" text-anchor="middle" class="tick">0.395</text>
+  <path class="corridor-yellow" d="M 75 315 L 92.7 315 L 110 315 L 128 315 L 146 315 L 163 315 L 181 315 L 199 315 L 217 315 L 234 315 L 252 315 L 270 315 L 287 315 L 305 315 L 323 315 L 340 315 L 358 314 L 376 312 L 393 308 L 411 300 L 429 286 L 447 264 L 464 234 L 482 195 L 500 153 L 517 112 L 535 80.3 L 553 65.5 L 570 70.6 L 588 94.4 L 606 131 L 623 174 L 641 216 L 659 250 L 677 276 L 694 294 L 712 304 L 730 310 L 747 313 L 765 314 L 765 317 L 747 316 L 730 313 L 712 308 L 694 298 L 677 282 L 659 259 L 641 227 L 623 190 L 606 151 L 588 118 L 570 96.2 L 553 91.6 L 535 105 L 517 133 L 500 170 L 482 209 L 464 244 L 447 272 L 429 291 L 411 303 L 393 311 L 376 314 L 358 316 L 340 317 L 323 317 L 305 318 L 287 318 L 270 318 L 252 318 L 234 318 L 217 318 L 199 318 L 181 318 L 163 318 L 146 318 L 128 318 L 110 318 L 92.7 318 L 75 318 Z"/>
+  <path class="corridor-green" d="M 75 316 L 92.7 316 L 110 316 L 128 316 L 146 316 L 163 316 L 181 316 L 199 316 L 217 316 L 234 316 L 252 316 L 270 316 L 287 316 L 305 316 L 323 316 L 340 316 L 358 315 L 376 313 L 393 309 L 411 301 L 429 288 L 447 267 L 464 238 L 482 201 L 500 160 L 517 120 L 535 90.2 L 553 76 L 570 80.9 L 588 104 L 606 139 L 623 181 L 641 220 L 659 254 L 677 279 L 694 296 L 712 306 L 730 311 L 747 314 L 765 315 L 765 316 L 747 315 L 730 312 L 712 306 L 694 296 L 677 280 L 659 256 L 641 223 L 623 184 L 606 143 L 588 108 L 570 86 L 553 81.2 L 535 95.1 L 517 125 L 500 163 L 482 204 L 464 240 L 447 269 L 429 289 L 411 302 L 393 309 L 376 313 L 358 315 L 340 316 L 323 317 L 305 317 L 287 317 L 270 317 L 252 317 L 234 317 L 217 317 L 199 317 L 181 317 L 163 317 L 146 317 L 128 317 L 110 317 L 92.7 317 L 75 317 Z"/>
+  <path class="exact-curve" d="M 75 316 L 92.7 316 L 110 316 L 128 316 L 146 316 L 163 316 L 181 316 L 199 316 L 217 316 L 234 316 L 252 316 L 270 316 L 287 316 L 305 316 L 323 316 L 340 316 L 358 315 L 376 313 L 393 309 L 411 302 L 429 289 L 447 268 L 464 239 L 482 202 L 500 161 L 517 122 L 535 92.7 L 553 78.6 L 570 83.4 L 588 106 L 606 141 L 623 182 L 641 222 L 659 255 L 677 279 L 694 296 L 712 306 L 730 312 L 747 314 L 765 316 "/>
+  <path class="num-curve" d="M 75 362 L 92.7 362 L 110 362 L 128 362 L 146 362 L 163 362 L 181 362 L 199 362 L 217 362 L 234 362 L 252 362 L 270 362 L 287 362 L 305 362 L 323 362 L 340 362 L 358 355 L 376 283 L 393 135 L 411 200 L 429 164 L 447 169 L 464 155 L 482 147 L 500 131 L 517 122 L 535 106 L 553 93.9 L 570 85 L 588 78.3 L 606 91.1 L 623 108 L 641 124 L 659 147 L 677 178 L 694 215 L 712 252 L 730 293 L 747 307 L 765 314 "/>
+  <circle cx="75" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="92.7" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="110" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="128" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="146" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="163" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="181" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="199" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="217" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="234" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="252" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="270" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="287" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="305" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="323" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="340" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="358" cy="355" r="3.5" fill="#f0883e"/>
+  <circle cx="376" cy="283" r="3.5" fill="#f0883e"/>
+  <circle cx="393" cy="135" r="3.5" fill="#f0883e"/>
+  <circle cx="411" cy="200" r="3.5" fill="#f0883e"/>
+  <circle cx="429" cy="164" r="3.5" fill="#f0883e"/>
+  <circle cx="447" cy="169" r="3.5" fill="#f0883e"/>
+  <circle cx="464" cy="155" r="3.5" fill="#f0883e"/>
+  <circle cx="482" cy="147" r="3.5" fill="#f0883e"/>
+  <circle cx="500" cy="131" r="3.5" fill="#f0883e"/>
+  <circle cx="517" cy="122" r="3.5" fill="#f0883e"/>
+  <circle cx="535" cy="106" r="3.5" fill="#f0883e"/>
+  <circle cx="553" cy="93.9" r="3.5" fill="#f0883e"/>
+  <circle cx="570" cy="85" r="3.5" fill="#f0883e"/>
+  <circle cx="588" cy="78.3" r="3.5" fill="#f0883e"/>
+  <circle cx="606" cy="91.1" r="3.5" fill="#f0883e"/>
+  <circle cx="623" cy="108" r="3.5" fill="#f0883e"/>
+  <circle cx="641" cy="124" r="3.5" fill="#f0883e"/>
+  <circle cx="659" cy="147" r="3.5" fill="#f0883e"/>
+  <circle cx="677" cy="178" r="3.5" fill="#f0883e"/>
+  <circle cx="694" cy="215" r="3.5" fill="#f0883e"/>
+  <circle cx="712" cy="252" r="3.5" fill="#f0883e"/>
+  <circle cx="730" cy="293" r="3.5" fill="#f0883e"/>
+  <circle cx="747" cy="307" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="314" r="3.5" fill="#f0883e"/>
+  <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
+  <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
+  <text x="400" y="435" text-anchor="middle" class="axis-label">Longitudinal Coordinate X (m)</text>
+  <text x="20" y="225" text-anchor="middle" transform="rotate(-90 20 225)" class="axis-label">Fluid Pressure P (MPa)</text>
+  <rect x="570" y="55" width="195" height="85" fill="#161b22" stroke="#30363d" rx="4"/>
+  <line x1="580" y1="73" x2="605" y2="73" stroke="#58a6ff" stroke-width="2.5"/>
+  <text x="612" y="77" font-size="11">Analytical / Exact</text>
+  <line x1="580" y1="93" x2="605" y2="93" stroke="#f0883e" stroke-width="2.0" stroke-dasharray="4,2"/>
+  <circle cx="592" cy="93" r="3" fill="#f0883e"/>
+  <text x="612" y="97" font-size="11">Numerical Result</text>
+  <rect x="580" y="107" width="25" height="10" fill="rgba(46,160,67,0.5)"/>
+  <text x="612" y="116" font-size="10">Acceptance Corridor ±1%</text>
+  <rect x="580" y="123" width="25" height="10" fill="rgba(210,153,34,0.3)"/>
+  <text x="612" y="132" font-size="10">Tolerance Corridor ±5%</text>
+</svg>

@@ -50,7 +50,7 @@ static void base64_encode_append(std::string& ret, const unsigned char* buf, siz
     }
 }
 
-static std::string base64_encode(const unsigned char* buf, unsigned int bufLen) {
+[[maybe_unused]] static std::string base64_encode(const unsigned char* buf, unsigned int bufLen) {
     std::string ret;
     ret.reserve(base64_calc_size(bufLen));
     base64_encode_append(ret, buf, bufLen);
@@ -420,6 +420,12 @@ void export_vtu_slice_3d_snapshot(const std::string& filename, const CFDSliceSna
     if (snap.has_unreacted) writeData("Unreacted_Explosive", snap.unreacted);
     if (snap.has_air) writeData("Air", snap.air);
     if (snap.has_solid) writeData("Solid", snap.solid);
+    if (snap.has_materials) writeData("Material_ID", snap.materials);
+    if (snap.has_water) writeData("Phase_Water", snap.water);
+    if (snap.has_soil) writeData("Phase_Soil", snap.soil);
+    if (snap.has_temp) writeData("Temperature", snap.temp);
+    if (snap.has_afterburn_rate) writeData("Afterburn_Rate", snap.afterburn_rate);
+    if (snap.has_fuel_density) writeData("Fuel_Density", snap.fuel_density);
 
     out << "      </CellData>\n";
     out << "    </Piece>\n";
@@ -628,12 +634,130 @@ void export_vtu_volume_3d_snapshot(const std::string& filename, const CFDVolumeS
     if (snap.has_unreacted) writeData("Unreacted_Explosive", snap.unreacted);
     if (snap.has_air) writeData("Air", snap.air);
     if (snap.has_solid) writeData("Solid", snap.solid);
+    if (snap.has_materials) writeData("Material_ID", snap.materials);
+    if (snap.has_water) writeData("Phase_Water", snap.water);
+    if (snap.has_soil) writeData("Phase_Soil", snap.soil);
+    if (snap.has_temp) writeData("Temperature", snap.temp);
+    if (snap.has_afterburn_rate) writeData("Afterburn_Rate", snap.afterburn_rate);
+    if (snap.has_fuel_density) writeData("Fuel_Density", snap.fuel_density);
 
     out << "      </CellData>\n";
     out << "    </Piece>\n";
     out << "  </UnstructuredGrid>\n";
     out << "</VTKFile>\n";
 
+    out.close();
+}
+
+void export_vts_cfd_3d_snapshot(const std::string& filename, const CFDVolumeSnapshot3D& snap, const std::string& format) {
+    std::ofstream out(filename);
+    if (!out) return;
+
+    int nx = snap.nx;
+    int ny = snap.ny;
+    int nz = snap.nz;
+    double cellSize = snap.cellSize;
+    double xmin = snap.xmin;
+    double ymin = snap.ymin;
+    double zmin = snap.zmin;
+    int stride = std::max(1, snap.stride);
+
+    int i_start = 0, i_end = nx;
+    int j_start = 0, j_end = ny;
+    int k_start = 0, k_end = nz;
+
+    if (snap.roi_enabled) {
+        i_start = snap.i_start;
+        i_end   = snap.i_end;
+        j_start = snap.j_start;
+        j_end   = snap.j_end;
+        k_start = snap.k_start;
+        k_end   = snap.k_end;
+    }
+
+    int nx_sub = (snap.nx_sub > 0) ? snap.nx_sub : ((i_end - i_start + stride - 1) / stride);
+    int ny_sub = (snap.ny_sub > 0) ? snap.ny_sub : ((j_end - j_start + stride - 1) / stride);
+    int nz_sub = (snap.nz_sub > 0) ? snap.nz_sub : ((k_end - k_start + stride - 1) / stride);
+
+    if (nx_sub <= 0 || ny_sub <= 0 || nz_sub <= 0) return;
+
+    int num_points = (nx_sub + 1) * (ny_sub + 1) * (nz_sub + 1);
+    int num_cells = nx_sub * ny_sub * nz_sub;
+
+    std::vector<float> points;
+    points.reserve(num_points * 3);
+    for (int k = 0; k <= nz_sub; ++k) {
+        float z = static_cast<float>(zmin + (k_start + k * stride) * cellSize);
+        for (int j = 0; j <= ny_sub; ++j) {
+            float y = static_cast<float>(ymin + (j_start + j * stride) * cellSize);
+            for (int i = 0; i <= nx_sub; ++i) {
+                float x = static_cast<float>(xmin + (i_start + i * stride) * cellSize);
+                points.push_back(x);
+                points.push_back(y);
+                points.push_back(z);
+            }
+        }
+    }
+
+    out << "<?xml version=\"1.0\"?>\n";
+    if (format == "ASCII") {
+        out << "<VTKFile type=\"StructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n";
+    } else {
+        out << "<VTKFile type=\"StructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\" header_type=\"UInt32\" compressor=\"vtkZLibDataCompressor\">\n";
+    }
+    out << "  <StructuredGrid WholeExtent=\"0 " << nx_sub << " 0 " << ny_sub << " 0 " << nz_sub << "\">\n";
+    out << "    <Piece Extent=\"0 " << nx_sub << " 0 " << ny_sub << " 0 " << nz_sub << "\">\n";
+
+    out << "      <Points>\n";
+    if (format == "ASCII") {
+        out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"ascii\">\n          ";
+        for (float v : points) out << v << " ";
+        out << "\n        </DataArray>\n";
+    } else {
+        out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"binary\">\n          "
+            << binary_encode(points) << "\n        </DataArray>\n";
+    }
+    out << "      </Points>\n";
+
+    out << "      <CellData>\n";
+    auto writeData = [&](const std::string& name, const std::vector<float>& data) {
+        if (data.empty()) return;
+        int comps = (data.size() == static_cast<size_t>(num_cells * 3)) ? 3 : 1;
+        if (format == "ASCII") {
+            out << "        <DataArray type=\"Float32\" Name=\"" << name << "\"";
+            if (comps > 1) out << " NumberOfComponents=\"" << comps << "\"";
+            out << " format=\"ascii\">\n          ";
+            for (float v : data) out << v << " ";
+            out << "\n        </DataArray>\n";
+        } else {
+            out << "        <DataArray type=\"Float32\" Name=\"" << name << "\"";
+            if (comps > 1) out << " NumberOfComponents=\"" << comps << "\"";
+            out << " format=\"binary\">\n          "
+                << binary_encode(data) << "\n        </DataArray>\n";
+        }
+    };
+
+    if (snap.has_p) writeData("Pressure", snap.p);
+    if (snap.has_overpressure) writeData("Peak_Overpressure", snap.overpressure);
+    if (snap.has_impulse) writeData("Peak_Impulse", snap.impulse);
+    if (snap.has_rho) writeData("Density", snap.rho);
+    if (snap.has_vel) writeData("Velocity", snap.vel);
+    if (snap.has_E) writeData("Energy", snap.E);
+    if (snap.has_reacted) writeData("Reacted_Explosive", snap.reacted);
+    if (snap.has_unreacted) writeData("Unreacted_Explosive", snap.unreacted);
+    if (snap.has_air) writeData("Air", snap.air);
+    if (snap.has_solid) writeData("Solid", snap.solid);
+    if (snap.has_materials) writeData("Material_ID", snap.materials);
+    if (snap.has_water) writeData("Phase_Water", snap.water);
+    if (snap.has_soil) writeData("Phase_Soil", snap.soil);
+    if (snap.has_temp) writeData("Temperature", snap.temp);
+    if (snap.has_afterburn_rate) writeData("Afterburn_Rate", snap.afterburn_rate);
+    if (snap.has_fuel_density) writeData("Fuel_Density", snap.fuel_density);
+
+    out << "      </CellData>\n";
+    out << "    </Piece>\n";
+    out << "  </StructuredGrid>\n";
+    out << "</VTKFile>\n";
     out.close();
 }
 
@@ -803,12 +927,10 @@ void export_vtu_amr_2d(const std::string& filename,
 #include "mpm_solver_3d.hpp"
 
 template <typename T>
-void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>& solver, const std::string& format,
-                       bool has_stress, bool has_strain, bool has_pressure,
-                       bool has_temp, bool has_damage, bool has_vel, bool has_disp) {
-    std::ofstream out(filename);
-    if (!out) return;
-
+FEMVTKSnapshot3D create_fem_snapshot(const Blast::FEMSolver3D<T>& solver,
+                                     bool has_stress, bool has_strain, bool has_pressure,
+                                     bool has_temp, bool has_damage, bool has_vel, bool has_disp) {
+    FEMVTKSnapshot3D snap;
     const auto& nodes = solver.getNodes();
     const auto& elements = solver.getElements();
     const auto& trusses = solver.getTrusses();
@@ -827,38 +949,46 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
         if (!bm.is_eroded) num_cells++;
     }
 
-    std::vector<float> points(num_points * 3);
-    std::vector<float> disp(num_points * 3, 0.0f);
-    std::vector<float> vel(num_points * 3, 0.0f);
+    snap.num_points = num_points;
+    snap.num_cells = num_cells;
+    snap.has_stress = has_stress;
+    snap.has_strain = has_strain;
+    snap.has_pressure = has_pressure;
+    snap.has_temp = has_temp;
+    snap.has_damage = has_damage;
+    snap.has_vel = has_vel;
+    snap.has_disp = has_disp;
+
+    snap.points.resize(num_points * 3);
+    snap.disp.resize(num_points * 3, 0.0f);
+    snap.vel.resize(num_points * 3, 0.0f);
 
     for (int i = 0; i < num_points; ++i) {
-        points[i * 3 + 0] = static_cast<float>(nodes[i].x[0]);
-        points[i * 3 + 1] = static_cast<float>(nodes[i].x[1]);
-        points[i * 3 + 2] = static_cast<float>(nodes[i].x[2]);
+        snap.points[i * 3 + 0] = static_cast<float>(nodes[i].x[0]);
+        snap.points[i * 3 + 1] = static_cast<float>(nodes[i].x[1]);
+        snap.points[i * 3 + 2] = static_cast<float>(nodes[i].x[2]);
 
-        disp[i * 3 + 0] = static_cast<float>(nodes[i].x[0] - nodes[i].x0[0]);
-        disp[i * 3 + 1] = static_cast<float>(nodes[i].x[1] - nodes[i].x0[1]);
-        disp[i * 3 + 2] = static_cast<float>(nodes[i].x[2] - nodes[i].x0[2]);
+        snap.disp[i * 3 + 0] = static_cast<float>(nodes[i].x[0] - nodes[i].x0[0]);
+        snap.disp[i * 3 + 1] = static_cast<float>(nodes[i].x[1] - nodes[i].x0[1]);
+        snap.disp[i * 3 + 2] = static_cast<float>(nodes[i].x[2] - nodes[i].x0[2]);
 
-        vel[i * 3 + 0] = static_cast<float>(nodes[i].v[0]);
-        vel[i * 3 + 1] = static_cast<float>(nodes[i].v[1]);
-        vel[i * 3 + 2] = static_cast<float>(nodes[i].v[2]);
+        snap.vel[i * 3 + 0] = static_cast<float>(nodes[i].v[0]);
+        snap.vel[i * 3 + 1] = static_cast<float>(nodes[i].v[1]);
+        snap.vel[i * 3 + 2] = static_cast<float>(nodes[i].v[2]);
     }
 
-    std::vector<int32_t> connectivity;
-    std::vector<int32_t> offsets(num_cells);
-    std::vector<uint8_t> types(num_cells);
+    snap.offsets.resize(num_cells);
+    snap.types.resize(num_cells);
+    snap.material_id.resize(num_cells);
+    snap.part_id.resize(num_cells);
+    snap.element_type.resize(num_cells);
+    snap.von_mises.resize(num_cells, 0.0f);
+    snap.plastic_strain.resize(num_cells, 0.0f);
+    snap.pressure.resize(num_cells, 0.0f);
+    snap.temperature.resize(num_cells, 0.0f);
+    snap.damage.resize(num_cells, 0.0f);
 
-    std::vector<int32_t> material_id(num_cells);
-    std::vector<int32_t> part_id(num_cells);
-    std::vector<int32_t> element_type(num_cells); // 0 = Solid Hex8, 1 = Truss 1D, 2 = Beam 1D
-    std::vector<float> von_mises(num_cells, 0.0f);
-    std::vector<float> plastic_strain(num_cells, 0.0f);
-    std::vector<float> pressure(num_cells, 0.0f);
-    std::vector<float> temperature(num_cells, 0.0f);
-    std::vector<float> damage(num_cells, 0.0f);
-
-    connectivity.reserve(num_cells * 8);
+    snap.connectivity.reserve(num_cells * 8);
 
     int c_idx = 0;
 
@@ -867,14 +997,14 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
         if (elem.is_eroded) continue;
 
         for (int n = 0; n < 8; ++n) {
-            connectivity.push_back(elem.node_ids[n]);
+            snap.connectivity.push_back(elem.node_ids[n]);
         }
-        offsets[c_idx] = static_cast<int32_t>(connectivity.size());
-        types[c_idx] = 12; // VTK_HEXAHEDRON
+        snap.offsets[c_idx] = static_cast<int32_t>(snap.connectivity.size());
+        snap.types[c_idx] = 12; // VTK_HEXAHEDRON
 
-        material_id[c_idx] = elem.mat_id;
-        part_id[c_idx] = elem.part_id;
-        element_type[c_idx] = 0; // 0 = Solid Hex8
+        snap.material_id[c_idx] = elem.mat_id;
+        snap.part_id[c_idx] = elem.part_id;
+        snap.element_type[c_idx] = 0; // 0 = Solid Hex8
 
         double mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / 3.0;
         double s00 = elem.sigma[0][0] - mean_s;
@@ -884,11 +1014,11 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
         double s12 = elem.sigma[1][2];
         double s20 = elem.sigma[2][0];
 
-        von_mises[c_idx] = static_cast<float>(std::sqrt(1.5 * (s00*s00 + s11*s11 + s22*s22 + 2.0*(s01*s01 + s12*s12 + s20*s20))));
-        plastic_strain[c_idx] = static_cast<float>(elem.ep_bar);
-        pressure[c_idx] = static_cast<float>(-mean_s);
-        temperature[c_idx] = static_cast<float>(elem.temperature);
-        damage[c_idx] = static_cast<float>(elem.damage);
+        snap.von_mises[c_idx] = static_cast<float>(std::sqrt(1.5 * (s00*s00 + s11*s11 + s22*s22 + 2.0*(s01*s01 + s12*s12 + s20*s20))));
+        snap.plastic_strain[c_idx] = static_cast<float>(elem.ep_bar);
+        snap.pressure[c_idx] = static_cast<float>(-mean_s);
+        snap.temperature[c_idx] = static_cast<float>(elem.temperature);
+        snap.damage[c_idx] = static_cast<float>(elem.damage);
         c_idx++;
     }
 
@@ -896,20 +1026,20 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
     for (const auto& tr : trusses) {
         if (tr.is_eroded) continue;
 
-        connectivity.push_back(tr.node_ids[0]);
-        connectivity.push_back(tr.node_ids[1]);
-        offsets[c_idx] = static_cast<int32_t>(connectivity.size());
-        types[c_idx] = 3; // VTK_LINE
+        snap.connectivity.push_back(tr.node_ids[0]);
+        snap.connectivity.push_back(tr.node_ids[1]);
+        snap.offsets[c_idx] = static_cast<int32_t>(snap.connectivity.size());
+        snap.types[c_idx] = 3; // VTK_LINE
 
-        material_id[c_idx] = tr.mat_id;
-        part_id[c_idx] = tr.part_id;
-        element_type[c_idx] = 1; // 1 = 1D Truss
+        snap.material_id[c_idx] = tr.mat_id;
+        snap.part_id[c_idx] = tr.part_id;
+        snap.element_type[c_idx] = 1; // 1 = 1D Truss
 
-        von_mises[c_idx] = static_cast<float>(std::abs(static_cast<double>(tr.sigma)));
-        plastic_strain[c_idx] = static_cast<float>(tr.ep_bar);
-        pressure[c_idx] = 0.0f;
-        temperature[c_idx] = 300.0f;
-        damage[c_idx] = tr.is_eroded ? 1.0f : 0.0f;
+        snap.von_mises[c_idx] = static_cast<float>(std::abs(static_cast<double>(tr.sigma)));
+        snap.plastic_strain[c_idx] = static_cast<float>(tr.ep_bar);
+        snap.pressure[c_idx] = 0.0f;
+        snap.temperature[c_idx] = 300.0f;
+        snap.damage[c_idx] = tr.is_eroded ? 1.0f : 0.0f;
         c_idx++;
     }
 
@@ -918,14 +1048,14 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
     for (const auto& bm : beams) {
         if (bm.is_eroded) continue;
 
-        connectivity.push_back(bm.node_ids[0]);
-        connectivity.push_back(bm.node_ids[1]);
-        offsets[c_idx] = static_cast<int32_t>(connectivity.size());
-        types[c_idx] = 3; // VTK_LINE
+        snap.connectivity.push_back(bm.node_ids[0]);
+        snap.connectivity.push_back(bm.node_ids[1]);
+        snap.offsets[c_idx] = static_cast<int32_t>(snap.connectivity.size());
+        snap.types[c_idx] = 3; // VTK_LINE
 
-        material_id[c_idx] = bm.mat_id;
-        part_id[c_idx] = bm.part_id;
-        element_type[c_idx] = 2; // 2 = 1D Beam
+        snap.material_id[c_idx] = bm.mat_id;
+        snap.part_id[c_idx] = bm.part_id;
+        snap.element_type[c_idx] = 2; // 2 = 1D Beam
 
         double E = 200.0e9;
         double sigma_y = 500.0e6;
@@ -941,13 +1071,23 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
             sig_eff = sigma_y + E_tan * static_cast<double>(bm.ep_bar);
         }
 
-        von_mises[c_idx] = static_cast<float>(sig_eff);
-        plastic_strain[c_idx] = static_cast<float>(bm.ep_bar);
-        pressure[c_idx] = 0.0f;
-        temperature[c_idx] = 300.0f;
-        damage[c_idx] = bm.is_eroded ? 1.0f : 0.0f;
+        snap.von_mises[c_idx] = static_cast<float>(sig_eff);
+        snap.plastic_strain[c_idx] = static_cast<float>(bm.ep_bar);
+        snap.pressure[c_idx] = 0.0f;
+        snap.temperature[c_idx] = 300.0f;
+        snap.damage[c_idx] = bm.is_eroded ? 1.0f : 0.0f;
         c_idx++;
     }
+
+    return snap;
+}
+
+void export_vtu_fem_3d_snapshot(const std::string& filename, const FEMVTKSnapshot3D& snap, const std::string& format) {
+    std::ofstream out(filename);
+    if (!out) return;
+
+    int num_points = snap.num_points;
+    int num_cells = snap.num_cells;
 
     out << "<?xml version=\"1.0\"?>\n";
     if (format == "ASCII") {
@@ -961,11 +1101,11 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
     out << "      <Points>\n";
     if (format == "ASCII") {
         out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"ascii\">\n          ";
-        for (float v : points) out << v << " ";
+        for (float v : snap.points) out << v << " ";
         out << "\n        </DataArray>\n";
     } else {
         out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"binary\">\n";
-        out << "          " << binary_encode(points) << "\n";
+        out << "          " << binary_encode(snap.points) << "\n";
         out << "        </DataArray>\n";
     }
     out << "      </Points>\n";
@@ -973,29 +1113,30 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
     out << "      <Cells>\n";
     if (format == "ASCII") {
         out << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">\n          ";
-        for (int32_t v : connectivity) out << v << " ";
+        for (int32_t v : snap.connectivity) out << v << " ";
         out << "\n        </DataArray>\n";
         out << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">\n          ";
-        for (int32_t v : offsets) out << v << " ";
+        for (int32_t v : snap.offsets) out << v << " ";
         out << "\n        </DataArray>\n";
         out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n          ";
-        for (uint8_t v : types) out << (int)v << " ";
+        for (uint8_t v : snap.types) out << (int)v << " ";
         out << "\n        </DataArray>\n";
     } else {
         out << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"binary\">\n";
-        out << "          " << binary_encode(connectivity) << "\n";
+        out << "          " << binary_encode(snap.connectivity) << "\n";
         out << "        </DataArray>\n";
         out << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"binary\">\n";
-        out << "          " << binary_encode(offsets) << "\n";
+        out << "          " << binary_encode(snap.offsets) << "\n";
         out << "        </DataArray>\n";
         out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"binary\">\n";
-        out << "          " << binary_encode(types) << "\n";
+        out << "          " << binary_encode(snap.types) << "\n";
         out << "        </DataArray>\n";
     }
     out << "      </Cells>\n";
 
     out << "      <PointData>\n";
     auto writePointData = [&](const std::string& name, const std::vector<float>& data, int num_comp = 3) {
+        if (data.empty()) return;
         if (format == "ASCII") {
             out << "        <DataArray type=\"Float32\" Name=\"" << name << "\" NumberOfComponents=\"" << num_comp << "\" format=\"ascii\">\n          ";
             for (float v : data) out << v << " ";
@@ -1005,12 +1146,13 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
         }
     };
 
-    if (has_disp) writePointData("Displacement", disp, 3);
-    if (has_vel) writePointData("Velocity", vel, 3);
+    if (snap.has_disp && !snap.disp.empty()) writePointData("Displacement", snap.disp, 3);
+    if (snap.has_vel && !snap.vel.empty()) writePointData("Velocity", snap.vel, 3);
     out << "      </PointData>\n";
 
     out << "      <CellData>\n";
     auto writeCellDataInt = [&](const std::string& name, const std::vector<int32_t>& data) {
+        if (data.empty()) return;
         if (format == "ASCII") {
             out << "        <DataArray type=\"Int32\" Name=\"" << name << "\" format=\"ascii\">\n          ";
             for (int32_t v : data) out << v << " ";
@@ -1021,6 +1163,7 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
     };
 
     auto writeCellDataFloat = [&](const std::string& name, const std::vector<float>& data) {
+        if (data.empty()) return;
         if (format == "ASCII") {
             out << "        <DataArray type=\"Float32\" Name=\"" << name << "\" format=\"ascii\">\n          ";
             for (float v : data) out << v << " ";
@@ -1030,15 +1173,15 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
         }
     };
 
-    writeCellDataInt("Material_ID", material_id);
-    writeCellDataInt("Part_ID", part_id);
-    writeCellDataInt("Element_Type", element_type);
+    if (!snap.material_id.empty()) writeCellDataInt("Material_ID", snap.material_id);
+    if (!snap.part_id.empty()) writeCellDataInt("Part_ID", snap.part_id);
+    if (!snap.element_type.empty()) writeCellDataInt("Element_Type", snap.element_type);
 
-    if (has_stress) writeCellDataFloat("von_Mises_Stress", von_mises);
-    if (has_strain) writeCellDataFloat("Plastic_Strain", plastic_strain);
-    if (has_pressure) writeCellDataFloat("Hydrostatic_Pressure", pressure);
-    if (has_temp) writeCellDataFloat("Temperature", temperature);
-    if (has_damage) writeCellDataFloat("Damage", damage);
+    if (snap.has_stress && !snap.von_mises.empty()) writeCellDataFloat("von_Mises_Stress", snap.von_mises);
+    if (snap.has_strain && !snap.plastic_strain.empty()) writeCellDataFloat("Plastic_Strain", snap.plastic_strain);
+    if (snap.has_pressure && !snap.pressure.empty()) writeCellDataFloat("Hydrostatic_Pressure", snap.pressure);
+    if (snap.has_temp && !snap.temperature.empty()) writeCellDataFloat("Temperature", snap.temperature);
+    if (snap.has_damage && !snap.damage.empty()) writeCellDataFloat("Damage", snap.damage);
 
     out << "      </CellData>\n";
     out << "    </Piece>\n";
@@ -1048,6 +1191,16 @@ void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>&
     out.close();
 }
 
+template <typename T>
+void export_vtu_fem_3d(const std::string& filename, const Blast::FEMSolver3D<T>& solver, const std::string& format,
+                       bool has_stress, bool has_strain, bool has_pressure,
+                       bool has_temp, bool has_damage, bool has_vel, bool has_disp) {
+    FEMVTKSnapshot3D snap = create_fem_snapshot(solver, has_stress, has_strain, has_pressure, has_temp, has_damage, has_vel, has_disp);
+    export_vtu_fem_3d_snapshot(filename, snap, format);
+}
+
+template FEMVTKSnapshot3D create_fem_snapshot<float>(const Blast::FEMSolver3D<float>&, bool, bool, bool, bool, bool, bool, bool);
+template FEMVTKSnapshot3D create_fem_snapshot<double>(const Blast::FEMSolver3D<double>&, bool, bool, bool, bool, bool, bool, bool);
 template void export_vtu_fem_3d<float>(const std::string&, const Blast::FEMSolver3D<float>&, const std::string&, bool, bool, bool, bool, bool, bool, bool);
 template void export_vtu_fem_3d<double>(const std::string&, const Blast::FEMSolver3D<double>&, const std::string&, bool, bool, bool, bool, bool, bool, bool);
 
@@ -1068,7 +1221,7 @@ void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
     }
 
     std::string points_encoded, conn_encoded, off_encoded, types_encoded;
-    std::string vel_encoded, vm_encoded, p_encoded, ep_encoded, dmg_encoded, temp_encoded, obj_encoded;
+    std::string vel_encoded, vm_encoded, p_encoded, ep_encoded, dmg_encoded, temp_encoded, obj_encoded, mat_encoded;
 
     if (format != "ASCII") {
         #pragma omp parallel sections
@@ -1086,7 +1239,7 @@ void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
             #pragma omp section
             { if (snap.has_stress && !snap.von_mises.empty()) vm_encoded = binary_encode(snap.von_mises); }
             #pragma omp section
-            { if (snap.has_stress && !snap.pressure.empty()) p_encoded = binary_encode(snap.pressure); }
+            { if ((snap.has_stress || snap.has_pressure) && !snap.pressure.empty()) p_encoded = binary_encode(snap.pressure); }
             #pragma omp section
             { if (snap.has_strain && !snap.ep_bar.empty()) ep_encoded = binary_encode(snap.ep_bar); }
             #pragma omp section
@@ -1095,6 +1248,8 @@ void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
             { if (snap.has_temp && !snap.temp.empty()) temp_encoded = binary_encode(snap.temp); }
             #pragma omp section
             { if (!snap.obj_id.empty()) obj_encoded = binary_encode(snap.obj_id); }
+            #pragma omp section
+            { if (snap.has_material_id && !snap.material_id.empty()) mat_encoded = binary_encode(snap.material_id); }
         }
     }
 
@@ -1150,16 +1305,137 @@ void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
     if (snap.has_vel) writePointData("Velocity", snap.vel, vel_encoded, 3);
     if (snap.has_stress) {
         writePointData("von_Mises_Stress", snap.von_mises, vm_encoded, 1);
+    }
+    if (snap.has_stress || snap.has_pressure) {
         writePointData("Hydrostatic_Pressure", snap.pressure, p_encoded, 1);
+        writePointData("Pressure", snap.pressure, p_encoded, 1);
     }
     if (snap.has_strain) writePointData("Plastic_Strain", snap.ep_bar, ep_encoded, 1);
     if (snap.has_damage) writePointData("Damage", snap.damage, dmg_encoded, 1);
     if (snap.has_temp) writePointData("Temperature", snap.temp, temp_encoded, 1);
     writePointData("ObjectID", snap.obj_id, obj_encoded, 1);
+    if (snap.has_material_id && !snap.material_id.empty()) writePointData("Material_ID", snap.material_id, mat_encoded, 1);
 
     out << "      </PointData>\n";
     out << "    </Piece>\n";
     out << "  </UnstructuredGrid>\n";
+    out << "</VTKFile>\n";
+
+    out.close();
+}
+
+void export_vtp_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapshot3D& snap, const std::string& format) {
+    std::ofstream out(filename);
+    if (!out) return;
+
+    int num_points = snap.num_particles;
+    int num_cells = num_points;
+    if (num_points <= 0) return;
+
+    std::vector<int32_t> connectivity(num_cells);
+    std::vector<int32_t> offsets(num_cells);
+    for (int i = 0; i < num_cells; ++i) {
+        connectivity[i] = i;
+        offsets[i] = i + 1;
+    }
+
+    std::string points_encoded, conn_encoded, off_encoded;
+    std::string vel_encoded, vm_encoded, p_encoded, ep_encoded, dmg_encoded, temp_encoded, obj_encoded, mat_encoded;
+
+    if (format != "ASCII") {
+        #pragma omp parallel sections
+        {
+            #pragma omp section
+            { points_encoded = binary_encode(snap.points); }
+            #pragma omp section
+            { conn_encoded = binary_encode(connectivity); }
+            #pragma omp section
+            { off_encoded = binary_encode(offsets); }
+            #pragma omp section
+            { if (snap.has_vel && !snap.vel.empty()) vel_encoded = binary_encode(snap.vel); }
+            #pragma omp section
+            { if (snap.has_stress && !snap.von_mises.empty()) vm_encoded = binary_encode(snap.von_mises); }
+            #pragma omp section
+            { if ((snap.has_stress || snap.has_pressure) && !snap.pressure.empty()) p_encoded = binary_encode(snap.pressure); }
+            #pragma omp section
+            { if (snap.has_strain && !snap.ep_bar.empty()) ep_encoded = binary_encode(snap.ep_bar); }
+            #pragma omp section
+            { if (snap.has_damage && !snap.damage.empty()) dmg_encoded = binary_encode(snap.damage); }
+            #pragma omp section
+            { if (snap.has_temp && !snap.temp.empty()) temp_encoded = binary_encode(snap.temp); }
+            #pragma omp section
+            { if (!snap.obj_id.empty()) obj_encoded = binary_encode(snap.obj_id); }
+            #pragma omp section
+            { if (snap.has_material_id && !snap.material_id.empty()) mat_encoded = binary_encode(snap.material_id); }
+        }
+    }
+
+    out << "<?xml version=\"1.0\"?>\n";
+    if (format == "ASCII") {
+        out << "<VTKFile type=\"PolyData\" version=\"0.1\" byte_order=\"LittleEndian\">\n";
+    } else {
+        out << "<VTKFile type=\"PolyData\" version=\"0.1\" byte_order=\"LittleEndian\" header_type=\"UInt32\" compressor=\"vtkZLibDataCompressor\">\n";
+    }
+    out << "  <PolyData>\n";
+    out << "    <Piece NumberOfPoints=\"" << num_points << "\" NumberOfVerts=\"" << num_cells << "\" NumberOfLines=\"0\" NumberOfStrips=\"0\" NumberOfPolys=\"0\">\n";
+
+    out << "      <Points>\n";
+    if (format == "ASCII") {
+        out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"ascii\">\n          ";
+        for (float v : snap.points) out << v << " ";
+        out << "\n        </DataArray>\n";
+    } else {
+        out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"binary\">\n          " << points_encoded << "\n        </DataArray>\n";
+    }
+    out << "      </Points>\n";
+
+    out << "      <Verts>\n";
+    if (format == "ASCII") {
+        out << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">\n          ";
+        for (int32_t v : connectivity) out << v << " ";
+        out << "\n        </DataArray>\n";
+        out << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">\n          ";
+        for (int32_t v : offsets) out << v << " ";
+        out << "\n        </DataArray>\n";
+    } else {
+        out << "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"binary\">\n          " << conn_encoded << "\n        </DataArray>\n";
+        out << "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"binary\">\n          " << off_encoded << "\n        </DataArray>\n";
+    }
+    out << "      </Verts>\n";
+
+    out << "      <PointData>\n";
+    auto writePointData = [&](const std::string& name, const std::vector<float>& data, const std::string& encoded, int num_comp = 1) {
+        if (data.empty()) return;
+        if (format == "ASCII") {
+            out << "        <DataArray type=\"Float32\" Name=\"" << name << "\"";
+            if (num_comp > 1) out << " NumberOfComponents=\"" << num_comp << "\"";
+            out << " format=\"ascii\">\n          ";
+            for (float v : data) out << v << " ";
+            out << "\n        </DataArray>\n";
+        } else {
+            out << "        <DataArray type=\"Float32\" Name=\"" << name << "\"";
+            if (num_comp > 1) out << " NumberOfComponents=\"" << num_comp << "\"";
+            out << " format=\"binary\">\n          " << encoded << "\n        </DataArray>\n";
+        }
+    };
+
+    if (snap.has_vel) writePointData("Velocity", snap.vel, vel_encoded, 3);
+    if (snap.has_stress) {
+        writePointData("von_Mises_Stress", snap.von_mises, vm_encoded, 1);
+    }
+    if (snap.has_stress || snap.has_pressure) {
+        writePointData("Hydrostatic_Pressure", snap.pressure, p_encoded, 1);
+        writePointData("Pressure", snap.pressure, p_encoded, 1);
+    }
+    if (snap.has_strain) writePointData("Plastic_Strain", snap.ep_bar, ep_encoded, 1);
+    if (snap.has_damage) writePointData("Damage", snap.damage, dmg_encoded, 1);
+    if (snap.has_temp) writePointData("Temperature", snap.temp, temp_encoded, 1);
+    writePointData("ObjectID", snap.obj_id, obj_encoded, 1);
+    if (snap.has_material_id && !snap.material_id.empty()) writePointData("Material_ID", snap.material_id, mat_encoded, 1);
+
+    out << "      </PointData>\n";
+    out << "    </Piece>\n";
+    out << "  </PolyData>\n";
     out << "</VTKFile>\n";
 
     out.close();
@@ -1251,6 +1527,27 @@ void append_pvd_timestep(const std::string& pvd_filename, double sim_time, const
     out << "  </Collection>\n";
     out << "</VTKFile>\n";
     out.close();
+}
+
+void export_vtm_multiblock(const std::string& vtm_filename, const std::vector<MultiBlockEntry>& blocks) {
+    std::ofstream out(vtm_filename);
+    if (!out) return;
+
+    out << "<?xml version=\"1.0\"?>\n";
+    out << "<VTKFile type=\"vtkMultiBlockDataSet\" version=\"1.0\" byte_order=\"LittleEndian\">\n";
+    out << "  <vtkMultiBlockDataSet>\n";
+    for (const auto& b : blocks) {
+        out << "    <Block index=\"" << b.index << "\" name=\"" << b.name << "\">\n";
+        out << "      <DataSet index=\"0\" file=\"" << b.relative_filepath << "\"/>\n";
+        out << "    </Block>\n";
+    }
+    out << "  </vtkMultiBlockDataSet>\n";
+    out << "</VTKFile>\n";
+    out.close();
+}
+
+void append_pvd_multiblock_timestep(const std::string& pvd_filename, double sim_time, const std::string& relative_vtm_path, const std::string& part) {
+    append_pvd_timestep(pvd_filename, sim_time, relative_vtm_path, part);
 }
 
 struct StaticMeshCache {

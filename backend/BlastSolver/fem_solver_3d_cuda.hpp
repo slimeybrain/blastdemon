@@ -122,6 +122,16 @@ void launch_fem_update_surface_facets_kernel_3d(
 );
 
 template <typename T>
+struct alignas(32) LBVHNode3D {
+    T aabb_min[3];
+    int left_child;  // >= 0: internal node index; < 0: leaf node (~left_child is sorted facet index)
+    T aabb_max[3];
+    int right_child; // >= 0: internal node index; < 0: leaf node (~right_child is sorted facet index)
+    int parent;
+    int is_leaf;
+};
+
+template <typename T>
 void launch_fem_contact_forces_kernel_3d(
     FEMNode3D<T>* d_nodes,
     int num_nodes,
@@ -136,6 +146,21 @@ void launch_fem_contact_forces_kernel_3d(
     int max_parts,
     const T* d_node_normals,
     const MaterialTable3D* d_materials,
+    FEMContactSearchMethod search_method,
+    int* d_cell_counts,
+    int* d_cell_facet_ids,
+    uint32_t table_size,
+    T base_cell_size,
+    uint32_t* d_morton_codes,
+    uint32_t* d_morton_codes_alt,
+    int* d_sorted_facet_ids,
+    int* d_facet_indices_in,
+    LBVHNode3D<T>* d_bvh_nodes,
+    int* d_bvh_leaf_parents,
+    int* d_bvh_flags,
+    void* d_bvh_temp_storage,
+    size_t& bvh_temp_storage_bytes,
+    T xmin, T xmax, T ymin, T ymax, T zmin, T zmax,
     T contact_penalty_scale,
     T mu_static,
     T mu_kinetic,
@@ -166,6 +191,15 @@ void launch_fem_mpm_debris_contact_kernel_3d(
     T mu_kinetic,
     T contact_damping,
     T dt,
+    cudaStream_t stream
+);
+
+template <typename T>
+void launch_fem_lysmer_dashpots_kernel_3d(
+    FEMNode3D<T>* d_nodes,
+    const FEMFacet3D<T>* d_facets,
+    int num_facets,
+    const LysmerBoundaryParams& params,
     cudaStream_t stream
 );
 
@@ -203,6 +237,8 @@ public:
     void setContactPenaltyScale(T scale) { m_cpu_solver.setContactPenaltyScale(scale); }
     void setContactDamping(T damping) { m_cpu_solver.setContactDamping(damping); }
     void setFrictionCoefficients(T mu_s, T mu_k) { m_cpu_solver.setFrictionCoefficients(mu_s, mu_k); }
+    void setContactSearchMethod(FEMContactSearchMethod method) { m_cpu_solver.setContactSearchMethod(method); }
+    FEMContactSearchMethod getContactSearchMethod() const { return m_cpu_solver.getContactSearchMethod(); }
 
     void createStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, const std::string& bc = "Free") {
         m_cpu_solver.createStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, mat, bc);
@@ -224,6 +260,11 @@ public:
         syncToDevice();
     }
 
+    void setNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const std::vector<MaterialTable3D>& materials) {
+        m_cpu_solver.setNodesAndElements(nodes, elements, materials);
+        syncToDevice();
+    }
+
     void appendNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const MaterialTable3D& mat) {
         m_cpu_solver.appendNodesAndElements(nodes, elements, mat);
         syncToDevice();
@@ -232,6 +273,10 @@ public:
     void setNodeFixed(int node_idx, bool fix_x, bool fix_y, bool fix_z) {
         m_cpu_solver.setNodeFixed(node_idx, fix_x, fix_y, fix_z);
         if (m_d_nodes) syncToDevice();
+    }
+
+    int addNode(T x, T y, T z, T mass = static_cast<T>(1.0f)) {
+        return m_cpu_solver.addNode(x, y, z, mass);
     }
 
     void addTruss(int n1, int n2, T area, const MaterialTable3D& mat, T failure_strain = static_cast<T>(0.20f), int64_t lsdyna_id = -1) {
@@ -248,11 +293,17 @@ public:
     std::vector<FEMBeam3DElement<T>>& getBeams() { return m_cpu_solver.getBeams(); }
     const std::vector<FEMBeam3DElement<T>>& getBeams() const { return m_cpu_solver.getBeams(); }
 
+    const std::vector<MaterialTable3D>& getMaterialTables() const { return m_cpu_solver.getMaterialTables(); }
+    std::vector<MaterialTable3D>& getMaterialTables() { return m_cpu_solver.getMaterialTables(); }
+
     void syncToDevice();
     void syncToHost() const;
 
     void step(T cfl = 0.6f);
     void stepWithDt(T dt);
+
+    void setLysmerParams(const LysmerBoundaryParams& params) { m_cpu_solver.setLysmerParams(params); }
+    const LysmerBoundaryParams& getLysmerParams() const { return m_cpu_solver.getLysmerParams(); }
 
     std::vector<FEMNode3D<T>>& getNodes() { syncToHost(); return m_cpu_solver.getNodes(); }
     const std::vector<FEMNode3D<T>>& getNodes() const { syncToHost(); return m_cpu_solver.getNodes(); }
@@ -276,6 +327,7 @@ public:
     const FEMNode3D<T>* getNodesDevice() const { return m_d_nodes; }
 
     void extractTelemetry(std::vector<float>& h_node_data, std::vector<float>& h_facet_data) const;
+    size_t getAllocatedVRAM() const;
 
     T getSimTime() const { return m_sim_time; }
     int getStepCount() const { return m_step_count; }
@@ -321,11 +373,27 @@ private:
     int* m_d_erosion_flag{nullptr};
     int* m_h_erosion_flag_pinned{nullptr};
 
-    // GPU Spatial Hash Grid for Contact
+    // GPU Multi-Level Octave Spatial Hash Grid for Contact
+    static constexpr int NUM_OCTAVES{4};
+    static constexpr int MAX_FACETS_PER_CELL{32};
+    size_t m_spatial_grid_capacity{65536};
     int* m_d_cell_counts{nullptr};
     int* m_d_cell_facet_ids{nullptr};
-    size_t m_spatial_grid_capacity{65536};
-    static constexpr int MAX_FACETS_PER_CELL{32};
+
+    // GPU Linear BVH (LBVH with 30-Bit Morton Codes)
+    uint32_t* m_d_bvh_morton_codes{nullptr};
+    uint32_t* m_d_bvh_morton_codes_alt{nullptr};
+    int* m_d_bvh_sorted_facet_ids{nullptr};
+    int* m_d_bvh_facet_indices_in{nullptr};
+    LBVHNode3D<T>* m_d_bvh_nodes{nullptr};
+    int* m_d_bvh_leaf_parents{nullptr};
+    int* m_d_bvh_flags{nullptr};
+    void* m_d_bvh_temp_storage{nullptr};
+    size_t m_bvh_temp_storage_bytes{0};
+    size_t m_allocated_bvh_facets{0};
+    T m_bbox_min[3]{static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
+    T m_bbox_max[3]{static_cast<T>(1), static_cast<T>(1), static_cast<T>(1)};
+    T m_base_cell_size{static_cast<T>(0.005f)};
 
     // GPU Direct Telemetry Extraction Buffers
     mutable float* m_d_telemetry_nodes{nullptr};

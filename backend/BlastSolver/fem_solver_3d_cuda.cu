@@ -1,7 +1,10 @@
 #include "fem_solver_3d_cuda.hpp"
 #include "fem_contact_3d.hpp"
 #include "constitutive_concrete_models.hpp"
+#include "cfd_eos_water.hpp"
 #include "mpm_solver_3d_cuda.hpp"
+#include "materials/ConstitutiveGeomaterials.hpp"
+#include <cub/cub.cuh>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <cmath>
@@ -437,9 +440,23 @@ __global__ void fem_element_forces_kernel_3d_device(
             if (fabs(vol_strain_g) < static_cast<T>(1.0e-6f)) {
                 vol_strain_g = static_cast<T>(0.0f);
             }
-            // Mie-Grueneisen Shock EOS Hydrostatic Pressure
+            // Mie-Grueneisen Shock EOS or Tait Water Hydrostatic Pressure
             T p_hydro_g = static_cast<T>(0.0f);
-            if (mat.mg_c0 > static_cast<T>(0.0f) && mat.mg_gamma0 > static_cast<T>(0.0f)) {
+            if (mat.material_model == MPMMaterialModel::TaitWater) {
+                T J_elem = (elem.V > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f))
+                         ? (elem.V / elem.V0) : static_cast<T>(1.0f);
+                T rho_elem = static_cast<T>(mat.tait_rho0) / (J_elem > static_cast<T>(0.05f) ? J_elem : static_cast<T>(0.05f));
+                T temp_val = (gp_hist_ptr ? gp_hist_ptr->temp_gp[g] : static_cast<T>(293.15f));
+                T e_elem = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 4184.0f) * (temp_val - static_cast<T>(mat.T_room > 0.0f ? mat.T_room : 293.15f));
+                if (mat.tait_variant == 1) { // Caloric
+                    p_hydro_g = Blast::TaitEOSWater::compute_pressure_caloric(rho_elem, e_elem, static_cast<T>(mat.tait_B), static_cast<T>(mat.tait_gamma), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_gruneisen), static_cast<T>(mat.tait_p_cav));
+                } else if (mat.tait_variant == 2) { // Shock Hugoniot
+                    p_hydro_g = Blast::TaitEOSWater::compute_pressure_hugoniot(rho_elem, e_elem, static_cast<T>(mat.tait_c0), static_cast<T>(1.75), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_gruneisen), static_cast<T>(mat.tait_p_cav));
+                } else { // Isentropic
+                    p_hydro_g = Blast::TaitEOSWater::compute_pressure_isentropic(rho_elem, static_cast<T>(mat.tait_B), static_cast<T>(mat.tait_gamma), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_p_cav));
+                }
+                p_hydro_g += q_visc_g;
+            } else if (mat.mg_c0 > static_cast<T>(0.0f) && mat.mg_gamma0 > static_cast<T>(0.0f)) {
                 T c0 = static_cast<T>(mat.mg_c0);
                 T s1 = static_cast<T>(mat.mg_s > 0.0f ? mat.mg_s : 1.49f);
                 T gamma0 = static_cast<T>(mat.mg_gamma0);
@@ -539,8 +556,36 @@ __global__ void fem_element_forces_kernel_3d_device(
                     gp_hist_ptr->lambda_gp[g] = cscm_state.kappa;
                     gp_hist_ptr->ep_bar_gp[g] = cscm_state.ep_bar;
                     p_hydro_g = cscm_state.p_hydro;
-                } else if (mat.material_model == MPMMaterialModel::LinearElastic) {
-                    // Pure Hookean linear elasticity - no plastic yielding
+                } else if (mat.material_model == MPMMaterialModel::DruckerPragerSoil) {
+                    Blast::Materials::DruckerPragerParams<T> dp_p;
+                    dp_p.cohesion = static_cast<T>(mat.dp_cohesion);
+                    dp_p.friction_angle = static_cast<T>(mat.dp_friction_angle * 3.14159265358979323846 / 180.0);
+                    dp_p.dilatancy_angle = static_cast<T>(mat.dp_dilatancy_angle * 3.14159265358979323846 / 180.0);
+                    dp_p.tensile_cutoff = static_cast<T>(mat.dp_tensile_cutoff);
+                    dp_p.H_plastic = static_cast<T>(mat.dp_hardening_modulus);
+
+                    T d_eps_g[3][3];
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            d_eps_g[r][c] = d_dev_g[r][c] * dt + (r == c ? static_cast<T>(1.0 / 3.0) * div_v_g * dt : static_cast<T>(0.0));
+                        }
+                    }
+                    T ep_bar_val = gp_hist_ptr->ep_bar_gp[g];
+                    Blast::Materials::update_constitutive_drucker_prager<T>(
+                        E, nu, dp_p, d_eps_g, gp_hist_ptr->s_dev_gp[g], p_hydro_g, ep_bar_val, false
+                    );
+                    gp_hist_ptr->ep_bar_gp[g] = ep_bar_val;
+                    gp_hist_ptr->damage_gp[g] = fmin(static_cast<T>(1.0), ep_bar_val / static_cast<T>(0.05));
+                } else if (mat.material_model == MPMMaterialModel::LinearElastic || mat.material_model == MPMMaterialModel::TaitWater) {
+                    // Pure Hookean linear elasticity or Tait fluid - no plastic yielding
+                    if (mat.material_model == MPMMaterialModel::TaitWater) {
+                        T mu_fluid = static_cast<T>(mat.tait_viscosity > 0.0f ? mat.tait_viscosity : 1.002e-3f);
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                gp_hist_ptr->s_dev_gp[g][r][c] = static_cast<T>(2.0f) * mu_fluid * d_dev_g[r][c];
+                            }
+                        }
+                    }
                 } else {
                     T s_norm_g = sqrt(
                         gp_hist_ptr->s_dev_gp[g][0][0]*gp_hist_ptr->s_dev_gp[g][0][0] + gp_hist_ptr->s_dev_gp[g][1][1]*gp_hist_ptr->s_dev_gp[g][1][1] + gp_hist_ptr->s_dev_gp[g][2][2]*gp_hist_ptr->s_dev_gp[g][2][2] +
@@ -848,9 +893,22 @@ __global__ void fem_element_forces_kernel_3d_device(
     if (fabs(vol_strain) < static_cast<T>(1.0e-6f)) {
         vol_strain = static_cast<T>(0.0f);
     }
-    // Mie-Grueneisen Shock EOS Hydrostatic Pressure
+    // Mie-Grueneisen Shock EOS or Tait Water Hydrostatic Pressure
     T p_hydro = static_cast<T>(0.0f);
-    if (mat.mg_c0 > static_cast<T>(0.0f) && mat.mg_gamma0 > static_cast<T>(0.0f)) {
+    if (mat.material_model == MPMMaterialModel::TaitWater) {
+        T J_elem = (elem.V > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f))
+                 ? (elem.V / elem.V0) : static_cast<T>(1.0f);
+        T rho_elem = static_cast<T>(mat.tait_rho0) / (J_elem > static_cast<T>(0.05f) ? J_elem : static_cast<T>(0.05f));
+        T e_elem = static_cast<T>(mat.Cp > 0.0f ? mat.Cp : 4184.0f) * (elem.temperature - static_cast<T>(mat.T_room > 0.0f ? mat.T_room : 293.15f));
+        if (mat.tait_variant == 1) { // Caloric
+            p_hydro = Blast::TaitEOSWater::compute_pressure_caloric(rho_elem, e_elem, static_cast<T>(mat.tait_B), static_cast<T>(mat.tait_gamma), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_gruneisen), static_cast<T>(mat.tait_p_cav));
+        } else if (mat.tait_variant == 2) { // Shock Hugoniot
+            p_hydro = Blast::TaitEOSWater::compute_pressure_hugoniot(rho_elem, e_elem, static_cast<T>(mat.tait_c0), static_cast<T>(1.75), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_gruneisen), static_cast<T>(mat.tait_p_cav));
+        } else { // Isentropic
+            p_hydro = Blast::TaitEOSWater::compute_pressure_isentropic(rho_elem, static_cast<T>(mat.tait_B), static_cast<T>(mat.tait_gamma), static_cast<T>(mat.tait_rho0), static_cast<T>(mat.tait_p_cav));
+        }
+        p_hydro += q_visc;
+    } else if (mat.mg_c0 > static_cast<T>(0.0f) && mat.mg_gamma0 > static_cast<T>(0.0f)) {
         T c0 = static_cast<T>(mat.mg_c0);
         T s1 = static_cast<T>(mat.mg_s > 0.0f ? mat.mg_s : 1.49f);
         T gamma0 = static_cast<T>(mat.mg_gamma0);
@@ -947,8 +1005,36 @@ __global__ void fem_element_forces_kernel_3d_device(
         elem.lambda = cscm_state.kappa;
         elem.ep_bar = cscm_state.ep_bar;
         p_hydro = cscm_state.p_hydro;
-    } else if (mat.material_model == MPMMaterialModel::LinearElastic) {
-        // Pure Hookean linear elasticity - no plastic yielding
+    } else if (mat.material_model == MPMMaterialModel::DruckerPragerSoil) {
+        Blast::Materials::DruckerPragerParams<T> dp_p;
+        dp_p.cohesion = static_cast<T>(mat.dp_cohesion);
+        dp_p.friction_angle = static_cast<T>(mat.dp_friction_angle * 3.14159265358979323846 / 180.0);
+        dp_p.dilatancy_angle = static_cast<T>(mat.dp_dilatancy_angle * 3.14159265358979323846 / 180.0);
+        dp_p.tensile_cutoff = static_cast<T>(mat.dp_tensile_cutoff);
+        dp_p.H_plastic = static_cast<T>(mat.dp_hardening_modulus);
+
+        T d_eps_elem[3][3];
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                d_eps_elem[r][c] = d_dev[r][c] * dt + (r == c ? static_cast<T>(1.0 / 3.0) * div_v * dt : static_cast<T>(0.0));
+            }
+        }
+        T ep_bar_val = elem.ep_bar;
+        Blast::Materials::update_constitutive_drucker_prager<T>(
+            E, nu, dp_p, d_eps_elem, elem.s_dev, p_hydro, ep_bar_val, false
+        );
+        elem.ep_bar = ep_bar_val;
+        elem.damage = fmin(static_cast<T>(1.0), ep_bar_val / static_cast<T>(0.05));
+    } else if (mat.material_model == MPMMaterialModel::LinearElastic || mat.material_model == MPMMaterialModel::TaitWater) {
+        // Pure Hookean linear elasticity or Tait fluid - no plastic yielding
+        if (mat.material_model == MPMMaterialModel::TaitWater) {
+            T mu_fluid = static_cast<T>(mat.tait_viscosity > 0.0f ? mat.tait_viscosity : 1.002e-3f);
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    elem.s_dev[r][c] = static_cast<T>(2.0f) * mu_fluid * d_dev[r][c];
+                }
+            }
+        }
     } else {
         T s_norm = sqrt(
             elem.s_dev[0][0]*elem.s_dev[0][0] + elem.s_dev[1][1]*elem.s_dev[1][1] + elem.s_dev[2][2]*elem.s_dev[2][2] +
@@ -1201,10 +1287,22 @@ __global__ void fem_initial_timestep_erosion_kernel_3d_device(
         }
     }
 
-    if (mat.enable_strain_erosion || erosion_criteria.enable_strain_erosion || mat.failure_strain > 0.0f || mat.erosion_strain > 0.0f || erosion_criteria.failure_strain > 0.0f) {
-        T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : erosion_criteria.failure_strain));
-        if (fail_strain > static_cast<T>(0.0f) && elem.ep_bar >= fail_strain) {
+    bool is_concrete = (mat.material_model == MPMMaterialModel::RHTConcrete ||
+                        mat.material_model == MPMMaterialModel::KCConcrete ||
+                        mat.material_model == MPMMaterialModel::CSCMConcrete);
+
+    if (is_concrete) {
+        T conc_erosion_strain = static_cast<T>((mat.erosion_strain >= 0.02f) ? mat.erosion_strain : (erosion_criteria.failure_strain >= 0.02f ? erosion_criteria.failure_strain : 0.10f));
+        bool damage_saturated = (elem.damage >= static_cast<T>(0.95f));
+        if (damage_saturated && elem.ep_bar >= conc_erosion_strain) {
             newly_eroded = true;
+        }
+    } else {
+        if (mat.enable_strain_erosion || erosion_criteria.enable_strain_erosion || mat.failure_strain > 0.0f || mat.erosion_strain > 0.0f || erosion_criteria.failure_strain > 0.0f) {
+            T fail_strain = static_cast<T>(mat.erosion_strain > 0.0f ? mat.erosion_strain : (mat.failure_strain > 0.0f ? mat.failure_strain : erosion_criteria.failure_strain));
+            if (fail_strain > static_cast<T>(0.0f) && elem.ep_bar >= fail_strain) {
+                newly_eroded = true;
+            }
         }
     }
 
@@ -1212,7 +1310,9 @@ __global__ void fem_initial_timestep_erosion_kernel_3d_device(
         T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
         T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : erosion_criteria.tensile_failure_stress));
         if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
-            newly_eroded = true;
+            if (!is_concrete || elem.damage >= static_cast<T>(0.95f)) {
+                newly_eroded = true;
+            }
         }
     }
 
@@ -1465,20 +1565,29 @@ __global__ void fem_extract_facet_telemetry_kernel_3d_device(
     int elem_idx = facet.element_id;
     if (elem_idx >= 0 && elem_idx < num_elements) {
         const auto& elem = d_elements[elem_idx];
-        if (!elem.is_eroded) {
-            float s00 = static_cast<float>(elem.sigma[0][0]);
-            float s11 = static_cast<float>(elem.sigma[1][1]);
-            float s22 = static_cast<float>(elem.sigma[2][2]);
-            float s01 = static_cast<float>(elem.sigma[0][1]);
-            float s02 = static_cast<float>(elem.sigma[0][2]);
-            float s12 = static_cast<float>(elem.sigma[1][2]);
-            press = -(s00 + s11 + s22) / 3.0f;
-            float dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
-            float vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0f * (s01 * s01 + s02 * s02 + s12 * s12);
-            vm = sqrtf(fmaxf(0.0f, 1.5f * vm_sq));
-            ep = static_cast<float>(elem.ep_bar);
-            dmg = static_cast<float>(elem.damage);
+        if (elem.is_eroded) {
+            d_facet_out[f * 8 + 0] = -1.0f;
+            d_facet_out[f * 8 + 1] = -1.0f;
+            d_facet_out[f * 8 + 2] = -1.0f;
+            d_facet_out[f * 8 + 3] = -1.0f;
+            d_facet_out[f * 8 + 4] = 0.0f;
+            d_facet_out[f * 8 + 5] = 0.0f;
+            d_facet_out[f * 8 + 6] = 0.0f;
+            d_facet_out[f * 8 + 7] = -1.0f;
+            return;
         }
+        float s00 = static_cast<float>(elem.sigma[0][0]);
+        float s11 = static_cast<float>(elem.sigma[1][1]);
+        float s22 = static_cast<float>(elem.sigma[2][2]);
+        float s01 = static_cast<float>(elem.sigma[0][1]);
+        float s02 = static_cast<float>(elem.sigma[0][2]);
+        float s12 = static_cast<float>(elem.sigma[1][2]);
+        press = -(s00 + s11 + s22) / 3.0f;
+        float dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
+        float vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0f * (s01 * s01 + s02 * s02 + s12 * s12);
+        vm = sqrtf(fmaxf(0.0f, 1.5f * vm_sq));
+        ep = static_cast<float>(elem.ep_bar);
+        dmg = static_cast<float>(elem.damage);
     }
     d_facet_out[f * 8 + 4] = vm;
     d_facet_out[f * 8 + 5] = ep;
@@ -1495,271 +1604,211 @@ __device__ __host__ inline uint32_t hashCoords3D(int cx, int cy, int cz, uint32_
     return h & (table_size - 1);
 }
 
-// CUDA Kernel: Insert surface facet bounding boxes into GPU uniform spatial hash grid
+// Common Contact Physics Helper: Evaluates contact penetration, interface stiffness, spring-damper response, and yield cap
 template <typename T>
-__global__ void fem_build_spatial_hash_grid_kernel_3d_device(
+__device__ inline void fem_evaluate_candidate_facet_contact(
+    int f,
+    int nid,
+    const FEMNode3D<T>& node,
+    int n_part,
+    bool has_node_norm,
+    const T* n_node,
     const FEMFacet3D<T>* d_facets,
     int num_facets,
-    T inv_cell_size,
-    int* d_cell_counts,
-    int* d_cell_facet_ids,
-    uint32_t table_size
+    const FEMNode3D<T>* d_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const MaterialTable3D* d_materials,
+    T K_slave_node,
+    T contact_penalty_scale,
+    T contact_damping,
+    T dt,
+    T& best_f_total,
+    T& best_nx, T& best_ny, T& best_nz,
+    int& best_fid,
+    T best_N[4],
+    T& best_m_pair
 ) {
-    int f = blockIdx.x * blockDim.x + threadIdx.x;
-    if (f >= num_facets) return;
+    if (f < 0 || f >= num_facets) return;
 
     const FEMFacet3D<T>& facet = d_facets[f];
     if (facet.is_eroded) return;
 
-    int min_cx = static_cast<int>(floor(facet.bbox_min[0] * inv_cell_size));
-    int max_cx = static_cast<int>(floor(facet.bbox_max[0] * inv_cell_size));
-    int min_cy = static_cast<int>(floor(facet.bbox_min[1] * inv_cell_size));
-    int max_cy = static_cast<int>(floor(facet.bbox_max[1] * inv_cell_size));
-    int min_cz = static_cast<int>(floor(facet.bbox_min[2] * inv_cell_size));
-    int max_cz = static_cast<int>(floor(facet.bbox_max[2] * inv_cell_size));
+    if (facet.node_ids[0] == nid || facet.node_ids[1] == nid ||
+        facet.node_ids[2] == nid || facet.node_ids[3] == nid) return;
 
-    if (max_cx - min_cx > 2) max_cx = min_cx + 2;
-    if (max_cy - min_cy > 2) max_cy = min_cy + 2;
-    if (max_cz - min_cz > 2) max_cz = min_cz + 2;
-
-    for (int cz = min_cz; cz <= max_cz; ++cz) {
-        for (int cy = min_cy; cy <= max_cy; ++cy) {
-            for (int cx = min_cx; cx <= max_cx; ++cx) {
-                uint32_t bucket = hashCoords3D(cx, cy, cz, table_size);
-                int slot = ::atomicAdd(&d_cell_counts[bucket], 1);
-                if (slot < 32) {
-                    d_cell_facet_ids[bucket * 32 + slot] = f;
-                }
-            }
+    // Contact filtering:
+    // If same part (monolithic self-contact), only opposing faces can contact (dot_norm <= 0.0).
+    // Coplanar / adjacent faces on the same body point outwards in roughly the same direction (dot_norm > 0.0), so skip them.
+    if (n_part >= 0 && facet.part_id >= 0 && n_part == facet.part_id) {
+        if (has_node_norm) {
+            T dot_norm = n_node[0]*facet.normal[0] + n_node[1]*facet.normal[1] + n_node[2]*facet.normal[2];
+            if (dot_norm > static_cast<T>(0.0f)) return;
         }
     }
-}
 
-// CUDA Kernel: Exact Penalty Surface Contact and Coulomb Friction (Direct All-Pairs on GPU)
-template <typename T>
-__global__ void fem_contact_forces_direct_kernel_3d_device(
-    FEMNode3D<T>* d_nodes,
-    int num_nodes,
-    const FEMElement3D<T>* d_elements,
-    int num_elements,
-    const FEMFacet3D<T>* d_facets,
-    int num_facets,
-    const int* d_surface_nodes,
-    int num_surface_nodes,
-    const int* d_node_part_id,
-    const int* d_part_mat_id,
-    int max_parts,
-    const T* d_node_normals,
-    const MaterialTable3D* d_materials,
-    T contact_penalty_scale,
-    T mu_static,
-    T mu_kinetic,
-    T contact_damping,
-    T dt
-) {
-    int sn_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (sn_idx >= num_surface_nodes) return;
+    if (facet.element_id >= 0 && facet.element_id < num_elements) {
+        if (d_elements[facet.element_id].is_eroded) return;
+    }
 
-    int nid = d_surface_nodes[sn_idx];
-    if (nid < 0 || nid >= num_nodes) return;
+    if (node.x[0] < facet.bbox_min[0] || node.x[0] > facet.bbox_max[0] ||
+        node.x[1] < facet.bbox_min[1] || node.x[1] > facet.bbox_max[1] ||
+        node.x[2] < facet.bbox_min[2] || node.x[2] > facet.bbox_max[2]) return;
 
-    FEMNode3D<T>& node = d_nodes[nid];
-    if (node.is_eroded || node.m <= static_cast<T>(1.0e-12f)) return;
+    const auto& n0 = d_nodes[facet.node_ids[0]];
+    const auto& n1 = d_nodes[facet.node_ids[1]];
+    const auto& n2 = d_nodes[facet.node_ids[2]];
+    const auto& n3 = d_nodes[facet.node_ids[3]];
 
-    int n_part = d_node_part_id ? d_node_part_id[nid] : -1;
+    T e1[3] = {n1.x[0] - n0.x[0], n1.x[1] - n0.x[1], n1.x[2] - n0.x[2]};
+    T e3[3] = {n3.x[0] - n0.x[0], n3.x[1] - n0.x[1], n3.x[2] - n0.x[2]};
+    T dx_v0[3] = {node.x[0] - n0.x[0], node.x[1] - n0.x[1], node.x[2] - n0.x[2]};
 
-    T K_slave_node = static_cast<T>(160.0e9f);
-    if (n_part >= 0 && n_part <= max_parts && d_part_mat_id && d_materials) {
-        int mid = d_part_mat_id[n_part];
-        if (mid >= 0) {
+    T len1_sq = e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2];
+    T len3_sq = e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2];
+    T dot_e1_e3 = e1[0]*e3[0] + e1[1]*e3[1] + e1[2]*e3[2];
+
+    T det_tangent = len1_sq * len3_sq - dot_e1_e3 * dot_e1_e3;
+    T u_param = static_cast<T>(0.5f), v_param = static_cast<T>(0.5f);
+
+    if (fabs(det_tangent) > static_cast<T>(1.0e-12f)) {
+        T proj1 = dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2];
+        T proj3 = dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2];
+        T inv_det = static_cast<T>(1.0f) / det_tangent;
+        u_param = (proj1 * len3_sq - proj3 * dot_e1_e3) * inv_det;
+        v_param = (proj3 * len1_sq - proj1 * dot_e1_e3) * inv_det;
+    } else {
+        u_param = (len1_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2]) / len1_sq) : static_cast<T>(0.5f);
+        v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
+    }
+
+    if (u_param < static_cast<T>(-0.05f) || u_param > static_cast<T>(1.05f) ||
+        v_param < static_cast<T>(-0.05f) || v_param > static_cast<T>(1.05f)) return;
+
+    T u_clamped = u_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (u_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : u_param);
+    T v_clamped = v_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (v_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : v_param);
+
+    T N_shape[4] = {
+        (static_cast<T>(1.0f) - u_clamped) * (static_cast<T>(1.0f) - v_clamped),
+        u_clamped * (static_cast<T>(1.0f) - v_clamped),
+        u_clamped * v_clamped,
+        (static_cast<T>(1.0f) - u_clamped) * v_clamped
+    };
+
+    T x_surf[3] = {
+        N_shape[0]*n0.x[0] + N_shape[1]*n1.x[0] + N_shape[2]*n2.x[0] + N_shape[3]*n3.x[0],
+        N_shape[0]*n0.x[1] + N_shape[1]*n1.x[1] + N_shape[2]*n2.x[1] + N_shape[3]*n3.x[1],
+        N_shape[0]*n0.x[2] + N_shape[1]*n1.x[2] + N_shape[2]*n2.x[2] + N_shape[3]*n3.x[2]
+    };
+
+    T contact_normal[3] = {facet.normal[0], facet.normal[1], facet.normal[2]};
+
+    T dx_surf[3] = {node.x[0] - x_surf[0], node.x[1] - x_surf[1], node.x[2] - x_surf[2]};
+    T penetration = -(dx_surf[0]*contact_normal[0] + dx_surf[1]*contact_normal[1] + dx_surf[2]*contact_normal[2]);
+
+    T h_elem = sqrt(facet.area > static_cast<T>(1.0e-24f) ? facet.area : static_cast<T>(1.0e-24f));
+    if (facet.element_id >= 0 && facet.element_id < num_elements) {
+        T elem_V = d_elements[facet.element_id].V;
+        if (elem_V > static_cast<T>(1.0e-30f) && facet.area > static_cast<T>(1.0e-24f)) {
+            h_elem = elem_V / facet.area;
+        }
+    }
+    T max_penetration = static_cast<T>(0.35f) * h_elem;
+
+    // Tangential offset check
+    T dx_t0 = dx_surf[0] + penetration * contact_normal[0];
+    T dx_t1 = dx_surf[1] + penetration * contact_normal[1];
+    T dx_t2 = dx_surf[2] + penetration * contact_normal[2];
+    T d_tangent_sq = dx_t0*dx_t0 + dx_t1*dx_t1 + dx_t2*dx_t2;
+    if (d_tangent_sq > static_cast<T>(0.04f) * h_elem * h_elem) return;
+
+    if (penetration > static_cast<T>(0.0f) && penetration <= max_penetration) {
+        T eff_penetration = (penetration < static_cast<T>(0.30f) * h_elem) ? penetration : static_cast<T>(0.30f) * h_elem;
+
+        T K_master = static_cast<T>(160.0e9f);
+        if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
+            int mid = d_elements[facet.element_id].mat_id;
             const MaterialTable3D& mat = d_materials[mid];
             T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
             T nu = static_cast<T>(mat.poissons_ratio);
             T denom = static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu;
             if (fabs(denom) > static_cast<T>(1.0e-4f)) {
-                K_slave_node = E / (static_cast<T>(3.0f) * denom);
+                K_master = E / (static_cast<T>(3.0f) * denom);
             }
+        }
+
+        T K_slave = K_slave_node;
+        T K_interface = (static_cast<T>(2.0f) * K_master * K_slave) / (K_master + K_slave + static_cast<T>(1.0e-30f));
+
+        T m_facet_avg = static_cast<T>(0.25f) * (n0.m + n1.m + n2.m + n3.m);
+        T m_sum = node.m + m_facet_avg;
+        T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (node.m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
+
+        T dt_safe = (dt > static_cast<T>(1.0e-12f)) ? dt : static_cast<T>(1.0e-12f);
+        T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
+        T k_geom = (static_cast<T>(0.10f) * K_interface) * h_elem;
+        T k_base = (k_geom < k_dyn) ? k_geom : k_dyn;
+        T k_stiff = contact_penalty_scale * k_base;
+        if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
+
+        T vf0 = N_shape[0]*n0.v[0] + N_shape[1]*n1.v[0] + N_shape[2]*n2.v[0] + N_shape[3]*n3.v[0];
+        T vf1 = N_shape[0]*n0.v[1] + N_shape[1]*n1.v[1] + N_shape[2]*n2.v[1] + N_shape[3]*n3.v[1];
+        T vf2 = N_shape[0]*n0.v[2] + N_shape[1]*n1.v[2] + N_shape[2]*n2.v[2] + N_shape[3]*n3.v[2];
+        T v_rel_n = (node.v[0] - vf0)*contact_normal[0] + (node.v[1] - vf1)*contact_normal[1] + (node.v[2] - vf2)*contact_normal[2];
+
+        T f_spring = k_stiff * eff_penetration;
+        if (v_rel_n >= static_cast<T>(0.0f)) {
+            f_spring *= static_cast<T>(0.10f); // Suppress static spring push on separating faces
+        }
+
+        T f_damp = static_cast<T>(0.0f);
+        if (v_rel_n < static_cast<T>(0.0f)) {
+            T c = static_cast<T>(2.0f) * contact_damping * sqrt(k_stiff * m_pair);
+            f_damp = -c * v_rel_n;
+        }
+
+        T f_total = f_spring + f_damp;
+        T v_limit = (static_cast<T>(1.5f) * fabs(v_rel_n) > static_cast<T>(1.0f)) ? static_cast<T>(1.5f) * fabs(v_rel_n) : static_cast<T>(1.0f);
+        T f_max = m_pair * v_limit / dt_safe;
+        if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
+            int mid = d_elements[facet.element_id].mat_id;
+            T sigma_y = static_cast<T>(d_materials[mid].yield_stress > 0.0f ? d_materials[mid].yield_stress : 400.0e6f);
+            T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
+            if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
+        }
+        if (f_total > f_max) f_total = f_max;
+
+        if (f_total > best_f_total) {
+            best_f_total = f_total;
+            best_nx = contact_normal[0];
+            best_ny = contact_normal[1];
+            best_nz = contact_normal[2];
+            best_fid = f;
+            best_N[0] = N_shape[0];
+            best_N[1] = N_shape[1];
+            best_N[2] = N_shape[2];
+            best_N[3] = N_shape[3];
+            best_m_pair = m_pair;
         }
     }
+}
 
-    T n_node[3] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
-    bool has_node_norm = false;
-    if (d_node_normals) {
-        T n_len = sqrt(d_node_normals[nid * 3 + 0]*d_node_normals[nid * 3 + 0] +
-                       d_node_normals[nid * 3 + 1]*d_node_normals[nid * 3 + 1] +
-                       d_node_normals[nid * 3 + 2]*d_node_normals[nid * 3 + 2]);
-        if (n_len > static_cast<T>(1.0e-12f)) {
-            n_node[0] = d_node_normals[nid * 3 + 0] / n_len;
-            n_node[1] = d_node_normals[nid * 3 + 1] / n_len;
-            n_node[2] = d_node_normals[nid * 3 + 2] / n_len;
-            has_node_norm = true;
-        }
-    }
-
-    T best_f_total = static_cast<T>(0.0f);
-    T best_nx = static_cast<T>(0.0f), best_ny = static_cast<T>(0.0f), best_nz = static_cast<T>(0.0f);
-    int best_fid = -1;
-    T best_N[4] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
-    T best_m_pair = static_cast<T>(0.0f);
-
-    for (int f = 0; f < num_facets; ++f) {
-        const FEMFacet3D<T>& facet = d_facets[f];
-        if (facet.is_eroded) continue;
-
-        if (facet.node_ids[0] == nid || facet.node_ids[1] == nid ||
-            facet.node_ids[2] == nid || facet.node_ids[3] == nid) continue;
-
-        if (n_part >= 0 && facet.part_id >= 0 && n_part == facet.part_id) continue;
-
-        if (facet.element_id >= 0 && facet.element_id < num_elements) {
-            if (d_elements[facet.element_id].is_eroded) continue;
-            int f_part = d_elements[facet.element_id].part_id;
-            if (n_part >= 0 && f_part >= 0 && n_part == f_part) continue;
-        }
-
-        if (has_node_norm) {
-            T dot_norm = n_node[0]*facet.normal[0] + n_node[1]*facet.normal[1] + n_node[2]*facet.normal[2];
-            if (dot_norm > static_cast<T>(-0.15f)) continue;
-        }
-
-        if (node.x[0] < facet.bbox_min[0] || node.x[0] > facet.bbox_max[0] ||
-            node.x[1] < facet.bbox_min[1] || node.x[1] > facet.bbox_max[1] ||
-            node.x[2] < facet.bbox_min[2] || node.x[2] > facet.bbox_max[2]) continue;
-
-        const auto& n0 = d_nodes[facet.node_ids[0]];
-        const auto& n1 = d_nodes[facet.node_ids[1]];
-        const auto& n2 = d_nodes[facet.node_ids[2]];
-        const auto& n3 = d_nodes[facet.node_ids[3]];
-
-        T e1[3] = {n1.x[0] - n0.x[0], n1.x[1] - n0.x[1], n1.x[2] - n0.x[2]};
-        T e3[3] = {n3.x[0] - n0.x[0], n3.x[1] - n0.x[1], n3.x[2] - n0.x[2]};
-        T dx_v0[3] = {node.x[0] - n0.x[0], node.x[1] - n0.x[1], node.x[2] - n0.x[2]};
-
-        T len1_sq = e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2];
-        T len3_sq = e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2];
-        T dot_e1_e3 = e1[0]*e3[0] + e1[1]*e3[1] + e1[2]*e3[2];
-
-        T det_tangent = len1_sq * len3_sq - dot_e1_e3 * dot_e1_e3;
-        T u_param = static_cast<T>(0.5f), v_param = static_cast<T>(0.5f);
-
-        if (fabs(det_tangent) > static_cast<T>(1.0e-12f)) {
-            T proj1 = dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2];
-            T proj3 = dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2];
-            T inv_det = static_cast<T>(1.0f) / det_tangent;
-            u_param = (proj1 * len3_sq - proj3 * dot_e1_e3) * inv_det;
-            v_param = (proj3 * len1_sq - proj1 * dot_e1_e3) * inv_det;
-        } else {
-            u_param = (len1_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2]) / len1_sq) : static_cast<T>(0.5f);
-            v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
-        }
-
-        if (u_param < static_cast<T>(-0.05f) || u_param > static_cast<T>(1.05f) ||
-            v_param < static_cast<T>(-0.05f) || v_param > static_cast<T>(1.05f)) continue;
-
-        T u_clamped = u_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (u_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : u_param);
-        T v_clamped = v_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (v_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : v_param);
-
-        T N_shape[4] = {
-            (static_cast<T>(1.0f) - u_clamped) * (static_cast<T>(1.0f) - v_clamped),
-            u_clamped * (static_cast<T>(1.0f) - v_clamped),
-            u_clamped * v_clamped,
-            (static_cast<T>(1.0f) - u_clamped) * v_clamped
-        };
-
-        T x_surf[3] = {
-            N_shape[0]*n0.x[0] + N_shape[1]*n1.x[0] + N_shape[2]*n2.x[0] + N_shape[3]*n3.x[0],
-            N_shape[0]*n0.x[1] + N_shape[1]*n1.x[1] + N_shape[2]*n2.x[1] + N_shape[3]*n3.x[1],
-            N_shape[0]*n0.x[2] + N_shape[1]*n1.x[2] + N_shape[2]*n2.x[2] + N_shape[3]*n3.x[2]
-        };
-
-        T contact_normal[3] = {facet.normal[0], facet.normal[1], facet.normal[2]};
-
-        T dx_surf[3] = {node.x[0] - x_surf[0], node.x[1] - x_surf[1], node.x[2] - x_surf[2]};
-        T penetration = -(dx_surf[0]*contact_normal[0] + dx_surf[1]*contact_normal[1] + dx_surf[2]*contact_normal[2]);
-
-        T h_elem = sqrt(facet.area > static_cast<T>(1.0e-24f) ? facet.area : static_cast<T>(1.0e-24f));
-        if (facet.element_id >= 0 && facet.element_id < num_elements) {
-            T elem_V = d_elements[facet.element_id].V;
-            if (elem_V > static_cast<T>(1.0e-30f) && facet.area > static_cast<T>(1.0e-24f)) {
-                h_elem = elem_V / facet.area;
-            }
-        }
-        T max_penetration = static_cast<T>(0.35f) * h_elem;
-
-        // Tangential offset check: Ensure node is physically over the facet and not far off the edge
-        T dx_t0 = dx_surf[0] + penetration * contact_normal[0];
-        T dx_t1 = dx_surf[1] + penetration * contact_normal[1];
-        T dx_t2 = dx_surf[2] + penetration * contact_normal[2];
-        T d_tangent_sq = dx_t0*dx_t0 + dx_t1*dx_t1 + dx_t2*dx_t2;
-        if (d_tangent_sq > static_cast<T>(0.04f) * h_elem * h_elem) continue;
-
-        if (penetration > static_cast<T>(0.0f) && penetration <= max_penetration) {
-            T eff_penetration = (penetration < static_cast<T>(0.30f) * h_elem) ? penetration : static_cast<T>(0.30f) * h_elem;
-
-            T K_master = static_cast<T>(160.0e9f);
-            if (facet.element_id >= 0 && facet.element_id < num_elements) {
-                int mid = d_elements[facet.element_id].mat_id;
-                const MaterialTable3D& mat = d_materials[mid];
-                T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
-                T nu = static_cast<T>(mat.poissons_ratio);
-                T denom = static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu;
-                if (fabs(denom) > static_cast<T>(1.0e-4f)) {
-                    K_master = E / (static_cast<T>(3.0f) * denom);
-                }
-            }
-
-            T K_slave = K_slave_node;
-            T K_interface = (static_cast<T>(2.0f) * K_master * K_slave) / (K_master + K_slave + static_cast<T>(1.0e-30f));
-
-            T m_facet_avg = static_cast<T>(0.25f) * (n0.m + n1.m + n2.m + n3.m);
-            T m_sum = node.m + m_facet_avg;
-            T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (node.m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
-
-            T dt_safe = (dt > static_cast<T>(1.0e-12f)) ? dt : static_cast<T>(1.0e-12f);
-            T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
-            T k_geom = (static_cast<T>(0.10f) * K_interface) * h_elem;
-            T k_base = (k_geom < k_dyn) ? k_geom : k_dyn;
-            T k_stiff = contact_penalty_scale * k_base;
-            if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
-            T f_spring = k_stiff * eff_penetration;
-
-            T vf0 = N_shape[0]*n0.v[0] + N_shape[1]*n1.v[0] + N_shape[2]*n2.v[0] + N_shape[3]*n3.v[0];
-            T vf1 = N_shape[0]*n0.v[1] + N_shape[1]*n1.v[1] + N_shape[2]*n2.v[1] + N_shape[3]*n3.v[1];
-            T vf2 = N_shape[0]*n0.v[2] + N_shape[1]*n1.v[2] + N_shape[2]*n2.v[2] + N_shape[3]*n3.v[2];
-            T v_rel_n = (node.v[0] - vf0)*contact_normal[0] + (node.v[1] - vf1)*contact_normal[1] + (node.v[2] - vf2)*contact_normal[2];
-
-            T f_damp = static_cast<T>(0.0f);
-            if (v_rel_n < static_cast<T>(0.0f)) {
-                T c = static_cast<T>(2.0f) * contact_damping * sqrt(k_stiff * m_pair);
-                f_damp = -c * v_rel_n;
-            }
-
-            T f_total = f_spring + f_damp;
-            T v_limit = (static_cast<T>(1.5f) * fabs(v_rel_n) > static_cast<T>(1.0f)) ? static_cast<T>(1.5f) * fabs(v_rel_n) : static_cast<T>(1.0f);
-            T f_max = m_pair * v_limit / dt_safe;
-            if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
-                int mid = d_elements[facet.element_id].mat_id;
-                T sigma_y = static_cast<T>(d_materials[mid].yield_stress > 0.0f ? d_materials[mid].yield_stress : 400.0e6f);
-                T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
-                if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
-            }
-            if (f_total > f_max) f_total = f_max;
-
-            if (f_total > best_f_total) {
-                best_f_total = f_total;
-                best_nx = contact_normal[0];
-                best_ny = contact_normal[1];
-                best_nz = contact_normal[2];
-                best_fid = f;
-                best_N[0] = N_shape[0];
-                best_N[1] = N_shape[1];
-                best_N[2] = N_shape[2];
-                best_N[3] = N_shape[3];
-                best_m_pair = m_pair;
-            }
-        }
-    }
-
+// Common Contact Physics Helper: Applies final penalty normal force + Coulomb friction to slave node and facet vertices
+template <typename T>
+__device__ inline void fem_apply_contact_response(
+    int best_fid,
+    T best_f_total,
+    T best_nx, T best_ny, T best_nz,
+    const T best_N[4],
+    T best_m_pair,
+    int nid,
+    const FEMNode3D<T>& node,
+    FEMNode3D<T>* d_nodes,
+    const FEMFacet3D<T>* d_facets,
+    T mu_static,
+    T mu_kinetic,
+    T dt
+) {
     if (best_fid >= 0 && best_f_total > static_cast<T>(0.0f)) {
         const FEMFacet3D<T>& facet = d_facets[best_fid];
         const auto& n0 = d_nodes[facet.node_ids[0]];
@@ -1813,6 +1862,481 @@ __global__ void fem_contact_forces_direct_kernel_3d_device(
             atomicAdd(&d_nodes[fnid].f_contact[2], -N_k * f_tot[2]);
         }
     }
+}
+
+// CUDA Kernel: Insert surface facet bounding boxes into multi-level octave spatial hash grid
+template <typename T>
+__global__ void fem_build_octave_hash_grid_kernel_3d_device(
+    const FEMFacet3D<T>* __restrict__ d_facets,
+    int num_facets,
+    T base_cell_size,
+    int* __restrict__ d_cell_counts,
+    int* __restrict__ d_cell_facet_ids,
+    uint32_t table_size
+) {
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= num_facets) return;
+
+    const FEMFacet3D<T>& facet = d_facets[f];
+    if (facet.is_eroded) return;
+
+    T dx = facet.bbox_max[0] - facet.bbox_min[0];
+    T dy = facet.bbox_max[1] - facet.bbox_min[1];
+    T dz = facet.bbox_max[2] - facet.bbox_min[2];
+    T max_d = (dx > dy) ? ((dx > dz) ? dx : dz) : ((dy > dz) ? dy : dz);
+
+    int lvl = 0;
+    if (max_d > base_cell_size * static_cast<T>(4.0f)) lvl = 3;
+    else if (max_d > base_cell_size * static_cast<T>(2.0f)) lvl = 2;
+    else if (max_d > base_cell_size) lvl = 1;
+    else lvl = 0;
+
+    T cell_size = base_cell_size * static_cast<T>(1 << lvl);
+    T inv_cs = static_cast<T>(1.0f) / cell_size;
+
+    int min_cx = static_cast<int>(floor(facet.bbox_min[0] * inv_cs));
+    int max_cx = static_cast<int>(floor(facet.bbox_max[0] * inv_cs));
+    int min_cy = static_cast<int>(floor(facet.bbox_min[1] * inv_cs));
+    int max_cy = static_cast<int>(floor(facet.bbox_max[1] * inv_cs));
+    int min_cz = static_cast<int>(floor(facet.bbox_min[2] * inv_cs));
+    int max_cz = static_cast<int>(floor(facet.bbox_max[2] * inv_cs));
+
+    if (max_cx > min_cx + 1) max_cx = min_cx + 1;
+    if (max_cy > min_cy + 1) max_cy = min_cy + 1;
+    if (max_cz > min_cz + 1) max_cz = min_cz + 1;
+
+    for (int cz = min_cz; cz <= max_cz; ++cz) {
+        for (int cy = min_cy; cy <= max_cy; ++cy) {
+            for (int cx = min_cx; cx <= max_cx; ++cx) {
+                uint32_t bucket = hashCoords3D(cx, cy, cz, table_size) + lvl * table_size;
+                int slot = ::atomicAdd(&d_cell_counts[bucket], 1);
+                if (slot < 32) {
+                    d_cell_facet_ids[bucket * 32 + slot] = f;
+                }
+            }
+        }
+    }
+}
+
+// CUDA Kernel: Penalty Surface Contact and Coulomb Friction using Multi-Level Octave Spatial Hash Grid
+template <typename T>
+__global__ void fem_contact_forces_octave_grid_kernel_3d_device(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const FEMFacet3D<T>* d_facets,
+    int num_facets,
+    const int* d_surface_nodes,
+    int num_surface_nodes,
+    const int* d_node_part_id,
+    const int* d_part_mat_id,
+    int max_parts,
+    const T* d_node_normals,
+    const MaterialTable3D* d_materials,
+    const int* __restrict__ d_cell_counts,
+    const int* __restrict__ d_cell_facet_ids,
+    uint32_t table_size,
+    T base_cell_size,
+    T contact_penalty_scale,
+    T mu_static,
+    T mu_kinetic,
+    T contact_damping,
+    T dt
+) {
+    int sn_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (sn_idx >= num_surface_nodes) return;
+
+    int nid = d_surface_nodes[sn_idx];
+    if (nid < 0 || nid >= num_nodes) return;
+
+    FEMNode3D<T>& node = d_nodes[nid];
+    if (node.is_eroded || node.m <= static_cast<T>(1.0e-12f)) return;
+
+    int n_part = d_node_part_id ? d_node_part_id[nid] : -1;
+
+    T K_slave_node = static_cast<T>(160.0e9f);
+    if (n_part >= 0 && n_part <= max_parts && d_part_mat_id && d_materials) {
+        int mid = d_part_mat_id[n_part];
+        if (mid >= 0) {
+            const MaterialTable3D& mat = d_materials[mid];
+            T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
+            T nu = static_cast<T>(mat.poissons_ratio);
+            T denom = static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu;
+            if (fabs(denom) > static_cast<T>(1.0e-4f)) {
+                K_slave_node = E / (static_cast<T>(3.0f) * denom);
+            }
+        }
+    }
+
+    T n_node[3] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
+    bool has_node_norm = false;
+    if (d_node_normals) {
+        T n_len = sqrt(d_node_normals[nid * 3 + 0]*d_node_normals[nid * 3 + 0] +
+                       d_node_normals[nid * 3 + 1]*d_node_normals[nid * 3 + 1] +
+                       d_node_normals[nid * 3 + 2]*d_node_normals[nid * 3 + 2]);
+        if (n_len > static_cast<T>(1.0e-12f)) {
+            n_node[0] = d_node_normals[nid * 3 + 0] / n_len;
+            n_node[1] = d_node_normals[nid * 3 + 1] / n_len;
+            n_node[2] = d_node_normals[nid * 3 + 2] / n_len;
+            has_node_norm = true;
+        }
+    }
+
+    T best_f_total = static_cast<T>(0.0f);
+    T best_nx = static_cast<T>(0.0f), best_ny = static_cast<T>(0.0f), best_nz = static_cast<T>(0.0f);
+    int best_fid = -1;
+    T best_N[4] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
+    T best_m_pair = static_cast<T>(0.0f);
+
+    // Query 4 octave scale levels
+    for (int lvl = 0; lvl < 4; ++lvl) {
+        T cell_size = base_cell_size * static_cast<T>(1 << lvl);
+        T inv_cs = static_cast<T>(1.0f) / cell_size;
+        int ncx = static_cast<int>(floor(node.x[0] * inv_cs));
+        int ncy = static_cast<int>(floor(node.x[1] * inv_cs));
+        int ncz = static_cast<int>(floor(node.x[2] * inv_cs));
+
+        #pragma unroll 1
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    uint32_t bucket = hashCoords3D(ncx + dx, ncy + dy, ncz + dz, table_size) + lvl * table_size;
+                    int count = d_cell_counts[bucket];
+                    if (count > 32) count = 32;
+
+                    for (int slot = 0; slot < count; ++slot) {
+                        int f = d_cell_facet_ids[bucket * 32 + slot];
+                        fem_evaluate_candidate_facet_contact<T>(
+                            f, nid, node, n_part, has_node_norm, n_node,
+                            d_facets, num_facets, d_nodes, d_elements, num_elements,
+                            d_materials, K_slave_node, contact_penalty_scale, contact_damping,
+                            dt, best_f_total, best_nx, best_ny, best_nz, best_fid, best_N, best_m_pair
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fem_apply_contact_response<T>(
+        best_fid, best_f_total, best_nx, best_ny, best_nz, best_N, best_m_pair,
+        nid, node, d_nodes, d_facets, mu_static, mu_kinetic, dt
+    );
+}
+
+// Morton 30-Bit Code Helper for GPU Linear BVH
+__device__ inline uint32_t expandBits30(uint32_t v) {
+    v = (v * 0x00010001u) & 0xFF0000FFu;
+    v = (v * 0x00000101u) & 0x0F00F00Fu;
+    v = (v * 0x00000011u) & 0xC30C30C3u;
+    v = (v * 0x00000005u) & 0x49249249u;
+    return v;
+}
+
+__device__ inline uint32_t morton3D_30(float x, float y, float z) {
+    x = fminf(fmaxf(x, 0.0f), 1.0f);
+    y = fminf(fmaxf(y, 0.0f), 1.0f);
+    z = fminf(fmaxf(z, 0.0f), 1.0f);
+    uint32_t ix = min(static_cast<uint32_t>(x * 1023.0f), 1023u);
+    uint32_t iy = min(static_cast<uint32_t>(y * 1023.0f), 1023u);
+    uint32_t iz = min(static_cast<uint32_t>(z * 1023.0f), 1023u);
+    return (expandBits30(ix) << 2) | (expandBits30(iy) << 1) | expandBits30(iz);
+}
+
+__device__ inline int longestCommonPrefix(int i, int j, int num_facets, const uint32_t* __restrict__ morton_keys) {
+    if (j < 0 || j >= num_facets) return -1;
+    uint32_t k_i = morton_keys[i];
+    uint32_t k_j = morton_keys[j];
+    if (k_i != k_j) {
+        return __clz(k_i ^ k_j);
+    }
+    return 32 + __clz(static_cast<uint32_t>(i ^ j));
+}
+
+// CUDA Kernel: Compute 30-bit Morton Codes from Facet Centroids
+template <typename T>
+__global__ void fem_compute_morton_codes_kernel_3d_device(
+    const FEMFacet3D<T>* __restrict__ d_facets,
+    int num_facets,
+    T min_x, T min_y, T min_z,
+    T inv_extent_x, T inv_extent_y, T inv_extent_z,
+    uint32_t* __restrict__ d_morton_codes,
+    int* __restrict__ d_facet_indices_in
+) {
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= num_facets) return;
+
+    d_facet_indices_in[f] = f;
+
+    const FEMFacet3D<T>& facet = d_facets[f];
+    if (facet.is_eroded) {
+        d_morton_codes[f] = 0xFFFFFFFFu;
+        return;
+    }
+
+    T cx = static_cast<T>(0.5f) * (facet.bbox_min[0] + facet.bbox_max[0]);
+    T cy = static_cast<T>(0.5f) * (facet.bbox_min[1] + facet.bbox_max[1]);
+    T cz = static_cast<T>(0.5f) * (facet.bbox_min[2] + facet.bbox_max[2]);
+
+    float u = static_cast<float>((cx - min_x) * inv_extent_x);
+    float v = static_cast<float>((cy - min_y) * inv_extent_y);
+    float w = static_cast<float>((cz - min_z) * inv_extent_z);
+
+    d_morton_codes[f] = morton3D_30(u, v, w);
+}
+
+// CUDA Kernel: Construct LBVH Radix Tree (Karras 2012 Parallel Hierarchy)
+template <typename T>
+__global__ void fem_build_lbvh_tree_kernel_3d_device(
+    int num_facets,
+    const uint32_t* __restrict__ morton_keys,
+    LBVHNode3D<T>* __restrict__ nodes,
+    int* __restrict__ leaf_parents
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_facets - 1) return;
+
+    nodes[i].parent = -1;
+    nodes[i].left_child = -1;
+    nodes[i].right_child = -1;
+    nodes[i].is_leaf = 0;
+
+    // Determine direction of range (+1 or -1)
+    int d = (longestCommonPrefix(i, i + 1, num_facets, morton_keys) - longestCommonPrefix(i, i - 1, num_facets, morton_keys) >= 0) ? 1 : -1;
+
+    // Compute upper bound for range length
+    int delta_min = longestCommonPrefix(i, i - d, num_facets, morton_keys);
+    int l_max = 2;
+    while (longestCommonPrefix(i, i + l_max * d, num_facets, morton_keys) > delta_min) {
+        l_max <<= 1;
+    }
+
+    // Find other end of range using binary search
+    int l = 0;
+    for (int t = l_max >> 1; t > 0; t >>= 1) {
+        if (longestCommonPrefix(i, i + (l + t) * d, num_facets, morton_keys) > delta_min) {
+            l += t;
+        }
+    }
+    int j = i + l * d;
+
+    // Find split position using binary search (Karras 2012 ceil divider)
+    int delta_node = longestCommonPrefix(i, j, num_facets, morton_keys);
+    int s = 0;
+    for (int div = 2; ; div *= 2) {
+        int t = (l + div - 1) / div;
+        if (s + t < l && longestCommonPrefix(i, i + (s + t) * d, num_facets, morton_keys) > delta_node) {
+            s += t;
+        }
+        if (t <= 1) break;
+    }
+    int gamma = i + s * d + min(d, 0);
+
+    // Output child pointers
+    int left_child, right_child;
+    int first = min(i, j);
+    int last = max(i, j);
+
+    if (first == gamma) {
+        left_child = ~gamma; // Leaf node (negative index encoding)
+        leaf_parents[gamma] = i;
+    } else {
+        left_child = gamma; // Internal node
+        nodes[gamma].parent = i;
+    }
+
+    if (last == gamma + 1) {
+        right_child = ~(gamma + 1); // Leaf node
+        leaf_parents[gamma + 1] = i;
+    } else {
+        right_child = gamma + 1; // Internal node
+        nodes[gamma + 1].parent = i;
+    }
+
+    nodes[i].left_child = left_child;
+    nodes[i].right_child = right_child;
+    nodes[i].is_leaf = 0;
+}
+
+// CUDA Kernel: Compute Node Bounding Boxes Bottom-Up with Atomic Counters (Karras 2012)
+template <typename T>
+__global__ void fem_build_lbvh_aabbs_kernel_3d_device(
+    int num_facets,
+    const int* __restrict__ sorted_facet_ids,
+    const FEMFacet3D<T>* __restrict__ facets,
+    LBVHNode3D<T>* __restrict__ nodes,
+    const int* __restrict__ leaf_parents,
+    int* __restrict__ node_flags,
+    int* __restrict__ d_root_index
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_facets) return;
+
+    int parent = leaf_parents[idx];
+    while (parent >= 0 && parent < num_facets - 1) {
+        __threadfence();
+        int old = ::atomicAdd(&node_flags[parent], 1);
+        if (old == 0) {
+            // First child to arrive terminates
+            return;
+        }
+
+        // Second child: both children are guaranteed to have completed and fenced their AABBs
+        int left = nodes[parent].left_child;
+        int right = nodes[parent].right_child;
+
+        T min_box[3], max_box[3];
+
+        if (left < 0) {
+            int leaf_id = sorted_facet_ids[~left];
+            const auto& f = facets[leaf_id];
+            min_box[0] = f.bbox_min[0]; min_box[1] = f.bbox_min[1]; min_box[2] = f.bbox_min[2];
+            max_box[0] = f.bbox_max[0]; max_box[1] = f.bbox_max[1]; max_box[2] = f.bbox_max[2];
+        } else {
+            min_box[0] = nodes[left].aabb_min[0]; min_box[1] = nodes[left].aabb_min[1]; min_box[2] = nodes[left].aabb_min[2];
+            max_box[0] = nodes[left].aabb_max[0]; max_box[1] = nodes[left].aabb_max[1]; max_box[2] = nodes[left].aabb_max[2];
+        }
+
+        if (right < 0) {
+            int leaf_id = sorted_facet_ids[~right];
+            const auto& f = facets[leaf_id];
+            min_box[0] = (min_box[0] < f.bbox_min[0]) ? min_box[0] : f.bbox_min[0];
+            min_box[1] = (min_box[1] < f.bbox_min[1]) ? min_box[1] : f.bbox_min[1];
+            min_box[2] = (min_box[2] < f.bbox_min[2]) ? min_box[2] : f.bbox_min[2];
+            max_box[0] = (max_box[0] > f.bbox_max[0]) ? max_box[0] : f.bbox_max[0];
+            max_box[1] = (max_box[1] > f.bbox_max[1]) ? max_box[1] : f.bbox_max[1];
+            max_box[2] = (max_box[2] > f.bbox_max[2]) ? max_box[2] : f.bbox_max[2];
+        } else {
+            min_box[0] = (min_box[0] < nodes[right].aabb_min[0]) ? min_box[0] : nodes[right].aabb_min[0];
+            min_box[1] = (min_box[1] < nodes[right].aabb_min[1]) ? min_box[1] : nodes[right].aabb_min[1];
+            min_box[2] = (min_box[2] < nodes[right].aabb_min[2]) ? min_box[2] : nodes[right].aabb_min[2];
+            max_box[0] = (max_box[0] > nodes[right].aabb_max[0]) ? max_box[0] : nodes[right].aabb_max[0];
+            max_box[1] = (max_box[1] > nodes[right].aabb_max[1]) ? max_box[1] : nodes[right].aabb_max[1];
+            max_box[2] = (max_box[2] > nodes[right].aabb_max[2]) ? max_box[2] : nodes[right].aabb_max[2];
+        }
+
+        nodes[parent].aabb_min[0] = min_box[0];
+        nodes[parent].aabb_min[1] = min_box[1];
+        nodes[parent].aabb_min[2] = min_box[2];
+        nodes[parent].aabb_max[0] = max_box[0];
+        nodes[parent].aabb_max[1] = max_box[1];
+        nodes[parent].aabb_max[2] = max_box[2];
+
+        int next_parent = nodes[parent].parent;
+        if (next_parent < 0) {
+            if (d_root_index) *d_root_index = parent;
+            return;
+        }
+        parent = next_parent;
+    }
+}
+
+// CUDA Kernel: Penalty Surface Contact and Coulomb Friction using GPU Linear BVH
+template <typename T>
+__global__ void fem_contact_forces_lbvh_kernel_3d_device(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const FEMFacet3D<T>* d_facets,
+    int num_facets,
+    const int* d_surface_nodes,
+    int num_surface_nodes,
+    const int* d_node_part_id,
+    const int* d_part_mat_id,
+    int max_parts,
+    const T* d_node_normals,
+    const MaterialTable3D* d_materials,
+    const int* __restrict__ d_sorted_facet_ids,
+    const LBVHNode3D<T>* __restrict__ d_bvh_nodes,
+    const int* __restrict__ d_root_index,
+    T contact_penalty_scale,
+    T mu_static,
+    T mu_kinetic,
+    T contact_damping,
+    T dt
+) {
+    int sn_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (sn_idx >= num_surface_nodes) return;
+
+    int nid = d_surface_nodes[sn_idx];
+    if (nid < 0 || nid >= num_nodes) return;
+
+    FEMNode3D<T>& node = d_nodes[nid];
+    if (node.is_eroded || node.m <= static_cast<T>(1.0e-12f)) return;
+
+    int n_part = d_node_part_id ? d_node_part_id[nid] : -1;
+
+    T K_slave_node = static_cast<T>(160.0e9f);
+    if (n_part >= 0 && n_part <= max_parts && d_part_mat_id && d_materials) {
+        int mid = d_part_mat_id[n_part];
+        if (mid >= 0) {
+            const MaterialTable3D& mat = d_materials[mid];
+            T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
+            T nu = static_cast<T>(mat.poissons_ratio);
+            T denom = static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu;
+            if (fabs(denom) > static_cast<T>(1.0e-4f)) {
+                K_slave_node = E / (static_cast<T>(3.0f) * denom);
+            }
+        }
+    }
+
+    T n_node[3] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
+    bool has_node_norm = false;
+    if (d_node_normals) {
+        T n_len = sqrt(d_node_normals[nid * 3 + 0]*d_node_normals[nid * 3 + 0] +
+                       d_node_normals[nid * 3 + 1]*d_node_normals[nid * 3 + 1] +
+                       d_node_normals[nid * 3 + 2]*d_node_normals[nid * 3 + 2]);
+        if (n_len > static_cast<T>(1.0e-12f)) {
+            n_node[0] = d_node_normals[nid * 3 + 0] / n_len;
+            n_node[1] = d_node_normals[nid * 3 + 1] / n_len;
+            n_node[2] = d_node_normals[nid * 3 + 2] / n_len;
+            has_node_norm = true;
+        }
+    }
+
+    T best_f_total = static_cast<T>(0.0f);
+    T best_nx = static_cast<T>(0.0f), best_ny = static_cast<T>(0.0f), best_nz = static_cast<T>(0.0f);
+    int best_fid = -1;
+    T best_N[4] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
+    T best_m_pair = static_cast<T>(0.0f);
+
+    int root = (d_root_index && *d_root_index >= 0) ? *d_root_index : 0;
+    int stack[64];
+    int stack_ptr = 0;
+    stack[stack_ptr++] = root;
+
+    while (stack_ptr > 0) {
+        int curr = stack[--stack_ptr];
+        if (curr < 0) {
+            int leaf_idx = ~curr;
+            if (leaf_idx >= 0 && leaf_idx < num_facets) {
+                int f = d_sorted_facet_ids[leaf_idx];
+                fem_evaluate_candidate_facet_contact<T>(
+                    f, nid, node, n_part, has_node_norm, n_node,
+                    d_facets, num_facets, d_nodes, d_elements, num_elements,
+                    d_materials, K_slave_node, contact_penalty_scale, contact_damping,
+                    dt, best_f_total, best_nx, best_ny, best_nz, best_fid, best_N, best_m_pair
+                );
+            }
+        } else if (curr < num_facets - 1) {
+            const LBVHNode3D<T>& bvh_node = d_bvh_nodes[curr];
+            if (node.x[0] >= bvh_node.aabb_min[0] && node.x[0] <= bvh_node.aabb_max[0] &&
+                node.x[1] >= bvh_node.aabb_min[1] && node.x[1] <= bvh_node.aabb_max[1] &&
+                node.x[2] >= bvh_node.aabb_min[2] && node.x[2] <= bvh_node.aabb_max[2]) {
+                if (stack_ptr < 62) {
+                    if (bvh_node.right_child != curr) stack[stack_ptr++] = bvh_node.right_child;
+                    if (bvh_node.left_child != curr) stack[stack_ptr++] = bvh_node.left_child;
+                }
+            }
+        }
+    }
+
+    fem_apply_contact_response<T>(
+        best_fid, best_f_total, best_nx, best_ny, best_nz, best_N, best_m_pair,
+        nid, node, d_nodes, d_facets, mu_static, mu_kinetic, dt
+    );
 }
 
 // CUDA Kernel: Penalty Contact between MPM Debris Particles and Intact FEM Facets & Rebars
@@ -2174,311 +2698,7 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
     }
 }
 
-// CUDA Kernel: Penalty Surface Contact and Coulomb Friction using GPU Spatial Hash Grid (O(1) lookups)
-template <typename T>
-__global__ void fem_contact_forces_spatial_grid_kernel_3d_device(
-    FEMNode3D<T>* d_nodes,
-    int num_nodes,
-    const FEMElement3D<T>* d_elements,
-    int num_elements,
-    const FEMFacet3D<T>* d_facets,
-    int num_facets,
-    const int* d_surface_nodes,
-    int num_surface_nodes,
-    const int* d_node_part_id,
-    const int* d_part_mat_id,
-    int max_parts,
-    const T* d_node_normals,
-    const MaterialTable3D* d_materials,
-    const int* d_cell_counts,
-    const int* d_cell_facet_ids,
-    uint32_t table_size,
-    T inv_cell_size,
-    T contact_penalty_scale,
-    T mu_static,
-    T mu_kinetic,
-    T contact_damping,
-    T dt
-) {
-    int sn_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (sn_idx >= num_surface_nodes) return;
 
-    int nid = d_surface_nodes[sn_idx];
-    if (nid < 0 || nid >= num_nodes) return;
-
-    FEMNode3D<T>& node = d_nodes[nid];
-    if (node.is_eroded || node.m <= static_cast<T>(1.0e-12f)) return;
-
-    int n_part = d_node_part_id ? d_node_part_id[nid] : -1;
-
-    T K_slave_node = static_cast<T>(160.0e9f);
-    if (n_part >= 0 && n_part <= max_parts && d_part_mat_id && d_materials) {
-        int mid = d_part_mat_id[n_part];
-        if (mid >= 0) {
-            const MaterialTable3D& mat = d_materials[mid];
-            T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
-            T nu = static_cast<T>(mat.poissons_ratio);
-            T denom = static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu;
-            if (fabs(denom) > static_cast<T>(1.0e-4f)) {
-                K_slave_node = E / (static_cast<T>(3.0f) * denom);
-            }
-        }
-    }
-
-    T n_node[3] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
-    bool has_node_norm = false;
-    if (d_node_normals) {
-        T n_len = sqrt(d_node_normals[nid * 3 + 0]*d_node_normals[nid * 3 + 0] +
-                       d_node_normals[nid * 3 + 1]*d_node_normals[nid * 3 + 1] +
-                       d_node_normals[nid * 3 + 2]*d_node_normals[nid * 3 + 2]);
-        if (n_len > static_cast<T>(1.0e-12f)) {
-            n_node[0] = d_node_normals[nid * 3 + 0] / n_len;
-            n_node[1] = d_node_normals[nid * 3 + 1] / n_len;
-            n_node[2] = d_node_normals[nid * 3 + 2] / n_len;
-            has_node_norm = true;
-        }
-    }
-
-    T best_f_total = static_cast<T>(0.0f);
-    T best_nx = static_cast<T>(0.0f), best_ny = static_cast<T>(0.0f), best_nz = static_cast<T>(0.0f);
-    int best_fid = -1;
-    T best_N[4] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
-    T best_m_pair = static_cast<T>(0.0f);
-
-    int node_cx = static_cast<int>(floor(node.x[0] * inv_cell_size));
-    int node_cy = static_cast<int>(floor(node.x[1] * inv_cell_size));
-    int node_cz = static_cast<int>(floor(node.x[2] * inv_cell_size));
-
-    #pragma unroll 1
-    for (int dz = -1; dz <= 1; ++dz) {
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                uint32_t bucket = hashCoords3D(node_cx + dx, node_cy + dy, node_cz + dz, table_size);
-                int count = d_cell_counts[bucket];
-                if (count > 32) count = 32;
-
-                for (int slot = 0; slot < count; ++slot) {
-                    int f = d_cell_facet_ids[bucket * 32 + slot];
-                    if (f < 0 || f >= num_facets) continue;
-
-                    const FEMFacet3D<T>& facet = d_facets[f];
-                    if (facet.is_eroded) continue;
-
-                    if (facet.node_ids[0] == nid || facet.node_ids[1] == nid ||
-                        facet.node_ids[2] == nid || facet.node_ids[3] == nid) continue;
-
-                    if (n_part >= 0 && facet.part_id >= 0 && n_part == facet.part_id) continue;
-
-                    if (facet.element_id >= 0 && facet.element_id < num_elements) {
-                        if (d_elements[facet.element_id].is_eroded) continue;
-                        int f_part = d_elements[facet.element_id].part_id;
-                        if (n_part >= 0 && f_part >= 0 && n_part == f_part) continue;
-                    }
-
-                    if (has_node_norm) {
-                        T dot_norm = n_node[0]*facet.normal[0] + n_node[1]*facet.normal[1] + n_node[2]*facet.normal[2];
-                        if (dot_norm > static_cast<T>(0.707f)) continue;
-                    }
-
-                    if (node.x[0] < facet.bbox_min[0] || node.x[0] > facet.bbox_max[0] ||
-                        node.x[1] < facet.bbox_min[1] || node.x[1] > facet.bbox_max[1] ||
-                        node.x[2] < facet.bbox_min[2] || node.x[2] > facet.bbox_max[2]) continue;
-
-                    const auto& n0 = d_nodes[facet.node_ids[0]];
-                    const auto& n1 = d_nodes[facet.node_ids[1]];
-                    const auto& n2 = d_nodes[facet.node_ids[2]];
-                    const auto& n3 = d_nodes[facet.node_ids[3]];
-
-                    T e1[3] = {n1.x[0] - n0.x[0], n1.x[1] - n0.x[1], n1.x[2] - n0.x[2]};
-                    T e3[3] = {n3.x[0] - n0.x[0], n3.x[1] - n0.x[1], n3.x[2] - n0.x[2]};
-                    T dx_v0[3] = {node.x[0] - n0.x[0], node.x[1] - n0.x[1], node.x[2] - n0.x[2]};
-
-                    T len1_sq = e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2];
-                    T len3_sq = e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2];
-                    T dot_e1_e3 = e1[0]*e3[0] + e1[1]*e3[1] + e1[2]*e3[2];
-
-                    T det_tangent = len1_sq * len3_sq - dot_e1_e3 * dot_e1_e3;
-                    T u_param = static_cast<T>(0.5f), v_param = static_cast<T>(0.5f);
-
-                    if (fabs(det_tangent) > static_cast<T>(1.0e-12f)) {
-                        T proj1 = dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2];
-                        T proj3 = dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2];
-                        T inv_det = static_cast<T>(1.0f) / det_tangent;
-                        u_param = (proj1 * len3_sq - proj3 * dot_e1_e3) * inv_det;
-                        v_param = (proj3 * len1_sq - proj1 * dot_e1_e3) * inv_det;
-                    } else {
-                        u_param = (len1_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2]) / len1_sq) : static_cast<T>(0.5f);
-                        v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
-                    }
-
-                    if (u_param < static_cast<T>(-0.05f) || u_param > static_cast<T>(1.05f) ||
-                        v_param < static_cast<T>(-0.05f) || v_param > static_cast<T>(1.05f)) continue;
-
-                    T u_clamped = u_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (u_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : u_param);
-                    T v_clamped = v_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (v_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : v_param);
-
-                    T N_shape[4] = {
-                        (static_cast<T>(1.0f) - u_clamped) * (static_cast<T>(1.0f) - v_clamped),
-                        u_clamped * (static_cast<T>(1.0f) - v_clamped),
-                        u_clamped * v_clamped,
-                        (static_cast<T>(1.0f) - u_clamped) * v_clamped
-                    };
-
-                    T x_surf[3] = {
-                        N_shape[0]*n0.x[0] + N_shape[1]*n1.x[0] + N_shape[2]*n2.x[0] + N_shape[3]*n3.x[0],
-                        N_shape[0]*n0.x[1] + N_shape[1]*n1.x[1] + N_shape[2]*n2.x[1] + N_shape[3]*n3.x[1],
-                        N_shape[0]*n0.x[2] + N_shape[1]*n1.x[2] + N_shape[2]*n2.x[2] + N_shape[3]*n3.x[2]
-                    };
-
-                    T contact_normal[3] = {facet.normal[0], facet.normal[1], facet.normal[2]};
-
-                    T dx_surf[3] = {node.x[0] - x_surf[0], node.x[1] - x_surf[1], node.x[2] - x_surf[2]};
-                    T penetration = -(dx_surf[0]*contact_normal[0] + dx_surf[1]*contact_normal[1] + dx_surf[2]*contact_normal[2]);
-
-                    T h_elem = sqrt(facet.area > static_cast<T>(1.0e-24f) ? facet.area : static_cast<T>(1.0e-24f));
-                    if (facet.element_id >= 0 && facet.element_id < num_elements) {
-                        T elem_V = d_elements[facet.element_id].V;
-                        if (elem_V > static_cast<T>(1.0e-30f) && facet.area > static_cast<T>(1.0e-24f)) {
-                            h_elem = elem_V / facet.area;
-                        }
-                    }
-                    T max_penetration = static_cast<T>(0.35f) * h_elem;
-
-                    // Tangential offset check: Ensure node is physically over the facet and not far off the edge
-                    T dx_t0 = dx_surf[0] + penetration * contact_normal[0];
-                    T dx_t1 = dx_surf[1] + penetration * contact_normal[1];
-                    T dx_t2 = dx_surf[2] + penetration * contact_normal[2];
-                    T d_tangent_sq = dx_t0*dx_t0 + dx_t1*dx_t1 + dx_t2*dx_t2;
-                    if (d_tangent_sq > static_cast<T>(0.04f) * h_elem * h_elem) continue;
-
-                    if (penetration > static_cast<T>(0.0f) && penetration <= max_penetration) {
-                        T eff_penetration = (penetration < static_cast<T>(0.30f) * h_elem) ? penetration : static_cast<T>(0.30f) * h_elem;
-
-                        T K_master = static_cast<T>(160.0e9f);
-                        if (facet.element_id >= 0 && facet.element_id < num_elements) {
-                            int mid = d_elements[facet.element_id].mat_id;
-                            const MaterialTable3D& mat = d_materials[mid];
-                            T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
-                            T nu = static_cast<T>(mat.poissons_ratio);
-                            T denom = static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu;
-                            if (fabs(denom) > static_cast<T>(1.0e-4f)) {
-                                K_master = E / (static_cast<T>(3.0f) * denom);
-                            }
-                        }
-
-                        T K_slave = K_slave_node;
-                        T K_interface = (static_cast<T>(2.0f) * K_master * K_slave) / (K_master + K_slave + static_cast<T>(1.0e-30f));
-
-                        T m_facet_avg = static_cast<T>(0.25f) * (n0.m + n1.m + n2.m + n3.m);
-                        T m_sum = node.m + m_facet_avg;
-                        T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (node.m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
-
-                        T dt_safe = (dt > static_cast<T>(1.0e-12f)) ? dt : static_cast<T>(1.0e-12f);
-                        T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
-                        T k_geom = (static_cast<T>(0.10f) * K_interface) * h_elem;
-                        T k_base = (k_geom < k_dyn) ? k_geom : k_dyn;
-                        T k_stiff = contact_penalty_scale * k_base;
-                        if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
-
-                        T vf0 = N_shape[0]*n0.v[0] + N_shape[1]*n1.v[0] + N_shape[2]*n2.v[0] + N_shape[3]*n3.v[0];
-                        T vf1 = N_shape[0]*n0.v[1] + N_shape[1]*n1.v[1] + N_shape[2]*n2.v[1] + N_shape[3]*n3.v[1];
-                        T vf2 = N_shape[0]*n0.v[2] + N_shape[1]*n1.v[2] + N_shape[2]*n2.v[2] + N_shape[3]*n3.v[2];
-                        T v_rel_n = (node.v[0] - vf0)*contact_normal[0] + (node.v[1] - vf1)*contact_normal[1] + (node.v[2] - vf2)*contact_normal[2];
-
-                        T f_spring = k_stiff * eff_penetration;
-                        if (v_rel_n >= static_cast<T>(0.0f)) {
-                            f_spring *= static_cast<T>(0.10f); // Suppress static spring push on separating faces
-                        }
-
-                        T f_damp = static_cast<T>(0.0f);
-                        if (v_rel_n < static_cast<T>(0.0f)) {
-                            T c = static_cast<T>(2.0f) * contact_damping * sqrt(k_stiff * m_pair);
-                            f_damp = -c * v_rel_n;
-                        }
-
-                        T f_total = f_spring + f_damp;
-                        T v_limit = (static_cast<T>(1.5f) * fabs(v_rel_n) > static_cast<T>(1.0f)) ? static_cast<T>(1.5f) * fabs(v_rel_n) : static_cast<T>(1.0f);
-                        T f_max = m_pair * v_limit / dt_safe;
-                        if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
-                            int mid = d_elements[facet.element_id].mat_id;
-                            T sigma_y = static_cast<T>(d_materials[mid].yield_stress > 0.0f ? d_materials[mid].yield_stress : 400.0e6f);
-                            T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
-                            if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
-                        }
-                        if (f_total > f_max) f_total = f_max;
-
-                        if (f_total > best_f_total) {
-                            best_f_total = f_total;
-                            best_nx = contact_normal[0];
-                            best_ny = contact_normal[1];
-                            best_nz = contact_normal[2];
-                            best_fid = f;
-                            best_N[0] = N_shape[0];
-                            best_N[1] = N_shape[1];
-                            best_N[2] = N_shape[2];
-                            best_N[3] = N_shape[3];
-                            best_m_pair = m_pair;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (best_fid >= 0 && best_f_total > static_cast<T>(0.0f)) {
-        const FEMFacet3D<T>& facet = d_facets[best_fid];
-        const auto& n0 = d_nodes[facet.node_ids[0]];
-        const auto& n1 = d_nodes[facet.node_ids[1]];
-        const auto& n2 = d_nodes[facet.node_ids[2]];
-        const auto& n3 = d_nodes[facet.node_ids[3]];
-
-        T vf0 = best_N[0]*n0.v[0] + best_N[1]*n1.v[0] + best_N[2]*n2.v[0] + best_N[3]*n3.v[0];
-        T vf1 = best_N[0]*n0.v[1] + best_N[1]*n1.v[1] + best_N[2]*n2.v[1] + best_N[3]*n3.v[1];
-        T vf2 = best_N[0]*n0.v[2] + best_N[1]*n1.v[2] + best_N[2]*n2.v[2] + best_N[3]*n3.v[2];
-
-        T v_rel[3] = {node.v[0] - vf0, node.v[1] - vf1, node.v[2] - vf2};
-        T v_rel_n = v_rel[0]*best_nx + v_rel[1]*best_ny + v_rel[2]*best_nz;
-
-        T v_rel_t[3] = {
-            v_rel[0] - v_rel_n * best_nx,
-            v_rel[1] - v_rel_n * best_ny,
-            v_rel[2] - v_rel_n * best_nz
-        };
-        T vt_mag = sqrt(v_rel_t[0]*v_rel_t[0] + v_rel_t[1]*v_rel_t[1] + v_rel_t[2]*v_rel_t[2]);
-
-        T f_fric[3] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
-        if (vt_mag > static_cast<T>(1.0e-6f) && (mu_static > static_cast<T>(0.0f) || mu_kinetic > static_cast<T>(0.0f))) {
-            T t_dir[3] = {v_rel_t[0] / vt_mag, v_rel_t[1] / vt_mag, v_rel_t[2] / vt_mag};
-            T mu_eff = mu_kinetic + (mu_static - mu_kinetic) * exp(-static_cast<T>(10.0f) * vt_mag);
-            T f_fric_mag = mu_eff * best_f_total;
-            T f_stick_max = best_m_pair * vt_mag / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
-            if (f_fric_mag > f_stick_max) f_fric_mag = f_stick_max;
-
-            f_fric[0] = -f_fric_mag * t_dir[0];
-            f_fric[1] = -f_fric_mag * t_dir[1];
-            f_fric[2] = -f_fric_mag * t_dir[2];
-        }
-
-        T f_tot[3] = {
-            best_f_total * best_nx + f_fric[0],
-            best_f_total * best_ny + f_fric[1],
-            best_f_total * best_nz + f_fric[2]
-        };
-
-        atomicAdd(&d_nodes[nid].f_contact[0], f_tot[0]);
-        atomicAdd(&d_nodes[nid].f_contact[1], f_tot[1]);
-        atomicAdd(&d_nodes[nid].f_contact[2], f_tot[2]);
-
-        #pragma unroll
-        for (int k = 0; k < 4; ++k) {
-            int fnid = facet.node_ids[k];
-            T N_k = best_N[k];
-            atomicAdd(&d_nodes[fnid].f_contact[0], -N_k * f_tot[0]);
-            atomicAdd(&d_nodes[fnid].f_contact[1], -N_k * f_tot[1]);
-            atomicAdd(&d_nodes[fnid].f_contact[2], -N_k * f_tot[2]);
-        }
-    }
-}
 
 // CUDA Kernel: Compute minimum stable timestep size on GPU
 template <typename T>
@@ -2737,10 +2957,21 @@ void launch_fem_contact_forces_kernel_3d(
     int max_parts,
     const T* d_node_normals,
     const MaterialTable3D* d_materials,
+    FEMContactSearchMethod search_method,
     int* d_cell_counts,
     int* d_cell_facet_ids,
     uint32_t table_size,
-    T inv_cell_size,
+    T base_cell_size,
+    uint32_t* d_morton_codes,
+    uint32_t* d_morton_codes_alt,
+    int* d_sorted_facet_ids,
+    int* d_facet_indices_in,
+    LBVHNode3D<T>* d_bvh_nodes,
+    int* d_bvh_leaf_parents,
+    int* d_bvh_flags,
+    void* d_bvh_temp_storage,
+    size_t& bvh_temp_storage_bytes,
+    T xmin, T xmax, T ymin, T ymax, T zmin, T zmax,
     T contact_penalty_scale,
     T mu_static,
     T mu_kinetic,
@@ -2752,24 +2983,70 @@ void launch_fem_contact_forces_kernel_3d(
     int block_size = 256;
     int sn_grid_size = (num_surface_nodes + block_size - 1) / block_size;
 
-    if (num_facets <= 131072) {
-        fem_contact_forces_direct_kernel_3d_device<T><<<sn_grid_size, block_size, 0, stream>>>(
-            d_nodes, num_nodes, d_elements, num_elements, d_facets, num_facets,
-            d_surface_nodes, num_surface_nodes, d_node_part_id, d_part_mat_id, max_parts,
-            d_node_normals, d_materials, contact_penalty_scale, mu_static, mu_kinetic, contact_damping, dt
+    if (search_method == FEMContactSearchMethod::LinearBVH &&
+        d_bvh_nodes && d_morton_codes && d_morton_codes_alt &&
+        d_sorted_facet_ids && d_facet_indices_in && d_bvh_leaf_parents &&
+        d_bvh_flags && d_bvh_temp_storage && bvh_temp_storage_bytes > 0) {
+
+        int facet_grid_size = (num_facets + block_size - 1) / block_size;
+        T lx = (xmax > xmin) ? (xmax - xmin) : static_cast<T>(1.0f);
+        T ly = (ymax > ymin) ? (ymax - ymin) : static_cast<T>(1.0f);
+        T lz = (zmax > zmin) ? (zmax - zmin) : static_cast<T>(1.0f);
+        T inv_lx = static_cast<T>(1.0f) / lx;
+        T inv_ly = static_cast<T>(1.0f) / ly;
+        T inv_lz = static_cast<T>(1.0f) / lz;
+
+        // 1. Compute 30-bit Morton codes from facet centroids
+        fem_compute_morton_codes_kernel_3d_device<T><<<facet_grid_size, block_size, 0, stream>>>(
+            d_facets, num_facets, xmin, ymin, zmin, inv_lx, inv_ly, inv_lz,
+            d_morton_codes, d_facet_indices_in
         );
-    } else {
-        if (d_cell_counts && d_cell_facet_ids && table_size > 0) {
-            cudaMemsetAsync(d_cell_counts, 0, sizeof(int) * table_size, stream);
-            int facet_grid_size = (num_facets + block_size - 1) / block_size;
-            fem_build_spatial_hash_grid_kernel_3d_device<T><<<facet_grid_size, block_size, 0, stream>>>(
-                d_facets, num_facets, inv_cell_size, d_cell_counts, d_cell_facet_ids, table_size
+
+        // 2. Parallel Radix Sort on Morton codes via CUB
+        cub::DeviceRadixSort::SortPairs(
+            d_bvh_temp_storage, bvh_temp_storage_bytes,
+            d_morton_codes, d_morton_codes_alt,
+            d_facet_indices_in, d_sorted_facet_ids,
+            num_facets, 0, 30, stream
+        );
+
+        if (num_facets > 1) {
+            cudaMemsetAsync(d_bvh_leaf_parents, 0xFF, sizeof(int) * num_facets, stream);
+            cudaMemsetAsync(d_bvh_flags, 0, sizeof(int) * (num_facets + 1), stream);
+
+            // 3. Construct LBVH binary radix tree (Karras 2012)
+            int tree_grid_size = ((num_facets - 1) + block_size - 1) / block_size;
+            fem_build_lbvh_tree_kernel_3d_device<T><<<tree_grid_size, block_size, 0, stream>>>(
+                num_facets, d_morton_codes_alt, d_bvh_nodes, d_bvh_leaf_parents
+            );
+
+            // 4. Compute AABBs bottom-up with atomic counters and capture root
+            int* d_root_index = &d_bvh_flags[num_facets - 1];
+            fem_build_lbvh_aabbs_kernel_3d_device<T><<<facet_grid_size, block_size, 0, stream>>>(
+                num_facets, d_sorted_facet_ids, d_facets, d_bvh_nodes, d_bvh_leaf_parents, d_bvh_flags, d_root_index
+            );
+
+            // 5. Query contact using stack-based GPU LBVH traversal
+            fem_contact_forces_lbvh_kernel_3d_device<T><<<sn_grid_size, block_size, 0, stream>>>(
+                d_nodes, num_nodes, d_elements, num_elements, d_facets, num_facets,
+                d_surface_nodes, num_surface_nodes, d_node_part_id, d_part_mat_id, max_parts,
+                d_node_normals, d_materials, d_sorted_facet_ids, d_bvh_nodes, d_root_index,
+                contact_penalty_scale, mu_static, mu_kinetic, contact_damping, dt
             );
         }
-        fem_contact_forces_spatial_grid_kernel_3d_device<T><<<sn_grid_size, block_size, 0, stream>>>(
+    } else {
+        // Multi-Level Octave Spatial Hash Grid (4 octaves)
+        if (d_cell_counts && d_cell_facet_ids && table_size > 0) {
+            cudaMemsetAsync(d_cell_counts, 0, sizeof(int) * 4 * table_size, stream);
+            int facet_grid_size = (num_facets + block_size - 1) / block_size;
+            fem_build_octave_hash_grid_kernel_3d_device<T><<<facet_grid_size, block_size, 0, stream>>>(
+                d_facets, num_facets, base_cell_size, d_cell_counts, d_cell_facet_ids, table_size
+            );
+        }
+        fem_contact_forces_octave_grid_kernel_3d_device<T><<<sn_grid_size, block_size, 0, stream>>>(
             d_nodes, num_nodes, d_elements, num_elements, d_facets, num_facets,
             d_surface_nodes, num_surface_nodes, d_node_part_id, d_part_mat_id, max_parts,
-            d_node_normals, d_materials, d_cell_counts, d_cell_facet_ids, table_size, inv_cell_size,
+            d_node_normals, d_materials, d_cell_counts, d_cell_facet_ids, table_size, base_cell_size,
             contact_penalty_scale, mu_static, mu_kinetic, contact_damping, dt
         );
     }
@@ -2867,6 +3144,14 @@ FEMSolver3DCUDA<T>::~FEMSolver3DCUDA() {
     if (m_d_erosion_flag) { cudaFree(m_d_erosion_flag); m_d_erosion_flag = nullptr; }
     if (m_d_cell_counts) { cudaFree(m_d_cell_counts); m_d_cell_counts = nullptr; }
     if (m_d_cell_facet_ids) { cudaFree(m_d_cell_facet_ids); m_d_cell_facet_ids = nullptr; }
+    if (m_d_bvh_morton_codes) { cudaFree(m_d_bvh_morton_codes); m_d_bvh_morton_codes = nullptr; }
+    if (m_d_bvh_morton_codes_alt) { cudaFree(m_d_bvh_morton_codes_alt); m_d_bvh_morton_codes_alt = nullptr; }
+    if (m_d_bvh_sorted_facet_ids) { cudaFree(m_d_bvh_sorted_facet_ids); m_d_bvh_sorted_facet_ids = nullptr; }
+    if (m_d_bvh_facet_indices_in) { cudaFree(m_d_bvh_facet_indices_in); m_d_bvh_facet_indices_in = nullptr; }
+    if (m_d_bvh_nodes) { cudaFree(m_d_bvh_nodes); m_d_bvh_nodes = nullptr; }
+    if (m_d_bvh_leaf_parents) { cudaFree(m_d_bvh_leaf_parents); m_d_bvh_leaf_parents = nullptr; }
+    if (m_d_bvh_flags) { cudaFree(m_d_bvh_flags); m_d_bvh_flags = nullptr; }
+    if (m_d_bvh_temp_storage) { cudaFree(m_d_bvh_temp_storage); m_d_bvh_temp_storage = nullptr; }
     if (m_d_trusses) { cudaFree(m_d_trusses); m_d_trusses = nullptr; }
     if (m_d_beams) { cudaFree(m_d_beams); m_d_beams = nullptr; }
     if (m_d_rot_nodes) { cudaFree(m_d_rot_nodes); m_d_rot_nodes = nullptr; }
@@ -3017,11 +3302,78 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
         cudaMemcpyAsync(m_d_facets, facets.data(), sizeof(FEMFacet3D<T>) * facets.size(), cudaMemcpyHostToDevice, m_cuda_stream);
     }
 
-    // Allocate GPU spatial grid buffers for contact
+    // Allocate GPU spatial grid buffers for contact (4 octaves)
     if (!m_d_cell_counts) {
-        cudaMalloc(&m_d_cell_counts, sizeof(int) * m_spatial_grid_capacity);
-        cudaMalloc(&m_d_cell_facet_ids, sizeof(int) * m_spatial_grid_capacity * MAX_FACETS_PER_CELL);
+        cudaMalloc(&m_d_cell_counts, sizeof(int) * m_spatial_grid_capacity * NUM_OCTAVES);
+        cudaMalloc(&m_d_cell_facet_ids, sizeof(int) * m_spatial_grid_capacity * NUM_OCTAVES * MAX_FACETS_PER_CELL);
     }
+
+    // Allocate GPU Linear BVH buffers for contact
+    if (target_facets_cap > m_allocated_bvh_facets) {
+        if (m_d_bvh_morton_codes) cudaFree(m_d_bvh_morton_codes);
+        if (m_d_bvh_morton_codes_alt) cudaFree(m_d_bvh_morton_codes_alt);
+        if (m_d_bvh_sorted_facet_ids) cudaFree(m_d_bvh_sorted_facet_ids);
+        if (m_d_bvh_facet_indices_in) cudaFree(m_d_bvh_facet_indices_in);
+        if (m_d_bvh_nodes) cudaFree(m_d_bvh_nodes);
+        if (m_d_bvh_leaf_parents) cudaFree(m_d_bvh_leaf_parents);
+        if (m_d_bvh_flags) cudaFree(m_d_bvh_flags);
+
+        m_allocated_bvh_facets = target_facets_cap + 4096;
+        cudaMalloc(&m_d_bvh_morton_codes, sizeof(uint32_t) * m_allocated_bvh_facets);
+        cudaMalloc(&m_d_bvh_morton_codes_alt, sizeof(uint32_t) * m_allocated_bvh_facets);
+        cudaMalloc(&m_d_bvh_sorted_facet_ids, sizeof(int) * m_allocated_bvh_facets);
+        cudaMalloc(&m_d_bvh_facet_indices_in, sizeof(int) * m_allocated_bvh_facets);
+        cudaMalloc(&m_d_bvh_nodes, sizeof(LBVHNode3D<T>) * m_allocated_bvh_facets);
+        cudaMalloc(&m_d_bvh_leaf_parents, sizeof(int) * m_allocated_bvh_facets);
+        cudaMalloc(&m_d_bvh_flags, sizeof(int) * (m_allocated_bvh_facets + 1));
+
+        // Query and allocate CUB RadixSort temp storage
+        m_bvh_temp_storage_bytes = 0;
+        cub::DeviceRadixSort::SortPairs(
+            nullptr, m_bvh_temp_storage_bytes,
+            m_d_bvh_morton_codes, m_d_bvh_morton_codes_alt,
+            m_d_bvh_facet_indices_in, m_d_bvh_sorted_facet_ids,
+            static_cast<int>(m_allocated_bvh_facets), 0, 30, m_cuda_stream
+        );
+        if (m_d_bvh_temp_storage) cudaFree(m_d_bvh_temp_storage);
+        cudaMalloc(&m_d_bvh_temp_storage, m_bvh_temp_storage_bytes);
+    }
+
+    // Compute mesh bounding box and base cell size
+    T bb_min_x = static_cast<T>(1.0e30f), bb_min_y = static_cast<T>(1.0e30f), bb_min_z = static_cast<T>(1.0e30f);
+    T bb_max_x = static_cast<T>(-1.0e30f), bb_max_y = static_cast<T>(-1.0e30f), bb_max_z = static_cast<T>(-1.0e30f);
+    for (const auto& node : nodes) {
+        if (node.x[0] < bb_min_x) bb_min_x = node.x[0];
+        if (node.x[0] > bb_max_x) bb_max_x = node.x[0];
+        if (node.x[1] < bb_min_y) bb_min_y = node.x[1];
+        if (node.x[1] > bb_max_y) bb_max_y = node.x[1];
+        if (node.x[2] < bb_min_z) bb_min_z = node.x[2];
+        if (node.x[2] > bb_max_z) bb_max_z = node.x[2];
+    }
+    if (bb_min_x < bb_max_x) {
+        T pad_x = std::max(static_cast<T>(0.05f) * (bb_max_x - bb_min_x), static_cast<T>(0.01f));
+        T pad_y = std::max(static_cast<T>(0.05f) * (bb_max_y - bb_min_y), static_cast<T>(0.01f));
+        T pad_z = std::max(static_cast<T>(0.05f) * (bb_max_z - bb_min_z), static_cast<T>(0.01f));
+        m_bbox_min[0] = bb_min_x - pad_x;
+        m_bbox_max[0] = bb_max_x + pad_x;
+        m_bbox_min[1] = bb_min_y - pad_y;
+        m_bbox_max[1] = bb_max_y + pad_y;
+        m_bbox_min[2] = bb_min_z - pad_z;
+        m_bbox_max[2] = bb_max_z + pad_z;
+    }
+
+    T min_edge = static_cast<T>(1.0e30f);
+    for (const auto& f : facets) {
+        T dx = f.bbox_max[0] - f.bbox_min[0];
+        T dy = f.bbox_max[1] - f.bbox_min[1];
+        T dz = f.bbox_max[2] - f.bbox_min[2];
+        T diag = std::max({dx, dy, dz});
+        if (diag > static_cast<T>(1.0e-5f) && diag < min_edge) min_edge = diag;
+    }
+    if (min_edge >= static_cast<T>(1.0e29f) || min_edge <= static_cast<T>(0.0f)) {
+        min_edge = static_cast<T>(0.005f);
+    }
+    m_base_cell_size = min_edge * static_cast<T>(1.2f);
 
     // Extract surface node indices on CPU and copy to GPU
     std::vector<bool> is_surf_node(nodes.size(), false);
@@ -3252,9 +3604,6 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
             m_d_nodes, num_nodes, m_d_elements, num_elements, m_d_facets, static_cast<int>(m_num_surface_facets), m_d_node_normals, m_cuda_stream
         );
 
-        T cell_size = static_cast<T>(0.005f); // 5mm default spatial grid cell
-        T inv_cell_size = static_cast<T>(1.0f) / cell_size;
-
         launch_fem_contact_forces_kernel_3d<T>(
             m_d_nodes, num_nodes,
             m_d_elements, num_elements,
@@ -3265,10 +3614,23 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
             m_max_part_id,
             m_d_node_normals,
             m_d_materials,
+            m_cpu_solver.getContactSearchMethod(),
             m_d_cell_counts,
             m_d_cell_facet_ids,
             static_cast<uint32_t>(m_spatial_grid_capacity),
-            inv_cell_size,
+            m_base_cell_size,
+            m_d_bvh_morton_codes,
+            m_d_bvh_morton_codes_alt,
+            m_d_bvh_sorted_facet_ids,
+            m_d_bvh_facet_indices_in,
+            m_d_bvh_nodes,
+            m_d_bvh_leaf_parents,
+            m_d_bvh_flags,
+            m_d_bvh_temp_storage,
+            m_bvh_temp_storage_bytes,
+            m_bbox_min[0], m_bbox_max[0],
+            m_bbox_min[1], m_bbox_max[1],
+            m_bbox_min[2], m_bbox_max[2],
             m_cpu_solver.getContactPenaltyScale(),
             m_cpu_solver.getFrictionStatic(),
             m_cpu_solver.getFrictionKinetic(),
@@ -3302,6 +3664,11 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
         fem_reset_nodal_contact_forces_kernel_device<T><<<grid_size, block_size, 0, m_cuda_stream>>>(
             m_d_nodes, num_nodes, m_d_node_normals
         );
+        if (m_cpu_solver.getLysmerParams().enabled && m_num_surface_facets > 0) {
+            launch_fem_update_surface_facets_kernel_3d<T>(
+                m_d_nodes, num_nodes, m_d_elements, num_elements, m_d_facets, static_cast<int>(m_num_surface_facets), m_d_node_normals, m_cuda_stream
+            );
+        }
     }
 
     // 3. Reset nodal internal forces on GPU
@@ -3326,20 +3693,31 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
         );
     }
 
+    // 4c. Lysmer-Kuhlemeyer Transmitting Boundary Dashpots on GPU
+    if (m_cpu_solver.getLysmerParams().enabled && m_num_surface_facets > 0) {
+        launch_fem_lysmer_dashpots_kernel_3d<T>(
+            m_d_nodes, m_d_facets, static_cast<int>(m_num_surface_facets),
+            m_cpu_solver.getLysmerParams(), m_cuda_stream
+        );
+    }
+
     // 5. Central Difference Kinematic Acceleration & Full Velocity Update on GPU
     launch_fem_nodal_full_step_kernel_3d<T>(m_d_nodes, num_nodes, dt, m_cuda_stream);
 
     // 6. Erosion Evaluation on GPU
-    launch_fem_initial_timestep_erosion_kernel_3d<T>(
-        m_d_nodes, num_nodes, m_d_elements, num_elements,
-        m_d_trusses, num_trusses, m_d_beams, num_beams,
-        m_d_materials, m_cpu_solver.getErosionCriteria(), m_d_node_active_count, m_d_erosion_flag, m_cuda_stream
-    );
+    const auto& erosion = m_cpu_solver.getErosionCriteria();
+    bool has_erosion = (erosion.enable_strain_erosion || erosion.enable_stress_erosion || erosion.enable_timestep_erosion);
+    if (has_erosion) {
+        launch_fem_initial_timestep_erosion_kernel_3d<T>(
+            m_d_nodes, num_nodes, m_d_elements, num_elements,
+            m_d_trusses, num_trusses, m_d_beams, num_beams,
+            m_d_materials, erosion, m_d_node_active_count, m_d_erosion_flag, m_cuda_stream
+        );
 
-    if (m_d_erosion_flag && m_h_erosion_flag_pinned) {
-        cudaMemcpyAsync(m_h_erosion_flag_pinned, m_d_erosion_flag, sizeof(int), cudaMemcpyDeviceToHost, m_cuda_stream);
-        cudaStreamSynchronize(m_cuda_stream);
-    }
+        if (m_d_erosion_flag && m_h_erosion_flag_pinned && (m_step_count % 10 == 0)) {
+            cudaMemcpyAsync(m_h_erosion_flag_pinned, m_d_erosion_flag, sizeof(int), cudaMemcpyDeviceToHost, m_cuda_stream);
+            cudaStreamSynchronize(m_cuda_stream);
+        }
 
     if (m_h_erosion_flag_pinned && *m_h_erosion_flag_pinned != 0) {
         *m_h_erosion_flag_pinned = 0;
@@ -3405,8 +3783,45 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
         }
         cudaStreamSynchronize(m_cuda_stream);
     }
+    }
 
     m_gpu_dirty = true;
+}
+
+template <typename T>
+size_t FEMSolver3DCUDA<T>::getAllocatedVRAM() const {
+    size_t total = 0;
+    if (m_d_nodes) total += sizeof(FEMNode3D<T>) * m_allocated_nodes;
+    if (m_d_node_part_id) total += sizeof(int) * m_allocated_nodes;
+    if (m_d_node_normals) total += sizeof(T) * m_allocated_nodes * 3;
+    if (m_d_node_active_count) total += sizeof(int) * m_allocated_nodes;
+    if (m_d_erosion_flag) total += sizeof(int);
+    if (m_d_part_mat_id) total += sizeof(int) * m_allocated_part_mat_id;
+    if (m_d_elements) total += sizeof(FEMElement3D<T>) * m_allocated_elements;
+    if (m_d_reduction_buffer) {
+        int grid_size = (m_allocated_elements + 255) / 256;
+        total += sizeof(T) * (grid_size > 0 ? grid_size : 1);
+    }
+    if (m_d_gp_history) total += sizeof(FEMGaussPointHistory3D<T>) * m_allocated_gp_history;
+    if (m_d_materials) total += sizeof(MaterialTable3D) * m_allocated_materials;
+    if (m_d_trusses) total += sizeof(FEMTrussElement3D<T>) * m_allocated_trusses;
+    if (m_d_beams) total += sizeof(FEMBeam3DElement<T>) * m_allocated_beams;
+    if (m_d_rot_nodes) total += sizeof(FEMNodeRotationalState3D<T>) * m_allocated_rot_nodes;
+    if (m_d_facets) total += sizeof(FEMFacet3D<T>) * m_allocated_facets;
+    if (m_d_cell_counts) total += sizeof(int) * m_spatial_grid_capacity * NUM_OCTAVES;
+    if (m_d_cell_facet_ids) total += sizeof(int) * m_spatial_grid_capacity * NUM_OCTAVES * MAX_FACETS_PER_CELL;
+    if (m_d_bvh_morton_codes) total += sizeof(uint32_t) * m_allocated_bvh_facets;
+    if (m_d_bvh_morton_codes_alt) total += sizeof(uint32_t) * m_allocated_bvh_facets;
+    if (m_d_bvh_sorted_facet_ids) total += sizeof(int) * m_allocated_bvh_facets;
+    if (m_d_bvh_facet_indices_in) total += sizeof(int) * m_allocated_bvh_facets;
+    if (m_d_bvh_nodes) total += sizeof(LBVHNode3D<T>) * m_allocated_bvh_facets;
+    if (m_d_bvh_leaf_parents) total += sizeof(int) * m_allocated_bvh_facets;
+    if (m_d_bvh_flags) total += sizeof(int) * (m_allocated_bvh_facets + 1);
+    if (m_d_bvh_temp_storage) total += m_bvh_temp_storage_bytes;
+    if (m_d_surface_nodes) total += sizeof(int) * m_allocated_surface_nodes;
+    if (m_d_telemetry_nodes) total += sizeof(float) * m_allocated_telemetry_nodes * 7;
+    if (m_d_telemetry_facets) total += sizeof(float) * m_allocated_telemetry_facets * 8;
+    return total;
 }
 
 template <typename T>
@@ -3698,6 +4113,84 @@ void launch_fem_beam_forces_kernel_3d(
     );
 }
 
+template <typename T>
+__global__ void fem_lysmer_dashpots_kernel_3d_device(
+    FEMNode3D<T>* d_nodes,
+    const FEMFacet3D<T>* d_facets,
+    int num_facets,
+    LysmerBoundaryParams params
+) {
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= num_facets) return;
+
+    const FEMFacet3D<T>& facet = d_facets[f];
+    if (facet.is_eroded) return;
+
+    if (params.filter_box) {
+        T cx = static_cast<T>(0.25f) * (d_nodes[facet.node_ids[0]].x[0] + d_nodes[facet.node_ids[1]].x[0] + d_nodes[facet.node_ids[2]].x[0] + d_nodes[facet.node_ids[3]].x[0]);
+        T cy = static_cast<T>(0.25f) * (d_nodes[facet.node_ids[0]].x[1] + d_nodes[facet.node_ids[1]].x[1] + d_nodes[facet.node_ids[2]].x[1] + d_nodes[facet.node_ids[3]].x[1]);
+        T cz = static_cast<T>(0.25f) * (d_nodes[facet.node_ids[0]].x[2] + d_nodes[facet.node_ids[1]].x[2] + d_nodes[facet.node_ids[2]].x[2] + d_nodes[facet.node_ids[3]].x[2]);
+        T tol = static_cast<T>(params.tol);
+
+        bool on_bound = (fabs(cx - static_cast<T>(params.x_min)) <= tol) ||
+                        (fabs(cx - static_cast<T>(params.x_max)) <= tol) ||
+                        (fabs(cy - static_cast<T>(params.y_min)) <= tol) ||
+                        (fabs(cy - static_cast<T>(params.y_max)) <= tol) ||
+                        (fabs(cz - static_cast<T>(params.z_min)) <= tol) ||
+                        (fabs(cz - static_cast<T>(params.z_max)) <= tol);
+        if (!on_bound) return;
+    }
+
+    T rho = static_cast<T>(params.rho);
+    T cp = static_cast<T>(params.c_p);
+    T cs = static_cast<T>(params.c_s);
+    T norm_rel = static_cast<T>(params.normal_relaxation);
+    T shear_rel = static_cast<T>(params.shear_relaxation);
+
+    T A_node = static_cast<T>(0.25f) * facet.area;
+    T nx = facet.normal[0], ny = facet.normal[1], nz = facet.normal[2];
+
+    for (int k = 0; k < 4; ++k) {
+        int nid = facet.node_ids[k];
+        const auto& node = d_nodes[nid];
+        if (node.is_eroded || node.m <= static_cast<T>(1.0e-12f)) continue;
+
+        T vn = node.v[0] * nx + node.v[1] * ny + node.v[2] * nz;
+        T vs_x = node.v[0] - vn * nx;
+        T vs_y = node.v[1] - vn * ny;
+        T vs_z = node.v[2] - vn * nz;
+
+        T fn = - A_node * rho * cp * norm_rel * vn;
+        T fs_x = - A_node * rho * cs * shear_rel * vs_x;
+        T fs_y = - A_node * rho * cs * shear_rel * vs_y;
+        T fs_z = - A_node * rho * cs * shear_rel * vs_z;
+
+        T fx = fn * nx + fs_x;
+        T fy = fn * ny + fs_y;
+        T fz = fn * nz + fs_z;
+
+        atomicAdd(&d_nodes[nid].f_contact[0], fx);
+        atomicAdd(&d_nodes[nid].f_contact[1], fy);
+        atomicAdd(&d_nodes[nid].f_contact[2], fz);
+    }
+}
+
+template <typename T>
+void launch_fem_lysmer_dashpots_kernel_3d(
+    FEMNode3D<T>* d_nodes,
+    const FEMFacet3D<T>* d_facets,
+    int num_facets,
+    const LysmerBoundaryParams& params,
+    cudaStream_t stream
+) {
+    if (!d_nodes || !d_facets || num_facets <= 0 || !params.enabled) return;
+    int blockSize = 256;
+    int numBlocks = (num_facets + blockSize - 1) / blockSize;
+    fem_lysmer_dashpots_kernel_3d_device<T><<<numBlocks, blockSize, 0, stream>>>(
+        d_nodes, d_facets, num_facets, params
+    );
+}
+
 // Explicit Instantiations
 template void launch_fem_reset_nodal_forces_kernel_3d<float>(FEMNode3D<float>*, int, cudaStream_t);
 template void launch_fem_reset_nodal_forces_kernel_3d<double>(FEMNode3D<double>*, int, cudaStream_t);
@@ -3726,14 +4219,31 @@ template void launch_fem_update_orphan_nodes_erosion_kernel_3d<double>(FEMNode3D
 template void launch_fem_update_surface_facets_kernel_3d<float>(FEMNode3D<float>*, int, const FEMElement3D<float>*, int, FEMFacet3D<float>*, int, float*, cudaStream_t);
 template void launch_fem_update_surface_facets_kernel_3d<double>(FEMNode3D<double>*, int, const FEMElement3D<double>*, int, FEMFacet3D<double>*, int, double*, cudaStream_t);
 
-template void launch_fem_contact_forces_kernel_3d<float>(FEMNode3D<float>*, int, const FEMElement3D<float>*, int, const FEMFacet3D<float>*, int, const int*, int, const int*, const int*, int, const float*, const MaterialTable3D*, int*, int*, uint32_t, float, float, float, float, float, float, cudaStream_t);
-template void launch_fem_contact_forces_kernel_3d<double>(FEMNode3D<double>*, int, const FEMElement3D<double>*, int, const FEMFacet3D<double>*, int, const int*, int, const int*, const int*, int, const double*, const MaterialTable3D*, int*, int*, uint32_t, double, double, double, double, double, double, cudaStream_t);
+template void launch_fem_contact_forces_kernel_3d<float>(
+    FEMNode3D<float>*, int, const FEMElement3D<float>*, int, const FEMFacet3D<float>*, int,
+    const int*, int, const int*, const int*, int, const float*, const MaterialTable3D*,
+    FEMContactSearchMethod, int*, int*, uint32_t, float,
+    uint32_t*, uint32_t*, int*, int*, LBVHNode3D<float>*, int*, int*, void*, size_t&,
+    float, float, float, float, float, float,
+    float, float, float, float, float, cudaStream_t
+);
+template void launch_fem_contact_forces_kernel_3d<double>(
+    FEMNode3D<double>*, int, const FEMElement3D<double>*, int, const FEMFacet3D<double>*, int,
+    const int*, int, const int*, const int*, int, const double*, const MaterialTable3D*,
+    FEMContactSearchMethod, int*, int*, uint32_t, double,
+    uint32_t*, uint32_t*, int*, int*, LBVHNode3D<double>*, int*, int*, void*, size_t&,
+    double, double, double, double, double, double,
+    double, double, double, double, double, cudaStream_t
+);
 
 template void launch_fem_mpm_debris_contact_kernel_3d<float>(MPMParticle3DSoA, int, FEMNode3D<float>*, int, const FEMElement3D<float>*, int, const FEMFacet3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, const MaterialTable3D*, float, float, float, float, float, cudaStream_t);
 template void launch_fem_mpm_debris_contact_kernel_3d<double>(MPMParticle3DSoA, int, FEMNode3D<double>*, int, const FEMElement3D<double>*, int, const FEMFacet3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, const MaterialTable3D*, double, double, double, double, double, cudaStream_t);
 
 template float launch_fem_compute_step_size_kernel_3d<float>(const FEMNode3D<float>*, const FEMElement3D<float>*, int, const MaterialTable3D*, float, float*, cudaStream_t);
 template double launch_fem_compute_step_size_kernel_3d<double>(const FEMNode3D<double>*, const FEMElement3D<double>*, int, const MaterialTable3D*, double, double*, cudaStream_t);
+
+template void launch_fem_lysmer_dashpots_kernel_3d<float>(FEMNode3D<float>*, const FEMFacet3D<float>*, int, const LysmerBoundaryParams&, cudaStream_t);
+template void launch_fem_lysmer_dashpots_kernel_3d<double>(FEMNode3D<double>*, const FEMFacet3D<double>*, int, const LysmerBoundaryParams&, cudaStream_t);
 
 template <typename T>
 void FEMSolver3DCUDA<T>::evaluateErosionCriteria() {

@@ -115,11 +115,21 @@ public:
     ~CFDSolver3DCuda();
 
     void setInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, double ambient_rho, double ambient_p) override;
+    void setStratifiedInitialCondition(const Charge3DParams& charge, const MultiMat::MaterialSet& materials, const Blast::Stratified3DParams& strat) override;
+    void setMaterialParameters(const MultiMat::MaterialSet& materials) override {
+        CFDSolver3DImplBase::setMaterialParameters(materials);
+        constants_dirty = true;
+    }
     void setDetonatorLocation(double x, double y, double z) override;
     void setFluxScheme(const std::string& scheme_name) override;
     void setSpatialOrder(int order) override;
     void setTemporalOrder(int order) override;
     void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) override;
+    void setChargeRadius(double r) override { charge_radius = r; constants_dirty = true; }
+    void setGravity(double gx, double gy, double gz) override {
+        CFDSolver3DImplBase::setGravity(gx, gy, gz);
+        constants_dirty = true;
+    }
 
     void pause() override;
     void resume() override;

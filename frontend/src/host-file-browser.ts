@@ -1448,6 +1448,10 @@ export class HostFileBrowserModal {
             .hfb-select:focus {
                 border-color: #00f0ff;
             }
+            .hfb-select option {
+                background: #141822;
+                color: #e2e8f0;
+            }
 
             .hfb-type-filter-group {
                 display: flex;

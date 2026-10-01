@@ -1,7 +1,7 @@
 import { StateManager, createDefaultWorkstationLayout, prepareModelSavePayload, extractModelResources, resolveResourcePath } from './state-manager.js';
 import { SimulationState, SimulationStatus, LayoutNode } from './types.js';
 import { NetworkManager } from './NetworkManager.js';
-import { serializeSimulationState, serializeForSolver, serializeToBinary, deserializeFromBinary } from './serialization.js';
+import { serializeSimulationState, serializeForSolver, serializeToBinary, deserializeFromBinary, isAirMaterialNode, isJWLMaterialNode, isIdealGasMaterialNode } from './serialization.js';
 import { LayoutManager } from './layout-manager.js';
 import { estimateGraphMemory } from './memory-validator.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
@@ -103,7 +103,16 @@ const initialState: SimulationState = {
                 jwl_B: 3.747e9,
                 jwl_R1: 4.15,
                 jwl_R2: 0.90,
-                jwl_omega: 0.35
+                jwl_omega: 0.35,
+                afterburn_enabled: true,
+                afterburn_energy: 1.071e7,
+                afterburn_fuel_fraction: 0.35,
+                afterburn_stoich_ratio: 2.67,
+                afterburn_ignition_temp: 800.0,
+                afterburn_tau_chem: 1.0e-5,
+                afterburn_c_edc: 0.15,
+                afterburn_tau_expansion: 0.0,
+                afterburn_ambient_o2_fraction: 0.233
             }
         },
         {
@@ -116,24 +125,21 @@ const initialState: SimulationState = {
             }
         },
         {
-            id: 'node-painter', type: 'ThePainter', x: 300, y: 200, displayMode: 'expanded',
-            inputs: [{ id: 'mesh', label: 'Mesh' }, { id: 'air', label: 'Air' }, { id: 'explosive', label: 'Charge' }],
-            outputs: [{ id: 'out', label: 'State' }],
-            parameters: {}
-        },
-        {
             id: 'node-solver', type: 'CFDSolver', x: 550, y: 200, displayMode: 'expanded',
-            inputs: [{ id: 'in', label: 'Initial State' }],
+            inputs: [
+                { id: 'mesh', label: 'Mesh' },
+                { id: 'air', label: 'Air' },
+                { id: 'charge', label: 'Charge' }
+            ],
             outputs: [{ id: 'telemetry', label: 'Telemetry' }],
             parameters: { init_mode: 'Multi-Material JWL', cfl: 0.4, flux_scheme: 'AUSM+', spatial_order: 2, temporal_order: 4 }
         }
     ],
     connections: [
-        { fromNode: 'node-mesh', fromPort: 'out', toNode: 'node-painter', toPort: 'mesh' },
-        { fromNode: 'node-air', fromPort: 'out', toNode: 'node-painter', toPort: 'air' },
+        { fromNode: 'node-mesh', fromPort: 'out', toNode: 'node-solver', toPort: 'mesh' },
+        { fromNode: 'node-air', fromPort: 'out', toNode: 'node-solver', toPort: 'air' },
         { fromNode: 'node-material-explosive', fromPort: 'out', toNode: 'node-explosive', toPort: 'material' },
-        { fromNode: 'node-explosive', fromPort: 'out', toNode: 'node-painter', toPort: 'explosive' },
-        { fromNode: 'node-painter', fromPort: 'out', toNode: 'node-solver', toPort: 'in' }
+        { fromNode: 'node-explosive', fromPort: 'out', toNode: 'node-solver', toPort: 'charge' }
     ],
     layout: createDefaultWorkstationLayout()
 };
@@ -144,7 +150,7 @@ const stateManager = new StateManager(initialState);
 const savedState = stateManager.loadWorkspace();
 const activeState = stateManager.getCurrentState() || savedState || initialState;
 
-const playbackBuffer = new PlaybackRingBuffer(1000);
+const playbackBuffer = new PlaybackRingBuffer(20, 128);
 (window as any).playbackBuffer = playbackBuffer;
 
 const platformBridge = PlatformBridge.getInstance();
@@ -215,19 +221,19 @@ function getTransportOptions(container?: HTMLElement): TransportControllerOption
                 });
             }
         },
-        onColormapChange: (colormap, min, max) => {
+        onColormapChange: (colormap, min, max, targetLayer) => {
             if (layoutManager) {
                 layoutManager.components.forEach(comp => {
-                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setColormap(colormap, min, max);
-                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setColormap?.(colormap, min, max);
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setColormap(colormap, min, max, targetLayer);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setColormap?.(colormap, min, max, targetLayer);
                 });
             }
         },
-        onQuantityChange: (quantity) => {
+        onQuantityChange: (quantity, targetLayer) => {
             if (layoutManager) {
                 layoutManager.components.forEach(comp => {
-                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setQuantity?.(quantity);
-                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setQuantity?.(quantity);
+                    if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setQuantity?.(quantity, targetLayer);
+                    if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setQuantity?.(quantity, targetLayer);
                 });
             }
         },
@@ -240,10 +246,18 @@ function getTransportOptions(container?: HTMLElement): TransportControllerOption
             }
         },
         onRefreshRateChange: (rate) => {
-            const vpNodes = stateManager.getAllModels().flatMap(m => m.nodes).filter(n => n.type === 'Telemetry3DViewport');
-            vpNodes.forEach(vp => {
-                stateManager.updateNodeParametersInPlace(vp.id, { refresh_rate: rate });
-            });
+            const activeModel = stateManager.getActiveModel();
+            if (activeModel) {
+                stateManager.setModelRefreshRate(activeModel.id, rate);
+                const has3D = activeModel.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'DomainMesh3D' || n.type === 'Telemetry3DViewport' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D');
+                if (has3D) {
+                    sendView3DConfig(activeModel.id);
+                }
+                const hasContour = activeModel.nodes.some(n => n.type === 'TelemetryContour');
+                if (hasContour) {
+                    sendContourConfig(activeModel.id);
+                }
+            }
             if (layoutManager) {
                 layoutManager.components.forEach(comp => {
                     if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setRefreshRate?.(rate);
@@ -350,7 +364,7 @@ function getCflFromSolver(modelId: string): number {
         return Number(mpm.parameters.cfl);
     }
 
-    const solver = model?.nodes?.find(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+    const solver = model?.nodes?.find(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
     if (solver?.parameters?.cfl !== undefined && !isNaN(Number(solver.parameters.cfl)) && Number(solver.parameters.cfl) > 0) {
         return Number(solver.parameters.cfl);
     }
@@ -379,7 +393,7 @@ function getEndTimeFromSolver(modelId: string): number {
         return Number(mpm.parameters.endtime);
     }
 
-    const solver = model?.nodes?.find(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+    const solver = model?.nodes?.find(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
     if (solver?.parameters?.endtime !== undefined && !isNaN(Number(solver.parameters.endtime)) && Number(solver.parameters.endtime) > 0) {
         return Number(solver.parameters.endtime);
     }
@@ -389,6 +403,33 @@ function getEndTimeFromSolver(modelId: string): number {
 
 (window as any).stateManager = stateManager;
 (window as any).layoutManager = layoutManager;
+
+let lastActiveModelId: string | null = stateManager.getActiveModelId();
+stateManager.onStateChange(() => {
+    const currentActiveModelId = stateManager.getActiveModelId();
+    if (currentActiveModelId && currentActiveModelId !== lastActiveModelId) {
+        lastActiveModelId = currentActiveModelId;
+        const rate = stateManager.getModelRefreshRate(currentActiveModelId);
+        if (layoutManager) {
+            layoutManager.components.forEach(comp => {
+                if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) comp.instance.setRefreshRate?.(rate);
+                if (comp.type === 'TELEMETRY_3D' && comp.instance) comp.instance.setRefreshRate?.(rate);
+                if (comp.type === 'TRANSPORT_BAR' && comp.instance) comp.instance.syncStateFromViewport?.();
+            });
+        }
+        const activeModel = stateManager.getActiveModel();
+        if (activeModel) {
+            const has3D = activeModel.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'DomainMesh3D' || n.type === 'Telemetry3DViewport' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D');
+            if (has3D) {
+                sendView3DConfig(activeModel.id);
+            }
+            const hasContour = activeModel.nodes.some(n => n.type === 'TelemetryContour');
+            if (hasContour) {
+                sendContourConfig(activeModel.id);
+            }
+        }
+    }
+});
 
 const wsUrl = new URLSearchParams(window.location.search).get('broker') || 'ws://localhost:8080';
 const networkManager = new NetworkManager(wsUrl);
@@ -837,8 +878,32 @@ function findRemapPipeline(modelId: string): RemapPipeline | null {
     const ws = stateManager.getActiveWorkspace();
     if (!ws) return null;
 
-    const wsConns = ws.connections as Array<{fromNode:string,fromPort:string,toNode:string,toPort:string}>;
     const allModels = stateManager.getAllModels();
+    const targetModel = allModels.find(m => m.id === modelId);
+
+    // 1. Explicit Remap Node parameter check (Highest precedence: source_model_id configured on remap node)
+    if (targetModel) {
+        const remapNode = targetModel.nodes.find(n =>
+            n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode' ||
+            n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode'
+        );
+        if (remapNode && remapNode.parameters?.source_model_id) {
+            const explicitSrc = allModels.find(m => m.id === remapNode.parameters.source_model_id);
+            if (explicitSrc) {
+                const is2D = remapNode.type === 'Remap2DTo3DNode' || explicitSrc.nodes.some(n => n.type === 'CFDSolver2D');
+                return {
+                    sourceModelId: explicitSrc.id,
+                    targetModelId: modelId,
+                    model1dId: explicitSrc.id,
+                    model2dId: modelId,
+                    sourceType: is2D ? '2D' : '1D',
+                    processId: modelId,
+                };
+            }
+        }
+    }
+
+    const wsConns = ws.connections as Array<{fromNode:string,fromPort:string,toNode:string,toPort:string}>;
 
     // Fast node-id → modelId lookup.
     const nodeToModel = new Map<string, string>();
@@ -892,6 +957,8 @@ function findRemapPipeline(modelId: string): RemapPipeline | null {
             }
         }
     }
+
+    // Zero fallback: If no source model is explicitly specified or wired, return null.
     return null;
 }
 
@@ -903,7 +970,7 @@ function sendContourConfig(targetId: string) {
             const isConnected = m.connections.some(c => c.toNode === contourNode.id || c.fromNode === contourNode.id);
             if (!isConnected) return;
             const stride = Number(contourNode.parameters?.downsample_stride ?? 1);
-            const rate = Number(contourNode.parameters?.refresh_rate ?? 0.0);
+            const rate = stateManager.getModelRefreshRate(targetId);
             networkManager.send({
                 command: "CONTOUR_CONFIG",
                 modelId: targetId,
@@ -945,7 +1012,7 @@ function sendView3DConfig(targetId: string) {
             });
         }
         
-        const rate = Number(view3DNode?.parameters?.refresh_rate ?? 2.0);
+        const rate = stateManager.getModelRefreshRate(targetId);
         networkManager.send({
             command: "VIEW3D_CONFIG",
             modelId: targetId,
@@ -965,7 +1032,7 @@ function requestAndPlotCurrentState(targetId?: string) {
     const targetModelId = resolvedId;
 
     const model = stateManager.getAllModels().find(m => m.id === targetModelId);
-    const is3D = model?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
+    const is3D = model?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'DomainMesh3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
 
     if (networkManager.isConnected()) {
         networkManager.send({
@@ -1003,18 +1070,37 @@ function requestAndPlotCurrentState(targetId?: string) {
     }
 }
 
-function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
+const autoRunInFlight = new Set<string>();
+
+function tryRemapFrom1D(targetModelId: string, pipe: any, allowAutoRun: boolean = true): boolean {
     const model = stateManager.getAllModels().find(m => m.id === targetModelId);
     const model1d = stateManager.getAllModels().find(m => m.id === pipe.model1dId);
     const solver1DNode = model1d?.nodes.find(n => n.type === 'CFDSolver');
-    const telemetry = solver1DNode ? stateManager.getTelemetry(solver1DNode.id + "-binary") : null;
+    
+    let telemetry: any = null;
+    if (solver1DNode) {
+        telemetry = stateManager.getTelemetry(solver1DNode.id + "-binary");
+        if (!telemetry || !(telemetry instanceof ArrayBuffer)) {
+            const raw = stateManager.getTelemetry(solver1DNode.id);
+            if (raw instanceof ArrayBuffer) telemetry = raw;
+        }
+    }
+    if (!telemetry && pipe.model1dId) {
+        const mBuf = stateManager.getTelemetry(pipe.model1dId + "-binary");
+        if (mBuf instanceof ArrayBuffer) telemetry = mBuf;
+    }
+    if (!telemetry && pipe.model1dId) {
+        const pb = (window as any).playbackBuffer;
+        const frame = pb?.getLatestFrameForModel?.(pipe.model1dId);
+        if (frame?.data instanceof ArrayBuffer) telemetry = frame.data;
+    }
     
     console.log(`[tryRemapFrom1D] targetModelId: ${targetModelId}, pipe.model1dId: ${pipe.model1dId}`);
     console.log(`[tryRemapFrom1D] solver1DNode:`, solver1DNode);
     console.log(`[tryRemapFrom1D] telemetry:`, telemetry);
 
     const solver2DNode = model?.nodes.find(n => n.type === 'CFDSolver2D');
-    const solver3DNode = model?.nodes.find(n => n.type === 'CFDSolver3D');
+    const solver3DNode = model?.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
     const activeSolverNode = solver2DNode || solver3DNode;
 
     if (activeSolverNode) {
@@ -1022,11 +1108,21 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
     }
 
     if (!telemetry || !(telemetry instanceof ArrayBuffer)) {
+        if (autoRunInFlight.has(pipe.model1dId)) {
+            console.log(`[tryRemapFrom1D] 1D model ${pipe.model1dId} execution is already in flight. Awaiting completion.`);
+            return false;
+        }
+        if (!allowAutoRun) {
+            console.warn(`[tryRemapFrom1D] No 1D simulation telemetry found for ${pipe.model1dId} and auto-run is disabled.`);
+            return false;
+        }
         if (activeSolverNode) {
             stateManager.pushTelemetry(activeSolverNode.id, `[INFO] No 1D simulation telemetry found. Automatically initializing and running 1D model (${pipe.model1dId})...`, targetModelId);
         }
         if (pipe.model1dId) {
             console.log(`[tryRemapFrom1D] Auto-running 1D model ${pipe.model1dId} to generate remap profile.`);
+            autoRunInFlight.add(pipe.model1dId);
+            pipelineAutoRunPending.set(targetModelId, { command: "INIT", extra: {} });
             executeModelCommand(pipe.model1dId, "INIT", {}, false);
             executeModelCommand(pipe.model1dId, "EXEC_ALL", {}, false);
         }
@@ -1087,19 +1183,65 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
             });
         }
 
-        const serialized1D = solver1DNode?.parameters || {};
+        const chargeNode1D = model1d?.nodes.find(n => n.type === 'Charge1D');
+        const matNode1D = model1d?.nodes.find(n => n.type === 'Material' && (isJWLMaterialNode(n) || isIdealGasMaterialNode(n)))
+            || model1d?.nodes.find(n => n.type === 'Material' && n.parameters?.material_type !== 'Air');
+        const airNode1D = model1d?.nodes.find(n => n.type === 'Material' && (isAirMaterialNode(n) || n.parameters?.material_type === 'Air'));
+
+        let charge_radius = Number(chargeNode1D?.parameters?.charge_radius ?? chargeNode1D?.parameters?.explosive_radius ?? 0.05);
+        if ((!charge_radius || charge_radius === 0) && chargeNode1D?.parameters?.charge_mass && matNode1D?.parameters?.rho) {
+            const m = Number(chargeNode1D.parameters.charge_mass);
+            const r_dens = Number(matNode1D.parameters.rho);
+            charge_radius = Math.pow((3.0 * m) / (4.0 * Math.PI * r_dens), 1.0 / 3.0);
+        }
+
+        const atm_p = Number(airNode1D?.parameters?.atm_pressure ?? solver1DNode?.parameters?.atm_pressure ?? 101325.0);
+        const atm_t = Number(airNode1D?.parameters?.atm_temperature ?? solver1DNode?.parameters?.atm_temperature ?? 288.15);
+        const ambient_rho = Number(airNode1D?.parameters?.density ?? airNode1D?.parameters?.ambient_rho ?? (atm_p / (287.058 * atm_t)));
+        const ambient_p = atm_p;
+
+        const isIdeal1D = (matNode1D?.parameters?.material_type === 'Ideal Gas Charge' || matNode1D?.parameters?.material_model === 'Ideal Gas' || solver1DNode?.parameters?.init_mode === 'Ideal Gas');
+        const explosive_type = isIdeal1D ? 'MaterialIdealGas' : 'MaterialExplosive';
+        const material_type = isIdeal1D ? 'Ideal Gas Charge' : (matNode1D?.parameters?.material_type ?? 'JWL Charge');
+        const composition = String(matNode1D?.parameters?.composition ?? 'TNT');
+        const preset = matNode1D?.parameters?.preset;
+        const rho = Number(matNode1D?.parameters?.rho ?? matNode1D?.parameters?.density ?? 1630.0);
+        const detonation_energy = Number(matNode1D?.parameters?.detonation_energy ?? 4290000);
+        const det_vel = Number(matNode1D?.parameters?.det_vel ?? 6930);
+        const jwl_A = Number(matNode1D?.parameters?.jwl_A ?? 373.77e9);
+        const jwl_B = Number(matNode1D?.parameters?.jwl_B ?? 3.747e9);
+        const jwl_R1 = Number(matNode1D?.parameters?.jwl_R1 ?? 4.15);
+        const jwl_R2 = Number(matNode1D?.parameters?.jwl_R2 ?? 0.90);
+        const jwl_omega = Number(matNode1D?.parameters?.jwl_omega ?? 0.35);
+
+        const afterburn_enabled = matNode1D?.parameters?.afterburn_enabled === true || matNode1D?.parameters?.afterburn_enabled === 'true' || matNode1D?.parameters?.afterburn_enabled === 'True';
+        const afterburn_energy = Number(matNode1D?.parameters?.afterburn_energy ?? 1.5e7);
+        const afterburn_fuel_fraction = Number(matNode1D?.parameters?.afterburn_fuel_fraction ?? 0.25);
+        const afterburn_stoich_ratio = Number(matNode1D?.parameters?.afterburn_stoich_ratio ?? 3.0);
+        const afterburn_ignition_temp = Number(matNode1D?.parameters?.afterburn_ignition_temp ?? 700.0);
+        const afterburn_tau_chem = Number(matNode1D?.parameters?.afterburn_tau_chem ?? 1.0e-5);
+        const afterburn_c_edc = Number(matNode1D?.parameters?.afterburn_c_edc ?? 0.15);
+        const afterburn_tau_expansion = Number(matNode1D?.parameters?.afterburn_tau_expansion ?? 0.0);
+        const afterburn_ambient_o2_fraction = Number(matNode1D?.parameters?.afterburn_ambient_o2_fraction ?? 0.233);
 
         const remapConn = model?.connections.find(c => (c.toNode === solver2DNode?.id || c.toNode === solver3DNode?.id) && c.toPort === 'remap');
-        const remapNode = remapConn ? model?.nodes.find(n => n.id === remapConn.fromNode) : null;
-
-        const explosive_x = Number(remapNode?.parameters?.explosive_x ?? 0.5);
-        const explosive_y = Number(remapNode?.parameters?.explosive_y ?? 0.5);
-        const explosive_z = Number(remapNode?.parameters?.explosive_z ?? (remapNode?.parameters?.explosive_r ?? 0.1));
-        const explosive_r = Number(remapNode?.parameters?.explosive_r ?? 0.0);
-        const remap_radius = Number(remapNode?.parameters?.remap_radius ?? (n_cells * cell_size));
+        const remapNode = remapConn ? model?.nodes.find(n => n.id === remapConn.fromNode) : model?.nodes.find(n => n.type === 'Remap1DTo3DNode' || n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode');
 
         const meshConn3D = model?.connections.find(c => c.toNode === solver3DNode?.id && c.toPort === 'mesh');
-        const meshNode3D = meshConn3D ? model?.nodes.find(n => n.id === meshConn3D.fromNode) : null;
+        const meshNode3D = meshConn3D ? model?.nodes.find(n => n.id === meshConn3D.fromNode) : model?.nodes.find(n => n.type === 'DomainMesh3D');
+
+        const defaultCenterX = meshNode3D?.parameters?.xmin !== undefined && meshNode3D?.parameters?.xmax !== undefined
+            ? (Number(meshNode3D.parameters.xmin) + Number(meshNode3D.parameters.xmax)) * 0.5 : 0.5;
+        const defaultCenterY = meshNode3D?.parameters?.ymin !== undefined && meshNode3D?.parameters?.ymax !== undefined
+            ? (Number(meshNode3D.parameters.ymin) + Number(meshNode3D.parameters.ymax)) * 0.5 : 0.5;
+        const defaultCenterZ = meshNode3D?.parameters?.zmin !== undefined && meshNode3D?.parameters?.zmax !== undefined
+            ? (Number(meshNode3D.parameters.zmin) + Number(meshNode3D.parameters.zmax)) * 0.5 : 0.1;
+
+        const explosive_x = Number(remapNode?.parameters?.explosive_x ?? defaultCenterX);
+        const explosive_y = Number(remapNode?.parameters?.explosive_y ?? defaultCenterY);
+        const explosive_z = Number(remapNode?.parameters?.explosive_z ?? (remapNode?.parameters?.explosive_r ?? defaultCenterZ));
+        const explosive_r = Number(remapNode?.parameters?.explosive_r ?? 0.0);
+        const remap_radius = Number(remapNode?.parameters?.remap_radius ?? (n_cells * cell_size));
         const bc_x_min = String(meshNode3D?.parameters?.bc_x_min ?? solver3DNode?.parameters?.bc_x_min ?? 'Reflecting');
         const bc_x_max = String(meshNode3D?.parameters?.bc_x_max ?? solver3DNode?.parameters?.bc_x_max ?? 'Transmitting');
         const bc_y_min = String(meshNode3D?.parameters?.bc_y_min ?? solver3DNode?.parameters?.bc_y_min ?? 'Reflecting');
@@ -1108,7 +1250,7 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
         const bc_z_max = String(meshNode3D?.parameters?.bc_z_max ?? solver3DNode?.parameters?.bc_z_max ?? 'Transmitting');
 
         const sourceTime = model1d ? stateManager.getModelSimTime(model1d.id) : 0.0;
-        console.log(`[tryRemapFrom1D] Sending REMAP payload for target ${targetModelId} with ${n_cells} cells. Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), radius: ${remap_radius}, sourceTime: ${sourceTime}`);
+        console.log(`[tryRemapFrom1D] Sending REMAP payload for target ${targetModelId} with ${n_cells} cells. Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), radius: ${remap_radius}, charge_radius: ${charge_radius}, afterburn: ${afterburn_enabled}, sourceTime: ${sourceTime}`);
         networkManager.send({
             command: "REMAP",
             modelId: targetModelId,
@@ -1118,6 +1260,7 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
             explosive_z: explosive_z,
             explosive_r: explosive_r,
             remap_radius: remap_radius,
+            charge_radius: charge_radius,
             bc_x_min: bc_x_min,
             bc_x_max: bc_x_max,
             bc_y_min: bc_y_min,
@@ -1129,19 +1272,34 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
             rho_1d: rho_1d,
             ur_1d: ur_1d,
             p_1d: p_1d,
-            ambient_rho: Number(serialized1D.ambient_rho ?? 1.225),
-            ambient_p: Number(serialized1D.ambient_p ?? 101325.0),
-            is_ideal_gas: (model?.nodes.find(n => n.type === 'Material' && n.parameters?.material_type !== 'Air')?.parameters?.material_type === 'Ideal Gas Charge' || serialized1D.explosive_type === 'MaterialIdealGas' || serialized1D.init_mode === 'Ideal Gas' || serialized1D.is_ideal_gas === true),
-            explosive_type: serialized1D.explosive_type,
-            rho: serialized1D.rho,
-            high_rho: serialized1D.rho,
-            detonation_energy: serialized1D.detonation_energy,
-            det_vel: serialized1D.det_vel,
-            jwl_A: serialized1D.jwl_A,
-            jwl_B: serialized1D.jwl_B,
-            jwl_R1: serialized1D.jwl_R1,
-            jwl_R2: serialized1D.jwl_R2,
-            jwl_omega: serialized1D.jwl_omega
+            gamma: gamma,
+            atm_pressure: atm_p,
+            atm_temperature: atm_t,
+            ambient_rho: ambient_rho,
+            ambient_p: ambient_p,
+            is_ideal_gas: isIdeal1D,
+            material_type: material_type,
+            explosive_type: explosive_type,
+            composition: composition,
+            preset: preset,
+            rho: rho,
+            high_rho: rho,
+            detonation_energy: detonation_energy,
+            det_vel: det_vel,
+            jwl_A: jwl_A,
+            jwl_B: jwl_B,
+            jwl_R1: jwl_R1,
+            jwl_R2: jwl_R2,
+            jwl_omega: jwl_omega,
+            afterburn_enabled: afterburn_enabled,
+            afterburn_energy: afterburn_energy,
+            afterburn_fuel_fraction: afterburn_fuel_fraction,
+            afterburn_stoich_ratio: afterburn_stoich_ratio,
+            afterburn_ignition_temp: afterburn_ignition_temp,
+            afterburn_tau_chem: afterburn_tau_chem,
+            afterburn_c_edc: afterburn_c_edc,
+            afterburn_tau_expansion: afterburn_tau_expansion,
+            afterburn_ambient_o2_fraction: afterburn_ambient_o2_fraction
         });
         return true;
     } catch (err) {
@@ -1152,27 +1310,54 @@ function tryRemapFrom1D(targetModelId: string, pipe: any): boolean {
     }
 }
 
-function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
+function tryRemapFrom2D(targetModelId: string, pipe: any, allowAutoRun: boolean = true): boolean {
     const model = stateManager.getAllModels().find(m => m.id === targetModelId);
-    const model2d = stateManager.getAllModels().find(m => m.id === (pipe.sourceModelId || pipe.model2dId));
+    const sourceModelId = pipe.sourceModelId || pipe.model2dId;
+    const model2d = stateManager.getAllModels().find(m => m.id === sourceModelId);
     const solver2DNode = model2d?.nodes.find(n => n.type === 'CFDSolver2D');
-    const telemetry = solver2DNode ? stateManager.getTelemetry(solver2DNode.id + "-binary") : null;
     
-    const solver3DNode = model?.nodes.find(n => n.type === 'CFDSolver3D');
+    let telemetry: any = null;
+    if (solver2DNode) {
+        telemetry = stateManager.getTelemetry(solver2DNode.id + "-binary");
+        if (!telemetry || !(telemetry instanceof ArrayBuffer)) {
+            const raw = stateManager.getTelemetry(solver2DNode.id);
+            if (raw instanceof ArrayBuffer) telemetry = raw;
+        }
+    }
+    if (!telemetry && sourceModelId) {
+        const mBuf = stateManager.getTelemetry(sourceModelId + "-binary");
+        if (mBuf instanceof ArrayBuffer) telemetry = mBuf;
+    }
+    if (!telemetry && sourceModelId) {
+        const pb = (window as any).playbackBuffer;
+        const frame = pb?.getLatestFrameForModel?.(sourceModelId);
+        if (frame?.data instanceof ArrayBuffer) telemetry = frame.data;
+    }
+    
+    const solver3DNode = model?.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
 
     if (solver3DNode) {
-        stateManager.pushTelemetry(solver3DNode.id, `[DEBUG] tryRemapFrom2D starting. target=${targetModelId} 2dModel=${pipe.sourceModelId || pipe.model2dId} node=${solver2DNode?.id ?? 'null'} telemetry=${telemetry ? ('ArrayBuffer(' + telemetry.byteLength + ')') : 'null'}`, targetModelId);
+        stateManager.pushTelemetry(solver3DNode.id, `[DEBUG] tryRemapFrom2D starting. target=${targetModelId} 2dModel=${sourceModelId} node=${solver2DNode?.id ?? 'null'} telemetry=${telemetry ? ('ArrayBuffer(' + telemetry.byteLength + ')') : 'null'}`, targetModelId);
     }
 
     if (!telemetry || !(telemetry instanceof ArrayBuffer)) {
-        if (solver3DNode) {
-            stateManager.pushTelemetry(solver3DNode.id, `[INFO] No 2D simulation telemetry found. Automatically initializing and running 2D model (${pipe.sourceModelId || pipe.model2dId})...`, targetModelId);
+        if (autoRunInFlight.has(sourceModelId)) {
+            console.log(`[tryRemapFrom2D] 2D model ${sourceModelId} execution is already in flight. Awaiting completion.`);
+            return false;
         }
-        const sId = pipe.sourceModelId || pipe.model2dId;
-        if (sId) {
-            console.log(`[tryRemapFrom2D] Auto-running 2D model ${sId} to generate remap profile.`);
-            executeModelCommand(sId, "INIT", {}, false);
-            executeModelCommand(sId, "EXEC_ALL", {}, false);
+        if (!allowAutoRun) {
+            console.warn(`[tryRemapFrom2D] No 2D simulation telemetry found for ${sourceModelId} and auto-run is disabled.`);
+            return false;
+        }
+        if (solver3DNode) {
+            stateManager.pushTelemetry(solver3DNode.id, `[INFO] No 2D simulation telemetry found. Automatically initializing and running 2D model (${sourceModelId})...`, targetModelId);
+        }
+        if (sourceModelId) {
+            console.log(`[tryRemapFrom2D] Auto-running 2D model ${sourceModelId} to generate remap profile.`);
+            autoRunInFlight.add(sourceModelId);
+            pipelineAutoRunPending.set(targetModelId, { command: "INIT", extra: {} });
+            executeModelCommand(sourceModelId, "INIT", {}, false);
+            executeModelCommand(sourceModelId, "EXEC_ALL", {}, false);
         }
         return false;
     }
@@ -1253,18 +1438,37 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
             }
         }
 
-        // Extract material and ambient parameters from 2D model
+        // Extract material and ambient parameters from 2D model (with fallback to 1D upstream if 2D was remapped from 1D)
         const airConn2D = model2d?.connections.find(c => c.toNode === solver2DNode!.id && c.toPort === 'air');
-        const airNode2D = airConn2D ? model2d?.nodes.find(n => n.id === airConn2D.fromNode) : null;
+        let airNode2D = airConn2D ? model2d?.nodes.find(n => n.id === airConn2D.fromNode) : (model2d?.nodes.find(n => isAirMaterialNode(n)) ?? null);
+
+        const expConn2D = model2d?.connections.find(c => c.toNode === solver2DNode!.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
+        let chargeNode2D = expConn2D ? model2d?.nodes.find(n => n.id === expConn2D.fromNode) : (model2d?.nodes.find(n => n.type === 'Charge2D' || n.type === 'Charge1D') ?? null);
+        const matConn2D = chargeNode2D ? model2d?.connections.find(c => c.toNode === chargeNode2D!.id && c.toPort === 'material') : null;
+        let matNode2D = matConn2D ? model2d?.nodes.find(n => n.id === matConn2D.fromNode) : (model2d?.nodes.find(n => isJWLMaterialNode(n) || isIdealGasMaterialNode(n)) ?? null);
+
+        // If 2D model was itself remapped from 1D and missing local nodes, look up upstream 1D model
+        let model1DUpstream: any = null;
+        if (model2d) {
+            const pipe1D = findRemapPipeline(model2d.id);
+            if (pipe1D?.sourceModelId) {
+                model1DUpstream = stateManager.getAllModels().find(m => m.id === pipe1D.sourceModelId);
+            }
+        }
+        if (!chargeNode2D && model1DUpstream) {
+            chargeNode2D = model1DUpstream.nodes.find((n: any) => n.type === 'Charge1D');
+        }
+        if (!matNode2D && model1DUpstream) {
+            matNode2D = model1DUpstream.nodes.find((n: any) => isJWLMaterialNode(n) || isIdealGasMaterialNode(n));
+        }
+        if (!airNode2D && model1DUpstream) {
+            airNode2D = model1DUpstream.nodes.find((n: any) => isAirMaterialNode(n));
+        }
+
         const gamma = Number(airNode2D?.parameters?.gamma ?? solver2DNode?.parameters?.gamma ?? 1.4);
         const atm_p = Number(airNode2D?.parameters?.atm_pressure ?? 101325.0);
         const atm_t = Number(airNode2D?.parameters?.atm_temperature ?? 288.0);
         const ambient_rho = atm_p / (287.058 * atm_t);
-
-        const expConn2D = model2d?.connections.find(c => c.toNode === solver2DNode!.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
-        const chargeNode2D = expConn2D ? model2d?.nodes.find(n => n.id === expConn2D.fromNode) : null;
-        const matConn2D = chargeNode2D ? model2d?.connections.find(c => c.toNode === chargeNode2D.id && c.toPort === 'material') : null;
-        const matNode2D = matConn2D ? model2d?.nodes.find(n => n.id === matConn2D.fromNode) : null;
 
         const matType = matNode2D?.parameters?.material_type ?? 'JWL Charge';
         const matNode3DLocal = model?.nodes.find(n => n.type === 'Material' && n.parameters?.material_type !== 'Air');
@@ -1272,6 +1476,7 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
         const is_ideal_gas = isIdeal3D || (matType === 'Ideal Gas Charge' || solver3DNode?.parameters?.init_mode === 'Ideal Gas' || solver3DNode?.parameters?.is_ideal_gas === true);
         const explosive_type = is_ideal_gas ? 'MaterialIdealGas' : 'MaterialExplosive';
         const composition = matNode2D?.parameters?.composition ?? 'TNT';
+        const preset = String(matNode2D?.parameters?.preset ?? composition);
         const rho = Number(matNode2D?.parameters?.rho ?? 1630.0);
         const detonation_energy = Number(matNode2D?.parameters?.detonation_energy ?? 4290000);
         const det_vel = Number(matNode2D?.parameters?.det_vel ?? 6930);
@@ -1281,6 +1486,29 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
         const jwl_R2 = Number(matNode2D?.parameters?.jwl_R2 ?? 0.90);
         const jwl_omega = Number(matNode2D?.parameters?.jwl_omega ?? 0.35);
 
+        let charge_radius = Number(chargeNode2D?.parameters?.radius ?? chargeNode2D?.parameters?.charge_radius ?? 0.0);
+        if (charge_radius <= 0 && chargeNode2D?.parameters?.charge_mass) {
+            const mass = Number(chargeNode2D.parameters.charge_mass);
+            if (mass > 0 && rho > 0) {
+                charge_radius = Math.cbrt((3.0 * mass) / (4.0 * Math.PI * rho));
+            }
+        }
+        if (charge_radius <= 0) {
+            charge_radius = 0.05;
+        }
+
+        const afterburn_enabled = matNode2D?.parameters?.afterburn_enabled !== undefined
+            ? Boolean(matNode2D.parameters.afterburn_enabled)
+            : true;
+        const afterburn_energy = Number(matNode2D?.parameters?.afterburn_energy ?? 1.5e7);
+        const afterburn_fuel_fraction = Number(matNode2D?.parameters?.afterburn_fuel_fraction ?? 0.40);
+        const afterburn_stoich_ratio = Number(matNode2D?.parameters?.afterburn_stoich_ratio ?? 3.0);
+        const afterburn_ignition_temp = Number(matNode2D?.parameters?.afterburn_ignition_temp ?? 700.0);
+        const afterburn_tau_chem = Number(matNode2D?.parameters?.afterburn_tau_chem ?? 1.0e-5);
+        const afterburn_c_edc = Number(matNode2D?.parameters?.afterburn_c_edc ?? 0.15);
+        const afterburn_tau_expansion = Number(matNode2D?.parameters?.afterburn_tau_expansion ?? 0.0);
+        const afterburn_ambient_o2_fraction = Number(matNode2D?.parameters?.afterburn_ambient_o2_fraction ?? 0.233);
+
         const bc_x_min = String(meshNode3D?.parameters?.bc_x_min ?? solver3DNode?.parameters?.bc_x_min ?? 'Reflecting');
         const bc_x_max = String(meshNode3D?.parameters?.bc_x_max ?? solver3DNode?.parameters?.bc_x_max ?? 'Transmitting');
         const bc_y_min = String(meshNode3D?.parameters?.bc_y_min ?? solver3DNode?.parameters?.bc_y_min ?? 'Reflecting');
@@ -1289,7 +1517,7 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
         const bc_z_max = String(meshNode3D?.parameters?.bc_z_max ?? solver3DNode?.parameters?.bc_z_max ?? 'Transmitting');
 
         const sourceTime = model2d ? stateManager.getModelSimTime(model2d.id) : 0.0;
-        console.log(`[tryRemapFrom2D] Sending REMAP_2D payload for target ${targetModelId} with ${nr}x${nz} cells. 3D Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), 2D detonator_z: ${source_explosive_z}, radius: ${remap_radius}, sourceTime: ${sourceTime}`);
+        console.log(`[tryRemapFrom2D] Sending REMAP_2D payload for target ${targetModelId} with ${nr}x${nz} cells. 3D Center: (${explosive_x}, ${explosive_y}, ${explosive_z}), 2D detonator_z: ${source_explosive_z}, radius: ${remap_radius}, charge_radius: ${charge_radius}, afterburn: ${afterburn_enabled}, sourceTime: ${sourceTime}`);
         networkManager.send({
             command: "REMAP_2D",
             modelId: targetModelId,
@@ -1319,6 +1547,7 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
             explosive_z: explosive_z,
             source_explosive_z: source_explosive_z,
             remap_radius: remap_radius,
+            charge_radius: charge_radius,
             num_materials: num_materials,
             gamma: gamma,
             ambient_rho: ambient_rho,
@@ -1327,6 +1556,7 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
             material_type: is_ideal_gas ? 'Ideal Gas Charge' : matType,
             explosive_type: explosive_type,
             composition: composition,
+            preset: preset,
             rho: rho,
             detonation_energy: detonation_energy,
             det_vel: det_vel,
@@ -1335,6 +1565,15 @@ function tryRemapFrom2D(targetModelId: string, pipe: any): boolean {
             jwl_R1: jwl_R1,
             jwl_R2: jwl_R2,
             jwl_omega: jwl_omega,
+            afterburn_enabled: afterburn_enabled,
+            afterburn_energy: afterburn_energy,
+            afterburn_fuel_fraction: afterburn_fuel_fraction,
+            afterburn_stoich_ratio: afterburn_stoich_ratio,
+            afterburn_ignition_temp: afterburn_ignition_temp,
+            afterburn_tau_chem: afterburn_tau_chem,
+            afterburn_c_edc: afterburn_c_edc,
+            afterburn_tau_expansion: afterburn_tau_expansion,
+            afterburn_ambient_o2_fraction: afterburn_ambient_o2_fraction,
             telemetry_data: Array.from(floats)
         });
         return true;
@@ -1387,7 +1626,7 @@ function executeWorkspacePipeline(): void {
     }
 }
 
-function executeModelCommand(modelId?: string, command: string = "INIT", extra: Record<string, any> = {}, fromGlobal: boolean = false) {
+function executeModelCommand(modelId?: string, command: string = "INIT", extra: Record<string, any> = {}, fromGlobal: boolean = false, allowAutoRun: boolean = true) {
     let resolvedId = modelId;
     if (!resolvedId || resolvedId === 'default' || resolvedId === '0') {
         resolvedId = stateManager.getActiveModelId() || undefined;
@@ -1413,9 +1652,9 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
     if (model) {
         const solver1Ds = model.nodes.filter(n => n.type === 'CFDSolver');
         const solver2Ds = model.nodes.filter(n => n.type === 'CFDSolver2D');
-        const solver3Ds = model.nodes.filter(n => n.type === 'CFDSolver3D');
+        const solver3Ds = model.nodes.filter(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
         const totalSolvers = solver1Ds.length + solver2Ds.length + solver3Ds.length;
-        const isFSICoupled = model.nodes.some(n => n.type === 'FSICoupler2D');
+        const isFSICoupled = model.nodes.some(n => n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D');
         if (totalSolvers > 1 && !isFSICoupled) {
             const msg = "Multiple solvers detected on the same canvas! BlastDaemon architecture requires exactly ONE solver per model tab (unless coupled via an FSI Coupler node). Please cut and paste your second simulation into a 'New Model'.";
             stateManager.pushTelemetry(targetModelId, "[ERROR] " + msg);
@@ -1424,22 +1663,34 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
         }
     }
 
-    const hasFEM3D     = model?.nodes.some(n => n.type === 'FEMDomain3D') || false;
-    const hasFEMFSI3D  = model?.nodes.some(n => n.type === 'FEMFSICoupler3D') || false;
-    const has2D       = model?.nodes.some(n => n.type === 'CFDSolver2D') || false;
-    const hasMPM2D    = model?.nodes.some(n => n.type === 'MPMDomain2D') || false;
-    const hasMPM3D    = model?.nodes.some(n => n.type === 'MPMDomain3D') || false;
-    const hasCoupler  = model?.nodes.some(n => n.type === 'FSICoupler2D') || false;
+    const has1D        = model?.nodes.some(n => n.type === 'CFDSolver') || false;
+    const has2D        = model?.nodes.some(n => n.type === 'CFDSolver2D') || false;
+    const hasMPM2D     = model?.nodes.some(n => n.type === 'MPMDomain2D' || n.type === 'MPMObject2D') || false;
+    const has3D        = model?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') || false;
+    const hasFEM3D     = model?.nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D') || false;
+    const hasFEMFSI3D  = model?.nodes.some(n => n.type === 'FEMFSICoupler3D') || (hasFEM3D && has3D);
+    const hasMPM3D     = model?.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D')
+                      || (model?.nodes.some(n => {
+                          if (n.type !== 'MarineHarbourDomain') return false;
+                          const waterMode = String(n.parameters?.water_discretization_mode || 'Spherical_MPM_Sleeve');
+                          const isPureFV = waterMode === 'Pure_FV' || waterMode === 'Pure FV';
+                          if (isPureFV) return false;
+                          const bedType = String(n.parameters?.seabed_mesh_type || 'Hybrid_MPM_Crater_FEM_FarField');
+                          const hasWaterMPM = (Number(n.parameters?.nearfield_sleeve_radius ?? 2.5) > 0);
+                          const hasBedMPM = (bedType !== 'Pure_FV' && bedType !== 'Pure FV' && bedType !== 'Pure_Hex8_FEM' && bedType !== 'Pure Hex8 FEM');
+                          return hasWaterMPM || hasBedMPM;
+                      }))
+                      || false;
+    const hasCoupler   = model?.nodes.some(n => n.type === 'FSICoupler2D') || false;
     const hasCoupler3D = model?.nodes.some(n => n.type === 'FSICoupler3D') || false;
-    const hasFSI2D    = hasCoupler || (has2D && hasMPM2D);
-    const pipeline = findRemapPipeline(targetModelId);
-    const has3D      = model?.nodes.some(n => n.type === 'CFDSolver3D') || false;
-    const hasFSI3D    = hasCoupler3D || (has3D && hasMPM3D);
+    const hasFSI2D     = hasCoupler || (has2D && hasMPM2D);
+    const hasFSI3D     = hasCoupler3D || (has3D && hasMPM3D);
+    const pipeline     = findRemapPipeline(targetModelId);
 
     // Helper to get solver node for logging
     const getSolverNode = (mid: string) => {
         const m = stateManager.getAllModels().find(m => m.id === mid);
-        return m?.nodes.find(n => n.type === 'FEMFSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D' || n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D');
+        return m?.nodes.find(n => n.type === 'FEMFSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D');
     };
 
     // ── Incomplete Model Gate ────────────────────────────────────────────────
@@ -1490,10 +1741,19 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                 console.log(`Sending INIT_FEM_FSI_3D for 3D FEM FSI model ${targetModelId}`);
                 networkManager.send(payload);
                 sendView3DConfig(targetModelId);
-                stateManager.setModelStatus(targetModelId, 'INITIALIZED');
+                if (pipeline) {
+                    const success = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline, allowAutoRun) : tryRemapFrom1D(targetModelId, pipeline, allowAutoRun);
+                    if (success) {
+                        stateManager.setModelStatus(targetModelId, 'INITIALIZED');
+                    } else {
+                        stateManager.setModelStatus(targetModelId, 'UNINITIALIZED');
+                    }
+                } else {
+                    stateManager.setModelStatus(targetModelId, 'INITIALIZED');
+                }
             }
         }
-        else if (hasFEM3D) {
+        else if (hasFEM3D && !has3D) {
             const state = stateManager.getSimulationState(targetModelId);
             if (state) {
                 const payload = serializeForSolver(state, "INIT_FEM_3D", targetModelId, model?.filename);
@@ -1510,7 +1770,16 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                 console.log(`Sending INIT_FSI_3D for 3D FSI model ${targetModelId}`);
                 networkManager.send(payload);
                 sendView3DConfig(targetModelId);
-                stateManager.setModelStatus(targetModelId, 'INITIALIZED');
+                if (pipeline) {
+                    const success = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline, allowAutoRun) : tryRemapFrom1D(targetModelId, pipeline, allowAutoRun);
+                    if (success) {
+                        stateManager.setModelStatus(targetModelId, 'INITIALIZED');
+                    } else {
+                        stateManager.setModelStatus(targetModelId, 'UNINITIALIZED');
+                    }
+                } else {
+                    stateManager.setModelStatus(targetModelId, 'INITIALIZED');
+                }
             }
         }
         else if (hasMPM3D) {
@@ -1529,7 +1798,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                 networkManager.send(payload);
                 sendView3DConfig(targetModelId);
                 if (pipeline) {
-                    const success = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline) : tryRemapFrom1D(targetModelId, pipeline);
+                    const success = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline, allowAutoRun) : tryRemapFrom1D(targetModelId, pipeline, allowAutoRun);
                     if (success) {
                         stateManager.setModelStatus(targetModelId, 'INITIALIZED');
                     } else {
@@ -1568,7 +1837,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                 networkManager.send(payload);
                 sendContourConfig(targetModelId);
                 if (pipeline) {
-                    if (tryRemapFrom1D(targetModelId, pipeline)) {
+                    if (tryRemapFrom1D(targetModelId, pipeline, allowAutoRun)) {
                         stateManager.setModelStatus(targetModelId, 'INITIALIZED');
                     } else {
                         stateManager.setModelStatus(targetModelId, 'UNINITIALIZED');
@@ -1577,7 +1846,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     stateManager.setModelStatus(targetModelId, 'INITIALIZED');
                 }
             }
-        } else {
+        } else if (has1D) {
             // Pure 1D model.
             const state = stateManager.getSimulationState(targetModelId);
             if (state) {
@@ -1586,6 +1855,12 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                 networkManager.send(payload);
                 stateManager.setModelStatus(targetModelId, 'INITIALIZED');
             }
+        } else {
+            const msg = "Cannot initialize simulation: No active physics solver domain node (such as FEMDomain3D, FEMFSICoupler3D, CFDSolver3D, MarineHarbourDomain, MPMDomain3D, or CFDSolver) was found in this model graph.";
+            stateManager.pushTelemetry(targetModelId, `[ERROR] ${msg}`);
+            CustomDialog.alert(msg, "Missing Solver Domain");
+            stateManager.setModelStatus(targetModelId, 'INCOMPLETE');
+            return;
         }
 
     // ── STEP ──────────────────────────────────────────────────────────────────
@@ -1596,7 +1871,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
         const endtime = getEndTimeFromSolver(targetModelId);
         const currentStep = stateManager.getModelStep(targetModelId);
 
-        if (status === 'UNINITIALIZED' || status === 'TERMINATED' || status === 'ERROR' || (status === 'PAUSED' && currentStep === 0)) {
+        if (status === 'UNINITIALIZED' || status === 'TERMINATED' || status === 'ERROR') {
             if (hasFEMFSI3D) {
                 const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
@@ -1604,10 +1879,20 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     console.log(`[Auto-Init Step] Sending INIT_FEM_FSI_3D for 3D FEM FSI model ${targetModelId}`);
                     networkManager.send(payload);
                     sendView3DConfig(targetModelId);
-                    networkManager.send({ command: "STEP_FEM_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
-                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                    if (pipeline) {
+                        const remapOk = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline, allowAutoRun) : tryRemapFrom1D(targetModelId, pipeline, allowAutoRun);
+                        if (remapOk) {
+                            networkManager.send({ command: "STEP_FEM_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
+                            stateManager.setModelStatus(targetModelId, 'RUNNING');
+                        } else {
+                            pipelineAutoRunPending.set(targetModelId, { command, extra });
+                        }
+                    } else {
+                        networkManager.send({ command: "STEP_FEM_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
+                        stateManager.setModelStatus(targetModelId, 'RUNNING');
+                    }
                 }
-            } else if (hasFEM3D) {
+            } else if (hasFEM3D && !has3D) {
                 const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
                     const payload = serializeForSolver(state, "INIT_FEM_3D", targetModelId, model?.filename);
@@ -1615,9 +1900,8 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     networkManager.send(payload);
                     sendView3DConfig(targetModelId);
                     const femNode = state.nodes.find(n => n.type === 'FEMDomain3D');
-                    const vpNode = state.nodes.find(n => n.type === 'Telemetry3DViewport');
                     const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
-                    const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
+                    const refreshRate = stateManager.getModelRefreshRate(targetModelId);
                     networkManager.send({ command: "STEP_FEM_3D", modelId: targetModelId, steps, cfl: femCfl, endtime, refresh_rate: refreshRate });
                     stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
@@ -1628,8 +1912,18 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     console.log(`[Auto-Init Step] Sending INIT_FSI_3D for 3D FSI model ${targetModelId}`);
                     networkManager.send(payload);
                     sendView3DConfig(targetModelId);
-                    networkManager.send({ command: "STEP_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
-                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                    if (pipeline) {
+                        const remapOk = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline, allowAutoRun) : tryRemapFrom1D(targetModelId, pipeline, allowAutoRun);
+                        if (remapOk) {
+                            networkManager.send({ command: "STEP_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
+                            stateManager.setModelStatus(targetModelId, 'RUNNING');
+                        } else {
+                            pipelineAutoRunPending.set(targetModelId, { command, extra });
+                        }
+                    } else {
+                        networkManager.send({ command: "STEP_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
+                        stateManager.setModelStatus(targetModelId, 'RUNNING');
+                    }
                 }
             } else if (hasMPM3D) {
                 const state = stateManager.getSimulationState(targetModelId);
@@ -1644,7 +1938,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
             } else if (pipeline) {
-                const is3D = model?.nodes.some(n => n.type === 'CFDSolver3D');
+                const is3D = model?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
                 const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
                     const cmd = is3D ? "INIT_3D" : "INIT_2D";
@@ -1653,7 +1947,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     networkManager.send(payload);
                     if (is3D) sendView3DConfig(targetModelId); else sendContourConfig(targetModelId);
 
-                    const remapOk = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline) : tryRemapFrom1D(targetModelId, pipeline);
+                    const remapOk = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline, allowAutoRun) : tryRemapFrom1D(targetModelId, pipeline, allowAutoRun);
                     if (remapOk) {
                         const stepCmd = is3D ? "STEP_3D" : "STEP_2D";
                         networkManager.send({ command: stepCmd, modelId: targetModelId, steps, cfl, endtime });
@@ -1703,7 +1997,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     networkManager.send({ command: "STEP_2D", modelId: targetModelId, steps, cfl, endtime });
                     stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
-            } else {
+            } else if (has1D) {
                 const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
                     const payload = serializeForSolver(state, "INIT", targetModelId, model?.filename);
@@ -1712,18 +2006,23 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     networkManager.send({ command: "STEP", modelId: targetModelId, steps, cfl, endtime });
                     stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
+            } else {
+                const msg = "Cannot execute step: No active physics solver domain node (such as FEMDomain3D, FEMFSICoupler3D, CFDSolver3D, MarineHarbourDomain, MPMDomain3D, or CFDSolver) was found in this model graph.";
+                stateManager.pushTelemetry(targetModelId, `[ERROR] ${msg}`);
+                CustomDialog.alert(msg, "Missing Solver Domain");
+                stateManager.setModelStatus(targetModelId, 'INCOMPLETE');
+                return;
             }
         } else {
             // Already initialized / paused
             if (hasFEMFSI3D) {
                 sendView3DConfig(targetModelId);
                 networkManager.send({ command: "STEP_FEM_FSI_3D", modelId: targetModelId, steps, cfl, endtime });
-            } else if (hasFEM3D) {
+            } else if (hasFEM3D && !has3D) {
                 sendView3DConfig(targetModelId);
                 const femNode = model?.nodes.find(n => n.type === 'FEMDomain3D');
-                const vpNode = model?.nodes.find(n => n.type === 'Telemetry3DViewport');
                 const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
-                const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
+                const refreshRate = stateManager.getModelRefreshRate(targetModelId);
                 networkManager.send({ command: "STEP_FEM_3D", modelId: targetModelId, steps, cfl: femCfl, endtime, refresh_rate: refreshRate });
             } else if (hasFSI3D) {
                 sendView3DConfig(targetModelId);
@@ -1768,7 +2067,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
         const endtime = getEndTimeFromSolver(targetModelId);
         const currentStep = stateManager.getModelStep(targetModelId);
 
-        if (status === 'UNINITIALIZED' || status === 'TERMINATED' || status === 'ERROR' || (status === 'PAUSED' && currentStep === 0)) {
+        if (status === 'UNINITIALIZED' || status === 'TERMINATED' || status === 'ERROR') {
             if (hasFEMFSI3D) {
                 const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
@@ -1776,10 +2075,20 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     console.log(`[Auto-Run] Sending INIT_FEM_FSI_3D for 3D FEM FSI model ${targetModelId}`);
                     networkManager.send(payload);
                     sendView3DConfig(targetModelId);
-                    networkManager.send({ command: "EXEC_ALL_FEM_FSI_3D", modelId: targetModelId, cfl, endtime });
-                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                    if (pipeline) {
+                        const remapOk = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline, allowAutoRun) : tryRemapFrom1D(targetModelId, pipeline, allowAutoRun);
+                        if (remapOk) {
+                            networkManager.send({ command: "EXEC_ALL_FEM_FSI_3D", modelId: targetModelId, cfl, endtime });
+                            stateManager.setModelStatus(targetModelId, 'RUNNING');
+                        } else {
+                            pipelineAutoRunPending.set(targetModelId, { command, extra });
+                        }
+                    } else {
+                        networkManager.send({ command: "EXEC_ALL_FEM_FSI_3D", modelId: targetModelId, cfl, endtime });
+                        stateManager.setModelStatus(targetModelId, 'RUNNING');
+                    }
                 }
-            } else if (hasFEM3D) {
+            } else if (hasFEM3D && !has3D) {
                 const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
                     const payload = serializeForSolver(state, "INIT_FEM_3D", targetModelId, model?.filename);
@@ -1787,9 +2096,8 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     networkManager.send(payload);
                     sendView3DConfig(targetModelId);
                     const femNode = state.nodes.find(n => n.type === 'FEMDomain3D');
-                    const vpNode = state.nodes.find(n => n.type === 'Telemetry3DViewport');
                     const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
-                    const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
+                    const refreshRate = stateManager.getModelRefreshRate(targetModelId);
                     networkManager.send({ command: "EXEC_ALL_FEM_3D", modelId: targetModelId, cfl: femCfl, endtime, refresh_rate: refreshRate });
                     stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
@@ -1800,8 +2108,18 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     console.log(`[Auto-Run] Sending INIT_FSI_3D for 3D FSI model ${targetModelId}`);
                     networkManager.send(payload);
                     sendView3DConfig(targetModelId);
-                    networkManager.send({ command: "EXEC_ALL_FSI_3D", modelId: targetModelId, cfl, endtime });
-                    stateManager.setModelStatus(targetModelId, 'RUNNING');
+                    if (pipeline) {
+                        const remapOk = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline, allowAutoRun) : tryRemapFrom1D(targetModelId, pipeline, allowAutoRun);
+                        if (remapOk) {
+                            networkManager.send({ command: "EXEC_ALL_FSI_3D", modelId: targetModelId, cfl, endtime });
+                            stateManager.setModelStatus(targetModelId, 'RUNNING');
+                        } else {
+                            pipelineAutoRunPending.set(targetModelId, { command, extra });
+                        }
+                    } else {
+                        networkManager.send({ command: "EXEC_ALL_FSI_3D", modelId: targetModelId, cfl, endtime });
+                        stateManager.setModelStatus(targetModelId, 'RUNNING');
+                    }
                 }
             } else if (hasMPM3D) {
                 const state = stateManager.getSimulationState(targetModelId);
@@ -1816,7 +2134,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
             } else if (pipeline) {
-                const is3D = model?.nodes.some(n => n.type === 'CFDSolver3D');
+                const is3D = model?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
                 const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
                     const cmd = is3D ? "INIT_3D" : "INIT_2D";
@@ -1825,7 +2143,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     networkManager.send(payload);
                     if (is3D) sendView3DConfig(targetModelId); else sendContourConfig(targetModelId);
 
-                    const remapOk = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline) : tryRemapFrom1D(targetModelId, pipeline);
+                    const remapOk = pipeline.sourceType === '2D' ? tryRemapFrom2D(targetModelId, pipeline, allowAutoRun) : tryRemapFrom1D(targetModelId, pipeline, allowAutoRun);
                     if (remapOk) {
                         const execCmd = is3D ? "EXEC_ALL_3D" : "EXEC_ALL_2D";
                         networkManager.send({ command: execCmd, modelId: targetModelId, cfl, endtime });
@@ -1876,7 +2194,7 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     networkManager.send({ command: "EXEC_ALL_2D", modelId: targetModelId, cfl, endtime });
                     stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
-            } else {
+            } else if (has1D) {
                 // Pure 1D model
                 const state = stateManager.getSimulationState(targetModelId);
                 if (state) {
@@ -1886,18 +2204,23 @@ function executeModelCommand(modelId?: string, command: string = "INIT", extra: 
                     networkManager.send({ command: "EXEC_ALL", modelId: targetModelId, cfl, endtime });
                     stateManager.setModelStatus(targetModelId, 'RUNNING');
                 }
+            } else {
+                const msg = "Cannot execute simulation: No active physics solver domain node (such as FEMDomain3D, FEMFSICoupler3D, CFDSolver3D, MarineHarbourDomain, MPMDomain3D, or CFDSolver) was found in this model graph.";
+                stateManager.pushTelemetry(targetModelId, `[ERROR] ${msg}`);
+                CustomDialog.alert(msg, "Missing Solver Domain");
+                stateManager.setModelStatus(targetModelId, 'INCOMPLETE');
+                return;
             }
         } else {
             // Already initialized / paused
             if (hasFEMFSI3D) {
                 sendView3DConfig(targetModelId);
                 networkManager.send({ command: "EXEC_ALL_FEM_FSI_3D", modelId: targetModelId, cfl, endtime });
-            } else if (hasFEM3D) {
+            } else if (hasFEM3D && !has3D) {
                 sendView3DConfig(targetModelId);
                 const femNode = model?.nodes.find(n => n.type === 'FEMDomain3D');
-                const vpNode = model?.nodes.find(n => n.type === 'Telemetry3DViewport');
                 const femCfl = Number(femNode?.parameters?.cfl ?? 0.3);
-                const refreshRate = Number(vpNode?.parameters?.refresh_rate ?? 0.5);
+                const refreshRate = stateManager.getModelRefreshRate(targetModelId);
                 networkManager.send({ command: "EXEC_ALL_FEM_3D", modelId: targetModelId, cfl: femCfl, endtime, refresh_rate: refreshRate });
             } else if (hasFSI3D) {
                 sendView3DConfig(targetModelId);
@@ -2099,20 +2422,22 @@ networkManager.onMessage(async (data) => {
             }
         }
 
-        const model = stateManager.getAllModels().find(m => m.id === modelId);
-        const solverNodes = model?.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D') || [];
+        const targetModelId = modelId || stateManager.getActiveModelId() || "";
+        const model = stateManager.getAllModels().find(m => m.id === (modelId || targetModelId));
+        const solverNodes = model?.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D') || [];
         if (solverNodes.length > 0) {
-            stateManager.pushTelemetry(solverNodes[0].id, payloadBuffer, modelId);
-            const curStep = (modelId ? stateManager.getModelStep(modelId) : 0) || 0;
-            const curTime = (modelId ? stateManager.getModelSimTime(modelId) : 0) || 0;
-            const curDt = (modelId ? stateManager.getModelDt(modelId) : 0) || 0;
-            const bufferedFrame = playbackBuffer.addFrame(payloadBuffer, { modelId, step: curStep, time: curTime, metrics: { dt: curDt } });
+            stateManager.pushTelemetry(solverNodes[0].id, payloadBuffer, targetModelId);
+            stateManager.setBinaryTelemetry(solverNodes[0].id, payloadBuffer, targetModelId);
+            const curStep = (targetModelId ? stateManager.getModelStep(targetModelId) : 0) || 0;
+            const curTime = (targetModelId ? stateManager.getModelSimTime(targetModelId) : 0) || 0;
+            const curDt = (targetModelId ? stateManager.getModelDt(targetModelId) : 0) || 0;
+            const bufferedFrame = playbackBuffer.addFrame(payloadBuffer, { modelId: targetModelId, step: curStep, time: curTime, metrics: { dt: curDt } });
             const hasViewport = Array.from(layoutManager.components.values()).some((c: any) => c.type === 'VIEWPORT' || c.type === 'MULTI_VIEW_STAGE');
             layoutManager.components.forEach(comp => {
                 if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
                     comp.instance.dispatchFrame(bufferedFrame, true);
                 } else if (comp.type === 'TELEMETRY_3D' && comp.instance && !hasViewport) {
-                    comp.instance.pushFrame(payloadBuffer, modelId);
+                    comp.instance.pushFrame(payloadBuffer, targetModelId);
                 }
             });
         }
@@ -2388,7 +2713,7 @@ networkManager.onMessage(async (data) => {
                 if (dataJson.step !== undefined) {
                     stateManager.setModelStep(modelId, dataJson.step);
                 }
-                const solverNodes = model.nodes.filter(n => n.type === targetType || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D' || n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D' || n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D');
+                const solverNodes = model.nodes.filter(n => n.type === targetType || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver' || n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D' || n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D');
                 solverNodes.forEach(sn => stateManager.pushTelemetry(sn.id, dataJson, modelId));
                 const textNodes = model.nodes.filter(n => n.type === 'TelemetryText');
                 textNodes.forEach(tn => stateManager.pushTelemetry(tn.id, dataJson, modelId));
@@ -2403,43 +2728,71 @@ networkManager.onMessage(async (data) => {
 
         if (dataJson.type === 'progress' || dataJson.type === 'progress_2d') {
             if (modelId) {
-                stateManager.setModelProgress(modelId, dataJson.percent);
-                stateManager.setModelSimTime(modelId, dataJson.sim_time);
-                if (dataJson.step !== undefined) {
-                    stateManager.setModelStep(modelId, dataJson.step);
-                }
-                
-                if (dataJson.percent === 100) {
-                    stateManager.setModelStatus(modelId, 'PAUSED');
-                    // Auto-trigger remap for downstream pipeline 2D/3D model if any!
-                    const allModels = stateManager.getAllModels();
-                    for (const m of allModels) {
-                        const pipe = findRemapPipeline(m.id);
-                        if (pipe && (pipe.sourceModelId === modelId || pipe.model1dId === modelId)) {
-                            console.log(`[Pipeline Auto-Init] Model ${modelId} completed. Initializing downstream model ${m.id}`);
-                            const mState = stateManager.getSimulationState(m.id);
-                            if (mState) {
-                                const is3D = m.nodes.some(n => n.type === 'CFDSolver3D');
-                                const cmd = is3D ? "INIT_3D" : "INIT_2D";
-                                const payload = serializeForSolver(mState, cmd, m.id, m.filename);
-                                networkManager.send(payload);
-                                if (is3D) sendView3DConfig(m.id); else sendContourConfig(m.id);
-                                const remapOk = pipe.sourceType === '2D' ? tryRemapFrom2D(m.id, pipe) : tryRemapFrom1D(m.id, pipe);
-                                if (remapOk) {
-                                    stateManager.setModelStatus(m.id, 'INITIALIZED');
+                const isInitProgress = typeof dataJson.mode === 'string' && dataJson.mode.startsWith('INIT');
+
+                if (isInitProgress) {
+                    if (dataJson.percent === 100) {
+                        const currentStatus = stateManager.getModelStatus(modelId);
+                        // If model is already RUNNING (e.g. from an EXEC_ALL or STEP pipeline), keep RUNNING.
+                        // Otherwise, transition to INITIALIZED.
+                        if (currentStatus !== 'RUNNING') {
+                            stateManager.setModelStatus(modelId, 'INITIALIZED');
+                        }
+                        stateManager.setModelProgress(modelId, 0);
+                        if (dataJson.sim_time !== undefined) {
+                            stateManager.setModelSimTime(modelId, dataJson.sim_time);
+                        } else {
+                            stateManager.setModelSimTime(modelId, 0.0);
+                        }
+                        if (dataJson.step !== undefined) {
+                            stateManager.setModelStep(modelId, dataJson.step);
+                        } else {
+                            stateManager.setModelStep(modelId, 0);
+                        }
+                    }
+                } else {
+                    stateManager.setModelProgress(modelId, dataJson.percent);
+                    if (dataJson.sim_time !== undefined) {
+                        stateManager.setModelSimTime(modelId, dataJson.sim_time);
+                    }
+                    if (dataJson.step !== undefined) {
+                        stateManager.setModelStep(modelId, dataJson.step);
+                    }
+
+                    if (dataJson.percent === 100) {
+                        stateManager.setModelStatus(modelId, 'PAUSED');
+                        autoRunInFlight.delete(modelId);
+                        // Auto-trigger remap for downstream pipeline 2D/3D model only on full execution completion!
+                        const isExecAll = typeof dataJson.mode === 'string' && dataJson.mode.startsWith('EXEC_ALL');
+                        if (isExecAll) {
+                            const allModels = stateManager.getAllModels();
+                            for (const m of allModels) {
+                                const pipe = findRemapPipeline(m.id);
+                                if (pipe && (pipe.sourceModelId === modelId || pipe.model1dId === modelId)) {
+                                    console.log(`[Pipeline Auto-Init] Upstream model ${modelId} completed. Initializing downstream model ${m.id}`);
+                                    const pending = pipelineAutoRunPending.get(m.id);
+                                    pipelineAutoRunPending.delete(m.id);
+
+                                    // Initialize downstream model without allowing recursive auto-runs
+                                    executeModelCommand(m.id, "INIT", {}, false, false);
+
+                                    // If a pending execution (STEP or EXEC_ALL) was scheduled, dispatch it now
+                                    if (pending && pending.command && pending.command !== "INIT") {
+                                        executeModelCommand(m.id, pending.command, pending.extra, false, false);
+                                    }
                                 }
                             }
                         }
-                    }
-                } else if (dataJson.percent < 100) {
-                    const currentStatus = stateManager.getModelStatus(modelId);
-                    if (currentStatus !== 'PAUSED' && currentStatus !== 'TERMINATED') {
-                        stateManager.setModelStatus(modelId, 'RUNNING');
+                    } else if (dataJson.percent < 100) {
+                        const currentStatus = stateManager.getModelStatus(modelId);
+                        if (currentStatus !== 'PAUSED' && currentStatus !== 'TERMINATED') {
+                            stateManager.setModelStatus(modelId, 'RUNNING');
+                        }
                     }
                 }
 
                 if (model) {
-                    const solverNodes = model.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
+                    const solverNodes = model.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
                     solverNodes.forEach(sn => stateManager.pushTelemetry(sn.id, dataJson, modelId));
                 }
             }
@@ -2448,20 +2801,30 @@ networkManager.onMessage(async (data) => {
 
         if (dataJson.type === 'TELEMETRY' || dataJson.type === 'TELEMETRY_2D' || dataJson.type === 'TELEMETRY_3D' || dataJson.type === 'TELEMETRY_MPM_2D' || dataJson.type === 'TELEMETRY_FEM_3D') {
             if (modelId) {
-                stateManager.setModelSimTime(modelId, dataJson.time);
-                if (dataJson.step !== undefined) {
+                const currentStatus = stateManager.getModelStatus(modelId);
+                const isReset = currentStatus === 'INITIALIZED' || currentStatus === 'UNINITIALIZED';
+                const curSimTime = stateManager.getModelSimTime(modelId) || 0;
+                const curStep = stateManager.getModelStep(modelId) || 0;
+
+                if (dataJson.time !== undefined && (dataJson.time > 0 || isReset || curSimTime === 0)) {
+                    stateManager.setModelSimTime(modelId, dataJson.time);
+                }
+                if (dataJson.step !== undefined && (dataJson.step > 0 || isReset || curStep === 0)) {
                     stateManager.setModelStep(modelId, dataJson.step);
                 }
-                if (dataJson.dt !== undefined) {
+                if (dataJson.dt !== undefined && dataJson.dt > 0) {
                     stateManager.setModelDt(modelId, dataJson.dt);
                 }
-                transportController.updateExecutionStats(dataJson.step, dataJson.time, dataJson.dt);
-                const currentStatus = stateManager.getModelStatus(modelId);
+                const effectiveStep = stateManager.getModelStep(modelId);
+                const effectiveTime = stateManager.getModelSimTime(modelId);
+                const effectiveDt = stateManager.getModelDt(modelId);
+                transportController.updateExecutionStats(effectiveStep, effectiveTime, effectiveDt);
 
                 if (dataJson.time === 0 && currentStatus === 'UNINITIALIZED') {
                     stateManager.setModelStatus(modelId, 'INITIALIZED');
                     stateManager.setModelProgress(modelId, 0);
                 } else if (dataJson.is_terminated === true) {
+                    autoRunInFlight.delete(modelId);
                     const endtime = getEndTimeFromSolver(modelId);
                     const currentProgress = stateManager.getModelProgress(modelId);
                     if (currentProgress !== 100 && (endtime <= 0 || dataJson.time < endtime - 1e-12)) {
@@ -2479,13 +2842,15 @@ networkManager.onMessage(async (data) => {
                         stateManager.setModelStatus(modelId, 'RUNNING');
                     }
                 } else {
-                    if (currentStatus !== 'PAUSED' && currentStatus !== 'TERMINATED' && currentStatus !== 'INITIALIZED') {
-                        stateManager.setModelStatus(modelId, 'RUNNING');
+                    if (currentStatus !== 'PAUSED' && currentStatus !== 'TERMINATED') {
+                        if (currentStatus !== 'INITIALIZED' || (dataJson.step !== undefined && dataJson.step > 0) || (dataJson.time !== undefined && dataJson.time > 0)) {
+                            stateManager.setModelStatus(modelId, 'RUNNING');
+                        }
                     }
                 }
 
                 if (model) {
-                    const solverNodes = model.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
+                    const solverNodes = model.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
                     solverNodes.forEach(sn => stateManager.pushTelemetry(sn.id, dataJson, modelId));
                 }
                 if (dataJson.type === 'TELEMETRY_3D' || dataJson.type === 'TELEMETRY_FEM_3D') {

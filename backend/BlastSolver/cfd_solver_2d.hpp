@@ -58,6 +58,14 @@ public:
     virtual double getDz() const = 0;
     virtual double getTime() const = 0;
     virtual void setTime(double t) = 0;
+
+    virtual void setChargeRadius(double r) { charge_radius = r; }
+    virtual double getChargeRadius() const { return charge_radius; }
+
+protected:
+    double charge_radius = 0.05;
+
+public:
     virtual double getGamma() const = 0;
     virtual FluxScheme getFluxScheme() const = 0;
     virtual int getSpatialOrder() const = 0;

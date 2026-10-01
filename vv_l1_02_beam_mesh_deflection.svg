@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 550" width="900" height="550">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; fill: #c9d1d9; }
+    .title { font-size: 15px; font-weight: 600; fill: #f0f6fc; }
+    .subtitle { font-size: 11px; fill: #8b949e; }
+    .legend-title { font-size: 11px; font-weight: 600; fill: #e6edf3; }
+    .legend-tick { font-size: 10px; fill: #8b949e; }
+    .mesh-wire { stroke: rgba(13, 17, 23, 0.45); stroke-width: 0.8; }
+    .undeformed-wire { stroke: #58a6ff; stroke-width: 1.0; stroke-dasharray: 4,3; fill: none; opacity: 0.7; }
+  </style>
+  <rect width="900" height="550" fill="#0d1117" rx="8" stroke="#30363d" stroke-width="1"/>
+  <text x="450" y="28" text-anchor="middle" class="title">VV-L1-02: FEM 3D Hex8 Near-Incompressible Isochoric Shear (nu = 0.4999)</text>
+  <!-- Undeformed Reference Configuration -->
+  <polygon class="undeformed-wire" points="113.5,349.444 262.389,349.444 262.389,275 113.5,275 "/>
+  <polygon class="undeformed-wire" points="262.389,349.444 411.278,349.444 411.278,275 262.389,275 "/>
+  <polygon class="undeformed-wire" points="411.278,349.444 560.167,349.444 560.167,275 411.278,275 "/>
+  <polygon class="undeformed-wire" points="560.167,349.444 709.056,349.444 709.056,275 560.167,275 "/>
+  <polygon class="undeformed-wire" points="113.5,275 262.389,275 262.389,200.556 113.5,200.556 "/>
+  <polygon class="undeformed-wire" points="262.389,275 411.278,275 411.278,200.556 262.389,200.556 "/>
+  <polygon class="undeformed-wire" points="411.278,275 560.167,275 560.167,200.556 411.278,200.556 "/>
+  <polygon class="undeformed-wire" points="560.167,275 709.056,275 709.056,200.556 560.167,200.556 "/>
+  <polygon class="undeformed-wire" points="113.5,349.444 262.389,349.444 262.389,275 113.5,275 "/>
+  <polygon class="undeformed-wire" points="262.389,349.444 411.278,349.444 411.278,275 262.389,275 "/>
+  <polygon class="undeformed-wire" points="411.278,349.444 560.167,349.444 560.167,275 411.278,275 "/>
+  <polygon class="undeformed-wire" points="560.167,349.444 709.056,349.444 709.056,275 560.167,275 "/>
+  <polygon class="undeformed-wire" points="113.5,275 262.389,275 262.389,200.556 113.5,200.556 "/>
+  <polygon class="undeformed-wire" points="262.389,275 411.278,275 411.278,200.556 262.389,200.556 "/>
+  <polygon class="undeformed-wire" points="411.278,275 560.167,275 560.167,200.556 411.278,200.556 "/>
+  <polygon class="undeformed-wire" points="560.167,275 709.056,275 709.056,200.556 560.167,200.556 "/>
+  <!-- Deformed Mesh with Field Contour Fill -->
+  <polygon points="113.5,349.444 262.389,349.444 266.111,275 117.222,275 " fill="#00feff" class="mesh-wire"/>
+  <polygon points="262.389,349.444 411.278,349.444 415,275 266.111,275 " fill="#00feff" class="mesh-wire"/>
+  <polygon points="411.278,349.444 560.167,349.444 563.889,275 415,275 " fill="#00feff" class="mesh-wire"/>
+  <polygon points="560.167,349.444 709.056,349.444 712.778,275 563.889,275 " fill="#00feff" class="mesh-wire"/>
+  <polygon points="117.222,275 266.111,275 269.833,200.556 120.944,200.556 " fill="#feff00" class="mesh-wire"/>
+  <polygon points="266.111,275 415,275 418.722,200.556 269.833,200.556 " fill="#feff00" class="mesh-wire"/>
+  <polygon points="415,275 563.889,275 567.611,200.556 418.722,200.556 " fill="#feff00" class="mesh-wire"/>
+  <polygon points="563.889,275 712.778,275 716.5,200.556 567.611,200.556 " fill="#feff00" class="mesh-wire"/>
+  <polygon points="113.5,349.444 262.389,349.444 266.111,275 117.222,275 " fill="#00feff" class="mesh-wire"/>
+  <polygon points="262.389,349.444 411.278,349.444 415,275 266.111,275 " fill="#00feff" class="mesh-wire"/>
+  <polygon points="411.278,349.444 560.167,349.444 563.889,275 415,275 " fill="#00feff" class="mesh-wire"/>
+  <polygon points="560.167,349.444 709.056,349.444 712.778,275 563.889,275 " fill="#00feff" class="mesh-wire"/>
+  <polygon points="117.222,275 266.111,275 269.833,200.556 120.944,200.556 " fill="#feff00" class="mesh-wire"/>
+  <polygon points="266.111,275 415,275 418.722,200.556 269.833,200.556 " fill="#feff00" class="mesh-wire"/>
+  <polygon points="415,275 563.889,275 567.611,200.556 418.722,200.556 " fill="#feff00" class="mesh-wire"/>
+  <polygon points="563.889,275 712.778,275 716.5,200.556 567.611,200.556 " fill="#feff00" class="mesh-wire"/>
+  <defs>
+    <linearGradient id="vv_colorbar_grad" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0.0%" stop-color="#0000ff"/>
+      <stop offset="10.0%" stop-color="#0066ff"/>
+      <stop offset="20.0%" stop-color="#00ccff"/>
+      <stop offset="30.0%" stop-color="#00ffcc"/>
+      <stop offset="40.0%" stop-color="#00ff65"/>
+      <stop offset="50.0%" stop-color="#00ff00"/>
+      <stop offset="60.0%" stop-color="#65ff00"/>
+      <stop offset="70.0%" stop-color="#cbff00"/>
+      <stop offset="80.0%" stop-color="#ffcb00"/>
+      <stop offset="90.0%" stop-color="#ff6500"/>
+      <stop offset="100.0%" stop-color="#ff0000"/>
+    </linearGradient>
+  </defs>
+  <!-- Colorbar Container -->
+  <rect x="785" y="90" width="18" height="380" fill="url(#vv_colorbar_grad)" stroke="#30363d" stroke-width="1" rx="2"/>
+  <text x="794" y="78" text-anchor="middle" class="legend-title">Shear Displacement u_x</text>
+  <text x="794" y="88" text-anchor="middle" class="legend-tick">[mm]</text>
+  <line x1="803" y1="470.0" x2="808" y2="470.0" stroke="#8b949e" stroke-width="1"/>
+  <text x="811" y="473.5" class="legend-tick">0.00</text>
+  <line x1="803" y1="375.0" x2="808" y2="375.0" stroke="#8b949e" stroke-width="1"/>
+  <text x="811" y="378.5" class="legend-tick">0.03</text>
+  <line x1="803" y1="280.0" x2="808" y2="280.0" stroke="#8b949e" stroke-width="1"/>
+  <text x="811" y="283.5" class="legend-tick">0.05</text>
+  <line x1="803" y1="185.0" x2="808" y2="185.0" stroke="#8b949e" stroke-width="1"/>
+  <text x="811" y="188.5" class="legend-tick">0.08</text>
+  <line x1="803" y1="90.0" x2="808" y2="90.0" stroke="#8b949e" stroke-width="1"/>
+  <text x="811" y="93.5" class="legend-tick">0.10</text>
+</svg>

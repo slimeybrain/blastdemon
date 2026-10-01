@@ -9,7 +9,15 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # Target the best available GPU architecture automatically
 set(CMAKE_CUDA_ARCHITECTURES native)
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math --threads 0")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math")
+
+# Compiler caching for near-zero rebuild times
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_CUDA_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    message(STATUS "ccache found and enabled for CXX and CUDA: ${CCACHE_PROGRAM}")
+endif()
 
 
 # Apply strict compiler warnings and high optimizations
@@ -23,7 +31,7 @@ else()
         $<$<COMPILE_LANGUAGE:CXX>:-march=native>
         $<$<COMPILE_LANGUAGE:CUDA>:-O3>
         $<$<COMPILE_LANGUAGE:CUDA>:-march=native>
-        $<$<COMPILE_LANGUAGE:CUDA>:--diag-suppress=177,550,20012>
+        $<$<COMPILE_LANGUAGE:CUDA>:--diag-suppress=177,550,2190,20012>
     )
 endif()
 
@@ -65,6 +73,7 @@ add_library(BlastSolverCore STATIC
     backend/BlastSolver/mpm_solver_3d.cpp
     backend/BlastSolver/mpm_solver_3d_cuda.cu
     backend/BlastSolver/fsi_coupler_3d.cpp
+    backend/BlastSolver/coupling/DynamicHybridCoupler3D.cpp
     # 3D Hexahedral FEM solver
     backend/BlastSolver/fem_solver_3d.cpp
     backend/BlastSolver/ls_dyna_reader_3d.cpp
@@ -83,12 +92,27 @@ add_library(BlastSolverCore STATIC
     backend/BlastSolver/cfd_solver_3d_cuda_f64_single.cu
     backend/BlastSolver/cfd_solver_3d_cuda_f64_multi.cu
     backend/BlastSolver/remapper_3d.cpp
+    # IPC and Command Dispatch
+    backend/BlastSolver/ipc/SharedMemoryIPC.cpp
+    backend/BlastSolver/dispatch/CommandDispatcher.cpp
+    backend/BlastSolver/dispatch/DispatchCFD.cpp
+    backend/BlastSolver/dispatch/DispatchMPM.cpp
+    backend/BlastSolver/dispatch/DispatchFEM.cpp
+    backend/BlastSolver/dispatch/DispatchFSI.cpp
+    backend/BlastSolver/dispatch/DispatchRemap.cpp
     # VTK output writer
     backend/BlastSolver/VTKWriter.cpp
 )
 
 target_include_directories(BlastSolverCore PUBLIC
+    backend/BlastSolver
     backend/BlastSolver/include
+    backend/BlastSolver/coupling
+    backend/BlastSolver/ipc
+    backend/BlastSolver/dispatch
+    backend/BlastSolver/elements
+    backend/BlastSolver/materials
+    backend/BlastSolver/verification
     ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 
@@ -134,18 +158,41 @@ add_executable(BlastStudio backend/BlastStudio/main.cpp)
 target_include_directories(BlastStudio PRIVATE backend/BlastSolver/include)
 target_link_libraries(BlastStudio PRIVATE ${CMAKE_DL_LIBS})
 
+# blast_verify - Headless Living Verification Compendium Runner
+add_executable(blast_verify
+    backend/BlastSolver/verification/vv_runner_main.cpp
+    backend/BlastSolver/verification/vv_framework.cpp
+    backend/BlastSolver/verification/vv_mesh_visualizer.cpp
+    backend/BlastSolver/verification/vv_l1_unit_elements.cpp
+    backend/BlastSolver/verification/vv_l2_canonical_benchmarks.cpp
+    backend/BlastSolver/verification/vv_l3_component_tests.cpp
+    backend/BlastSolver/verification/vv_l4_full_scale_systems.cpp
+)
+target_include_directories(blast_verify PRIVATE
+    backend/BlastSolver
+    backend/BlastSolver/include
+    backend/BlastSolver/elements
+    backend/BlastSolver/materials
+    backend/BlastSolver/verification
+)
+target_link_libraries(blast_verify PRIVATE BlastSolverCore)
+
 # Optional standalone test binaries (default: OFF, build with -DBUILD_TESTS=ON)
 option(BUILD_TESTS "Build standalone test executables" OFF)
 
 if(BUILD_TESTS)
     message(STATUS "Building standalone test executables.")
 
-    # Helper macro to add test executable if source file exists
+    # Custom target to explicitly build all standalone tests on demand
+    add_custom_target(all_tests)
+
+    # Helper macro to add test executable if source file exists (EXCLUDE_FROM_ALL so default build is instantaneous)
     macro(add_test_executable_if_exists target_name source_file)
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source_file}")
-            add_executable(${target_name} ${source_file})
+            add_executable(${target_name} EXCLUDE_FROM_ALL ${source_file})
             target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
             target_link_libraries(${target_name} PRIVATE BlastSolverCore)
+            add_dependencies(all_tests ${target_name})
         endif()
     endmacro()
 
@@ -172,6 +219,7 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_fem_3d_ls_dyna_transform backend/BlastSolver/test_fem_3d_ls_dyna_transform.cpp)
     add_test_executable_if_exists(test_fem_3d_precision_parity backend/BlastSolver/test_fem_3d_precision_parity.cu)
     add_test_executable_if_exists(test_fem_3d_cpu_gpu_equivalence backend/BlastSolver/test_fem_3d_cpu_gpu_equivalence.cu)
+    add_test_executable_if_exists(test_fem_3d_gpu_contact_methods backend/BlastSolver/test_fem_3d_gpu_contact_methods.cu)
     add_test_executable_if_exists(test_fem_fsi_3d_uncovering backend/BlastSolver/test_fem_fsi_3d_uncovering.cpp)
     add_test_executable_if_exists(test_contact_impact backend/BlastSolver/test_contact_impact.cpp)
     add_test_executable_if_exists(test_fem_3d_large_rotation backend/BlastSolver/test_fem_3d_large_rotation.cpp)
@@ -192,5 +240,9 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_radial_mls_motion backend/BlastSolver/test_radial_mls_motion.cpp)
     add_test_executable_if_exists(test_memory_guard backend/BlastSolver/test_memory_guard.cpp)
     add_test_executable_if_exists(test_thin_shell_stability backend/BlastSolver/test_thin_shell_stability.cu)
+    add_test_executable_if_exists(test_afterburn_cfd backend/BlastSolver/test_afterburn_cfd.cpp)
+    add_test_executable_if_exists(test_multiblock_vtm backend/BlastSolver/test_multiblock_vtm.cpp)
+    add_test_executable_if_exists(test_harbour_diag backend/BlastSolver/test_harbour_diag.cu)
+    add_test_executable_if_exists(test_quiescent_harbour backend/BlastSolver/test_quiescent_harbour.cu)
 endif()
 

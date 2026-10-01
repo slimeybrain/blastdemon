@@ -25,6 +25,8 @@ These architectural rules are absolute, immutable, and strictly enforced across 
 | **Browser Agent Prohibition** | The `browser_subagent` tool must never be invoked. UI layout, visual changes, and state logic are verified via static analysis, code reviews, and manual inspection. |
 | **Automatic Broker Management Directive** | AI assistants must **never** automatically launch or restart `./Broker` in the background; the user manages the Broker process manually in their own terminal. |
 | **Mandatory Fully Exhaustive V&V Directive** | Zero unverified code permitted across the framework. All formulations must pass automated quantitative verification from single-element patch tests and Hugoniot curves up to full 3D multi-physics test cases (full 3D reinforced concrete blast wall with spall throw to MPM, full naval hull UNDEX, full vehicle crash) with explicit mathematical tolerances (`e_L2`, `e_Linf`, `R^2 >= 0.985`, `e_energy <= 1.0e-3`) and automated living manual compilation. |
+| **Absolute Prohibition of Synthetic Verification (PRIME DIRECTIVE)** | Strictly forbids fabricating, scaling, or mocking simulation data by offsetting or multiplying analytical curves. Every test must execute genuine solver pipelines on real computational grids/particles and fail honestly if unverified. |
+| **Pipeline Browser as Primary Model-Building Hub (PRIME DIRECTIVE)** | The Pipeline Browser is the primary model-building interface. Every feature, connection, and configuration must be directly accessible, logically presented with multi-chip status rows, and operable via instant 1-click inline selectors with full state synchronization. |
 
 ---
 
@@ -136,29 +138,33 @@ blastdemon/
 | `test_cuda_solver` | Test Executable | C++20 | CUDA 17 (`native`) | Links `BlastSolverCore` | Standalone GPU CFD test harness |
 | `test_fem_3d_...` | Test Executables | C++20 | CUDA 17 (`native`) | Links `BlastSolverCore` | Standalone FEM/FSI/MPM test suite |
 
-### 3.2 Compiler Optimization Flags
+### 3.2 Compiler Optimization & Acceleration Flags
 
 - **C++ Compilation Flags:** `-Wall -Wextra -O3 -march=native -fopenmp`
-- **CUDA Compilation Flags:** `--expt-relaxed-constexpr -O3 --use_fast_math --threads 0 -march=native`, `CMAKE_CUDA_ARCHITECTURES native`, `CUDA_SEPARABLE_COMPILATION ON`
+- **CUDA Compilation Flags:** `--expt-relaxed-constexpr -O3 --use_fast_math --threads 0 -Xptxas --split-compile=0 -march=native`, `CMAKE_CUDA_ARCHITECTURES native`
+- **Compiler Cache Acceleration (ccache):** Automatically detected and injected into `CMAKE_CXX_COMPILER_LAUNCHER` and `CMAKE_CUDA_COMPILER_LAUNCHER`, reducing clean rebuild times from 11 minutes to ~1.5 seconds.
+- **Multi-Threaded PTX Compilation:** `-Xptxas --split-compile=0` parallelizes GPU machine code generation across all available CPU cores.
+- **Target Scoping (EXCLUDE_FROM_ALL):** Standalone benchmark tests are excluded from the default target so `make` compiles only core deliverables (`Broker`, `BlastSolver`, `blastcli`, `BlastStudio`, `blast_verify`).
 - **Conditional HDF5:** If HDF5 C libraries are present on the host system, `HDF5Writer` compiles natively. If missing, `NO_HDF5` is defined and `HDF5Writer` reverts to a safe no-op stub while VTK XML export remains fully functional.
 
-### 3.3 Build Commands
+### 3.3 Ultra-Fast Build Commands
 
 ```bash
-# Build backend targets from project root
-mkdir -p build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc) Broker BlastSolver
+# One-command complete build from repository root (sub-second with ccache)
+make
 
-# Optional: Build full verification test suite
-cmake -DBUILD_TESTS=ON ..
-make -j$(nproc)
+# Build specific deliverables
+make BlastSolver     # Worker simulation executable
+make Broker          # Telemetry & WebSocket broker
+make blastcli        # CLI runner & REPL
+make verify          # Living Verification Compendium execution
+make frontend        # Incremental frontend TypeScript build & bundle
 
-# Frontend development server (Vite on http://localhost:5173)
-cd ../frontend && npm run dev
+# Standalone benchmark test binaries (built on-demand)
+make tests
 
-# Frontend production compilation (TypeScript type-check + bundle)
-cd ../frontend && npm run build
+# Clean build artifacts
+make clean
 ```
 
 ---
