@@ -152,6 +152,28 @@ Perform deep forensic analysis of verification tests in `backend/BlastSolver/ver
 
 ---
 
+### Gate 11: Governing Physics Integrity & Realizability Audit (Directive 19)
+- **Zero Heuristic Shims & State Overwrites**: Strictly verify that NO solver (FV, MPM, FEM) enforces stability via post-step loops, cell freezing, hardcoded flux zeroing, coordinate-based conditional overrides, or heuristic unlatch thresholds.
+- **The Three Ironclad Tests**: Audit every limiter or safeguard against:
+  1. *Scale Isolation Test*: Activates exclusively at asymptotic/machine limits (vacuum/zero), never in bulk states.
+  2. *Invariance Test*: Free of coordinate checks (`z < z_bed`), entity tags, or simulation time checks.
+  3. *Conservation & Monotonicity Test*: Strictly respects conservation laws and the Second Law of Thermodynamics (entropy dissipation).
+
+---
+
+### Gate 12: Point-Wise Stencil Continuity & Cavitation Audit (Directive 20)
+- **Zero Scalar-Only Approvals**: Prohibit approving implementations based solely on global scalar reductions (`max_v`, `max_p`, exit code 0).
+- **Point-Wise Profile Audit**: Manually inspect spatial continuity across `±5 cells` centered on interfaces (`gz - 5` to `gz + 5`).
+- **Hard Zero-Cavitation Assertion**: If ANY cell at an interface drops to a cavitation floor (`p = p_cav`) or exhibits an inverted pressure spike while adjacent to high-pressure shock cells, the gate FAILS unconditionally.
+
+---
+
+### Gate 13: Spatial Contour Visual Inspection Audit (Directive 21)
+- For any visual artifact, boundary tear, or interface instability task, confirm that a 2D spatial slice contour map (SVG/PNG/PPM) matching the viewport colormap and dynamic range was generated and inspected.
+- Confirm contour lines are smooth and continuous without artificial horizontal/vertical stripes, pinches, or tears.
+
+---
+
 ## 3. The Checker's Standardized Audit Report
 
 When presenting the results of an audit to the Doer or User, you must output a structured **Audit Verdict & Compliance Report** in the following format:
@@ -174,6 +196,9 @@ When presenting the results of an audit to the Doer or User, you must output a s
 | Gate 8 | SSOT Parameter Documentation | PASS / FAIL | ... |
 | Gate 9 | Operational Safety Directives | PASS / FAIL | ... |
 | Gate 10 | LaTeX Prohibition & Formatting | PASS / FAIL | ... |
+| Gate 11 | Physics Integrity & Realizability | PASS / FAIL | ... |
+| Gate 12 | Point-Wise Stencil & Cavitation | PASS / FAIL | ... |
+| Gate 13 | Spatial Contour Visual Inspection | PASS / FAIL | ... |
 
 ### Detailed Findings & Code Citations
 - **[Gate X Violation]**: Description of issue in `path/to/file.ts#L12-L34`.
@@ -185,4 +210,4 @@ When presenting the results of an audit to the Doer or User, you must output a s
 2. [Actionable step 2]
 ```
 
-If any gate fails, the verdict is **CHANGES REQUESTED** or **REJECTED**. You must not approve code until all 10 gates achieve a definitive **PASS**.
+If any gate fails, the verdict is **CHANGES REQUESTED** or **REJECTED**. You must not approve code until all 13 gates achieve a definitive **PASS**.

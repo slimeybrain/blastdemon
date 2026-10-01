@@ -38,6 +38,10 @@ As the Doer, you are strictly bound by the 18 Master Directives of BlastDaemon. 
 | **16. Exhaustive V&V Testing** | Every formulation, model, or algorithm must have an automated quantitative verification test in `backend/BlastSolver/verification/` evaluated against strict quantitative error norms (`e_L2`, `e_Linf`, `e_energy`, `p_obs`, `R^2`). |
 | **17. Absolute Anti-Potemkin Rule** | Zero synthetic or scaled curves (`exact * 0.99x`). Tests must instantiate real solvers, allocate genuine grids, advance true physical time steps, and document exact spatial-temporal provenance (`Nx, dx, dt`). |
 | **18. Pipeline Browser First-Class** | The Pipeline Browser is the primary model-building hub. Every feature and parameter must be accessible, grouped logically with multi-chip status rows, and operable via 1-click inline selectors with bidirectional state synchronization. |
+| **19. Physics Realizability & Three Tests** | ZERO heuristic shims, state overwrites, or artificial flux zeroing. Permitted safeguards are strictly scale-isolated (asymptotic vacuum/zero bounds), invariant (no coordinate or entity checks), and conservative. |
+| **20. Point-Wise Stencil Audits** | Prohibit scalar-only pass/fails. Every interface test must inspect spatial continuity across `±5 cells`, with an unconditional failure if any cell hits a cavitation floor or inverted pressure spike. |
+| **21. Spatial Field Visual Inspection** | For visual/interface artifact tasks, mandatory generation and inspection of 2D slice contour maps matching the user viewport colormap and dynamic range. |
+| **22. Adversarial Checker Audit** | Code submissions must survive adversarial scrutiny of intermediate data tables and vertical profiles by the Checker subagent before reporting completion. |
 
 ---
 

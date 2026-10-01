@@ -123,5 +123,33 @@
 - **Hierarchical Child-Entity Nesting:** Sub-features belonging to domains (orthogonal slices, virtual gauge probes, structural object parts, element sets) must appear as interactive, expandable sub-rows directly beneath their parent domain in the tree.
 - **Mandatory Bidirectional State & Parameter Synchronization:** Every wiring action or parameter assignment executed in the Pipeline Browser must simultaneously update the global DAG connection topology (`state.connections`) and the local node parameter dictionary (`parameters`), strictly enforcing model status invalidation (`this.stateManager.setModelStatus(modelId, 'UNINITIALIZED')`) per Directive 12.
 
+## 19. Governing Physics Integrity & The Three Ironclad Realizability Tests (PRIME DIRECTIVE)
+- **Zero Heuristic Shims & State Overwrites (ABSOLUTE PROHIBITION):** It is strictly prohibited across all solvers (FV, MPM, FEM) to enforce numerical stability, interface balance, or boundary conditions through post-step state overwrites, frozen background loops, hardcoded flux zeroing, coordinate-based conditional overrides, or heuristic unlatch thresholds.
+- **The Strict Definition of Permitted Safeguards:** The ONLY permitted safeguards are local, scale-isolated numerical realizability limiters designed exclusively to prevent non-physical realizability violations (e.g. negative density, negative internal energy, volume fractions outside `[0, 1]`, negative deformation Jacobians `J <= 0`, or element inversion).
+- **The Three Ironclad Tests (Zero Get-Out Clauses):** Every numerical safeguard implemented in the codebase MUST satisfy all three tests. Any mechanism failing even one test is strictly classified as an unpermitted artificial hack:
+  1. *Scale Isolation Test (Asymptotic Cutoff Only):* The limiter must activate ONLY within machine/asymptotic proximity to physical limits (e.g. `rho < rho_min = 1.0e-7 kg/m^3`, `e < e_min = 0.0 J/kg`, `J < 1.0e-4`). If a limiter activates or modifies variables in bulk physical states (e.g. in soil at `rho = 2000 kg/m^3` or water at `p = 170 kPa`), it FAILS the test.
+  2. *Spatial & Temporal Invariance Test (No Geometry / Scenario Shims):* The safeguard must be mathematically invariant to space, time, and entity names. It must apply identically across every cell, particle, or Gauss point. If the logic contains conditional statements based on coordinates (e.g. `if (z < 3.0)`), material labels (e.g. `if (is_seabed)`), or simulation time (e.g. `if (t < t_arrival)`), it FAILS the test.
+  3. *Conservative & Thermodynamic Monotonicity Test:* The safeguard must strictly respect the Second Law of Thermodynamics (dissipative entropy fix) or use conservative scaling (e.g. Zhang-Shu positivity limiter). Overwriting velocities, restoring artificial momentum, or zeroing selected flux channels destroys physical conservation and FAILS the test.
+- **Cross-Solver Application:**
+  - *FV Eulerian CFD:* Positivity preservation for density and energy; phase fraction bounds `[0, 1]` with partition of unity `sum(alpha_k) = 1.0`; entropy fixes in Riemann solvers for sonic rarefactions. Zero bulk velocity or pressure freezing loops.
+  - *MPM:* Grid node mass regularization (`m_node < 1.0e-8 * m_ref`) to prevent division by zero; deformation gradient determinant floor `J = max(1.0e-4, J)`; radial return mapping in plasticity. Zero particle velocity freezing based on coordinate or tag.
+  - *FEM:* Negative Jacobian element failure reporting; Belytschko-Bindeman hourglass stabilization; plastic yield tolerance floors. Zero coordinate pinning on unconstrained interior nodes.
+
+## 20. Mandatory Point-Wise Interface Profile Audit (Prohibition of Purely Scalar Pass/Fails)
+- **Zero Scalar-Only Approvals:** Verification tests asserting interface stability, shock transmission, or contact equilibrium MUST NEVER rely solely on global scalar reductions (e.g. `max_v < 0.05`, `max_p > 20 MPa`, or script exit codes).
+- **Mandatory Point-Wise Stencil Profiling:** Every interface verification benchmark MUST inspect and report the spatial continuity across a minimum band of `±5 cells` centered on the interface (e.g. `gz - 5` to `gz + 5`):
+  1. *Spatial Monotonicity & Continuity:* Under shock traversal, pressure and normal velocity across the wave front must be physically consistent.
+  2. *Zero-Cavitation & Inverted Gradient Assertion:* Any cell that drops to a cavitation floor (`p = p_cav`) or exhibits an unphysical inverted pressure spike while adjacent to high-pressure shock cells constitutes an AUTOMATIC, UNCONDITIONAL TEST FAILURE.
+  3. *Quiescent Drift Bound:* In quiescent tests, every individual cell in the interface band must independently satisfy `|u| < tolerance` and `|p - p_exact| / p_exact < tolerance`.
+
+## 21. Mandatory Spatial Field Visual Inspection (Colormap-True Contour Audits)
+- **Mandatory Spatial Visual Verification:** For any task addressing visual artifacts, straight-line tears, or multi-phase interface boundaries, the verification agent MUST generate and inspect a spatial 2D slice contour map (SVG, PPM, or PNG generated directly by headless solver routines) matching the user's viewport colormap and dynamic range.
+- **Geometric Topology Checks:** The verification agent must confirm that contour lines are smooth and continuous across material interfaces without artificial horizontal or vertical stripes, and that shock fronts maintain their expected spherical, cylindrical, or planar topology without artificial pinches, flats, or tears at grid boundaries.
+
+## 22. Adversarial Audit Protocol for the Checker Subagent
+- **Zero-Trust Adversarial Mandate:** The Checker subagent must operate strictly as a skeptical, adversarial auditor whose explicit mission is to actively hunt for reasons why the implementation fails, rather than seeking confirmation to issue a pass badge.
+- **Mandatory Intermediate Data Inspection:** The Checker must inspect intermediate tables, vertical profiles, and point-wise distributions. Discovering any negative pressures, zeroed gradients, or anomalous velocities in intermediate output immediately triggers an AUDIT FAILURE, regardless of whether a top-level summary assertion returned true.
+
+
 
 
