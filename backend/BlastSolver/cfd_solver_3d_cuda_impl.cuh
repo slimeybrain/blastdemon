@@ -1044,24 +1044,6 @@ __device__ void getMaterialInterfaceFluxGPU(
         u_star = (RealType)0.0;
     }
 
-    if (sL_soil != sR_soil) {
-        // Soil-water / soil-fluid contact discontinuity:
-        // Soil is a solid geotechnical foundation, so normal mass flux across contact interface is identically zero.
-        flux[0] = (RealType)0.0;
-        flux[1] = (dir == 0 ? p_star : (RealType)0.0);
-        flux[2] = (dir == 1 ? p_star : (RealType)0.0);
-        flux[3] = (dir == 2 ? p_star : (RealType)0.0);
-        flux[4] = u_star * p_star;
-        if constexpr (IsMultiMaterial) {
-            flux[5] = (RealType)0.0;
-            flux[6] = (RealType)0.0;
-            flux[7] = (RealType)0.0;
-            flux[8] = (RealType)0.0;
-        }
-        flux[9] = u_star;
-        return;
-    }
-
     // Upwind state selection based on contact wave velocity u_star
     const auto& s_up = (u_star >= (RealType)0.0) ? sL : sR;
 
@@ -5769,132 +5751,6 @@ __global__ void kernel_enforce_passive_velocities(
         }
     }
 }
-// =============================================================================
-// enforce_geostatic_soil_bc_kernel: Frozen rigid seabed BC for UNDEX simulations.
-// Resets all soil cells (z < seabed_z) to their geostatic reference state after
-// each timestep. This prevents the hydrostatic Riemann-flux imbalance at the
-// soil/water density discontinuity from accumulating as spurious velocity and
-// radiating acoustic waves into the water column.
-// =============================================================================
-template <typename RealType, bool IsMultiMaterial>
-__global__ void __launch_bounds__(512)
-enforce_geostatic_soil_bc_kernel(
-    PrimitiveTile3D<RealType, IsMultiMaterial>*    states,
-    ConservativeTile3D<RealType, IsMultiMaterial>* U,
-    const int* active_tile_indices,
-    int n_active_tiles,
-    RealType current_time)
-{
-    int a = blockIdx.x;
-    if (a >= n_active_tiles) return;
-    int t_idx = active_tile_indices[a];
-
-    if (!d_stratParams.enabled) return;
-
-    int lx = threadIdx.x;
-    int ly = threadIdx.y;
-    int lz = threadIdx.z;
-    int c_idx = lx + ly * TILE_SIZE_3D + lz * TILE_SIZE_3D * TILE_SIZE_3D;
-
-    int tx = t_idx % d_ntx;
-    int ty = (t_idx / d_ntx) % d_nty;
-    int tz = t_idx / (d_ntx * d_nty);
-
-    int gx = tx * TILE_SIZE_3D + lx;
-    int gy = ty * TILE_SIZE_3D + ly;
-    int gz = tz * TILE_SIZE_3D + lz;
-
-    if (gx >= d_nx || gy >= d_ny || gz >= d_nz) return;
-
-    RealType x_c = (RealType)d_xmin + ((RealType)gx + (RealType)0.5) * (RealType)d_cellSize;
-    RealType y_c = (RealType)d_ymin + ((RealType)gy + (RealType)0.5) * (RealType)d_cellSize;
-    RealType z_c = (RealType)d_zmin + ((RealType)gz + (RealType)0.5) * (RealType)d_cellSize;
-    if (z_c >= (RealType)d_stratParams.seabed_surface_z) return;  // Mudline interface or water cell
-
-    // Compute geostatic reference at this z-level
-    double g_mag = fabs((double)d_stratParams.gravity_z);
-    if (g_mag < 1e-6) g_mag = 9.80665;
-
-    double p_bed = 0.0, rho_bed_unused = 0.0, e_bed_unused = 0.0;
-    Blast::TaitEOSWater::compute_hydrostatic_state(
-        (double)d_stratParams.seabed_surface_z, (double)d_stratParams.water_surface_z,
-        g_mag, (double)d_stratParams.p_atm,
-        p_bed, rho_bed_unused, e_bed_unused,
-        (double)d_stratParams.tait_B, (double)d_stratParams.tait_gamma, (double)d_stratParams.tait_rho0);
-
-    double sig_v = 0.0, u_pw = 0.0, sig_h = 0.0;
-    Blast::TaitEOSWater::compute_geostatic_stress(
-        (double)z_c, (double)d_stratParams.seabed_surface_z, p_bed,
-        (double)d_stratParams.soil_density, (double)d_stratParams.tait_rho0,
-        g_mag, (double)d_stratParams.k0_earth_pressure,
-        sig_v, u_pw, sig_h);
-
-    double ref_p_d  = fmax(sig_v, d_stratParams.p_atm);
-    double gam_soil = (d_stratParams.soil_gamma > 0.0) ? d_stratParams.soil_gamma : 4.0;
-    double rho_soil = (d_stratParams.soil_density > 0.0) ? d_stratParams.soil_density : 2000.0;
-    double c0_soil  = (d_stratParams.soil_c0 > 0.0) ? d_stratParams.soil_c0 : 2500.0;
-    double B_soil   = (rho_soil * c0_soil * c0_soil) / gam_soil;
-    double ref_rho_d = (double)Blast::TaitEOSWater::compute_density_isentropic(
-        ref_p_d, B_soil, gam_soil, rho_soil, d_stratParams.p_atm);
-    double ref_e_d   = (double)Blast::TaitEOSWater::compute_energy_isentropic(
-        ref_rho_d, B_soil, gam_soil, rho_soil);
-    double ref_E_d   = ref_rho_d * ref_e_d;
-
-    RealType ref_p   = (RealType)ref_p_d;
-    RealType ref_rho = (RealType)ref_rho_d;
-    RealType ref_E   = (RealType)ref_E_d;
-
-    // Causality distance & minimum physical shock arrival time check:
-    RealType dx_chg = x_c - (RealType)d_stratParams.charge_x;
-    RealType dy_chg = y_c - (RealType)d_stratParams.charge_y;
-    RealType dz_chg = z_c - (RealType)d_stratParams.charge_z;
-    RealType dist_chg = sqrt(dx_chg * dx_chg + dy_chg * dy_chg + dz_chg * dz_chg);
-    RealType prop_dist = fmax((RealType)0.0, dist_chg - (RealType)d_stratParams.charge_radius);
-    // Physical shock propagation speed in water (~2200 m/s maximum peak Hugoniot):
-    RealType t_arrival = (d_stratParams.charge_radius <= (RealType)0.0) ? (RealType)1.0e30 : (prop_dist / (RealType)2200.0);
-
-    if (states[t_idx].floor_status[c_idx] & 2) {
-        return; // Already activated by blast shock - stay dynamic permanently!
-    }
-
-    // Check if dynamic waves are propagating through the soil:
-    RealType p_cur = states[t_idx].p[c_idx];
-    RealType ux_cur = states[t_idx].ux[c_idx];
-    RealType uy_cur = states[t_idx].uy[c_idx];
-    RealType uz_cur = states[t_idx].uz[c_idx];
-    RealType v_sq = ux_cur * ux_cur + uy_cur * uy_cur + uz_cur * uz_cur;
-
-    // If the blast shock has physically arrived AND perturbation exceeds threshold,
-    // allow the genuine dynamic shock to propagate into the seabed according to the soil EOS!
-    if (current_time >= t_arrival && (fabs(p_cur - ref_p) > (RealType)2.0e5 || v_sq > (RealType)0.04)) {
-        states[t_idx].floor_status[c_idx] |= 2; // Latch active
-        return;
-    }
-
-    // Enforce frozen geostatic state for quiescent background drift only
-    states[t_idx].rho[c_idx]  = ref_rho;
-    states[t_idx].ux[c_idx]   = (RealType)0.0;
-    states[t_idx].uy[c_idx]   = (RealType)0.0;
-    states[t_idx].uz[c_idx]   = (RealType)0.0;
-    states[t_idx].p[c_idx]    = ref_p;
-
-    U[t_idx].rho[c_idx]   = ref_rho;
-    U[t_idx].rhoux[c_idx] = (RealType)0.0;
-    U[t_idx].rhouy[c_idx] = (RealType)0.0;
-    U[t_idx].rhouz[c_idx] = (RealType)0.0;
-    U[t_idx].E[c_idx]     = ref_E;
-
-    if constexpr (IsMultiMaterial) {
-        states[t_idx].alpha1[c_idx] = (RealType)0.0;
-        states[t_idx].alpha2[c_idx] = (RealType)0.0;
-        states[t_idx].arho1[c_idx]  = (RealType)0.0;
-        states[t_idx].arho2[c_idx]  = (RealType)0.0;
-        U[t_idx].alpha1[c_idx] = (RealType)0.0;
-        U[t_idx].alpha2[c_idx] = (RealType)0.0;
-        U[t_idx].arho1[c_idx]  = (RealType)0.0;
-        U[t_idx].arho2[c_idx]  = (RealType)0.0;
-    }
-}
 
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
@@ -6080,21 +5936,6 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
         CHECK_CUDA(cudaDeviceSynchronize());
     }
 
-    // Enforce frozen-geostatic rigid seabed BC — MUST be last operation of every step.
-    // This cancels the flux-imbalance drift accumulated during the Riemann solve at the
-    // soil/water density discontinuity, preventing spurious acoustic wave radiation.
-    if (stratified_params.enabled && h_num_active_tiles > 0) {
-        dim3 soil_threads(TILE_SIZE_3D, TILE_SIZE_3D, TILE_SIZE_3D);
-        int soil_n = h_num_active_tiles;
-        enforce_geostatic_soil_bc_kernel<RealType, IsMultiMaterial><<<soil_n, soil_threads>>>(
-            (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
-            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
-            (const int*)d_active_tile_indices,
-            soil_n,
-            (RealType)currentTime
-        );
-        CHECK_CUDA(cudaGetLastError());
-    }
 
     currentTime += dt;
     updateActiveRegions();

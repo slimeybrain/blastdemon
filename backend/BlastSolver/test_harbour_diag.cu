@@ -2,6 +2,7 @@
 #include <iomanip>
 #include <vector>
 #include <cmath>
+#include <fstream>
 #include "cfd_solver_3d_cuda.hpp"
 
 int main() {
@@ -169,6 +170,27 @@ int main() {
                           << " | P=" << std::scientific << std::setprecision(4) << p_slice[0 + gz * w]
                           << " | V=" << vel_slice[0 + gz * w]
                           << " | alpha1=" << a1_slice[0 + gz * w] << std::endl;
+            }
+            if (step == 1937) {
+                std::ofstream out("harbour_slice_step1937.ppm", std::ios::binary);
+                out << "P6\n" << nx << " " << nz << "\n255\n";
+                float log_min = std::log10(30000.0f);
+                float log_max = std::log10(44474224.0f);
+                for (int r = 0; r < nz; ++r) {
+                    int gz = nz - 1 - r;
+                    for (int gx = 0; gx < nx; ++gx) {
+                        float val = p_slice[gx + gz * nx];
+                        float val_c = std::max(30000.0f, std::min(44474224.0f, val));
+                        float t = (std::log10(val_c) - log_min) / (log_max - log_min);
+                        t = std::max(0.0f, std::min(1.0f, t));
+                        float rf = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * t - 3.0f)));
+                        float gf = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * t - 2.0f)));
+                        float bf = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * t - 1.0f)));
+                        out.put((unsigned char)std::round(rf * 255.0f));
+                        out.put((unsigned char)std::round(gf * 255.0f));
+                        out.put((unsigned char)std::round(bf * 255.0f));
+                    }
+                }
             }
         }
     }

@@ -37,7 +37,7 @@
 | **VV-L2-15** | Level 2 | All-Around Transmitting & Characteristic Riemann Absorbing Boundary Benchmark | `e_L2 = 6.11e-05` | `e_L2 <= 2.50e-02` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L3-01** | Level 3 | Progressive Accordion Buckling (Thin-Walled Box S-Rail Axial Crush) | `STATUS: PENDING INTEGRATION` | `Full Multi-Scale Integration` | <span style="color:#d29922;font-weight:bold;">PENDING</span> |
 | **VV-L3-02** | Level 3 | Top-Hat Rail Spotwelded Crash Box Progressive Failure | `STATUS: PENDING INTEGRATION` | `Full Multi-Scale Integration` | <span style="color:#d29922;font-weight:bold;">PENDING</span> |
-| **VV-L3-03** | Level 3 | Taylor Anvil Impact Validation (Wilkins-Guinan OFHC Copper Benchmark) | `e_L2 = 4.63e-03` | `e_L2 <= 6.00e-02` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
+| **VV-L3-03** | Level 3 | Taylor Anvil Impact Validation (Wilkins-Guinan OFHC Copper Benchmark) | `e_L2 = 4.75e-03` | `e_L2 <= 6.00e-02` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L3-04** | Level 3 | High-Pressure Gas Cavity Metallic Casing Expansion (Gurney Analytical Benchmark) | `e_L2 = 3.87e-03` | `e_L2 <= 3.00e-02` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L3-05** | Level 3 | 3D Spherical Airblast Overpressure (Kingery-Bulmash / UFC 3-340-02 Standard) | `STATUS: PENDING INTEGRATION` | `Full Multi-Scale Integration` | <span style="color:#d29922;font-weight:bold;">PENDING</span> |
 | **VV-L3-06** | Level 3 | Two-Phase Shock Refraction Across Water-Air Interface (1000:1 Density Ratio) | `STATUS: PENDING INTEGRATION` | `Full Multi-Scale Integration` | <span style="color:#d29922;font-weight:bold;">PENDING</span> |
