@@ -67,14 +67,17 @@ void FEMContact3D<T>::buildSpatialHash(FEMSolver3D<T>& solver) {
         if (facets[f].is_eroded) continue;
         const auto& facet = facets[f];
 
+        const bool is_tri = (facet.node_ids[2] == facet.node_ids[3]);
+        const int n_corners = is_tri ? 3 : 4;
+        const T inv_corners = is_tri ? (static_cast<T>(1.0f) / static_cast<T>(3.0f)) : static_cast<T>(0.25f);
         T f_center[3] = {0.0f, 0.0f, 0.0f};
-        for (int k = 0; k < 4; ++k) {
+        for (int k = 0; k < n_corners; ++k) {
             int nid = facet.node_ids[k];
             f_center[0] += nodes[nid].x[0];
             f_center[1] += nodes[nid].x[1];
             f_center[2] += nodes[nid].x[2];
         }
-        f_center[0] *= 0.25f; f_center[1] *= 0.25f; f_center[2] *= 0.25f;
+        f_center[0] *= inv_corners; f_center[1] *= inv_corners; f_center[2] *= inv_corners;
 
         int cx = static_cast<int>(std::floor(f_center[0] * inv_cell));
         int cy = static_cast<int>(std::floor(f_center[1] * inv_cell));
@@ -97,7 +100,8 @@ void FEMContact3D<T>::findCandidatePairs(FEMSolver3D<T>& solver) {
     m_node_part_id.assign(nodes.size(), -1);
     for (const auto& elem : elements) {
         if (elem.is_eroded) continue;
-        for (int k = 0; k < 8; ++k) {
+        const int n_elem_nodes = isTet4Element(elem) ? 4 : 8;
+        for (int k = 0; k < n_elem_nodes; ++k) {
             if (elem.node_ids[k] >= 0 && elem.node_ids[k] < static_cast<int>(nodes.size())) {
                 m_node_part_id[elem.node_ids[k]] = elem.part_id;
             }
@@ -127,10 +131,15 @@ void FEMContact3D<T>::findCandidatePairs(FEMSolver3D<T>& solver) {
                             if (facet.node_ids[0] == i || facet.node_ids[1] == i ||
                                 facet.node_ids[2] == i || facet.node_ids[3] == i) continue;
 
-                            // Exclude facets from the same part/mesh object to prevent self-penetration
+                            // Exclude nodes belonging to the facet's own parent element, and same-part intact elements
                             if (facet.element_id >= 0 && facet.element_id < static_cast<int>(elements.size())) {
-                                int facet_part = elements[facet.element_id].part_id;
-                                if (n_part >= 0 && facet_part >= 0 && n_part == facet_part) continue;
+                                const auto& f_elem = elements[facet.element_id];
+                                if (f_elem.node_ids[0] == i || f_elem.node_ids[1] == i ||
+                                    f_elem.node_ids[2] == i || f_elem.node_ids[3] == i ||
+                                    f_elem.node_ids[4] == i || f_elem.node_ids[5] == i ||
+                                    f_elem.node_ids[6] == i || f_elem.node_ids[7] == i) continue;
+                                int facet_part = f_elem.part_id;
+                                if (!f_elem.is_detached && n_part >= 0 && facet_part >= 0 && n_part == facet_part) continue;
                             }
 
                             ContactPairCandidate<T> pair;
@@ -195,7 +204,8 @@ void FEMContact3D<T>::updateDynamicSurfaceNormals(FEMSolver3D<T>& solver) {
         facet.bbox_max[1] = max_fy + margin;
         facet.bbox_max[2] = max_fz + margin;
 
-        for (int k = 0; k < 4; ++k) {
+        const int n_corners = (facet.node_ids[2] == facet.node_ids[3]) ? 3 : 4;
+        for (int k = 0; k < n_corners; ++k) {
             int nid = facet.node_ids[k];
             if (nid >= 0 && nid < static_cast<int>(nodes.size())) {
                 m_node_facets[nid].push_back(f);
@@ -203,7 +213,7 @@ void FEMContact3D<T>::updateDynamicSurfaceNormals(FEMSolver3D<T>& solver) {
         }
     }
 
-    // Step 2: Compute feature-angle nodal surface normals for each facet's 4 corner nodes
+    // Step 2: Compute feature-angle nodal surface normals for each facet's corner nodes
     for (int f = 0; f < static_cast<int>(facets.size()); ++f) {
         if (facets[f].is_eroded) continue;
         const auto& facet = facets[f];
@@ -284,12 +294,13 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
             node.x[1] < facet.bbox_min[1] || node.x[1] > facet.bbox_max[1] ||
             node.x[2] < facet.bbox_min[2] || node.x[2] > facet.bbox_max[2]) continue;
 
+        const bool is_tri = (facet.node_ids[2] == facet.node_ids[3]);
         T v0[3] = {nodes[facet.node_ids[0]].x[0], nodes[facet.node_ids[0]].x[1], nodes[facet.node_ids[0]].x[2]};
         T v1[3] = {nodes[facet.node_ids[1]].x[0], nodes[facet.node_ids[1]].x[1], nodes[facet.node_ids[1]].x[2]};
         T v2[3] = {nodes[facet.node_ids[2]].x[0], nodes[facet.node_ids[2]].x[1], nodes[facet.node_ids[2]].x[2]};
         T v3[3] = {nodes[facet.node_ids[3]].x[0], nodes[facet.node_ids[3]].x[1], nodes[facet.node_ids[3]].x[2]};
 
-        // Closed-form analytical projection onto quad face local tangent frame
+        // Closed-form analytical projection onto face local tangent frame (for tri: v3 == v2, so e3 = v2 - v0)
         T e1[3] = {v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]};
         T e3[3] = {v3[0] - v0[0], v3[1] - v0[1], v3[2] - v0[2]};
         T dx_v0[3] = {node.x[0] - v0[0], node.x[1] - v0[1], node.x[2] - v0[2]};
@@ -299,7 +310,8 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
         T dot_e1_e3 = e1[0]*e3[0] + e1[1]*e3[1] + e1[2]*e3[2];
 
         T det_tangent = len1_sq * len3_sq - dot_e1_e3 * dot_e1_e3;
-        T u_param = 0.5f, v_param = 0.5f;
+        T u_param = is_tri ? static_cast<T>(1.0f / 3.0f) : static_cast<T>(0.5f);
+        T v_param = is_tri ? static_cast<T>(1.0f / 3.0f) : static_cast<T>(0.5f);
 
         if (std::abs(det_tangent) > static_cast<T>(1.0e-12f)) {
             T proj1 = dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2];
@@ -312,19 +324,33 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
             v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
         }
 
-        if (u_param < static_cast<T>(-0.05f) || u_param > static_cast<T>(1.05f) ||
-            v_param < static_cast<T>(-0.05f) || v_param > static_cast<T>(1.05f)) continue;
+        T N_shape[4];
+        if (is_tri) {
+            if (u_param < static_cast<T>(-0.05f) || v_param < static_cast<T>(-0.05f) ||
+                (u_param + v_param) > static_cast<T>(1.05f)) continue;
+            T u_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), u_param));
+            T v_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), v_param));
+            if (u_clamped + v_clamped > static_cast<T>(1.0f)) {
+                T s_uv = u_clamped + v_clamped;
+                u_clamped /= s_uv;
+                v_clamped /= s_uv;
+            }
+            N_shape[0] = static_cast<T>(1.0f) - u_clamped - v_clamped;
+            N_shape[1] = u_clamped;
+            N_shape[2] = v_clamped;
+            N_shape[3] = static_cast<T>(0.0f);
+        } else {
+            if (u_param < static_cast<T>(-0.05f) || u_param > static_cast<T>(1.05f) ||
+                v_param < static_cast<T>(-0.05f) || v_param > static_cast<T>(1.05f)) continue;
+            T u_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), u_param));
+            T v_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), v_param));
+            N_shape[0] = (static_cast<T>(1.0f) - u_clamped) * (static_cast<T>(1.0f) - v_clamped);
+            N_shape[1] = u_clamped * (static_cast<T>(1.0f) - v_clamped);
+            N_shape[2] = u_clamped * v_clamped;
+            N_shape[3] = (static_cast<T>(1.0f) - u_clamped) * v_clamped;
+        }
 
-        T u_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), u_param));
-        T v_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), v_param));
-        T N_shape[4] = {
-            (static_cast<T>(1.0f) - u_clamped) * (static_cast<T>(1.0f) - v_clamped),
-            u_clamped * (static_cast<T>(1.0f) - v_clamped),
-            u_clamped * v_clamped,
-            (static_cast<T>(1.0f) - u_clamped) * v_clamped
-        };
-
-        // Bilinearly interpolate exact target surface point on quad face
+        // Interpolate exact target surface point on face
         T x_surf[3] = {
             N_shape[0]*v0[0] + N_shape[1]*v1[0] + N_shape[2]*v2[0] + N_shape[3]*v3[0],
             N_shape[0]*v0[1] + N_shape[1]*v1[1] + N_shape[2]*v2[1] + N_shape[3]*v3[1],
@@ -344,7 +370,7 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
         if (facet.element_id >= 0 && facet.element_id < static_cast<int>(elements.size())) {
             T elem_V = elements[facet.element_id].V;
             if (elem_V > static_cast<T>(1.0e-30f) && facet.area > static_cast<T>(1.0e-24f)) {
-                h_elem = elem_V / facet.area;
+                h_elem = (is_tri ? static_cast<T>(3.0f) : static_cast<T>(1.0f)) * elem_V / facet.area;
             }
         }
         T max_penetration = static_cast<T>(0.35f) * h_elem;
@@ -358,12 +384,13 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
 
         if (penetration > static_cast<T>(0.0f) && penetration <= max_penetration) {
             T eff_penetration = std::min(penetration, static_cast<T>(0.30f) * h_elem);
-            const auto& elements = solver.getElements();
             const auto& materials = solver.getMaterialTables();
 
             T K_master = static_cast<T>(160.0e9f);
+            T p_elem_master = static_cast<T>(0.0f);
             if (facet.element_id >= 0 && facet.element_id < static_cast<int>(elements.size())) {
                 const auto& elem = elements[facet.element_id];
+                p_elem_master = std::max(static_cast<T>(0.0f), -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f));
                 if (elem.mat_id >= 0 && elem.mat_id < static_cast<int>(materials.size())) {
                     const auto& mat = materials[elem.mat_id];
                     T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
@@ -372,7 +399,11 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
                     if (std::abs(denom) > static_cast<T>(1.0e-4f)) {
                         K_master = E / (static_cast<T>(3.0f) * denom);
                     }
+                    if (mat.density > 0.0f && mat.mg_c0 > 0.0f) {
+                        K_master = std::max(K_master, static_cast<T>(mat.density * mat.mg_c0 * mat.mg_c0));
+                    }
                 }
+                K_master = std::max(K_master, static_cast<T>(3.0f) * p_elem_master);
             }
 
             T K_slave = K_master;
@@ -388,6 +419,9 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
                         if (std::abs(denom) > static_cast<T>(1.0e-4f)) {
                             K_slave = E / (static_cast<T>(3.0f) * denom);
                         }
+                        if (mat.density > 0.0f && mat.mg_c0 > 0.0f) {
+                            K_slave = std::max(K_slave, static_cast<T>(mat.density * mat.mg_c0 * mat.mg_c0));
+                        }
                     }
                     break;
                 }
@@ -396,8 +430,9 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
             // Harmonic mean interface bulk modulus for general dissimilar materials
             T K_interface = (static_cast<T>(2.0f) * K_master * K_slave) / (K_master + K_slave + static_cast<T>(1.0e-30f));
 
-            T m_facet_avg = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m
-                                                     + nodes[facet.node_ids[2]].m + nodes[facet.node_ids[3]].m);
+            T m_facet_avg = is_tri
+                ? ((nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m + nodes[facet.node_ids[2]].m) / static_cast<T>(3.0f))
+                : (static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m + nodes[facet.node_ids[2]].m + nodes[facet.node_ids[3]].m));
             T m_sum = node.m + m_facet_avg;
             T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (node.m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
 
@@ -409,9 +444,9 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
             if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
             T f_spring = k_stiff * eff_penetration;
 
-            T vf0 = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].v[0] + nodes[facet.node_ids[1]].v[0] + nodes[facet.node_ids[2]].v[0] + nodes[facet.node_ids[3]].v[0]);
-            T vf1 = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].v[1] + nodes[facet.node_ids[1]].v[1] + nodes[facet.node_ids[2]].v[1] + nodes[facet.node_ids[3]].v[1]);
-            T vf2 = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].v[2] + nodes[facet.node_ids[1]].v[2] + nodes[facet.node_ids[2]].v[2] + nodes[facet.node_ids[3]].v[2]);
+            T vf0 = N_shape[0]*nodes[facet.node_ids[0]].v[0] + N_shape[1]*nodes[facet.node_ids[1]].v[0] + N_shape[2]*nodes[facet.node_ids[2]].v[0] + N_shape[3]*nodes[facet.node_ids[3]].v[0];
+            T vf1 = N_shape[0]*nodes[facet.node_ids[0]].v[1] + N_shape[1]*nodes[facet.node_ids[1]].v[1] + N_shape[2]*nodes[facet.node_ids[2]].v[1] + N_shape[3]*nodes[facet.node_ids[3]].v[1];
+            T vf2 = N_shape[0]*nodes[facet.node_ids[0]].v[2] + N_shape[1]*nodes[facet.node_ids[1]].v[2] + N_shape[2]*nodes[facet.node_ids[2]].v[2] + N_shape[3]*nodes[facet.node_ids[3]].v[2];
             T v_rel_n = (node.v[0] - vf0)*contact_normal[0] + (node.v[1] - vf1)*contact_normal[1] + (node.v[2] - vf2)*contact_normal[2];
 
             if (v_rel_n >= static_cast<T>(0.0f)) {
@@ -431,13 +466,11 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
                 const auto& elem = elements[facet.element_id];
                 if (elem.mat_id >= 0 && elem.mat_id < static_cast<int>(materials.size())) {
                     T sigma_y = static_cast<T>(materials[elem.mat_id].yield_stress > 0.0f ? materials[elem.mat_id].yield_stress : 400.0e6f);
-                    T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
+                    T f_mat_cap = std::max(static_cast<T>(1.5f) * sigma_y, p_elem_master) * facet.area;
                     if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
                 }
             }
             f_total = std::min(f_total, f_max);
-
-
 
             if (f_total > m_node_f_mag[candidate.node_idx]) {
                 m_node_f_mag[candidate.node_idx] = f_total;
@@ -463,6 +496,7 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
 
             int fid = m_node_f_facet_idx[nid];
             const auto& facet = facets[fid];
+            const bool is_tri = (facet.node_ids[2] == facet.node_ids[3]);
 
             T f_normal[3] = {f_mag * nx, f_mag * ny, f_mag * nz};
 
@@ -490,7 +524,9 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
                     T mu = m_mu_kinetic + (m_mu_static - m_mu_kinetic) * std::exp(-static_cast<T>(10.0f) * v_tan_len);
                     T f_fric_limit = mu * f_mag;
 
-                    T m_facet = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m + nodes[facet.node_ids[2]].m + nodes[facet.node_ids[3]].m);
+                    T m_facet = is_tri
+                        ? ((nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m + nodes[facet.node_ids[2]].m) / static_cast<T>(3.0f))
+                        : (static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m + nodes[facet.node_ids[2]].m + nodes[facet.node_ids[3]].m));
                     T m_pair = (node.m * m_facet) / (node.m + m_facet > static_cast<T>(1.0e-12f) ? node.m + m_facet : static_cast<T>(1.0e-12f));
                     T f_stick = m_pair * v_tan_len / (dt > static_cast<T>(1.0e-12f) ? dt : static_cast<T>(1.0e-12f));
 
@@ -745,12 +781,13 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                             continue;
                         }
 
+                        const bool is_tri = (facet.node_ids[2] == facet.node_ids[3]);
                         T v0[3] = { nodes[facet.node_ids[0]].x[0], nodes[facet.node_ids[0]].x[1], nodes[facet.node_ids[0]].x[2] };
                         T v1[3] = { nodes[facet.node_ids[1]].x[0], nodes[facet.node_ids[1]].x[1], nodes[facet.node_ids[1]].x[2] };
                         T v2[3] = { nodes[facet.node_ids[2]].x[0], nodes[facet.node_ids[2]].x[1], nodes[facet.node_ids[2]].x[2] };
                         T v3[3] = { nodes[facet.node_ids[3]].x[0], nodes[facet.node_ids[3]].x[1], nodes[facet.node_ids[3]].x[2] };
 
-                        // Closed-form analytical projection onto quad face local tangent frame
+                        // Closed-form analytical projection onto face local tangent frame
                         T e1[3] = { v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2] };
                         T e3[3] = { v3[0] - v0[0], v3[1] - v0[1], v3[2] - v0[2] };
                         T dx_v0[3] = { px - v0[0], py - v0[1], pz - v0[2] };
@@ -760,7 +797,8 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                         T dot_e1_e3 = e1[0]*e3[0] + e1[1]*e3[1] + e1[2]*e3[2];
 
                         T det_tangent = len1_sq * len3_sq - dot_e1_e3 * dot_e1_e3;
-                        T u_param = static_cast<T>(0.5f), v_param = static_cast<T>(0.5f);
+                        T u_param = is_tri ? static_cast<T>(1.0f / 3.0f) : static_cast<T>(0.5f);
+                        T v_param = is_tri ? static_cast<T>(1.0f / 3.0f) : static_cast<T>(0.5f);
 
                         if (std::abs(det_tangent) > static_cast<T>(1.0e-12f)) {
                             T proj1 = dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2];
@@ -773,19 +811,33 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                             v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
                         }
 
-                        if (u_param < static_cast<T>(-0.08f) || u_param > static_cast<T>(1.08f) ||
-                            v_param < static_cast<T>(-0.08f) || v_param > static_cast<T>(1.08f)) continue;
+                        T N_shape[4];
+                        if (is_tri) {
+                            if (u_param < static_cast<T>(-0.08f) || v_param < static_cast<T>(-0.08f) ||
+                                (u_param + v_param) > static_cast<T>(1.08f)) continue;
+                            T u_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), u_param));
+                            T v_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), v_param));
+                            if (u_clamped + v_clamped > static_cast<T>(1.0f)) {
+                                T s_uv = u_clamped + v_clamped;
+                                u_clamped /= s_uv;
+                                v_clamped /= s_uv;
+                            }
+                            N_shape[0] = static_cast<T>(1.0f) - u_clamped - v_clamped;
+                            N_shape[1] = u_clamped;
+                            N_shape[2] = v_clamped;
+                            N_shape[3] = static_cast<T>(0.0f);
+                        } else {
+                            if (u_param < static_cast<T>(-0.08f) || u_param > static_cast<T>(1.08f) ||
+                                v_param < static_cast<T>(-0.08f) || v_param > static_cast<T>(1.08f)) continue;
+                            T u_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), u_param));
+                            T v_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), v_param));
+                            N_shape[0] = (static_cast<T>(1.0f) - u_clamped) * (static_cast<T>(1.0f) - v_clamped);
+                            N_shape[1] = u_clamped * (static_cast<T>(1.0f) - v_clamped);
+                            N_shape[2] = u_clamped * v_clamped;
+                            N_shape[3] = (static_cast<T>(1.0f) - u_clamped) * v_clamped;
+                        }
 
-                        T u_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), u_param));
-                        T v_clamped = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), v_param));
-                        T N_shape[4] = {
-                            (static_cast<T>(1.0f) - u_clamped) * (static_cast<T>(1.0f) - v_clamped),
-                            u_clamped * (static_cast<T>(1.0f) - v_clamped),
-                            u_clamped * v_clamped,
-                            (static_cast<T>(1.0f) - u_clamped) * v_clamped
-                        };
-
-                        // Bilinearly interpolate exact target surface point on quad face
+                        // Interpolate exact target surface point on face
                         T x_surf[3] = {
                             N_shape[0]*v0[0] + N_shape[1]*v1[0] + N_shape[2]*v2[0] + N_shape[3]*v3[0],
                             N_shape[0]*v0[1] + N_shape[1]*v1[1] + N_shape[2]*v2[1] + N_shape[3]*v3[1],
@@ -802,7 +854,7 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                         if (facet.element_id >= 0 && facet.element_id < static_cast<int>(elements.size())) {
                             T elem_V = elements[facet.element_id].V;
                             if (elem_V > static_cast<T>(1.0e-30f) && facet.area > static_cast<T>(1.0e-24f)) {
-                                h_elem = elem_V / facet.area;
+                                h_elem = (is_tri ? static_cast<T>(3.0f) : static_cast<T>(1.0f)) * elem_V / facet.area;
                             }
                         }
 
@@ -829,8 +881,10 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                             T eff_penetration = std::min(penetration, capture_depth);
 
                             T K_master = static_cast<T>(160.0e9f);
+                            T p_elem_master = static_cast<T>(0.0f);
                             if (facet.element_id >= 0 && facet.element_id < static_cast<int>(elements.size())) {
                                 const auto& elem = elements[facet.element_id];
+                                p_elem_master = std::max(static_cast<T>(0.0f), -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f));
                                 if (elem.mat_id >= 0 && elem.mat_id < static_cast<int>(materials.size())) {
                                     const auto& mat = materials[elem.mat_id];
                                     T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
@@ -839,11 +893,16 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                                     if (std::abs(denom) > static_cast<T>(1.0e-4f)) {
                                         K_master = E / (static_cast<T>(3.0f) * denom);
                                     }
+                                    if (mat.density > 0.0f && mat.mg_c0 > 0.0f) {
+                                        K_master = std::max(K_master, static_cast<T>(mat.density * mat.mg_c0 * mat.mg_c0));
+                                    }
                                 }
+                                K_master = std::max(K_master, static_cast<T>(3.0f) * p_elem_master);
                             }
 
-                            T m_facet_avg = static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m
-                                                                     + nodes[facet.node_ids[2]].m + nodes[facet.node_ids[3]].m);
+                            T m_facet_avg = is_tri
+                                ? ((nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m + nodes[facet.node_ids[2]].m) / static_cast<T>(3.0f))
+                                : (static_cast<T>(0.25f) * (nodes[facet.node_ids[0]].m + nodes[facet.node_ids[1]].m + nodes[facet.node_ids[2]].m + nodes[facet.node_ids[3]].m));
                             T p_m = static_cast<T>(p.m > 0.0f ? p.m : 0.01f);
                             T m_sum = p_m + m_facet_avg;
                             T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (p_m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
@@ -872,7 +931,7 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                                 const auto& elem = elements[facet.element_id];
                                 if (elem.mat_id >= 0 && elem.mat_id < static_cast<int>(materials.size())) {
                                     T sigma_y = static_cast<T>(materials[elem.mat_id].yield_stress > 0.0f ? materials[elem.mat_id].yield_stress : 400.0e6f);
-                                    T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
+                                    T f_mat_cap = std::max(static_cast<T>(1.5f) * sigma_y, p_elem_master) * facet.area;
                                     if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
                                 }
                             }

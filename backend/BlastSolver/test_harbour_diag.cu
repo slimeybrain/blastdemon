@@ -47,7 +47,7 @@ int main() {
     strat.soil_gamma = 4.0;
     strat.soil_s = 1.35;
     strat.soil_gruneisen = 1.45;
-    strat.soil_p_cav = -1.0e5;
+    strat.soil_p_cav = 0.0; // Vacuum cutoff in absolute pressure
     strat.soil_eos_variant = 2;
 
     Charge3DParams cp;
@@ -93,23 +93,30 @@ int main() {
     slice_alpha1.offset = 0.0;
     slice_alpha1.quantities = {"alpha1"};
 
-    // Let's run steps up to 1950
+    Slice3D slice_mat;
+    slice_mat.axis = "xz";
+    slice_mat.offset = 0.0;
+    slice_mat.quantities = {"materials"};
+
+    // Run steps up to 4500 (spanning 9.0 ms to capture seabed shock reflection hitting cavity)
     double dt = 2.0e-6;
     double sim_time = 0.0;
     float final_max_alpha1_air = 0.0f;
-    for (int step = 0; step <= 1950; ++step) {
+    float global_min_p_soil = 1e30f;
+    for (int step = 0; step <= 4500; ++step) {
         if (step > 0) {
             double cfl_dt = solver.computeStepSize(0.4);
             dt = std::min(2.0e-6, std::max(1.0e-8, cfl_dt));
             solver.step(dt);
             sim_time += dt;
         }
-        bool print_step = (step % 200 == 0 || step == 1 || step == 50 || step == 100 || step == 1937 || (step >= 1800 && step % 10 == 0));
+        bool print_step = (step % 400 == 0 || (step >= 3600 && step <= 4500 && step % 50 == 0) || step == 1 || step == 1937 || step == 2559 || step == 3862 || step == 4344);
         if (!print_step) continue;
         std::vector<float> p_slice = solver.extractSlice(slice_p);
         std::vector<float> vel_slice = solver.extractSlice(slice_vel);
         std::vector<float> a1_slice = solver.extractSlice(slice_alpha1);
         std::vector<float> rho_slice = solver.extractSlice(slice_rho);
+        std::vector<float> mat_slice = solver.extractSlice(slice_mat);
 
         int w = nx;
         int gz_bed = (int)round((strat.seabed_surface_z - zmin) / cellSize);
@@ -131,6 +138,7 @@ int main() {
                 if (v > max_v_soil) max_v_soil = v;
             }
         }
+        if (min_p_soil < global_min_p_soil) global_min_p_soil = min_p_soil;
 
         // Max alpha1 in air (gz >= gz_surf)
         float max_alpha1_air = 0.0f;
@@ -142,6 +150,23 @@ int main() {
         }
         final_max_alpha1_air = max_alpha1_air;
 
+        // Max pressure inside gas cavity (alpha1 > 0.05, z >= 7.0, z <= 12.0)
+        float max_p_cavity = 0.0f;
+        float max_v_cavity = 0.0f;
+        float p_at_cavity_base = 0.0f;
+        for (int gz = 0; gz < nz; ++gz) {
+            double z = zmin + (gz + 0.5) * cellSize;
+            if (z < 7.0 || z > 13.0) continue;
+            for (int gx = 0; gx < nx; ++gx) {
+                if (a1_slice[gx + gz * w] > 0.05f) {
+                    float p = p_slice[gx + gz * w];
+                    float v = vel_slice[gx + gz * w];
+                    if (p > max_p_cavity) max_p_cavity = p;
+                    if (v > max_v_cavity) max_v_cavity = v;
+                }
+            }
+        }
+
         double dt_cfl = solver.computeStepSize(0.5);
 
         std::cout << "Step " << std::setw(4) << step 
@@ -149,12 +174,23 @@ int main() {
                   << " | P_air_surf: " << std::fixed << std::setprecision(1) << p_slice[idx_surf_air]
                   << " | P_wat_surf: " << p_slice[idx_surf_water]
                   << " | Max_alpha1_air: " << std::setprecision(4) << max_alpha1_air
+                  << " | Max_P_cavity: " << std::scientific << std::setprecision(3) << max_p_cavity
+                  << " | Max_V_cavity: " << std::fixed << std::setprecision(1) << max_v_cavity
                   << " | Soil [min=" << min_p_soil << ", max=" << max_p_soil << "]"
-                  << " | Max_v_soil: " << std::scientific << std::setprecision(2) << max_v_soil
                   << " | CFL_dt: " << std::scientific << std::setprecision(2) << dt_cfl
                   << std::endl;
 
-        if (step == 1937 || step == 1000) {
+        if ((step >= 1600 && step <= 1700) || (step >= 2200 && step <= 2400)) {
+            std::cout << "  [INTERFACE " << step << "] gz=23 (Soil): p=" << std::scientific << p_slice[0 + gz_bed * w - w]
+                      << ", rho=" << rho_slice[0 + gz_bed * w - w]
+                      << ", v=" << vel_slice[0 + gz_bed * w - w]
+                      << " | gz=24 (Wat): p=" << p_slice[0 + gz_bed * w]
+                      << ", rho=" << rho_slice[0 + gz_bed * w]
+                      << ", v=" << vel_slice[0 + gz_bed * w]
+                      << std::endl;
+        }
+
+        if (step == 1937 || step == 2559 || step == 2600) {
             std::cout << "--- Vertical profile at x=0 (gz_bed=" << gz_bed << ", z=" << strat.seabed_surface_z << ") ---" << std::endl;
             for (int gz = gz_bed - 4; gz <= gz_bed + 4; ++gz) {
                 double z = zmin + (gz + 0.5) * cellSize;
@@ -163,34 +199,59 @@ int main() {
                           << " | V=" << vel_slice[0 + gz * w]
                           << " | alpha1=" << a1_slice[0 + gz * w] << std::endl;
             }
-            std::cout << "--- Vertical profile at x=0 (gz_surf=" << gz_surf << ", z=" << strat.water_surface_z << ") ---" << std::endl;
+            std::cout << "--- Horizontal profile at z=3.0 (gz=" << gz_bed << ") ---" << std::endl;
+            for (int gx = 0; gx < 50; gx += 5) {
+                std::cout << "  gx=" << gx << " x=" << gx * cellSize
+                          << " | P_water(gz=" << gz_bed << ")=" << p_slice[gx + gz_bed * w]
+                          << " | P_soil(gz=" << gz_bed-1 << ")=" << p_slice[gx + (gz_bed-1) * w]
+                          << " | V_water=" << vel_slice[gx + gz_bed * w]
+                          << " | V_soil=" << vel_slice[gx + (gz_bed-1) * w] << std::endl;
+            }
+            std::cout << "--- Vertical profile at x=0 across surface (gz_surf=" << gz_surf << ", z=" << strat.water_surface_z << ") ---" << std::endl;
             for (int gz = gz_surf - 4; gz <= gz_surf + 4; ++gz) {
                 double z = zmin + (gz + 0.5) * cellSize;
                 std::cout << "  gz=" << gz << " z=" << std::fixed << std::setprecision(3) << z
                           << " | P=" << std::scientific << std::setprecision(4) << p_slice[0 + gz * w]
+                          << " | rho=" << rho_slice[0 + gz * w]
                           << " | V=" << vel_slice[0 + gz * w]
-                          << " | alpha1=" << a1_slice[0 + gz * w] << std::endl;
+                          << " | alpha1=" << a1_slice[0 + gz * w]
+                          << " | mat=" << std::fixed << std::setprecision(1) << mat_slice[0 + gz * w]
+                          << std::endl;
             }
-            if (step == 1937) {
-                std::ofstream out("harbour_slice_step1937.ppm", std::ios::binary);
+            std::cout << "--- Surface transect gz=79 (z=9.938) vs gz=80 (z=10.062) ---" << std::endl;
+            for (int gx = 0; gx <= 30; gx += 2) {
+                std::cout << "  gx=" << std::setw(2) << gx << " x=" << std::fixed << std::setprecision(2) << gx * cellSize
+                          << " | P79=" << std::scientific << std::setprecision(2) << p_slice[gx + (gz_surf-1) * w]
+                          << " P80=" << p_slice[gx + gz_surf * w]
+                          << " | rho79=" << rho_slice[gx + (gz_surf-1) * w]
+                          << " rho80=" << rho_slice[gx + gz_surf * w]
+                          << " | a1_79=" << std::fixed << std::setprecision(2) << a1_slice[gx + (gz_surf-1) * w]
+                          << " a1_80=" << a1_slice[gx + gz_surf * w]
+                          << " | mat79=" << mat_slice[gx + (gz_surf-1) * w]
+                          << " mat80=" << mat_slice[gx + gz_surf * w]
+                          << std::endl;
+            }
+            if (const char* dump_ppm = std::getenv("DUMP_PPM")) {
+                std::string ppm_name = "harbour_slice_step" + std::to_string(step) + ".ppm";
+                std::ofstream out(ppm_name, std::ios::binary);
                 out << "P6\n" << nx << " " << nz << "\n255\n";
-                float log_min = std::log10(30000.0f);
-                float log_max = std::log10(44474224.0f);
-                for (int r = 0; r < nz; ++r) {
-                    int gz = nz - 1 - r;
-                    for (int gx = 0; gx < nx; ++gx) {
-                        float val = p_slice[gx + gz * nx];
-                        float val_c = std::max(30000.0f, std::min(44474224.0f, val));
-                        float t = (std::log10(val_c) - log_min) / (log_max - log_min);
-                        t = std::max(0.0f, std::min(1.0f, t));
-                        float rf = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * t - 3.0f)));
-                        float gf = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * t - 2.0f)));
-                        float bf = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * t - 1.0f)));
-                        out.put((unsigned char)std::round(rf * 255.0f));
-                        out.put((unsigned char)std::round(gf * 255.0f));
-                        out.put((unsigned char)std::round(bf * 255.0f));
-                    }
+            float log_min = std::log10(30000.0f);
+            float log_max = std::log10(44474224.0f);
+            for (int r = 0; r < nz; ++r) {
+                int gz = nz - 1 - r;
+                for (int gx = 0; gx < nx; ++gx) {
+                    float val = p_slice[gx + gz * nx];
+                    float val_c = std::max(30000.0f, std::min(44474224.0f, val));
+                    float t = (std::log10(val_c) - log_min) / (log_max - log_min);
+                    t = std::max(0.0f, std::min(1.0f, t));
+                    float rf = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * t - 3.0f)));
+                    float gf = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * t - 2.0f)));
+                    float bf = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(4.0f * t - 1.0f)));
+                    out.put((unsigned char)std::round(rf * 255.0f));
+                    out.put((unsigned char)std::round(gf * 255.0f));
+                    out.put((unsigned char)std::round(bf * 255.0f));
                 }
+            }
             }
         }
     }
@@ -199,11 +260,25 @@ int main() {
     std::cout << "\n--- VERIFICATION RESULT ---" << std::endl;
     std::cout << "Final max_alpha1_air: " << final_max_alpha1_air << std::endl;
     std::cout << "Final CFL_dt: " << final_dt_cfl << " s" << std::endl;
-    if (final_max_alpha1_air > 0.05f && final_dt_cfl > 5.0e-7) {
-        std::cout << "[PASS] Detonation products successfully breached water/air interface and expanded into air with healthy dt!" << std::endl;
+    std::cout << "Global min soil pressure: " << global_min_p_soil << " Pa" << std::endl;
+
+    bool passed = true;
+    if (final_max_alpha1_air <= 0.05f) {
+        std::cout << "[FAIL] Detonation products failed to breach water/air interface!" << std::endl;
+        passed = false;
+    }
+    if (final_dt_cfl <= 5.0e-7) {
+        std::cout << "[FAIL] CFL timestep collapsed!" << std::endl;
+        passed = false;
+    }
+    if (global_min_p_soil < 0.0f) {
+        std::cout << "[FAIL] Seabed soil entered tension/cavitation! min_p_soil = " << global_min_p_soil << " Pa" << std::endl;
+        passed = false;
+    }
+    if (passed) {
+        std::cout << "[PASS] All physics criteria satisfied: clean breach, healthy CFL dt, and zero seabed cavitation!" << std::endl;
         return 0;
     } else {
-        std::cout << "[FAIL] Verification criteria failed (breach or dt collapse)!" << std::endl;
         return 1;
     }
 }

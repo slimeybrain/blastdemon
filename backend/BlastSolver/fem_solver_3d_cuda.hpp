@@ -34,7 +34,10 @@ void launch_fem_element_forces_kernel_3d(
     T hourglass_coeff,
     FEMHourglassModel hg_model,
     FEMIntegrationScheme integration_scheme,
-    cudaStream_t stream
+    cudaStream_t stream,
+    T* d_nodal_vol_cur = nullptr,
+    T* d_nodal_vol_ref = nullptr,
+    T sim_time = static_cast<T>(0)
 );
 
 template <typename T>
@@ -92,7 +95,8 @@ void launch_fem_initial_timestep_erosion_kernel_3d(
     FEMErosionCriteria<T> erosion_criteria,
     int* d_node_active_count,
     int* d_erosion_flag,
-    cudaStream_t stream
+    cudaStream_t stream,
+    bool enable_cohesive_splitting = false
 );
 
 template <typename T>
@@ -255,6 +259,51 @@ public:
         syncToDevice();
     }
 
+    void createStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, const std::string& bc = "Free") {
+        m_cpu_solver.createStructuredTetBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, mat, bc);
+        syncToDevice();
+    }
+
+    void addStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), const std::string& bc = "Free") {
+        m_cpu_solver.addStructuredTetBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, mat, vx, vy, vz, bc);
+        syncToDevice();
+    }
+
+    void addStructuredTetCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), T inner_r = static_cast<T>(0), const std::string& bc = "Free") {
+        m_cpu_solver.addStructuredTetCylinderMesh(nr, nz, radius, height, pos_x, pos_y, pos_z, mat, vx, vy, vz, inner_r, bc);
+        syncToDevice();
+    }
+
+    void addSTLMesh(
+        const std::string& filepath,
+        int nx, int ny, int nz,
+        T pos_x, T pos_y, T pos_z,
+        T scale_x, T scale_y, T scale_z,
+        T rot_x_deg, T rot_y_deg, T rot_z_deg,
+        const std::string& origin_mode,
+        const MaterialTable3D& mat,
+        T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0),
+        bool use_tet4 = true,
+        const std::string& bc = "Free"
+    ) {
+        m_cpu_solver.addSTLMesh(filepath, nx, ny, nz, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, rot_x_deg, rot_y_deg, rot_z_deg, origin_mode, mat, vx, vy, vz, use_tet4, bc);
+        syncToDevice();
+    }
+
+    void clearDetonators() { m_cpu_solver.clearDetonators(); }
+    void addDetonator(const FEMDetonator3D& det) {
+        m_cpu_solver.addDetonator(det);
+        if (m_d_elements) syncToDevice();
+    }
+    void addDetonator(T x, T y, T z, T radius, T delay = static_cast<T>(0), int target_part_id = -1) {
+        m_cpu_solver.addDetonator(x, y, z, radius, delay, target_part_id);
+        if (m_d_elements) syncToDevice();
+    }
+    void igniteDetonator(T det_x, T det_y, T det_z, T det_r, int target_part_id = -1, T time_delay = static_cast<T>(0)) {
+        m_cpu_solver.igniteDetonator(det_x, det_y, det_z, det_r, target_part_id, time_delay);
+        if (m_d_elements) syncToDevice();
+    }
+
     void setNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const MaterialTable3D& mat) {
         m_cpu_solver.setNodesAndElements(nodes, elements, mat);
         syncToDevice();
@@ -362,6 +411,8 @@ private:
     int* m_d_node_part_id{nullptr};
     int* m_d_part_mat_id{nullptr};
     T* m_d_node_normals{nullptr};
+    T* m_d_nodal_vol_cur{nullptr};
+    T* m_d_nodal_vol_ref{nullptr};
     T* m_d_reduction_buffer{nullptr};
     int* m_d_node_active_count{nullptr};
     FEMTrussElement3D<T>* m_d_trusses{nullptr};

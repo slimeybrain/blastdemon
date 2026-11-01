@@ -1480,6 +1480,10 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (isNaN(rot_x) || isNaN(rot_y) || isNaN(rot_z)) {
                 addMessage(node.id, 'error', "Charge rotation angles must be numeric.");
             }
+            const ppc = Number(node.parameters?.ppc ?? 64);
+            if (isNaN(ppc) || ppc < 1) {
+                addMessage(node.id, 'error', "Charge PPC must be an integer >= 1.");
+            }
             if (shape === 'Sphere' && (isNaN(charge_radius) || charge_radius <= 0)) {
                 addMessage(node.id, 'error', "Charge radius must be greater than 0 for spherical charges.");
             }

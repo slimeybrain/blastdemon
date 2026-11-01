@@ -90,6 +90,7 @@ void export_vts_cfd_3d_snapshot(const std::string& filename, const CFDVolumeSnap
 namespace Blast {
 template <typename T> class FEMSolver3D;
 struct MPMParticle3D;
+struct PhaseTrackingVTKSnapshot3D;
 }
 
 struct FEMVTKSnapshot3D {
@@ -140,24 +141,34 @@ struct MPMVTKSnapshot3D {
     bool has_temp = true;
     bool has_pressure = true;
     bool has_material_id = true;
-    std::vector<float> points;      // 3 * num_particles
-    std::vector<float> vel;         // 3 * num_particles
-    std::vector<float> von_mises;   // num_particles
-    std::vector<float> pressure;    // num_particles
-    std::vector<float> ep_bar;      // num_particles
-    std::vector<float> damage;      // num_particles
-    std::vector<float> temp;        // num_particles
-    std::vector<float> obj_id;      // num_particles
-    std::vector<float> material_id; // num_particles
+    bool has_object_id = true;
+    int compression_level = 6;
+    std::string float_precision = "12-bit Mantissa (~4 sig. digits)";
+    std::string mpm_topology = "Individual Vertices";
+    bool is_groomed = false;
+    std::vector<float> points;        // 3 * num_particles
+    std::vector<float> vel;           // 3 * num_particles
+    std::vector<float> von_mises;     // num_particles
+    std::vector<float> pressure;      // num_particles
+    std::vector<float> ep_bar;        // num_particles
+    std::vector<float> damage;        // num_particles
+    std::vector<float> temp;          // num_particles
+    std::vector<uint8_t> obj_id;      // num_particles (1 B/particle UInt8)
+    std::vector<uint8_t> material_id; // num_particles (1 B/particle UInt8)
 };
+
+void apply_mpm_bit_grooming(MPMVTKSnapshot3D& snap);
 
 void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapshot3D& snap, const std::string& format = "Binary");
 
 void export_vtp_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapshot3D& snap, const std::string& format = "Binary");
 
+void export_vtu_phase_particles_3d_snapshot(const std::string& filename, const Blast::PhaseTrackingVTKSnapshot3D& snap, const std::string& format = "Binary");
+
 void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPMParticle3D>& particles, const std::string& format = "Binary",
-                       bool has_vel = true, bool has_disp = true, bool has_stress = true,
-                       bool has_strain = true, bool has_damage = true, bool has_temp = true);
+                       bool has_vel = true, bool has_disp = false, bool has_stress = true,
+                       bool has_strain = true, bool has_damage = true, bool has_temp = true,
+                       bool has_pressure = true, bool has_material_id = true, bool has_object_id = true);
 
 struct ObstacleSurfaceSnapshot3D {
     int num_faces = 0;

@@ -962,9 +962,11 @@ export class GraphRenderer {
                     return fromType === 'FEMObject3D' || fromType === 'LSDynaImporter3D' || fromType === 'FEMBeam3D' || fromType === 'FEMRebar3D';
                 }
                 if (toPortId === 'material') return fromType === 'Material';
+                if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation3D' || fromType === 'TriggerLocation3D' || fromType === 'DetonatorLocation';
                 return false;
             case 'FEMObject3D':
                 if (toPortId === 'material') return fromType === 'Material';
+                if (toPortId === 'stl') return fromType === 'STLGeometry';
                 if (toPortId === 'importer') return fromType === 'LSDynaImporter3D';
                 return false;
             case 'LSDynaImporter3D':
@@ -4395,7 +4397,8 @@ export class GraphRenderer {
             } else if (node.type === 'FEMObject3D') {
                 const meshSrc = node.parameters['mesh_source'] || 'Box Generator';
                 const shapeType = node.parameters['shape_type'] || 'Box';
-                if (form.dataset.renderedMeshSource !== meshSrc.toString() || form.dataset.renderedShapeType !== shapeType.toString()) needsRebuild = true;
+                const elemTopo = node.parameters['element_topology'] || 'Hex8';
+                if (form.dataset.renderedMeshSource !== meshSrc.toString() || form.dataset.renderedShapeType !== shapeType.toString() || form.dataset.renderedElementTopology !== elemTopo.toString()) needsRebuild = true;
             } else if (node.type === 'FEMDomain3D') {
                 const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
                 const eHet = !!node.parameters['enable_heterogeneity'];
@@ -4403,12 +4406,14 @@ export class GraphRenderer {
                 const anisoAxis = node.parameters['anisotropy_axis'] || 'X';
                 const convMpm = !!node.parameters['convert_failed_elements_to_mpm'];
                 const eCrack = !!node.parameters['enable_directional_crack_band'];
+                const eCoh = !!node.parameters['enable_cohesive_splitting'];
                 if (form.dataset.renderedIntegrationScheme !== scheme.toString() ||
                     form.dataset.renderedEnableHeterogeneity !== eHet.toString() ||
                     form.dataset.renderedEnableAnisotropy !== eAniso.toString() ||
                     form.dataset.renderedAnisotropyAxis !== anisoAxis.toString() ||
                     form.dataset.renderedConvertMpm !== convMpm.toString() ||
-                    form.dataset.renderedEnableCrackBand !== eCrack.toString()) {
+                    form.dataset.renderedEnableCrackBand !== eCrack.toString() ||
+                    form.dataset.renderedEnableCohesive !== eCoh.toString()) {
                     needsRebuild = true;
                 }
             } else if (node.type === 'FEMFSICoupler3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D') {
@@ -4619,8 +4624,10 @@ export class GraphRenderer {
         } else if (node.type === 'FEMObject3D') {
             const meshSrc = node.parameters['mesh_source'] || 'Box Generator';
             const shapeType = node.parameters['shape_type'] || 'Box';
+            const elemTopo = node.parameters['element_topology'] || 'Hex8';
             form.dataset.renderedMeshSource = meshSrc.toString();
             form.dataset.renderedShapeType = shapeType.toString();
+            form.dataset.renderedElementTopology = elemTopo.toString();
         } else if (node.type === 'FEMDomain3D') {
             const scheme = node.parameters['integration_scheme'] || 'OnePointFB';
             const eHet = !!node.parameters['enable_heterogeneity'];
@@ -4628,12 +4635,14 @@ export class GraphRenderer {
             const anisoAxis = node.parameters['anisotropy_axis'] || 'X';
             const convMpm = !!node.parameters['convert_failed_elements_to_mpm'];
             const eCrack = !!node.parameters['enable_directional_crack_band'];
+            const eCoh = !!node.parameters['enable_cohesive_splitting'];
             form.dataset.renderedIntegrationScheme = scheme.toString();
             form.dataset.renderedEnableHeterogeneity = eHet.toString();
             form.dataset.renderedEnableAnisotropy = eAniso.toString();
             form.dataset.renderedAnisotropyAxis = anisoAxis.toString();
             form.dataset.renderedConvertMpm = convMpm.toString();
             form.dataset.renderedEnableCrackBand = eCrack.toString();
+            form.dataset.renderedEnableCohesive = eCoh.toString();
         } else if (node.type === 'FEMFSICoupler3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D') {
             const eVenting = !!node.parameters['erosion_venting'];
             form.dataset.renderedErosionVenting = eVenting.toString();
@@ -4848,6 +4857,9 @@ export class GraphRenderer {
                 const vtkLabels: Record<string, string> = {
                     'trigger_type': 'TRIGGER TYPE',
                     'vtk_format': 'FORMAT',
+                    'compression_level': 'ZLIB LEVEL',
+                    'float_precision': 'FLOAT PRECISION',
+                    'mpm_topology': 'MPM TOPOLOGY',
                     'step_interval': 'STEP INTV',
                     'time_interval': 'TIME INTV (S)',
                     'custom_filename': 'FILENAME',
@@ -4879,12 +4891,14 @@ export class GraphRenderer {
                     'qty_fem_damage': 'DAMAGE',
                     'qty_fem_vel': 'VELOCITY',
                     'qty_fem_disp': 'DISPLACEMENT',
-                    'qty_mpm_stress': 'STRESS TENSOR',
+                    'qty_mpm_stress': 'VON MISES STRESS',
                     'qty_mpm_strain': 'PLASTIC STRAIN',
                     'qty_mpm_damage': 'DAMAGE',
+                    'qty_mpm_pressure': 'PRESSURE',
+                    'qty_mpm_material_id': 'MATERIAL ID',
+                    'qty_mpm_object_id': 'OBJECT ID',
                     'qty_mpm_temp': 'TEMPERATURE',
                     'qty_mpm_vel': 'VELOCITY',
-                    'qty_mpm_disp': 'DISPLACEMENT',
                     'roi_enabled': 'CROP ROI',
                     'roi_xmin': 'X MIN (M)',
                     'roi_xmax': 'X MAX (M)',
@@ -4973,14 +4987,19 @@ export class GraphRenderer {
                 'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
                 'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
                 'contact_search_method': ['Hierarchical Octave Hash Grid', 'Linear BVH (Morton Code)'],
-                'mesh_source': ['Box Generator', 'Cylinder Generator', 'LS-DYNA Keyword File'],
+                'mesh_source': ['Box Generator', 'Cylinder Generator', 'Plate Generator', 'STL File', 'LS-DYNA Keyword File'],
+                'element_topology': ['Hex8', 'Tet4_ANP'],
                 'fsi_algorithm': ['CutCellPenalty', 'ImmersedBoundary', 'DirectMassCoupled'],
                 'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
+                'vtk_format': ['Binary', 'XDMF + HDF5', 'ASCII'],
+                'compression_level': ['1', '3', '6', '9'],
+                'float_precision': ['12-bit Mantissa (~4 sig. digits)', '16-bit Mantissa (~5 sig. digits)', 'Full 23-bit Float32 (Lossless)'],
+                'mpm_topology': ['Individual Vertices', 'Single PolyVertex', 'Zero-Cell Point Cloud'],
                 'stl_outside_domain': ['nan', 'zero', 'omit'],
                 // Explosive composition — JWL parameter sets (Ideal Gas uses its own node)
                 'undex_coupling_method': ['LocalCurvedDAA', 'HighFidelityCFD', 'ZonalHybrid_MPM_FV_FEM'],
                 'seabed_mesh_type': ['Pure_FV', 'Hybrid_MPM_Crater_FEM_FarField', 'Full_Domain_MPM', 'Local_Crater_MPM', 'Pure_Hex8_FEM', 'Pure_MPM'],
-                'water_discretization_mode': ['Pure_FV', 'Spherical_MPM_Sleeve', 'Full_Column_MPM_Cylinder'],
+                'water_discretization_mode': ['Pure_FV', 'Spherical_MPM_Sleeve', 'Full_Column_MPM_Cylinder', 'LPTP_Phase_Tracking_Sleeve', 'Full_Column_LPTP_Cylinder'],
                 'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
@@ -5007,7 +5026,7 @@ export class GraphRenderer {
                 'enable_dem_contact': ['Disabled', 'Enabled'],
                 'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
                 'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
-                'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
+                'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'Plate', 'STL', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
                 'origin_mode': node.type === 'FEMObject3D' ? ['Center', 'CAD Origin'] : ['CAD Origin', 'Center'],
                 'anisotropy_axis': ['X', 'Y', 'Z', 'Custom'],
                 'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
@@ -5637,7 +5656,8 @@ export class GraphRenderer {
                             return;
                         }
                         const numericKeys = [
-                            'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
+                            'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature', 'initial_temperature',
+                            'water_temperature', 'soil_temperature', 'air_temperature',
                             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
                             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'endtime',
                             'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate', 'fps',
@@ -5646,7 +5666,7 @@ export class GraphRenderer {
                             // 2D CFD keys
                             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
                             'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
-                            'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+                            'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
                             'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
                             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
                             // 3D CFD keys
@@ -5664,6 +5684,7 @@ export class GraphRenderer {
                             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'initial_velocity_x', 'initial_velocity_y', 'initial_velocity_z', 'initial_velocity_r', 'radius', 'inner_radius',
                             'scale_x', 'scale_y', 'scale_z',
                             'rot_x', 'rot_y', 'rot_z',
+                            'clip_z_min', 'clip_z_max',
                             'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
                             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
@@ -5672,12 +5693,13 @@ export class GraphRenderer {
                             'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                             'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
                             'mg_gamma0', 'mg_c0', 'mg_s',
-                            'ppc',
+                            'ppc', 'phase_particle_ppc', 'charge_ppc',
                             'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+                            'phaseParticleDiameter', 'phaseParticleSize', 'phaseParticleOpacity', 'phaseParticleStride',
                             'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
                             'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
                             // FEM keys
-                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
+                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy',
                             'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
                             'rebarRadius', 'viewport_refresh_rate', 'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
                             'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
@@ -5709,7 +5731,7 @@ export class GraphRenderer {
                             'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
                             'afterburn_ambient_o2_fraction', 'ambient_o2_fraction',
                             // VTK ROI & Strides
-                            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
+                            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride', 'compression_level',
                             'nonlocal_radius', 'opacity',
                             // Lysmer-Kuhlemeyer Absorbing Boundaries
                             'lysmer_rho', 'lysmer_cp', 'lysmer_cs', 'lysmer_normal_relaxation', 'lysmer_shear_relaxation',
@@ -6213,9 +6235,11 @@ export class GraphRenderer {
                             updates['provenance'] = 'user';
                         } else if (node.type === 'FEMObject3D' && (key === 'shape_type' || key === 'mesh_source')) {
                             if (key === 'shape_type') {
-                                updates['mesh_source'] = newVal === 'Cylinder' ? 'Cylinder Generator' : (newVal === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator');
+                                updates['mesh_source'] = newVal === 'Cylinder' ? 'Cylinder Generator' : (newVal === 'STL' ? 'STL File' : (newVal === 'Plate' ? 'Plate Generator' : (newVal === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')));
+                                if (newVal === 'STL') updates['element_topology'] = 'Tet4_ANP';
                             } else if (key === 'mesh_source') {
-                                updates['shape_type'] = newVal === 'Cylinder Generator' ? 'Cylinder' : (newVal === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box');
+                                updates['shape_type'] = newVal === 'Cylinder Generator' ? 'Cylinder' : (newVal === 'STL File' ? 'STL' : (newVal === 'Plate Generator' ? 'Plate' : (newVal === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
+                                if (newVal === 'STL File') updates['element_topology'] = 'Tet4_ANP';
                             }
                         } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && newVal === 'STL') || (key === 'origin_mode' && newVal === 'CAD Origin'))) {
                             if (key === 'shape_type' && newVal === 'STL') {
@@ -6236,6 +6260,16 @@ export class GraphRenderer {
                     },
                     key
                 );
+            } else if (typeof value === 'boolean' || key === 'track_mpm_velocity') {
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = Boolean(value);
+                cb.dataset.key = key;
+                cb.style.margin = '4px 0';
+                cb.addEventListener('change', () => {
+                    this.stateManager.updateNodeParameters(node.id, { [key]: cb.checked });
+                });
+                inputEl = cb;
             } else {
                 const input = document.createElement('input');
                 const isNumeric = typeof value === 'number';
@@ -8628,10 +8662,22 @@ export class GraphRenderer {
             }
         }
 
+        const targetNodeInState = state.nodes.find(n => n.id === nodeId);
+        if (targetNodeInState) {
+            if (!targetNodeInState.parameters) targetNodeInState.parameters = {};
+            targetNodeInState.parameters['material'] = matId;
+        }
+
         const targetModel = this.stateManager.getModelForNode(nodeId) || this.stateManager.getActiveModel();
         if (targetModel) {
+            const modelNode = targetModel.nodes.find(n => n.id === nodeId);
+            if (modelNode) {
+                if (!modelNode.parameters) modelNode.parameters = {};
+                modelNode.parameters['material'] = matId;
+            }
             this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
         }
+        this.stateManager.updateNodeParametersInPlace(nodeId, { material: matId });
         this.stateManager.pushState(state);
         this.render();
     }

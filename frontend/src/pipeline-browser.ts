@@ -5,7 +5,7 @@
  */
 
 import { StateManager, prepareModelSavePayload, getSliceAxisLabel, isExplosiveMaterialNode, isSeabedMaterialNode, isWaterMaterialNode, isSolidMaterialNode, resolveFEMCounts } from './state-manager.js';
-import { Model, Node, NodeType, SimulationStatus } from './types.js';
+import { Model, Node, NodeType, SimulationStatus, SimulationState } from './types.js';
 import { PlatformBridge } from './PlatformBridge.js';
 import { CustomDialog } from './custom-dialog.js';
 import { HostFileBrowserModal } from './host-file-browser.js';
@@ -2045,31 +2045,43 @@ export class PipelineBrowser {
             childList.appendChild(waterItem);
 
             // 3. Near-Field Water Sleeve / Water Discretization
-            const waterMode = String(node.parameters?.water_discretization_mode || 'Spherical_MPM_Sleeve');
+            const waterMode = String(node.parameters?.water_discretization_mode || 'LPTP_Phase_Tracking_Sleeve');
             const isPureFVWater = waterMode === 'Pure_FV' || waterMode === 'Pure FV';
+            const isLPTPWater = waterMode === 'LPTP_Phase_Tracking_Sleeve' || waterMode === 'LPTP Phase Tracking Sleeve';
+            const isFullColLPTP = waterMode === 'Full_Column_LPTP_Cylinder' || waterMode === 'Full Column LPTP Cylinder';
             const isFullColWater = waterMode === 'Full_Column_MPM_Cylinder' || waterMode === 'Full Column MPM Cylinder';
             const ppc = node.parameters?.nearfield_ppc ?? 8;
-            let sleeveMethodTag = `MPM ${ppc} PPC`;
-            let sleeveSubtitle = `Lagrangian MPM (${ppc} PPC), R = ${sleeveR}m, Tait Water`;
-            let sleeveTagText = `Sphere R=${sleeveR}m${breach ? ' (Sky)' : ''}`;
-            let sleeveTagColor = '#a855f7';
+            let sleeveMethodTag = `LPTP ${ppc} PPC`;
+            let sleeveSubtitle = `Lagrangian Phase Tracking (${ppc} PPC), R = ${sleeveR}m, Partition-of-Unity Remap`;
+            let sleeveTagText = `LPTP R=${sleeveR}m${breach ? ' (Sky)' : ''}`;
+            let sleeveTagColor = '#10b981';
 
             if (isPureFVWater) {
                 sleeveMethodTag = 'Pure Eulerian FV';
                 sleeveSubtitle = 'Pure Finite Volume (Unobstructed shockwave propagation, no particles)';
                 sleeveTagText = 'Pure FV';
                 sleeveTagColor = '#38bdf8';
+            } else if (isFullColLPTP) {
+                sleeveMethodTag = `LPTP Column ${ppc} PPC`;
+                sleeveSubtitle = `Vertical Column Phase Tracking (${ppc} PPC), R = ${sleeveR}m (Mudline to Surface)`;
+                sleeveTagText = `LPTP Cyl R=${sleeveR}m`;
+                sleeveTagColor = '#06b6d4';
+            } else if (waterMode === 'Spherical_MPM_Sleeve' || waterMode === 'Spherical MPM Sleeve') {
+                sleeveMethodTag = `MPM ${ppc} PPC`;
+                sleeveSubtitle = `Lagrangian Continuum MPM (${ppc} PPC), R = ${sleeveR}m, Tait Water`;
+                sleeveTagText = `MPM R=${sleeveR}m${breach ? ' (Sky)' : ''}`;
+                sleeveTagColor = '#a855f7';
             } else if (isFullColWater) {
                 sleeveMethodTag = `MPM Column ${ppc} PPC`;
                 sleeveSubtitle = `Vertical Column MPM Cylinder (${ppc} PPC), R = ${sleeveR}m (Mudline to Surface)`;
-                sleeveTagText = `Cylinder R=${sleeveR}m`;
+                sleeveTagText = `MPM Cyl R=${sleeveR}m`;
                 sleeveTagColor = '#c084fc';
             }
 
             const isWaterSleeveVisible = node.parameters?.show_water_sleeve !== false;
             const sleeveItem = this.createMarineLayerItem({
                 branch: '├──',
-                icon: isPureFVWater ? '🌊' : '🌀',
+                icon: isPureFVWater ? '🌊' : (isLPTPWater || isFullColLPTP ? '✨' : '🌀'),
                 title: 'Water Discretization',
                 methodTag: sleeveMethodTag,
                 subtitle: sleeveSubtitle,
@@ -2092,8 +2104,10 @@ export class PipelineBrowser {
                 },
                 onClick: (anchorEl) => {
                     const candidates = [
+                        { id: 'mode_LPTP_Phase_Tracking_Sleeve', label: '✨ LPTP Phase Tracking Sleeve (Recommended — Robust Interface + Sparsity Safeguard)' },
+                        { id: 'mode_Full_Column_LPTP_Cylinder', label: '🌟 Full-Column LPTP Cylinder (Seabed-to-Surface Lagrangian Tracking)' },
                         { id: 'mode_Pure_FV', label: '🌊 Pure Eulerian FV (No Particles — Shockwave Penetrates Fluid)' },
-                        { id: 'mode_Spherical_MPM_Sleeve', label: '🌀 Spherical MPM Sleeve (Near-Field Charge Cavitation Only)' },
+                        { id: 'mode_Spherical_MPM_Sleeve', label: '🌀 Spherical MPM Sleeve (Continuum MPM Cavitation Sleeve)' },
                         { id: 'mode_Full_Column_MPM_Cylinder', label: '🏛️ Full-Column MPM Cylinder (Spanning Seabed to Water Surface)' },
                         { id: 'divider_1', label: '────────── Sizing & Resolution ──────────' },
                         { id: 'toggle_breach', label: breach ? '🔓 Breach: Venting to Sky (Click to Submerge)' : '🔒 Breach: Submerged Only (Click to Vent to Sky)' },
@@ -2118,6 +2132,8 @@ export class PipelineBrowser {
                             if (sel.startsWith('mode_')) {
                                 let mode = sel.replace('mode_', '');
                                 if (mode === 'Pure FV') mode = 'Pure_FV';
+                                else if (mode === 'LPTP Phase Tracking Sleeve') mode = 'LPTP_Phase_Tracking_Sleeve';
+                                else if (mode === 'Full Column LPTP Cylinder') mode = 'Full_Column_LPTP_Cylinder';
                                 else if (mode === 'Spherical MPM Sleeve') mode = 'Spherical_MPM_Sleeve';
                                 else if (mode === 'Full Column MPM Cylinder') mode = 'Full_Column_MPM_Cylinder';
                                 this.stateManager.updateNodeParameters(node.id, { water_discretization_mode: mode });
@@ -2151,7 +2167,7 @@ export class PipelineBrowser {
                 icon: '⚙️',
                 title: 'Pressurized Casing',
                 methodTag: 'MPM Metal',
-                subtitle: chgNode ? `Eulerian Gas + MPM Metal Casing (${chgNode.parameters?.name || chgNode.id}: ${chgNode.parameters?.charge_mass ?? '0.85'} kg)` : 'Eulerian Gas + MPM Metal Casing',
+                subtitle: chgNode ? `Eulerian Gas (${chgNode.parameters?.ppc ?? 64} PPC) + MPM Metal Casing (${chgNode.parameters?.name || chgNode.id}: ${chgNode.parameters?.charge_mass ?? '0.85'} kg)` : 'Eulerian Gas + MPM Metal Casing',
                 tagText: 'Metal/JWL',
                 tagColor: '#eab308',
                 onClick: () => {
@@ -2319,6 +2335,142 @@ export class PipelineBrowser {
                 }
             });
             childList.appendChild(farfieldItem);
+
+            // 5. Zonal Absorbing Boundaries (Quiet Ports)
+            const meshConn = model.connections?.find(c => (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in')) || (c.fromNode === node.id && c.fromPort === 'mesh'));
+            const meshNode = meshConn ? model.nodes.find(n => n.id === (meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode)) : model.nodes.find(n => n.type === 'DomainMesh3D');
+
+            const curSky = String(meshNode?.parameters?.bc_z_max ?? node.parameters?.bc_z_max ?? 'Transmitting');
+            const curBed = String(meshNode?.parameters?.bc_z_min ?? node.parameters?.bc_z_min ?? 'Lysmer');
+            const bc_x_min = String(meshNode?.parameters?.bc_x_min ?? node.parameters?.bc_x_min ?? 'Transmitting');
+            const bc_x_max = String(meshNode?.parameters?.bc_x_max ?? node.parameters?.bc_x_max ?? 'Transmitting');
+            const bc_y_min = String(meshNode?.parameters?.bc_y_min ?? node.parameters?.bc_y_min ?? 'Transmitting');
+            const bc_y_max = String(meshNode?.parameters?.bc_y_max ?? node.parameters?.bc_y_max ?? 'Transmitting');
+
+            const isQuarterSym = bc_x_min === 'Reflecting' && bc_y_min === 'Reflecting' && bc_x_max === 'Transmitting' && bc_y_max === 'Transmitting';
+            const isAllLatRefl = bc_x_min === 'Reflecting' && bc_x_max === 'Reflecting' && bc_y_min === 'Reflecting' && bc_y_max === 'Reflecting';
+            const isAllLatTrans = bc_x_min === 'Transmitting' && bc_x_max === 'Transmitting' && bc_y_min === 'Transmitting' && bc_y_max === 'Transmitting';
+
+            const baseDesc = curBed === 'Lysmer' ? 'Lysmer Bedrock' : curBed;
+            let boundaryMethodTag = 'Quiet Ports';
+            let boundarySubtitle = `Sky: Riemann | Lateral: Zonal Riemann+Lysmer | Base: ${baseDesc}`;
+            let boundaryTagText = 'All-Around Quiet';
+            let boundaryTagColor = '#10b981';
+
+            if (isQuarterSym) {
+                boundaryMethodTag = 'Quarter-Symmetry';
+                boundarySubtitle = `Sky: Riemann | Lateral: Corner Reflecting (Xmin/Ymin) + Transmitting (Xmax/Ymax) | Base: ${baseDesc}`;
+                boundaryTagText = 'Quarter-Symmetry';
+                boundaryTagColor = '#0ea5e9';
+            } else if (isAllLatRefl) {
+                boundaryMethodTag = 'Confined Basin';
+                boundarySubtitle = `Sky: Riemann | Lateral: Reflecting (Quaysides) | Base: ${baseDesc}`;
+                boundaryTagText = 'Quayside Walls';
+                boundaryTagColor = '#f59e0b';
+            } else if (isAllLatTrans) {
+                boundaryMethodTag = 'Quiet Ports';
+                boundarySubtitle = `Sky: Riemann | Lateral: Zonal Riemann+Lysmer | Base: ${baseDesc}`;
+                boundaryTagText = 'All-Around Quiet';
+                boundaryTagColor = '#10b981';
+            } else if (curBed === 'Reflecting') {
+                boundaryMethodTag = 'Rigid Base';
+                boundarySubtitle = `Sky: ${curSky} (Riemann) | Lateral: Mixed | Base: Rigid Bedrock`;
+                boundaryTagText = 'Rigid Floor';
+                boundaryTagColor = '#38bdf8';
+            } else {
+                boundaryMethodTag = 'Custom Boundaries';
+                boundarySubtitle = `Sky: ${curSky} (Riemann) | Lateral: Mixed | Base: ${baseDesc}`;
+                boundaryTagText = 'Custom BC';
+                boundaryTagColor = '#8b5cf6';
+            }
+
+            const boundaryItem = this.createMarineLayerItem({
+                branch: '└──',
+                icon: '🛡️',
+                title: 'Zonal Absorbing Boundaries',
+                methodTag: boundaryMethodTag,
+                subtitle: boundarySubtitle,
+                tagText: boundaryTagText,
+                tagColor: boundaryTagColor,
+                onClick: (anchorEl) => {
+                    const candidates: { id: string; label: string; sublabel?: string }[] = [];
+                    if (meshNode) {
+                        candidates.push({
+                            id: 'open_mesh_node',
+                            label: `📐 Inspect DomainMesh3D Boundaries (${meshNode.parameters?.name || meshNode.id})`,
+                            sublabel: 'View and tune individual face boundary conditions and Lysmer dashpot parameters in Property Editor'
+                        });
+                    }
+                    candidates.push(
+                        {
+                            id: 'preset_open_harbour',
+                            label: '🌊 Open Marine Harbour (All-Around Transmitting Sky/Water + Lysmer Bedrock) [Recommended]',
+                            sublabel: 'Sky: Riemann outflow | Lateral: Zonal fluid Riemann + soil Lysmer | Bedrock: Lysmer dashpots'
+                        },
+                        {
+                            id: 'preset_confined_basin',
+                            label: '🏛️ Confined Harbour Basin (Reflecting Lateral Quay Walls + Open Sky)',
+                            sublabel: 'Sky: Riemann outflow | Lateral: Rigid reflective quay walls | Bedrock: Lysmer dashpots'
+                        },
+                        {
+                            id: 'preset_rigid_bedrock',
+                            label: '🏔️ Rigid Bedrock Basement (Reflecting Base + Transmitting Lateral & Sky)',
+                            sublabel: 'Sky: Riemann outflow | Lateral: Zonal transmitting | Bedrock: Rigid impenetrable floor'
+                        }
+                    );
+
+                    this.showQuickAssignPopup({
+                        anchorEl,
+                        title: 'Harbour Boundary Condition Architecture & Presets',
+                        currentId: isAllLatRefl ? 'preset_confined_basin' : (curBed === 'Reflecting' ? 'preset_rigid_bedrock' : 'preset_open_harbour'),
+                        candidateNodes: candidates,
+                        hideNoneOption: true,
+                        model,
+                        onSelect: (sel) => {
+                            if (sel === 'open_mesh_node' && meshNode) {
+                                this.stateManager.selectNode(model.id, meshNode.id);
+                                return;
+                            }
+                            let updates: Record<string, string> = {};
+                            if (sel === 'preset_open_harbour') {
+                                updates = {
+                                    bc_z_max: 'Transmitting',
+                                    bc_z_min: 'Lysmer',
+                                    bc_x_min: 'Transmitting',
+                                    bc_x_max: 'Transmitting',
+                                    bc_y_min: 'Transmitting',
+                                    bc_y_max: 'Transmitting'
+                                };
+                            } else if (sel === 'preset_confined_basin') {
+                                updates = {
+                                    bc_z_max: 'Transmitting',
+                                    bc_z_min: 'Lysmer',
+                                    bc_x_min: 'Reflecting',
+                                    bc_x_max: 'Reflecting',
+                                    bc_y_min: 'Reflecting',
+                                    bc_y_max: 'Reflecting'
+                                };
+                            } else if (sel === 'preset_rigid_bedrock') {
+                                updates = {
+                                    bc_z_max: 'Transmitting',
+                                    bc_z_min: 'Reflecting',
+                                    bc_x_min: 'Transmitting',
+                                    bc_x_max: 'Transmitting',
+                                    bc_y_min: 'Transmitting',
+                                    bc_y_max: 'Transmitting'
+                                };
+                            }
+                            if (meshNode) {
+                                this.stateManager.updateNodeParameters(meshNode.id, updates);
+                            }
+                            this.stateManager.updateNodeParameters(node.id, updates);
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                            this.render();
+                        }
+                    });
+                }
+            });
+            childList.appendChild(boundaryItem);
         }
 
         return nodeContainer;
@@ -3776,8 +3928,10 @@ export class PipelineBrowser {
                 const z = Number(node.parameters.detonator_z ?? node.parameters.trigger_z ?? 0.1);
                 return `${r}, ${z}`;
             }
-            case 'Charge3D':
-                return `${node.parameters.charge_mass || '0.85'} kg`;
+            case 'Charge3D': {
+                const ppc = node.parameters?.ppc ?? 64;
+                return `${node.parameters.charge_mass || '0.85'} kg (${ppc} PPC)`;
+            }
             case 'DomainMesh3D': {
                 const nx = node.parameters.nx || 100;
                 const ny = node.parameters.ny || 100;
@@ -3799,18 +3953,21 @@ export class PipelineBrowser {
             case 'MPMObject3D':
                 return node.parameters.shape_type || 'MPM 3D';
             case 'FEMObject3D': {
-                const shape = node.parameters.shape_type || (node.parameters.mesh_source === 'Cylinder Generator' ? 'Cylinder' : (node.parameters.mesh_source === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box'));
+                const shape = node.parameters.shape_type || (node.parameters.mesh_source === 'Cylinder Generator' ? 'Cylinder' : (node.parameters.mesh_source === 'STL Tetrahedral Mesher' ? 'STL' : (node.parameters.mesh_source === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
+                const topo = node.parameters.element_topology === 'Tet4_ANP' ? ' [Tet4]' : '';
                 if (shape === 'Box') {
                     const nx = node.parameters.nx ?? 10;
                     const ny = node.parameters.ny ?? 10;
                     const nz = node.parameters.nz ?? 10;
-                    return `Box ${nx}×${ny}×${nz}`;
+                    return `Box ${nx}×${ny}×${nz}${topo}`;
                 } else if (shape === 'Cylinder') {
                     const nr = node.parameters.nx ?? 2;
                     const nz = node.parameters.nz ?? 4;
-                    return `Cyl ${nr}r×${nz}z`;
+                    return `Cyl ${nr}r×${nz}z${topo}`;
+                } else if (shape === 'STL') {
+                    return `STL Tet4`;
                 } else {
-                    return shape;
+                    return `${shape}${topo}`;
                 }
             }
             case 'LSDynaImporter3D':
@@ -3837,7 +3994,7 @@ export class PipelineBrowser {
             if (preset.includes('Water') || preset.includes('Tait')) return 'Tait Water';
             if (preset.includes('Air')) return 'Air (STP)';
             if (preset.includes('TNT') || preset.includes('JWL')) return 'JWL TNT';
-            if (preset.includes('Steel')) return 'Steel';
+            if (preset.includes('Steel') || preset.includes('4150') || preset.includes('4340') || preset.includes('Krupp') || preset.includes('E22')) return 'Steel';
             if (preset.includes('Concrete')) return 'Concrete';
             if (preset.includes('Soil') || preset.includes('Sand')) return 'Soil';
             if (preset.length > 14) return preset.slice(0, 13) + '…';
@@ -3920,7 +4077,7 @@ export class PipelineBrowser {
                 e.stopPropagation();
                 const is3D = node.type === 'TriggerLocation3D' || node.type === 'DetonatorLocation3D';
                 const candidates = model.nodes
-                    .filter(n => is3D ? ['CFDSolver3D', 'MPMDomain3D', 'MarineHarbourDomain'].includes(n.type) : ['CFDSolver2D', 'MPMDomain2D', 'CFDSolver'].includes(n.type))
+                    .filter(n => is3D ? ['CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D', 'MarineHarbourDomain'].includes(n.type) : ['CFDSolver2D', 'MPMDomain2D', 'CFDSolver'].includes(n.type))
                     .map(n => ({ id: n.id, label: n.parameters?.name || n.type, sublabel: n.type }));
                 this.showQuickAssignPopup({
                     anchorEl: chip,
@@ -3955,7 +4112,7 @@ export class PipelineBrowser {
                 const is3D = node.type === 'DomainMesh3D';
                 const is2D = node.type === 'DomainMesh2D';
                 const candidates = model.nodes
-                    .filter(n => is3D ? ['CFDSolver3D', 'MPMDomain3D', 'MarineHarbourDomain'].includes(n.type) : (is2D ? ['CFDSolver2D', 'MPMDomain2D'].includes(n.type) : ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D'].includes(n.type)))
+                    .filter(n => is3D ? ['CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D', 'MarineHarbourDomain'].includes(n.type) : (is2D ? ['CFDSolver2D', 'MPMDomain2D'].includes(n.type) : ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D'].includes(n.type)))
                     .map(n => ({ id: n.id, label: n.parameters?.name || n.type, sublabel: n.type }));
                 this.showQuickAssignPopup({
                     anchorEl: chip,
@@ -4041,6 +4198,46 @@ export class PipelineBrowser {
                     });
                 });
                 group.appendChild(matChip);
+            }
+
+            if (node.type === 'FEMObject3D' || node.type === 'MPMObject3D') {
+                const stlConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'stl');
+                const currentStlId = stlConn ? stlConn.fromNode : '';
+                const stlNode = model.nodes.find(n => n.id === currentStlId);
+                const isStlShape = node.parameters?.shape_type === 'STL' || node.parameters?.mesh_source === 'STL Tetrahedral Mesher';
+                if (stlNode || isStlShape) {
+                    const stlChip = document.createElement('span');
+                    stlChip.className = 'pipeline-conn-chip';
+                    if (stlNode) {
+                        stlChip.classList.add('connected');
+                        stlChip.textContent = `📐 ${this.getCleanEntityName(stlNode.parameters?.name || stlNode.type)}`;
+                        stlChip.title = `STL Geometry [${stlNode.parameters?.name || stlNode.id}] wired. Click to reassign or disconnect.`;
+                    } else if (node.parameters?.stl_file || node.parameters?.file_path) {
+                        stlChip.classList.add('connected');
+                        const fName = String(node.parameters.stl_file || node.parameters.file_path).split('/').pop() || 'STL';
+                        stlChip.textContent = `📐 ${fName}`;
+                        stlChip.title = `STL file [${fName}] assigned. Click to wire an STLGeometry node.`;
+                    } else {
+                        stlChip.classList.add('unconnected');
+                        stlChip.textContent = '📐 +STL';
+                        stlChip.title = 'STL shape selected but no STLGeometry wired! Click to assign.';
+                    }
+                    stlChip.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const candidates = model.nodes
+                            .filter(n => n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D')
+                            .map(n => ({ id: n.id, label: n.parameters?.name || n.type, sublabel: n.parameters?.file_path ? String(n.parameters.file_path).split('/').pop() : n.type }));
+                        this.showQuickAssignPopup({
+                            anchorEl: stlChip,
+                            title: 'Source CAD / STL Geometry',
+                            currentId: currentStlId,
+                            candidateNodes: candidates,
+                            model,
+                            onSelect: (selectedId) => this.assignSTLToObject(node, selectedId, model)
+                        });
+                    });
+                    group.appendChild(stlChip);
+                }
             }
 
             return group;
@@ -4206,14 +4403,20 @@ export class PipelineBrowser {
                 group.appendChild(chgChip);
             }
 
-            // Other object connections (FEM/MPM/Harbour/Rigid)
-            const targetBodyTypes = ['FEMObject3D', 'MPMObject3D', 'RigidBody3D', 'MarineHarbourDomain', 'FEMDomain3D', 'MPMDomain3D', 'Obstacle3D', 'Obstacle'];
-            const assignedBodies = model.nodes.filter(n => targetBodyTypes.includes(n.type) && (
-                n.parameters?.material === node.id ||
-                n.parameters?.seabed_foundation === node.id ||
-                seabedConns.some(c => c.toNode === n.id || c.fromNode === n.id) ||
-                matConns.some(c => (c.toNode === n.id && (c.toPort === 'material' || c.toPort === 'mat' || c.toPort === 'in' || c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'elements' || c.toPort === 'seabed')) || (c.fromNode === n.id && (c.fromPort === 'material' || c.fromPort === 'mat' || c.fromPort === 'out')))
-            ));
+            // Structural body connections (FEM/MPM/Rigid)
+            const targetBodyTypes = ['FEMObject3D', 'MPMObject3D', 'MPMObject2D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D', 'RigidBody3D'];
+            const assignedBodies = model.nodes.filter(n => {
+                if (!targetBodyTypes.includes(n.type)) return false;
+                const matConn = state.connections.find(c => 
+                    (c.toNode === n.id || c.fromNode === n.id) && 
+                    (c.toPort === 'material' || c.fromPort === 'material' || c.toPort === 'mat' || c.fromPort === 'mat')
+                );
+                if (matConn) {
+                    const connMatId = matConn.toNode === n.id ? matConn.fromNode : matConn.toNode;
+                    return connMatId === node.id;
+                }
+                return n.parameters?.material === node.id;
+            });
 
             const candidateBodies = model.nodes
                 .filter(n => targetBodyTypes.includes(n.type))
@@ -4295,38 +4498,84 @@ export class PipelineBrowser {
             const remapNode = model.nodes.find(n => n.id === currentRemapId);
             const isRemapActive = isCFD && (is2D || is3D) && (!!remapNode || node.parameters?.init_mode === 'From1D' || node.parameters?.init_mode === 'From2D');
 
-            // 1. Mesh Chip
+            // 1. Mesh Chip (optional for FEMDomain3D unless convert_failed_elements_to_mpm is enabled)
             const meshConn = state.connections.find(c => (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in')) || (c.fromNode === node.id && c.fromPort === 'mesh'));
             let currentMeshId = meshConn ? (meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode) : (node.parameters?.mesh || '');
-            const meshNode = model.nodes.find(n => n.id === currentMeshId);
-            const meshChip = document.createElement('span');
-            meshChip.className = 'pipeline-conn-chip chip-mesh';
-            if (meshNode) {
-                meshChip.classList.add('connected');
-                const cs = meshNode.parameters?.cell_size ?? meshNode.parameters?.dx;
-                const csStr = cs !== undefined ? ` (${cs}m)` : '';
-                meshChip.textContent = `📐 ${this.getCleanEntityName(meshNode.parameters?.name || meshNode.type)}${csStr}`;
-                meshChip.title = `Background Mesh [${meshNode.parameters?.name || meshNode.id}] is wired. Click to reassign or disconnect.`;
-            } else {
-                meshChip.classList.add('unconnected');
-                meshChip.textContent = '📐 +Mesh';
-                meshChip.title = 'No background mesh connected! Click to assign mesh.';
-            }
-            meshChip.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const candidates = model.nodes
-                    .filter(n => is3D ? n.type === 'DomainMesh3D' : (is2D ? n.type === 'DomainMesh2D' : ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D'].includes(n.type)))
-                    .map(n => ({ id: n.id, label: n.parameters?.name || n.type, sublabel: n.type }));
-                this.showQuickAssignPopup({
-                    anchorEl: meshChip,
-                    title: 'Background Mesh',
-                    currentId: currentMeshId,
-                    candidateNodes: candidates,
-                    model,
-                    onSelect: (selectedId) => this.assignMeshToSolver(node, selectedId, model)
+            const meshNode = model.nodes.find(n => n.id === currentMeshId && ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D'].includes(n.type));
+            const needsBgMesh = node.type !== 'FEMDomain3D' || Boolean(node.parameters?.convert_failed_elements_to_mpm);
+            if (meshNode || needsBgMesh) {
+                const meshChip = document.createElement('span');
+                meshChip.className = 'pipeline-conn-chip chip-mesh';
+                if (meshNode) {
+                    meshChip.classList.add('connected');
+                    const cs = meshNode.parameters?.cell_size ?? meshNode.parameters?.dx;
+                    const csStr = cs !== undefined ? ` (${cs}m)` : '';
+                    meshChip.textContent = `📐 ${this.getCleanEntityName(meshNode.parameters?.name || meshNode.type)}${csStr}`;
+                    meshChip.title = `Background Mesh [${meshNode.parameters?.name || meshNode.id}] is wired. Click to reassign or disconnect.`;
+                } else {
+                    meshChip.classList.add('unconnected');
+                    meshChip.textContent = '📐 +Mesh';
+                    meshChip.title = 'No background mesh connected! Click to assign mesh.';
+                }
+                meshChip.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const candidates = model.nodes
+                        .filter(n => is3D ? n.type === 'DomainMesh3D' : (is2D ? n.type === 'DomainMesh2D' : ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D'].includes(n.type)))
+                        .map(n => ({ id: n.id, label: n.parameters?.name || n.type, sublabel: n.type }));
+                    this.showQuickAssignPopup({
+                        anchorEl: meshChip,
+                        title: 'Background Mesh',
+                        currentId: meshNode ? meshNode.id : '',
+                        candidateNodes: candidates,
+                        model,
+                        onSelect: (selectedId) => this.assignMeshToSolver(node, selectedId, model)
+                    });
                 });
-            });
-            group.appendChild(meshChip);
+                group.appendChild(meshChip);
+            }
+
+            // 1b. Structural Parts Chip for FEMDomain3D
+            if (node.type === 'FEMDomain3D') {
+                const femParts = model.nodes.filter(n => ['FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D'].includes(n.type));
+                const connectedParts = femParts.filter(p => state.connections.some(c => c.fromNode === p.id && c.toNode === node.id));
+                const partChip = document.createElement('span');
+                partChip.className = 'pipeline-conn-chip';
+                if (connectedParts.length > 0) {
+                    partChip.classList.add('connected');
+                    partChip.textContent = connectedParts.length === 1
+                        ? `🏗️ ${this.getCleanEntityName(connectedParts[0].parameters?.name || connectedParts[0].type)}`
+                        : `🏗️ ${connectedParts.length} Parts`;
+                    partChip.title = `${connectedParts.length} structural part(s) wired to FEM solver. Click to manage.`;
+                } else {
+                    partChip.classList.add('unconnected');
+                    partChip.textContent = '🏗️ +Part';
+                    partChip.title = 'No structural part wired to FEM solver! Click to assign.';
+                }
+                partChip.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const candidates = femParts.map(p => ({
+                        id: p.id,
+                        label: p.parameters?.name || p.type,
+                        sublabel: `${p.parameters?.shape_type || p.type}${p.parameters?.element_topology === 'Tet4_ANP' ? ' · Tet4' : ''}`
+                    }));
+                    this.showQuickAssignPopup({
+                        anchorEl: partChip,
+                        title: 'FEM Structural Part',
+                        currentId: connectedParts[0]?.id || '',
+                        candidateNodes: candidates,
+                        model,
+                        onSelect: (selectedId) => {
+                            if (selectedId) {
+                                const targetBody = model.nodes.find(n => n.id === selectedId);
+                                if (targetBody) this.assignObjectDomain(targetBody, node.id, model);
+                            } else if (connectedParts.length > 0) {
+                                this.assignObjectDomain(connectedParts[0], '', model);
+                            }
+                        }
+                    });
+                });
+                group.appendChild(partChip);
+            }
 
             // 2. Air Material Chip (for CFD solvers)
             if (isCFD) {
@@ -4438,17 +4687,46 @@ export class PipelineBrowser {
                 }
             }
 
-            // 4. Detonator Chip (if wired)
+            // 4. Detonator Chip (if wired or if detonators exist in model)
             const detConn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'detonator' || c.toPort === 'trigger' || c.toPort === 'detonators'));
-            if (detConn) {
-                const detNode = model.nodes.find(n => n.id === detConn.fromNode);
+            const detCandidates = model.nodes.filter(n => is3D ? (n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D') : (n.type === 'DetonatorLocation' || n.type === 'TriggerLocation'));
+            if (detConn || detCandidates.length > 0) {
+                const detNode = detConn ? model.nodes.find(n => n.id === detConn.fromNode) : undefined;
                 const detChip = document.createElement('span');
-                detChip.className = 'pipeline-conn-chip connected';
-                detChip.textContent = `🎯 ${this.getCleanEntityName(detNode?.parameters?.name || detNode?.type || 'Det')}`;
-                detChip.title = `Detonator [${detNode?.parameters?.name || detNode?.id}] is connected. Click to open connections manager.`;
+                detChip.className = 'pipeline-conn-chip';
+                if (detNode) {
+                    detChip.classList.add('connected');
+                    detChip.textContent = `🎯 ${this.getCleanEntityName(detNode.parameters?.name || detNode.type || 'Det')}`;
+                    detChip.title = `Detonator [${detNode.parameters?.name || detNode.id}] is connected. Click to reassign or disconnect.`;
+                } else {
+                    detChip.classList.add('unconnected');
+                    detChip.textContent = '🎯 +Detonator';
+                    detChip.title = 'Detonator node available in model. Click to wire to this solver domain.';
+                }
                 detChip.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    new PipelineConnectionModal(this.stateManager, model, () => this.render());
+                    const candidates = detCandidates.map(n => ({
+                        id: n.id,
+                        label: n.parameters?.name || n.type,
+                        sublabel: is3D
+                            ? `(${n.parameters?.detonator_x ?? 0.5}, ${n.parameters?.detonator_y ?? 0.5}, ${n.parameters?.detonator_z ?? 0.5})`
+                            : `(${n.parameters?.detonator_r ?? 0.0}, ${n.parameters?.detonator_z ?? 0.1})`
+                    }));
+                    this.showQuickAssignPopup({
+                        anchorEl: detChip,
+                        title: 'Initiation Detonator',
+                        currentId: detNode ? detNode.id : '',
+                        candidateNodes: candidates,
+                        model,
+                        onSelect: (selectedId) => {
+                            if (selectedId) {
+                                const targetDet = model.nodes.find(n => n.id === selectedId);
+                                if (targetDet) this.assignDetonatorTarget(targetDet, node.id, model);
+                            } else if (detNode) {
+                                this.assignDetonatorTarget(detNode, '', model);
+                            }
+                        }
+                    });
                 });
                 group.appendChild(detChip);
             }
@@ -4954,6 +5232,39 @@ export class PipelineBrowser {
             return group;
         }
 
+        // 10. STL Geometry & CAD Surface Chips
+        if (node.type === 'STLGeometry' || node.type === 'PrimitiveGeometry3D') {
+            const conn = state.connections.find(c => c.fromNode === node.id && c.toPort === 'stl');
+            const targetId = conn ? conn.toNode : '';
+            const target = model.nodes.find(n => n.id === targetId);
+            const chip = document.createElement('span');
+            chip.className = 'pipeline-conn-chip';
+            if (target) {
+                chip.classList.add('connected');
+                chip.textContent = `🔗 ${this.getCleanEntityName(target.parameters?.name || target.type)}`;
+                chip.title = `CAD geometry wired to ${target.parameters?.name || target.id}. Click to reassign or disconnect.`;
+            } else {
+                chip.classList.add('unconnected');
+                chip.textContent = '⚠️ Assign Target';
+                chip.title = 'CAD geometry is not connected to any solver or structural body! Click to assign.';
+            }
+            chip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const candidates = model.nodes
+                    .filter(n => ['FEMObject3D', 'MPMObject3D', 'CFDSolver3D', 'MPMDomain3D', 'MarineHarbourDomain'].includes(n.type))
+                    .map(n => ({ id: n.id, label: n.parameters?.name || n.type, sublabel: n.type }));
+                this.showQuickAssignPopup({
+                    anchorEl: chip,
+                    title: 'Target Body or Solver (stl)',
+                    currentId: targetId,
+                    candidateNodes: candidates,
+                    model,
+                    onSelect: (selectedId) => this.assignSTLToTarget(node, selectedId, model)
+                });
+            });
+            return chip;
+        }
+
         return null;
     }
 
@@ -5065,6 +5376,20 @@ export class PipelineBrowser {
         }, 10);
     }
 
+    private syncParamInStateAndModel(state: SimulationState, model: Model, nodeId: string, params: Record<string, any>): void {
+        const stateNode = state.nodes.find((n: any) => n.id === nodeId);
+        if (stateNode) {
+            if (!stateNode.parameters) stateNode.parameters = {};
+            Object.assign(stateNode.parameters, params);
+        }
+        const modelNode = model.nodes.find((n: any) => n.id === nodeId);
+        if (modelNode) {
+            if (!modelNode.parameters) modelNode.parameters = {};
+            Object.assign(modelNode.parameters, params);
+        }
+        this.stateManager.updateNodeParametersInPlace(nodeId, params);
+    }
+
     private assignAirToSolver(solver: Node, newAirId: string, model: Model): void {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
@@ -5077,17 +5402,10 @@ export class PipelineBrowser {
                 toPort: 'air'
             });
         }
-        if (!solver.parameters) solver.parameters = {};
-        solver.parameters['ambient_air_material'] = newAirId;
-        this.stateManager.updateNodeParametersInPlace(solver.id, { ambient_air_material: newAirId });
+        this.syncParamInStateAndModel(state, model, solver.id, { ambient_air_material: newAirId });
 
         if (newAirId) {
-            const mat = model.nodes.find(n => n.id === newAirId);
-            if (mat) {
-                if (!mat.parameters) mat.parameters = {};
-                mat.parameters['ambient_air_target'] = solver.id;
-                this.stateManager.updateNodeParametersInPlace(mat.id, { ambient_air_target: solver.id });
-            }
+            this.syncParamInStateAndModel(state, model, newAirId, { ambient_air_target: solver.id });
         }
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
@@ -5106,17 +5424,10 @@ export class PipelineBrowser {
                 toPort: 'charge'
             });
         }
-        if (!solver.parameters) solver.parameters = {};
-        solver.parameters['explosive_charge'] = newChargeId;
-        this.stateManager.updateNodeParametersInPlace(solver.id, { explosive_charge: newChargeId });
+        this.syncParamInStateAndModel(state, model, solver.id, { explosive_charge: newChargeId });
 
         if (newChargeId) {
-            const charge = model.nodes.find(n => n.id === newChargeId);
-            if (charge) {
-                if (!charge.parameters) charge.parameters = {};
-                charge.parameters['target_domain'] = solver.id;
-                this.stateManager.updateNodeParametersInPlace(charge.id, { target_domain: solver.id });
-            }
+            this.syncParamInStateAndModel(state, model, newChargeId, { target_domain: solver.id });
         }
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
@@ -5135,17 +5446,10 @@ export class PipelineBrowser {
                 toPort: 'remap'
             });
         }
-        if (!solver.parameters) solver.parameters = {};
-        solver.parameters['remap'] = newRemapId;
-        this.stateManager.updateNodeParametersInPlace(solver.id, { remap: newRemapId });
+        this.syncParamInStateAndModel(state, model, solver.id, { remap: newRemapId });
 
         if (newRemapId) {
-            const remap = model.nodes.find(n => n.id === newRemapId);
-            if (remap) {
-                if (!remap.parameters) remap.parameters = {};
-                remap.parameters['target_solver'] = solver.id;
-                this.stateManager.updateNodeParametersInPlace(remap.id, { target_solver: solver.id });
-            }
+            this.syncParamInStateAndModel(state, model, newRemapId, { target_solver: solver.id });
         }
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
@@ -5165,9 +5469,7 @@ export class PipelineBrowser {
         const isAuto = !newSourceModelId || newSourceModelId === '__auto__';
         const finalModelId = isAuto ? '' : newSourceModelId;
 
-        if (!remapNode.parameters) remapNode.parameters = {};
-        remapNode.parameters['source_model_id'] = finalModelId;
-        this.stateManager.updateNodeParametersInPlace(remapNode.id, { source_model_id: finalModelId });
+        this.syncParamInStateAndModel(state, model, remapNode.id, { source_model_id: finalModelId });
 
         if (finalModelId && ws) {
             const sourceModel = allModels.find(m => m.id === finalModelId);
@@ -5203,9 +5505,7 @@ export class PipelineBrowser {
                 toPort: 'mesh'
             });
         }
-        if (!solver.parameters) solver.parameters = {};
-        solver.parameters['mesh'] = newMeshId;
-        this.stateManager.updateNodeParametersInPlace(solver.id, { mesh: newMeshId });
+        this.syncParamInStateAndModel(state, model, solver.id, { mesh: newMeshId });
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
@@ -5223,9 +5523,7 @@ export class PipelineBrowser {
                 toPort: 'material'
             });
         }
-        if (!charge.parameters) charge.parameters = {};
-        charge.parameters['material'] = newMatId;
-        this.stateManager.updateNodeParametersInPlace(charge.id, { material: newMatId });
+        this.syncParamInStateAndModel(state, model, charge.id, { material: newMatId });
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
@@ -5243,17 +5541,10 @@ export class PipelineBrowser {
                 toPort: 'charge'
             });
         }
-        if (!charge.parameters) charge.parameters = {};
-        charge.parameters['target_domain'] = newSolverId;
-        this.stateManager.updateNodeParametersInPlace(charge.id, { target_domain: newSolverId });
+        this.syncParamInStateAndModel(state, model, charge.id, { target_domain: newSolverId });
 
         if (newSolverId) {
-            const solver = model.nodes.find(n => n.id === newSolverId);
-            if (solver) {
-                if (!solver.parameters) solver.parameters = {};
-                solver.parameters['explosive_charge'] = charge.id;
-                this.stateManager.updateNodeParametersInPlace(solver.id, { explosive_charge: charge.id });
-            }
+            this.syncParamInStateAndModel(state, model, newSolverId, { explosive_charge: charge.id });
         }
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
@@ -5272,17 +5563,10 @@ export class PipelineBrowser {
                 toPort: 'air'
             });
         }
-        if (!mat.parameters) mat.parameters = {};
-        mat.parameters['ambient_air_target'] = newSolverId;
-        this.stateManager.updateNodeParametersInPlace(mat.id, { ambient_air_target: newSolverId });
+        this.syncParamInStateAndModel(state, model, mat.id, { ambient_air_target: newSolverId });
 
         if (newSolverId) {
-            const solver = model.nodes.find(n => n.id === newSolverId);
-            if (solver) {
-                if (!solver.parameters) solver.parameters = {};
-                solver.parameters['ambient_air_material'] = mat.id;
-                this.stateManager.updateNodeParametersInPlace(solver.id, { ambient_air_material: mat.id });
-            }
+            this.syncParamInStateAndModel(state, model, newSolverId, { ambient_air_material: mat.id });
         }
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
@@ -5300,12 +5584,7 @@ export class PipelineBrowser {
                 toNode: newSolverId,
                 toPort: 'mesh'
             });
-            const solver = model.nodes.find(n => n.id === newSolverId);
-            if (solver) {
-                if (!solver.parameters) solver.parameters = {};
-                solver.parameters['mesh'] = mesh.id;
-                this.stateManager.updateNodeParametersInPlace(solver.id, { mesh: mesh.id });
-            }
+            this.syncParamInStateAndModel(state, model, newSolverId, { mesh: mesh.id });
         }
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
@@ -5326,9 +5605,7 @@ export class PipelineBrowser {
                 toPort: port
             });
         }
-        if (!det.parameters) det.parameters = {};
-        det.parameters['target_domain'] = newSolverId;
-        this.stateManager.updateNodeParametersInPlace(det.id, { target_domain: newSolverId });
+        this.syncParamInStateAndModel(state, model, det.id, { target_domain: newSolverId });
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
@@ -5348,9 +5625,7 @@ export class PipelineBrowser {
                 toPort: toPort
             });
         }
-        if (!body.parameters) body.parameters = {};
-        body.parameters['target_domain'] = newDomainId;
-        this.stateManager.updateNodeParametersInPlace(body.id, { target_domain: newDomainId });
+        this.syncParamInStateAndModel(state, model, body.id, { target_domain: newDomainId });
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
@@ -5368,9 +5643,7 @@ export class PipelineBrowser {
                 toPort: 'water'
             });
         }
-        if (!solver.parameters) solver.parameters = {};
-        solver.parameters['seawater_material'] = waterMatId;
-        this.stateManager.updateNodeParametersInPlace(solver.id, { seawater_material: waterMatId });
+        this.syncParamInStateAndModel(state, model, solver.id, { seawater_material: waterMatId });
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
@@ -5388,9 +5661,7 @@ export class PipelineBrowser {
                 toPort: 'seabed'
             });
         }
-        if (!solver.parameters) solver.parameters = {};
-        solver.parameters['seabed_foundation'] = seabedMatId;
-        this.stateManager.updateNodeParametersInPlace(solver.id, { seabed_foundation: seabedMatId });
+        this.syncParamInStateAndModel(state, model, solver.id, { seabed_foundation: seabedMatId });
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
@@ -5407,16 +5678,9 @@ export class PipelineBrowser {
                 toNode: targetSolverId,
                 toPort: 'water'
             });
-            const solverNode = model.nodes.find(n => n.id === targetSolverId);
-            if (solverNode) {
-                if (!solverNode.parameters) solverNode.parameters = {};
-                solverNode.parameters['seawater_material'] = waterMat.id;
-                this.stateManager.updateNodeParametersInPlace(solverNode.id, { seawater_material: waterMat.id });
-            }
+            this.syncParamInStateAndModel(state, model, targetSolverId, { seawater_material: waterMat.id });
         }
-        if (!waterMat.parameters) waterMat.parameters = {};
-        waterMat.parameters['water_target'] = targetSolverId;
-        this.stateManager.updateNodeParametersInPlace(waterMat.id, { water_target: targetSolverId });
+        this.syncParamInStateAndModel(state, model, waterMat.id, { water_target: targetSolverId });
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
@@ -5433,16 +5697,9 @@ export class PipelineBrowser {
                 toNode: targetSolverId,
                 toPort: 'seabed'
             });
-            const solverNode = model.nodes.find(n => n.id === targetSolverId);
-            if (solverNode) {
-                if (!solverNode.parameters) solverNode.parameters = {};
-                solverNode.parameters['seabed_foundation'] = seabedMat.id;
-                this.stateManager.updateNodeParametersInPlace(solverNode.id, { seabed_foundation: seabedMat.id });
-            }
+            this.syncParamInStateAndModel(state, model, targetSolverId, { seabed_foundation: seabedMat.id });
         }
-        if (!seabedMat.parameters) seabedMat.parameters = {};
-        seabedMat.parameters['seabed_target'] = targetSolverId;
-        this.stateManager.updateNodeParametersInPlace(seabedMat.id, { seabed_target: targetSolverId });
+        this.syncParamInStateAndModel(state, model, seabedMat.id, { seabed_target: targetSolverId });
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
@@ -5477,9 +5734,61 @@ export class PipelineBrowser {
                 toPort: 'material'
             });
         }
-        if (!body.parameters) body.parameters = {};
-        body.parameters['material'] = newMatId;
-        this.stateManager.updateNodeParametersInPlace(body.id, { material: newMatId });
+        this.syncParamInStateAndModel(state, model, body.id, { material: newMatId });
+        this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private assignSTLToObject(body: Node, newStlId: string, model: Model): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+        state.connections = state.connections.filter(c => !(c.toNode === body.id && c.toPort === 'stl'));
+        if (newStlId) {
+            state.connections.push({
+                fromNode: newStlId,
+                fromPort: 'stl',
+                toNode: body.id,
+                toPort: 'stl'
+            });
+            const stlNode = model.nodes.find(n => n.id === newStlId);
+            const stlFile = stlNode?.parameters?.file_path || stlNode?.parameters?.stl_file || '';
+            if (body.type === 'FEMObject3D') {
+                this.syncParamInStateAndModel(state, model, body.id, {
+                    shape_type: 'STL',
+                    mesh_source: 'STL Tetrahedral Mesher',
+                    element_topology: 'Tet4_ANP',
+                    ...(stlFile ? { stl_file: stlFile } : {})
+                });
+            }
+        }
+        this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private assignSTLToTarget(stlNode: Node, newTargetId: string, model: Model): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+        state.connections = state.connections.filter(c => !(c.fromNode === stlNode.id && c.toPort === 'stl'));
+        if (newTargetId) {
+            state.connections.push({
+                fromNode: stlNode.id,
+                fromPort: 'stl',
+                toNode: newTargetId,
+                toPort: 'stl'
+            });
+            const targetNode = model.nodes.find(n => n.id === newTargetId);
+            const stlFile = stlNode.parameters?.file_path || stlNode.parameters?.stl_file || '';
+            if (targetNode && targetNode.type === 'FEMObject3D') {
+                this.syncParamInStateAndModel(state, model, targetNode.id, {
+                    shape_type: 'STL',
+                    mesh_source: 'STL Tetrahedral Mesher',
+                    element_topology: 'Tet4_ANP',
+                    ...(stlFile ? { stl_file: stlFile } : {})
+                });
+            }
+        }
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
@@ -6539,26 +6848,14 @@ export class PipelineBrowser {
                         matItem.textContent = `🧪 Assign Material [${matName}]`;
                         matItem.addEventListener('click', () => {
                             menu.remove();
-                            state.connections = state.connections.filter(c => !((c.toNode === node.id || c.fromNode === node.id) && (c.toPort === 'material' || c.fromPort === 'material')));
-                            state.connections.push({
-                                fromNode: mat.id,
-                                fromPort: 'material',
-                                toNode: node.id,
-                                toPort: 'material'
-                            });
-                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
-                            this.stateManager.pushState(state);
-                            this.render();
+                            this.assignChargeMaterial(node, mat.id, model);
                         });
                     } else {
                         matItem.style.color = '#f87171';
                         matItem.textContent = `❌ Disconnect Material [${matName}]`;
                         matItem.addEventListener('click', () => {
                             menu.remove();
-                            state.connections = state.connections.filter(c => !((c.toNode === node.id || c.fromNode === node.id) && (c.toPort === 'material' || c.fromPort === 'material')));
-                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
-                            this.stateManager.pushState(state);
-                            this.render();
+                            this.assignChargeMaterial(node, '', model);
                         });
                     }
                     menu.appendChild(matItem);
@@ -6654,16 +6951,17 @@ export class PipelineBrowser {
                         matItem.textContent = `🧪 Assign Material [${matName}]`;
                         matItem.addEventListener('click', () => {
                             menu.remove();
-                            state.connections = state.connections.filter(c => !(c.toNode === node.id && c.toPort === 'material'));
-                            state.connections.push({
-                                fromNode: mat.id,
-                                fromPort: 'material',
-                                toNode: node.id,
-                                toPort: 'material'
-                            });
-                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
-                            this.stateManager.pushState(state);
-                            this.render();
+                            this.assignObjectMaterial(node, mat.id, model);
+                        });
+                        menu.appendChild(matItem);
+                    } else {
+                        const matItem = document.createElement('div');
+                        matItem.className = 'context-menu-item';
+                        matItem.style.color = '#f87171';
+                        matItem.textContent = `❌ Disconnect Material [${matName}]`;
+                        matItem.addEventListener('click', () => {
+                            menu.remove();
+                            this.assignObjectMaterial(node, '', model);
                         });
                         menu.appendChild(matItem);
                     }
@@ -6681,26 +6979,14 @@ export class PipelineBrowser {
                         airItem.textContent = `💨 Assign as Ambient Air to ${solverName}`;
                         airItem.addEventListener('click', () => {
                             menu.remove();
-                            state.connections = state.connections.filter(c => !(c.toNode === solver.id && c.toPort === 'air'));
-                            state.connections.push({
-                                fromNode: node.id,
-                                fromPort: 'air',
-                                toNode: solver.id,
-                                toPort: 'air'
-                            });
-                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
-                            this.stateManager.pushState(state);
-                            this.render();
+                            this.assignAirTargetDomain(node, solver.id, model);
                         });
                     } else {
                         airItem.style.color = '#f87171';
                         airItem.textContent = `❌ Disconnect Ambient Air from ${solverName}`;
                         airItem.addEventListener('click', () => {
                             menu.remove();
-                            state.connections = state.connections.filter(c => !(c.fromNode === node.id && c.toNode === solver.id && c.toPort === 'air'));
-                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
-                            this.stateManager.pushState(state);
-                            this.render();
+                            this.assignAirTargetDomain(node, '', model);
                         });
                     }
                     menu.appendChild(airItem);
@@ -6718,26 +7004,14 @@ export class PipelineBrowser {
                         chgItem.textContent = `💥 Assign to Charge [${chgName}]`;
                         chgItem.addEventListener('click', () => {
                             menu.remove();
-                            state.connections = state.connections.filter(c => !((c.toNode === chg.id || c.fromNode === chg.id) && (c.toPort === 'material' || c.fromPort === 'material')));
-                            state.connections.push({
-                                fromNode: node.id,
-                                fromPort: 'material',
-                                toNode: chg.id,
-                                toPort: 'material'
-                            });
-                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
-                            this.stateManager.pushState(state);
-                            this.render();
+                            this.assignChargeMaterial(chg, node.id, model);
                         });
                     } else {
                         chgItem.style.color = '#f87171';
                         chgItem.textContent = `❌ Disconnect from Charge [${chgName}]`;
                         chgItem.addEventListener('click', () => {
                             menu.remove();
-                            state.connections = state.connections.filter(c => !((c.toNode === chg.id || c.fromNode === chg.id) && (c.toPort === 'material' || c.fromPort === 'material')));
-                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
-                            this.stateManager.pushState(state);
-                            this.render();
+                            this.assignChargeMaterial(chg, '', model);
                         });
                     }
                     menu.appendChild(chgItem);
@@ -6748,26 +7022,24 @@ export class PipelineBrowser {
                 for (const obj of objectNodes) {
                     const objName = obj.parameters?.name || obj.type;
                     const isConnected = state.connections.some(c => c.fromNode === node.id && c.toNode === obj.id && c.toPort === 'material');
+                    const matItem = document.createElement('div');
+                    matItem.className = 'context-menu-item';
                     if (!isConnected) {
-                        const matItem = document.createElement('div');
-                        matItem.className = 'context-menu-item';
                         matItem.style.color = '#4ade80';
                         matItem.textContent = `🧪 Assign to [${objName}]`;
                         matItem.addEventListener('click', () => {
                             menu.remove();
-                            state.connections = state.connections.filter(c => !(c.toNode === obj.id && c.toPort === 'material'));
-                            state.connections.push({
-                                fromNode: node.id,
-                                fromPort: 'material',
-                                toNode: obj.id,
-                                toPort: 'material'
-                            });
-                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
-                            this.stateManager.pushState(state);
-                            this.render();
+                            this.assignObjectMaterial(obj, node.id, model);
                         });
-                        menu.appendChild(matItem);
+                    } else {
+                        matItem.style.color = '#f87171';
+                        matItem.textContent = `❌ Disconnect from [${objName}]`;
+                        matItem.addEventListener('click', () => {
+                            menu.remove();
+                            this.assignObjectMaterial(obj, '', model);
+                        });
                     }
+                    menu.appendChild(matItem);
                 }
             } else if (node.type === 'STLGeometry' || node.type === 'PrimitiveGeometry3D' || node.type === 'Obstacle3D' || node.type === 'Obstacle') {
                 const cfdSolver = model.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
@@ -6802,6 +7074,31 @@ export class PipelineBrowser {
                         });
                     }
                     menu.appendChild(geomItem);
+                }
+                if (node.type === 'STLGeometry') {
+                    const objTargets = model.nodes.filter(n => n.type === 'MPMObject3D' || n.type === 'FEMObject3D');
+                    for (const obj of objTargets) {
+                        const objName = obj.parameters?.name || obj.id;
+                        const isConn = state.connections.some(c => c.fromNode === node.id && c.toNode === obj.id && c.toPort === 'stl');
+                        const objItem = document.createElement('div');
+                        objItem.className = 'context-menu-item';
+                        if (!isConn) {
+                            objItem.style.color = '#38bdf8';
+                            objItem.textContent = `🔗 Assign STL to [${objName}]`;
+                            objItem.addEventListener('click', () => {
+                                menu.remove();
+                                this.assignSTLToObject(obj, node.id, model);
+                            });
+                        } else {
+                            objItem.style.color = '#f87171';
+                            objItem.textContent = `❌ Unassign STL from [${objName}]`;
+                            objItem.addEventListener('click', () => {
+                                menu.remove();
+                                this.assignSTLToObject(obj, '', model);
+                            });
+                        }
+                        menu.appendChild(objItem);
+                    }
                 }
             }
 
@@ -6910,7 +7207,7 @@ export class PipelineBrowser {
         model.nodes.push(newNode);
 
         // Auto-connect complementary nodes within the same model
-        if (type === 'MPMDomain3D' || type === 'MarineHarbourDomain') {
+        if (type === 'MPMDomain3D' || type === 'FEMDomain3D' || type === 'MarineHarbourDomain') {
             const meshNode = model.nodes.find(n => n.id !== id && n.type === 'DomainMesh3D');
             const hasMeshConn = state.connections.some(c => c.toNode === id && c.toPort === 'mesh');
             if (meshNode && !hasMeshConn) {
@@ -6930,6 +7227,23 @@ export class PipelineBrowser {
             if (type === 'MPMDomain3D') {
                 const objNode = model.nodes.find(n => n.id !== id && n.type === 'MPMObject3D');
                 const hasObjConn = state.connections.some(c => c.toNode === id && (c.toPort === 'objects' || c.toPort === 'mpm_objects'));
+                if (objNode && !hasObjConn) {
+                    state.connections.push({
+                        fromNode: objNode.id,
+                        fromPort: 'out',
+                        toNode: id,
+                        toPort: 'objects'
+                    });
+                    model.connections.push({
+                        fromNode: objNode.id,
+                        fromPort: 'out',
+                        toNode: id,
+                        toPort: 'objects'
+                    });
+                }
+            } else if (type === 'FEMDomain3D') {
+                const objNode = model.nodes.find(n => n.id !== id && n.type === 'FEMObject3D');
+                const hasObjConn = state.connections.some(c => c.toNode === id && c.toPort === 'objects');
                 if (objNode && !hasObjConn) {
                     state.connections.push({
                         fromNode: objNode.id,
@@ -6980,24 +7294,26 @@ export class PipelineBrowser {
                 });
                 newNode.parameters['target_domain'] = solverNode.id;
             }
-        } else if (type === 'MPMObject3D') {
-            const mpmDomain = model.nodes.find(n => n.id !== id && n.type === 'MPMDomain3D');
-            if (mpmDomain) {
+        } else if (type === 'MPMObject3D' || type === 'FEMObject3D') {
+            const targetDomainType = type === 'FEMObject3D' ? 'FEMDomain3D' : 'MPMDomain3D';
+            const targetDomain = model.nodes.find(n => n.id !== id && n.type === targetDomainType);
+            if (targetDomain) {
                 state.connections.push({
                     fromNode: id,
                     fromPort: 'out',
-                    toNode: mpmDomain.id,
+                    toNode: targetDomain.id,
                     toPort: 'objects'
                 });
                 model.connections.push({
                     fromNode: id,
                     fromPort: 'out',
-                    toNode: mpmDomain.id,
+                    toNode: targetDomain.id,
                     toPort: 'objects'
                 });
             }
-            const matNode = model.nodes.find(n => n.id !== id && n.type === 'Material');
-            if (matNode) {
+            const matNodes = model.nodes.filter(n => n.id !== id && (n.type === 'Material' || (n.type as string).startsWith('MPMMaterial')));
+            if (matNodes.length === 1) {
+                const matNode = matNodes[0];
                 state.connections.push({
                     fromNode: matNode.id,
                     fromPort: 'out',

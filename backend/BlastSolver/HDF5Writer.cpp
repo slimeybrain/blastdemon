@@ -2,6 +2,7 @@
 #ifndef NO_HDF5
 #include <hdf5.h>
 #endif
+#include <algorithm>
 #include <iostream>
 
 bool HDF5Writer::writePressure(const std::string& filename, const std::vector<float>& data) {
@@ -167,5 +168,118 @@ bool HDF5Writer::writeGauges(const std::string& filename,
     if (gauges_grp >= 0) H5Gclose(gauges_grp);
     H5Fclose(file_id);
     return true;
+#endif
+}
+
+bool HDF5Writer::writeMPMSnapshot3D(const std::string& filename, const MPMVTKSnapshot3D& snap) {
+#ifdef NO_HDF5
+    (void)filename; (void)snap;
+    return false;
+#else
+    if (snap.num_particles <= 0) return false;
+
+    MPMVTKSnapshot3D local_groomed;
+    const MPMVTKSnapshot3D* src_ptr = &snap;
+    if (!snap.is_groomed && snap.float_precision.find("23") == std::string::npos && snap.float_precision.find("Full") == std::string::npos) {
+        local_groomed = snap;
+        apply_mpm_bit_grooming(local_groomed);
+        src_ptr = &local_groomed;
+    }
+    const MPMVTKSnapshot3D& src = *src_ptr;
+
+    hid_t file_id = H5Fcreate(filename.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+    if (file_id < 0) {
+        std::cerr << "[ERROR] Failed to create MPM HDF5 file (check directory permissions and available disk space): " << filename << std::endl;
+        return false;
+    }
+
+    const hsize_t N = static_cast<hsize_t>(src.num_particles);
+    const int z_level = std::clamp(src.compression_level, 1, 9);
+    const hsize_t chunk_len = std::min<hsize_t>(N, 65536);
+    bool write_ok = true;
+
+    auto writeFloatVec3 = [&](const char* dset_name, const std::vector<float>& vec) {
+        if (vec.size() < 3 * N) return;
+        hsize_t dims[2] = { N, 3 };
+        hid_t space_id = H5Screate_simple(2, dims, NULL);
+        hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+        hsize_t chunk_dims[2] = { chunk_len, 3 };
+        H5Pset_chunk(dcpl, 2, chunk_dims);
+        H5Pset_shuffle(dcpl);
+        H5Pset_deflate(dcpl, z_level);
+        hid_t dset_id = H5Dcreate2(file_id, dset_name, H5T_NATIVE_FLOAT, space_id, H5P_DEFAULT, dcpl, H5P_DEFAULT);
+        if (dset_id >= 0) {
+            if (H5Dwrite(dset_id, H5T_NATIVE_FLOAT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vec.data()) < 0) {
+                write_ok = false;
+            }
+            H5Dclose(dset_id);
+        } else {
+            write_ok = false;
+        }
+        H5Pclose(dcpl);
+        H5Sclose(space_id);
+    };
+
+    auto writeFloatScalar = [&](const char* dset_name, const std::vector<float>& vec) {
+        if (vec.size() < N) return;
+        hsize_t dims[1] = { N };
+        hid_t space_id = H5Screate_simple(1, dims, NULL);
+        hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+        hsize_t chunk_dims[1] = { chunk_len };
+        H5Pset_chunk(dcpl, 1, chunk_dims);
+        H5Pset_shuffle(dcpl);
+        H5Pset_deflate(dcpl, z_level);
+        hid_t dset_id = H5Dcreate2(file_id, dset_name, H5T_NATIVE_FLOAT, space_id, H5P_DEFAULT, dcpl, H5P_DEFAULT);
+        if (dset_id >= 0) {
+            if (H5Dwrite(dset_id, H5T_NATIVE_FLOAT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vec.data()) < 0) {
+                write_ok = false;
+            }
+            H5Dclose(dset_id);
+        } else {
+            write_ok = false;
+        }
+        H5Pclose(dcpl);
+        H5Sclose(space_id);
+    };
+
+    auto writeUInt8Scalar = [&](const char* dset_name, const std::vector<uint8_t>& vec) {
+        if (vec.size() < N) return;
+        hsize_t dims[1] = { N };
+        hid_t space_id = H5Screate_simple(1, dims, NULL);
+        hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+        hsize_t chunk_dims[1] = { chunk_len };
+        H5Pset_chunk(dcpl, 1, chunk_dims);
+        H5Pset_shuffle(dcpl);
+        H5Pset_deflate(dcpl, z_level);
+        hid_t dset_id = H5Dcreate2(file_id, dset_name, H5T_NATIVE_UINT8, space_id, H5P_DEFAULT, dcpl, H5P_DEFAULT);
+        if (dset_id >= 0) {
+            if (H5Dwrite(dset_id, H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, vec.data()) < 0) {
+                write_ok = false;
+            }
+            H5Dclose(dset_id);
+        } else {
+            write_ok = false;
+        }
+        H5Pclose(dcpl);
+        H5Sclose(space_id);
+    };
+
+    writeFloatVec3("/Points", src.points);
+    if (src.has_vel && !src.vel.empty()) writeFloatVec3("/Velocity", src.vel);
+    if (src.has_stress && !src.von_mises.empty()) writeFloatScalar("/von_Mises_Stress", src.von_mises);
+    if (src.has_pressure && !src.pressure.empty()) writeFloatScalar("/Pressure", src.pressure);
+    if (src.has_strain && !src.ep_bar.empty()) writeFloatScalar("/Plastic_Strain", src.ep_bar);
+    if (src.has_damage && !src.damage.empty()) writeFloatScalar("/Damage", src.damage);
+    if (src.has_temp && !src.temp.empty()) writeFloatScalar("/Temperature", src.temp);
+    if (src.has_object_id && !src.obj_id.empty()) writeUInt8Scalar("/ObjectID", src.obj_id);
+    if (src.has_material_id && !src.material_id.empty()) writeUInt8Scalar("/Material_ID", src.material_id);
+
+    if (H5Fclose(file_id) < 0) {
+        write_ok = false;
+    }
+    if (!write_ok) {
+        std::cerr << "[ERROR] Failed to write MPM HDF5 datasets to " << filename << " (check available disk space)" << std::endl;
+    }
+    return write_ok;
 #endif
 }

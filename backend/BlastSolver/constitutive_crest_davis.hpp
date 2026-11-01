@@ -52,6 +52,44 @@ HD_CREST_FUNC T computeDavisReactantPressure(
     return p_react;
 }
 
+// Helper: Irreversible Rayleigh-Hugoniot specific shock dissipation energy e_irr = e_H(mu) - e_rev(mu)
+// Along the linear Us = c0 + s1 * Up Hugoniot:
+//   p_H(mu)   = rho0 * c0^2 * mu / (1 - s1 * mu)^2
+//   e_H(mu)   = (1/2) * p_H(mu) * mu / rho0 = (c0 / s1)^2 * x^2 / (2 * (1 - x)^2),  x = s1 * mu
+//   e_rev(mu) = int_0^mu (p_H(mu') / rho0) d(mu') = (c0 / s1)^2 * (x / (1 - x) + ln(1 - x))
+// Subtracting the reversible isentropic elastic strain energy e_rev(mu) cancels the O(mu^2) linear
+// elastic energy identically, leaving the strictly positive O(mu^3) Bethe-Weyl shock dissipation energy.
+template <typename T>
+HD_CREST_FUNC T computeIrreversibleHugoniotEnergy(
+    T mu,               // Compressive volumetric strain 1 - V/V0 > 0
+    T c0,               // Bulk acoustic speed (m/s)
+    T s1                // Hugoniot slope Us-Up
+) {
+    if (mu <= static_cast<T>(1.0e-5) || s1 <= static_cast<T>(1.0e-4)) {
+        return static_cast<T>(0.0);
+    }
+    T x = s1 * mu;
+    if (x > static_cast<T>(0.90)) x = static_cast<T>(0.90);
+
+    T f_irr = static_cast<T>(0.0);
+    if (x < static_cast<T>(0.05)) {
+        // Exact cancellation-free Maclaurin series: sum_{n=3..6} ((n-1)(n-2)/(2n)) * x^n
+        T x2 = x * x;
+        T x3 = x2 * x;
+        f_irr = x3 * (static_cast<T>(1.0 / 3.0) +
+                      x * (static_cast<T>(0.75) +
+                           x * (static_cast<T>(1.20) +
+                                x * static_cast<T>(5.0 / 3.0))));
+    } else {
+        T denom = static_cast<T>(1.0) - x;
+        f_irr = (x * (static_cast<T>(1.5) * x - static_cast<T>(1.0))) / (denom * denom) - std::log(denom);
+    }
+    if (f_irr <= static_cast<T>(0.0)) return static_cast<T>(0.0);
+
+    T c0_over_s1 = c0 / s1;
+    return (c0_over_s1 * c0_over_s1) * f_irr;
+}
+
 // Compute peak shock entropy along unreacted solid Hugoniot from minimum volume v_min
 template <typename T>
 HD_CREST_FUNC T computeDavisShockEntropy(
@@ -64,26 +102,19 @@ HD_CREST_FUNC T computeDavisShockEntropy(
     T rho0              // Reference density (kg/m^3)
 ) {
     (void)gamma0;
+    (void)rho0;
     if (v_min >= static_cast<T>(0.9999)) return static_cast<T>(0.0);
     if (v_min < static_cast<T>(0.1)) v_min = static_cast<T>(0.1);
 
     T mu = static_cast<T>(1.0) - v_min;
-    T denom = static_cast<T>(1.0) - s1 * mu;
-    if (denom < static_cast<T>(0.1)) denom = static_cast<T>(0.1);
+    T e_irr = computeIrreversibleHugoniotEnergy(mu, c0, s1);
+    if (e_irr <= static_cast<T>(0.0)) return static_cast<T>(0.0);
 
-    T p_H = (rho0 * c0 * c0 * mu) / (denom * denom);
-    T e_H = static_cast<T>(0.5) * p_H * mu / rho0;
+    T cv_safe = (cv > static_cast<T>(1.0)) ? cv : static_cast<T>(1000.0);
+    T t0_safe = (t0 > static_cast<T>(1.0)) ? t0 : static_cast<T>(293.0);
 
-    // Thermodynamic Hugoniot temperature estimate
-    T T_H = t0 + (e_H / (cv > static_cast<T>(1.0) ? cv : static_cast<T>(1000.0)));
-    if (T_H <= t0) return static_cast<T>(0.0);
-
-    // Shock entropy jump: s_s = cv * ln(T_H / T0)
-    T ratio = T_H / (t0 > static_cast<T>(1.0) ? t0 : static_cast<T>(293.0));
-    if (ratio < static_cast<T>(1.0)) ratio = static_cast<T>(1.0);
-
-    T s_shock = cv * std::log(ratio);
-    return s_shock;
+    // Shock entropy jump from irreversible shock dissipation: s_s = cv * ln(1 + e_irr / (cv * T0))
+    return cv_safe * std::log(static_cast<T>(1.0) + e_irr / (cv_safe * t0_safe));
 }
 
 // Compute peak shock entropy along unreacted solid Hugoniot directly from compressive shock pressure
@@ -109,15 +140,13 @@ HD_CREST_FUNC T computeDavisShockEntropyFromPressure(
     if (mu <= static_cast<T>(0.0)) return static_cast<T>(0.0);
     if (mu > static_cast<T>(0.90)) mu = static_cast<T>(0.90);
 
-    T e_H = static_cast<T>(0.5) * p_shock * mu / rho0;
-    T T_H = t0 + (e_H / (cv > static_cast<T>(1.0) ? cv : static_cast<T>(1000.0)));
-    if (T_H <= t0) return static_cast<T>(0.0);
+    T e_irr = computeIrreversibleHugoniotEnergy(mu, c0, s1);
+    if (e_irr <= static_cast<T>(0.0)) return static_cast<T>(0.0);
 
-    T ratio = T_H / (t0 > static_cast<T>(1.0) ? t0 : static_cast<T>(293.0));
-    if (ratio < static_cast<T>(1.0)) ratio = static_cast<T>(1.0);
+    T cv_safe = (cv > static_cast<T>(1.0)) ? cv : static_cast<T>(1000.0);
+    T t0_safe = (t0 > static_cast<T>(1.0)) ? t0 : static_cast<T>(293.0);
 
-    T s_shock = cv * std::log(ratio);
-    return s_shock;
+    return cv_safe * std::log(static_cast<T>(1.0) + e_irr / (cv_safe * t0_safe));
 }
 
 // ============================================================================

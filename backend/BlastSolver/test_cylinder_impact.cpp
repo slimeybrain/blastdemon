@@ -14,20 +14,15 @@ int main() {
     float ymin = -0.003f, ymax = 0.003f;
     float zmin = 0.0000001f, zmax = 0.015f;
     float cell_size = 0.00025f;
-    int pad = 3;
 
-    int nx = std::max(1, static_cast<int>(std::round((xmax - xmin) / cell_size))) + 2 * pad;
-    int ny = std::max(1, static_cast<int>(std::round((ymax - ymin) / cell_size))) + 2 * pad;
-    int nz = std::max(1, static_cast<int>(std::round((zmax - zmin) / cell_size))) + 2 * pad;
-    xmin -= pad * cell_size;
-    ymin -= pad * cell_size;
-    zmin -= pad * cell_size;
+    int nx = std::max(1, static_cast<int>(std::round((xmax - xmin) / cell_size)));
+    int ny = std::max(1, static_cast<int>(std::round((ymax - ymin) / cell_size)));
+    int nz = std::max(1, static_cast<int>(std::round((zmax - zmin) / cell_size)));
     float dx = cell_size, dy = cell_size, dz = cell_size;
 
     std::cout << "Grid Dimensions: " << nx << " x " << ny << " x " << nz << "\n";
     std::cout << "xmin=" << xmin << ", ymin=" << ymin << ", zmin=" << zmin << "\n\n";
 
-    auto bc_trans = Blast::MPMBoundaryCondition3D::Terminate; // Transmitting
     auto bc_sticky = Blast::MPMBoundaryCondition3D::Sticky;
 
     // --- CPU Setup ---

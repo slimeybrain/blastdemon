@@ -358,7 +358,7 @@ export class PipelineConnectionModal {
         }
 
         // 3. Detonator Connection
-        if (solver.type === 'MPMDomain3D' || solver.type === 'CFDSolver3D' || solver.type === 'MPMDomain2D' || solver.type === 'CFDSolver2D' || solver.type === 'MarineHarbourDomain') {
+        if (solver.type === 'MPMDomain3D' || solver.type === 'CFDSolver3D' || solver.type === 'FEMDomain3D' || solver.type === 'MPMDomain2D' || solver.type === 'CFDSolver2D' || solver.type === 'MarineHarbourDomain') {
             const detNodes = allNodes.filter(n => is3D ? (n.type === 'TriggerLocation3D' || n.type === 'DetonatorLocation3D') : (n.type === 'TriggerLocation' || n.type === 'DetonatorLocation'));
             const currentDetConn = conns.find(c => c.toNode === solver.id && (c.toPort === 'trigger' || c.toPort === 'detonator'));
             const detRow = this.createConnectionSelectRow(
@@ -613,7 +613,7 @@ export class PipelineConnectionModal {
             if (det.type === 'Charge3D') return n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain';
             const is3D = det.type === 'TriggerLocation3D' || det.type === 'DetonatorLocation3D';
             return is3D 
-                ? ['MPMDomain3D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(n.type) 
+                ? ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MarineHarbourDomain'].includes(n.type) 
                 : ['MPMDomain2D', 'CFDSolver2D', 'CFDSolver'].includes(n.type);
         });
 
@@ -817,7 +817,7 @@ export class PipelineConnectionModal {
         const currentBodyConn = conns.find(c => (c.fromNode === mat.id || c.toNode === mat.id) && (c.toPort === 'material' || c.fromPort === 'material') && bodyNodes.some(b => b.id === c.toNode || b.id === c.fromNode));
         const currentBodyId = currentBodyConn ? (currentBodyConn.toNode === mat.id ? currentBodyConn.fromNode : currentBodyConn.toNode) : (bodyNodes.find(b => b.parameters?.material === mat.id)?.id || mat.parameters?.body_target || '');
 
-        if (bodyNodes.length > 0 && ((isSolid && !isExplosive) || isGeneric || currentBodyId)) {
+        if (bodyNodes.length > 0 && (isSolid || isExplosive || isGeneric || currentBodyId)) {
             const bodyRow = this.createConnectionSelectRow(
                 'Assigned Structural Body (material)',
                 bodyNodes,
@@ -903,8 +903,8 @@ export class PipelineConnectionModal {
         );
         card.appendChild(matRow);
 
-        // 3. STL / CAD Shape Source Connection (for MPMObject3D)
-        if (body.type === 'MPMObject3D') {
+        // 3. STL / CAD Shape Source Connection (for MPMObject3D and FEMObject3D)
+        if (body.type === 'MPMObject3D' || body.type === 'FEMObject3D') {
             const geomNodes = allNodes.filter(n => ['STLGeometry', 'PrimitiveGeometry3D'].includes(n.type));
             const currentGeomConn = conns.find(c => c.toNode === body.id && c.toPort === 'stl');
             const geomRow = this.createConnectionSelectRow(
@@ -915,6 +915,10 @@ export class PipelineConnectionModal {
                     let updated = conns.filter(c => !(c.toNode === body.id && c.toPort === 'stl'));
                     if (newGeomId) {
                         updated.push({ fromNode: newGeomId, fromPort: 'stl', toNode: body.id, toPort: 'stl' });
+                        if (body.type === 'FEMObject3D') {
+                            body.parameters['shape_type'] = 'STL';
+                            body.parameters['mesh_source'] = 'STL Tetrahedral Mesher';
+                        }
                     }
                     this.saveConnections(updated);
                 }
@@ -935,8 +939,8 @@ export class PipelineConnectionModal {
         header.innerHTML = `<strong>${geom.parameters?.name || geom.id}</strong> <span class="pcm-badge" style="background: rgba(129, 199, 132, 0.2); color: #81c784; border: 1px solid #81c784;">${geom.type}</span> <span class="pcm-meta">${fileOrType}</span>`;
         card.appendChild(header);
 
-        // Target solver or body connection (CFDSolver3D, MPMDomain3D, MPMObject3D)
-        const targetNodes = allNodes.filter(n => ['CFDSolver3D', 'MPMDomain3D', 'MPMObject3D'].includes(n.type));
+        // Target solver or body connection (CFDSolver3D, MPMDomain3D, MPMObject3D, FEMObject3D)
+        const targetNodes = allNodes.filter(n => ['CFDSolver3D', 'MPMDomain3D', 'MPMObject3D', 'FEMObject3D'].includes(n.type));
         const currentConn = conns.find(c => c.fromNode === geom.id && c.toPort === 'stl');
 
         const row = this.createConnectionSelectRow(
@@ -947,6 +951,12 @@ export class PipelineConnectionModal {
                 let updated = conns.filter(c => !(c.fromNode === geom.id && c.toPort === 'stl'));
                 if (newTargetId) {
                     updated.push({ fromNode: geom.id, fromPort: 'stl', toNode: newTargetId, toPort: 'stl' });
+                    const targetNode = allNodes.find(n => n.id === newTargetId);
+                    if (targetNode && targetNode.type === 'FEMObject3D') {
+                        if (!targetNode.parameters) targetNode.parameters = {};
+                        targetNode.parameters['shape_type'] = 'STL';
+                        targetNode.parameters['mesh_source'] = 'STL Tetrahedral Mesher';
+                    }
                 }
                 this.saveConnections(updated);
             }

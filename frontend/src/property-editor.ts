@@ -90,10 +90,10 @@ export class PropertyEditor {
 
         this.inPlaceListener = (nodeId: string, parameters: Record<string, any>) => {
             if (nodeId === this.currentNodeId) {
-                const state = this.stateManager.getCurrentState();
+                const state = this.stateManager.getActiveModel();
                 const node = state?.nodes.find(n => n.id === this.currentNodeId);
-                if (node) {
-                    const visJson = JSON.stringify(this.getVisibleKeysForNode(node, state));
+                if (node && state) {
+                    const visJson = JSON.stringify(this.getVisibleKeysForNode(node, state as any));
                     if (visJson !== this._lastVisibleKeysJson) {
                         this._lastVisibleKeysJson = visJson;
                         this.render(true);
@@ -739,6 +739,8 @@ export class PropertyEditor {
             if (waterRow) form.appendChild(waterRow);
             const seabedRow = this.createSeabedConnectionRow(node, state);
             if (seabedRow) form.appendChild(seabedRow);
+            const boundaryCard = this.createMarineBoundaryArchitectureCard(node, state);
+            if (boundaryCard) form.appendChild(boundaryCard);
         }
 
         // Target CFD Domain Connection Selector for Charges
@@ -792,6 +794,12 @@ export class PropertyEditor {
         }
 
         for (const key of paramKeys) {
+            if (['MarineHarbourDomain', 'CFDSolver3D'].includes(node.type) && (key === 'ambient_air_material' || key === 'explosive_charge')) {
+                continue;
+            }
+            if (node.type === 'MarineHarbourDomain' && (key === 'seawater_material' || key === 'seabed_foundation')) {
+                continue;
+            }
             let value = node.parameters[key];
             if (value === undefined || value === null) {
                 if (node.type === 'Material') {
@@ -866,7 +874,24 @@ export class PropertyEditor {
             label.style.color = '#888';
             label.style.marginBottom = '4px';
             
-            const paramInfo = getParameterInfo(key, node.type);
+            const baseParamInfo = getParameterInfo(key, node.type);
+            const paramInfo = { ...baseParamInfo };
+            if (node.type === 'DomainMesh3D') {
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const isHarbourModel = owningModel?.nodes.some((n: any) => n.type === 'MarineHarbourDomain' || n.parameters?.init_mode === 'Hydrostatic_Stratified_3D');
+                if (isHarbourModel) {
+                    if (key === 'bc_z_max') {
+                        paramInfo.label = 'Z-Max Face [Atmospheric Sky]';
+                        paramInfo.shortDesc = 'Atmospheric Sky (Open Atmosphere): Transmitting (Riemann outflow) lets blast shock escape cleanly.';
+                    } else if (key === 'bc_z_min') {
+                        paramInfo.label = 'Z-Min Face [Deep Bedrock Base]';
+                        paramInfo.shortDesc = 'Deep Bedrock: Lysmer dashpots absorb downward seismic ground shock into bedrock half-space.';
+                    } else if (['bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max'].includes(key)) {
+                        paramInfo.label = `${paramInfo.label} [Zonal Perimeter]`;
+                        paramInfo.shortDesc = 'Zonal Stratified Perimeter: Transmitting applies Riemann fluid outflow (air/water) and Lysmer dashpots (seabed).';
+                    }
+                }
+            }
             label.title = `${paramInfo.label} (${paramInfo.unit}): ${paramInfo.shortDesc} — ${paramInfo.detailedDesc}`;
             label.style.cursor = 'help';
 
@@ -962,7 +987,7 @@ export class PropertyEditor {
             }
             form.appendChild(row);
 
-            if (key === 'scale_z' && (node.type === 'STLGeometry' || (node.type === 'MPMObject3D' && node.parameters?.shape_type === 'STL'))) {
+            if (key === 'scale_z' && (node.type === 'STLGeometry' || ((node.type === 'MPMObject3D' || node.type === 'FEMObject3D') && node.parameters?.shape_type === 'STL'))) {
                 const presetRow = document.createElement('div');
                 presetRow.style.margin = '4px 0 10px 0';
                 presetRow.style.display = 'flex';
@@ -1433,8 +1458,22 @@ export class PropertyEditor {
                 addRowToPanel('time_interval', 'TIME INTERVAL (SECONDS)', timeEl, 0);
             }
 
-            const formatEl = this.createInputElement(node, 'vtk_format', node.parameters['vtk_format'] ?? 'Binary');
-            addRowToPanel('vtk_format', 'VTK FORMAT (BINARY / ASCII)', formatEl, 0);
+            const vtkFormat = node.parameters['vtk_format'] ?? 'Binary';
+            const formatEl = this.createInputElement(node, 'vtk_format', vtkFormat);
+            addRowToPanel('vtk_format', 'CONTAINER FORMAT (VTU / XDMF+HDF5 / ASCII)', formatEl, 0);
+
+            if (vtkFormat !== 'ASCII') {
+                const compEl = this.createInputElement(node, 'compression_level', String(node.parameters['compression_level'] ?? 6));
+                addRowToPanel('compression_level', 'ZLIB COMPRESSION LEVEL (1-9)', compEl, 0);
+
+                const precEl = this.createInputElement(node, 'float_precision', node.parameters['float_precision'] ?? '12-bit Mantissa (~4 sig. digits)');
+                addRowToPanel('float_precision', 'FLOAT32 MANTISSA PRECISION', precEl, 0);
+            }
+
+            if (vtkFormat !== 'XDMF + HDF5') {
+                const topoEl = this.createInputElement(node, 'mpm_topology', node.parameters['mpm_topology'] ?? 'Individual Vertices');
+                addRowToPanel('mpm_topology', 'MPM POINT CLOUD TOPOLOGY', topoEl, 0);
+            }
 
             const fileEl = this.createInputElement(node, 'custom_filename', node.parameters['custom_filename'] ?? 'vtk_output');
             addRowToPanel('custom_filename', 'CUSTOM FILENAME PREFIX', fileEl, 0);
@@ -1719,14 +1758,14 @@ export class PropertyEditor {
                 mpmGrid.style.gap = '4px 8px';
 
                 const mpmFieldKeys = [
-                    { k: 'qty_mpm_stress', l: 'Cauchy Stress & VM' },
+                    { k: 'qty_mpm_stress', l: 'von Mises Stress' },
                     { k: 'qty_mpm_strain', l: 'Plastic Strain' },
                     { k: 'qty_mpm_damage', l: 'Damage / Failure' },
-                    { k: 'qty_mpm_pressure', l: 'Pressure / Overburden' },
-                    { k: 'qty_mpm_material_id', l: 'Material ID' },
+                    { k: 'qty_mpm_pressure', l: 'Hydrostatic Pressure' },
+                    { k: 'qty_mpm_material_id', l: 'Material ID (UInt8)' },
+                    { k: 'qty_mpm_object_id', l: 'Object / Part ID (UInt8)' },
                     { k: 'qty_mpm_temp', l: 'Temperature' },
-                    { k: 'qty_mpm_vel', l: 'Velocity Vector' },
-                    { k: 'qty_mpm_disp', l: 'Displacement Vector' }
+                    { k: 'qty_mpm_vel', l: 'Velocity Vector' }
                 ];
                 mpmFieldKeys.forEach(({ k, l }) => {
                     mpmGrid.appendChild(createCheckboxField(k, node.parameters[k] !== false, l));
@@ -2336,7 +2375,7 @@ export class PropertyEditor {
     }
 
     private createInputElement(node: Node, key: string, value: any): HTMLElement {
-        if (typeof value === 'boolean' || key === 'afterburn_enabled') {
+        if (typeof value === 'boolean' || key === 'afterburn_enabled' || key === 'track_mpm_velocity') {
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
             checkbox.checked = Boolean(value);
@@ -2349,7 +2388,8 @@ export class PropertyEditor {
         }
 
         const numericKeys = [
-            'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
+            'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature', 'initial_temperature',
+            'water_temperature', 'soil_temperature', 'air_temperature',
             'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
             'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'endtime',
             'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate', 'fps',
@@ -2358,7 +2398,7 @@ export class PropertyEditor {
             // 2D CFD keys
             'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
-            'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+            'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
             'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
             'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
             // 3D CFD keys
@@ -2376,6 +2416,7 @@ export class PropertyEditor {
             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'initial_velocity_x', 'initial_velocity_y', 'initial_velocity_z', 'initial_velocity_r', 'radius', 'inner_radius',
             'scale_x', 'scale_y', 'scale_z',
             'rot_x', 'rot_y', 'rot_z',
+            'clip_z_min', 'clip_z_max',
             'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
@@ -2384,12 +2425,13 @@ export class PropertyEditor {
             'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
             'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
             'mg_gamma0', 'mg_c0', 'mg_s',
-            'ppc',
+            'ppc', 'phase_particle_ppc', 'charge_ppc',
             'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+            'phaseParticleDiameter', 'phaseParticleSize', 'phaseParticleOpacity', 'phaseParticleStride',
             'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
             'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
             // FEM keys
-            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
+            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy',
             'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
             'rebarRadius', 'viewport_refresh_rate', 'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
             'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
@@ -2421,7 +2463,7 @@ export class PropertyEditor {
             'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
             'afterburn_ambient_o2_fraction', 'ambient_o2_fraction',
             // VTK ROI & Strides
-            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
+            'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride', 'compression_level',
             'nonlocal_radius', 'opacity',
             // Lysmer-Kuhlemeyer Absorbing Boundaries
             'lysmer_rho', 'lysmer_cp', 'lysmer_cs', 'lysmer_normal_relaxation', 'lysmer_shear_relaxation',
@@ -2454,7 +2496,7 @@ export class PropertyEditor {
         const dropdowns: Record<string, string[]> = {
             'undex_coupling_method': ['ZonalHybrid MPM FV FEM', 'Eulerian Multimaterial FSI', 'One-Way Acoustic Impedance', 'LocalCurvedDAA', 'HighFidelityCFD', 'ZonalHybrid_MPM_FV_FEM'],
             'seabed_mesh_type': ['Pure_FV', 'Hybrid_MPM_Crater_FEM_FarField', 'Full_Domain_MPM', 'Local_Crater_MPM', 'Pure_Hex8_FEM', 'Pure_MPM', 'Rigid Acoustic Boundary'],
-            'water_discretization_mode': ['Pure_FV', 'Spherical_MPM_Sleeve', 'Full_Column_MPM_Cylinder'],
+            'water_discretization_mode': ['Pure_FV', 'Spherical_MPM_Sleeve', 'Full_Column_MPM_Cylinder', 'LPTP_Phase_Tracking_Sleeve', 'Full_Column_LPTP_Cylinder'],
             'detonator_source': ['Connected Detonator Node', 'Internal Coordinates'],
             'font_size': ['8', '9', '10', '11', '12', '13', '14', '15', '16', '18', '20', '22'],
             'stream_layout': ['Live Page (In-Place)', 'Multi-Line Cards', 'Dual-Deck (Page + Log)', 'Columnar (Fixed-Width)', 'Ultra-Compact', 'Standard Log'],
@@ -2515,6 +2557,8 @@ export class PropertyEditor {
             'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
             'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
             'contact_search_method': ['Hierarchical Octave Hash Grid', 'Linear BVH (Morton Code)'],
+            'mesh_source': ['Box Generator', 'Cylinder Generator', 'Plate Generator', 'STL File', 'LS-DYNA Keyword File'],
+            'element_topology': ['Hex8', 'Tet4_ANP'],
             'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
             'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Nitromethane', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
             'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
@@ -2533,7 +2577,10 @@ export class PropertyEditor {
             'gauge_quantity': ['pressure', 'velocity', 'peak_overpressure', 'status'],
             'refresh_rate': ['0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0', '2.0', '5.0', '10.0', '20.0', '50.0', '100.0', '1000.0'],
             'ascii_delimiter': ['Comma', 'Tab', 'Space'],
-            'vtk_format': ['ASCII', 'Binary', 'Compressed Binary'],
+            'vtk_format': ['Binary', 'XDMF + HDF5', 'ASCII'],
+            'compression_level': ['1', '3', '6', '9'],
+            'float_precision': ['12-bit Mantissa (~4 sig. digits)', '16-bit Mantissa (~5 sig. digits)', 'Full 23-bit Float32 (Lossless)'],
+            'mpm_topology': ['Individual Vertices', 'Single PolyVertex', 'Zero-Cell Point Cloud'],
             'voxelization_method': node.type === 'MPMObject3D' ? ['watertight_raycast', 'winding_number'] : ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
             'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
             'transfer_scheme': (node.type === 'Material') ? 
@@ -2548,7 +2595,7 @@ export class PropertyEditor {
             'enable_dem_contact': ['Disabled', 'Enabled'],
             'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
             'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
-            'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
+            'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'Plate', 'STL', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'origin_mode': node.type === 'FEMObject3D' ? ['Center', 'CAD Origin'] : ['CAD Origin', 'Center'],
             'anisotropy_axis': ['X', 'Y', 'Z', 'Custom'],
             'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
@@ -3568,7 +3615,7 @@ export class PropertyEditor {
             input.type = 'number';
             input.min = '1';
             input.step = '1';
-            const defaultPpc = node.type.includes('2D') ? 4 : 8;
+            const defaultPpc = (node.type === 'Charge3D') ? 64 : (node.type.includes('2D') ? 4 : 8);
             input.value = String(value ?? defaultPpc);
             input.style.width = '100%';
             input.style.background = '#252526';
@@ -4314,6 +4361,7 @@ export class PropertyEditor {
             interpLbl.style.fontSize = '10px';
             interpLbl.style.color = '#ccc';
             interpLbl.style.cursor = 'pointer';
+            interpLbl.title = 'Bilinear cell texture interpolation';
             const interpCb = document.createElement('input');
             interpCb.type = 'checkbox';
             interpCb.checked = slice.interpolate === true;
@@ -4323,8 +4371,33 @@ export class PropertyEditor {
                 this.updateSlicesInPlace(updated);
             };
             interpLbl.appendChild(interpCb);
-            interpLbl.appendChild(document.createTextNode('Smooth'));
+            interpLbl.appendChild(document.createTextNode('Interp'));
             togglesDiv.appendChild(interpLbl);
+
+            const smoothLbl = document.createElement('label');
+            smoothLbl.style.display = 'flex';
+            smoothLbl.style.alignItems = 'center';
+            smoothLbl.style.gap = '3px';
+            smoothLbl.style.fontSize = '10px';
+            smoothLbl.style.color = '#ccc';
+            smoothLbl.style.cursor = 'pointer';
+            smoothLbl.title = 'Smooth continuous gradient vs discrete banded isocontours';
+            const smoothCb = document.createElement('input');
+            smoothCb.type = 'checkbox';
+            const isSliceSmooth = slice.smooth_contours !== false && (slice.contour_levels === undefined || slice.contour_levels <= 1);
+            smoothCb.checked = isSliceSmooth;
+            smoothCb.onchange = () => {
+                const updated = [...slices];
+                updated[idx] = {
+                    ...slice,
+                    smooth_contours: smoothCb.checked,
+                    contour_levels: smoothCb.checked ? 0 : (slice.contour_levels && slice.contour_levels > 1 ? slice.contour_levels : 10)
+                };
+                this.updateSlicesInPlace(updated);
+            };
+            smoothLbl.appendChild(smoothCb);
+            smoothLbl.appendChild(document.createTextNode('Smooth'));
+            togglesDiv.appendChild(smoothLbl);
 
             const cbLbl = document.createElement('label');
             cbLbl.style.display = 'flex';
@@ -4393,7 +4466,9 @@ export class PropertyEditor {
                 interpolate: false,
                 min_val: 101325.0,
                 max_val: 101325.0 * 10.0,
-                enabled: true
+                enabled: true,
+                smooth_contours: true,
+                contour_levels: 0
             }];
             // FIX 4: Use in-place update (no undo entry, no simulation reset) for interactive slice control
             this.updateSlicesInPlace(updated);
@@ -5012,9 +5087,11 @@ export class PropertyEditor {
             }
         } else if (node.type === 'FEMObject3D' && (key === 'shape_type' || key === 'mesh_source')) {
             if (key === 'shape_type') {
-                updates['mesh_source'] = value === 'Cylinder' ? 'Cylinder Generator' : (value === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator');
+                updates['mesh_source'] = value === 'Cylinder' ? 'Cylinder Generator' : (value === 'STL' ? 'STL File' : (value === 'Plate' ? 'Plate Generator' : (value === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')));
+                if (value === 'STL') updates['element_topology'] = 'Tet4_ANP';
             } else if (key === 'mesh_source') {
-                updates['shape_type'] = value === 'Cylinder Generator' ? 'Cylinder' : (value === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box');
+                updates['shape_type'] = value === 'Cylinder Generator' ? 'Cylinder' : (value === 'STL File' ? 'STL' : (value === 'Plate Generator' ? 'Plate' : (value === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
+                if (value === 'STL File') updates['element_topology'] = 'Tet4_ANP';
             }
         } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && value === 'STL') || (key === 'origin_mode' && value === 'CAD Origin'))) {
             if (key === 'shape_type' && value === 'STL') {
@@ -5025,13 +5102,43 @@ export class PropertyEditor {
                 updates['pos_y'] = 0.0;
                 updates['pos_z'] = 0.0;
             }
-        } else if (node.type === 'Material' && (key === 'atm_pressure' || key === 'atm_temperature')) {
+        } else if (node.type === 'Material' && (key === 'atm_pressure' || key === 'atm_temperature' || key === 'initial_temperature')) {
             const p = Number(key === 'atm_pressure' ? value : (node.parameters['atm_pressure'] ?? 101325.0));
-            const t = Number(key === 'atm_temperature' ? value : (node.parameters['atm_temperature'] ?? 288.15));
-            const rho = p / (287.058 * t);
-            updates['density'] = rho;
-            updates['ambient_rho'] = rho;
-            updates['ambient_p'] = p;
+            const t = Number((key === 'atm_temperature' || key === 'initial_temperature') ? value : (node.parameters['initial_temperature'] ?? node.parameters['atm_temperature'] ?? 288.15));
+            updates['initial_temperature'] = t;
+            updates['atm_temperature'] = t;
+            if (node.parameters['material_model'] === 'Ideal Gas' || node.parameters['material_type'] === 'Air') {
+                const rho = p / (287.058 * t);
+                updates['density'] = rho;
+                updates['ambient_rho'] = rho;
+                updates['ambient_p'] = p;
+            } else if (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge') {
+                const gamma = Number(node.parameters['ideal_gamma'] ?? 1.4);
+                const cv = 287.058 / Math.max(0.01, gamma - 1.0);
+                const e0 = cv * t;
+                updates['ideal_e_0'] = e0;
+                updates['detonation_energy'] = e0;
+            } else {
+                updates['T_room'] = t;
+                if (node.parameters['davis_t0'] !== undefined) updates['davis_t0'] = t;
+            }
+            updates['preset'] = 'Custom';
+            updates['provenance'] = 'user';
+        } else if (node.type === 'Material' && (key === 'ideal_e_0' || key === 'detonation_energy') && (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge')) {
+            const e0 = Number(value);
+            const gamma = Number(node.parameters['ideal_gamma'] ?? 1.4);
+            const cv = 287.058 / Math.max(0.01, gamma - 1.0);
+            const t = e0 / cv;
+            updates['ideal_e_0'] = e0;
+            updates['detonation_energy'] = e0;
+            updates['initial_temperature'] = t;
+            updates['preset'] = 'Custom';
+            updates['provenance'] = 'user';
+        } else if (node.type === 'Material' && key === 'ideal_gamma' && (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge')) {
+            const gamma = Number(value);
+            const cv = 287.058 / Math.max(0.01, gamma - 1.0);
+            const e0 = Number(node.parameters['ideal_e_0'] ?? 4.29e6);
+            updates['initial_temperature'] = e0 / cv;
             updates['preset'] = 'Custom';
             updates['provenance'] = 'user';
         } else if (node.type === 'Material' && key === 'density' && node.parameters['material_model'] === 'Ideal Gas') {
@@ -5976,10 +6083,22 @@ export class PropertyEditor {
             }
         }
 
+        const targetNodeInState = state.nodes.find(n => n.id === nodeId);
+        if (targetNodeInState) {
+            if (!targetNodeInState.parameters) targetNodeInState.parameters = {};
+            targetNodeInState.parameters['material'] = matId;
+        }
+
         const targetModel = this.stateManager.getModelForNode(nodeId) || this.stateManager.getActiveModel();
         if (targetModel) {
+            const modelNode = targetModel.nodes.find(n => n.id === nodeId);
+            if (modelNode) {
+                if (!modelNode.parameters) modelNode.parameters = {};
+                modelNode.parameters['material'] = matId;
+            }
             this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
         }
+        this.stateManager.updateNodeParametersInPlace(nodeId, { material: matId });
         this.stateManager.pushState(state);
     }
 
@@ -7038,6 +7157,273 @@ export class PropertyEditor {
         row.appendChild(label);
         row.appendChild(select);
         return row;
+    }
+
+    private createMarineBoundaryArchitectureCard(node: Node, state: SimulationState | null): HTMLElement {
+        const card = document.createElement('div');
+        card.className = 'marine-boundary-architecture-card';
+        card.style.marginTop = '6px';
+        card.style.marginBottom = '14px';
+        card.style.padding = '10px 12px';
+        card.style.background = 'rgba(16, 185, 129, 0.05)';
+        card.style.border = '1px solid rgba(16, 185, 129, 0.3)';
+        card.style.borderRadius = '6px';
+        card.style.fontSize = '11px';
+
+        const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+        const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+        const connections = owningModel?.connections || state?.connections || [];
+        const meshConn = connections.find((c: any) => (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in')) || (c.fromNode === node.id && c.fromPort === 'mesh'));
+        const meshNode = meshConn ? candidateNodes.find((n: any) => n.id === (meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode)) : candidateNodes.find((n: any) => n.type === 'DomainMesh3D');
+
+        const waterZ = node.parameters?.water_surface_z ?? 10.0;
+        const seabedZ = node.parameters?.seabed_surface_z ?? 2.0;
+
+        const curSky = String(meshNode?.parameters?.bc_z_max ?? node.parameters?.bc_z_max ?? 'Transmitting');
+        const curBed = String(meshNode?.parameters?.bc_z_min ?? node.parameters?.bc_z_min ?? 'Lysmer');
+        const curLat = String(meshNode?.parameters?.bc_x_min ?? node.parameters?.bc_x_min ?? 'Transmitting');
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.alignItems = 'center';
+        header.style.justifyContent = 'space-between';
+        header.style.marginBottom = '8px';
+        header.innerHTML = `
+            <div style="font-weight:bold; color:#10b981; display:flex; align-items:center; gap:6px; font-size:12px;">
+                <span>🛡️</span> <span>ZONAL BOUNDARY ARCHITECTURE &amp; QUIET PORTS</span>
+            </div>
+            <span style="font-size:10px; color:#cbd5e1; background:rgba(16,185,129,0.15); padding:2px 6px; border-radius:4px; border:1px solid rgba(16,185,129,0.3);">
+                ${meshNode ? `Mesh: ${meshNode.parameters?.name || meshNode.id.substring(0, 8)}` : 'Mesh Unbound'}
+            </span>
+        `;
+        card.appendChild(header);
+
+        const desc = document.createElement('div');
+        desc.style.color = '#94a3b8';
+        desc.style.fontSize = '10.5px';
+        desc.style.lineHeight = '1.35';
+        desc.style.marginBottom = '10px';
+        desc.textContent = 'Harbour blast waves span air (Z ≈ 400), seawater (Z ≈ 1.5×10⁶), and seabed (Z ≈ 5×10⁶). Truncation boundaries are zonally partitioned so shockwaves exit without artificial box reverberation.';
+        card.appendChild(desc);
+
+        // Helper to update boundaries across mesh and harbour node
+        const applyBoundaryPreset = (settings: { bc_z_max: string; bc_z_min: string; bc_lat: string }) => {
+            const updates: Record<string, string> = {
+                bc_z_max: settings.bc_z_max,
+                bc_z_min: settings.bc_z_min,
+                bc_x_min: settings.bc_lat,
+                bc_x_max: settings.bc_lat,
+                bc_y_min: settings.bc_lat,
+                bc_y_max: settings.bc_lat
+            };
+            if (meshNode) {
+                this.stateManager.updateNodeParameters(meshNode.id, updates);
+            }
+            this.stateManager.updateNodeParameters(node.id, updates);
+            if (owningModel) {
+                this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+            }
+            this.render();
+        };
+
+        // Presets Container
+        const presetBox = document.createElement('div');
+        presetBox.style.display = 'flex';
+        presetBox.style.gap = '6px';
+        presetBox.style.flexWrap = 'wrap';
+        presetBox.style.marginBottom = '10px';
+
+        const createPresetBtn = (label: string, icon: string, active: boolean, onClick: () => void) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.style.padding = '3px 8px';
+            btn.style.fontSize = '10px';
+            btn.style.borderRadius = '3px';
+            btn.style.border = active ? '1px solid #10b981' : '1px solid #444';
+            btn.style.background = active ? 'rgba(16, 185, 129, 0.25)' : '#1e293b';
+            btn.style.color = active ? '#ffffff' : '#cbd5e1';
+            btn.style.cursor = 'pointer';
+            btn.style.fontWeight = active ? 'bold' : 'normal';
+            btn.innerHTML = `<span>${icon}</span> <span>${label}</span>`;
+            btn.onclick = (e) => {
+                e.preventDefault();
+                onClick();
+            };
+            return btn;
+        };
+
+        const isOpenHarbour = curSky === 'Transmitting' && curLat === 'Transmitting' && (curBed === 'Lysmer' || curBed === 'LysmerDashpot');
+        const isConfinedBasin = curSky === 'Transmitting' && curLat === 'Reflecting';
+        const isRigidBedrock = curSky === 'Transmitting' && curLat === 'Transmitting' && curBed === 'Reflecting';
+
+        presetBox.appendChild(createPresetBtn('Open Harbour (Quiet Ports)', '🌊', isOpenHarbour, () => {
+            applyBoundaryPreset({ bc_z_max: 'Transmitting', bc_z_min: 'Lysmer', bc_lat: 'Transmitting' });
+        }));
+
+        presetBox.appendChild(createPresetBtn('Confined Basin (Quayside Walls)', '🏛️', isConfinedBasin, () => {
+            applyBoundaryPreset({ bc_z_max: 'Transmitting', bc_z_min: 'Lysmer', bc_lat: 'Reflecting' });
+        }));
+
+        presetBox.appendChild(createPresetBtn('Rigid Bedrock Base', '🏔️', isRigidBedrock, () => {
+            applyBoundaryPreset({ bc_z_max: 'Transmitting', bc_z_min: 'Reflecting', bc_lat: 'Transmitting' });
+        }));
+
+        card.appendChild(presetBox);
+
+        // Strata Controls Box
+        const strataBox = document.createElement('div');
+        strataBox.style.background = 'rgba(15, 23, 42, 0.5)';
+        strataBox.style.border = '1px solid rgba(148, 163, 184, 0.15)';
+        strataBox.style.borderRadius = '4px';
+        strataBox.style.padding = '8px 10px';
+        strataBox.style.display = 'flex';
+        strataBox.style.flexDirection = 'column';
+        strataBox.style.gap = '8px';
+
+        // 1. Sky Row (Z-Max)
+        const skyRow = document.createElement('div');
+        skyRow.style.display = 'flex';
+        skyRow.style.alignItems = 'center';
+        skyRow.style.justifyContent = 'space-between';
+        skyRow.style.gap = '8px';
+        skyRow.innerHTML = `
+            <div>
+                <div style="font-weight:600; color:#38bdf8; display:flex; align-items:center; gap:4px;">
+                    <span>🌫️</span> <span>Top (Z-Max): Atmospheric Sky</span>
+                </div>
+                <div style="font-size:9.5px; color:#64748b;">Acoustic blast shocks &amp; cavity gas venting escape to open atmosphere</div>
+            </div>
+        `;
+        const skySelect = document.createElement('select');
+        skySelect.style.background = '#1e293b';
+        skySelect.style.color = '#e2e8f0';
+        skySelect.style.border = '1px solid #475569';
+        skySelect.style.borderRadius = '3px';
+        skySelect.style.padding = '2px 4px';
+        skySelect.style.fontSize = '10px';
+        [
+            { val: 'Transmitting', label: 'Transmitting (Riemann Sky Outflow) [Recommended]' },
+            { val: 'Reflecting', label: 'Reflecting (Rigid Ceiling)' },
+            { val: 'Terminate', label: 'Terminate (Absorption)' }
+        ].forEach(opt => {
+            const el = document.createElement('option');
+            el.value = opt.val;
+            el.textContent = opt.label;
+            if (opt.val === curSky) el.selected = true;
+            skySelect.appendChild(el);
+        });
+        skySelect.onchange = () => {
+            const updates = { bc_z_max: skySelect.value };
+            if (meshNode) this.stateManager.updateNodeParameters(meshNode.id, updates);
+            this.stateManager.updateNodeParameters(node.id, updates);
+            if (owningModel) this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+            this.render();
+        };
+        skyRow.appendChild(skySelect);
+        strataBox.appendChild(skyRow);
+
+        // 2. Lateral Row (X/Y)
+        const latRow = document.createElement('div');
+        latRow.style.display = 'flex';
+        latRow.style.alignItems = 'center';
+        latRow.style.justifyContent = 'space-between';
+        latRow.style.gap = '8px';
+        latRow.innerHTML = `
+            <div>
+                <div style="font-weight:600; color:#0ea5e9; display:flex; align-items:center; gap:4px;">
+                    <span>🌊</span> <span>Lateral (X/Y): Stratified Perimeter</span>
+                </div>
+                <div style="font-size:9.5px; color:#64748b;">Air &amp; water (Riemann outflow) + Seabed soil (Lysmer dashpot damping)</div>
+            </div>
+        `;
+        const latSelect = document.createElement('select');
+        latSelect.style.background = '#1e293b';
+        latSelect.style.color = '#e2e8f0';
+        latSelect.style.border = '1px solid #475569';
+        latSelect.style.borderRadius = '3px';
+        latSelect.style.padding = '2px 4px';
+        latSelect.style.fontSize = '10px';
+        [
+            { val: 'Transmitting', label: 'Transmitting (Zonal Multi-Physics) [Recommended]' },
+            { val: 'Reflecting', label: 'Reflecting (Rigid Quayside Walls / Closed Flume)' },
+            { val: 'FreeSlip', label: 'FreeSlip (Tangential Sliding Wall)' }
+        ].forEach(opt => {
+            const el = document.createElement('option');
+            el.value = opt.val;
+            el.textContent = opt.label;
+            if (opt.val === curLat) el.selected = true;
+            latSelect.appendChild(el);
+        });
+        latSelect.onchange = () => {
+            const updates = {
+                bc_x_min: latSelect.value,
+                bc_x_max: latSelect.value,
+                bc_y_min: latSelect.value,
+                bc_y_max: latSelect.value
+            };
+            if (meshNode) this.stateManager.updateNodeParameters(meshNode.id, updates);
+            this.stateManager.updateNodeParameters(node.id, updates);
+            if (owningModel) this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+            this.render();
+        };
+        latRow.appendChild(latSelect);
+        strataBox.appendChild(latRow);
+
+        // 3. Bedrock Base Row (Z-Min)
+        const bedRow = document.createElement('div');
+        bedRow.style.display = 'flex';
+        bedRow.style.alignItems = 'center';
+        bedRow.style.justifyContent = 'space-between';
+        bedRow.style.gap = '8px';
+        bedRow.innerHTML = `
+            <div>
+                <div style="font-weight:600; color:#f59e0b; display:flex; align-items:center; gap:4px;">
+                    <span>🧱</span> <span>Bottom (Z-Min): Deep Bedrock Base</span>
+                </div>
+                <div style="font-size:9.5px; color:#64748b;">Absorbs downward seismic P- and S-waves into infinite bedrock strata</div>
+            </div>
+        `;
+        const bedSelect = document.createElement('select');
+        bedSelect.style.background = '#1e293b';
+        bedSelect.style.color = '#e2e8f0';
+        bedSelect.style.border = '1px solid #475569';
+        bedSelect.style.borderRadius = '3px';
+        bedSelect.style.padding = '2px 4px';
+        bedSelect.style.fontSize = '10px';
+        [
+            { val: 'Lysmer', label: 'Lysmer (Viscous Absorbing Bedrock) [Recommended]' },
+            { val: 'Reflecting', label: 'Reflecting (Rigid Impenetrable Floor)' }
+        ].forEach(opt => {
+            const el = document.createElement('option');
+            el.value = opt.val;
+            el.textContent = opt.label;
+            if (opt.val === curBed) el.selected = true;
+            bedSelect.appendChild(el);
+        });
+        bedSelect.onchange = () => {
+            const updates = { bc_z_min: bedSelect.value };
+            if (meshNode) this.stateManager.updateNodeParameters(meshNode.id, updates);
+            this.stateManager.updateNodeParameters(node.id, updates);
+            if (owningModel) this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+            this.render();
+        };
+        bedRow.appendChild(bedSelect);
+        strataBox.appendChild(bedRow);
+
+        card.appendChild(strataBox);
+
+        // Interface reminder note
+        const note = document.createElement('div');
+        note.style.marginTop = '8px';
+        note.style.padding = '4px 6px';
+        note.style.background = 'rgba(56, 189, 248, 0.08)';
+        note.style.borderLeft = '2px solid #38bdf8';
+        note.style.fontSize = '9.5px';
+        note.style.color = '#cbd5e1';
+        note.innerHTML = `<strong>Internal Physical Interfaces:</strong> Water Free Surface (z = ${waterZ}m, pressure-release reflection with cavitation floor) and Seabed Mudline (z = ${seabedZ}m, continuous normal traction with Scholte waves) are active physical interfaces, not outer box boundaries.`;
+        card.appendChild(note);
+
+        return card;
     }
 
     private createMaterialWaterDomainRow(node: Node, state: SimulationState | null): HTMLElement {

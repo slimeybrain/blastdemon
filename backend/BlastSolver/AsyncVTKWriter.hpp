@@ -9,6 +9,9 @@
 #include <atomic>
 #include <memory>
 #include <iostream>
+#ifdef __linux__
+#include <malloc.h>
+#endif
 
 namespace Blast {
 
@@ -17,6 +20,15 @@ public:
     static AsyncVTKWriter& getInstance() {
         static AsyncVTKWriter instance;
         return instance;
+    }
+
+    void setMaxQueueSize(size_t max_size) {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_max_queue_size = std::max<size_t>(1, max_size);
+    }
+
+    size_t getMaxQueueSize() const {
+        return m_max_queue_size;
     }
 
     void enqueue(std::function<void()> task) {
@@ -61,7 +73,7 @@ public:
     AsyncVTKWriter& operator=(const AsyncVTKWriter&) = delete;
 
 private:
-    AsyncVTKWriter() : m_stop(false), m_busy(false), m_max_queue_size(32) {
+    AsyncVTKWriter() : m_stop(false), m_busy(false), m_max_queue_size(4) {
         ensureRunning();
     }
 
@@ -101,13 +113,21 @@ private:
                 } catch (...) {
                     std::cerr << "[ERROR] AsyncVTKWriter task unknown error" << std::endl;
                 }
+                task = nullptr;
             }
 
+            bool queue_empty = false;
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
                 m_busy = false;
+                queue_empty = m_queue.empty();
             }
             m_cv_flush.notify_all();
+#ifdef __linux__
+            if (queue_empty) {
+                malloc_trim(0);
+            }
+#endif
         }
     }
 

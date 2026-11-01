@@ -3,6 +3,7 @@
 
 #include "mpm_solver_3d.hpp"
 #include "VTKWriter.hpp"
+#include "cfd_eos_water.hpp"
 
 namespace Blast {
 
@@ -78,6 +79,25 @@ public:
     void setObjectMaterialMapping(const std::vector<int>& obj_to_mat, int num_materials);
     int getNumMaterials() const { return m_num_materials; }
 
+    // Compact multi-material (Bardenhagen) grid storage.
+    // Per-material grid fields are stored only on nodes where two or more material fields
+    // overlap ("multi-material slots"). Single-material nodes use the global grid node directly,
+    // which is arithmetically identical to the dense layout (the per-material copy of a
+    // single-material node duplicates the global node). A 4-byte tag per node records
+    // empty / owning material / slot index. Enabled by default; the dense layout is retained
+    // for verification parity runs and is used automatically when zonal ghost coupling is on
+    // (ghost mass enters the global node only, so the global node no longer equals the
+    // single material field).
+    void setCompactMultiMaterialStorage(bool enable);
+    bool getCompactMultiMaterialStorage() const { return m_compact_mat_storage; }
+    bool isCompactMultiMaterialStorageActive() const;
+    int getNumMultiMaterialSlots() const { return m_num_mat_slots; }
+    size_t getMultiMaterialSlotCapacity() const { return m_mat_slot_capacity; }
+    size_t getMultiMaterialStorageBytes() const { return m_allocated_mat_grid_bytes + m_allocated_mat_tag_bytes; }
+    // Initial number of compact multi-material slots (grown geometrically on demand, never shrunk
+    // during a run). Lowering it below the current capacity resets the slot buffer.
+    void setInitialMultiMaterialSlotCapacity(size_t slots);
+
     // Retained for backward API compatibility (Clean Single-Grid Continuum Contact)
     void setSdfBarrier([[maybe_unused]] bool enable = false,
                        [[maybe_unused]] float restitution = 0.10f,
@@ -94,8 +114,26 @@ public:
     void setBoundaryConditions(MPMBoundaryCondition3D x_min, MPMBoundaryCondition3D x_max,
                                MPMBoundaryCondition3D y_min, MPMBoundaryCondition3D y_max,
                                MPMBoundaryCondition3D z_min, MPMBoundaryCondition3D z_max);
+    bool is_terminated() const { return m_terminated; }
+    void resetTermination() { m_terminated = false; }
     void setLysmerParams(const LysmerDashpotParams& params) { m_lysmer_params = params; }
     const LysmerDashpotParams& getLysmerParams() const { return m_lysmer_params; }
+    void setZonalHandoffParams(const Blast::ZonalHandoff3DParams& params);
+    const Blast::ZonalHandoff3DParams& getZonalHandoffParams() const { return m_zonal_params; }
+    // Zonal FV -> MPM exterior coupling (overlapping Schwarz, ghost material points).
+    // The FV solver writes its state into this per-node SoA buffer (MPM node layout
+    // [(i * ny + j) * nz + k]) as 5 planes of nx*ny*nz floats: [p | rho | ux | uy | uz],
+    // for cells in the exterior band of the sleeve, and the sentinel kZonalGhostNone in the
+    // p-plane elsewhere. applyZonalGhostPressureTraction() integrates the exterior water as
+    // ghost material points (sigma = -p * I, density rho, velocity u) over the region *outside*
+    // the sleeve, with the same shape functions as P2G: ghosts add mass, momentum, mass-weighted
+    // pressure and stress-divergence force to nodes that already carry particle mass.
+    // Uniform pressure yields zero net boundary force, and boundary nodes carry their full
+    // mass, so the interface has the acoustic impedance of the continuing water.
+    static constexpr float kZonalGhostNone = -1.0e30f;
+    static constexpr int kZonalGhostPlanes = 5;
+    float* getZonalGhostPressureBuffer(); // allocates once (5 * nx*ny*nz floats) if not yet allocated
+    void applyZonalGhostPressureTraction();
 
     // Gravity & Stratified Initial Condition
     void setGravity(float gx, float gy, float gz) {
@@ -117,7 +155,8 @@ public:
                       float tensile_failure_stress = 600.0e6f, int ppc = 8,
                       MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                       MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
-                      float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
+                      float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f,
+                      float clip_z_min = -1.0e30f, float clip_z_max = 1.0e30f);
 
     void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius, float inner_radius,
                          float vel_x, float vel_y, float vel_z,
@@ -127,7 +166,8 @@ public:
                          float tensile_failure_stress = 600.0e6f, int ppc = 8,
                          MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                          MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
-                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
+                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f,
+                         float clip_z_min = -1.0e30f, float clip_z_max = 1.0e30f);
 
     void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius,
                          float vel_x, float vel_y, float vel_z,
@@ -137,8 +177,9 @@ public:
                          float tensile_failure_stress = 600.0e6f, int ppc = 8,
                          MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                          MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
-                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f) {
-        addSphereObject(obj_id, pos_x, pos_y, pos_z, radius, 0.0f, vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f,
+                         float clip_z_min = -1.0e30f, float clip_z_max = 1.0e30f) {
+        addSphereObject(obj_id, pos_x, pos_y, pos_z, radius, 0.0f, vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z, clip_z_min, clip_z_max);
     }
 
     void addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
@@ -150,7 +191,8 @@ public:
                            float tensile_failure_stress = 600.0e6f, int ppc = 8,
                            MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                            MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
-                           float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
+                           float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f,
+                           float clip_z_min = -1.0e30f, float clip_z_max = 1.0e30f);
 
     void addSTLObject(int obj_id, const std::string& stl_filepath,
                       float pos_x, float pos_y, float pos_z,
@@ -188,7 +230,7 @@ public:
     void syncParticlesToHost();
     void syncGridToHost();
     void syncToDevice();
-    MPMVTKSnapshot3D extractVTKSnapshot(bool has_vel = true, bool has_stress = true, bool has_strain = true, bool has_damage = true, bool has_temp = true);
+    MPMVTKSnapshot3D extractVTKSnapshot(bool has_vel = true, bool has_stress = true, bool has_strain = true, bool has_damage = true, bool has_temp = true, bool has_pressure = true, bool has_material_id = true, bool has_object_id = true);
     void uploadGridToDevice();
     void uploadMaterialTableToDevice();
 
@@ -219,8 +261,22 @@ public:
             m_material_tables.resize(object_id + 1);
         }
         m_material_tables[object_id] = mat;
+        m_material_tables[object_id].synchronizePillars();
+        if (m_material_tables[object_id].cell_dx <= 0.0f) {
+            m_material_tables[object_id].cell_dx = m_dx;
+        }
         initMaterialHeterogeneity(object_id);
     }
+
+    // Detonator & Point Initiation Management
+    void clearDetonators() { m_detonators.clear(); }
+    void addDetonator(float x, float y, float z, float radius, float time_delay, bool track_velocity, int target_object_id = -1);
+    void addDetonator(const MPMDetonator3D& det) { m_detonators.push_back(det); }
+    const std::vector<MPMDetonator3D>& getDetonators() const { return m_detonators; }
+    std::vector<MPMDetonator3D>& getDetonators() { return m_detonators; }
+    bool interpolateGridVelocityDevice(float x, float y, float z, float& vx, float& vy, float& vz) const;
+    void updateDetonators(float dt);
+    void fireDetonator(MPMDetonator3D& det);
 
     const std::vector<MPMParticle3D>& getParticles() const { return m_host_particles; }
     const std::vector<MPMGridNode3D>& getGrid() const { return m_host_grid; }
@@ -289,6 +345,7 @@ private:
     MPMBoundaryCondition3D m_bc_z_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_z_max{MPMBoundaryCondition3D::Sticky};
     LysmerDashpotParams m_lysmer_params;
+    Blast::ZonalHandoff3DParams m_zonal_params{};
 
     std::vector<MPMGridNode3D> m_host_grid;
     std::vector<MPMParticle3D> m_host_particles;
@@ -309,6 +366,9 @@ private:
     // Persistent FSI external force buffer: 3 floats per node (fx, fy, fz)
     float* d_f_ext_fsi{nullptr};
     size_t m_allocated_f_ext_fsi{0};
+    // Zonal exterior FV pressure band (1 float per node), allocated once in setZonalHandoffParams
+    float* d_zonal_ghost_p{nullptr};
+    size_t m_allocated_zonal_ghost_p{0};
 
     int* d_active_nodes{nullptr};
     int* d_num_active_nodes{nullptr};
@@ -326,6 +386,7 @@ private:
 
     int* d_compaction_counters{nullptr};
     int* d_active_count{nullptr};
+    int* d_boundary_flags{nullptr};
     int* d_compaction_indices{nullptr};
     size_t m_allocated_compaction_indices{0};
 
@@ -347,6 +408,7 @@ private:
     mutable float m_last_v_max{0.0f};
     double m_sim_time{0.0};
     int m_step_count{0};
+    bool m_terminated{false};
     bool m_device_dirty{true};
     float m_xmin{0.0f};
     float m_ymin{0.0f};
@@ -369,6 +431,25 @@ private:
     int* d_mat_to_obj{nullptr};
     void allocateMatGridBuffers(size_t num_nodes, int num_materials);
     void freeMatGridBuffers();
+
+    // Compact multi-material storage state (see setCompactMultiMaterialStorage)
+    bool m_compact_mat_storage{true};
+    bool m_mat_grid_compact_layout{false};  // layout of the currently allocated d_mat_grid_buffer
+    int* d_mat_tag{nullptr};                 // per-node tag: -1 empty, [0,M) owning material, >= M slot + M
+    size_t m_allocated_mat_tag_bytes{0};
+    int* d_mat_slot_counters{nullptr};       // [0] = assigned multi-material slots, [1] = tag consistency violations
+    size_t m_mat_slot_capacity{0};
+    int m_mat_slot_materials{0};             // material count the slot buffer is laid out for
+    int m_num_mat_slots{0};
+    static constexpr size_t kInitialMatSlotCapacity = 131072;
+    size_t m_initial_mat_slot_capacity{kInitialMatSlotCapacity};
+    // (Re)allocates the compact slot buffer if needed; returns true if the buffer was replaced (zero-filled).
+    bool allocateMatSlotBuffer(size_t slot_capacity, int num_materials);
+    // Runs the full P2G scatter (tagging, slot assignment, scatter) and refreshes m_num_active_nodes.
+    void launchParticleToGrid(int num_particles, bool use_bardenhagen);
+
+    std::vector<MPMDetonator3D> m_detonators;
+    float* d_det_vel_buffer{nullptr};
 };
 
 } // namespace Blast

@@ -2,6 +2,7 @@
 #define LS_DYNA_READER_3D_HPP
 
 #include "fem_solver_3d.hpp"
+#include "FEMShell4BT.hpp"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -35,6 +36,26 @@ public:
         std::vector<MaterialTable3D>& out_materials
     );
 
+    bool parseFile(
+        const std::string& filepath,
+        std::vector<FEMNode3D<T>>& out_nodes,
+        std::vector<FEMElement3D<T>>& out_elements,
+        std::vector<FEMShell4BTElement<T>>& out_shells,
+        MaterialTable3D& out_default_mat,
+        std::vector<MaterialTable3D>& out_materials
+    );
+
+    bool parseFile(
+        const std::string& filepath,
+        std::vector<FEMNode3D<T>>& out_nodes,
+        std::vector<FEMElement3D<T>>& out_elements,
+        std::vector<FEMTrussElement3D<T>>& out_trusses,
+        std::vector<FEMBeam3DElement<T>>& out_beams,
+        std::vector<FEMShell4BTElement<T>>& out_shells,
+        MaterialTable3D& out_default_mat,
+        std::vector<MaterialTable3D>& out_materials
+    );
+
     struct PartInfo {
         int part_id{1};
         std::string name{"Part_1"};
@@ -43,6 +64,7 @@ public:
         int num_solids{0};
         int num_beams{0};
         int num_trusses{0};
+        int num_shells{0};
     };
 
     struct SetInfo {
@@ -55,11 +77,13 @@ public:
     int getNodeCount() const { return static_cast<int>(m_id_to_node_index.size()); }
     int getElementCount() const { return static_cast<int>(m_id_to_elem_index.size()); }
     int getBeamCount() const { return static_cast<int>(m_id_to_beam_index.size()); }
+    int getShellCount() const { return static_cast<int>(m_id_to_shell_index.size()); }
 
     const std::unordered_map<int, PartInfo>& getParts() const { return m_parts; }
     const std::unordered_map<int, SetInfo>& getSets() const { return m_sets; }
     const std::map<int, MaterialTable3D>& getImportedMaterials() const { return m_imported_materials; }
     const std::unordered_map<int64_t, int>& getNodeIdToIndex() const { return m_id_to_node_index; }
+    const std::unordered_map<int64_t, int>& getShellIdToIndex() const { return m_id_to_shell_index; }
 
 private:
     struct BeamSectionProps {
@@ -72,12 +96,24 @@ private:
         T Zp{2.88e-7f};
     };
 
+    struct ShellSectionProps {
+        int elform{2};       // 2 = Belytschko-Tsay (default fast), 16 = Fully Integrated
+        T shrf{1.0f};        // Shear factor (default 1.0 or 5/6)
+        int nip{5};          // Number of through-thickness Simpson integration points
+        T thickness{0.001f}; // Uniform thickness (m)
+        T t1{0.001f};
+        T t2{0.001f};
+        T t3{0.001f};
+        T t4{0.001f};
+    };
+
     bool parseStream(
         const std::string& filepath,
         std::vector<FEMNode3D<T>>& out_nodes,
         std::vector<FEMElement3D<T>>& out_elements,
         std::vector<FEMTrussElement3D<T>>& out_trusses,
         std::vector<FEMBeam3DElement<T>>& out_beams,
+        std::vector<FEMShell4BTElement<T>>& out_shells,
         MaterialTable3D& out_default_mat,
         std::vector<MaterialTable3D>& out_materials,
         int depth = 0
@@ -112,7 +148,9 @@ private:
     std::unordered_map<int64_t, int> m_id_to_node_index;
     std::unordered_map<int64_t, int> m_id_to_elem_index;
     std::unordered_map<int64_t, int> m_id_to_beam_index;
+    std::unordered_map<int64_t, int> m_id_to_shell_index;
     std::unordered_map<int, BeamSectionProps> m_secid_to_beam_props;
+    std::unordered_map<int, ShellSectionProps> m_secid_to_shell_props;
     std::unordered_map<int, int> m_part_to_secid;
     std::unordered_map<int, int> m_part_to_matid;
     std::unordered_map<int, PartInfo> m_parts;

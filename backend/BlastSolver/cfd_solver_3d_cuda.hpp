@@ -100,6 +100,7 @@ private:
 
     std::vector<ObstacleFace> obstacle_faces;
     void* d_fsi_mpm_grid = nullptr;
+    Blast::ZonalHandoff3DParams m_zonal_handoff_params;
 
 private:
     void updateActiveRegions();
@@ -120,7 +121,7 @@ public:
         CFDSolver3DImplBase::setMaterialParameters(materials);
         constants_dirty = true;
     }
-    void setDetonatorLocation(double x, double y, double z) override;
+    void setDetonatorLocation(double x, double y, double z, double start_time = 0.0) override;
     void setFluxScheme(const std::string& scheme_name) override;
     void setSpatialOrder(int order) override;
     void setTemporalOrder(int order) override;
@@ -169,6 +170,9 @@ public:
     bool getFluidVelocity(int i, int j, int k, float& u, float& v, float& w, float& rho, float& p) const override;
     std::vector<float> extractPressureField() const override;
     void coupleFSIWithMPMGPU(void* mpm_solver_cuda) override;
+    void coupleZonalHandoffWithMPMGPU(void* mpm_solver_cuda) override;
+    void synchronizeFluidSleeveWithMPMGPU(void* mpm_solver_cuda) override;
+    void setZonalHandoffParams(const Blast::ZonalHandoff3DParams& params) override;
     void coupleFSIWithFEMGPU(void* fem_solver_cuda) override;
     void invalidateTileCache() const override { last_cached_tile_idx = -1; }
 
@@ -184,8 +188,11 @@ public:
     void commitStates() override;
     size_t getAllocatedVRAM() const override;
 
-    const void* getDeviceStates() const { return d_states; }
-    const void* getDeviceU() const { return d_U; }
+    const void* getDeviceStates() const override { return d_states; }
+    void* getDeviceStatesMutable() override { return d_states; }
+    const void* getDeviceU() const override { return d_U; }
+    void* getDeviceUMutable() override { return d_U; }
+    bool isDoublePrecision() const override { return std::is_same<RealType, double>::value; }
     const void* getDeviceActiveTiles() const { return d_active_tiles; }
     void* getDeviceGeom() const { return d_geom; }
     bool isCUDA() const override { return true; }

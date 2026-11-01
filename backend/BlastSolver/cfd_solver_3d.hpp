@@ -13,15 +13,16 @@
 enum class BCType3D {
     REFLECTIVE = 0,
     TRANSMISSIVE = 1,
-    OUTFLOW_RIEMANN = 2
+    OUTFLOW_RIEMANN = 2,
+    TERMINATE = 3
 };
 
 struct Charge3DParams {
-    int shape_type; // 0=Sphere, 1=Block, 2=Cylinder
-    double x, y, z;
-    double radius;
-    double height;
-    double lx, ly, lz;
+    int shape_type = 0; // 0=Sphere, 1=Block, 2=Cylinder
+    double x = 0.0, y = 0.0, z = 0.0;
+    double radius = 0.0;
+    double height = 0.0;
+    double lx = 0.0, ly = 0.0, lz = 0.0;
     double rot_x = 0.0, rot_y = 0.0, rot_z = 0.0;
 };
 
@@ -156,7 +157,7 @@ public:
     }
     virtual void setAcousticWavePacket(double /*x0*/, double /*sigma*/, double /*delta_p*/, double /*ambient_rho*/, double /*ambient_p*/) {}
     virtual void setGravity(double /*gx*/, double /*gy*/, double /*gz*/) {}
-    virtual void setDetonatorLocation(double x, double y, double z) = 0;
+    virtual void setDetonatorLocation(double x, double y, double z, double start_time = 0.0) = 0;
     virtual void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) = 0;
     virtual void setFluxScheme(const std::string& scheme_name) = 0;
     virtual void setSpatialOrder(int order) = 0;
@@ -238,6 +239,9 @@ public:
     // Bulk pressure extraction for FSI coupling — one cudaMemcpy for the whole field, not per-cell
     virtual std::vector<float> extractPressureField() const { return {}; }
     virtual void coupleFSIWithMPMGPU(void* /*mpm_solver_cuda*/) {}
+    virtual void coupleZonalHandoffWithMPMGPU(void* /*mpm_solver_cuda*/) {}
+    virtual void synchronizeFluidSleeveWithMPMGPU(void* /*mpm_solver_cuda*/) {}
+    virtual void setZonalHandoffParams(const Blast::ZonalHandoff3DParams& /*params*/) {}
     virtual void coupleFSIWithFEMGPU(void* /*fem_solver_cuda*/) {}
     virtual void invalidateTileCache() const {}
 
@@ -255,6 +259,11 @@ public:
     virtual bool isIdealGas() const = 0;
     virtual bool isMultiMaterial() const = 0;
     virtual bool isCUDA() const { return false; }
+    virtual const void* getDeviceStates() const { return nullptr; }
+    virtual void* getDeviceStatesMutable() { return nullptr; }
+    virtual const void* getDeviceU() const { return nullptr; }
+    virtual void* getDeviceUMutable() { return nullptr; }
+    virtual bool isDoublePrecision() const { return false; }
     virtual void setGamma(double) {}
     virtual void setIdealGas(bool) {}
     virtual bool isWaterTait() const { return false; }
@@ -296,6 +305,7 @@ protected:
     double lx, ly, lz;
     double xmin, ymin, zmin;
     double detX = 0, detY = 0, detZ = 0;
+    double detStartTime = 0.0;
     double cellSize;
     double currentTime = 0.0;
     double gamma = 1.4;
@@ -508,7 +518,7 @@ public:
     void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) override;
     void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) override;
     void commitStates() override;
-    void setDetonatorLocation(double x, double y, double z) override;
+    void setDetonatorLocation(double x, double y, double z, double start_time = 0.0) override;
     
     const std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>>& getStatesPool() const { return states_pool; }
     const std::vector<ConservativeTile3D<RealType, IsMultiMaterial>>& getUPool() const { return U_pool; }
@@ -879,7 +889,11 @@ public:
         if constexpr (IsMultiMaterial) {
             s.alpha1 = tile.alpha1[c_idx]; s.alpha2 = tile.alpha2[c_idx];
             s.arho1 = tile.arho1[c_idx]; s.arho2 = tile.arho2[c_idx];
-            s.E = (RealType)MultiMat::getMixtureEnergy(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+            if (this->is_water_tait_val) {
+                s.E = (RealType)MultiMat::getMixtureEnergyTait((double)s.p, (double)s.rho, (double)s.alpha1, (double)s.alpha2, (double)s.arho1, (double)s.arho2, this->tait_water_params, currentMaterials.products, currentMaterials.unreacted) + ke;
+            } else {
+                s.E = (RealType)MultiMat::getMixtureEnergy(s.p, s.rho, s.alpha1, s.alpha2, s.arho1, s.arho2, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+            }
         } else if (this->is_water_tait_val) {
             CellState3D<IsMultiMaterial> s_tmp{};
             s_tmp.rho = s.rho;
@@ -953,22 +967,22 @@ public:
             }
         }
 
-        // Non-reflecting characteristic Riemann boundary condition (OUTFLOW_RIEMANN)
-        bool is_riemann = (orig_gx < 0 && bcXmin == BCType3D::OUTFLOW_RIEMANN) ||
-                          (orig_gx >= nx && bcXmax == BCType3D::OUTFLOW_RIEMANN) ||
-                          (orig_gy < 0 && bcYmin == BCType3D::OUTFLOW_RIEMANN) ||
-                          (orig_gy >= ny && bcYmax == BCType3D::OUTFLOW_RIEMANN) ||
-                          (orig_gz < 0 && bcZmin == BCType3D::OUTFLOW_RIEMANN) ||
-                          (orig_gz >= nz && bcZmax == BCType3D::OUTFLOW_RIEMANN);
+        // Non-reflecting characteristic Riemann boundary condition (OUTFLOW_RIEMANN / TERMINATE)
+        bool is_riemann = (orig_gx < 0 && (bcXmin == BCType3D::OUTFLOW_RIEMANN || bcXmin == BCType3D::TERMINATE)) ||
+                          (orig_gx >= nx && (bcXmax == BCType3D::OUTFLOW_RIEMANN || bcXmax == BCType3D::TERMINATE)) ||
+                          (orig_gy < 0 && (bcYmin == BCType3D::OUTFLOW_RIEMANN || bcYmin == BCType3D::TERMINATE)) ||
+                          (orig_gy >= ny && (bcYmax == BCType3D::OUTFLOW_RIEMANN || bcYmax == BCType3D::TERMINATE)) ||
+                          (orig_gz < 0 && (bcZmin == BCType3D::OUTFLOW_RIEMANN || bcZmin == BCType3D::TERMINATE)) ||
+                          (orig_gz >= nz && (bcZmax == BCType3D::OUTFLOW_RIEMANN || bcZmax == BCType3D::TERMINATE));
 
         if (is_riemann) {
             double nx_out = 0.0, ny_out = 0.0, nz_out = 0.0;
-            if (orig_gx < 0 && bcXmin == BCType3D::OUTFLOW_RIEMANN) nx_out = -1.0;
-            else if (orig_gx >= nx && bcXmax == BCType3D::OUTFLOW_RIEMANN) nx_out = 1.0;
-            else if (orig_gy < 0 && bcYmin == BCType3D::OUTFLOW_RIEMANN) ny_out = -1.0;
-            else if (orig_gy >= ny && bcYmax == BCType3D::OUTFLOW_RIEMANN) ny_out = 1.0;
-            else if (orig_gz < 0 && bcZmin == BCType3D::OUTFLOW_RIEMANN) nz_out = -1.0;
-            else if (orig_gz >= nz && bcZmax == BCType3D::OUTFLOW_RIEMANN) nz_out = 1.0;
+            if (orig_gx < 0 && (bcXmin == BCType3D::OUTFLOW_RIEMANN || bcXmin == BCType3D::TERMINATE)) nx_out = -1.0;
+            else if (orig_gx >= nx && (bcXmax == BCType3D::OUTFLOW_RIEMANN || bcXmax == BCType3D::TERMINATE)) nx_out = 1.0;
+            else if (orig_gy < 0 && (bcYmin == BCType3D::OUTFLOW_RIEMANN || bcYmin == BCType3D::TERMINATE)) ny_out = -1.0;
+            else if (orig_gy >= ny && (bcYmax == BCType3D::OUTFLOW_RIEMANN || bcYmax == BCType3D::TERMINATE)) ny_out = 1.0;
+            else if (orig_gz < 0 && (bcZmin == BCType3D::OUTFLOW_RIEMANN || bcZmin == BCType3D::TERMINATE)) nz_out = -1.0;
+            else if (orig_gz >= nz && (bcZmax == BCType3D::OUTFLOW_RIEMANN || bcZmax == BCType3D::TERMINATE)) nz_out = 1.0;
 
             double un_int = (double)s.ux * nx_out + (double)s.uy * ny_out + (double)s.uz * nz_out;
 
@@ -1041,9 +1055,20 @@ public:
                 if (Z < 1.0e-3) Z = rho0_soil * c0_soil;
 
                 double p_pert_int = (double)s.p - p_hydro_int;
-                double un_ghost = 0.5 * (un_int + p_pert_int / Z);
-                double p_ghost = p_target + 0.5 * (p_pert_int + Z * un_int);
-                if (p_ghost < p_cav_soil) p_ghost = p_cav_soil;
+                double un_ghost;
+                double p_ghost;
+                if (un_int >= c_soil) {
+                    un_ghost = un_int;
+                    p_ghost = (double)s.p;
+                } else if (un_int > 0.0) {
+                    // Subsonic outflow: non-reflecting acoustic expansion into ambient reservoir
+                    un_ghost = un_int + ((double)s.p - p_target) / Z;
+                    p_ghost = p_target;
+                } else {
+                    un_ghost = 0.5 * (un_int + p_pert_int / Z);
+                    p_ghost = p_target + 0.5 * (p_pert_int + Z * un_int);
+                    if (p_ghost < p_cav_soil) p_ghost = p_cav_soil;
+                }
 
                 double rho_ghost = Blast::TaitEOSWater::compute_density_isentropic(
                     p_ghost, B_soil, gamma_soil, rho0_soil, p0_soil);
@@ -1065,9 +1090,20 @@ public:
                 if (Z < 1.0e-3) Z = 1.0e3 * 1482.0;
 
                 double p_pert_int = (double)s.p - p_hydro_int;
-                double un_ghost = 0.5 * (un_int + p_pert_int / Z);
-                double p_ghost = p_target + 0.5 * (p_pert_int + Z * un_int);
-                if (p_ghost < this->tait_water_params.p_cav) p_ghost = this->tait_water_params.p_cav;
+                double un_ghost;
+                double p_ghost;
+                if (un_int >= c_w) {
+                    un_ghost = un_int;
+                    p_ghost = (double)s.p;
+                } else if (un_int > 0.0) {
+                    // Subsonic water outflow: non-reflecting acoustic expansion into ambient reservoir
+                    un_ghost = un_int + ((double)s.p - p_target) / Z;
+                    p_ghost = p_target;
+                } else {
+                    un_ghost = 0.5 * (un_int + p_pert_int / Z);
+                    p_ghost = p_target + 0.5 * (p_pert_int + Z * un_int);
+                    if (p_ghost < this->tait_water_params.p_cav) p_ghost = this->tait_water_params.p_cav;
+                }
 
                 double rho_ghost = Blast::TaitEOSWater::compute_density_isentropic(
                     p_ghost, this->tait_water_params.B, this->tait_water_params.gamma,
@@ -1530,9 +1566,19 @@ public:
                 double Z = (double)s.rho * c_soil;
                 if (Z < 1.0e-3) Z = rho0_soil * c0_soil;
 
-                double un_ghost = 0.5 * (un_int + ((double)s.p - p_target) / Z);
-                double p_ghost = 0.5 * ((double)s.p + p_target + Z * un_int);
-                if (p_ghost < p_cav_soil) p_ghost = p_cav_soil;
+                double un_ghost;
+                double p_ghost;
+                if (un_int >= c_soil) {
+                    un_ghost = un_int;
+                    p_ghost = (double)s.p;
+                } else if (un_int > 0.0) {
+                    un_ghost = un_int + ((double)s.p - p_target) / Z;
+                    p_ghost = p_target;
+                } else {
+                    un_ghost = 0.5 * (un_int + ((double)s.p - p_target) / Z);
+                    p_ghost = 0.5 * ((double)s.p + p_target + Z * un_int);
+                    if (p_ghost < p_cav_soil) p_ghost = p_cav_soil;
+                }
 
                 double rho_ghost = Blast::TaitEOSWater::compute_density_isentropic(
                     p_ghost, B_soil, gamma_soil, rho0_soil, p0_soil);
@@ -1553,9 +1599,19 @@ public:
                 double Z = (double)s.rho * c_w;
                 if (Z < 1.0e-3) Z = 1.0e3 * 1482.0;
 
-                double un_ghost = 0.5 * (un_int + ((double)s.p - p_target) / Z);
-                double p_ghost = 0.5 * ((double)s.p + p_target + Z * un_int);
-                if (p_ghost < this->tait_water_params.p_cav) p_ghost = this->tait_water_params.p_cav;
+                double un_ghost;
+                double p_ghost;
+                if (un_int >= c_w) {
+                    un_ghost = un_int;
+                    p_ghost = (double)s.p;
+                } else if (un_int > 0.0) {
+                    un_ghost = un_int + ((double)s.p - p_target) / Z;
+                    p_ghost = p_target;
+                } else {
+                    un_ghost = 0.5 * (un_int + ((double)s.p - p_target) / Z);
+                    p_ghost = 0.5 * ((double)s.p + p_target + Z * un_int);
+                    if (p_ghost < this->tait_water_params.p_cav) p_ghost = this->tait_water_params.p_cav;
+                }
 
                 double rho_ghost = Blast::TaitEOSWater::compute_density_isentropic(
                     p_ghost, this->tait_water_params.B, this->tait_water_params.gamma,

@@ -1644,7 +1644,17 @@ export const MPM_MATERIAL_CATEGORIES: MPMCategoryGroup[] = [
             'Steel S460',
             'Steel 1006',
             'Steel 1020',
-            'Steel 4340',
+            'AISI 4150 Steel',
+            'AISI 4340 Steel',
+            'AISI 4340 (Penetrator Nose / 55-58 HRC)',
+            'AISI 4340 (Shell Base / 32-36 HRC)',
+            'AISI 4340 (Annealed)',
+            'AISI 4340 (Normalized)',
+            'AISI 4340 (Q&T 315°C / 48 HRC)',
+            'AISI 4340 (Q&T 425°C / 42 HRC)',
+            'AISI 4340 (Q&T 540°C / 36 HRC)',
+            'AISI 4340 (Q&T 650°C / 27 HRC)',
+            'Krupp E22 Steel',
             'Q1N (HY-80 Naval Steel)',
             'HY-100 Steel',
             'RHA (Rolled Homogeneous Armor)',
@@ -1943,12 +1953,185 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         T_melt: 1790.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         category: 'Structural & Military Steels', reference: 'ASM Metals Handbook Vol. 1'
     },
+    'AISI 4150 Steel': {
+        density: 7850.0, youngs_modulus: 207.0e9, poissons_ratio: 0.285, yield_stress: 850.0e6, hardening_modulus: 1.25e9, failure_strain: 0.18, tensile_failure_stress: 1100.0e6,
+        jc_A: 850.0e6, jc_B: 550.0e6, jc_n: 0.28, jc_C: 0.013, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1785.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'ASTM E8 / Tensile & Split-Hopkinson Pressure Bar (SHPB) Dynamic Calibration',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'MIL-S-11595 / ASTM A29 Cr-Mo Ordnance Steel / ARL-TR-4340'
+    },
+    'AISI 4150': {
+        density: 7850.0, youngs_modulus: 207.0e9, poissons_ratio: 0.285, yield_stress: 850.0e6, hardening_modulus: 1.25e9, failure_strain: 0.18, tensile_failure_stress: 1100.0e6,
+        jc_A: 850.0e6, jc_B: 550.0e6, jc_n: 0.28, jc_C: 0.013, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1785.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'ASTM E8 / Tensile & Split-Hopkinson Pressure Bar (SHPB) Dynamic Calibration',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'MIL-S-11595 / ASTM A29 Cr-Mo Ordnance Steel / ARL-TR-4340'
+    },
+    'AISI 4340 Steel': {
+        density: 7830.0, youngs_modulus: 207.0e9, poissons_ratio: 0.29, yield_stress: 792.0e6, hardening_modulus: 1.2e9, failure_strain: 0.25, tensile_failure_stress: 1000.0e6,
+        jc_A: 792.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'Split-Hopkinson Pressure Bar (SHPB), Taylor Anvil & Torsion Hopkinson Tests',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics / MIL-HDBK-5J'
+    },
+    'AISI 4340': {
+        density: 7830.0, youngs_modulus: 207.0e9, poissons_ratio: 0.29, yield_stress: 792.0e6, hardening_modulus: 1.2e9, failure_strain: 0.25, tensile_failure_stress: 1000.0e6,
+        jc_A: 792.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'Split-Hopkinson Pressure Bar (SHPB), Taylor Anvil & Torsion Hopkinson Tests',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics / MIL-HDBK-5J'
+    },
     'Steel 4340': {
         density: 7830.0, youngs_modulus: 207.0e9, poissons_ratio: 0.29, yield_stress: 792.0e6, hardening_modulus: 1.2e9, failure_strain: 0.25, tensile_failure_stress: 1000.0e6,
         jc_A: 792.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
-        category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics'
+        provenance: 'experimental',
+        test_method: 'Split-Hopkinson Pressure Bar (SHPB), Taylor Anvil & Torsion Hopkinson Tests',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics / MIL-HDBK-5J'
+    },
+    'AISI 4340 (Penetrator Nose / 55-58 HRC)': {
+        density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 1725.0e6, hardening_modulus: 1.8e9, failure_strain: 0.09, tensile_failure_stress: 2025.0e6,
+        jc_A: 1725.0e6, jc_B: 680.0e6, jc_n: 0.18, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.015, jc_d2: 1.50, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'ASTM E8 / High-Hardness Armor Penetrator Nose Specification (55-58 HRC)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'MIL-A-12560 / Børvik et al. / Projectile Nose Zone (55-58 HRC)'
+    },
+    'AISI 4340 (Shell Base / 32-36 HRC)': {
+        density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 900.0e6, hardening_modulus: 1.2e9, failure_strain: 0.165, tensile_failure_stress: 1075.0e6,
+        jc_A: 900.0e6, jc_B: 530.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.045, jc_d2: 3.20, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'ASTM E8 / Shell Core & Base High-Toughness Heat Treatment (32-36 HRC)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'MIL-HDBK-5J / Tempered Martensite High-Ductility Core & Base (32-36 HRC)'
+    },
+    'AISI 4340 (Annealed)': {
+        density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 470.0e6, hardening_modulus: 1.1e9, failure_strain: 0.22, tensile_failure_stress: 745.0e6,
+        jc_A: 470.0e6, jc_B: 480.0e6, jc_n: 0.32, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.07, jc_d2: 3.80, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'ASTM E8 / Spheroidize Annealed Tensile Test (815°C Furnace Cool)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'ASTM A29 / ASM Handbook Vol. 1 / Annealed (95 HRB / 217 HB)'
+    },
+    'AISI 4340 (Normalized)': {
+        density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 860.0e6, hardening_modulus: 1.4e9, failure_strain: 0.12, tensile_failure_stress: 1280.0e6,
+        jc_A: 860.0e6, jc_B: 580.0e6, jc_n: 0.24, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.035, jc_d2: 2.80, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'ASTM E8 / Air Cool Normalized from 870°C',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'MIL-HDBK-5J / Normalized Condition (38 HRC / 355 HB)'
+    },
+    'AISI 4340 (Q&T 315°C / 48 HRC)': {
+        density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 1520.0e6, hardening_modulus: 1.5e9, failure_strain: 0.10, tensile_failure_stress: 1750.0e6,
+        jc_A: 1520.0e6, jc_B: 620.0e6, jc_n: 0.20, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.02, jc_d2: 2.00, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'ASTM E8 / High-Strength Aircraft & Ordnance Temper (Oil Quenched & Tempered 315°C)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'MIL-S-5000 / MIL-HDBK-5J / 48 HRC High Strength'
+    },
+    'AISI 4340 (Q&T 425°C / 42 HRC)': {
+        density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 1320.0e6, hardening_modulus: 1.35e9, failure_strain: 0.12, tensile_failure_stress: 1450.0e6,
+        jc_A: 1320.0e6, jc_B: 570.0e6, jc_n: 0.22, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.03, jc_d2: 2.50, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'ASTM E8 / Intermediate Hardness Temper (Oil Quenched & Tempered 425°C)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'MIL-HDBK-5J / 42 HRC Medium-High Strength'
+    },
+    'AISI 4340 (Q&T 540°C / 36 HRC)': {
+        density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 1100.0e6, hardening_modulus: 1.25e9, failure_strain: 0.15, tensile_failure_stress: 1200.0e6,
+        jc_A: 1100.0e6, jc_B: 540.0e6, jc_n: 0.25, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.04, jc_d2: 3.00, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'ASTM E8 / Toughness Optimized Temper (Oil Quenched & Tempered 540°C)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'MIL-HDBK-5J / 36 HRC Fatigue & Shock Resistant'
+    },
+    'AISI 4340 (Q&T 650°C / 27 HRC)': {
+        density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 790.0e6, hardening_modulus: 1.15e9, failure_strain: 0.20, tensile_failure_stress: 950.0e6,
+        jc_A: 790.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'ASTM E8 / High-Ductility Maximum Energy Absorption Temper (650°C)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'MIL-HDBK-5J / 27 HRC High Ductility'
+    },
+    'Krupp E22 Steel': {
+        density: 7850.0, youngs_modulus: 208.0e9, poissons_ratio: 0.29, yield_stress: 820.0e6, hardening_modulus: 1.15e9, failure_strain: 0.18, tensile_failure_stress: 1000.0e6,
+        jc_A: 820.0e6, jc_B: 520.0e6, jc_n: 0.27, jc_C: 0.013, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'hybrid',
+        test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
+    },
+    'Krupp E22 Formula': {
+        density: 7850.0, youngs_modulus: 208.0e9, poissons_ratio: 0.29, yield_stress: 820.0e6, hardening_modulus: 1.15e9, failure_strain: 0.18, tensile_failure_stress: 1000.0e6,
+        jc_A: 820.0e6, jc_B: 520.0e6, jc_n: 0.27, jc_C: 0.013, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'hybrid',
+        test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
+    },
+    'Krupp E22': {
+        density: 7850.0, youngs_modulus: 208.0e9, poissons_ratio: 0.29, yield_stress: 820.0e6, hardening_modulus: 1.15e9, failure_strain: 0.18, tensile_failure_stress: 1000.0e6,
+        jc_A: 820.0e6, jc_B: 520.0e6, jc_n: 0.27, jc_C: 0.013, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'hybrid',
+        test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
+    },
+    'E22 Steel': {
+        density: 7850.0, youngs_modulus: 208.0e9, poissons_ratio: 0.29, yield_stress: 820.0e6, hardening_modulus: 1.15e9, failure_strain: 0.18, tensile_failure_stress: 1000.0e6,
+        jc_A: 820.0e6, jc_B: 520.0e6, jc_n: 0.27, jc_C: 0.013, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'hybrid',
+        test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
+    },
+    'E22': {
+        density: 7850.0, youngs_modulus: 208.0e9, poissons_ratio: 0.29, yield_stress: 820.0e6, hardening_modulus: 1.15e9, failure_strain: 0.18, tensile_failure_stress: 1000.0e6,
+        jc_A: 820.0e6, jc_B: 520.0e6, jc_n: 0.27, jc_C: 0.013, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'hybrid',
+        test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
     },
     'Q1N (HY-80 Naval Steel)': {
         density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 550.0e6, hardening_modulus: 1.1e9, failure_strain: 0.22, tensile_failure_stress: 700.0e6,
@@ -3633,11 +3816,14 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
                 'Structural Steel (A36)',
                 'Steel S275',
                 'Steel S355',
+                'AISI 4150 Steel',
+                'AISI 4340 Steel',
+                'Krupp E22 Steel',
                 'Aluminum 6061-T6 (Elastic)',
                 'Titanium Ti-6Al-4V (Elastic)',
                 'Structural Concrete C30 (Elastic)',
                 'Tempered Glass (Elastic)'
-            ].concat(getSolidPresets().filter(p => !['Structural Steel (A36)', 'Steel S275', 'Steel S355', 'Custom'].includes(p))).concat(['Custom']);
+            ].concat(getSolidPresets().filter(p => !['Structural Steel (A36)', 'Steel S275', 'Steel S355', 'AISI 4150 Steel', 'AISI 4340 Steel', 'Steel 4340', 'Krupp E22 Steel', 'Krupp E22 Formula', 'Custom'].includes(p))).concat(['Custom']);
 
         case 'Hypoelastic':
         case 'Johnson-Cook + Mie-Grüneisen':

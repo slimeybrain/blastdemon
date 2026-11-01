@@ -1056,11 +1056,14 @@ function requestAndPlotCurrentState(targetId?: string) {
             if (comp.type === 'TELEMETRY_3D' && comp.instance) {
                 if (latestFrame.sliceBuffer) {
                     comp.instance.pushFrame(latestFrame.sliceBuffer, latestFrame.modelId);
-                } else if (latestFrame.buffer && latestFrame.buffer !== latestFrame.mpmBuffer && latestFrame.buffer !== latestFrame.femBuffer) {
+                } else if (latestFrame.buffer && latestFrame.buffer !== latestFrame.mpmBuffer && latestFrame.buffer !== latestFrame.phaseParticlesBuffer && latestFrame.buffer !== latestFrame.femBuffer) {
                     comp.instance.pushFrame(latestFrame.buffer, latestFrame.modelId);
                 }
                 if (latestFrame.mpmBuffer) {
                     comp.instance.pushFrame(latestFrame.mpmBuffer, latestFrame.modelId);
+                }
+                if (latestFrame.phaseParticlesBuffer) {
+                    comp.instance.pushFrame(latestFrame.phaseParticlesBuffer, latestFrame.modelId);
                 }
                 if (latestFrame.femBuffer) {
                     comp.instance.pushFrame(latestFrame.femBuffer, latestFrame.modelId);
@@ -2760,9 +2763,13 @@ networkManager.onMessage(async (data) => {
                     }
 
                     if (dataJson.percent === 100) {
-                        stateManager.setModelStatus(modelId, 'PAUSED');
+                        if (dataJson.is_terminated === true) {
+                            stateManager.setModelStatus(modelId, 'TERMINATED');
+                        } else {
+                            stateManager.setModelStatus(modelId, 'PAUSED');
+                        }
                         autoRunInFlight.delete(modelId);
-                        // Auto-trigger remap for downstream pipeline 2D/3D model only on full execution completion!
+                        // Auto-trigger remap for downstream pipeline 2D/3D model on execution completion
                         const isExecAll = typeof dataJson.mode === 'string' && dataJson.mode.startsWith('EXEC_ALL');
                         if (isExecAll) {
                             const allModels = stateManager.getAllModels();
@@ -2826,8 +2833,7 @@ networkManager.onMessage(async (data) => {
                 } else if (dataJson.is_terminated === true) {
                     autoRunInFlight.delete(modelId);
                     const endtime = getEndTimeFromSolver(modelId);
-                    const currentProgress = stateManager.getModelProgress(modelId);
-                    if (currentProgress !== 100 && (endtime <= 0 || dataJson.time < endtime - 1e-12)) {
+                    if (endtime <= 0 || dataJson.time < endtime - 1e-12) {
                         stateManager.setModelStatus(modelId, 'TERMINATED');
                     } else {
                         stateManager.setModelStatus(modelId, 'PAUSED');

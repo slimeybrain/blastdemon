@@ -826,9 +826,10 @@ void CFDSolver2DImpl<RealType>::step(double dt) {
                     RealType det_x_r = (RealType)det_x;
                     RealType det_y_r = (RealType)det_y;
                     RealType det_z_r = (RealType)det_z;
+                    RealType det_start_time_r = (RealType)det_start_time;
                     RealType currentTime_r = (RealType)currentTime;
                     RealType dt_r = (RealType)dt;
-                    RealType dF = MultiMat::computeProgrammedBurn(currentTime_r, dt_r, r_c, (RealType)0.0, z_c, (RealType)currentMaterials.det_vel, (RealType)0.0, det_x_r, det_y_r, det_z_r, std::min((RealType)dr, (RealType)dz), (RealType)currentMaterials.products.rho0, tmp_alpha1, tmp_alpha2, tmp_arho1, tmp_arho2);
+                    RealType dF = MultiMat::computeProgrammedBurn(currentTime_r, dt_r, r_c, (RealType)0.0, z_c, (RealType)currentMaterials.det_vel, det_start_time_r, det_x_r, det_y_r, det_z_r, std::min((RealType)dr, (RealType)dz), (RealType)currentMaterials.products.rho0, tmp_alpha1, tmp_alpha2, tmp_arho1, tmp_arho2);
                     U_pool[pool_idx].alpha1[k] = tmp_alpha1;
                     U_pool[pool_idx].alpha2[k] = tmp_alpha2;
                     U_pool[pool_idx].arho1[k] = tmp_arho1;

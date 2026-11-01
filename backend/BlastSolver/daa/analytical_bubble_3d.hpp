@@ -25,6 +25,8 @@ struct alignas(64) GeersHunterBubble4DOF {
     double hull_distance{10.0}; // Distance to structural hull (m)
     bool enable_bjerknes{true};
 
+    double R_0{0.1};           // Initial explosive core radius (m)
+
     // Derived equilibrium properties
     double R_max{0.0};         // Rayleigh maximum bubble radius
     double T_period{0.0};      // Willis pulsation period
@@ -43,8 +45,9 @@ struct alignas(64) GeersHunterBubble4DOF {
         const double K2 = 3.50;
         R_max = (K2 * std::pow(W_charge, 1.0 / 3.0)) / std::pow(depth0 + 10.33, 1.0 / 3.0);
 
-        R = R_max * 0.15; // Initial core radius
-        R_dot = 200.0;    // Initial expansion shock velocity
+        R_0 = R_max * 0.15; // Initial core radius
+        R = R_0;
+        R_dot = 0.0;        // Natural unconstrained expansion from rest
         u_z = 0.0;
     }
 
@@ -57,7 +60,11 @@ struct alignas(64) GeersHunterBubble4DOF {
             dz = cur_uz;
 
             double P_inf = 101325.0 + rho_water * 9.81 * cur_z;
-            double P_gas = P_inf * std::pow(R_max / std::max(0.01, cur_R), 3.0 * gamma_gas);
+            // Physical energy-conserving gas expansion:
+            // E_bubble = P_inf * V_max = P_0 * V_0 / (gamma - 1)
+            // P_gas(R) = (gamma - 1) * P_inf * (R_max / R_0)^3 * (R_0 / R)^(3 * gamma)
+            double P_gas = (gamma_gas - 1.0) * P_inf * std::pow(R_max / R_0, 3.0) *
+                           std::pow(R_0 / std::max(0.005, cur_R), 3.0 * gamma_gas);
 
             // Geers-Hunter modified Keller-Miksis radial equation with acoustic radiation damping:
             // R * R_ddot * (1 - R_dot/c) + 1.5 * R_dot^2 * (1 - R_dot/(3*c)) = (1/rho) * (P_gas - P_inf) + (R / (rho*c)) * dP_gas/dt

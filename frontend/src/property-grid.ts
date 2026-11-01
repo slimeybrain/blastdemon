@@ -50,7 +50,8 @@ export const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
 };
 
 const NUMERIC_KEYS = new Set([
-    'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
+    'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature', 'initial_temperature',
+    'water_temperature', 'soil_temperature', 'air_temperature',
     'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
     'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'endtime',
     'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
@@ -88,7 +89,7 @@ const NUMERIC_KEYS = new Set([
     'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
     'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
     'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
-    'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
+    'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy',
     'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
     'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
@@ -100,7 +101,7 @@ const NUMERIC_KEYS = new Set([
     'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
     'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
     'initiation_radius', 'booster_overpressure',
-    'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
+    'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride', 'compression_level',
     'nonlocal_radius', 'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
     'aoRadius', 'aoIntensity', 'aoBias', 'opacity', 'rebarRadius', 'viewport_refresh_rate'
 ]);
@@ -760,15 +761,15 @@ export class PropertyGrid {
             })));
 
             // Contour Levels
-            const levels = slice.contour_levels !== undefined ? Number(slice.contour_levels) : 10;
-            contourTable.appendChild(this.createTableRow('Contour Levels', this.createSlider(2, 30, 1, levels, (val) => {
-                updateSlice({ contour_levels: val });
+            const levels = slice.contour_levels !== undefined ? Number(slice.contour_levels) : 0;
+            contourTable.appendChild(this.createTableRow('Contour Levels', this.createSlider(0, 32, 1, levels, (val) => {
+                updateSlice({ contour_levels: val, smooth_contours: val <= 1 });
             })));
 
             // Smooth Contours
-            const isSmooth = slice.smooth_contours === true;
+            const isSmooth = slice.smooth_contours !== false && levels <= 1;
             contourTable.appendChild(this.createTableRow('Smooth Contours', this.createCheckbox(isSmooth, (val) => {
-                updateSlice({ smooth_contours: val });
+                updateSlice({ smooth_contours: val, contour_levels: val ? 0 : (levels > 1 ? levels : 10) });
             })));
 
             // Show Vectors
@@ -2301,14 +2302,16 @@ export class PropertyGrid {
                 this.updateDisplayParam(node, 'mpmParticleShowColorbar', val);
             })));
 
-            const mpmLevels = p.mpmContourLevels !== undefined ? Number(p.mpmContourLevels) : 10;
+            const mpmLevels = p.mpmContourLevels !== undefined ? Number(p.mpmContourLevels) : 0;
             table.appendChild(this.createTableRow('Contour Levels (Bands)', this.createSlider(0, 32, 1, mpmLevels, (val) => {
                 this.updateDisplayParam(node, 'mpmContourLevels', val);
+                if (val <= 1) this.updateDisplayParam(node, 'mpmSmoothContours', true);
             })));
 
-            const mpmSmooth = p.mpmSmoothContours === true;
+            const mpmSmooth = p.mpmSmoothContours !== false && mpmLevels <= 1;
             table.appendChild(this.createTableRow('Smooth Contours', this.createCheckbox(mpmSmooth, (val) => {
                 this.updateDisplayParam(node, 'mpmSmoothContours', val);
+                if (val) this.updateDisplayParam(node, 'mpmContourLevels', 0);
             })));
 
             const state = this.stateManager.getCurrentState();
@@ -2429,14 +2432,16 @@ export class PropertyGrid {
                 this.updateDisplayParam(node, 'femShowColorbar', val);
             })));
 
-            const contourLevels = p.femContourLevels !== undefined ? Number(p.femContourLevels) : 10;
+            const contourLevels = p.femContourLevels !== undefined ? Number(p.femContourLevels) : 0;
             table.appendChild(this.createTableRow('Contour Levels (Bands)', this.createSlider(0, 32, 1, contourLevels, (val) => {
                 this.updateDisplayParam(node, 'femContourLevels', val);
+                if (val <= 1) this.updateDisplayParam(node, 'femSmoothContours', true);
             })));
 
-            const femSmooth = p.femSmoothContours === true;
+            const femSmooth = p.femSmoothContours !== false && contourLevels <= 1;
             table.appendChild(this.createTableRow('Smooth Contours', this.createCheckbox(femSmooth, (val) => {
                 this.updateDisplayParam(node, 'femSmoothContours', val);
+                if (val) this.updateDisplayParam(node, 'femContourLevels', 0);
             })));
 
             const state = this.stateManager.getCurrentState();
@@ -2495,14 +2500,16 @@ export class PropertyGrid {
                 this.updateDisplayParam(node, 'beamColormap', val);
             })));
 
-            const beamLevels = p.beamContourLevels !== undefined ? Number(p.beamContourLevels) : 10;
+            const beamLevels = p.beamContourLevels !== undefined ? Number(p.beamContourLevels) : 0;
             table.appendChild(this.createTableRow('Contour Levels (Bands)', this.createSlider(0, 32, 1, beamLevels, (val) => {
                 this.updateDisplayParam(node, 'beamContourLevels', val);
+                if (val <= 1) this.updateDisplayParam(node, 'beamSmoothContours', true);
             })));
 
-            const beamSmooth = p.beamSmoothContours === true;
+            const beamSmooth = p.beamSmoothContours !== false && beamLevels <= 1;
             table.appendChild(this.createTableRow('Smooth Contours', this.createCheckbox(beamSmooth, (val) => {
                 this.updateDisplayParam(node, 'beamSmoothContours', val);
+                if (val) this.updateDisplayParam(node, 'beamContourLevels', 0);
             })));
 
             visContent.appendChild(table);
@@ -3100,10 +3107,17 @@ export class PropertyGrid {
                 table.appendChild(this.createStatRow('Structural Elements in Model', `${totalFem.toLocaleString()} Hex8 elements`, '#4ade80'));
             }
 
+            const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+            const isHarbourModel = node.type === 'DomainMesh3D' && owningModel?.nodes.some((n: any) => n.type === 'MarineHarbourDomain' || n.parameters?.init_mode === 'Hydrostatic_Stratified_3D');
+
             for (const param of params) {
                 const widget = this.createWidgetForParam(node, param.key, param.value);
                 const info = getParameterInfo(param.key, node.type);
-                const labelText = info?.label || param.label || this.formatKeyToLabel(param.key);
+                let labelText = info?.label || param.label || this.formatKeyToLabel(param.key);
+                if (isHarbourModel) {
+                    if (param.key === 'bc_z_min') labelText = 'Z-Min Face Boundary [Deep Bedrock Base]';
+                    else if (param.key === 'bc_z_max') labelText = 'Z-Max Face Boundary [Atmospheric Sky]';
+                }
                 
                 const row = this.createTableRow(labelText, widget, param.key, node.type, info?.unit);
                 table.appendChild(row);
@@ -3987,7 +4001,10 @@ export class PropertyGrid {
             'gauge_quantity': ['pressure', 'velocity', 'peak_overpressure', 'status'],
             'refresh_rate': ['0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0', '2.0', '5.0', '10.0', '20.0', '50.0', '100.0', '1000.0'],
             'ascii_delimiter': ['Comma', 'Tab', 'Space'],
-            'vtk_format': ['ASCII', 'Binary', 'Compressed Binary'],
+            'vtk_format': ['Binary', 'XDMF + HDF5', 'ASCII'],
+            'compression_level': ['1', '3', '6', '9'],
+            'float_precision': ['12-bit Mantissa (~4 sig. digits)', '16-bit Mantissa (~5 sig. digits)', 'Full 23-bit Float32 (Lossless)'],
+            'mpm_topology': ['Individual Vertices', 'Single PolyVertex', 'Zero-Cell Point Cloud'],
             'voxelization_method': node.type === 'MPMObject3D' ? ['watertight_raycast', 'winding_number'] : ['watertight_floodfill', 'watertight_raycast', 'thin_shell', 'winding_number'],
             'origin_mode': node.type === 'FEMObject3D' ? ['Center', 'CAD Origin'] : ['CAD Origin', 'Center'],
             'colorbar_source': ['slice', 'mpm', 'obstacles', 'stl'],
@@ -4003,15 +4020,16 @@ export class PropertyGrid {
             'enable_dem_contact': ['Disabled', 'Enabled'],
             'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
             'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
-            'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
+            'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'Plate', 'STL', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'anisotropy_axis': ['X', 'Y', 'Z', 'Custom'],
-            'mesh_source': ['Primitive', 'LS-DYNA Importer (*.k)', 'Box Generator'],
+            'mesh_source': ['Box Generator', 'Cylinder Generator', 'Plate Generator', 'STL File', 'LS-DYNA Keyword File'],
+            'element_topology': ['Hex8', 'Tet4_ANP'],
             'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
                 ['Leapfrog', 'RK2', 'USL', 'USF'] : 
                 ['MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)'],
             'undex_coupling_method': ['ZonalHybrid MPM FV FEM', 'Eulerian Multimaterial FSI', 'One-Way Acoustic Impedance', 'LocalCurvedDAA', 'HighFidelityCFD', 'ZonalHybrid_MPM_FV_FEM'],
             'seabed_mesh_type': ['Pure_FV', 'Hybrid_MPM_Crater_FEM_FarField', 'Full_Domain_MPM', 'Local_Crater_MPM', 'Pure_Hex8_FEM', 'Pure_MPM', 'Rigid Acoustic Boundary'],
-            'water_discretization_mode': ['Pure_FV', 'Spherical_MPM_Sleeve', 'Full_Column_MPM_Cylinder'],
+            'water_discretization_mode': ['Pure_FV', 'LPTP_Phase_Tracking_Sleeve', 'Full_Column_LPTP_Cylinder'],
             'detonator_source': ['Connected Detonator Node', 'Internal Coordinates'],
             'font_size': ['8', '9', '10', '11', '12', '13', '14', '15', '16', '18', '20', '22'],
             'stream_layout': ['Live Page (In-Place)', 'Multi-Line Cards', 'Dual-Deck (Page + Log)', 'Columnar (Fixed-Width)', 'Ultra-Compact', 'Standard Log'],
@@ -4972,13 +4990,41 @@ export class PropertyGrid {
                     }
                 }
             }
-        } else if (node.type === 'Material' && (key === 'atm_pressure' || key === 'atm_temperature')) {
+        } else if (node.type === 'Material' && (key === 'atm_pressure' || key === 'atm_temperature' || key === 'initial_temperature')) {
             const p = Number(key === 'atm_pressure' ? value : (node.parameters['atm_pressure'] ?? 101325.0));
-            const t = Number(key === 'atm_temperature' ? value : (node.parameters['atm_temperature'] ?? 288.15));
-            const rho = p / (287.058 * t);
-            updates['density'] = rho;
-            updates['ambient_rho'] = rho;
-            updates['ambient_p'] = p;
+            const t = Number((key === 'atm_temperature' || key === 'initial_temperature') ? value : (node.parameters['initial_temperature'] ?? node.parameters['atm_temperature'] ?? 288.15));
+            updates['initial_temperature'] = t;
+            updates['atm_temperature'] = t;
+            if (node.parameters['material_model'] === 'Ideal Gas' || node.parameters['material_type'] === 'Air') {
+                const rho = p / (287.058 * t);
+                updates['density'] = rho;
+                updates['ambient_rho'] = rho;
+                updates['ambient_p'] = p;
+            } else if (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge') {
+                const gamma = Number(node.parameters['ideal_gamma'] ?? 1.4);
+                const cv = 287.058 / Math.max(0.01, gamma - 1.0);
+                const e0 = cv * t;
+                updates['ideal_e_0'] = e0;
+                updates['detonation_energy'] = e0;
+            } else {
+                updates['T_room'] = t;
+                if (node.parameters['davis_t0'] !== undefined) updates['davis_t0'] = t;
+            }
+            updates['preset'] = 'Custom';
+        } else if (node.type === 'Material' && (key === 'ideal_e_0' || key === 'detonation_energy') && (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge')) {
+            const e0 = Number(value);
+            const gamma = Number(node.parameters['ideal_gamma'] ?? 1.4);
+            const cv = 287.058 / Math.max(0.01, gamma - 1.0);
+            const t = e0 / cv;
+            updates['ideal_e_0'] = e0;
+            updates['detonation_energy'] = e0;
+            updates['initial_temperature'] = t;
+            updates['preset'] = 'Custom';
+        } else if (node.type === 'Material' && key === 'ideal_gamma' && (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge')) {
+            const gamma = Number(value);
+            const cv = 287.058 / Math.max(0.01, gamma - 1.0);
+            const e0 = Number(node.parameters['ideal_e_0'] ?? 4.29e6);
+            updates['initial_temperature'] = e0 / cv;
             updates['preset'] = 'Custom';
         } else if (node.type === 'Material' && key === 'density' && node.parameters['material_model'] === 'Ideal Gas') {
             updates['ambient_rho'] = Number(value);
@@ -5072,9 +5118,11 @@ export class PropertyGrid {
             }
         } else if (node.type === 'FEMObject3D' && (key === 'shape_type' || key === 'mesh_source')) {
             if (key === 'shape_type') {
-                updates['mesh_source'] = value === 'Cylinder' ? 'Cylinder Generator' : (value === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator');
+                updates['mesh_source'] = value === 'Cylinder' ? 'Cylinder Generator' : (value === 'STL' ? 'STL File' : (value === 'Plate' ? 'Plate Generator' : (value === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')));
+                if (value === 'STL') updates['element_topology'] = 'Tet4_ANP';
             } else if (key === 'mesh_source') {
-                updates['shape_type'] = value === 'Cylinder Generator' ? 'Cylinder' : (value === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box');
+                updates['shape_type'] = value === 'Cylinder Generator' ? 'Cylinder' : (value === 'STL File' ? 'STL' : (value === 'Plate Generator' ? 'Plate' : (value === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
+                if (value === 'STL File') updates['element_topology'] = 'Tet4_ANP';
             }
         } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && value === 'STL') || (key === 'origin_mode' && value === 'CAD Origin'))) {
             if (key === 'shape_type' && value === 'STL') {
@@ -5318,17 +5366,17 @@ export class PropertyGrid {
             const matModel = node.parameters['material_model'] || 'Hypoelastic';
 
             if (matModel === 'Ideal Gas') {
-                return ['ambient_air_target', 'material_model', 'preset', 'density', 'atm_pressure', 'atm_temperature', 'gamma'];
+                return ['ambient_air_target', 'material_model', 'preset', 'density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma'];
             } else if (matModel === 'JWL Detonation Gas') {
                 return [
-                    'material_model', 'preset', 'composition', 'rho', 'detonation_energy', 'det_vel',
+                    'material_model', 'preset', 'composition', 'rho', 'detonation_energy', 'det_vel', 'initial_temperature',
                     'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
                     'afterburn_enabled', 'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
                     'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
                     'afterburn_ambient_o2_fraction'
                 ];
             } else if (matModel === 'Ideal Gas Charge') {
-                return ['material_model', 'preset', 'composition', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma'];
+                return ['material_model', 'preset', 'composition', 'ideal_rho_0', 'ideal_e_0', 'initial_temperature', 'ideal_gamma'];
             }
 
             if (!node.parameters['material_model']) {
@@ -5499,12 +5547,13 @@ export class PropertyGrid {
 
         if (node.type === 'Charge1D' || node.type === 'Charge2D' || node.type === 'Charge3D') {
             const shape = node.parameters['charge_shape'] || 'Sphere';
+            const extraKeys = (node.type === 'Charge3D') ? ['ppc'] : [];
             if (shape === 'Sphere') {
-                return ['target_domain', 'material', 'charge_mass', 'charge_shape', 'charge_x', 'charge_y', 'charge_z', 'charge_r', 'charge_radius', 'charge_opacity'].filter(k => k in node.parameters || k === 'material' || k === 'target_domain');
+                return ['target_domain', 'material', 'charge_mass', 'charge_shape', ...extraKeys, 'charge_x', 'charge_y', 'charge_z', 'charge_r', 'charge_radius', 'charge_opacity'].filter(k => k in node.parameters || k === 'material' || k === 'target_domain');
             } else if (shape === 'Cylinder') {
-                return ['target_domain', 'material', 'charge_mass', 'charge_shape', 'charge_x', 'charge_y', 'charge_z', 'charge_r', 'charge_radius', 'charge_height', 'charge_aspect_ratio', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z', 'charge_opacity'].filter(k => k in node.parameters || k === 'material' || k === 'target_domain');
+                return ['target_domain', 'material', 'charge_mass', 'charge_shape', ...extraKeys, 'charge_x', 'charge_y', 'charge_z', 'charge_r', 'charge_radius', 'charge_height', 'charge_aspect_ratio', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z', 'charge_opacity'].filter(k => k in node.parameters || k === 'material' || k === 'target_domain');
             } else if (shape === 'Block') {
-                return ['target_domain', 'material', 'charge_mass', 'charge_shape', 'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z', 'charge_opacity'].filter(k => k in node.parameters || k === 'material' || k === 'target_domain');
+                return ['target_domain', 'material', 'charge_mass', 'charge_shape', ...extraKeys, 'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z', 'charge_opacity'].filter(k => k in node.parameters || k === 'material' || k === 'target_domain');
             }
         }
 
@@ -5566,6 +5615,7 @@ export class PropertyGrid {
             return [
                 'device', 'precision', 'cfl', 'endtime',
                 'enable_directional_crack_band', 'enable_nonlocal_damage',
+                'enable_cohesive_splitting', 'cohesive_fracture_energy',
                 'enable_heterogeneity', 'material_heterogeneity',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
                 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed',
@@ -5577,10 +5627,12 @@ export class PropertyGrid {
 
         if (node.type === 'FEMObject3D') {
             const shape = node.parameters['shape_type'] || 'Box';
-            if (shape === 'Box') {
-                return ['shape_type', 'origin_mode', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'].filter(k => k in node.parameters || k === 'origin_mode');
+            if (shape === 'Box' || shape === 'Plate') {
+                return ['shape_type', 'element_topology', 'origin_mode', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'].filter(k => k in node.parameters || k === 'origin_mode' || k === 'element_topology');
             } else if (shape === 'Cylinder') {
-                return ['shape_type', 'origin_mode', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'].filter(k => k in node.parameters || k === 'origin_mode');
+                return ['shape_type', 'element_topology', 'origin_mode', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'].filter(k => k in node.parameters || k === 'origin_mode' || k === 'element_topology');
+            } else if (shape === 'STL') {
+                return ['shape_type', 'element_topology', 'stl_file', 'origin_mode', 'boundary_condition', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z'].filter(k => k in node.parameters || k === 'origin_mode' || k === 'element_topology');
             } else {
                 return ['shape_type', 'boundary_condition', 'k_file', 'scale_factor', 'pos_x', 'pos_y', 'pos_z', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'].filter(k => k in node.parameters);
             }
@@ -5613,9 +5665,9 @@ export class PropertyGrid {
         if (node.type === 'DetonatorLocation' || node.type === 'DetonatorLocation3D' || node.type === 'TriggerLocation' || node.type === 'TriggerLocation3D') {
             const is3D = node.type === 'DetonatorLocation3D' || node.type === 'TriggerLocation3D';
             const keys = is3D
-                ? ['target_domain', 'detonator_x', 'detonator_y', 'detonator_z', 'detonator_radius', 'detonator_time']
-                : ['target_domain', 'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_time'];
-            return keys.filter(k => k in node.parameters || k === 'target_domain' || k === 'detonator_radius');
+                ? ['target_domain', 'detonator_x', 'detonator_y', 'detonator_z', 'detonator_radius', 'time_delay', 'track_mpm_velocity', 'detonator_time']
+                : ['target_domain', 'detonator_r', 'detonator_z', 'detonator_radius', 'time_delay', 'track_mpm_velocity', 'detonator_time'];
+            return keys.filter(k => k in node.parameters || k === 'target_domain' || k === 'detonator_radius' || k === 'time_delay' || k === 'track_mpm_velocity');
         }
 
         if (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode') {
@@ -5657,7 +5709,7 @@ export class PropertyGrid {
             const hasObstacles = state ? state.nodes.some(n => n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D') : true;
 
             const keys: string[] = [
-                'trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'custom_filename', 'vtk_dir', 'export_pvd'
+                'trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'compression_level', 'float_precision', 'mpm_topology', 'custom_filename', 'vtk_dir', 'export_pvd'
             ];
             if (!is3D) {
                 keys.push('export_cfd_2d');
@@ -5684,7 +5736,7 @@ export class PropertyGrid {
                 keys.push('qty_fem_stress', 'qty_fem_strain', 'qty_fem_pressure', 'qty_fem_temp', 'qty_fem_damage', 'qty_fem_vel', 'qty_fem_disp');
             }
             if (hasMpm) {
-                keys.push('qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_temp', 'qty_mpm_vel', 'qty_mpm_disp');
+                keys.push('qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id', 'qty_mpm_temp', 'qty_mpm_vel');
             }
             return keys.filter(k => k in node.parameters);
         }
@@ -5861,7 +5913,7 @@ export class PropertyGrid {
                 ]);
 
                 addGroup('mat_solid', `Pillar 1: Solid Reactant EOS [${solidShort}]`, [
-                    'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress',
+                    'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'initial_temperature',
                     'mg_c0', 'mg_s', 'mg_gamma0',
                     'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0'
                 ]);
@@ -5890,7 +5942,7 @@ export class PropertyGrid {
                 addGroup('mat_ambient', 'Atmospheric & Ambient EOS', [
                     'ambient_air_target',
                     'material_model', 'preset',
-                    'density', 'atm_pressure', 'atm_temperature', 'gamma'
+                    'density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma'
                 ]);
                 return groups;
             }
@@ -5898,7 +5950,7 @@ export class PropertyGrid {
             if (matModel === 'JWL Detonation Gas') {
                 addGroup('mat_jwl', 'High-Explosive & JWL EOS', [
                     'material_model', 'preset',
-                    'composition', 'rho', 'detonation_energy', 'det_vel',
+                    'composition', 'rho', 'detonation_energy', 'det_vel', 'initial_temperature',
                     'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'
                 ]);
                 addGroup('mat_afterburn', 'Afterburn & Aerobic Combustion [FV Only]', [
@@ -5912,7 +5964,7 @@ export class PropertyGrid {
             if (matModel === 'Ideal Gas Charge') {
                 addGroup('mat_idealgas', 'Ideal Gas Blast EOS', [
                     'material_model', 'preset',
-                    'composition', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma'
+                    'composition', 'ideal_rho_0', 'ideal_e_0', 'initial_temperature', 'ideal_gamma'
                 ]);
                 return groups;
             }
@@ -5932,7 +5984,7 @@ export class PropertyGrid {
             if (matModel === 'Johnson-Cook + Mie-Grüneisen' || matModel === 'Johnson-Cook') {
                 addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
                 addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
-                addGroup('mat_jc_plasticity', 'Johnson-Cook Viscoplasticity', ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp']);
+                addGroup('mat_jc_plasticity', 'Johnson-Cook Viscoplasticity', ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'initial_temperature', 'Cp']);
                 addGroup('mat_jc_damage', 'Failure & Spall Fracture', ['failure_strain', 'tensile_failure_stress', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5']);
                 addGroup('mat_shock_eos', 'Mie-Grüneisen Shock EOS', ['mg_gamma0', 'mg_c0', 'mg_s']);
                 if (visibleKeys.some(k => k.includes('erosion'))) {
@@ -6014,8 +6066,9 @@ export class PropertyGrid {
                 'enable_heterogeneity', 'material_heterogeneity',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ]);
-            addGroup('fem_damage', 'Damage & Debris', [
+            addGroup('fem_damage', 'Damage, Cohesive Splitting & Debris', [
                 'enable_directional_crack_band', 'enable_nonlocal_damage',
+                'enable_cohesive_splitting', 'cohesive_fracture_energy',
                 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed',
                 'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element'
             ]);
@@ -6025,7 +6078,7 @@ export class PropertyGrid {
         }
 
         if (node.type === 'FEMObject3D') {
-            addGroup('fem_geom', 'Geometry & Mesh Discretization', ['shape_type', 'origin_mode', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'k_file', 'scale_factor']);
+            addGroup('fem_geom', 'Geometry & Mesh Discretization', ['shape_type', 'element_topology', 'origin_mode', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'k_file', 'scale_factor']);
             addGroup('fem_bc', 'Boundary Conditions & Kinematics', ['boundary_condition', 'vel_x', 'vel_y', 'vel_z']);
             addGroup('fem_visco', 'Viscosity & Time Step Control', ['bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
@@ -6059,8 +6112,9 @@ export class PropertyGrid {
             ]);
             addGroup('mesh_bc', 'Boundary Conditions', [
                 'left_bc', 'right_bc',
-                'bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max', 'bc_z_min', 'bc_z_max',
-                'bc_r_min', 'bc_r_max', 'bc_z_min', 'bc_z_max',
+                'bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max',
+                'bc_r_min', 'bc_r_max',
+                'bc_z_min', 'bc_z_max',
                 'x_min_bc', 'x_max_bc', 'y_min_bc', 'y_max_bc', 'z_min_bc', 'z_max_bc'
             ]);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
@@ -6093,6 +6147,9 @@ export class PropertyGrid {
             addGroup('charge_pipeline', 'Pipeline Connections & Target Domain', ['target_domain', 'material']);
             addGroup('charge_mat', 'Explosive Material & EOS', ['material']);
             addGroup('charge_mass_shape', 'Explosive Mass & Charge Shape', ['charge_mass', 'charge_shape']);
+            if (node.type === 'Charge3D') {
+                addGroup('charge_discretization', 'Phase Tracking & Particle Discretization', ['ppc']);
+            }
             addGroup('charge_geom', 'Spatial Placement & Dimensions', ['charge_x', 'charge_y', 'charge_z', 'charge_r', 'charge_radius', 'charge_height', 'charge_aspect_ratio', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z']);
             addGroup('charge_display', 'Display Properties', ['charge_opacity']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
@@ -6116,7 +6173,8 @@ export class PropertyGrid {
                 ? ['detonator_x', 'detonator_y', 'detonator_z', 'detonator_radius']
                 : ['detonator_r', 'detonator_z', 'detonator_radius'];
             addGroup('det_geom', 'Detonator Geometry & Position', geomKeys);
-            addGroup('det_timing', 'Initiation Timing', ['detonator_time']);
+            addGroup('det_timing', 'Initiation Timing', ['time_delay', 'detonator_time']);
+            addGroup('det_kinematics', 'Kinematics & Tracking', ['track_mpm_velocity']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
             return groups;
@@ -6132,11 +6190,11 @@ export class PropertyGrid {
         }
 
         if (node.type === 'VTKOutput') {
-            addGroup('vtk_format', 'Output Triggers & Formats', ['trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'custom_filename', 'vtk_dir', 'export_pvd', 'compression_level']);
+            addGroup('vtk_format', 'Output Triggers & Formats', ['trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'compression_level', 'float_precision', 'mpm_topology', 'custom_filename', 'vtk_dir', 'export_pvd']);
             addGroup('vtk_domains', 'Physics Domains & Strides', ['export_cfd_2d', 'export_slices', 'export_volumes', 'export_obstacles', 'export_stl_faces', 'stl_outside_domain', 'tessellate_stl_faces', 'tessellation_max_edge', 'export_fem', 'export_mpm', 'volume_stride', 'slice_stride', 'roi_enabled', 'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'downsample_stride', 'fields']);
             addGroup('vtk_cfd_qty', 'CFD Eulerian Fluid Fields', ['qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_overpressure', 'qty_impulse', 'qty_temperature', 'qty_afterburn_rate', 'qty_fuel_density']);
             addGroup('vtk_fem_qty', 'Solid FEM Structural Fields', ['qty_fem_stress', 'qty_fem_strain', 'qty_fem_pressure', 'qty_fem_temp', 'qty_fem_damage', 'qty_fem_vel', 'qty_fem_disp']);
-            addGroup('vtk_mpm_qty', 'Solid MPM Particle Fields', ['qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_temp', 'qty_mpm_vel', 'qty_mpm_disp']);
+            addGroup('vtk_mpm_qty', 'Solid MPM Particle Fields', ['qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id', 'qty_mpm_temp', 'qty_mpm_vel']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
             return groups;
@@ -6221,8 +6279,20 @@ export class PropertyGrid {
             }
         }
 
+        const targetNode = state.nodes.find(n => n.id === nodeId);
+        if (targetNode) {
+            if (!targetNode.parameters) targetNode.parameters = {};
+            targetNode.parameters['material'] = matId;
+        }
+        this.stateManager.updateNodeParametersInPlace(nodeId, { material: matId });
+
         const targetModel = this.stateManager.getModelForNode(nodeId) || this.stateManager.getActiveModel();
         if (targetModel) {
+            const modelNode = targetModel.nodes.find(n => n.id === nodeId);
+            if (modelNode) {
+                if (!modelNode.parameters) modelNode.parameters = {};
+                modelNode.parameters['material'] = matId;
+            }
             this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
         }
         this.stateManager.pushState(state);
@@ -7750,10 +7820,19 @@ export class PropertyGrid {
                 }
             } else {
                 // Solid material: show bound solid objects
-                const boundObjects = candidateNodes.filter((n: Node) =>
-                    state?.connections.some((c: any) => (c.fromNode === node.id || c.toNode === node.id) && (c.toPort === 'material' || c.fromPort === 'material' || c.toPort === 'seabed' || c.fromPort === 'seabed') && (c.toNode === n.id || c.fromNode === n.id)) ||
-                    n.parameters?.material === node.id || n.parameters?.seabed_foundation === node.id
-                );
+                const validSolidTargetTypes = ['MPMObject2D', 'MPMObject3D', 'FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D', 'RigidBody3D', 'MarineHarbourDomain', 'CFDSolver3D'];
+                const boundObjects = candidateNodes.filter((n: Node) => {
+                    if (!validSolidTargetTypes.includes(n.type)) return false;
+                    const matConn = state?.connections.find((c: any) =>
+                        (c.fromNode === n.id || c.toNode === n.id) &&
+                        (c.toPort === 'material' || c.fromPort === 'material' || c.toPort === 'mat' || c.fromPort === 'mat' || c.toPort === 'seabed' || c.fromPort === 'seabed')
+                    );
+                    if (matConn) {
+                        const connMatId = matConn.toNode === n.id ? matConn.fromNode : matConn.toNode;
+                        return connMatId === node.id;
+                    }
+                    return n.parameters?.material === node.id || (n.parameters?.seabed_foundation === node.id && (n.type === 'MarineHarbourDomain' || n.type === 'CFDSolver3D'));
+                });
                 if (boundObjects.length > 0) {
                     table.appendChild(this.createStatRow('Assigned Solid / Foundation Objects', `${boundObjects.length} object(s): ${boundObjects.map(o => (o as any).name || o.parameters?.name || o.type).join(', ')}`, '#4ade80'));
                 } else {

@@ -3,6 +3,7 @@
 #include "vv_l2_canonical_benchmarks.hpp"
 #include "vv_l3_component_tests.hpp"
 #include "vv_l4_full_scale_systems.hpp"
+#include "vv_mpm_compact_contact.hpp"
 #include <iostream>
 #include <vector>
 #include <iomanip>
@@ -25,6 +26,11 @@ int main(int argc, char** argv) {
     std::cout << "[RUNNING] Level 2: Canonical Mesoscale Benchmarks...\n";
     auto l2 = Blast::VV::run_level_2_benchmarks();
     all_results.insert(all_results.end(), l2.begin(), l2.end());
+
+    // Level 2 (GPU MPM): compact vs dense Bardenhagen multi-material storage parity
+    std::cout << "[RUNNING] Level 2: GPU MPM compact multi-material storage parity...\n";
+    auto l2_cmp = Blast::VV::run_mpm_compact_contact_benchmarks();
+    all_results.insert(all_results.end(), l2_cmp.begin(), l2_cmp.end());
 
     // Run Level 3
     std::cout << "[RUNNING] Level 3: Component & Subsystem Impact/Blast Tests...\n";

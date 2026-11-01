@@ -306,6 +306,15 @@ enum class MPMTimeIntegrationScheme {
     RK2       // Midpoint RK2
 };
 
+enum class MPMBoundaryCondition2D {
+    Sticky = 0,        // No-slip (v = 0)
+    FreeSlip = 1,      // Normal velocity v_n = 0, tangential free
+    Reflecting = 2,    // Symmetric velocity reflection
+    Terminate = 3,     // Terminate simulation when particles cross boundary
+    LysmerDashpot = 4, // Lysmer-Kuhlemeyer viscous absorbing boundary
+    Transmitting = 5   // Free outflow: particles pass out of domain and stop being processed
+};
+
 class MPMSolver2D {
 public:
     MPMSolver2D();
@@ -319,6 +328,13 @@ public:
     void setSmoothPlasticStrain(bool smooth) { m_smooth_plastic_strain = smooth; }
     bool getSmoothPlasticStrain() const { return m_smooth_plastic_strain; }
     void setFlipBlend(float blend) { m_flip_blend = std::clamp(blend, 0.0f, 1.0f); }
+    void setBoundaryConditions(MPMBoundaryCondition2D x_min, MPMBoundaryCondition2D x_max,
+                               MPMBoundaryCondition2D y_min, MPMBoundaryCondition2D y_max) {
+        m_bc_x_min = x_min; m_bc_x_max = x_max;
+        m_bc_y_min = y_min; m_bc_y_max = y_max;
+    }
+    bool is_terminated() const { return m_terminated; }
+    void resetTermination() { m_terminated = false; }
 
     // Object Adders (Primitives)
     void addRectangleObject(int obj_id, float pos_x, float pos_y, float size_x, float size_y,
@@ -391,6 +407,11 @@ private:
     float m_flip_blend{0.95f};
     bool m_smooth_plastic_strain{true};
 
+    MPMBoundaryCondition2D m_bc_x_min{MPMBoundaryCondition2D::Sticky};
+    MPMBoundaryCondition2D m_bc_x_max{MPMBoundaryCondition2D::Sticky};
+    MPMBoundaryCondition2D m_bc_y_min{MPMBoundaryCondition2D::Sticky};
+    MPMBoundaryCondition2D m_bc_y_max{MPMBoundaryCondition2D::Sticky};
+
     std::vector<MPMGridNode2D> m_grid;
     std::vector<MPMParticle2D> m_particles;
 
@@ -399,6 +420,7 @@ private:
     mutable float m_last_v_max{0.0f};
     double m_sim_time{0.0};
     int m_step_count{0};
+    bool m_terminated{false};
 };
 
 } // namespace Blast

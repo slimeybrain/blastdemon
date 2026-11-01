@@ -33,8 +33,8 @@ int main(int argc, char** argv) {
     solver.setVelocityScheme(MPMVelocityScheme::APIC);
     solver.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
 
-    std::string path_exp = "/media/chris/D288B0E688B0CA6D/Users/chris/Downloads/sc1_charge.stl";
-    std::string path_liner = "/media/chris/D288B0E688B0CA6D/Users/chris/Downloads/sc1_liner.stl";
+    std::string path_exp = "/home/chris/blastdemon_tests/sc1/sc2_charge.stl";
+    std::string path_liner = "/home/chris/blastdemon_tests/sc1/sc2_liner.stl";
 
     std::cout << "Adding Object 1: Explosive..." << std::endl;
     solver.addSTLObject(1, path_exp, 0, 0, 0, 1.0f, 1.0f, 1.0f, 0,0,0, 0,0,0, 1630.0f, 4.5e9f, 0.38f, 15.0e6f, 100.0e6f, 0.15f, 4.0e6f, 8, MPMParticleDistribution::Hexagonal, MPMBoundaryFilling::Partial, "watertight_raycast", 0,0,0, "CAD Origin");
@@ -55,6 +55,9 @@ int main(int argc, char** argv) {
 
     // Object 1: Explosive CREST Reactive Burn
     mat_tables[1].material_model = MPMMaterialModel::CRESTReactiveBurn;
+    mat_tables[1].burn_model = ReactionKinetics::CRESTEntropy;
+    mat_tables[1].solid_model = SolidReactantEOS::DavisSolid;
+    mat_tables[1].product_model = DetonationProductEOS::DavisProduct;
     mat_tables[1].density = 1630.0f;
     mat_tables[1].davis_c0 = 2050.0f; mat_tables[1].davis_s1 = 2.12f; mat_tables[1].davis_gamma0 = 0.65f; mat_tables[1].davis_cv = 1000.0f; mat_tables[1].davis_t0 = 293.0f; mat_tables[1].davis_rho0 = 1895.0f;
     mat_tables[1].davis_a = 2.85f; mat_tables[1].davis_b = 1.10f; mat_tables[1].davis_k = 1.35f; mat_tables[1].davis_vc = 0.65f; mat_tables[1].davis_pc = 12.5e9f; mat_tables[1].davis_q_det = 3.90e6f;
@@ -140,6 +143,16 @@ int main(int argc, char** argv) {
                     liner_max_z = std::max(liner_max_z, p.x[2]);
                 }
             }
+            int num_reacted = 0;
+            float max_lambda = 0.0f;
+            float max_s_shock = 0.0f;
+            for (const auto& p : all_p) {
+                if (p.object_id == 1) {
+                    if (p.lambda > 0.1f) num_reacted++;
+                    max_lambda = std::max(max_lambda, p.lambda);
+                    max_s_shock = std::max(max_s_shock, p.s_shock);
+                }
+            }
             if (n1 > 0) v1_avg /= n1;
             if (n2 > 0) v2_avg /= n2;
 
@@ -164,7 +177,7 @@ int main(int argc, char** argv) {
             }
 
             std::cout << "  Time " << std::fixed << std::setprecision(2) << (cur_t * 1e6f) << " us (Step " << step_num << ")"
-                      << " | Exp vMax=" << std::setprecision(1) << v1_max << " vAvg=" << v1_avg
+                      << " | Exp vMax=" << std::setprecision(1) << v1_max << " vAvg=" << v1_avg << " Reacted=" << num_reacted << "/" << n1 << " LamMax=" << max_lambda << " SMax=" << max_s_shock
                       << " | Liner vMax=" << v2_max << " vAvg=" << v2_avg << " Z=[" << std::setprecision(4) << liner_min_z << ", " << liner_max_z << "]"
                       << " | GasPastApex=" << gas_past_liner_apex << " GasPastFront=" << gas_past_liner_front << std::endl;
 

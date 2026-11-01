@@ -22,6 +22,12 @@ enum class MPMDEMContactMode : int {
     AllDynamic = 2
 };
 
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#define HD_MPM_FUNC __host__ __device__
+#else
+#define HD_MPM_FUNC
+#endif
+
 enum class MPMContactMethod : int {
     SingleVelocity = 0,
     SubGridDEM = 1,
@@ -146,6 +152,7 @@ struct MaterialTable3D {
     float det_vel{6930.0f};              // Detonation velocity D_cj (m/s)
     float detonation_energy{4.29e6f};    // Detonation chemical energy release e0 (J/kg)
     int   burn_zone_cells{4};            // Smeared burn zone cell width N_cells
+    float cell_dx{0.0f};                 // Background grid cell size dx for smeared burn zone
     float tau_burn_min{1.0e-7f};         // Minimum burn duration limiter (s)
 
     // Lee-Tarver Ignition & Growth Parameters
@@ -240,13 +247,22 @@ struct MaterialTable3D {
     float dp_dilatancy_angle{0.0f};      // Dilatancy angle psi (degrees)
     float dp_tensile_cutoff{10.0e3f};    // Tensile stress cutoff (Pa)
     float dp_hardening_modulus{0.0f};    // Plastic hardening modulus H (Pa)
-};
 
-#if defined(__CUDACC__) || defined(__HIPCC__)
-#define HD_MPM_FUNC __host__ __device__
-#else
-#define HD_MPM_FUNC
-#endif
+    HD_MPM_FUNC void synchronizePillars() {
+        if (material_model == MPMMaterialModel::CRESTReactiveBurn) {
+            if (burn_model == ReactionKinetics::ProgrammedBurn) burn_model = ReactionKinetics::CRESTEntropy;
+            if (solid_model == SolidReactantEOS::MieGruneisen) solid_model = SolidReactantEOS::DavisSolid;
+            if (product_model == DetonationProductEOS::JWLProductGas) product_model = DetonationProductEOS::DavisProduct;
+        } else if (material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
+            if (burn_model == ReactionKinetics::ProgrammedBurn) burn_model = ReactionKinetics::LeeTarverODE;
+            if (solid_model == SolidReactantEOS::DavisSolid) solid_model = SolidReactantEOS::MieGruneisen;
+            if (product_model == DetonationProductEOS::DavisProduct) product_model = DetonationProductEOS::JWLProductGas;
+        } else if (material_model == MPMMaterialModel::JWLProgrammedBurn) {
+            if (solid_model == SolidReactantEOS::DavisSolid) solid_model = SolidReactantEOS::MieGruneisen;
+            if (product_model == DetonationProductEOS::DavisProduct) product_model = DetonationProductEOS::JWLProductGas;
+        }
+    }
+};
 
 // Cauchy stress tensor stored compactly in symmetric Voigt format:
 // data[0]=xx, data[1]=yy, data[2]=zz, data[3]=xy, data[4]=yz, data[5]=zx
@@ -319,6 +335,55 @@ struct SymmetricTensor3D {
     HD_MPM_FUNC inline ConstRowProxy operator[](int r) const { return ConstRowProxy{data, r}; }
 };
 
+// Exact 2nd-order orthogonal Cayley stress rotation:
+//   R = (I + 0.5*dW)*(I - 0.5*dW)^(-1) = I + (1 / (1 + 0.25*theta^2)) * (dW + 0.5*dW^2)
+//   sigma_out = R * sigma_in * R^T
+// Strictly orthogonal (R*R^T = I, det(R) = 1) for all spin rates |w|*dt with zero trig/sqrt calls,
+// preserving principal stresses and J2 invariants without 1st-order Jaumann O((|w|*dt)^2) inflation.
+HD_MPM_FUNC inline void rotate_stress_cayley_3d(const float sigma_in[3][3], const float W[3][3], float dt, float sigma_out[3][3]) {
+    const float w01 = W[0][1] * dt;
+    const float w02 = W[0][2] * dt;
+    const float w12 = W[1][2] * dt;
+    const float theta2 = w01 * w01 + w02 * w02 + w12 * w12;
+    const float c = 1.0f / (1.0f + 0.25f * theta2);
+    const float h_c = 0.5f * c;
+
+    const float dW[3][3] = {
+        { 0.0f,  w01,  w02},
+        {-w01,  0.0f,  w12},
+        {-w02, -w12,  0.0f}
+    };
+
+    float R[3][3];
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            float dW2_ij = dW[i][0] * dW[0][j] + dW[i][1] * dW[1][j] + dW[i][2] * dW[2][j];
+            R[i][j] = (i == j ? 1.0f : 0.0f) + c * dW[i][j] + h_c * dW2_ij;
+        }
+    }
+
+    float tmp[3][3];
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            tmp[i][j] = R[i][0] * sigma_in[0][j] + R[i][1] * sigma_in[1][j] + R[i][2] * sigma_in[2][j];
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            sigma_out[i][j] = tmp[i][0] * R[j][0] + tmp[i][1] * R[j][1] + tmp[i][2] * R[j][2];
+        }
+    }
+}
+
+HD_MPM_FUNC inline void rotate_stress_cayley_3d(const SymmetricTensor3D& sigma_in, const float W[3][3], float dt, float sigma_out[3][3]) {
+    const float s_mat[3][3] = {
+        {sigma_in.data[0], sigma_in.data[3], sigma_in.data[5]},
+        {sigma_in.data[3], sigma_in.data[1], sigma_in.data[4]},
+        {sigma_in.data[5], sigma_in.data[4], sigma_in.data[2]}
+    };
+    rotate_stress_cayley_3d(s_mat, W, dt, sigma_out);
+}
+
 struct MPMParticle3D {
     // Kinematics & Position in 3D
     float x[3];         // Position (x, y, z)
@@ -360,18 +425,24 @@ struct alignas(32) MPMGridNode3D {
     float f_ext[3]{0.0f, 0.0f, 0.0f};     // External force (FSI coupling) (12B)
     float f_int[3]{0.0f, 0.0f, 0.0f};     // Internal stress force (12B)
     float plastic_strain{0.0f}; // Interpolated plastic strain for smoothing (4B)
+    float pressure{0.0f};       // Mass-weighted continuum pressure (Pa) for zonal coupling and telemetry (4B)
     float m_solid{0.0f};        // Solid mass excluding fluid TaitWater (4B)
+    float m_energetic{0.0f};    // Energetic gaseous explosive mass (4B)
+    float m_reacted{0.0f};      // Reacted JWL explosive mass (4B)
+    float v_energetic{0.0f};    // Shape-weighted volume of energetic particles (sum N_i V_p) (4B)
+    float v_reacted{0.0f};      // Shape-weighted volume of reacted products (sum N_i V_p lambda) (4B)
 
-    static constexpr float MIN_MASS = 1.0e-11f;
+    static constexpr float MIN_MASS = 1.0e-20f;
     float v(int i) const { return m > MIN_MASS ? p[i] / m : 0.0f; }
 };
 
 enum class MPMBoundaryCondition3D {
-    Sticky,        // No-slip (v = 0)
-    FreeSlip,      // Normal velocity v_n = 0, tangential free
-    Reflecting,    // Symmetric velocity reflection
-    Terminate,     // Outflow / particle absorption
-    LysmerDashpot  // Lysmer-Kuhlemeyer viscous absorbing boundary
+    Sticky = 0,        // No-slip (v = 0)
+    FreeSlip = 1,      // Normal velocity v_n = 0, tangential free
+    Reflecting = 2,    // Symmetric velocity reflection
+    Terminate = 3,     // Terminate simulation when particles cross boundary
+    LysmerDashpot = 4, // Lysmer-Kuhlemeyer viscous absorbing boundary
+    Transmitting = 5   // Free outflow: particles pass out of domain and stop being processed
 };
 
 struct LysmerDashpotParams {
@@ -382,10 +453,31 @@ struct LysmerDashpotParams {
     float shear_relaxation{1.0f};
 };
 
+struct MPMDetonator3D {
+    float x{0.5f};
+    float y{0.5f};
+    float z{0.5f};
+    float radius{0.01f};
+    float time_delay{0.0f};
+    bool track_mpm_velocity{false};
+    bool fired{false};
+    int target_object_id{-1};
+};
+
 class MPMSolver3D {
 public:
     MPMSolver3D();
     ~MPMSolver3D() = default;
+
+    // Detonator & Point Initiation Management
+    void clearDetonators() { m_detonators.clear(); }
+    void addDetonator(float x, float y, float z, float radius, float time_delay, bool track_velocity, int target_object_id = -1);
+    void addDetonator(const MPMDetonator3D& det) { m_detonators.push_back(det); }
+    const std::vector<MPMDetonator3D>& getDetonators() const { return m_detonators; }
+    std::vector<MPMDetonator3D>& getDetonators() { return m_detonators; }
+    bool interpolateGridVelocity(float x, float y, float z, float& vx, float& vy, float& vz) const;
+    void updateDetonators(float dt);
+    void fireDetonator(MPMDetonator3D& det);
 
     // Initialization & Grid Setup
     void initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f);
@@ -403,6 +495,8 @@ public:
     void setBoundaryConditions(MPMBoundaryCondition3D x_min, MPMBoundaryCondition3D x_max,
                                MPMBoundaryCondition3D y_min, MPMBoundaryCondition3D y_max,
                                MPMBoundaryCondition3D z_min, MPMBoundaryCondition3D z_max);
+    bool is_terminated() const { return m_terminated; }
+    void resetTermination() { m_terminated = false; }
     void setLysmerParams(const LysmerDashpotParams& params) { m_lysmer_params = params; }
     const LysmerDashpotParams& getLysmerParams() const { return m_lysmer_params; }
 
@@ -427,7 +521,8 @@ public:
                       float tensile_failure_stress = 600.0e6f, int ppc = 8,
                       MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                       MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
-                      float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
+                      float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f,
+                      float clip_z_min = -1.0e30f, float clip_z_max = 1.0e30f);
 
     void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius, float inner_radius,
                          float vel_x, float vel_y, float vel_z,
@@ -437,7 +532,8 @@ public:
                          float tensile_failure_stress = 600.0e6f, int ppc = 8,
                          MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                          MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
-                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
+                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f,
+                         float clip_z_min = -1.0e30f, float clip_z_max = 1.0e30f);
 
     void addSphereObject(int obj_id, float pos_x, float pos_y, float pos_z, float radius,
                          float vel_x, float vel_y, float vel_z,
@@ -447,8 +543,9 @@ public:
                          float tensile_failure_stress = 600.0e6f, int ppc = 8,
                          MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                          MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
-                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f) {
-        addSphereObject(obj_id, pos_x, pos_y, pos_z, radius, 0.0f, vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z);
+                         float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f,
+                         float clip_z_min = -1.0e30f, float clip_z_max = 1.0e30f) {
+        addSphereObject(obj_id, pos_x, pos_y, pos_z, radius, 0.0f, vel_x, vel_y, vel_z, angular_vel_x, angular_vel_y, angular_vel_z, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill, rot_x, rot_y, rot_z, clip_z_min, clip_z_max);
     }
 
     void addCylinderObject(int obj_id, float pos_x, float pos_y, float pos_z,
@@ -460,7 +557,8 @@ public:
                            float tensile_failure_stress = 600.0e6f, int ppc = 8,
                            MPMParticleDistribution particle_dist = MPMParticleDistribution::Cartesian,
                            MPMBoundaryFilling boundary_fill = MPMBoundaryFilling::Stairstepped,
-                           float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f);
+                           float rot_x = 0.0f, float rot_y = 0.0f, float rot_z = 0.0f,
+                           float clip_z_min = -1.0e30f, float clip_z_max = 1.0e30f);
 
     void addSTLObject(int obj_id, const std::string& stl_filepath,
                       float pos_x, float pos_y, float pos_z,
@@ -492,7 +590,7 @@ public:
     // Getters & Telemetry
     std::vector<MPMParticle3D>& getParticles() { return m_particles; }
     const std::vector<MPMParticle3D>& getParticles() const { return m_particles; }
-    MPMVTKSnapshot3D extractVTKSnapshot(bool has_vel = true, bool has_stress = true, bool has_strain = true, bool has_damage = true, bool has_temp = true) const;
+    MPMVTKSnapshot3D extractVTKSnapshot(bool has_vel = true, bool has_stress = true, bool has_strain = true, bool has_damage = true, bool has_temp = true, bool has_pressure = true, bool has_material_id = true, bool has_object_id = true) const;
 
     std::vector<MaterialTable3D>& getMaterialTables() { return m_material_tables; }
     const std::vector<MaterialTable3D>& getMaterialTables() const { return m_material_tables; }
@@ -508,6 +606,10 @@ public:
             m_material_tables.resize(object_id + 1);
         }
         m_material_tables[object_id] = mat;
+        m_material_tables[object_id].synchronizePillars();
+        if (m_material_tables[object_id].cell_dx <= 0.0f) {
+            m_material_tables[object_id].cell_dx = m_dx;
+        }
         initMaterialHeterogeneity(object_id);
     }
 
@@ -603,6 +705,13 @@ public:
     void initMaterialHeterogeneity(int obj_id);
     void seedMottGradyFragments(int obj_id);
 
+    // Single material-point constitutive driver (V&V unit level): advances ONE particle through the
+    // genuine production stress update with a prescribed velocity gradient L over dt. Used by
+    // blast_verify to exercise the exact constitutive code path without grid transfer noise.
+    void driveMaterialPoint(MPMParticle3D& p, float dt, const float L[3][3], const MaterialTable3D& mat) {
+        updateParticleStress(p, dt, L, mat, 0.0f);
+    }
+
 private:
     void updateGridKinematics(float dt);
     void gridToParticle(float dt);
@@ -610,7 +719,7 @@ private:
     void gridToParticleAndStress(float dt);
     template <bool FUSE_STRESS>
     void gridToParticleInternal(float dt);
-    void updateParticleStress(MPMParticle3D& p, float dt, const float L[3][3], const MaterialTable3D& mat);
+    void updateParticleStress(MPMParticle3D& p, float dt, const float L[3][3], const MaterialTable3D& mat, float ep_smoothed = 0.0f);
 
     // Shape Function Evaluators (1D & 3D)
     float evalGIMP_S(float x_p, float x_i, float h, float l_p) const;
@@ -662,6 +771,7 @@ private:
         float target_v[3]{0.0f, 0.0f, 0.0f};
         float B_new[3][3]{{0,0,0},{0,0,0},{0,0,0}};
         float L_new[3][3]{{0,0,0},{0,0,0},{0,0,0}};
+        float ep_smoothed{0.0f};
     };
     MPMGatheredKinematics3D gatherParticleKinematics(const MPMParticle3D& p, float dt) const;
     MPMGatheredKinematics3D gatherParticleKinematicsBardenhagen(const MPMParticle3D& p, float dt) const;
@@ -687,12 +797,14 @@ private:
     std::vector<MPMGridNode3D> m_grid;
     std::vector<MPMParticle3D> m_particles;
     std::vector<float> m_f_ext_fsi;
+    std::vector<MPMDetonator3D> m_detonators;
 
     float m_last_dt{0.0f};
     float m_last_cfl{0.3f};
     mutable float m_last_v_max{0.0f};
     double m_sim_time{0.0};
     int m_step_count{0};
+    bool m_terminated{false};
     std::function<void(float dt)> m_grid_kinematics_callback;
 };
 

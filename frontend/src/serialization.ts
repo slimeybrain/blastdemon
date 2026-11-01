@@ -34,7 +34,7 @@ export const AFTERBURN_KEYS = [
 ];
 
 export const AIR_KEYS = [
-    'atm_pressure', 'atm_temperature', 'gamma', 'density', 'ambient_rho', 'ambient_p', 'ambient_o2_fraction'
+    'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'density', 'ambient_rho', 'ambient_p', 'ambient_o2_fraction'
 ];
 
 export function extractJWLAndAfterburnParams(matNode: any, target: Record<string, any>, numericKeys: string[], booleanKeys: string[]): void {
@@ -116,6 +116,9 @@ export function extractUnderwaterParams(
         flattenedParams['tait_gruneisen'] = Number(waterNode.parameters?.tait_gruneisen ?? 0.28);
         if (waterNode.parameters?.tait_variant_str) {
             flattenedParams['tait_variant_str'] = waterNode.parameters.tait_variant_str;
+        }
+        if (waterNode.parameters?.initial_temperature !== undefined) {
+            flattenedParams['water_temperature'] = Number(waterNode.parameters.initial_temperature);
         }
     }
 
@@ -227,6 +230,9 @@ export function extractUnderwaterParams(
         if (sParams.hardening_modulus !== undefined || sParams.dp_hardening_modulus !== undefined) {
             flattenedParams['dp_hardening_modulus'] = Number(sParams.hardening_modulus ?? sParams.dp_hardening_modulus);
         }
+        if (sParams.initial_temperature !== undefined) {
+            flattenedParams['soil_temperature'] = Number(sParams.initial_temperature);
+        }
     } else if (solverNode3D.type === 'MarineHarbourDomain' || solverNode3D.parameters?.init_mode === 'Hydrostatic_Stratified_3D' || solverNode3D.parameters?.water_surface_z !== undefined) {
         flattenedParams['soil_density'] = Number(solverNode3D.parameters?.soil_density ?? 2000.0);
         flattenedParams['soil_friction_angle'] = Number(solverNode3D.parameters?.soil_friction_angle ?? 30.0);
@@ -242,9 +248,12 @@ export function extractUnderwaterParams(
     // 3. Near-Field Sleeve & Zonal Properties
     if (solverNode3D.type === 'MarineHarbourDomain' || solverNode3D.parameters?.init_mode === 'Hydrostatic_Stratified_3D' || solverNode3D.parameters?.water_surface_z !== undefined) {
         flattenedParams['stratified_equilibrium'] = true;
-        let waterMode = solverNode3D.parameters?.water_discretization_mode || 'Spherical_MPM_Sleeve';
+        let waterMode = solverNode3D.parameters?.water_discretization_mode || 'Pure_FV';
         if (waterMode === 'Pure FV') waterMode = 'Pure_FV';
         flattenedParams['water_discretization_mode'] = waterMode;
+        if (waterMode === 'LPTP_Phase_Tracking_Sleeve' || waterMode === 'Full_Column_LPTP_Cylinder') {
+            flattenedParams['enable_phase_tracking'] = true;
+        }
         flattenedParams['nearfield_ppc'] = Number(solverNode3D.parameters?.nearfield_ppc ?? 8);
         flattenedParams['nearfield_sleeve_radius'] = Number(solverNode3D.parameters?.nearfield_sleeve_radius ?? 2.5);
         flattenedParams['vertical_sleeve_breach'] = solverNode3D.parameters?.vertical_sleeve_breach === true;
@@ -256,6 +265,12 @@ export function extractUnderwaterParams(
         flattenedParams['seabed_surface_z'] = Number(solverNode3D.parameters?.seabed_surface_z ?? 2.0);
         flattenedParams['k0_earth_pressure'] = Number(solverNode3D.parameters?.k0_earth_pressure ?? 0.50);
         flattenedParams['gravity_z'] = Number(solverNode3D.parameters?.gravity_z ?? -9.81);
+        const chgNode = state.nodes.find(n => n.type === 'Charge3D');
+        if (chgNode && chgNode.parameters?.ppc !== undefined) {
+            flattenedParams['charge_ppc'] = Number(chgNode.parameters.ppc);
+        } else if (flattenedParams['charge_ppc'] === undefined) {
+            flattenedParams['charge_ppc'] = 64;
+        }
     }
 }
 
@@ -268,15 +283,14 @@ export function serializeMPMObjectsWithSleeve(
     modelFilename?: string | null
 ): any[] {
     const mpmObjNodes = state.nodes.filter(n => n.type === 'MPMObject3D');
-    const waterMode = solverNode3D?.parameters?.water_discretization_mode || 'Spherical_MPM_Sleeve';
-    const isPureFV = (waterMode === 'Pure_FV' || waterMode === 'Pure FV');
+    const waterMode = solverNode3D?.parameters?.water_discretization_mode || 'Pure_FV';
+    const isPureWater = (waterMode === 'Pure_FV' || waterMode === 'Pure FV' || waterMode === 'LPTP_Phase_Tracking_Sleeve' || waterMode === 'Full_Column_LPTP_Cylinder');
+    const sleeveR = Number(solverNode3D?.parameters?.nearfield_sleeve_radius ?? 2.5);
+    const isHarbourWithWater = (solverNode3D?.type === 'MarineHarbourDomain' && !isPureWater && sleeveR > 0);
     const bedType = solverNode3D?.parameters?.seabed_mesh_type || 'Hybrid_MPM_Crater_FEM_FarField';
     const isPureBed = (bedType === 'Pure_Hex8_FEM' || bedType === 'Pure Hex8 FEM' || bedType === 'Pure_FV' || bedType === 'Pure FV');
-    const isHarbourWithSleeve = (solverNode3D?.type === 'MarineHarbourDomain' && !isPureFV && (
-        (Number(solverNode3D.parameters?.nearfield_sleeve_radius ?? 2.5) > 0) ||
-        !isPureBed
-    ));
-    if (!mpmDomain && mpmObjNodes.length === 0 && !isHarbourWithSleeve) {
+    const isHarbourWithSoil = (solverNode3D?.type === 'MarineHarbourDomain' && !isPureBed);
+    if (!mpmDomain && mpmObjNodes.length === 0 && !isHarbourWithSoil && !isHarbourWithWater) {
         return [];
     }
 
@@ -332,8 +346,17 @@ export function serializeMPMObjectsWithSleeve(
         if (matNode) {
             objParams['material_id'] = matNode.id;
             objParams['material_name'] = (matNode as any).name || matNode.parameters?.name || matNode.id;
+            const skipMatKeys = new Set([
+                'visible', 'hidden', 'name', 'label', 'id',
+                'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z',
+                'scale_x', 'scale_y', 'scale_z', 'size_x', 'size_y', 'size_z',
+                'radius', 'inner_radius', 'height', 'shape', 'shape_type',
+                'stl_file', 'origin_mode', 'ppc', 'voxelization_method'
+            ]);
             Object.entries(matNode.parameters).forEach(([mk, mv]) => {
-                objParams[mk] = numericKeys.includes(mk) ? Number(mv) : mv;
+                if (!skipMatKeys.has(mk)) {
+                    objParams[mk] = numericKeys.includes(mk) ? Number(mv) : mv;
+                }
             });
         }
         if (matNode?.parameters?.['material_model']) {
@@ -345,20 +368,44 @@ export function serializeMPMObjectsWithSleeve(
         if (objParams['vel_y'] === undefined && objParams['initial_velocity_y'] !== undefined) objParams['vel_y'] = objParams['initial_velocity_y'];
         if (objParams['vel_z'] === undefined && objParams['initial_velocity_z'] !== undefined) objParams['vel_z'] = objParams['initial_velocity_z'];
         objParams['ppc'] = Math.max(1, Math.round(Number(objNode.parameters?.ppc ?? domainPpc)));
-        if (domainParticleDist && (objParams['particle_distribution'] === undefined || objParams['particle_distribution'] === 'Cartesian')) {
-            objParams['particle_distribution'] = domainParticleDist;
-        }
-        if (domainBoundaryFill && (objParams['boundary_filling'] === undefined || objParams['boundary_filling'] === 'Stairstepped')) {
-            objParams['boundary_filling'] = domainBoundaryFill;
-        }
         mpmObjects.push(objParams);
     }
 
-    // Auto-synthesize Nearfield Water Sleeve and Seabed Soil for Marine Harbour Domain
+    // Auto-synthesize Nearfield Water Sleeve, Charge, and Seabed Soil for Marine Harbour Domain
     if (solverNode3D?.type === 'MarineHarbourDomain') {
-        const waterMode = solverNode3D.parameters?.water_discretization_mode || 'Spherical_MPM_Sleeve';
-        const isPureFV = (waterMode === 'Pure_FV' || waterMode === 'Pure FV');
+        const waterMode = solverNode3D.parameters?.water_discretization_mode || 'Pure_FV';
+        const isPureFV = (waterMode === 'Pure_FV' || waterMode === 'Pure FV' || waterMode === 'LPTP_Phase_Tracking_Sleeve' || waterMode === 'Full_Column_LPTP_Cylinder');
         const sleeveR = Number(solverNode3D.parameters?.nearfield_sleeve_radius ?? 2.5);
+
+        // Find connected Charge node and Detonator node
+        const chargeConn = state.connections.find(c => (c.toNode === solverNode3D.id && (c.toPort === 'charge' || c.toPort === 'explosive')) || (c.fromNode === solverNode3D.id && (c.fromPort === 'charge' || c.fromPort === 'explosive')));
+        let chgNode = chargeConn ? state.nodes.find(n => n.id === (chargeConn.toNode === solverNode3D.id ? chargeConn.fromNode : chargeConn.toNode)) : null;
+        if (!chgNode && solverNode3D.parameters?.explosive_charge) {
+            chgNode = state.nodes.find(n => n.id === solverNode3D.parameters.explosive_charge || (n as any).name === solverNode3D.parameters.explosive_charge);
+        }
+        if (!chgNode) {
+            chgNode = state.nodes.find(n => n.type === 'Charge3D' || n.type === 'Charge2D');
+        }
+
+        const detConn = state.connections.find(c => (c.toNode === solverNode3D.id && (c.toPort === 'detonator' || c.toPort === 'trigger')) || (c.fromNode === solverNode3D.id && (c.fromPort === 'detonator' || c.fromPort === 'trigger')));
+        let detNode = detConn ? state.nodes.find(n => n.id === (detConn.toNode === solverNode3D.id ? detConn.fromNode : detConn.toNode)) : null;
+        if (!detNode && solverNode3D.parameters?.connected_detonators) {
+            detNode = state.nodes.find(n => n.id === solverNode3D.parameters.connected_detonators || (n as any).name === solverNode3D.parameters.connected_detonators);
+        }
+        if (!detNode) {
+            detNode = state.nodes.find(n => n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D');
+        }
+
+        let chgX = Number(flattenedParams['charge_x'] ?? chgNode?.parameters?.charge_x ?? chgNode?.parameters?.pos_x ?? chgNode?.parameters?.x ?? detNode?.parameters?.detonator_x ?? 0.0);
+        let chgY = Number(flattenedParams['charge_y'] ?? chgNode?.parameters?.charge_y ?? chgNode?.parameters?.pos_y ?? chgNode?.parameters?.y ?? detNode?.parameters?.detonator_y ?? 0.0);
+        let chgZ = Number(flattenedParams['charge_z'] ?? chgNode?.parameters?.charge_z ?? chgNode?.parameters?.pos_z ?? chgNode?.parameters?.z ?? 0.0);
+        if (isNaN(chgZ) || chgZ === 0.0) {
+            chgZ = Number(detNode?.parameters?.detonator_z ?? detNode?.parameters?.trigger_z ?? detNode?.parameters?.z ?? flattenedParams['detonator_z'] ?? 0.0);
+        }
+        const chgR = Number(flattenedParams['charge_radius'] ?? chgNode?.parameters?.radius ?? chgNode?.parameters?.charge_radius ?? 0.1);
+        const waterZ = Number(solverNode3D.parameters?.water_surface_z ?? flattenedParams['water_surface_z'] ?? 10.0);
+        const seabedZ = Number(solverNode3D.parameters?.seabed_surface_z ?? flattenedParams['seabed_surface_z'] ?? 2.0);
+
         if (!isPureFV && sleeveR > 0) {
             const hasWaterSleeve = mpmObjects.some(o => 
                 (o.material_name && String(o.material_name).toLowerCase().includes('water')) ||
@@ -366,24 +413,10 @@ export function serializeMPMObjectsWithSleeve(
                 (o.material_model === 'TaitWater')
             );
             if (!hasWaterSleeve) {
+                const domainCellSize = Number(solverNode3D.parameters?.cell_size ?? flattenedParams['cell_size'] ?? 0.05);
+                const overlapTh = Math.max(2.0 * domainCellSize, 0.15 * sleeveR);
                 const sleevePpc = Number(solverNode3D.parameters?.nearfield_ppc ?? 8);
-                let chgX = Number(flattenedParams['charge_x'] ?? 0.0);
-                let chgY = Number(flattenedParams['charge_y'] ?? 0.0);
-                let chgZ = Number(flattenedParams['charge_z'] ?? 0.0);
-                const chgNode = state.nodes.find(n => n.type === 'Charge3D' || n.type === 'Charge2D');
-                if (chgNode?.parameters) {
-                    const cz = chgNode.parameters.charge_z ?? chgNode.parameters.pos_z ?? chgNode.parameters.z;
-                    if (cz !== undefined && (flattenedParams['charge_z'] === undefined || isNaN(chgZ) || chgZ === 0.0)) chgZ = Number(cz);
-                    const cx = chgNode.parameters.charge_x ?? chgNode.parameters.pos_x ?? chgNode.parameters.x;
-                    if (cx !== undefined && (flattenedParams['charge_x'] === undefined || isNaN(chgX) || chgX === 0.0)) chgX = Number(cx);
-                    const cy = chgNode.parameters.charge_y ?? chgNode.parameters.pos_y ?? chgNode.parameters.y;
-                    if (cy !== undefined && (flattenedParams['charge_y'] === undefined || isNaN(chgY) || chgY === 0.0)) chgY = Number(cy);
-                }
-                const chgR = Number(flattenedParams['charge_radius'] ?? 0.1);
-                const waterZ = Number(solverNode3D.parameters?.water_surface_z ?? flattenedParams['water_surface_z'] ?? 10.0);
-                const seabedZ = Number(solverNode3D.parameters?.seabed_surface_z ?? flattenedParams['seabed_surface_z'] ?? 2.0);
-
-                const isCylinder = waterMode === 'Full_Column_MPM_Cylinder';
+                const isCylinder = (waterMode === 'Full_Column_MPM_Cylinder');
                 const cylHeight = Math.max(0.1, waterZ - seabedZ);
                 const cylPosZ = seabedZ + 0.5 * cylHeight;
 
@@ -393,7 +426,7 @@ export function serializeMPMObjectsWithSleeve(
                     pos_x: chgX,
                     pos_y: chgY,
                     pos_z: isCylinder ? cylPosZ : chgZ,
-                    radius: sleeveR,
+                    radius: sleeveR + overlapTh,
                     inner_radius: isCylinder ? 0.0 : chgR,
                     height: isCylinder ? cylHeight : undefined,
                     material_id: 'mat_water_sleeve',
@@ -419,12 +452,67 @@ export function serializeMPMObjectsWithSleeve(
                     particle_distribution: 'Cartesian',
                     boundary_filling: 'Stairstepped'
                 });
+
+                const hasChargeMpm = mpmObjects.some(o =>
+                    (o.material_model && (o.material_model.includes('JWL') || o.material_model.includes('Explosive'))) ||
+                    (o.name && o.name.toLowerCase().includes('charge'))
+                );
+                if (!hasChargeMpm && chgR > 0) {
+                    let chgMatNode: Node | undefined;
+                    if (chgNode) {
+                        const chgMatConn = state.connections.find(c => 
+                            (c.toNode === chgNode.id && (c.toPort === 'material' || c.toPort === 'in')) ||
+                            (c.fromNode === chgNode.id && (c.fromPort === 'material' || c.fromPort === 'out'))
+                        );
+                        if (chgMatConn) {
+                            const matId = chgMatConn.toNode === chgNode.id ? chgMatConn.fromNode : chgMatConn.toNode;
+                            chgMatNode = state.nodes.find(n => n.id === matId);
+                        } else if (chgNode.parameters?.material) {
+                            chgMatNode = state.nodes.find(n => n.id === chgNode.parameters.material || (n as any).name === chgNode.parameters.material);
+                        }
+                    }
+                    const chgMatModel = chgMatNode?.parameters?.material_model ?? flattenedParams['material_model'] ?? 'JWL Programmed Burn';
+                    const chgDensity = Number(chgMatNode?.parameters?.density ?? flattenedParams['rho'] ?? 1630.0);
+                    const chgDetVel = Number(chgMatNode?.parameters?.det_vel ?? flattenedParams['det_vel'] ?? 6930.0);
+                    const chgDetEnergy = Number(chgMatNode?.parameters?.detonation_energy ?? flattenedParams['detonation_energy'] ?? 4.29e6);
+                    const chgJwlA = Number(chgMatNode?.parameters?.jwl_A ?? flattenedParams['jwl_A'] ?? 3.7377e11);
+                    const chgJwlB = Number(chgMatNode?.parameters?.jwl_B ?? flattenedParams['jwl_B'] ?? 3.747e9);
+                    const chgJwlR1 = Number(chgMatNode?.parameters?.jwl_R1 ?? flattenedParams['jwl_R1'] ?? 4.15);
+                    const chgJwlR2 = Number(chgMatNode?.parameters?.jwl_R2 ?? flattenedParams['jwl_R2'] ?? 0.9);
+                    const chgJwlOmega = Number(chgMatNode?.parameters?.jwl_omega ?? flattenedParams['jwl_omega'] ?? 0.35);
+
+                    const chgPpc = Math.max(sleevePpc, Number(flattenedParams['charge_ppc'] ?? 64));
+                    mpmObjects.push({
+                        name: 'Nearfield Explosive Charge',
+                        shape_type: 'Sphere',
+                        pos_x: chgX,
+                        pos_y: chgY,
+                        pos_z: chgZ,
+                        radius: chgR,
+                        inner_radius: 0.0,
+                        material_id: chgMatNode ? chgMatNode.id : 'mat_explosive_charge',
+                        material_name: chgMatNode?.parameters?.name ?? 'Explosive Charge',
+                        material_model: chgMatModel,
+                        preset: chgMatNode?.parameters?.preset,
+                        density: chgDensity,
+                        det_vel: chgDetVel,
+                        detonation_energy: chgDetEnergy,
+                        jwl_A: chgJwlA,
+                        jwl_B: chgJwlB,
+                        jwl_R1: chgJwlR1,
+                        jwl_R2: chgJwlR2,
+                        jwl_omega: chgJwlOmega,
+                        ppc: chgPpc,
+                        particle_distribution: 'Cartesian',
+                        boundary_filling: 'Stairstepped'
+                    });
+                }
             }
         }
 
         const bedType = solverNode3D.parameters?.seabed_mesh_type || 'Hybrid_MPM_Crater_FEM_FarField';
         const isPureBed = (bedType === 'Pure_Hex8_FEM' || bedType === 'Pure Hex8 FEM' || bedType === 'Pure_FV' || bedType === 'Pure FV');
-        if (!isPureFV && !isPureBed) {
+        if (!isPureBed) {
             const hasSoilMpm = mpmObjects.some(o => 
                 (o.material_name && String(o.material_name).toLowerCase().includes('soil')) ||
                 (o.name && String(o.name).toLowerCase().includes('seabed')) ||
@@ -823,7 +911,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
     const strippedNodes = state.nodes.map(({ x, y, ...rest }) => rest);
 
     const numericKeys = [
-        'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature',
+        'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature', 'initial_temperature',
+        'water_temperature', 'soil_temperature', 'air_temperature',
         'charge_mass', 'rho', 'detonation_energy', 'jwl_A', 'jwl_B',
         'jwl_R1', 'jwl_R2', 'jwl_omega', 'det_vel', 'cfl', 'endtime',
         'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate', 'fps',
@@ -832,7 +921,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         // 2D CFD keys
         'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
         'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
-        'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+        'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
         'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
         'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
         // 3D CFD keys
@@ -850,6 +939,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'vel_x', 'vel_y', 'vel_z', 'initial_velocity_x', 'initial_velocity_y', 'initial_velocity_z', 'initial_velocity_r', 'radius', 'inner_radius',
         'scale_x', 'scale_y', 'scale_z',
         'rot_x', 'rot_y', 'rot_z',
+        'clip_z_min', 'clip_z_max',
         'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
         'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
@@ -858,12 +948,13 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
         'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
         'mg_gamma0', 'mg_c0', 'mg_s',
-        'ppc',
+        'ppc', 'phase_particle_ppc', 'charge_ppc',
         'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
+        'phaseParticleDiameter', 'phaseParticleSize', 'phaseParticleOpacity', 'phaseParticleStride',
         'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
         'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
         // FEM keys
-        'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping',
+        'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy',
         'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
         'rebarRadius', 'viewport_refresh_rate', 'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
         'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
@@ -895,7 +986,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
         'afterburn_ambient_o2_fraction', 'ambient_o2_fraction',
         // VTK ROI & Strides
-        'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride',
+        'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride', 'compression_level',
         'nonlocal_radius', 'opacity',
         // Lysmer-Kuhlemeyer Absorbing Boundaries
         'lysmer_rho', 'lysmer_cp', 'lysmer_cs', 'lysmer_normal_relaxation', 'lysmer_shear_relaxation',
@@ -924,16 +1015,16 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'enabled', 'afterburn_enabled', 'smooth_plastic_strain', 'enable_sdf_barrier', 'enable_dem_contact', 'export_ascii', 'export_binary', 'export_hdf5',
         'include_header', 'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy',
         'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_materials', 'qty_water', 'qty_soil',
-        'qty_mpm_pressure', 'qty_mpm_material_id',
+        'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id',
         'qty_overpressure', 'qty_impulse',
         'export_slices', 'export_volumes', 'export_fem', 'export_mpm', 'export_pvd',
         'roi_enabled', 'is_ideal_gas', 'directional_crack_band', 'enable_heterogeneity',
         'enable_anisotropy', 'enable_strain_erosion', 'enable_stress_erosion',
-        'enable_timestep_erosion', 'kc_auto_generate',
+        'enable_timestep_erosion', 'kc_auto_generate', 'enable_cohesive_splitting',
         'convert_failed_elements_to_mpm', 'use_pvd_collection', 'enable_compression',
         'export_raw_binary', 'show_stl', 'stl_show_results',
         'show_timing_breakdown', 'show_memory', 'show_wallclock', 'show_dt',
-        'vertical_sleeve_breach'
+        'vertical_sleeve_breach', 'track_mpm_velocity'
     ];
 
     const castParam = (key: string, value: any): any => {
@@ -1257,6 +1348,10 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             if (cY !== undefined) {
                 flattenedParams['charge_y'] = Number(cY);
             }
+            const cPpc = chargeNode3D.parameters?.ppc;
+            if (cPpc !== undefined) {
+                flattenedParams['charge_ppc'] = Number(cPpc);
+            }
 
             // Trace Material for Charge 3D
             let matNode: Node | undefined;
@@ -1298,14 +1393,30 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         }
 
         // Trace Detonator / Trigger for CFD Solver 3D
-        const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
-        if (detConn3D) {
-            const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
-            if (detNode3D && (detNode3D.type === 'DetonatorLocation3D' || detNode3D.type === 'TriggerLocation3D')) {
-                Object.entries(detNode3D.parameters).forEach(([key, value]) => {
-                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
-                });
-            }
+        const detConn3D = state.connections.find(c => 
+            (c.toNode === solverNode3D.id || c.fromNode === solverNode3D.id) && 
+            (c.toPort === 'detonator' || c.toPort === 'trigger' || c.fromPort === 'detonator' || c.fromPort === 'trigger')
+        );
+        let detNode3D = detConn3D ? state.nodes.find(n => (n.id === detConn3D.fromNode || n.id === detConn3D.toNode) && (n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D')) : null;
+        if (!detNode3D) {
+            detNode3D = state.nodes.find(n => n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D') || null;
+        }
+        if (detNode3D) {
+            Object.entries(detNode3D.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
+            });
+            const tDelay = Number(detNode3D.parameters?.time_delay ?? detNode3D.parameters?.detonator_time ?? detNode3D.parameters?.start_time ?? 0.0);
+            flattenedParams['time_delay'] = tDelay;
+            flattenedParams['detonator_time'] = tDelay;
+            flattenedParams['start_time'] = tDelay;
+            flattenedParams['track_mpm_velocity'] = Boolean(detNode3D.parameters?.track_mpm_velocity);
+            const dX = Number(flattenedParams['detonator_x'] ?? flattenedParams['trigger_x'] ?? flattenedParams['charge_x'] ?? 0.0);
+            const dY = Number(flattenedParams['detonator_y'] ?? flattenedParams['trigger_y'] ?? flattenedParams['charge_y'] ?? 0.0);
+            const dZ = Number(flattenedParams['detonator_z'] ?? flattenedParams['trigger_z'] ?? flattenedParams['charge_z'] ?? 0.0);
+            const dR = Number(flattenedParams['detonator_radius'] ?? flattenedParams['trigger_radius'] ?? 0.02);
+            const detObj = { trigger_x: dX, trigger_y: dY, trigger_z: dZ, trigger_radius: dR, start_time: tDelay, time_delay: tDelay, track_mpm_velocity: Boolean(detNode3D.parameters?.track_mpm_velocity) };
+            flattenedParams['detonators'] = [detObj];
+            flattenedParams['triggers'] = [detObj];
         }
 
         // Trace Remap 3D
@@ -1400,14 +1511,29 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         }
 
         // Trace detonator / trigger input
-        const detConn2D = state.connections.find(c => c.toNode === solverNode2D.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
-        if (detConn2D) {
-            const detNode2D = state.nodes.find(n => n.id === detConn2D.fromNode);
-            if (detNode2D && (detNode2D.type === 'DetonatorLocation' || detNode2D.type === 'TriggerLocation')) {
-                Object.entries(detNode2D.parameters).forEach(([key, value]) => {
-                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
-                });
-            }
+        const detConn2D = state.connections.find(c => 
+            (c.toNode === solverNode2D.id || c.fromNode === solverNode2D.id) && 
+            (c.toPort === 'detonator' || c.toPort === 'trigger' || c.fromPort === 'detonator' || c.fromPort === 'trigger')
+        );
+        let detNode2D = detConn2D ? state.nodes.find(n => (n.id === detConn2D.fromNode || n.id === detConn2D.toNode) && (n.type === 'DetonatorLocation' || n.type === 'TriggerLocation')) : null;
+        if (!detNode2D) {
+            detNode2D = state.nodes.find(n => n.type === 'DetonatorLocation' || n.type === 'TriggerLocation') || null;
+        }
+        if (detNode2D) {
+            Object.entries(detNode2D.parameters).forEach(([key, value]) => {
+                flattenedParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
+            });
+            const tDelay = Number(detNode2D.parameters?.time_delay ?? detNode2D.parameters?.detonator_time ?? detNode2D.parameters?.start_time ?? 0.0);
+            flattenedParams['time_delay'] = tDelay;
+            flattenedParams['detonator_time'] = tDelay;
+            flattenedParams['start_time'] = tDelay;
+            flattenedParams['track_mpm_velocity'] = Boolean(detNode2D.parameters?.track_mpm_velocity);
+            const dR = Number(flattenedParams['detonator_r'] ?? flattenedParams['trigger_r'] ?? flattenedParams['charge_r'] ?? 0.0);
+            const dZ = Number(flattenedParams['detonator_z'] ?? flattenedParams['trigger_z'] ?? flattenedParams['charge_z'] ?? 0.1);
+            const dRad = Number(flattenedParams['detonator_radius'] ?? flattenedParams['trigger_radius'] ?? 0.001);
+            const detObj = { trigger_r: dR, trigger_z: dZ, trigger_radius: dRad, start_time: tDelay, time_delay: tDelay, track_mpm_velocity: Boolean(detNode2D.parameters?.track_mpm_velocity) };
+            flattenedParams['detonators'] = [detObj];
+            flattenedParams['triggers'] = [detObj];
         }
 
         // Trace hardware config
@@ -1784,6 +1910,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         // 1. Serialize 3D CFD Solver part
         const cfdConn = couplerNode ? state.connections.find(c => c.toNode === couplerNode.id && (c.toPort === 'cfd' || c.toPort === 'cfd_solver')) : null;
         const solverNode3D = cfdConn ? state.nodes.find(n => n.id === cfdConn.fromNode) : state.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
+        let detNode3D: any = null;
         if (solverNode3D) {
             Object.entries(solverNode3D.parameters).forEach(([key, value]) => {
                 if (key !== 'cfl' && key !== 'endtime') {
@@ -1857,6 +1984,10 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     if (cY !== undefined) {
                         flattenedParams['charge_y'] = Number(cY);
                     }
+                    const cPpc = chargeNode3D.parameters?.ppc;
+                    if (cPpc !== undefined) {
+                        flattenedParams['charge_ppc'] = Number(cPpc);
+                    }
                     let matNode: Node | undefined;
                     const matConn = state.connections.find(c => (c.toNode === chargeNode3D.id && c.toPort === 'material') || (c.fromNode === chargeNode3D.id && c.fromPort === 'material'));
                     if (matConn) {
@@ -1887,13 +2018,36 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
             }
             const detConn3D = state.connections.find(c => c.toNode === solverNode3D.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
-            if (detConn3D) {
-                const detNode3D = state.nodes.find(n => n.id === detConn3D.fromNode);
-                if (detNode3D && (detNode3D.type === 'DetonatorLocation3D' || detNode3D.type === 'TriggerLocation3D')) {
-                    Object.entries(detNode3D.parameters).forEach(([key, value]) => {
-                        flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
-                    });
-                }
+            detNode3D = detConn3D ? state.nodes.find(n => n.id === detConn3D.fromNode) : null;
+            if (!detNode3D && solverNode3D.parameters?.connected_detonators) {
+                detNode3D = state.nodes.find(n => n.id === solverNode3D.parameters.connected_detonators || (n as any).name === solverNode3D.parameters.connected_detonators || n.parameters?.name === solverNode3D.parameters.connected_detonators);
+            }
+            if (!detNode3D) {
+                detNode3D = state.nodes.find(n => n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D');
+            }
+            if (detNode3D && (detNode3D.type === 'DetonatorLocation3D' || detNode3D.type === 'TriggerLocation3D')) {
+                Object.entries(detNode3D.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
+                });
+                const dX = Number(detNode3D.parameters.detonator_x ?? detNode3D.parameters.trigger_x ?? detNode3D.parameters.x ?? flattenedParams['charge_x'] ?? 0.0);
+                const dY = Number(detNode3D.parameters.detonator_y ?? detNode3D.parameters.trigger_y ?? detNode3D.parameters.y ?? flattenedParams['charge_y'] ?? 0.0);
+                const dZ = Number(detNode3D.parameters.detonator_z ?? detNode3D.parameters.trigger_z ?? detNode3D.parameters.z ?? flattenedParams['charge_z'] ?? 6.0);
+                const dR = Number(detNode3D.parameters.detonator_radius ?? detNode3D.parameters.trigger_radius ?? detNode3D.parameters.radius ?? 0.05);
+                const tDelay = Number(detNode3D.parameters.time_delay ?? detNode3D.parameters.detonator_time ?? detNode3D.parameters.start_time ?? 0.0);
+                const trackVel = Boolean(detNode3D.parameters.track_mpm_velocity);
+                const detObj = { trigger_x: dX, trigger_y: dY, trigger_z: dZ, trigger_radius: dR, start_time: tDelay, time_delay: tDelay, track_mpm_velocity: trackVel };
+                flattenedParams['detonators'] = [detObj];
+                flattenedParams['triggers'] = [detObj];
+            } else if (flattenedParams['detonator_x'] !== undefined || flattenedParams['charge_x'] !== undefined) {
+                const dX = Number(flattenedParams['detonator_x'] ?? flattenedParams['charge_x'] ?? 0.0);
+                const dY = Number(flattenedParams['detonator_y'] ?? flattenedParams['charge_y'] ?? 0.0);
+                const dZ = Number(flattenedParams['detonator_z'] ?? flattenedParams['charge_z'] ?? 6.0);
+                const dR = Number(flattenedParams['detonator_radius'] ?? 0.05);
+                const tDelay = Number(flattenedParams['time_delay'] ?? flattenedParams['detonator_time'] ?? flattenedParams['start_time'] ?? 0.0);
+                const trackVel = Boolean(flattenedParams['track_mpm_velocity']);
+                const detObj = { trigger_x: dX, trigger_y: dY, trigger_z: dZ, trigger_radius: dR, start_time: tDelay, time_delay: tDelay, track_mpm_velocity: trackVel };
+                flattenedParams['detonators'] = [detObj];
+                flattenedParams['triggers'] = [detObj];
             }
             const telemetryConns = state.connections.filter(c => c.fromNode === solverNode3D.id && c.fromPort === 'telemetry');
             for (const conn of telemetryConns) {
@@ -1939,6 +2093,56 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
 
         serializeMPMObjectsWithSleeve(state, solverNode3D, mpmDomain, flattenedParams, numericKeys, modelFilename);
 
+        if (mpmDomain) {
+            const isDetNode = (n: any) => n && (n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation' || n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation');
+            const mpmDetConns = state.connections.filter(c => 
+                ((c.toNode === mpmDomain.id || c.fromNode === mpmDomain.id) ||
+                 state.nodes.some(n => n.type === 'MPMObject3D' && (n.id === c.toNode || n.id === c.fromNode))) &&
+                (c.toPort === 'detonator' || c.toPort === 'trigger' || c.toPort === 'detonators' || c.fromPort === 'detonator' || c.fromPort === 'trigger')
+            );
+            const mpmDetonators: any[] = [];
+            for (const conn of mpmDetConns) {
+                const otherId = (conn.toNode === mpmDomain.id || state.nodes.some(n => n.type === 'MPMObject3D' && n.id === conn.toNode)) ? conn.fromNode : conn.toNode;
+                const detNode = state.nodes.find(n => n.id === otherId && isDetNode(n));
+                if (detNode && !mpmDetonators.some(d => d._id === detNode.id)) {
+                    const detParams: any = { _id: detNode.id };
+                    Object.entries(detNode.parameters).forEach(([key, value]) => {
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
+                    });
+                    const tDelay = Number(detParams.time_delay ?? detParams.detonator_time ?? detParams.start_time ?? 0.0);
+                    detParams.time_delay = tDelay;
+                    detParams.detonator_time = tDelay;
+                    detParams.start_time = tDelay;
+                    detParams.track_mpm_velocity = Boolean(detParams.track_mpm_velocity);
+                    mpmDetonators.push(detParams);
+                }
+            }
+            if (mpmDetonators.length === 0 && !flattenedParams['detonators']) {
+                const fallbackDets = state.nodes.filter(isDetNode);
+                for (const detNode of fallbackDets) {
+                    if (detNode3D && detNode.id === detNode3D.id) continue;
+                    const detParams: any = { _id: detNode.id };
+                    Object.entries(detNode.parameters).forEach(([key, value]) => {
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
+                    });
+                    const tDelay = Number(detParams.time_delay ?? detParams.detonator_time ?? detParams.start_time ?? 0.0);
+                    detParams.time_delay = tDelay;
+                    detParams.detonator_time = tDelay;
+                    detParams.start_time = tDelay;
+                    detParams.track_mpm_velocity = Boolean(detParams.track_mpm_velocity);
+                    mpmDetonators.push(detParams);
+                }
+            }
+            if (mpmDetonators.length > 0) {
+                const existing = Array.isArray(flattenedParams['detonators']) ? flattenedParams['detonators'] : [];
+                flattenedParams['detonators'] = [...existing, ...mpmDetonators.map(({ _id, ...rest }) => rest)];
+                flattenedParams['triggers'] = flattenedParams['detonators'];
+                Object.entries(mpmDetonators[0]).forEach(([key, value]) => {
+                    if (key !== '_id' && flattenedParams[key] === undefined) flattenedParams[key] = value;
+                });
+            }
+        }
+
         // 3. Serialize FSICoupler3D parameters
         if (couplerNode) {
             Object.entries(couplerNode.parameters).forEach(([key, value]) => {
@@ -1973,13 +2177,14 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
         }
 
-        const cellSize = flattenedParams['cell_size'] || 0.01;
-        const xmin = flattenedParams['xmin'] !== undefined ? flattenedParams['xmin'] : 0.0;
-        const xmax = flattenedParams['xmax'] !== undefined ? flattenedParams['xmax'] : 1.0;
-        const ymin = flattenedParams['ymin'] !== undefined ? flattenedParams['ymin'] : 0.0;
-        const ymax = flattenedParams['ymax'] !== undefined ? flattenedParams['ymax'] : 1.0;
+        const isHarbourSolver = (solverNode3D?.type === 'MarineHarbourDomain');
+        const cellSize = flattenedParams['cell_size'] || (isHarbourSolver ? 0.125 : 0.01);
+        const xmin = flattenedParams['xmin'] !== undefined ? flattenedParams['xmin'] : (isHarbourSolver ? -10.0 : 0.0);
+        const xmax = flattenedParams['xmax'] !== undefined ? flattenedParams['xmax'] : (isHarbourSolver ? 10.0 : 1.0);
+        const ymin = flattenedParams['ymin'] !== undefined ? flattenedParams['ymin'] : (isHarbourSolver ? -10.0 : 0.0);
+        const ymax = flattenedParams['ymax'] !== undefined ? flattenedParams['ymax'] : (isHarbourSolver ? 10.0 : 1.0);
         const zmin = flattenedParams['zmin'] !== undefined ? flattenedParams['zmin'] : 0.0;
-        const zmax = flattenedParams['zmax'] !== undefined ? flattenedParams['zmax'] : 1.0;
+        const zmax = flattenedParams['zmax'] !== undefined ? flattenedParams['zmax'] : (isHarbourSolver ? 15.0 : 1.0);
         flattenedParams['nx'] = Math.round((xmax - xmin) / cellSize);
         flattenedParams['ny'] = Math.round((ymax - ymin) / cellSize);
         flattenedParams['nz'] = Math.round((zmax - zmin) / cellSize);
@@ -2089,6 +2294,10 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     Object.entries(chargeNode3D.parameters).forEach(([key, value]) => {
                         flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                     });
+                    const cPpc = chargeNode3D.parameters?.ppc;
+                    if (cPpc !== undefined) {
+                        flattenedParams['charge_ppc'] = Number(cPpc);
+                    }
                     let matNode: Node | undefined;
                     const matConn = state.connections.find(c => (c.toNode === chargeNode3D.id && c.toPort === 'material') || (c.fromNode === chargeNode3D.id && c.fromPort === 'material'));
                     if (matConn) {
@@ -2176,6 +2385,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     }
                 } else {
                     const impConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'importer');
+                    const stlConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'stl');
                     if (impConn) {
                         const impNode = state.nodes.find(n => n.id === impConn.fromNode);
                         if (impNode && impNode.type === 'LSDynaImporter3D') {
@@ -2185,6 +2395,20 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                             if (impNode.parameters.scale_factor !== undefined) {
                                 objParams['scale_factor'] = Number(impNode.parameters.scale_factor);
                             }
+                        }
+                    } else if (stlConn) {
+                        const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
+                        if (stlNode && stlNode.type === 'STLGeometry') {
+                            objParams['stl_file'] = resolveResourcePath(stlNode.parameters.stl_file || '', modelFilename);
+                            objParams['mesh_source'] = 'STL File';
+                            objParams['shape_type'] = 'STL';
+                            objParams['element_topology'] = 'Tet4_ANP';
+                            if (stlNode.parameters.scale_x !== undefined && objNode.parameters.scale_x === undefined) objParams['scale_x'] = Number(stlNode.parameters.scale_x);
+                            if (stlNode.parameters.scale_y !== undefined && objNode.parameters.scale_y === undefined) objParams['scale_y'] = Number(stlNode.parameters.scale_y);
+                            if (stlNode.parameters.scale_z !== undefined && objNode.parameters.scale_z === undefined) objParams['scale_z'] = Number(stlNode.parameters.scale_z);
+                            if (stlNode.parameters.rot_x !== undefined && objNode.parameters.rot_x === undefined) objParams['rot_x'] = Number(stlNode.parameters.rot_x);
+                            if (stlNode.parameters.rot_y !== undefined && objNode.parameters.rot_y === undefined) objParams['rot_y'] = Number(stlNode.parameters.rot_y);
+                            if (stlNode.parameters.rot_z !== undefined && objNode.parameters.rot_z === undefined) objParams['rot_z'] = Number(stlNode.parameters.rot_z);
                         }
                     } else if (objParams['k_file']) {
                         objParams['k_file'] = resolveResourcePath(objParams['k_file'], modelFilename);
@@ -2231,10 +2455,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 } else if (!objParams['material_model']) {
                     objParams['material_model'] = objNode.parameters?.['material_model'] || 'Hypoelastic';
                 }
-                const shapeType = objParams['shape_type'] || (objParams['mesh_source'] === 'Cylinder Generator' ? 'Cylinder' : (objParams['mesh_source'] === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box'));
+                const shapeType = objParams['shape_type'] || (objParams['mesh_source'] === 'Cylinder Generator' ? 'Cylinder' : (objParams['mesh_source'] === 'STL File' ? 'STL' : (objParams['mesh_source'] === 'Plate Generator' ? 'Plate' : (objParams['mesh_source'] === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box'))));
                 objParams['shape_type'] = shapeType;
-                objParams['mesh_source'] = shapeType === 'Cylinder' ? 'Cylinder Generator' : (shapeType === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator');
+                objParams['mesh_source'] = shapeType === 'Cylinder' ? 'Cylinder Generator' : (shapeType === 'STL' ? 'STL File' : (shapeType === 'Plate' ? 'Plate Generator' : (shapeType === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')));
                 objParams['origin_mode'] = objParams['origin_mode'] || objNode.parameters?.origin_mode || 'Center';
+                objParams['element_topology'] = objParams['element_topology'] || objNode.parameters?.element_topology || (shapeType === 'STL' ? 'Tet4_ANP' : 'Hex8');
 
                 if (objParams['failure_strain'] === undefined) objParams['failure_strain'] = 0.20;
                 if (objParams['tensile_failure_stress'] === undefined) objParams['tensile_failure_stress'] = 400.0e6;
@@ -2335,6 +2560,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                             } else if (primaryPart.shape_type) {
                                 objParams['shape_type'] = primaryPart.shape_type;
                             }
+                            if (objNode.parameters?.['element_topology']) {
+                                objParams['element_topology'] = objNode.parameters['element_topology'];
+                                primaryPart.element_topology = objParams['element_topology'];
+                            } else if (primaryPart.element_topology) {
+                                objParams['element_topology'] = primaryPart.element_topology;
+                            }
                         }
                         objParams['fem_parts'] = setup.parts.map((p: any) => {
                             const isSelfPart = (setup.parts.length === 1 || p.node_id === objNode.id || p.id === objNode.id);
@@ -2360,6 +2591,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                                 failure_strain: p.erosion_override?.failure_strain !== undefined ? Number(p.erosion_override.failure_strain) : undefined,
                                 convert_to_mpm: p.erosion_override?.convert_to_mpm === true,
                                 shape_type: p.shape_type || objParams['shape_type'] || 'Box',
+                                element_topology: p.element_topology || objParams['element_topology'] || 'Hex8',
+                                stl_file: p.stl_file || objParams['stl_file'] || '',
                                 origin_mode: p.origin_mode || objParams['origin_mode'] || 'Center',
                                 nx: Number((isSelfPart ? objParams['nx'] : p.nx) ?? objParams['nx'] ?? 10),
                                 ny: Number((isSelfPart ? objParams['ny'] : p.ny) ?? objParams['ny'] ?? 10),
@@ -2408,6 +2641,27 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             state.nodes.filter(n => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D').forEach(processObjNode);
             if (femObjects.length > 0) {
                 flattenedParams['fem_objects'] = femObjects;
+            }
+
+            if (femDomain) {
+                const femDetConns = state.connections.filter(c => c.toNode === femDomain.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
+                const femDetonators: any[] = Array.isArray(flattenedParams['triggers']) ? [...flattenedParams['triggers']] : [];
+                for (const conn of femDetConns) {
+                    const detNode = state.nodes.find(n => n.id === conn.fromNode);
+                    if (detNode && (detNode.type === 'DetonatorLocation3D' || detNode.type === 'DetonatorLocation' || detNode.type === 'TriggerLocation3D' || detNode.type === 'TriggerLocation')) {
+                        const detParams: any = {};
+                        Object.entries(detNode.parameters).forEach(([key, value]) => {
+                            detParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
+                        });
+                        if (detParams.time_delay === undefined && detParams.detonator_time !== undefined) detParams.time_delay = detParams.detonator_time;
+                        if (detParams.detonator_time === undefined && detParams.time_delay !== undefined) detParams.detonator_time = detParams.time_delay;
+                        femDetonators.push(detParams);
+                    }
+                }
+                if (femDetonators.length > 0) {
+                    flattenedParams['detonators'] = femDetonators;
+                    flattenedParams['triggers'] = femDetonators;
+                }
             }
 
             // Promote global erosion criteria to top-level: prefer explicit object/material erosion parameters over domain defaults
@@ -2685,33 +2939,50 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
             }
 
-            const detConns = state.connections.filter(c => c.toNode === mpmDomain.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
+            const isDetNode2D = (n: any) => n && (n.type === 'DetonatorLocation' || n.type === 'TriggerLocation');
+            const detConns = state.connections.filter(c => 
+                ((c.toNode === mpmDomain.id || c.fromNode === mpmDomain.id) ||
+                 state.nodes.some(n => n.type === 'MPMObject2D' && (n.id === c.toNode || n.id === c.fromNode))) &&
+                (c.toPort === 'detonator' || c.toPort === 'trigger' || c.toPort === 'detonators' || c.fromPort === 'detonator' || c.fromPort === 'trigger')
+            );
             const detonators: any[] = [];
             for (const conn of detConns) {
-                const detNode = state.nodes.find(n => n.id === conn.fromNode);
-                if (detNode && (detNode.type === 'DetonatorLocation' || detNode.type === 'TriggerLocation')) {
-                    const detParams: any = {};
+                const otherId = (conn.toNode === mpmDomain.id || state.nodes.some(n => n.type === 'MPMObject2D' && n.id === conn.toNode)) ? conn.fromNode : conn.toNode;
+                const detNode = state.nodes.find(n => n.id === otherId && isDetNode2D(n));
+                if (detNode && !detonators.some(d => d._id === detNode.id)) {
+                    const detParams: any = { _id: detNode.id };
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
-                        detParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
                     });
+                    const tDelay = Number(detParams.time_delay ?? detParams.detonator_time ?? detParams.start_time ?? 0.0);
+                    detParams.time_delay = tDelay;
+                    detParams.detonator_time = tDelay;
+                    detParams.start_time = tDelay;
+                    detParams.track_mpm_velocity = Boolean(detParams.track_mpm_velocity);
                     detonators.push(detParams);
                 }
             }
             if (detonators.length === 0) {
-                const fallbackDets = state.nodes.filter(n => n.type === 'DetonatorLocation' || n.type === 'TriggerLocation');
+                const fallbackDets = state.nodes.filter(isDetNode2D);
                 for (const detNode of fallbackDets) {
-                    const detParams: any = {};
+                    if (detonators.some(d => d._id === detNode.id)) continue;
+                    const detParams: any = { _id: detNode.id };
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
-                        detParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
                     });
+                    const tDelay = Number(detParams.time_delay ?? detParams.detonator_time ?? detParams.start_time ?? 0.0);
+                    detParams.time_delay = tDelay;
+                    detParams.detonator_time = tDelay;
+                    detParams.start_time = tDelay;
+                    detParams.track_mpm_velocity = Boolean(detParams.track_mpm_velocity);
                     detonators.push(detParams);
                 }
             }
             if (detonators.length > 0) {
-                flattenedParams['detonators'] = detonators;
-                flattenedParams['triggers'] = detonators;
+                flattenedParams['detonators'] = detonators.map(({ _id, ...rest }) => rest);
+                flattenedParams['triggers'] = flattenedParams['detonators'];
                 Object.entries(detonators[0]).forEach(([key, value]) => {
-                    flattenedParams[key] = value;
+                    if (key !== '_id') flattenedParams[key] = value;
                 });
             }
 
@@ -2899,8 +3170,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                         objParams['material_id'] = 'mat_' + objNode.id;
                         objParams['material_name'] = ((matNode as any).name || matNode.parameters?.name || 'Material') + '_' + objNode.id;
                     }
+                    const skipMatKeys = new Set(['visible', 'hidden', 'name', 'label', 'id']);
                     Object.entries(matNode.parameters).forEach(([k, v]) => {
-                        objParams[k] = castParam(k, v);
+                        if (!skipMatKeys.has(k)) {
+                            objParams[k] = castParam(k, v);
+                        }
                     });
                 } else {
                     objParams['material_id'] = objNode.parameters?.material || ('mat_' + objNode.id);
@@ -2909,7 +3183,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
 
                 // Re-apply explicit objNode parameters to ensure geometric precedence over material defaults
                 const nonConstitutiveKeys = [
-                    'name', 'shape', 'shape_type', 'pos_x', 'pos_y', 'pos_z',
+                    'name', 'label', 'id', 'visible', 'hidden', 'shape', 'shape_type', 'pos_x', 'pos_y', 'pos_z',
                     'scale_x', 'scale_y', 'scale_z', 'rot_x', 'rot_y', 'rot_z',
                     'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height',
                     'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
@@ -2985,49 +3259,58 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 objParams['vel_z'] = Number(objNode.parameters?.vel_z ?? objNode.parameters?.initial_velocity_z ?? 0.0);
                 objParams['ppc'] = Math.max(1, Math.round(Number(objNode.parameters?.ppc ?? domainPpc)));
 
-                if (domainParticleDist && (objParams['particle_distribution'] === undefined || objParams['particle_distribution'] === 'Cartesian')) {
-                    objParams['particle_distribution'] = domainParticleDist;
-                }
-                if (domainBoundaryFill && (objParams['boundary_filling'] === undefined || objParams['boundary_filling'] === 'Stairstepped')) {
-                    objParams['boundary_filling'] = domainBoundaryFill;
-                }
                 mpmObjects.push(objParams);
             }
 
-            const detConns = state.connections.filter(c => c.toNode === mpmDomain.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
+            const isDetNode = (n: any) => n && (n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation' || n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation');
+            const detConns = state.connections.filter(c => 
+                ((c.toNode === mpmDomain.id || c.fromNode === mpmDomain.id) ||
+                 targetObjNodes.some(o => o && (o.id === c.toNode || o.id === c.fromNode))) &&
+                (c.toPort === 'detonator' || c.toPort === 'trigger' || c.toPort === 'detonators' || c.fromPort === 'detonator' || c.fromPort === 'trigger')
+            );
             const detonators: any[] = [];
             for (const conn of detConns) {
-                const detNode = state.nodes.find(n => n.id === conn.fromNode);
-                if (detNode && (detNode.type === 'DetonatorLocation3D' || detNode.type === 'DetonatorLocation' || detNode.type === 'TriggerLocation3D' || detNode.type === 'TriggerLocation')) {
-                    const detParams: any = {};
+                const otherId = (conn.toNode === mpmDomain.id || targetObjNodes.some(o => o && o.id === conn.toNode)) ? conn.fromNode : conn.toNode;
+                const detNode = state.nodes.find(n => n.id === otherId && isDetNode(n));
+                if (detNode && !detonators.some(d => d._id === detNode.id)) {
+                    const detParams: any = { _id: detNode.id };
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
-                        detParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
                     });
+                    const tDelay = Number(detParams.time_delay ?? detParams.detonator_time ?? detParams.start_time ?? 0.0);
+                    detParams.time_delay = tDelay;
+                    detParams.detonator_time = tDelay;
+                    detParams.start_time = tDelay;
+                    detParams.track_mpm_velocity = Boolean(detParams.track_mpm_velocity);
+                    const targetObjNode = targetObjNodes.find(o => o && (o.id === conn.toNode || o.id === conn.fromNode) && o.id !== detNode.id);
+                    if (targetObjNode) {
+                        const objIdx = targetObjNodes.findIndex(o => o && o.id === targetObjNode.id) + 1;
+                        if (objIdx > 0) detParams.target_object_id = objIdx;
+                    }
                     detonators.push(detParams);
                 }
             }
             if (detonators.length === 0) {
-                // Scope fallback detonator search to nodes connected to this MPMDomain only (avoid cross-model contamination)
-                const mpmDomainConnectedIds = new Set<string>(
-                    state.connections
-                        .filter(c => c.toNode === mpmDomain.id || c.fromNode === mpmDomain.id)
-                        .flatMap(c => [c.fromNode, c.toNode])
-                );
-                mpmDomainConnectedIds.add(mpmDomain.id);
-                const fallbackDets = state.nodes.filter(n => (n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation' || n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation') && mpmDomainConnectedIds.has(n.id));
+                const fallbackDets = state.nodes.filter(isDetNode);
                 for (const detNode of fallbackDets) {
-                    const detParams: any = {};
+                    if (detonators.some(d => d._id === detNode.id)) continue;
+                    const detParams: any = { _id: detNode.id };
                     Object.entries(detNode.parameters).forEach(([key, value]) => {
-                        detParams[key] = numericKeys.includes(key) ? Number(value) : value;
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
                     });
+                    const tDelay = Number(detParams.time_delay ?? detParams.detonator_time ?? detParams.start_time ?? 0.0);
+                    detParams.time_delay = tDelay;
+                    detParams.detonator_time = tDelay;
+                    detParams.start_time = tDelay;
+                    detParams.track_mpm_velocity = Boolean(detParams.track_mpm_velocity);
                     detonators.push(detParams);
                 }
             }
             if (detonators.length > 0) {
-                flattenedParams['detonators'] = detonators;
-                flattenedParams['triggers'] = detonators;
+                flattenedParams['detonators'] = detonators.map(({ _id, ...rest }) => rest);
+                flattenedParams['triggers'] = flattenedParams['detonators'];
                 Object.entries(detonators[0]).forEach(([key, value]) => {
-                    flattenedParams[key] = value;
+                    if (key !== '_id') flattenedParams[key] = value;
                 });
             }
 
@@ -3109,6 +3392,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     }
                 } else {
                     const impConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'importer');
+                    const stlConn = state.connections.find(c => c.toNode === objNode.id && c.toPort === 'stl');
                     if (impConn) {
                         const impNode = state.nodes.find(n => n.id === impConn.fromNode);
                         if (impNode && impNode.type === 'LSDynaImporter3D') {
@@ -3118,6 +3402,20 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                             if (impNode.parameters.scale_factor !== undefined) {
                                 objParams['scale_factor'] = Number(impNode.parameters.scale_factor);
                             }
+                        }
+                    } else if (stlConn) {
+                        const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
+                        if (stlNode && stlNode.type === 'STLGeometry') {
+                            objParams['stl_file'] = resolveResourcePath(stlNode.parameters.stl_file || '', modelFilename);
+                            objParams['mesh_source'] = 'STL File';
+                            objParams['shape_type'] = 'STL';
+                            objParams['element_topology'] = 'Tet4_ANP';
+                            if (stlNode.parameters.scale_x !== undefined && objNode.parameters.scale_x === undefined) objParams['scale_x'] = Number(stlNode.parameters.scale_x);
+                            if (stlNode.parameters.scale_y !== undefined && objNode.parameters.scale_y === undefined) objParams['scale_y'] = Number(stlNode.parameters.scale_y);
+                            if (stlNode.parameters.scale_z !== undefined && objNode.parameters.scale_z === undefined) objParams['scale_z'] = Number(stlNode.parameters.scale_z);
+                            if (stlNode.parameters.rot_x !== undefined && objNode.parameters.rot_x === undefined) objParams['rot_x'] = Number(stlNode.parameters.rot_x);
+                            if (stlNode.parameters.rot_y !== undefined && objNode.parameters.rot_y === undefined) objParams['rot_y'] = Number(stlNode.parameters.rot_y);
+                            if (stlNode.parameters.rot_z !== undefined && objNode.parameters.rot_z === undefined) objParams['rot_z'] = Number(stlNode.parameters.rot_z);
                         }
                     } else if (objParams['k_file']) {
                         objParams['k_file'] = resolveResourcePath(objParams['k_file'], modelFilename);
@@ -3155,8 +3453,16 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     matNode = state.nodes.find(n => n.type === 'Material' && !isJWLMaterialNode(n) && !isIdealGasMaterialNode(n)) || state.nodes.find(n => n.type === 'Material');
                 }
                 if (matNode) {
+                    const skipMatKeys = new Set([
+                        'visible', 'hidden', 'name', 'label', 'id',
+                        'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z',
+                        'scale_x', 'scale_y', 'scale_z', 'size_x', 'size_y', 'size_z',
+                        'nx', 'ny', 'nz', 'shape', 'shape_type', 'stl_file', 'origin_mode'
+                    ]);
                     Object.entries(matNode.parameters).forEach(([mk, mv]) => {
-                        objParams[mk] = numericKeys.includes(mk) ? Number(mv) : mv;
+                        if (!skipMatKeys.has(mk)) {
+                            objParams[mk] = numericKeys.includes(mk) ? Number(mv) : mv;
+                        }
                     });
                 }
                 if (matNode?.parameters?.['material_model']) {
@@ -3164,10 +3470,11 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 } else if (!objParams['material_model']) {
                     objParams['material_model'] = objNode.parameters?.['material_model'] || 'Hypoelastic';
                 }
-                const shapeType = objParams['shape_type'] || (objParams['mesh_source'] === 'Cylinder Generator' ? 'Cylinder' : (objParams['mesh_source'] === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box'));
+                const shapeType = objParams['shape_type'] || (objParams['mesh_source'] === 'Cylinder Generator' ? 'Cylinder' : (objParams['mesh_source'] === 'STL File' ? 'STL' : (objParams['mesh_source'] === 'Plate Generator' ? 'Plate' : (objParams['mesh_source'] === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box'))));
                 objParams['shape_type'] = shapeType;
-                objParams['mesh_source'] = shapeType === 'Cylinder' ? 'Cylinder Generator' : (shapeType === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator');
+                objParams['mesh_source'] = shapeType === 'Cylinder' ? 'Cylinder Generator' : (shapeType === 'STL' ? 'STL File' : (shapeType === 'Plate' ? 'Plate Generator' : (shapeType === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')));
                 objParams['origin_mode'] = objParams['origin_mode'] || objNode.parameters?.origin_mode || 'Center';
+                objParams['element_topology'] = objParams['element_topology'] || objNode.parameters?.element_topology || (shapeType === 'STL' ? 'Tet4_ANP' : 'Hex8');
 
                 if (objParams['failure_strain'] === undefined) objParams['failure_strain'] = 0.20;
                 if (objParams['tensile_failure_stress'] === undefined) objParams['tensile_failure_stress'] = 400.0e6;
@@ -3268,6 +3575,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                             } else if (primaryPart.shape_type) {
                                 objParams['shape_type'] = primaryPart.shape_type;
                             }
+                            if (objNode.parameters?.['element_topology']) {
+                                objParams['element_topology'] = objNode.parameters['element_topology'];
+                                primaryPart.element_topology = objParams['element_topology'];
+                            } else if (primaryPart.element_topology) {
+                                objParams['element_topology'] = primaryPart.element_topology;
+                            }
                         }
                         objParams['fem_parts'] = setup.parts.map((p: any) => {
                             const isSelfPart = (setup.parts.length === 1 || p.node_id === objNode.id || p.id === objNode.id);
@@ -3293,6 +3606,8 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                                 failure_strain: p.erosion_override?.failure_strain !== undefined ? Number(p.erosion_override.failure_strain) : undefined,
                                 convert_to_mpm: p.erosion_override?.convert_to_mpm === true,
                                 shape_type: p.shape_type || objParams['shape_type'] || 'Box',
+                                element_topology: p.element_topology || objParams['element_topology'] || 'Hex8',
+                                stl_file: p.stl_file || objParams['stl_file'] || '',
                                 origin_mode: p.origin_mode || objParams['origin_mode'] || 'Center',
                                 nx: Number((isSelfPart ? objParams['nx'] : p.nx) ?? objParams['nx'] ?? 10),
                                 ny: Number((isSelfPart ? objParams['ny'] : p.ny) ?? objParams['ny'] ?? 10),
@@ -3340,6 +3655,40 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
 
             state.nodes.filter(n => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D').forEach(processObjNode);
             flattenedParams['fem_objects'] = femObjects;
+
+            const detConns = state.connections.filter(c => c.toNode === femDomain.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
+            const detonators: any[] = [];
+            for (const conn of detConns) {
+                const detNode = state.nodes.find(n => n.id === conn.fromNode);
+                if (detNode && (detNode.type === 'DetonatorLocation3D' || detNode.type === 'DetonatorLocation' || detNode.type === 'TriggerLocation3D' || detNode.type === 'TriggerLocation')) {
+                    const detParams: any = {};
+                    Object.entries(detNode.parameters).forEach(([key, value]) => {
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
+                    });
+                    if (detParams.time_delay === undefined && detParams.detonator_time !== undefined) detParams.time_delay = detParams.detonator_time;
+                    if (detParams.detonator_time === undefined && detParams.time_delay !== undefined) detParams.detonator_time = detParams.time_delay;
+                    detonators.push(detParams);
+                }
+            }
+            if (detonators.length === 0) {
+                const fallbackDets = state.nodes.filter(n => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation' || n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation');
+                for (const detNode of fallbackDets) {
+                    const detParams: any = {};
+                    Object.entries(detNode.parameters).forEach(([key, value]) => {
+                        detParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
+                    });
+                    if (detParams.time_delay === undefined && detParams.detonator_time !== undefined) detParams.time_delay = detParams.detonator_time;
+                    if (detParams.detonator_time === undefined && detParams.time_delay !== undefined) detParams.detonator_time = detParams.time_delay;
+                    detonators.push(detParams);
+                }
+            }
+            if (detonators.length > 0) {
+                flattenedParams['detonators'] = detonators;
+                flattenedParams['triggers'] = detonators;
+                Object.entries(detonators[0]).forEach(([key, value]) => {
+                    flattenedParams[key] = value;
+                });
+            }
 
             // Promote global erosion criteria to top-level: prefer explicit object/material erosion parameters over domain defaults
             if (femObjects.length > 0 && femObjects[0]['erosion_strain'] !== undefined) {

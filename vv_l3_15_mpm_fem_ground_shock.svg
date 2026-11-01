@@ -41,27 +41,27 @@
   <path class="corridor-yellow" d="M 75 64.2 L 111 64.2 L 148 64.2 L 184 64.2 L 220 64.2 L 257 64.2 L 293 64.2 L 329 64.2 L 366 64.2 L 402 64.2 L 438 64.2 L 474 64.2 L 511 64.2 L 547 64.2 L 583 64.2 L 620 64.2 L 656 362 L 692 362 L 729 362 L 765 362 L 765 362 L 729 362 L 692 362 L 656 362 L 620 92.5 L 583 92.5 L 547 92.5 L 511 92.5 L 474 92.5 L 438 92.5 L 402 92.5 L 366 92.5 L 329 92.5 L 293 92.5 L 257 92.5 L 220 92.5 L 184 92.5 L 148 92.5 L 111 92.5 L 75 92.5 Z"/>
   <path class="corridor-green" d="M 75 75.5 L 111 75.5 L 148 75.5 L 184 75.5 L 220 75.5 L 257 75.5 L 293 75.5 L 329 75.5 L 366 75.5 L 402 75.5 L 438 75.5 L 474 75.5 L 511 75.5 L 547 75.5 L 583 75.5 L 620 75.5 L 656 362 L 692 362 L 729 362 L 765 362 L 765 362 L 729 362 L 692 362 L 656 362 L 620 81.2 L 583 81.2 L 547 81.2 L 511 81.2 L 474 81.2 L 438 81.2 L 402 81.2 L 366 81.2 L 329 81.2 L 293 81.2 L 257 81.2 L 220 81.2 L 184 81.2 L 148 81.2 L 111 81.2 L 75 81.2 Z"/>
   <path class="exact-curve" d="M 75 78.3 L 111 78.3 L 148 78.3 L 184 78.3 L 220 78.3 L 257 78.3 L 293 78.3 L 329 78.3 L 366 78.3 L 402 78.3 L 438 78.3 L 474 78.3 L 511 78.3 L 547 78.3 L 583 78.3 L 620 78.3 L 656 362 L 692 362 L 729 362 L 765 362 "/>
-  <path class="num-curve" d="M 75 354 L 111 264 L 148 90.3 L 184 90.3 L 220 203 L 257 235 L 293 244 L 329 259 L 366 276 L 402 225 L 438 255 L 474 255 L 511 256 L 547 255 L 583 255 L 620 254 L 656 254 L 692 258 L 729 285 L 765 334 "/>
+  <path class="num-curve" d="M 75 354 L 111 264 L 148 90.3 L 184 90.3 L 220 203 L 257 234 L 293 242 L 329 257 L 366 274 L 402 219 L 438 249 L 474 249 L 511 250 L 547 250 L 583 249 L 620 248 L 656 248 L 692 253 L 729 282 L 765 333 "/>
   <circle cx="75" cy="354" r="3.5" fill="#f0883e"/>
   <circle cx="111" cy="264" r="3.5" fill="#f0883e"/>
   <circle cx="148" cy="90.3" r="3.5" fill="#f0883e"/>
   <circle cx="184" cy="90.3" r="3.5" fill="#f0883e"/>
   <circle cx="220" cy="203" r="3.5" fill="#f0883e"/>
-  <circle cx="257" cy="235" r="3.5" fill="#f0883e"/>
-  <circle cx="293" cy="244" r="3.5" fill="#f0883e"/>
-  <circle cx="329" cy="259" r="3.5" fill="#f0883e"/>
-  <circle cx="366" cy="276" r="3.5" fill="#f0883e"/>
-  <circle cx="402" cy="225" r="3.5" fill="#f0883e"/>
-  <circle cx="438" cy="255" r="3.5" fill="#f0883e"/>
-  <circle cx="474" cy="255" r="3.5" fill="#f0883e"/>
-  <circle cx="511" cy="256" r="3.5" fill="#f0883e"/>
-  <circle cx="547" cy="255" r="3.5" fill="#f0883e"/>
-  <circle cx="583" cy="255" r="3.5" fill="#f0883e"/>
-  <circle cx="620" cy="254" r="3.5" fill="#f0883e"/>
-  <circle cx="656" cy="254" r="3.5" fill="#f0883e"/>
-  <circle cx="692" cy="258" r="3.5" fill="#f0883e"/>
-  <circle cx="729" cy="285" r="3.5" fill="#f0883e"/>
-  <circle cx="765" cy="334" r="3.5" fill="#f0883e"/>
+  <circle cx="257" cy="234" r="3.5" fill="#f0883e"/>
+  <circle cx="293" cy="242" r="3.5" fill="#f0883e"/>
+  <circle cx="329" cy="257" r="3.5" fill="#f0883e"/>
+  <circle cx="366" cy="274" r="3.5" fill="#f0883e"/>
+  <circle cx="402" cy="219" r="3.5" fill="#f0883e"/>
+  <circle cx="438" cy="249" r="3.5" fill="#f0883e"/>
+  <circle cx="474" cy="249" r="3.5" fill="#f0883e"/>
+  <circle cx="511" cy="250" r="3.5" fill="#f0883e"/>
+  <circle cx="547" cy="250" r="3.5" fill="#f0883e"/>
+  <circle cx="583" cy="249" r="3.5" fill="#f0883e"/>
+  <circle cx="620" cy="248" r="3.5" fill="#f0883e"/>
+  <circle cx="656" cy="248" r="3.5" fill="#f0883e"/>
+  <circle cx="692" cy="253" r="3.5" fill="#f0883e"/>
+  <circle cx="729" cy="282" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="333" r="3.5" fill="#f0883e"/>
   <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
   <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
   <text x="400" y="435" text-anchor="middle" class="axis-label">Longitudinal Coordinate X (m)</text>

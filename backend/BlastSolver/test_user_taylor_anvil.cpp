@@ -13,14 +13,10 @@ void run_test(const std::string& name, Blast::MPMMaterialModel model_type, Blast
     float ymin = -0.015f, ymax = 0.015f;
     float zmin = 0.0f, zmax = 0.06f;
     float cell_size = 0.00075f;
-    int pad = 3;
 
-    int nx = std::max(1, static_cast<int>(std::round((xmax - xmin) / cell_size))) + 2 * pad;
-    int ny = std::max(1, static_cast<int>(std::round((ymax - ymin) / cell_size))) + 2 * pad;
-    int nz = std::max(1, static_cast<int>(std::round((zmax - zmin) / cell_size))) + 2 * pad;
-    xmin -= pad * cell_size;
-    ymin -= pad * cell_size;
-    zmin -= pad * cell_size;
+    int nx = std::max(1, static_cast<int>(std::round((xmax - xmin) / cell_size)));
+    int ny = std::max(1, static_cast<int>(std::round((ymax - ymin) / cell_size)));
+    int nz = std::max(1, static_cast<int>(std::round((zmax - zmin) / cell_size)));
     float dx = cell_size, dy = cell_size, dz = cell_size;
 
     std::cout << "Grid: " << nx << " x " << ny << " x " << nz << " | dx=" << dx << "\n";
@@ -96,7 +92,7 @@ void run_test(const std::string& name, Blast::MPMMaterialModel model_type, Blast
                 if (p.x[2] > 0.025f && p.ep_bar > max_ep_top) max_ep_top = p.ep_bar;
                 if (p.x[2] <= 0.015f && p.ep_bar > max_ep_impact) max_ep_impact = p.ep_bar;
                 if (p.has_failed || p.damage >= 1.0f) failed_count++;
-                if (r > 0.015f || p.x[2] < -0.001f || p.x[2] > 0.06f) escaped_count++;
+                if (r > 0.015f || p.x[2] < 0.0f || p.x[2] > 0.06f) escaped_count++;
             }
 
             std::cout << "Step " << std::setw(4) << i

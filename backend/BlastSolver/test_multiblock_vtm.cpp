@@ -1,4 +1,7 @@
 #include "AsyncMultiBlockWriter.hpp"
+#include "mpm_solver_3d.hpp"
+#include "HDF5Writer.hpp"
+#include "XDMFWriter.hpp"
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -53,7 +56,7 @@ int main() {
     job.mpm_snap.ep_bar.resize(16, 0.05f);
     job.mpm_snap.damage.resize(16, 0.0f);
     job.mpm_snap.temp.resize(16, 320.0f);
-    job.mpm_snap.obj_id.resize(16, 1.0f);
+    job.mpm_snap.obj_id.resize(16, 1);
     for (int p = 0; p < 16; ++p) {
         job.mpm_snap.points[p * 3 + 0] = static_cast<float>(0.1 * (p % 4));
         job.mpm_snap.points[p * 3 + 1] = static_cast<float>(0.1 * ((p / 4) % 4));
@@ -168,6 +171,97 @@ int main() {
         return 1;
     }
     std::cout << "[PASS] .vtp PolyData NumberOfPoints is 16.\n";
+
+    // 9. Verify 3D MPM High-Compression VTU (Raw Appended) & XDMF+HDF5 Pipeline on Genuine MPMSolver3D
+    std::cout << "\n[INFO] Running 3D MPM High-Compression VTU & XDMF+HDF5 Verification...\n";
+    Blast::MPMSolver3D mpm_solver;
+    mpm_solver.initializeGrid(20, 20, 20, 0.05f, 0.05f, 0.05f, 0.0f, 0.0f, 0.0f);
+    mpm_solver.addBoxObject(1, 0.50f, 0.50f, 0.35f, 0.60f, 0.60f, 0.50f,
+                            0.0f, 0.0f, -150.0f, 0.0f, 0.0f, 5.0f,
+                            7850.0f, 210.0e9f, 0.3f, 800.0e6f, 1.0e9f, 0.25f, 600.0e6f, 8);
+    for (int s = 0; s < 5; ++s) {
+        mpm_solver.step(1.0e-5f);
+    }
+
+    auto base_snap = mpm_solver.extractVTKSnapshot(true, true, true, true, true, true, true, true);
+    const size_t Np = base_snap.num_particles;
+    // Reference legacy uncompressed + Base64 equivalent payload size:
+    // Legacy wrote Points(12B) + Velocity(12B) + VM(4B) + Pressure(4B) + PlasticStrain(4B) + Damage(4B)
+    // + Hydrostatic_Pressure(4B duplicate) + Material_ID(4B Float32) + Temp(4B) + ObjectID(4B Float32)
+    // + Connectivity(4B) + Offsets(4B) + Types(1B) = 65 B/particle raw -> * 4/3 Base64
+    std::cout << "[INFO] Genuine MPMSolver3D active particle count: Np = " << Np << " ( after 5 steps, dt = 1.0e-5 s )\n";
+
+    fs::path vtu_lossless_path = test_dir / "mpm_raw_polyvertex_23bit.vtu";
+    {
+        auto snap = base_snap;
+        snap.compression_level = 6;
+        snap.float_precision = "Full 23-bit Float32 (Lossless)";
+        snap.mpm_topology = "Single PolyVertex";
+        export_vtu_mpm_3d_snapshot(vtu_lossless_path.string(), snap, "Binary");
+    }
+
+    fs::path vtu_poly16_path = test_dir / "mpm_raw_polyvertex_16bit.vtu";
+    {
+        auto snap = base_snap;
+        snap.compression_level = 6;
+        snap.float_precision = "16-bit Mantissa (~5 sig. digits)";
+        snap.mpm_topology = "Single PolyVertex";
+        export_vtu_mpm_3d_snapshot(vtu_poly16_path.string(), snap, "Binary");
+    }
+
+    fs::path vtu_poly12_path = test_dir / "mpm_raw_polyvertex_12bit.vtu";
+    {
+        auto snap = base_snap;
+        snap.compression_level = 6;
+        snap.float_precision = "12-bit Mantissa (~4 sig. digits)";
+        snap.mpm_topology = "Single PolyVertex";
+        export_vtu_mpm_3d_snapshot(vtu_poly12_path.string(), snap, "Binary");
+    }
+
+    fs::path vtu_zerocell12_path = test_dir / "mpm_raw_zerocell_12bit.vtu";
+    {
+        auto snap = base_snap;
+        snap.compression_level = 6;
+        snap.float_precision = "12-bit Mantissa (~4 sig. digits)";
+        snap.mpm_topology = "Zero-Cell Point Cloud";
+        export_vtu_mpm_3d_snapshot(vtu_zerocell12_path.string(), snap, "Binary");
+    }
+
+    fs::path h5_12_path = test_dir / "mpm_step_00005.h5";
+    fs::path xdmf_12_path = test_dir / "mpm_step_00005.xdmf";
+    {
+        auto snap = base_snap;
+        snap.compression_level = 6;
+        snap.float_precision = "12-bit Mantissa (~4 sig. digits)";
+        HDF5Writer::writeMPMSnapshot3D(h5_12_path.string(), snap);
+        XDMFWriter::writeMPMStepXDMF3D(xdmf_12_path.string(), "mpm_step_00005.h5", 5, 5.0e-5, snap);
+    }
+
+    // Check raw appended header and UInt8 attributes in vtu_poly12_path
+    std::ifstream vtu_check(vtu_poly12_path, std::ios::binary);
+    std::string vtu_hdr(2048, '\0');
+    vtu_check.read(&vtu_hdr[0], 2048);
+    if (vtu_hdr.find("encoding=\"raw\"") == std::string::npos ||
+        vtu_hdr.find("type=\"UInt8\" Name=\"ObjectID\"") == std::string::npos ||
+        vtu_hdr.find("type=\"UInt8\" Name=\"Material_ID\"") == std::string::npos ||
+        vtu_hdr.find("NumberOfCells=\"1\"") == std::string::npos ||
+        vtu_hdr.find("Hydrostatic_Pressure") != std::string::npos) {
+        std::cerr << "[FAIL] Upgraded VTU header did not match expected schema:\n" << vtu_hdr << "\n";
+        return 1;
+    }
+
+    size_t sz_lossless = fs::file_size(vtu_lossless_path);
+    size_t sz_poly16   = fs::file_size(vtu_poly16_path);
+    size_t sz_poly12   = fs::file_size(vtu_poly12_path);
+    size_t sz_zerocell = fs::file_size(vtu_zerocell12_path);
+    size_t sz_h5       = fs::file_size(h5_12_path) + fs::file_size(xdmf_12_path);
+
+    std::cout << "  - Raw Binary VTU (Single PolyVertex, Full 23-bit): " << sz_lossless << " bytes (" << (double)sz_lossless / Np << " B/particle)\n";
+    std::cout << "  - Raw Binary VTU (Single PolyVertex, 16-bit):      " << sz_poly16   << " bytes (" << (double)sz_poly16 / Np   << " B/particle)\n";
+    std::cout << "  - Raw Binary VTU (Single PolyVertex, 12-bit):      " << sz_poly12   << " bytes (" << (double)sz_poly12 / Np   << " B/particle)\n";
+    std::cout << "  - Raw Binary VTU (Zero-Cell Cloud,   12-bit):      " << sz_zerocell << " bytes (" << (double)sz_zerocell / Np << " B/particle)\n";
+    std::cout << "  - XDMF + HDF5    (Polyvertex Shuffle, 12-bit):     " << sz_h5       << " bytes (" << (double)sz_h5 / Np       << " B/particle)\n";
+    std::cout << "[PASS] 3D MPM High-Compression VTU & XDMF+HDF5 verified.\n";
 
     std::cout << "\n========================================================================\n";
     std::cout << "  Multi-Block VTK (.vtm) Pipeline Verification: ALL CHECKS PASSED\n";

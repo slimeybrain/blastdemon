@@ -72,7 +72,7 @@ public:
     virtual int getTemporalOrder() const = 0;
     virtual void setBCTypes(BCType r_min, BCType r_max, BCType z_min, BCType z_max) = 0;
     virtual void setCoordinateSystemCartesian(bool cartesian) = 0;
-    virtual void setDetonatorLocation(double r, double z) = 0;
+    virtual void setDetonatorLocation(double r, double z, double start_time = 0.0) = 0;
 
     virtual BCType getBCRmin() const = 0;
     virtual BCType getBCRmax() const = 0;
@@ -151,9 +151,10 @@ public:
         bcRmin = r_min; bcRmax = r_max; bcZmin = z_min; bcZmax = z_max;
     }
     void setCoordinateSystemCartesian(bool cartesian) override { is_cartesian = cartesian; }
-    void setDetonatorLocation(double r, double z) override {
+    void setDetonatorLocation(double r, double z, double start_time = 0.0) override {
         det_x = r;
         det_z = z;
+        det_start_time = start_time;
     }
 
     BCType getBCRmin() const override { return bcRmin; }
@@ -206,6 +207,7 @@ private:
     double det_x = 0.0;
     double det_y = 0.0;
     double det_z = 0.0;
+    double det_start_time = 0.0;
 
     // Tile management
     int num_tiles_r;

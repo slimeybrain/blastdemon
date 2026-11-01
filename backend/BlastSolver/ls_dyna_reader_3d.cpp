@@ -123,6 +123,7 @@ bool LSDynaReader3D<T>::parseStream(
     std::vector<FEMElement3D<T>>& out_elements,
     std::vector<FEMTrussElement3D<T>>& out_trusses,
     std::vector<FEMBeam3DElement<T>>& out_beams,
+    std::vector<FEMShell4BTElement<T>>& out_shells,
     MaterialTable3D& out_default_mat,
     std::vector<MaterialTable3D>& out_materials,
     int depth
@@ -358,9 +359,9 @@ bool LSDynaReader3D<T>::parseStream(
             // Card 1: MID, EXFAIL, MXPRES, MNEPS, EFFEPS, VOLEPS, NUMFIP, NCS
             int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
             T exf = parseFieldVal(line, 1, 0.0f);
-            T effeps = parseFieldVal(line, 4, 0.0f);
+            T f4 = parseFieldVal(line, 4, 0.0f);
             float fail_eps = 0.0f;
-            if (effeps > 0.0f && effeps <= 10.0f) fail_eps = static_cast<float>(effeps);
+            if (f4 > 0.0f && f4 <= 10.0f) fail_eps = static_cast<float>(f4);
             else if (exf > 0.0f && exf <= 10.0f) fail_eps = static_cast<float>(exf);
 
             if (fail_eps > 0.0f) {
@@ -370,6 +371,37 @@ bool LSDynaReader3D<T>::parseStream(
                     m_imported_materials[mid].failure_strain = fail_eps;
                     m_imported_materials[mid].enable_strain_erosion = true;
                 }
+            }
+
+            if (f4 > 1.0e5f) {
+                out_default_mat.tensile_failure_stress = static_cast<float>(f4);
+                out_default_mat.enable_stress_erosion = true;
+                if (m_imported_materials.count(mid)) {
+                    m_imported_materials[mid].tensile_failure_stress = static_cast<float>(f4);
+                    m_imported_materials[mid].enable_stress_erosion = true;
+                }
+            }
+
+            // Optional Card 2: MNPRES, SIGP1, SIGVM, ...
+            std::streampos pos = file.tellg();
+            std::string line2;
+            while (std::getline(file, line2)) {
+                std::string trimmed2 = trim(line2);
+                if (trimmed2.empty() || trimmed2[0] == '$') continue;
+                if (trimmed2[0] == '*') {
+                    file.seekg(pos);
+                    break;
+                }
+                T sigp1_c2 = parseFieldVal(line2, 1, 0.0f);
+                if (sigp1_c2 > 1.0e5f) {
+                    out_default_mat.tensile_failure_stress = static_cast<float>(sigp1_c2);
+                    out_default_mat.enable_stress_erosion = true;
+                    if (m_imported_materials.count(mid)) {
+                        m_imported_materials[mid].tensile_failure_stress = static_cast<float>(sigp1_c2);
+                        m_imported_materials[mid].enable_stress_erosion = true;
+                    }
+                }
+                break;
             }
             current_keyword = "";
         } else if (current_keyword.rfind("*CONTROL_TIMESTEP", 0) == 0) {
@@ -689,10 +721,124 @@ bool LSDynaReader3D<T>::parseStream(
                     m_parts[part_id].num_beams++;
                 }
             }
+        } else if (current_keyword.rfind("*SECTION_SHELL", 0) == 0) {
+            if (current_keyword.rfind("*SECTION_SHELL_TITLE", 0) == 0) {
+                std::getline(file, line);
+                current_keyword = "*SECTION_SHELL";
+                continue;
+            }
+            // Card 1: SECID, ELFORM, SHRF, NIP, PROPT, QR/IRID, ICOMP, SETYP
+            int sec_id = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            int elform = static_cast<int>(parseFieldVal(line, 1, 2.0f)); // Default 2 = Belytschko-Tsay
+            T shrf = parseFieldVal(line, 2, 1.0f);
+            int nip = static_cast<int>(parseFieldVal(line, 3, 5.0f));
+
+            ShellSectionProps props{};
+            props.elform = elform;
+            props.shrf = shrf > static_cast<T>(0.0f) ? shrf : static_cast<T>(1.0f);
+            props.nip = nip > 0 ? nip : 5;
+
+            // Card 2: Read shell thickness T1, T2, T3, T4
+            std::streampos pos = file.tellg();
+            std::string line2;
+            while (std::getline(file, line2)) {
+                std::string trimmed2 = trim(line2);
+                if (trimmed2.empty() || trimmed2[0] == '$') continue;
+                if (trimmed2[0] == '*') {
+                    file.seekg(pos);
+                    break;
+                }
+                T t1 = parseFieldVal(line2, 0, 0.001f);
+                T t2 = parseFieldVal(line2, 1, 0.0f);
+                T t3 = parseFieldVal(line2, 2, 0.0f);
+                T t4 = parseFieldVal(line2, 3, 0.0f);
+
+                props.t1 = t1 > static_cast<T>(0.0f) ? t1 : static_cast<T>(0.001f);
+                props.t2 = (t2 > static_cast<T>(0.0f)) ? t2 : props.t1;
+                props.t3 = (t3 > static_cast<T>(0.0f)) ? t3 : props.t1;
+                props.t4 = (t4 > static_cast<T>(0.0f)) ? t4 : props.t1;
+                props.thickness = (props.t1 + props.t2 + props.t3 + props.t4) * static_cast<T>(0.25f);
+                break;
+            }
+
+            m_secid_to_shell_props[sec_id] = props;
+        } else if (current_keyword.rfind("*ELEMENT_SHELL", 0) == 0) {
+            if (current_keyword.rfind("*ELEMENT_SHELL_TITLE", 0) == 0) {
+                std::getline(file, line);
+                current_keyword = "*ELEMENT_SHELL";
+                continue;
+            }
+
+            int64_t elem_id = static_cast<int64_t>(getFieldVal(tb, line, 0, 0.0f));
+            int part_id = static_cast<int>(getFieldVal(tb, line, 1, 1.0f));
+            int64_t n1 = static_cast<int64_t>(getFieldVal(tb, line, 2, 0.0f));
+            int64_t n2 = static_cast<int64_t>(getFieldVal(tb, line, 3, 0.0f));
+            int64_t n3 = static_cast<int64_t>(getFieldVal(tb, line, 4, 0.0f));
+            int64_t n4 = static_cast<int64_t>(getFieldVal(tb, line, 5, 0.0f));
+
+            if (elem_id > 0 && m_id_to_node_index.count(n1) && m_id_to_node_index.count(n2) &&
+                m_id_to_node_index.count(n3)) {
+                int idx1 = m_id_to_node_index[n1];
+                int idx2 = m_id_to_node_index[n2];
+                int idx3 = m_id_to_node_index[n3];
+                int idx4 = (n4 > 0 && m_id_to_node_index.count(n4)) ? m_id_to_node_index[n4] : idx3;
+
+                FEMShell4BTElement<T> shell{};
+                shell.node_ids[0] = idx1;
+                shell.node_ids[1] = idx2;
+                shell.node_ids[2] = idx3;
+                shell.node_ids[3] = idx4;
+                shell.lsdyna_id = elem_id;
+                shell.part_id = part_id;
+
+                int sec_id = m_part_to_secid.count(part_id) ? m_part_to_secid[part_id] : part_id;
+                if (m_secid_to_shell_props.count(sec_id)) {
+                    shell.thickness = m_secid_to_shell_props[sec_id].thickness;
+                } else {
+                    shell.thickness = static_cast<T>(0.001f);
+                }
+
+                int shell_mat_key = m_part_to_matid.count(part_id) ? m_part_to_matid[part_id] : 0;
+                shell.mat_id = shell_mat_key;
+
+                T shell_fs = static_cast<T>(0.30f);
+                if (m_imported_materials.count(shell_mat_key) && m_imported_materials[shell_mat_key].failure_strain > static_cast<float>(0.01f)) {
+                    shell_fs = static_cast<T>(m_imported_materials[shell_mat_key].failure_strain);
+                }
+                shell.failure_strain = shell_fs;
+
+                // Compute initial co-rotational triad and reference area
+                T x_elem[4][3];
+                for (int k = 0; k < 3; ++k) {
+                    x_elem[0][k] = out_nodes[idx1].x[k];
+                    x_elem[1][k] = out_nodes[idx2].x[k];
+                    x_elem[2][k] = out_nodes[idx3].x[k];
+                    x_elem[3][k] = out_nodes[idx4].x[k];
+                }
+                T area = static_cast<T>(0.0f);
+                FEMShell4BTElement<T>::compute_corotational_triad(x_elem, shell.e1, shell.e2, shell.e3, area);
+                shell.area0 = area;
+                shell.area = area;
+
+                T cd = static_cast<T>(5000.0f);
+                if (m_imported_materials.count(shell_mat_key)) {
+                    cd = computeDilatationalWaveSpeed<T>(m_imported_materials[shell_mat_key]);
+                }
+                T char_len = std::sqrt(std::max(static_cast<T>(1e-12), area));
+                shell.dt0 = char_len / cd;
+
+                m_id_to_shell_index[elem_id] = static_cast<int>(out_shells.size());
+                out_shells.push_back(shell);
+                m_parts[part_id].num_shells++;
+                if (!m_parts.count(part_id)) {
+                    m_parts[part_id].part_id = part_id;
+                    m_parts[part_id].name = "Part_" + std::to_string(part_id);
+                }
+            }
         } else if (current_keyword.rfind("*INCLUDE", 0) == 0) {
             std::string inc_file = trim(line);
             if (!inc_file.empty()) {
-                parseStream(inc_file, out_nodes, out_elements, out_trusses, out_beams, out_default_mat, out_materials, depth + 1);
+                parseStream(inc_file, out_nodes, out_elements, out_trusses, out_beams, out_shells, out_default_mat, out_materials, depth + 1);
             }
         }
     }
@@ -710,7 +856,8 @@ bool LSDynaReader3D<T>::parseFile(
 ) {
     std::vector<FEMTrussElement3D<T>> dummy_trusses;
     std::vector<FEMBeam3DElement<T>> dummy_beams;
-    return parseFile(filepath, out_nodes, out_elements, dummy_trusses, dummy_beams, out_default_mat, out_materials);
+    std::vector<FEMShell4BTElement<T>> dummy_shells;
+    return parseFile(filepath, out_nodes, out_elements, dummy_trusses, dummy_beams, dummy_shells, out_default_mat, out_materials);
 }
 
 template <typename T>
@@ -723,10 +870,41 @@ bool LSDynaReader3D<T>::parseFile(
     MaterialTable3D& out_default_mat,
     std::vector<MaterialTable3D>& out_materials
 ) {
+    std::vector<FEMShell4BTElement<T>> dummy_shells;
+    return parseFile(filepath, out_nodes, out_elements, out_trusses, out_beams, dummy_shells, out_default_mat, out_materials);
+}
+
+template <typename T>
+bool LSDynaReader3D<T>::parseFile(
+    const std::string& filepath,
+    std::vector<FEMNode3D<T>>& out_nodes,
+    std::vector<FEMElement3D<T>>& out_elements,
+    std::vector<FEMShell4BTElement<T>>& out_shells,
+    MaterialTable3D& out_default_mat,
+    std::vector<MaterialTable3D>& out_materials
+) {
+    std::vector<FEMTrussElement3D<T>> dummy_trusses;
+    std::vector<FEMBeam3DElement<T>> dummy_beams;
+    return parseFile(filepath, out_nodes, out_elements, dummy_trusses, dummy_beams, out_shells, out_default_mat, out_materials);
+}
+
+template <typename T>
+bool LSDynaReader3D<T>::parseFile(
+    const std::string& filepath,
+    std::vector<FEMNode3D<T>>& out_nodes,
+    std::vector<FEMElement3D<T>>& out_elements,
+    std::vector<FEMTrussElement3D<T>>& out_trusses,
+    std::vector<FEMBeam3DElement<T>>& out_beams,
+    std::vector<FEMShell4BTElement<T>>& out_shells,
+    MaterialTable3D& out_default_mat,
+    std::vector<MaterialTable3D>& out_materials
+) {
     m_id_to_node_index.clear();
     m_id_to_elem_index.clear();
     m_id_to_beam_index.clear();
+    m_id_to_shell_index.clear();
     m_secid_to_beam_props.clear();
+    m_secid_to_shell_props.clear();
     m_part_to_secid.clear();
     m_part_to_matid.clear();
     m_parts.clear();
@@ -744,12 +922,14 @@ bool LSDynaReader3D<T>::parseFile(
             size_t est_elems = static_cast<size_t>(fsize / 160);
             out_nodes.reserve(est_nodes);
             out_elements.reserve(est_elems);
+            out_shells.reserve(est_elems);
             m_id_to_node_index.reserve(est_nodes);
             m_id_to_elem_index.reserve(est_elems);
+            m_id_to_shell_index.reserve(est_elems);
         }
     }
 
-    bool ok = parseStream(filepath, out_nodes, out_elements, out_trusses, out_beams, out_default_mat, out_materials, 0);
+    bool ok = parseStream(filepath, out_nodes, out_elements, out_trusses, out_beams, out_shells, out_default_mat, out_materials, 0);
     if (ok) {
         for (const auto& spc : m_pending_spc_nodes) {
             auto it = m_id_to_node_index.find(spc.node_id);
@@ -800,6 +980,13 @@ bool LSDynaReader3D<T>::parseFile(
                 bm.mat_id = mid_to_index[bm.mat_id];
             } else if (!out_materials.empty()) {
                 bm.mat_id = 0;
+            }
+        }
+        for (auto& sh : out_shells) {
+            if (mid_to_index.count(sh.mat_id)) {
+                sh.mat_id = mid_to_index[sh.mat_id];
+            } else if (!out_materials.empty()) {
+                sh.mat_id = 0;
             }
         }
     }

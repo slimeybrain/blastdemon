@@ -37,8 +37,8 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setBoundaryConditions(BCType3D 
 }
 
 template <typename RealType, bool IsMultiMaterial>
-void CFDSolver3DImpl<RealType, IsMultiMaterial>::setDetonatorLocation(double x, double y, double z) {
-    detX = x; detY = y; detZ = z;
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::setDetonatorLocation(double x, double y, double z, double start_time) {
+    detX = x; detY = y; detZ = z; detStartTime = start_time;
 }
 
 template <typename RealType, bool IsMultiMaterial>
@@ -557,7 +557,22 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updateActiveRegions() {
                         }
                         if (a1 > 1e-4 || a2 > 1e-4 || dp > 1e-3 * ambient_p || u2 > 1e-2) {
                             active = true;
-                            break;
+                            if (dp > 0.05 * ambient_p || u2 > 1.0) {
+                                int lx = i & 7;
+                                int ly = (i >> 3) & 7;
+                                int lz = i >> 6;
+                                int gx = tx * 8 + lx;
+                                int gy = ty * 8 + ly;
+                                int gz = tz * 8 + lz;
+                                if ((gx == 0 && bcXmin == BCType3D::TERMINATE) ||
+                                    (gx == nx - 1 && bcXmax == BCType3D::TERMINATE) ||
+                                    (gy == 0 && bcYmin == BCType3D::TERMINATE) ||
+                                    (gy == ny - 1 && bcYmax == BCType3D::TERMINATE) ||
+                                    (gz == 0 && bcZmin == BCType3D::TERMINATE) ||
+                                    (gz == nz - 1 && bcZmax == BCType3D::TERMINATE)) {
+                                    this->terminated = true;
+                                }
+                            }
                         }
                     }
                     physically_active[t_idx] = active ? 1 : 0;
@@ -781,9 +796,12 @@ Flux3DT<RealType, IsMultiMaterial> getAUSMPlusFlux3D(
 
     RealType p_scale = (is_water && tait) ? (RealType)tait->B : std::min(sL.p, sR.p);
     RealType dp_rel = (p_scale > (RealType)1e-6) ? (std::abs(dp_wave) / p_scale) : (RealType)0.0;
+    RealType Mo_sq = std::min((RealType)1.0, std::max(M_bar_sq, (RealType)1e-6));
+    RealType Mo = std::sqrt(Mo_sq);
+    RealType fa_Mo = Mo * ((RealType)2.0 - Mo);
     RealType shock_sense = (dp_rel > (RealType)0.2) ? ((RealType)1.0 / ((RealType)1.0 + dp_rel * dp_rel)) : (RealType)1.0;
     RealType Kp = (RealType)0.25 * fa * shock_sense;
-    RealType Ku = (RealType)0.75 * shock_sense;
+    RealType Ku = (RealType)0.75 * fa_Mo * shock_sense;
     if (is_large_density_jump || (dir == 2 && has_gravity && std::abs(uL) < (RealType)1.0e-3 && std::abs(uR) < (RealType)1.0e-3)) {
         Kp = (RealType)0.0;
         if (is_large_density_jump) Ku = (RealType)0.0;
@@ -847,6 +865,61 @@ static inline RealType weno3(RealType qm1, RealType q0, RealType qp1) {
     return (RealType)(w0 * (0.5 * (double)q0 + 0.5 * (double)qp1) + w1 * (-0.5 * (double)qm1 + 1.5 * (double)q0));
 }
 
+template <typename RealType>
+static inline bool thinc_reconstruct_cell_cpu(
+    RealType vM, RealType vC, RealType vP,
+    RealType& vFaceL, RealType& vFaceR,
+    RealType beta = (RealType)1.6
+) {
+    if (vC <= (RealType)1e-5) {
+        vFaceL = (RealType)0.0;
+        vFaceR = (RealType)0.0;
+        return true;
+    }
+    if (vC >= (RealType)(1.0 - 1e-5)) {
+        vFaceL = (RealType)1.0;
+        vFaceR = (RealType)1.0;
+        return true;
+    }
+
+    RealType dL = vC - vM;
+    RealType dR = vP - vC;
+
+    if (dL * dR <= (RealType)0.0) {
+        return false;
+    }
+
+    RealType theta = (dR > (RealType)0.0) ? (RealType)1.0 : (RealType)-1.0;
+    RealType q = (theta > (RealType)0.0) ? vC : ((RealType)1.0 - vC);
+    q = std::clamp(q, (RealType)1e-5, (RealType)(1.0 - 1e-5));
+
+    RealType exp_term = std::exp(beta * ((RealType)2.0 * q - (RealType)1.0));
+    RealType cosh_b = std::cosh(beta);
+    RealType sinh_b = std::sinh(beta);
+    RealType tanh_b = std::tanh(beta);
+
+    RealType y = (cosh_b - exp_term) / sinh_b;
+    y = std::clamp(y, (RealType)-0.999999, (RealType)0.999999);
+
+    RealType a0 = (RealType)0.5 * ((RealType)1.0 - y);
+    RealType denom = (RealType)1.0 - y * tanh_b;
+    RealType tanh_1_minus_x0 = (std::abs(denom) > (RealType)1e-7) ? ((tanh_b - y) / denom) : (RealType)1.0;
+    RealType a1 = (RealType)0.5 * ((RealType)1.0 + tanh_1_minus_x0);
+
+    a0 = std::clamp(a0, (RealType)0.0, (RealType)1.0);
+    a1 = std::clamp(a1, (RealType)0.0, (RealType)1.0);
+
+    if (theta > (RealType)0.0) {
+        vFaceL = a0;
+        vFaceR = a1;
+    } else {
+        vFaceL = (RealType)1.0 - a0;
+        vFaceR = (RealType)1.0 - a1;
+    }
+
+    return true;
+}
+
 template <typename RealType, bool IsMultiMaterial>
 typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial> reconstruct(
     const typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealType, IsMultiMaterial>& sL, 
@@ -872,6 +945,8 @@ typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealT
         return res;
     }
     
+    auto slope = [&](RealType L, RealType C, RealType R) { return minmod(C - L, R - C); };
+
     if (spatialOrder == 3) {
         if (side < (RealType)0.0) { // Right-biased for left face of i+1
             res.rho = std::max((RealType)1e-7, weno3(sR.rho, sC.rho, sL.rho));
@@ -882,8 +957,6 @@ typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealT
             if constexpr (IsMultiMaterial) {
                 res.alpha1 = std::clamp(weno3(sR.alpha1, sC.alpha1, sL.alpha1), (RealType)0.0, (RealType)1.0);
                 res.alpha2 = std::clamp(weno3(sR.alpha2, sC.alpha2, sL.alpha2), (RealType)0.0, (RealType)1.0);
-                res.arho1 = std::max((RealType)0.0, weno3(sR.arho1, sC.arho1, sL.arho1));
-                res.arho2 = std::max((RealType)0.0, weno3(sR.arho2, sC.arho2, sL.arho2));
             }
         } else { // Left-biased for right face of i
             res.rho = std::max((RealType)1e-7, weno3(sL.rho, sC.rho, sR.rho));
@@ -894,12 +967,9 @@ typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealT
             if constexpr (IsMultiMaterial) {
                 res.alpha1 = std::clamp(weno3(sL.alpha1, sC.alpha1, sR.alpha1), (RealType)0.0, (RealType)1.0);
                 res.alpha2 = std::clamp(weno3(sL.alpha2, sC.alpha2, sR.alpha2), (RealType)0.0, (RealType)1.0);
-                res.arho1 = std::max((RealType)0.0, weno3(sL.arho1, sC.arho1, sR.arho1));
-                res.arho2 = std::max((RealType)0.0, weno3(sL.arho2, sC.arho2, sR.arho2));
             }
         }
     } else { // spatialOrder == 2 (MinMod)
-        auto slope = [&](RealType L, RealType C, RealType R) { return minmod(C - L, R - C); };
         res.rho = sC.rho + side * slope(sL.rho, sC.rho, sR.rho);
         res.ux = sC.ux + side * slope(sL.ux, sC.ux, sR.ux);
         res.uy = sC.uy + side * slope(sL.uy, sC.uy, sR.uy);
@@ -909,9 +979,51 @@ typename CFDSolver3DImpl<RealType, IsMultiMaterial>::template CellState3DT<RealT
         if constexpr (IsMultiMaterial) {
             res.alpha1 = std::clamp(sC.alpha1 + side * slope(sL.alpha1, sC.alpha1, sR.alpha1), (RealType)0.0, (RealType)1.0);
             res.alpha2 = std::clamp(sC.alpha2 + side * slope(sL.alpha2, sC.alpha2, sR.alpha2), (RealType)0.0, (RealType)1.0);
-            res.arho1 = std::clamp(sC.arho1 + side * slope(sL.arho1, sC.arho1, sR.arho1), (RealType)0.0, res.rho);
-            res.arho2 = std::clamp(sC.arho2 + side * slope(sL.arho2, sC.arho2, sR.arho2), (RealType)0.0, res.rho);
         }
+    }
+
+    if constexpr (IsMultiMaterial) {
+        // Apply THINC-BVD for sharp volume fraction interface capturing
+        RealType thinc_L_a1, thinc_R_a1;
+        bool ok_a1 = thinc_reconstruct_cell_cpu(sL.alpha1, sC.alpha1, sR.alpha1, thinc_L_a1, thinc_R_a1, (RealType)1.6);
+        if (ok_a1 && sC.alpha1 > (RealType)1e-4 && sC.alpha1 < (RealType)(1.0 - 1e-4)) {
+            res.alpha1 = (side > (RealType)0.0) ? thinc_R_a1 : thinc_L_a1;
+        }
+
+        RealType thinc_L_a2, thinc_R_a2;
+        bool ok_a2 = thinc_reconstruct_cell_cpu(sL.alpha2, sC.alpha2, sR.alpha2, thinc_L_a2, thinc_R_a2, (RealType)1.6);
+        if (ok_a2 && sC.alpha2 > (RealType)1e-4 && sC.alpha2 < (RealType)(1.0 - 1e-4)) {
+            res.alpha2 = (side > (RealType)0.0) ? thinc_R_a2 : thinc_L_a2;
+        }
+
+        res.alpha1 = std::clamp(res.alpha1, (RealType)0.0, (RealType)1.0);
+        res.alpha2 = std::clamp(res.alpha2, (RealType)0.0, (RealType)(1.0 - res.alpha1));
+
+        // Abgrall-consistent intrinsic phase density reconstruction
+        RealType r1 = (sC.alpha1 > (RealType)1e-5) ? (sC.arho1 / sC.alpha1) : (RealType)products.rho0;
+        RealType r2 = (sC.alpha2 > (RealType)1e-5) ? (sC.arho2 / sC.alpha2) : (RealType)unreacted.rho0;
+        RealType a0 = std::max((RealType)0.0, (RealType)1.0 - sC.alpha1 - sC.alpha2);
+        RealType r0 = (a0 > (RealType)1e-5) ? std::max((RealType)1e-7, (sC.rho - sC.arho1 - sC.arho2) / a0) : (is_water && tait ? (RealType)tait->rho0 : (RealType)1.225);
+
+        RealType r1_L = (sL.alpha1 > (RealType)1e-5) ? (sL.arho1 / sL.alpha1) : r1;
+        RealType r1_R = (sR.alpha1 > (RealType)1e-5) ? (sR.arho1 / sR.alpha1) : r1;
+        RealType r2_L = (sL.alpha2 > (RealType)1e-5) ? (sL.arho2 / sL.alpha2) : r2;
+        RealType r2_R = (sR.alpha2 > (RealType)1e-5) ? (sR.arho2 / sR.alpha2) : r2;
+
+        RealType a0_L = std::max((RealType)0.0, (RealType)1.0 - sL.alpha1 - sL.alpha2);
+        RealType r0_L = (a0_L > (RealType)1e-5) ? std::max((RealType)1e-7, (sL.rho - sL.arho1 - sL.arho2) / a0_L) : r0;
+        RealType a0_R = std::max((RealType)0.0, (RealType)1.0 - sR.alpha1 - sR.alpha2);
+        RealType r0_R = (a0_R > (RealType)1e-5) ? std::max((RealType)1e-7, (sR.rho - sR.arho1 - sR.arho2) / a0_R) : r0;
+
+        RealType r1_face = std::max((RealType)1e-7, r1 + side * slope(r1_L, r1, r1_R));
+        RealType r2_face = std::max((RealType)1e-7, r2 + side * slope(r2_L, r2, r2_R));
+        RealType r0_face = std::max((RealType)1e-7, r0 + side * slope(r0_L, r0, r0_R));
+
+        res.arho1 = res.alpha1 * r1_face;
+        res.arho2 = res.alpha2 * r2_face;
+        RealType a0_face = std::max((RealType)0.0, (RealType)1.0 - res.alpha1 - res.alpha2);
+        res.rho = res.arho1 + res.arho2 + a0_face * r0_face;
+        res.rho = std::max((RealType)1e-7, res.rho);
     }
 
     RealType ke = (RealType)0.5 * res.rho * (res.ux*res.ux + res.uy*res.uy + res.uz*res.uz);
@@ -1064,38 +1176,47 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                                 flx.v_face = vn_wall;
                                 return flx;
                             }
-                            int eff_order = spatialOrder;
-                            if (!is_interior_tile && (is_solid_cell(xLL, yLL, zLL) || is_solid_cell(xRR, yRR, zRR))) {
-                                eff_order = 1;
-                            }
-                            if (this->stratified_params.enabled) {
-                                RealType z_L1 = (RealType)this->zmin + ((RealType)zL + (RealType)0.5) * (RealType)this->cellSize;
-                                RealType z_R1 = (RealType)this->zmin + ((RealType)zR + (RealType)0.5) * (RealType)this->cellSize;
-                                bool soil_L = (z_L1 < (RealType)this->stratified_params.seabed_surface_z);
-                                bool soil_R = (z_R1 < (RealType)this->stratified_params.seabed_surface_z);
-                                bool water_L = (z_L1 <= (RealType)this->stratified_params.water_surface_z);
-                                bool water_R = (z_R1 <= (RealType)this->stratified_params.water_surface_z);
-                                if (soil_L != soil_R || water_L != water_R) {
-                                    eff_order = 1;
-                                }
-                            }
                             auto sL2 = sample_func(xLL, yLL, zLL, gx, gy, gz, dir);
                             auto sL1 = sample_func(xL, yL, zL, gx, gy, gz, dir);
                             auto sR1 = sample_func(xR, yR, zR, gx, gy, gz, dir);
                             auto sR2 = sample_func(xRR, yRR, zRR, gx, gy, gz, dir);
-                            auto wL = reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, eff_order, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
-                            auto wR = reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, eff_order, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+
+                            int eff_order = spatialOrder;
+                            if (!is_interior_tile && (is_solid_cell(xLL, yLL, zLL) || is_solid_cell(xRR, yRR, zRR))) {
+                                eff_order = 1;
+                            }
                             RealType z_cL = (RealType)this->zmin + ((RealType)zL + (RealType)0.5) * (RealType)this->cellSize;
                             RealType z_cR = (RealType)this->zmin + ((RealType)zR + (RealType)0.5) * (RealType)this->cellSize;
+                            auto get_mat_cpu = [&](const auto& state, RealType z_c) -> int {
+                                if (!this->stratified_params.enabled) return 0;
+                                RealType a_he = (RealType)0.0;
+                                if constexpr (IsMultiMaterial) {
+                                    a_he = state.alpha1 + state.alpha2;
+                                    if (state.alpha1 >= (RealType)0.02 || (state.rho > (RealType)0.0 && state.arho1 / state.rho >= (RealType)0.02)) {
+                                        return 3; // Detonation products
+                                    }
+                                }
+                                if (a_he > (RealType)0.5) return 3; // Dominant HE
+                                if (state.rho > (RealType)1600.0 || (z_c > (RealType)0.0 && z_c <= (RealType)this->stratified_params.seabed_surface_z && state.rho > (RealType)500.0)) return 2; // Soil
+                                if (z_c > (RealType)0.0 && z_c <= (RealType)this->stratified_params.water_surface_z) {
+                                    if (a_he > (RealType)0.02 && state.rho < (RealType)100.0) return 0; // Gas cavity
+                                    return 1; // Water
+                                }
+                                if (state.rho >= (RealType)300.0) return 1; // Splash / plume
+                                return 0; // Gas
+                            };
+                            int mat_L = get_mat_cpu(sL1, z_cL);
+                            int mat_R = get_mat_cpu(sR1, z_cR);
+                            if (mat_L != mat_R && (mat_L == 2 || mat_R == 2)) {
+                                eff_order = 1;
+                            }
+                            auto wL = reconstruct<RealType, IsMultiMaterial>(sL2, sL1, sR1, (RealType)0.5, eff_order, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
+                            auto wR = reconstruct<RealType, IsMultiMaterial>(sL1, sR1, sR2, (RealType)-0.5, eff_order, gamma_r, currentMaterials.products, currentMaterials.unreacted, this->is_water_tait_val, &this->tait_water_params);
                             bool has_g = this->stratified_params.enabled || std::abs(this->gravity_z) > 1e-6;
                             RealType g_z = (RealType)(this->stratified_params.enabled ? this->stratified_params.gravity_z : this->gravity_z);
 
                             if (this->stratified_params.enabled && dir == 2 && has_g) {
-                                bool soil_L = (z_cL < (RealType)this->stratified_params.seabed_surface_z);
-                                bool soil_R = (z_cR < (RealType)this->stratified_params.seabed_surface_z);
-                                bool water_L = (z_cL <= (RealType)this->stratified_params.water_surface_z);
-                                bool water_R = (z_cR <= (RealType)this->stratified_params.water_surface_z);
-                                if (soil_L != soil_R || water_L != water_R) {
+                                if (mat_L != mat_R && (mat_L == 2 || mat_R == 2)) {
                                     wL.p = sL1.p + (RealType)0.5 * sL1.rho * g_z * (RealType)this->cellSize;
                                     wR.p = sR1.p - (RealType)0.5 * sR1.rho * g_z * (RealType)this->cellSize;
                                 }
@@ -1169,7 +1290,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::applyProgrammedBurn(double dt) 
                         RealType tmp_arho2 = u.arho2[c_idx];
                         RealType dF = MultiMat::computeProgrammedBurn(
                             (RealType)currentTime, (RealType)dt, x_c, y_c, z_c,
-                            (RealType)currentMaterials.det_vel, (RealType)0.0, (RealType)detX, (RealType)detY, (RealType)detZ,
+                            (RealType)currentMaterials.det_vel, (RealType)detStartTime, (RealType)detX, (RealType)detY, (RealType)detZ,
                             (RealType)cellSize, (RealType)currentMaterials.products.rho0,
                             tmp_alpha1, tmp_alpha2, tmp_arho1, tmp_arho2
                         );
@@ -1182,7 +1303,14 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::applyProgrammedBurn(double dt) 
                             u.E[c_idx] += dF * rho_expl * (RealType)currentMaterials.detonation_energy;
                         }
                         if (currentMaterials.afterburn.enabled) {
-                            RealType arho0 = u.rho[c_idx] - u.arho1[c_idx] - u.arho2[c_idx];
+                            RealType arho0 = (RealType)0.0;
+                            if (this->stratified_params.enabled) {
+                                if (z_c > (RealType)this->stratified_params.water_surface_z && u.rho[c_idx] < (RealType)300.0) {
+                                    arho0 = fmax((RealType)0.0, u.rho[c_idx] - u.arho1[c_idx] - u.arho2[c_idx]);
+                                }
+                            } else if (!this->is_water_tait_val) {
+                                arho0 = fmax((RealType)0.0, u.rho[c_idx] - u.arho1[c_idx] - u.arho2[c_idx]);
+                            }
                             RealType ke = (RealType)0.5 * (u.rhoux[c_idx] * u.rhoux[c_idx] + u.rhouy[c_idx] * u.rhouy[c_idx] + u.rhouz[c_idx] * u.rhouz[c_idx]) / u.rho[c_idx];
                             RealType R_ch = (RealType)charge_radius;
                             RealType tmp_alpha1_ab = u.alpha1[c_idx];
@@ -1322,18 +1450,26 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::updatePrimitiveFromConservative
                     RealType z_c = (RealType)zmin + ((RealType)gz + (RealType)0.5) * (RealType)cellSize;
                     bool is_water = false;
                     bool is_soil = false;
-                    bool is_he = (s.alpha1[i] > (RealType)0.02 || s.alpha2[i] > (RealType)0.02);
-                    if (this->stratified_params.enabled) {
-                        if (z_c < (RealType)this->stratified_params.seabed_surface_z) {
-                            is_water = false;
-                            is_soil = true;
-                        } else if (z_c <= (RealType)this->stratified_params.water_surface_z) {
-                            is_water = true;
-                        } else if (!is_he) {
-                            is_water = (s.rho[i] >= (RealType)800.0);
+                    RealType a_he = (RealType)0.0;
+                    if constexpr (IsMultiMaterial) {
+                        a_he = s.alpha1[i] + s.alpha2[i];
+                    }
+                    if (a_he < (RealType)0.5) {
+                        if (this->stratified_params.enabled) {
+                            if (s.rho[i] > (RealType)1600.0 || (z_c > (RealType)0.0 && z_c <= (RealType)this->stratified_params.seabed_surface_z && s.rho[i] > (RealType)500.0)) {
+                                is_soil = true;
+                            } else if (z_c > (RealType)0.0 && z_c <= (RealType)this->stratified_params.water_surface_z) {
+                                if (!(a_he > (RealType)0.02 && s.rho[i] < (RealType)100.0)) {
+                                    is_water = true;
+                                }
+                            } else if (s.rho[i] >= (RealType)300.0) {
+                                is_water = true;
+                            }
+                        } else if (this->is_water_tait_val) {
+                            if (!(a_he > (RealType)0.02 && s.rho[i] < (RealType)100.0)) {
+                                is_water = true;
+                            }
                         }
-                    } else if (!is_he && this->is_water_tait_val) {
-                        is_water = (s.rho[i] > (RealType)100.0);
                     }
                     RealType p_val;
                     if (is_water) {
@@ -1565,8 +1701,8 @@ void computeTimeDerivative(
     dW_dt.p = -(sC.ux * d_x.p + sC.uy * d_y.p + sC.uz * d_z.p + gamma_r * sC.p * (d_x.ux + d_y.uy + d_z.uz));
     
     if constexpr (IsMultiMaterial) {
-        dW_dt.alpha1 = -(sC.ux * d_x.alpha1 + sC.uy * d_y.alpha1 + sC.uz * d_z.alpha1) + sC.alpha1 * (d_x.ux + d_y.uy + d_z.uz);
-        dW_dt.alpha2 = -(sC.ux * d_x.alpha2 + sC.uy * d_y.alpha2 + sC.uz * d_z.alpha2) + sC.alpha2 * (d_x.ux + d_y.uy + d_z.uz);
+        dW_dt.alpha1 = -(sC.ux * d_x.alpha1 + sC.uy * d_y.alpha1 + sC.uz * d_z.alpha1);
+        dW_dt.alpha2 = -(sC.ux * d_x.alpha2 + sC.uy * d_y.alpha2 + sC.uz * d_z.alpha2);
         
         dW_dt.arho1 = -(sC.ux * d_x.arho1 + sC.arho1 * d_x.ux +
                         sC.uy * d_y.arho1 + sC.arho1 * d_y.uy +
@@ -1687,18 +1823,26 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
                         }
                         bool is_water = false;
                         bool is_soil = false;
-                        bool is_he = (out_s.alpha1 > (RealType)0.02 || out_s.alpha2 > (RealType)0.02);
-                        if (this->stratified_params.enabled) {
-                            if (z_c < (RealType)this->stratified_params.seabed_surface_z) {
-                                is_water = false;
-                                is_soil = true;
-                            } else if (z_c <= (RealType)this->stratified_params.water_surface_z) {
-                                is_water = true;
-                            } else if (!is_he) {
-                                is_water = (out_s.rho >= (RealType)800.0);
+                        RealType a_he = (RealType)0.0;
+                        if constexpr (IsMultiMaterial) {
+                            a_he = out_s.alpha1 + out_s.alpha2;
+                        }
+                        if (a_he < (RealType)0.5) {
+                            if (this->stratified_params.enabled) {
+                                if (out_s.rho > (RealType)1600.0 || (z_c > (RealType)0.0 && z_c <= (RealType)this->stratified_params.seabed_surface_z && out_s.rho > (RealType)500.0)) {
+                                    is_soil = true;
+                                } else if (z_c > (RealType)0.0 && z_c <= (RealType)this->stratified_params.water_surface_z) {
+                                    if (!(a_he > (RealType)0.02 && out_s.rho < (RealType)100.0)) {
+                                        is_water = true;
+                                    }
+                                } else if (out_s.rho >= (RealType)300.0) {
+                                    is_water = true;
+                                }
+                            } else if (this->is_water_tait_val) {
+                                if (!(a_he > (RealType)0.02 && out_s.rho < (RealType)100.0)) {
+                                    is_water = true;
+                                }
                             }
-                        } else if (!is_he && this->is_water_tait_val) {
-                            is_water = (out_s.rho > (RealType)100.0);
                         }
                         RealType p_val;
                         if (is_water) {
@@ -2462,47 +2606,81 @@ std::vector<float> CFDSolver3DImpl<RealType, IsMultiMaterial>::extractSlice(cons
         if (qty == "energy" || qty == "internal_energy") return (float)(s.E / std::max(s.rho, 1e-6));
         if (qty == "species1" || qty == "alpha1" || qty == "species_1" || qty == "species" || qty == "products" || qty == "detonation_products" || qty == "detonation" || qty == "reacted" || qty == "reacted_gas" || qty == "he_products" || qty == "alpha_1") return (float)s.alpha1;
         if (qty == "species2" || qty == "alpha2" || qty == "species_2" || qty == "unreacted" || qty == "unreacted_solid" || qty == "solid_he" || qty == "solid_explosive" || qty == "he_solid" || qty == "alpha_2") return (float)s.alpha2;
-        if (qty == "species3" || qty == "species_3" || qty == "air" || qty == "ambient_air" || qty == "alpha3" || qty == "alpha_3") return (float)(1.0 - s.alpha1 - s.alpha2);
+        if (qty == "species3" || qty == "species_3" || qty == "air" || qty == "ambient_air" || qty == "alpha3" || qty == "alpha_3") {
+            if (this->stratified_params.enabled) {
+                double z_c = (double)this->zmin + ((double)gz_c + 0.5) * (double)this->cellSize;
+                if (z_c <= (double)this->stratified_params.water_surface_z || s.rho >= (RealType)300.0) {
+                    return 0.0f;
+                }
+                return (float)std::max<double>(0.0, 1.0 - (double)s.alpha1 - (double)s.alpha2);
+            }
+            if (this->is_water_tait_val && s.rho >= (RealType)300.0) {
+                return 0.0f;
+            }
+            return (float)std::max<double>(0.0, 1.0 - (double)s.alpha1 - (double)s.alpha2);
+        }
         if (qty == "overpressure" || qty == "peak_overpressure") return (float)s.peak_overpressure;
         if (qty == "impulse" || qty == "peak_impulse") return (float)s.peak_impulse;
         if (qty == "materials" || qty == "material" || qty == "phase") {
             if (is_solid(gx_c, gy_c, gz_c)) return 5.0f; // FEM Solid / Obstacle
-            double z_c = zmin + ((double)gz_c + 0.5) * cellSize;
+            double z_c = (double)this->zmin + ((double)gz_c + 0.5) * (double)this->cellSize;
             if constexpr (IsMultiMaterial) {
-                if (s.alpha2 > 0.05f && s.alpha2 >= s.alpha1) return 3.0f; // Solid HE
-                if (s.alpha1 > 0.05f) return 4.0f; // Detonation products
+                if (s.alpha2 >= 0.5f || (s.alpha2 >= 0.05f && s.alpha2 >= s.alpha1)) return 3.0f; // Solid HE
+                if (s.alpha1 >= 0.02f || (s.rho > 0.0f && s.arho1 / s.rho >= 0.02f)) return 4.0f; // Detonation products
             }
             if (this->stratified_params.enabled) {
-                if (z_c < this->stratified_params.seabed_surface_z) return 2.0f; // Seabed Soil
-                if (z_c <= this->stratified_params.water_surface_z || s.rho > 300.0) return 1.0f; // Water
-            } else {
-                if (s.rho > 1800.0) return 2.0f;
-                if (s.rho > 300.0) return 1.0f;
+                if (s.rho > 1600.0 || (z_c <= (double)this->stratified_params.seabed_surface_z && s.rho > 500.0)) return 2.0f; // Seabed Soil
+                if (z_c <= (double)this->stratified_params.water_surface_z) {
+                    if constexpr (IsMultiMaterial) {
+                        if (s.alpha1 > 0.02f && s.rho < 100.0f) return 0.0f; // Gas cavity
+                    }
+                    return 1.0f; // Water
+                }
             }
+            if (s.rho >= 300.0) return 1.0f; // Water splash
             return 0.0f; // Air
         }
         if (qty == "water" || qty == "phase_water") {
             if (is_solid(gx_c, gy_c, gz_c)) return 0.0f;
-            double z_c = zmin + ((double)gz_c + 0.5) * cellSize;
+            double z_c = (double)this->zmin + ((double)gz_c + 0.5) * (double)this->cellSize;
             if (this->stratified_params.enabled) {
-                if (z_c >= this->stratified_params.seabed_surface_z && (z_c <= this->stratified_params.water_surface_z || s.rho > 300.0)) return 1.0f;
-                return 0.0f;
-            } else {
-                return (s.rho > 300.0 && s.rho <= 1800.0) ? 1.0f : 0.0f;
+                if (s.rho > 1600.0 || z_c <= (double)this->stratified_params.seabed_surface_z) return 0.0f;
+                if (z_c <= (double)this->stratified_params.water_surface_z) {
+                    if constexpr (IsMultiMaterial) {
+                        if (s.alpha1 > 0.02f && s.rho < 100.0f) return 0.0f;
+                    }
+                    return 1.0f;
+                }
             }
+            return (s.rho >= 300.0 && s.rho <= 1600.0) ? 1.0f : 0.0f;
         }
         if (qty == "soil" || qty == "phase_soil" || qty == "sediment") {
             if (is_solid(gx_c, gy_c, gz_c)) return 0.0f;
-            double z_c = zmin + ((double)gz_c + 0.5) * cellSize;
-            if (this->stratified_params.enabled) {
-                return (z_c < this->stratified_params.seabed_surface_z) ? 1.0f : 0.0f;
-            } else {
-                return (s.rho > 1800.0) ? 1.0f : 0.0f;
-            }
+            return (s.rho > 1600.0) ? 1.0f : 0.0f;
         }
         if (qty == "temperature" || qty == "temp" || qty == "T") {
             RealType ke = (RealType)0.5 * s.rho * (s.ux * s.ux + s.uy * s.uy + s.uz * s.uz);
             RealType e_int = (s.E - ke) / std::max((RealType)s.rho, (RealType)1e-6);
+            if (this->stratified_params.enabled) {
+                double z_c = (double)this->zmin + ((double)gz_c + 0.5) * (double)this->cellSize;
+                RealType a_he = (RealType)0.0;
+                if constexpr (IsMultiMaterial) a_he = s.alpha1 + s.alpha2;
+                if (s.rho > (RealType)1600.0 || (z_c <= (double)this->stratified_params.seabed_surface_z && s.rho > (RealType)500.0)) {
+                    return (float)this->stratified_params.soil_temperature;
+                }
+                if (z_c <= (double)this->stratified_params.water_surface_z && !(a_he > (RealType)0.02 && s.rho < (RealType)100.0)) {
+                    return (float)this->stratified_params.water_temperature;
+                }
+                if constexpr (IsMultiMaterial) {
+                    if (s.alpha1 >= (RealType)0.02) {
+                        return (float)std::max((RealType)200.0, e_int / (RealType)1000.0);
+                    }
+                }
+                return (float)std::max((RealType)200.0, e_int / (RealType)718.0);
+            }
+            if (this->is_water_tait_val) {
+                return (float)288.15;
+            }
             RealType c_v = (RealType)718.0;
             return (float)std::max((RealType)200.0, e_int / c_v);
         }
@@ -2685,24 +2863,65 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::sampleSurfacePoints(
         if (qty == "energy" || qty == "internal_energy") return (float)(s.E / std::max(s.rho, 1e-6));
         if (qty == "species1" || qty == "alpha1" || qty == "reacted" || qty == "reacted_gas") return (float)s.alpha1;
         if (qty == "species2" || qty == "alpha2" || qty == "unreacted" || qty == "unreacted_solid") return (float)s.alpha2;
-        if (qty == "species3" || qty == "air" || qty == "ambient_air") return (float)(1.0 - s.alpha1 - s.alpha2);
+        if (qty == "species3" || qty == "species_3" || qty == "air" || qty == "ambient_air" || qty == "alpha3" || qty == "alpha_3") {
+            if (this->stratified_params.enabled) {
+                double z_c = (double)this->zmin + ((double)gz_c + 0.5) * (double)this->cellSize;
+                if (z_c <= (double)this->stratified_params.water_surface_z || s.rho >= (RealType)300.0) {
+                    return 0.0f;
+                }
+                return (float)std::max<double>(0.0, 1.0 - (double)s.alpha1 - (double)s.alpha2);
+            }
+            if (this->is_water_tait_val && s.rho >= (RealType)300.0) {
+                return 0.0f;
+            }
+            return (float)std::max<double>(0.0, 1.0 - (double)s.alpha1 - (double)s.alpha2);
+        }
         if (qty == "overpressure" || qty == "peak_overpressure") return (float)s.peak_overpressure;
         if (qty == "impulse" || qty == "peak_impulse") return (float)s.peak_impulse;
         if (qty == "materials" || qty == "material" || qty == "phase") {
             if (is_solid(gx_c, gy_c, gz_c)) return 5.0f; // FEM Solid / Obstacle
-            double z_c = zmin + ((double)gz_c + 0.5) * cellSize;
+            double z_c = (double)this->zmin + ((double)gz_c + 0.5) * (double)this->cellSize;
             if constexpr (IsMultiMaterial) {
-                if (s.alpha2 > 0.05f && s.alpha2 >= s.alpha1) return 3.0f; // Solid HE
-                if (s.alpha1 > 0.05f) return 4.0f; // Detonation products
+                if (s.alpha2 >= 0.5f || (s.alpha2 >= 0.05f && s.alpha2 >= s.alpha1)) return 3.0f; // Solid HE
+                if (s.alpha1 >= 0.02f || (s.rho > 0.0f && s.arho1 / s.rho >= 0.02f)) return 4.0f; // Detonation products
             }
             if (this->stratified_params.enabled) {
-                if (z_c < this->stratified_params.seabed_surface_z) return 2.0f; // Seabed Soil
-                if (z_c <= this->stratified_params.water_surface_z || s.rho > 300.0) return 1.0f; // Water
-            } else {
-                if (s.rho > 1800.0) return 2.0f;
-                if (s.rho > 300.0) return 1.0f;
+                if (s.rho > 1600.0 || (z_c <= (double)this->stratified_params.seabed_surface_z && s.rho > 500.0)) return 2.0f; // Seabed Soil
+                if (z_c <= (double)this->stratified_params.water_surface_z) {
+                    if constexpr (IsMultiMaterial) {
+                        if (s.alpha1 > 0.02f && s.rho < 100.0f) return 0.0f; // Gas cavity
+                    }
+                    return 1.0f; // Water
+                }
             }
+            if (s.rho >= 300.0) return 1.0f; // Water splash
             return 0.0f; // Air
+        }
+        if (qty == "temperature" || qty == "temp" || qty == "T") {
+            RealType ke = (RealType)0.5 * s.rho * (s.ux * s.ux + s.uy * s.uy + s.uz * s.uz);
+            RealType e_int = (s.E - ke) / std::max((RealType)s.rho, (RealType)1e-6);
+            if (this->stratified_params.enabled) {
+                double z_c = (double)this->zmin + ((double)gz_c + 0.5) * (double)this->cellSize;
+                RealType a_he = (RealType)0.0;
+                if constexpr (IsMultiMaterial) a_he = s.alpha1 + s.alpha2;
+                if (s.rho > (RealType)1600.0 || (z_c <= (double)this->stratified_params.seabed_surface_z && s.rho > (RealType)500.0)) {
+                    return (float)this->stratified_params.soil_temperature;
+                }
+                if (z_c <= (double)this->stratified_params.water_surface_z && !(a_he > (RealType)0.02 && s.rho < (RealType)100.0)) {
+                    return (float)this->stratified_params.water_temperature;
+                }
+                if constexpr (IsMultiMaterial) {
+                    if (s.alpha1 >= (RealType)0.02) {
+                        return (float)std::max((RealType)200.0, e_int / (RealType)1000.0);
+                    }
+                }
+                return (float)std::max((RealType)200.0, e_int / (RealType)718.0);
+            }
+            if (this->is_water_tait_val) {
+                return (float)288.15;
+            }
+            RealType c_v = (RealType)718.0;
+            return (float)std::max((RealType)200.0, e_int / c_v);
         }
         return (float)s.p;
     };
@@ -3117,7 +3336,11 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::commitStates() {
             RealType ke = (RealType)0.5 * state_tile.rho[i] * (state_tile.ux[i]*state_tile.ux[i] + state_tile.uy[i]*state_tile.uy[i] + state_tile.uz[i]*state_tile.uz[i]);
             RealType total_E;
             if constexpr (IsMultiMaterial) {
-                total_E = (RealType)MultiMat::getMixtureEnergy((double)state_tile.p[i], (double)state_tile.rho[i], (double)state_tile.alpha1[i], (double)state_tile.alpha2[i], (double)state_tile.arho1[i], (double)state_tile.arho2[i], gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+                if (this->is_water_tait_val) {
+                    total_E = (RealType)MultiMat::getMixtureEnergyTait((double)state_tile.p[i], (double)state_tile.rho[i], (double)state_tile.alpha1[i], (double)state_tile.alpha2[i], (double)state_tile.arho1[i], (double)state_tile.arho2[i], this->tait_water_params, currentMaterials.products, currentMaterials.unreacted) + ke;
+                } else {
+                    total_E = (RealType)MultiMat::getMixtureEnergy((double)state_tile.p[i], (double)state_tile.rho[i], (double)state_tile.alpha1[i], (double)state_tile.alpha2[i], (double)state_tile.arho1[i], (double)state_tile.arho2[i], gamma, currentMaterials.products, currentMaterials.unreacted) + ke;
+                }
             } else if (this->is_water_tait_val) {
                 CellState3D<IsMultiMaterial> s_tmp{};
                 s_tmp.rho = state_tile.rho[i];

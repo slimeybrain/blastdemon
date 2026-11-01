@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; fill: #c9d1d9; }
+    .title { font-size: 16px; font-weight: 600; fill: #f0f6fc; }
+    .axis-label { font-size: 12px; fill: #8b949e; }
+    .tick { font-size: 10px; fill: #8b949e; }
+    .grid { stroke: #30363d; stroke-width: 1; stroke-dasharray: 4,4; }
+    .axis-line { stroke: #484f58; stroke-width: 1.5; }
+    .exact-curve { fill: none; stroke: #58a6ff; stroke-width: 2.5; }
+    .num-curve { fill: none; stroke: #f0883e; stroke-width: 2.0; stroke-dasharray: 6,3; }
+    .corridor-yellow { fill: rgba(210, 153, 34, 0.18); }
+    .corridor-green { fill: rgba(46, 160, 67, 0.30); }
+  </style>
+  <rect width="800" height="450" fill="#0d1117" rx="8"/>
+  <text x="400" y="30" text-anchor="middle" class="title">VV-L2-CMP-04: High-Spin (2000 rad/s) 3D MPM Total Angular Momentum |L(t)|</text>
+  <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
+  <text x="67" y="394" text-anchor="end" class="tick">0.00388</text>
+  <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
+  <text x="67" y="326" text-anchor="end" class="tick">0.00388</text>
+  <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
+  <text x="67" y="258" text-anchor="end" class="tick">0.00388</text>
+  <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
+  <text x="67" y="190" text-anchor="end" class="tick">0.00388</text>
+  <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
+  <text x="67" y="122" text-anchor="end" class="tick">0.00388</text>
+  <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
+  <text x="67" y="54" text-anchor="end" class="tick">0.00388</text>
+  <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
+  <text x="75" y="408" text-anchor="middle" class="tick">2</text>
+  <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
+  <text x="213" y="408" text-anchor="middle" class="tick">5.6</text>
+  <line x1="351" y1="50" x2="351" y2="390" class="grid"/>
+  <text x="351" y="408" text-anchor="middle" class="tick">9.2</text>
+  <line x1="489" y1="50" x2="489" y2="390" class="grid"/>
+  <text x="489" y="408" text-anchor="middle" class="tick">12.8</text>
+  <line x1="627" y1="50" x2="627" y2="390" class="grid"/>
+  <text x="627" y="408" text-anchor="middle" class="tick">16.4</text>
+  <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
+  <text x="765" y="408" text-anchor="middle" class="tick">20</text>
+  <path class="corridor-yellow" d="M 75 -5.23e+06 L 152 -5.23e+06 L 228 -5.23e+06 L 305 -5.23e+06 L 382 -5.23e+06 L 458 -5.23e+06 L 535 -5.23e+06 L 612 -5.23e+06 L 688 -5.23e+06 L 765 -5.23e+06 L 765 5.23e+06 L 688 5.23e+06 L 612 5.23e+06 L 535 5.23e+06 L 458 5.23e+06 L 382 5.23e+06 L 305 5.23e+06 L 228 5.23e+06 L 152 5.23e+06 L 75 5.23e+06 Z"/>
+  <path class="corridor-green" d="M 75 -1.05e+06 L 152 -1.05e+06 L 228 -1.05e+06 L 305 -1.05e+06 L 382 -1.05e+06 L 458 -1.05e+06 L 535 -1.05e+06 L 612 -1.05e+06 L 688 -1.05e+06 L 765 -1.05e+06 L 765 1.05e+06 L 688 1.05e+06 L 612 1.05e+06 L 535 1.05e+06 L 458 1.05e+06 L 382 1.05e+06 L 305 1.05e+06 L 228 1.05e+06 L 152 1.05e+06 L 75 1.05e+06 Z"/>
+  <path class="exact-curve" d="M 75 362 L 152 362 L 228 362 L 305 362 L 382 362 L 458 362 L 535 362 L 612 362 L 688 362 L 765 362 "/>
+  <path class="num-curve" d="M 75 344 L 152 316 L 228 286 L 305 259 L 382 235 L 458 203 L 535 167 L 612 135 L 688 106 L 765 78.3 "/>
+  <circle cx="75" cy="344" r="3.5" fill="#f0883e"/>
+  <circle cx="152" cy="316" r="3.5" fill="#f0883e"/>
+  <circle cx="228" cy="286" r="3.5" fill="#f0883e"/>
+  <circle cx="305" cy="259" r="3.5" fill="#f0883e"/>
+  <circle cx="382" cy="235" r="3.5" fill="#f0883e"/>
+  <circle cx="458" cy="203" r="3.5" fill="#f0883e"/>
+  <circle cx="535" cy="167" r="3.5" fill="#f0883e"/>
+  <circle cx="612" cy="135" r="3.5" fill="#f0883e"/>
+  <circle cx="688" cy="106" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="78.3" r="3.5" fill="#f0883e"/>
+  <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
+  <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
+  <text x="400" y="435" text-anchor="middle" class="axis-label">Time (us)</text>
+  <text x="20" y="225" text-anchor="middle" transform="rotate(-90 20 225)" class="axis-label">|L| (kg m^2 / s)</text>
+  <rect x="570" y="55" width="195" height="85" fill="#161b22" stroke="#30363d" rx="4"/>
+  <line x1="580" y1="73" x2="605" y2="73" stroke="#58a6ff" stroke-width="2.5"/>
+  <text x="612" y="77" font-size="11">Analytical / Exact</text>
+  <line x1="580" y1="93" x2="605" y2="93" stroke="#f0883e" stroke-width="2.0" stroke-dasharray="4,2"/>
+  <circle cx="592" cy="93" r="3" fill="#f0883e"/>
+  <text x="612" y="97" font-size="11">Numerical Result</text>
+  <rect x="580" y="107" width="25" height="10" fill="rgba(46,160,67,0.5)"/>
+  <text x="612" y="116" font-size="10">Acceptance Corridor ±1%</text>
+  <rect x="580" y="123" width="25" height="10" fill="rgba(210,153,34,0.3)"/>
+  <text x="612" y="132" font-size="10">Tolerance Corridor ±5%</text>
+</svg>

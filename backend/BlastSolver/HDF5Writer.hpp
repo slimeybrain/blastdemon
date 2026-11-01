@@ -4,8 +4,11 @@
 #include <string>
 #include <vector>
 
+#include "VTKWriter.hpp"
+
 class HDF5Writer {
 public:
+    static bool writeMPMSnapshot3D(const std::string& filename, const MPMVTKSnapshot3D& snap);
     static bool writePressure(const std::string& filename, const std::vector<float>& data);
     static bool writeFrame(const std::string& filename,
                           const std::vector<double>& rho,

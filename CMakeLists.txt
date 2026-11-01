@@ -100,6 +100,9 @@ add_library(BlastSolverCore STATIC
     backend/BlastSolver/dispatch/DispatchFEM.cpp
     backend/BlastSolver/dispatch/DispatchFSI.cpp
     backend/BlastSolver/dispatch/DispatchRemap.cpp
+    # Lagrangian Phase Tracking Particles (LPTP)
+    backend/BlastSolver/PhaseTrackingParticles3D.cpp
+    backend/BlastSolver/PhaseTrackingParticles3D_cuda.cu
     # VTK output writer
     backend/BlastSolver/VTKWriter.cpp
 )
@@ -167,6 +170,7 @@ add_executable(blast_verify
     backend/BlastSolver/verification/vv_l2_canonical_benchmarks.cpp
     backend/BlastSolver/verification/vv_l3_component_tests.cpp
     backend/BlastSolver/verification/vv_l4_full_scale_systems.cpp
+    backend/BlastSolver/verification/vv_mpm_compact_contact.cpp
 )
 target_include_directories(blast_verify PRIVATE
     backend/BlastSolver
@@ -209,6 +213,12 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_mpm_continuum_contact backend/BlastSolver/test_mpm_continuum_contact.cpp)
     add_test_executable_if_exists(test_mpm_dem_contact backend/BlastSolver/test_mpm_dem_contact.cpp)
     add_test_executable_if_exists(test_mpm_bardenhagen_contact backend/BlastSolver/test_mpm_bardenhagen_contact.cpp)
+    add_test_executable_if_exists(test_mpm_compact_bardenhagen_parity backend/BlastSolver/test_mpm_compact_bardenhagen_parity.cpp)
+    if(TARGET test_mpm_compact_bardenhagen_parity)
+        target_sources(test_mpm_compact_bardenhagen_parity PRIVATE
+            backend/BlastSolver/verification/vv_mpm_compact_contact.cpp
+            backend/BlastSolver/verification/vv_framework.cpp)
+    endif()
     add_test_executable_if_exists(test_fsi_3d backend/BlastSolver/test_fsi_3d.cu)
     add_test_executable_if_exists(test_fem_3d_element_math backend/BlastSolver/test_fem_3d_element_math.cpp)
     add_test_executable_if_exists(test_fem_3d_hourglass backend/BlastSolver/test_fem_3d_hourglass.cpp)
@@ -244,5 +254,9 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_multiblock_vtm backend/BlastSolver/test_multiblock_vtm.cpp)
     add_test_executable_if_exists(test_harbour_diag backend/BlastSolver/test_harbour_diag.cu)
     add_test_executable_if_exists(test_quiescent_harbour backend/BlastSolver/test_quiescent_harbour.cu)
+    add_test_executable_if_exists(test_sleeve_diag backend/BlastSolver/test_sleeve_diag.cu)
+    add_test_executable_if_exists(test_zonal_interface_gpu backend/BlastSolver/test_zonal_interface_gpu.cu)
+    add_test_executable_if_exists(test_phase_tracking_adaptive backend/BlastSolver/test_phase_tracking_adaptive.cu)
+    add_test_executable_if_exists(test_detonator_delay_diag backend/BlastSolver/test_detonator_delay_diag.cpp)
 endif()
 

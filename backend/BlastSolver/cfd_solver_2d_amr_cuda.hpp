@@ -60,6 +60,7 @@ private:
     MultiMat::MaterialSet materials_val;
     double detonator_r_coord;
     double detonator_z_coord;
+    double detonator_start_time = 0.0;
 
     friend int main();
 
@@ -191,7 +192,7 @@ public:
     int getTemporalOrder() const override { return temporal_order_val; }
 
     void setBCTypes(BCType r_min, BCType r_max, BCType z_min, BCType z_max) override;
-    void setDetonatorLocation(double r, double z) override { detonator_r_coord = r; detonator_z_coord = z; }
+    void setDetonatorLocation(double r, double z, double start_time = 0.0) override { detonator_r_coord = r; detonator_z_coord = z; detonator_start_time = start_time; }
 
     std::vector<State2D> getStates() override;
     std::vector<float> getTelemetry2D(int stride = 1) override;

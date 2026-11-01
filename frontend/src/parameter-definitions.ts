@@ -165,42 +165,42 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'X-Min Face Boundary',
         category: 'Domain & Discretization',
         shortDesc: '3D Domain X-Min boundary condition',
-        detailedDesc: 'Reflecting (solid/symmetry wall), Transmitting (non-reflecting outflow), Terminate (absorption), Sticky (no-slip wall), or FreeSlip (tangential sliding).'
+        detailedDesc: 'West lateral boundary condition. In marine harbour models (spanning air, water, and seabed), setting to "Transmitting" executes Zonal Multi-Physics Radiation: characteristic Riemann outflow for the atmosphere and seawater, and Lysmer-Kuhlemeyer viscous dashpots for the geotechnical seabed. Setting to "Reflecting" models rigid quayside walls or closed wave flume boundaries.'
     },
     'bc_x_max': {
         key: 'bc_x_max',
         label: 'X-Max Face Boundary',
         category: 'Domain & Discretization',
         shortDesc: '3D Domain X-Max boundary condition',
-        detailedDesc: 'Reflecting (solid/symmetry wall), Transmitting (non-reflecting outflow), Terminate (absorption), Sticky (no-slip wall), or FreeSlip (tangential sliding).'
+        detailedDesc: 'East lateral boundary condition. In marine harbour models, setting to "Transmitting" executes Zonal Multi-Physics Radiation: characteristic Riemann outflow for the atmosphere and seawater, and Lysmer-Kuhlemeyer viscous dashpots for the geotechnical seabed. Setting to "Reflecting" models rigid quayside walls or closed wave flume boundaries.'
     },
     'bc_y_min': {
         key: 'bc_y_min',
         label: 'Y-Min Face Boundary',
         category: 'Domain & Discretization',
         shortDesc: '3D Domain Y-Min boundary condition',
-        detailedDesc: 'Reflecting (ground reflection plane), Transmitting (far-field), Terminate (absorption), Sticky (no-slip ground), or FreeSlip (frictionless ground).'
+        detailedDesc: 'South lateral boundary condition. In marine harbour models, setting to "Transmitting" executes Zonal Multi-Physics Radiation: characteristic Riemann outflow for the atmosphere and seawater, and Lysmer-Kuhlemeyer viscous dashpots for the geotechnical seabed. Setting to "Reflecting" models rigid quayside walls or closed wave flume boundaries.'
     },
     'bc_y_max': {
         key: 'bc_y_max',
         label: 'Y-Max Face Boundary',
         category: 'Domain & Discretization',
         shortDesc: '3D Domain Y-Max boundary condition',
-        detailedDesc: 'Reflecting (ceiling), Transmitting (open sky), Terminate (absorption), Sticky (no-slip ceiling), or FreeSlip (tangential sliding).'
+        detailedDesc: 'North lateral boundary condition. In marine harbour models, setting to "Transmitting" executes Zonal Multi-Physics Radiation: characteristic Riemann outflow for the atmosphere and seawater, and Lysmer-Kuhlemeyer viscous dashpots for the geotechnical seabed. Setting to "Reflecting" models rigid quayside walls or closed wave flume boundaries.'
     },
     'bc_z_min': {
         key: 'bc_z_min',
         label: 'Z-Min Face Boundary',
         category: 'Domain & Discretization',
-        shortDesc: '3D Domain Z-Min boundary condition',
-        detailedDesc: 'Reflecting (symmetry/wall), Transmitting (open far-field), Terminate (absorption), Sticky (no-slip wall), or FreeSlip (tangential sliding).'
+        shortDesc: '3D Domain Z-Min (Bottom) boundary condition',
+        detailedDesc: 'Bottom vertical boundary condition (Z-Min face). Controls how particles, stress waves, and fluid fluxes interact with the floor of the 3D computational domain (e.g., Reflecting, Transmitting, Terminate, Sticky, FreeSlip, or Lysmer absorbing dashpots).'
     },
     'bc_z_max': {
         key: 'bc_z_max',
         label: 'Z-Max Face Boundary',
         category: 'Domain & Discretization',
-        shortDesc: '3D Domain Z-Max boundary condition',
-        detailedDesc: 'Reflecting (wall), Transmitting (open atmosphere), Terminate (absorption), Sticky (no-slip wall), or FreeSlip (tangential sliding).'
+        shortDesc: '3D Domain Z-Max (Top) boundary condition',
+        detailedDesc: 'Top vertical boundary condition (Z-Max face). Controls how particles, stress waves, and fluid fluxes interact with the top of the 3D computational domain (e.g., Reflecting, Transmitting, Terminate, Sticky, FreeSlip, or Lysmer absorbing dashpots).'
     },
     'lysmer_rho': {
         key: 'lysmer_rho',
@@ -560,6 +560,14 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Ambient initial temperature',
         detailedDesc: 'Ambient baseline temperature (K). Standard ambient reference is 288.15 K (15°C).'
     },
+    'initial_temperature': {
+        key: 'initial_temperature',
+        label: 'Initial Temperature (T₀)',
+        unit: 'K',
+        category: 'Material EOS',
+        shortDesc: 'Initial thermodynamic temperature of the material',
+        detailedDesc: 'Thermodynamic initial reference temperature (Kelvin). For atmospheric air, couples with atm_pressure via the Ideal Gas Law (rho = p / (R_specific * T)). For liquid water, defines the quiescent seawater/freshwater baseline. For solids (metals, concrete, soil), sets initial particle/element temperature and Johnson-Cook thermal softening reference temperature T_ref. For energetic materials, represents the pre-detonation storage temperature of the unreacted solid reactant prior to shock initiation or thermal auto-ignition.'
+    },
     'gamma': {
         key: 'gamma',
         label: 'Adiabatic Ratio of Specific Heats (γ)',
@@ -898,6 +906,22 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Physical time delay prior to detonation initiation',
         detailedDesc: 'Simulation time (seconds) at which point detonation is triggered. Defaults to 0.0 for immediate initiation.'
     },
+    'time_delay': {
+        key: 'time_delay',
+        label: 'Detonation Time Delay',
+        unit: 's',
+        category: 'Detonator',
+        shortDesc: 'Physical time delay prior to detonation initiation',
+        detailedDesc: 'Simulation time (seconds) at which point detonation is triggered. Defaults to 0.0 for immediate initiation. For moving munitions or delayed explosive sequencing, initiation occurs at the updated detonator position at t = time_delay.'
+    },
+    'track_mpm_velocity': {
+        key: 'track_mpm_velocity',
+        label: 'Track MPM Velocity',
+        unit: '',
+        category: 'Detonator',
+        shortDesc: 'Move detonator with underlying MPM grid velocity',
+        detailedDesc: 'When enabled, the detonator advects continuously through the continuum domain matching the instantaneous background MPM grid velocity interpolated at the detonator location. If an explosive body or projectile has an initial velocity or accelerates dynamically, the detonator remains fixed relative to the material at its initial location and detonates from its updated position at t = time_delay. When disabled, the detonator remains fixed at its initial spatial coordinates.'
+    },
     'target_domain': {
         key: 'target_domain',
         label: 'Target Domain / Solver',
@@ -1101,6 +1125,22 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Euler rotation angle around Z-axis',
         detailedDesc: 'Counter-clockwise rotation angle in degrees around the local Z-axis.'
     },
+    'clip_z_min': {
+        key: 'clip_z_min',
+        label: 'Z-Axis Clipping Floor',
+        unit: 'm',
+        category: 'Boundary Geometry',
+        shortDesc: 'Minimum vertical coordinate for particle generation',
+        detailedDesc: 'Restricts particle seeding to coordinates with z ≥ clip_z_min. Particles generated below this plane (such as a nearfield water sleeve plunging below the seabed mudline) are omitted during initialization.'
+    },
+    'clip_z_max': {
+        key: 'clip_z_max',
+        label: 'Z-Axis Clipping Ceiling',
+        unit: 'm',
+        category: 'Boundary Geometry',
+        shortDesc: 'Maximum vertical coordinate for particle generation',
+        detailedDesc: 'Restricts particle seeding to coordinates with z ≤ clip_z_max. Particles generated above this plane (such as a nearfield water sleeve expanding above the ocean free surface) are omitted during initialization.'
+    },
 
     // --- MPM Continuum Particle Dynamics ---
     'transfer_scheme': {
@@ -1235,9 +1275,9 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         key: 'ppc',
         label: 'Particles Per Cell (PPC)',
         unit: 'particles',
-        category: 'MPM Particle Mechanics',
-        shortDesc: 'Particle sampling density per cell (per-object or domain default)',
-        detailedDesc: 'Number of Lagrangian material points initialized per Eulerian grid cell (typically 4 for 2D, 8 for 3D). When configured on an MPMObject2D or MPMObject3D body, it controls particle resolution specifically for that body, overriding the domain default. Higher PPC resolves thin features, curved boundaries, and fracture fragments with higher fidelity.'
+        category: 'Discretization & Seeding',
+        shortDesc: 'Lagrangian particle sampling density per Eulerian grid cell',
+        detailedDesc: 'Number of discrete Lagrangian particles initialized per Eulerian background cell. When configured on Charge3D (default 64), it controls high-density gas tracer sampling for expanding detonation products to prevent artificial bubble dissipation. When configured on MPMObject2D, MPMObject3D, or MPMDomain3D (default 8), it controls solid continuum material points.'
     },
     'shape_type': {
         key: 'shape_type',
@@ -1388,7 +1428,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'Material Property Preset',
         category: 'Material Constitutive',
         shortDesc: 'Pre-calibrated empirical parameters from literature for the selected model',
-        detailedDesc: 'Loads peer-reviewed, laboratory-calibrated material properties dynamically filtered for the active constitutive formulation: structural & armor steels, light alloys, concrete/masonry grades, soils & geomaterials (marine clay, silty clay, saturated mud/slurry, sand, granite, basalt, sandstone, limestone, shale, ice), soft materials & bio-surrogates (10% & 20% ballistic gelatins, hydrodynamic water, silicone tissue simulant, hydrogel), polymers, ceramics, unreacted explosive solids, CFD ideal gases, and JWL detonation products (or Custom).'
+        detailedDesc: 'Loads peer-reviewed, laboratory-calibrated material properties dynamically filtered for the active constitutive formulation: structural & armor steels (A36, S275, S355, S460, 1006, 1020, AISI 4150, AISI 4340 and heat-treated variants [Penetrator Nose 55-58 HRC, Shell Base 32-36 HRC, Annealed, Normalized, Q&T 315-650°C], Krupp E22, HY-80, HY-100, RHA, Armox, Weldox, stainless steels), light alloys, concrete/masonry grades, soils & geomaterials (marine clay, silty clay, saturated mud/slurry, sand, granite, basalt, sandstone, limestone, shale, ice), soft materials & bio-surrogates (10% & 20% ballistic gelatins, hydrodynamic water, silicone tissue simulant, hydrogel), polymers, ceramics, unreacted explosive solids, CFD ideal gases, and JWL detonation products (or Custom).'
     },
     'solid_model': {
         key: 'solid_model',
@@ -2500,7 +2540,33 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'Mesh Generation Source',
         category: 'Structural Mechanics',
         shortDesc: 'Geometry topology generator',
-        detailedDesc: 'Box Generator (analytic hexahedral brick), Cylinder Generator (polar hex mesh), or LS-DYNA Keyword File (imported *.k mesh).'
+        detailedDesc: 'Box Generator (analytic hexahedral brick or Freudenthal 6-tet subdivision), Cylinder Generator (polar hex or tetrahedral mesh), STL Surface Mesh (watertight CAD surface tetrahedralization), or LS-DYNA Keyword File (imported *.k mesh).'
+    },
+    'element_topology': {
+        key: 'element_topology',
+        label: 'Solid Element Topology',
+        allowedValues: ['Hex8', 'Tet4_ANP'],
+        defaultVal: 'Hex8',
+        category: 'FEM Structural Dynamics',
+        shortDesc: 'Solid element formulation: Hex8 vs Tet4_ANP (Average Nodal Pressure)',
+        detailedDesc: 'Selects the 3D Lagrangian finite element topology and volumetric stabilization: Hex8 (8-node hexahedral brick with Flanagan-Belytschko hourglass control) or Tet4_ANP (4-node tetrahedral element with 2-pass Bonet-Burton Average Nodal Pressure stabilization, eliminating volumetric locking in incompressible J2 metal plasticity and energetic detonation with zero hourglass modes).'
+    },
+    'enable_cohesive_splitting': {
+        key: 'enable_cohesive_splitting',
+        label: 'Cohesive Facet Node-Splitting',
+        defaultVal: false,
+        category: 'Fracture Mechanics',
+        shortDesc: 'Topological inter-element cohesive node splitting for grid-free fragmentation',
+        detailedDesc: 'Enables topological cohesive facet node-splitting (Option C) for 3D FEM fragmentation without requiring an Eulerian MPM background grid. When an element reaches critical fracture damage (D >= 0.99), shared nodes are duplicated into pre-allocated node pools with exact mass-weighted partition of unity (m_dup = m_elem / N_nodes), conserving total mass and linear momentum to machine precision while allowing fragments to separate cleanly and interact via penalty/impulse contact.'
+    },
+    'cohesive_fracture_energy': {
+        key: 'cohesive_fracture_energy',
+        label: 'Cohesive Fracture Energy (G_c)',
+        unit: 'J/m²',
+        defaultVal: 1000.0,
+        category: 'Fracture Mechanics',
+        shortDesc: 'Critical fracture energy release rate for inter-element facet separation',
+        detailedDesc: 'Critical fracture energy G_c (J/m² = N/m) governing cohesive traction-separation degradation prior to topological node splitting.'
     },
     'boundary_condition': {
         key: 'boundary_condition',
@@ -2793,7 +2859,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Telemetry & Diagnostics',
         shortDesc: 'Number of discrete isocontour color bands (0 = Continuous gradient)',
         detailedDesc: 'Controls the discretization of finite element field colormapping into discrete isocontour intervals (e.g. 5, 8, 10, 12, 16, 20, 24, 32 levels) matching standard CAE post-processors like LS-PrePost, Abaqus, and ANSYS. When set to 0 or 1, continuous smooth gradient interpolation is applied.',
-        defaultVal: 10
+        defaultVal: 0
     },
     'femSmoothContours': {
         key: 'femSmoothContours',
@@ -2801,7 +2867,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Telemetry & Diagnostics',
         shortDesc: 'Enable smooth continuous gradient interpolation for FEM mesh contours',
         detailedDesc: 'When enabled, overrides discrete banding to render continuous smooth scalar field gradients across FEM facets.',
-        defaultVal: false
+        defaultVal: true
     },
     'sliceContourLevels': {
         key: 'sliceContourLevels',
@@ -2810,7 +2876,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Telemetry & Diagnostics',
         shortDesc: 'Number of discrete isocontour color bands for CFD planar slices',
         detailedDesc: 'Controls the discretization of Eulerian CFD slice scalar fields into sharp isocontour bands across the 3D viewport and matching color bar overlays.',
-        defaultVal: 10
+        defaultVal: 0
     },
     'sliceSmoothContours': {
         key: 'sliceSmoothContours',
@@ -2818,7 +2884,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Telemetry & Diagnostics',
         shortDesc: 'Enable smooth continuous gradient interpolation for CFD slice contours',
         detailedDesc: 'When enabled, renders continuous smooth scalar field gradients across Eulerian CFD slices instead of discrete isocontour bands.',
-        defaultVal: false
+        defaultVal: true
     },
     'beamContourLevels': {
         key: 'beamContourLevels',
@@ -2827,7 +2893,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Telemetry & Diagnostics',
         shortDesc: 'Number of discrete isocontour color bands for 1D structural beam and rebar elements',
         detailedDesc: 'Specifies discrete color intervals for 1D beam and rebar elements independently of 2D/3D solid and shell elements.',
-        defaultVal: 10
+        defaultVal: 0
     },
     'beamSmoothContours': {
         key: 'beamSmoothContours',
@@ -2835,7 +2901,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Telemetry & Diagnostics',
         shortDesc: 'Enable smooth continuous gradient interpolation for 1D beam elements',
         detailedDesc: 'When enabled, renders continuous smooth colormap interpolation along 1D beam ribbons.',
-        defaultVal: false
+        defaultVal: true
     },
     'mpmContourLevels': {
         key: 'mpmContourLevels',
@@ -2844,7 +2910,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Telemetry & Diagnostics',
         shortDesc: 'Number of discrete isocontour color bands for Material Point Method particles',
         detailedDesc: 'Discretizes continuous MPM particle field values into stepped color intervals matching CAE isocontour plots.',
-        defaultVal: 10
+        defaultVal: 0
     },
     'mpmSmoothContours': {
         key: 'mpmSmoothContours',
@@ -2852,7 +2918,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Telemetry & Diagnostics',
         shortDesc: 'Enable smooth continuous gradient interpolation for MPM particles',
         detailedDesc: 'When enabled, maps particle scalar quantities directly to continuous colormaps without banding.',
-        defaultVal: false
+        defaultVal: true
     },
     'step_interval': {
         key: 'step_interval',
@@ -2872,10 +2938,32 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     },
     'vtk_format': {
         key: 'vtk_format',
-        label: 'VTK Encoding Format',
+        label: 'Container Format',
         category: 'VTK Output',
-        shortDesc: 'Binary vs ASCII VTK XML',
-        detailedDesc: 'Binary (compressed base64 raw binary - 5x smaller, high performance) or ASCII (plain text readable).'
+        shortDesc: 'Raw Binary XML (.vtu), XDMF + HDF5 (.xdmf + .h5), or ASCII',
+        detailedDesc: 'Selects the file container and compression pipeline: "Binary" writes raw binary <AppendedData encoding="raw"> with Zlib compression (zero Base64 overhead); "XDMF + HDF5" writes chunked HDF5 datasets with byte-shuffle + DEFLATE filtering and zero-byte implicit Polyvertex topology for maximum compression; "ASCII" writes human-readable text.'
+    },
+    'compression_level': {
+        key: 'compression_level',
+        label: 'Zlib Compression Level',
+        unit: 'level',
+        category: 'VTK Output',
+        shortDesc: 'DEFLATE / Zlib compression level (1 = fast, 6 = balanced, 9 = max)',
+        detailedDesc: 'Controls the Zlib / HDF5 DEFLATE compression level from 1 (fastest write speed) to 9 (maximum dictionary search). Level 6 is the recommended balance of disk space reduction and I/O throughput.'
+    },
+    'float_precision': {
+        key: 'float_precision',
+        label: 'Float32 Mantissa Precision',
+        category: 'VTK Output',
+        shortDesc: 'IEEE-754 mantissa bit-grooming for high Zlib / byte-shuffle compression',
+        detailedDesc: 'Applies round-to-nearest-even IEEE-754 mantissa bit-grooming prior to compression. "12-bit Mantissa (~4 sig. digits)" zeros the noisy bottom 11 mantissa bits on scalar/vector fields (~0.012% max relative error) and keeps 15 mantissa bits on 3D coordinates, increasing Zlib and HDF5 byte-shuffle compression ratios by 2.5x to 3.5x with zero visual difference in ParaView.'
+    },
+    'mpm_topology': {
+        key: 'mpm_topology',
+        label: 'MPM Point Cloud Topology',
+        category: 'VTK Output',
+        shortDesc: 'Individual vertex cells vs Single PolyVertex vs Zero-Cell Point Cloud for VTU/VTP',
+        detailedDesc: '"Individual Vertices" (default & recommended) creates a dedicated VTK_VERTEX cell (type 1) for every particle, ensuring full compatibility with all ParaView filters (Threshold, Clip, Point Data to Cell Data, Glyph, Extract Selection). "Single PolyVertex" wraps all N particles into a single VTK_POLY_VERTEX cell (type 2) so particles render immediately in ParaView while eliminating per-particle offset and type arrays. "Zero-Cell Point Cloud" writes NumberOfCells="0" (saving 100% of connectivity bytes) for rendering via ParaView Point Gaussian or Glyph filters.'
     },
     'custom_filename': {
         key: 'custom_filename',
@@ -3164,11 +3252,19 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     },
     'qty_mpm_material_id': {
         key: 'qty_mpm_material_id',
-        label: 'MPM Material ID',
+        label: 'MPM Material ID (UInt8)',
         unit: 'index',
         category: 'VTK Output Fields',
-        shortDesc: 'Include material identifier on material points',
-        detailedDesc: 'Exports material/body identification index on MPM particles for multi-material visualization.'
+        shortDesc: 'Include compact 1-byte material identifier on material points',
+        detailedDesc: 'Exports compact UInt8 (1 byte/particle) material identification index on MPM particles for multi-material coloring and thresholding in ParaView.'
+    },
+    'qty_mpm_object_id': {
+        key: 'qty_mpm_object_id',
+        label: 'MPM Object / Part ID (UInt8)',
+        unit: 'index',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include compact 1-byte object/part identifier on material points',
+        detailedDesc: 'Exports compact UInt8 (1 byte/particle) object/part identification index on MPM particles for per-body filtering in ParaView.'
     },
     'qty_mpm_temp': {
         key: 'qty_mpm_temp',
@@ -3523,7 +3619,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         unit: 'm',
         category: 'Domain & Discretization',
         shortDesc: 'Radial extent of Lagrangian MPM water sleeve surrounding explosive source',
-        detailedDesc: 'Radius (m) of the spherical Lagrangian particle sleeve capturing cavitation, cavitation closure water-hammer, and droplet splash before transmitting acoustic waves across impedance-matched ghost cells to the Eulerian far field.',
+        detailedDesc: 'Radius (m) of the spherical Lagrangian particle sleeve capturing cavitation, cavitation closure water-hammer, and droplet splash before transmitting acoustic waves to the Eulerian far field. Coupling is an overlapping Schwarz exchange on the co-located grid: (1) FV -> MPM: cells just outside R act as ghost material points carrying the FV state (p, ρ, u); they add mass, momentum and the stress-divergence force `f_i += V_g · p_FV · ∇N_i` to the sleeve boundary nodes with the same shape functions as P2G, so the outer face sees the continuing water impedance `ρc` rather than a free surface. (2) MPM -> FV: inside the overlap band `[R - overlap, R]` the FV state is blended toward the MPM grid state with a smoothstep weight (fully MPM for `r < R - overlap`). Particles crossing R leave the subdomain (the FV carries the outflow). Exchange is explicit and lagged by one step.',
         defaultVal: 2.5
     },
     'vertical_sleeve_breach': {
@@ -3549,10 +3645,84 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'Water Discretization Mode',
         unit: 'mode',
         category: 'Domain & Discretization',
-        shortDesc: 'Discretization mode for the water column (Pure FV vs Nearfield MPM Sleeve vs Full Column Cylinder)',
-        detailedDesc: 'Selects the water discretization architecture: Pure_FV (Eulerian finite volume everywhere, no MPM particles, shockwave penetrates seamlessly), Spherical_MPM_Sleeve (spherical MPM sleeve centered at charge for near-field cavitation), or Full_Column_MPM_Cylinder (MPM cylinder spanning from seabed to water surface).',
-        allowedValues: ['Pure_FV', 'Spherical_MPM_Sleeve', 'Full_Column_MPM_Cylinder'],
-        defaultVal: 'Spherical_MPM_Sleeve'
+        shortDesc: 'Discretization mode for the water column (Pure FV vs LPTP Phase Tracking vs Full Column LPTP)',
+        detailedDesc: 'Selects the water discretization architecture: Pure_FV (High-order Eulerian finite volume everywhere, no particles, shockwaves penetrate seamlessly with exact conservation), LPTP_Phase_Tracking_Sleeve (Lagrangian Phase Tracking Particles in charge/bubble near-field with partition-of-unity remap), or Full_Column_LPTP_Cylinder (column-spanning LPTP interface tracking).',
+        allowedValues: ['Pure_FV', 'LPTP_Phase_Tracking_Sleeve', 'Full_Column_LPTP_Cylinder'],
+        defaultVal: 'Pure_FV'
+    },
+    'phase_particle_ppc': {
+        key: 'phase_particle_ppc',
+        label: 'Phase Tracking Particles Per Cell (PPC)',
+        unit: 'count',
+        category: 'Domain & Discretization',
+        shortDesc: 'Number of Lagrangian phase tracking particles seeded per Eulerian cell in nearfield sleeve',
+        detailedDesc: 'Controls particle seeding density for Lagrangian Phase Tracking Particles (LPTP). Values (e.g. 8 or 27) resolve intricate bubble interfacial wrinkles and multilateral contact boundaries with exact partition-of-unity volume remapping to Eulerian CFD cells.',
+        defaultVal: 8
+    },
+    'showPhaseParticles': {
+        key: 'showPhaseParticles',
+        label: 'Show Phase Tracking Particles',
+        unit: 'bool',
+        category: 'Visualization & Rendering',
+        shortDesc: 'Toggle 3D rendering of Lagrangian phase tracking particles',
+        detailedDesc: 'Controls whether Lagrangian phase tracking particles are rendered in the 3D viewport (WebGPU billboard spheres / WebGL point clouds).',
+        defaultVal: true
+    },
+    'phaseParticleQuantity': {
+        key: 'phaseParticleQuantity',
+        label: 'Phase Tracking Particle Color Scalar',
+        unit: 'mode',
+        category: 'Visualization & Rendering',
+        shortDesc: 'Scalar field used to color phase tracking particles (discrete phase vs fluid velocity)',
+        detailedDesc: 'Selects coloring mode: "phase" uses distinct material palettes (Orange: JWL Gas, Amber: Unreacted HE, Cyan: Liquid Water, Silver: Casing, Ochre: Soil, White: Air); "velocity" or "speed" maps particle advection velocity to the chosen colormap.',
+        allowedValues: ['phase', 'velocity', 'speed'],
+        defaultVal: 'phase'
+    },
+    'phaseParticleDiameter': {
+        key: 'phaseParticleDiameter',
+        label: 'Phase Particle Diameter',
+        unit: 'm',
+        category: 'Visualization & Rendering',
+        shortDesc: 'Physical diameter for 3D billboard sphere rendering of phase particles (0 = Auto)',
+        detailedDesc: 'Sets the physical spherical diameter in meters for instanced billboard rendering in WebGPU/WebGL. Set to 0 to auto-scale based on grid spacing dx / cbrt(ppc).',
+        defaultVal: 0
+    },
+    'phaseParticleSize': {
+        key: 'phaseParticleSize',
+        label: 'Phase Particle Pixel Size',
+        unit: 'px',
+        category: 'Visualization & Rendering',
+        shortDesc: 'Screen-space point size in pixels when rendered in point cloud mode',
+        detailedDesc: 'Specifies the pixel radius for phase tracking particles when rendered using point primitives.',
+        defaultVal: 4.0
+    },
+    'phaseParticleOpacity': {
+        key: 'phaseParticleOpacity',
+        label: 'Phase Particle Opacity',
+        unit: 'fraction',
+        category: 'Visualization & Rendering',
+        shortDesc: 'Opacity (alpha) of rendered phase tracking particles [0.0 - 1.0]',
+        detailedDesc: 'Controls visual transparency for phase tracking particles in the 3D viewport.',
+        defaultVal: 1.0
+    },
+    'phaseParticleColormap': {
+        key: 'phaseParticleColormap',
+        label: 'Phase Particle Colormap',
+        unit: 'colormap',
+        category: 'Visualization & Rendering',
+        shortDesc: 'Colormap for velocity scalar display on phase particles',
+        detailedDesc: 'Colormap applied when phaseParticleQuantity is set to velocity or speed.',
+        allowedValues: ['rainbow', 'turbo', 'viridis', 'plasma', 'inferno', 'coolwarm', 'grayscale'],
+        defaultVal: 'rainbow'
+    },
+    'phaseParticleStride': {
+        key: 'phaseParticleStride',
+        label: 'Phase Particle Visual Stride',
+        unit: 'count',
+        category: 'Visualization & Rendering',
+        shortDesc: 'Display subsampling stride for phase tracking particles (1 = all particles)',
+        detailedDesc: 'Subsampling stride to reduce rendered particle count on low-power devices without altering the underlying physical simulation.',
+        defaultVal: 1
     },
     'show_water_sleeve': {
         key: 'show_water_sleeve',
@@ -3935,6 +4105,7 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
                 <div class="node-doc-heading">Key Parameters</div>
                 <ul>
                     <li><code>charge_shape</code>: Sphere, Cylinder, or Block.</li>
+                    <li><code>ppc</code>: Lagrangian particle sampling density per cell for detonation product gases (default 64). Controls tracer resolution to prevent gas bubble dissipation during massive volumetric expansion.</li>
                     <li><code>charge_x</code>, <code>charge_y</code>, <code>charge_z</code>: Cartesian coordinates of charge center.</li>
                     <li><code>charge_rot_x</code>, <code>charge_rot_y</code>, <code>charge_rot_z</code>: 3-axis Euler rotation angles (degrees) to orient directional blast charges.</li>
                 </ul>
@@ -4457,15 +4628,15 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'FEMDomain3D',
         title: '3D Explicit FEM Solver Domain',
         category: 'Lagrangian FEM Structural Dynamics',
-        shortDesc: '3D Explicit Lagrangian FEM structural dynamics solver supporting arbitrary solid, beam, and shell topologies, contact, and erosion.',
+        shortDesc: '3D Explicit Lagrangian FEM structural dynamics solver supporting Hex8 and Tet4-ANP solid elements, cohesive node-splitting fragmentation, energetic reactive burn, contact, and erosion.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>FEMDomain3D</strong> node executes 3D explicit Lagrangian finite-element structural dynamics. It supports arbitrary unstructured finite-element topologies including Hex8 solid elements, Timoshenko/Hughes-Liu beams, and truss reinforcement. Pure FEM models operate directly on unstructured finite element meshes without requiring an Eulerian Cartesian background grid.</p>
+                <p>The <strong>FEMDomain3D</strong> node executes 3D explicit Lagrangian finite-element structural and energetic dynamics. It supports arbitrary unstructured finite-element topologies including Hex8 solid elements, locking-free 2-pass <strong>Tet4-ANP</strong> (Bonet-Burton Average Nodal Pressure) tetrahedral elements, Timoshenko/Hughes-Liu beams, truss reinforcement, and <strong>Topological Cohesive Facet Node-Splitting</strong> for grid-free shattering and fragmentation. Pure FEM models operate directly on unstructured finite element meshes without requiring an Eulerian Cartesian background grid.</p>
             </div>
             <div class="node-doc-section">
                 <div class="node-doc-heading">Inputs & Upstream Connections</div>
-                <p>Connect structural meshes from <strong>LSDynaImporter3D</strong>, parametric parts from <strong>FEMObject3D</strong>, or discrete beams/rebars to the <em>Structural Mesh / Parts</em> input. Optionally connect a <strong>Material</strong> node to specify or override the default constitutive model.</p>
+                <p>Connect structural or energetic meshes from <strong>LSDynaImporter3D</strong>, parametric/STL parts from <strong>FEMObject3D</strong>, or discrete beams/rebars to the <em>Structural Mesh / Parts</em> input. Connect <strong>DetonatorLocation3D</strong> nodes to the <code>detonator</code> port to initiate programmed or reactive burn (JWL, Lee-Tarver, CREST) in explosive FEM parts.</p>
             </div>
         `
     },
@@ -4474,11 +4645,11 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'FEMObject3D',
         title: '3D FEM Structural Body',
         category: 'Lagrangian FEM Structural Dynamics',
-        shortDesc: '3D FEM Hexahedral solid body defining geometry generator, boundary constraints, and material bindings.',
+        shortDesc: '3D FEM Hexahedral (Hex8) or Tetrahedral (Tet4-ANP) solid/energetic body defining geometry generator, STL meshing, boundary constraints, and material bindings.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>FEMObject3D</strong> node defines a 3D structural body discretized into 8-node hexahedral solid elements. Supports parametric Box and Cylinder generators as well as imported LS-DYNA keyword meshes.</p>
+                <p>The <strong>FEMObject3D</strong> node defines a 3D structural or energetic body discretized into 8-node hexahedral (<code>Hex8</code>) or 4-node Average Nodal Pressure tetrahedral (<code>Tet4_ANP</code>) solid elements. Supports parametric Box, Plate, and Cylinder generators, watertight STL surface tetrahedralization, and imported LS-DYNA keyword meshes.</p>
             </div>
         `
     },
@@ -4605,10 +4776,20 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
                 </ul>
             </div>
             <div class="node-doc-section">
+                <div class="node-doc-heading">Zonal Boundary Architecture &amp; Quiet Ports</div>
+                <p>Because acoustic impedances differ by over 3,600:1 across atmospheric air, seawater, and geotechnical seabed, outer truncation boundaries must be zonally stratified:</p>
+                <ul>
+                    <li><strong>Atmospheric Sky (Z-Max):</strong> Set to <code>Transmitting</code> (Characteristic Riemann Outflow) to allow explosive fireballs, cavity venting, and acoustic air shocks to radiate into the atmosphere without artificial ceiling reflection.</li>
+                    <li><strong>Lateral Perimeter (X &amp; Y):</strong> Set to <code>Transmitting</code> (Zonal Multi-Physics Radiation). The solver automatically evaluates Riemann fluid outflow across the air and seawater column, and Lysmer-Kuhlemeyer viscous dashpots across the sediment strata. Set to <code>Reflecting</code> only for rigid quayside walls or closed testing tanks.</li>
+                    <li><strong>Deep Bedrock Base (Z-Min):</strong> Set to <code>Lysmer</code> (Viscous Absorbing Bedrock) to absorb downward-traveling seismic body waves (P/S waves) into the geological half-space. Set to <code>Reflecting</code> for rigid basement floors.</li>
+                    <li><strong>Internal Physical Interfaces:</strong> Free surface (<code>z = water_surface_z</code>) acts as a pressure-release boundary (R ≈ -1.0) with cavitation pressure floor clamp; mudline (<code>z = seabed_surface_z</code>) preserves normal traction continuity while radiating Scholte interface waves.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
                 <div class="node-doc-heading">Key Parameters & Tuning Guide</div>
                 <ul>
                     <li><code>undex_coupling_method</code>: Selects between LocalCurvedDAA, HighFidelityCFD, and ZonalHybrid_MPM_FV_FEM.</li>
-                    <li><code>water_discretization_mode</code>: Discretization architecture for the water column: Pure_FV (shockwaves propagate directly through fluid, no MPM particles), Spherical_MPM_Sleeve (cavitation sleeve), or Full_Column_MPM_Cylinder.</li>
+                    <li><code>water_discretization_mode</code>: Discretization architecture for the water column: Pure_FV (shockwaves and bubbles propagate seamlessly on Eulerian CFD grid with exact conservation) or LPTP_Phase_Tracking_Sleeve.</li>
                     <li><code>water_surface_z</code> &amp; <code>seabed_surface_z</code>: Vertical elevations defining the stratified air-water and water-seabed interfaces.</li>
                     <li><code>nearfield_sleeve_radius</code>: Radial boundary separating the Lagrangian MPM droplet/plume zone from the far-field Eulerian grid.</li>
                     <li><code>seabed_mesh_type</code>: Discretization mode for the seabed (Pure_FV allows shockwaves to penetrate directly into mud without solid wall freezing; Hybrid MPM Crater + FEM Far-Field; Full_Domain_MPM; or Pure_Hex8_FEM).</li>
@@ -4658,6 +4839,7 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
         'enable_timestep_erosion', 'timestep_erosion_factor', 'hourglass_coeff', 'contact_search_method', 'contact_penalty_scale', 
         'friction_static', 'friction_kinetic', 'integration_scheme', 'hourglass_model', 
         'rebar_formulation', 'mpm_particles_per_failed_element', 'convert_failed_elements_to_mpm', 
+        'enable_cohesive_splitting', 'cohesive_fracture_energy', 'element_topology',
         'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 
         'random_seed', 'k_file'
     ];
@@ -4971,17 +5153,17 @@ export function getParamKeysForNode(
         const isEnergetic = ['JWL Programmed Burn', 'Lee-Tarver Ignition & Growth', 'CREST Reactive Burn', 'Davis Reactive Burn'].includes(matModel);
 
         if (matModel === 'Ideal Gas') {
-            keys = ['ambient_air_target', 'material_model', 'preset', 'density', 'atm_pressure', 'atm_temperature', 'gamma', 'ambient_o2_fraction'];
+            keys = ['ambient_air_target', 'material_model', 'preset', 'density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'ambient_o2_fraction'];
         } else if (matModel === 'JWL Detonation Gas' || matModel === 'JWL Charge') {
             keys = [
-                'charge_target', 'material_model', 'preset', 'composition', 'rho', 'density', 'detonation_energy', 'det_vel',
+                'charge_target', 'material_model', 'preset', 'composition', 'rho', 'density', 'detonation_energy', 'det_vel', 'initial_temperature',
                 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'burn_zone_cells',
                 'afterburn_enabled', 'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
                 'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
                 'afterburn_ambient_o2_fraction'
             ];
         } else if (matModel === 'Ideal Gas Charge') {
-            keys = ['charge_target', 'material_model', 'preset', 'composition', 'ideal_rho_0', 'density', 'ideal_e_0', 'detonation_energy', 'ideal_gamma'];
+            keys = ['charge_target', 'material_model', 'preset', 'composition', 'ideal_rho_0', 'density', 'ideal_e_0', 'detonation_energy', 'initial_temperature', 'ideal_gamma'];
         } else if (matModel === 'Drucker-Prager' || matModel === 'Mohr-Coulomb') {
             keys = [
                 'seabed_target', 'material_model', 'preset', 'transfer_scheme',
@@ -4999,7 +5181,7 @@ export function getParamKeysForNode(
 
             // Pillar 1: Solid Reactant EOS
             const solidModel = parameters['solid_model'] || (matModel.includes('CREST') || matModel.includes('Davis') ? 'Davis Solid Reactant' : 'Mie-Grüneisen Shock Reactant');
-            keys.push('density', 'youngs_modulus', 'poissons_ratio', 'yield_stress');
+            keys.push('density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'initial_temperature');
             if (solidModel.includes('Davis')) {
                 keys.push('davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0');
             } else {
@@ -5046,7 +5228,7 @@ export function getParamKeysForNode(
             ];
         } else if (matModel === 'Tait Water') {
             keys = [
-                'material_model', 'preset', 'transfer_scheme', 'density',
+                'material_model', 'preset', 'transfer_scheme', 'density', 'initial_temperature',
                 'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0',
                 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str',
                 'bulk_viscosity_b1', 'bulk_viscosity_b2'
@@ -5064,7 +5246,7 @@ export function getParamKeysForNode(
                 'failure_strain', 'tensile_failure_stress',
                 'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
                 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
-                'T_melt', 'T_room', 'Cp',
+                'T_melt', 'T_room', 'initial_temperature', 'Cp',
                 'mg_gamma0', 'mg_c0', 'mg_s',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
@@ -5142,18 +5324,21 @@ export function getParamKeysForNode(
         keys = isAxisym
             ? ['coordinate_system', 'min_r', 'max_r', 'min_z', 'max_z', 'cell_size', 'nx', 'ny', 'bc_r_min', 'bc_r_max', 'bc_y_min', 'bc_y_max']
             : ['coordinate_system', 'xmin', 'xmax', 'ymin', 'ymax', 'cell_size', 'nx', 'ny', 'bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max'];
-    } else if (nodeType === 'DomainMesh3D') {
         keys = ['xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax', 'cell_size', 'nx', 'ny', 'nz', 'bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max', 'bc_z_min', 'bc_z_max'];
+        const hasLysmer = ['bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max', 'bc_z_min', 'bc_z_max'].some(k => parameters[k] === 'Lysmer' || parameters[k] === 'LysmerDashpot');
+        if (hasLysmer) {
+            keys.push('lysmer_rho', 'lysmer_cp', 'lysmer_cs', 'lysmer_normal_relaxation', 'lysmer_shear_relaxation');
+        }
     } else if (nodeType === 'Charge1D') {
         keys = ['target_domain', 'material', 'charge_mass', 'charge_radius'];
     } else if (nodeType === 'Charge2D') {
         keys = ['target_domain', 'material', 'charge_mass', 'charge_shape', 'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio'];
     } else if (nodeType === 'Charge3D') {
-        keys = ['target_domain', 'material', 'charge_mass', 'charge_shape', 'charge_x', 'charge_y', 'charge_z', 'charge_radius', 'charge_height', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z'];
+        keys = ['target_domain', 'material', 'charge_mass', 'charge_shape', 'ppc', 'charge_x', 'charge_y', 'charge_z', 'charge_radius', 'charge_height', 'charge_lx', 'charge_ly', 'charge_lz', 'charge_rot_x', 'charge_rot_y', 'charge_rot_z'];
     } else if (nodeType === 'DetonatorLocation' || nodeType === 'TriggerLocation') {
-        keys = ['target_domain', 'detonator_r', 'detonator_z', 'detonator_radius'];
+        keys = ['target_domain', 'detonator_r', 'detonator_z', 'detonator_radius', 'time_delay', 'track_mpm_velocity'];
     } else if (nodeType === 'DetonatorLocation3D' || nodeType === 'TriggerLocation3D') {
-        keys = ['target_domain', 'detonator_x', 'detonator_y', 'detonator_z', 'detonator_radius'];
+        keys = ['target_domain', 'detonator_x', 'detonator_y', 'detonator_z', 'detonator_radius', 'time_delay', 'track_mpm_velocity'];
     } else if (nodeType === 'CFDSolver3D') {
         keys = ['ambient_air_material', 'explosive_charge', 'device', 'precision', 'connected_detonators', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
         if (parameters['init_mode'] === 'Hydrostatic_Stratified_3D') {
@@ -5168,11 +5353,12 @@ export function getParamKeysForNode(
     } else if (nodeType === 'MPMObject2D') {
         keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'];
     } else if (nodeType === 'MPMObject3D') {
-        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'voxelization_method', 'stl_file', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
+        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'voxelization_method', 'stl_file', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'clip_z_min', 'clip_z_max', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
     } else if (nodeType === 'FEMDomain3D') {
         keys = [
-            'device', 'precision', 'cfl', 'endtime',
+            'device', 'precision', 'connected_detonators', 'cfl', 'endtime',
             'integration_scheme', 'hourglass_model', 'hourglass_coeff',
+            'enable_cohesive_splitting', 'cohesive_fracture_energy',
             'enable_directional_crack_band', 'enable_nonlocal_damage',
             'enable_heterogeneity', 'material_heterogeneity',
             'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
@@ -5187,10 +5373,10 @@ export function getParamKeysForNode(
         ];
     } else if (nodeType === 'FEMObject3D') {
         keys = [
-            'material', 'shape_type', 'mesh_source', 'origin_mode', 'boundary_condition',
+            'material', 'element_topology', 'shape_type', 'mesh_source', 'origin_mode', 'boundary_condition',
             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z',
             'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz',
-            'k_file', 'scale_x', 'scale_y', 'scale_z',
+            'stl_file', 'k_file', 'scale_x', 'scale_y', 'scale_z', 'rot_x', 'rot_y', 'rot_z',
             'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'
         ];
     } else if (nodeType === 'FEMFSICoupler3D') {
@@ -5209,11 +5395,11 @@ export function getParamKeysForNode(
         keys = ['cfl', 'endtime'];
     } else if (nodeType === 'VTKOutput') {
         keys = [
-            'trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'custom_filename', 'vtk_dir',
+            'trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'compression_level', 'float_precision', 'mpm_topology', 'custom_filename', 'vtk_dir',
             'export_cfd_2d', 'export_slices', 'export_volumes', 'export_obstacles', 'export_stl_faces', 'stl_outside_domain', 'tessellate_stl_faces', 'tessellation_max_edge', 'export_fem', 'export_mpm', 'export_pvd',
             'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_materials', 'qty_water', 'qty_soil', 'qty_overpressure', 'qty_impulse',
             'qty_fem_stress', 'qty_fem_strain', 'qty_fem_pressure', 'qty_fem_temp', 'qty_fem_damage', 'qty_fem_vel', 'qty_fem_disp',
-            'qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_temp', 'qty_mpm_vel', 'qty_mpm_disp',
+            'qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id', 'qty_mpm_temp', 'qty_mpm_vel',
             'roi_enabled', 'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
         ];
     } else if (nodeType === 'Telemetry3DViewport') {
@@ -5428,7 +5614,7 @@ export function shouldSkipNodeParameter(
         const isEnergetic = ['JWL Programmed Burn', 'Lee-Tarver Ignition & Growth', 'CREST Reactive Burn', 'Davis Reactive Burn'].includes(matModel);
 
         if (matModel === 'Ideal Gas') {
-            if (['density', 'atm_pressure', 'atm_temperature', 'gamma', 'ambient_o2_fraction', 'ambient_air_target', 'material_model', 'preset'].includes(key)) {
+            if (['density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'ambient_o2_fraction', 'ambient_air_target', 'material_model', 'preset'].includes(key)) {
                 return false;
             }
             return true;
@@ -5436,7 +5622,7 @@ export function shouldSkipNodeParameter(
 
         if (matModel === 'Tait Water') {
             if (!ctx.hasMPM && (key === 'bulk_viscosity_b1' || key === 'bulk_viscosity_b2')) return true;
-            if (['material_model', 'preset', 'transfer_scheme', 'density', 'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str', 'bulk_viscosity_b1', 'bulk_viscosity_b2'].includes(key)) {
+            if (['material_model', 'preset', 'transfer_scheme', 'density', 'initial_temperature', 'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str', 'bulk_viscosity_b1', 'bulk_viscosity_b2'].includes(key)) {
                 return false;
             }
             return true;
@@ -5450,7 +5636,7 @@ export function shouldSkipNodeParameter(
 
         if (matModel === 'JWL Detonation Gas' || matModel === 'JWL Charge') {
             const jwlAllowed = [
-                'charge_target', 'material_model', 'preset', 'composition', 'rho', 'density', 'detonation_energy', 'det_vel',
+                'charge_target', 'material_model', 'preset', 'composition', 'rho', 'density', 'detonation_energy', 'det_vel', 'initial_temperature',
                 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'burn_zone_cells',
                 'afterburn_enabled', 'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
                 'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
@@ -5463,7 +5649,7 @@ export function shouldSkipNodeParameter(
 
         if (matModel === 'Ideal Gas Charge') {
             const idealGasChargeAllowed = [
-                'charge_target', 'material_model', 'preset', 'composition', 'ideal_rho_0', 'density', 'ideal_e_0', 'detonation_energy', 'ideal_gamma'
+                'charge_target', 'material_model', 'preset', 'composition', 'ideal_rho_0', 'density', 'ideal_e_0', 'detonation_energy', 'initial_temperature', 'ideal_gamma'
             ];
             return !idealGasChargeAllowed.includes(key);
         }
@@ -5574,11 +5760,12 @@ export function shouldSkipNodeParameter(
         } else if (shape === 'Cylinder') {
             if (['size_x', 'size_y', 'size_z', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'origin_mode', 'voxelization_method'].includes(key)) return true;
         } else if (shape === 'STL') {
-            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height'].includes(key)) return true;
+            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'clip_z_min', 'clip_z_max'].includes(key)) return true;
         }
     } else if (nodeType === 'FEMDomain3D') {
         const scheme = parameters['integration_scheme'] || 'OnePointFB';
         if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && (key === 'hourglass_model' || key === 'hourglass_coeff')) return true;
+        if (key === 'cohesive_fracture_energy' && !parameters['enable_cohesive_splitting']) return true;
         if (key === 'mpm_particles_per_failed_element' && !parameters['convert_failed_elements_to_mpm']) return true;
         if (['material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size'].includes(key) && !parameters['enable_heterogeneity']) return true;
         if (['anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'].includes(key) && !parameters['enable_anisotropy']) return true;
@@ -5586,13 +5773,15 @@ export function shouldSkipNodeParameter(
         if (key === 'nonlocal_radius' && !parameters['enable_directional_crack_band']) return true;
     } else if (nodeType === 'FEMObject3D') {
         if (key === 'mesh_source') return true;
-        const shape = parameters['shape_type'] || (parameters['mesh_source'] === 'Cylinder Generator' ? 'Cylinder' : (parameters['mesh_source'] === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box'));
-        if (shape === 'Box') {
-            if (['radius', 'inner_radius', 'height', 'k_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
+        const shape = parameters['shape_type'] || (parameters['mesh_source'] === 'Cylinder Generator' ? 'Cylinder' : (parameters['mesh_source'] === 'STL Surface Mesh' ? 'STL' : (parameters['mesh_source'] === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
+        if (shape === 'Box' || shape === 'Plate') {
+            if (['radius', 'inner_radius', 'height', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'rot_x', 'rot_y', 'rot_z'].includes(key)) return true;
         } else if (shape === 'Cylinder') {
-            if (['size_x', 'size_y', 'size_z', 'ny', 'k_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
+            if (['size_x', 'size_y', 'size_z', 'ny', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'rot_x', 'rot_y', 'rot_z'].includes(key)) return true;
+        } else if (shape === 'STL') {
+            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'k_file'].includes(key)) return true;
         } else if (shape === 'LS-DYNA File') {
-            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'origin_mode'].includes(key)) return true;
+            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'origin_mode', 'stl_file', 'rot_x', 'rot_y', 'rot_z'].includes(key)) return true;
         }
     } else if (nodeType === 'FEMFSICoupler3D') {
         if ((key === 'vacuum_density' || key === 'vacuum_pressure') && !parameters['erosion_venting']) return true;
@@ -5600,10 +5789,12 @@ export function shouldSkipNodeParameter(
         const triggerType = parameters['trigger_type'] || 'Step Interval';
         if ((triggerType === 'Step Interval' || triggerType === 'step') && key === 'time_interval') return true;
         if ((triggerType === 'Time Interval' || triggerType === 'time') && key === 'step_interval') return true;
+        if (parameters['vtk_format'] === 'ASCII' && (key === 'compression_level' || key === 'float_precision')) return true;
+        if (parameters['vtk_format'] === 'XDMF + HDF5' && key === 'mpm_topology') return true;
 
         // Model-level physics dependencies (Directive: don't display params that are not relevant to the current setup)
         if (!ctx.hasFEM && (key === 'export_fem' || key.startsWith('qty_fem_'))) return true;
-        if (!ctx.hasMPM && (key === 'export_mpm' || key.startsWith('qty_mpm_'))) return true;
+        if (!ctx.hasMPM && (key === 'export_mpm' || key === 'mpm_topology' || key.startsWith('qty_mpm_'))) return true;
         if (!ctx.hasCFD && (
             key === 'export_cfd_2d' || key === 'export_slices' || key === 'export_volumes' ||
             ['qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_materials', 'qty_water', 'qty_soil', 'qty_overpressure', 'qty_impulse'].includes(key)
@@ -5617,7 +5808,7 @@ export function shouldSkipNodeParameter(
 
         // Node options dependencies
         if (parameters['export_fem'] === false && key.startsWith('qty_fem_')) return true;
-        if (parameters['export_mpm'] === false && key.startsWith('qty_mpm_')) return true;
+        if (parameters['export_mpm'] === false && (key === 'mpm_topology' || key.startsWith('qty_mpm_'))) return true;
         if (parameters['export_stl_faces'] === false && (key === 'stl_outside_domain' || key === 'tessellate_stl_faces' || key === 'tessellation_max_edge')) return true;
         if (parameters['tessellate_stl_faces'] === false && key === 'tessellation_max_edge') return true;
 
@@ -5715,8 +5906,10 @@ export function getNodeSectionInfo(
         if (key === 'enable_anisotropy') return { title: 'DIRECTIONAL ANISOTROPY [MPM · FEM]', color: '#38bdf8', defaultCollapsed: true };
     } else if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || nodeType === 'DomainMesh3D') {
         if (key === 'cell_size' || key === 'nx') return { title: 'GRID RESOLUTION', color: '#569cd6', defaultCollapsed: false };
-        if (key === 'left_bc' || key === 'bc_x_min' || key === 'bc_r_min' || key === 'x_min_bc') return { title: 'BOUNDARY CONDITIONS', color: '#569cd6', defaultCollapsed: true };
+        if (key === 'left_bc' || key === 'bc_x_min' || key === 'bc_r_min' || key === 'x_min_bc') return { title: 'BOUNDARY CONDITIONS', color: '#569cd6', defaultCollapsed: false };
+        if (key.startsWith('lysmer_')) return { title: 'LYSMER-KUHLEMEYER ABSORBING DASHPOTS', color: '#10b981', defaultCollapsed: false };
     } else if (nodeType === 'Charge1D' || nodeType === 'Charge2D' || nodeType === 'Charge3D') {
+        if (key === 'ppc') return { title: 'PARTICLE DISCRETIZATION', color: '#c084fc', defaultCollapsed: false };
         if (key === 'charge_r' || key === 'charge_x' || key === 'charge_radius') return { title: 'GEOMETRY & POSITIONING', color: '#fbbf24', defaultCollapsed: false };
     } else if (['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(nodeType)) {
         if (key === 'source_model_id' || key === 'target_solver') return { title: 'PIPELINE SOURCE & TARGET COUPLING', color: '#38bdf8', defaultCollapsed: false };
@@ -5738,12 +5931,12 @@ export function getNodeSectionInfo(
         if (key === 'origin_mode') return { title: 'TRANSFORM & ORIENTATION', color: '#c084fc', defaultCollapsed: false };
     } else if (nodeType === 'FEMDomain3D') {
         if (key === 'integration_scheme') return { title: 'ELEMENT FORMULATION', color: '#38bdf8', defaultCollapsed: false };
-        if (key === 'enable_directional_crack_band') return { title: 'DAMAGE REGULARIZATION', color: '#38bdf8', defaultCollapsed: true };
+        if (key === 'enable_cohesive_splitting' || (key === 'enable_directional_crack_band' && parameters['enable_cohesive_splitting'] === undefined)) return { title: 'COHESIVE FRACTURE & DAMAGE REGULARIZATION', color: '#38bdf8', defaultCollapsed: true };
         if (key === 'rebar_formulation') return { title: 'CONTACT & REBAR', color: '#38bdf8', defaultCollapsed: true };
         if (key === 'enable_heterogeneity') return { title: 'MICROSTRUCTURE & DEBRIS', color: '#c084fc', defaultCollapsed: true };
         if (key === 'enable_anisotropy') return { title: 'DIRECTIONAL ANISOTROPY', color: '#38bdf8', defaultCollapsed: true };
     } else if (nodeType === 'FEMObject3D') {
-        if (key === 'material' || key === 'shape_type' || key === 'origin_mode' || key === 'boundary_condition') {
+        if (key === 'material' || key === 'element_topology' || key === 'shape_type' || key === 'origin_mode' || key === 'boundary_condition') {
             return { title: 'STRUCTURAL TOPOLOGY & BOUNDARIES', color: '#38bdf8', defaultCollapsed: false };
         }
         if (key === 'pos_x' || key === 'size_x' || key === 'radius' || key === 'height') {
@@ -5752,7 +5945,7 @@ export function getNodeSectionInfo(
         if (key === 'nx' || key === 'ny' || key === 'nz') {
             return { title: 'MESH DISCRETIZATION & SUBDIVISIONS', color: '#38bdf8', defaultCollapsed: false };
         }
-        if (key === 'k_file' || key === 'scale_x') {
+        if (key === 'stl_file' || key === 'k_file' || key === 'scale_x' || key === 'rot_x') {
             return { title: 'EXTERNAL CAD & LS-DYNA INGESTION', color: '#38bdf8', defaultCollapsed: true };
         }
         if (key === 'vel_x' || key === 'bulk_viscosity_b1' || key === 'timestep_erosion_factor') {

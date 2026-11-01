@@ -625,7 +625,7 @@ template <typename RealType>
 __global__ void applyProgrammedBurn_kernel(
     int num_tiles_r, int num_tiles_z, int nr_cells, int nz_cells,
     RealType dr, RealType dz, RealType currentTime, RealType dt,
-    RealType det_x, RealType det_y, RealType det_z,
+    RealType det_x, RealType det_y, RealType det_z, RealType det_start_time,
     RealType charge_radius,
     MultiMat::MaterialSet* d_materials,
     const int32_t* tile_map,
@@ -656,7 +656,7 @@ __global__ void applyProgrammedBurn_kernel(
     using std::fmin;
     RealType dF = MultiMat::computeProgrammedBurn(
         currentTime, dt, r_c, (RealType)0.0, z_c,
-        (RealType)d_materials->det_vel, (RealType)0.0,
+        (RealType)d_materials->det_vel, det_start_time,
         det_x, (RealType)0.0, det_z,
         fmin(dr, dz),
         (RealType)d_materials->products.rho0,
@@ -1626,6 +1626,7 @@ void CFDSolver2DCudaImpl<RealType>::step(double dt) {
     RealType det_x_r = (RealType)det_x;
     RealType det_y_r = (RealType)det_y;
     RealType det_z_r = (RealType)det_z;
+    RealType det_start_time_r = (RealType)det_start_time;
 
     if (temporalOrder == 1) {
         computeTileRHS_kernel<<<blocks, threads>>>(
@@ -1662,7 +1663,7 @@ void CFDSolver2DCudaImpl<RealType>::step(double dt) {
     
     if (!is_ideal_gas) {
         RealType charge_radius_r = (RealType)this->charge_radius;
-        applyProgrammedBurn_kernel<<<blocks, threads>>>(num_tiles_r, num_tiles_z, nr_cells, nz_cells, dr_r, dz_r, currentTime_r, dt_r, det_x_r, det_y_r, det_z_r, charge_radius_r, d_materials, d_tile_map, d_U_pool);
+        applyProgrammedBurn_kernel<<<blocks, threads>>>(num_tiles_r, num_tiles_z, nr_cells, nz_cells, dr_r, dz_r, currentTime_r, dt_r, det_x_r, det_y_r, det_z_r, det_start_time_r, charge_radius_r, d_materials, d_tile_map, d_U_pool);
         CUDA_CHECK(cudaGetLastError());
         
         updatePrimitiveFromConservative_kernel<<<current_pool_size, threads>>>(current_pool_size, gamma_r, d_materials, ambient_rho_r, ambient_p_r, d_U_pool, d_states_pool);

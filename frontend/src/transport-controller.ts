@@ -411,6 +411,12 @@ export class TransportController {
         const currentActive = this.isLayerActive(key);
         const nextActive = !currentActive;
         this.activeLayers[key] = nextActive;
+        if (this.onLayerToggle) {
+            this.onLayerToggle(key, nextActive);
+            this.updateAllLayerChips();
+            this.requestTabRender();
+            return;
+        }
         const vpNode = this.getActiveViewportNode();
         const activeModel = this.stateManager.getActiveModel();
         if (vpNode) {
@@ -437,11 +443,19 @@ export class TransportController {
                         updates.femWireframe = true;
                     }
                     if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'FEMObject3D' || n.type === 'FEMDomain3D' || n.type === 'LSDynaImporter3D')
-                            .forEach((n: any) => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: nextActive, hidden: !nextActive, showFEMMesh: nextActive });
-                            });
+                        const femDomains = activeModel.nodes.filter((n: any) => n.type === 'FEMDomain3D');
+                        femDomains.forEach((n: any) => {
+                            this.stateManager.updateNodeParametersInPlace(n.id, { showFEMMesh: nextActive });
+                        });
+                        if (nextActive) {
+                            const femObjs = activeModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+                            const allHidden = femObjs.length > 0 && femObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                            if (allHidden) {
+                                femObjs.forEach((n: any) => {
+                                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showFEMMesh: true });
+                                });
+                            }
+                        }
                     }
                     break;
                 }
@@ -449,19 +463,26 @@ export class TransportController {
                     updates.showMPMParticles = nextActive;
                     if (activeModel) {
                         activeModel.nodes
-                            .filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMDomain3D' || n.type === 'MPMObject2D' || n.type === 'MarineHarbourDomain')
+                            .filter((n: any) => n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain')
                             .forEach((n: any) => {
                                 if (n.type === 'MarineHarbourDomain') {
                                     this.stateManager.updateNodeParametersInPlace(n.id, {
-                                        visible: nextActive,
-                                        hidden: !nextActive,
                                         show_water_sleeve: nextActive,
                                         show_soil_mpm: nextActive
                                     });
                                 } else {
-                                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: nextActive, hidden: !nextActive, showMPMParticles: nextActive });
+                                    this.stateManager.updateNodeParametersInPlace(n.id, { showMPMParticles: nextActive });
                                 }
                             });
+                        if (nextActive) {
+                            const mpmObjs = activeModel.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
+                            const allHidden = mpmObjs.length > 0 && mpmObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                            if (allHidden) {
+                                mpmObjs.forEach((n: any) => {
+                                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showMPMParticles: true });
+                                });
+                            }
+                        }
                     }
                     this.onShadingChange?.('show_water_sleeve', nextActive);
                     this.onShadingChange?.('show_soil_mpm', nextActive);
@@ -476,45 +497,53 @@ export class TransportController {
                         updates.rebarSolid = true;
                         updates.rebarWireframe = true;
                     }
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D' || n.type === 'StructuralObject3D')
-                            .forEach((n: any) => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: nextActive, hidden: !nextActive, showBeams: nextActive, showRebar: nextActive });
+                    if (activeModel && nextActive) {
+                        const beamObjs = activeModel.nodes.filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D' || n.type === 'StructuralObject3D');
+                        const allHidden = beamObjs.length > 0 && beamObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                        if (allHidden) {
+                            beamObjs.forEach((n: any) => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showBeams: true, showRebar: true });
                             });
+                        }
                     }
                     break;
                 }
                 case 'stl': {
                     updates.show_stl = nextActive;
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'STLGeometry' || n.type === 'CADDomain3D')
-                            .forEach((n: any) => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: nextActive, hidden: !nextActive, show_stl: nextActive });
+                    if (activeModel && nextActive) {
+                        const stlObjs = activeModel.nodes.filter((n: any) => n.type === 'STLGeometry' || n.type === 'CADDomain3D');
+                        const allHidden = stlObjs.length > 0 && stlObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                        if (allHidden) {
+                            stlObjs.forEach((n: any) => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_stl: true });
                             });
+                        }
                     }
                     break;
                 }
                 case 'obstacles': {
                     updates.show_obstacles = nextActive;
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'Obstacle3D' || n.type === 'ImmersedObstacle')
-                            .forEach((n: any) => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: nextActive, hidden: !nextActive, show_obstacles: nextActive });
+                    if (activeModel && nextActive) {
+                        const obsObjs = activeModel.nodes.filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'Obstacle3D' || n.type === 'ImmersedObstacle' || n.type === 'PrimitiveGeometry3D' || n.type === 'Obstacle');
+                        const allHidden = obsObjs.length > 0 && obsObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                        if (allHidden) {
+                            obsObjs.forEach((n: any) => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_obstacles: true });
                             });
+                        }
                     }
                     break;
                 }
                 case 'gauges': {
                     updates.show_gauges = nextActive;
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'VirtualGauges3D' || n.type === 'VirtualGaugeProbe3D' || n.type === 'VirtualGauge')
-                            .forEach((n: any) => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: nextActive, hidden: !nextActive, show_gauges: nextActive });
+                    if (activeModel && nextActive) {
+                        const gaugeObjs = activeModel.nodes.filter((n: any) => n.type === 'VirtualGauges3D' || n.type === 'VirtualGaugeProbe3D' || n.type === 'VirtualGauge' || n.type === 'VirtualGauges');
+                        const allHidden = gaugeObjs.length > 0 && gaugeObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                        if (allHidden) {
+                            gaugeObjs.forEach((n: any) => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_gauges: true });
                             });
+                        }
                     }
                     break;
                 }
@@ -526,7 +555,6 @@ export class TransportController {
         }
         this.updateAllLayerChips();
         this.requestTabRender();
-        this.onLayerToggle?.(key, nextActive);
     }
 
     public setPerspective(perspective: boolean): void {
@@ -2427,8 +2455,8 @@ export class TransportController {
                 maxVal: sMax,
                 logScale: (isGloballyLocked ? params.quantity_log_scales?.[rawQ] : undefined) ?? (slice.log_scale === true),
                 isLocked: isGloballyLocked,
-                contourLevels: slice.contour_levels ?? params.sliceContourLevels ?? 10,
-                smoothContours: slice.smooth_contours ?? params.sliceSmoothContours ?? false,
+                contourLevels: slice.contour_levels ?? params.sliceContourLevels ?? 0,
+                smoothContours: slice.smooth_contours ?? params.sliceSmoothContours ?? true,
                 showColorbar: slice.show_colorbar === true,
                 showMeshLines: slice.interpolate === false || slice.gridlines === true,
                 visibility: slice.enabled !== false,
@@ -2461,11 +2489,11 @@ export class TransportController {
             const femVis = this.isLayerActive('fem') && (selectedNode?.parameters?.visible !== false && !selectedNode?.parameters?.hidden);
             const isBeamOrRebar = objType === 'FEMBeam3D' || objType === 'FEMRebar3D';
             const femLevels = isBeamOrRebar
-                ? (selectedNode?.parameters?.beamContourLevels ?? params.beamContourLevels ?? 10)
-                : (selectedNode?.parameters?.femContourLevels ?? params.femContourLevels ?? 10);
+                ? (selectedNode?.parameters?.beamContourLevels ?? params.beamContourLevels ?? 0)
+                : (selectedNode?.parameters?.femContourLevels ?? params.femContourLevels ?? 0);
             const femSmooth = isBeamOrRebar
-                ? (selectedNode?.parameters?.beamSmoothContours ?? params.beamSmoothContours ?? false)
-                : (selectedNode?.parameters?.femSmoothContours ?? params.femSmoothContours ?? false);
+                ? (selectedNode?.parameters?.beamSmoothContours ?? params.beamSmoothContours ?? true)
+                : (selectedNode?.parameters?.femSmoothContours ?? params.femSmoothContours ?? true);
 
             return {
                 targetType: 'fem',
@@ -2523,8 +2551,8 @@ export class TransportController {
             } else if (isMarineSoil) {
                 mpmVis = this.isLayerActive('mpm') && (selectedNode?.parameters?.show_soil_mpm !== false) && (selectedNode?.parameters?.visible !== false && !selectedNode?.parameters?.hidden);
             }
-            const mpmLevels = selectedNode?.parameters?.mpmContourLevels ?? params.mpmContourLevels ?? 10;
-            const mpmSmooth = selectedNode?.parameters?.mpmSmoothContours ?? params.mpmSmoothContours ?? false;
+            const mpmLevels = selectedNode?.parameters?.mpmContourLevels ?? params.mpmContourLevels ?? 0;
+            const mpmSmooth = selectedNode?.parameters?.mpmSmoothContours ?? params.mpmSmoothContours ?? true;
 
             let targetLabel = selectedNode?.parameters?.name || this.selectedObject?.label || 'MPM Particles';
             let targetIcon = '✨';
@@ -2769,8 +2797,8 @@ export class TransportController {
                 maxVal: femMax,
                 logScale: femLog,
                 isLocked: isGloballyLocked,
-                contourLevels: params.femContourLevels ?? 10,
-                smoothContours: params.femSmoothContours ?? false,
+                contourLevels: params.femContourLevels ?? 0,
+                smoothContours: params.femSmoothContours ?? true,
                 showColorbar: (params.femShowColorbar !== undefined ? params.femShowColorbar : params.show_colorbar) !== false,
                 showMeshLines: params.femWireframe !== false,
                 visibility: this.isLayerActive('fem')
@@ -2799,8 +2827,8 @@ export class TransportController {
             maxVal: isGloballyLocked ? defaultGlobRange[1] : (params.max_val !== undefined ? Number(params.max_val) : this.maxScalarVal),
             logScale: globLog,
             isLocked: isGloballyLocked,
-            contourLevels: params.sliceContourLevels ?? 10,
-            smoothContours: params.sliceSmoothContours ?? false,
+            contourLevels: params.sliceContourLevels ?? 0,
+            smoothContours: params.sliceSmoothContours ?? true,
             showColorbar: globBar,
             showMeshLines: globMesh,
             visibility: this.activeLayers.slices !== false
@@ -3263,20 +3291,33 @@ export class TransportController {
                     vpUpdates.beamSmoothContours = sm;
                     this.onShadingChange?.('beamSmoothContours', sm);
                 } else if (key === 'visibility') {
-                    nodeUpdates.showBeams = value;
-                    nodeUpdates.showRebar = value;
-                    nodeUpdates.visible = value;
-                    nodeUpdates.hidden = !value;
-                    vpUpdates.showBeams = value;
-                    vpUpdates.showRebar = value;
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D' || n.type === 'StructuralObject3D')
-                            .forEach((n: any) => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: value, hidden: !value, showBeams: value, showRebar: value });
-                            });
+                    if (selectedNode && (selectedNode.type === 'FEMBeam3D' || selectedNode.type === 'FEMRebar3D')) {
+                        nodeUpdates.visible = value;
+                        nodeUpdates.hidden = !value;
+                        nodeUpdates.showBeams = value;
+                        nodeUpdates.showRebar = value;
+                        if (value) {
+                            vpUpdates.showBeams = true;
+                            vpUpdates.showRebar = true;
+                            this.activeLayers.beams = true;
+                        }
+                    } else {
+                        nodeUpdates.showBeams = value;
+                        nodeUpdates.showRebar = value;
+                        vpUpdates.showBeams = value;
+                        vpUpdates.showRebar = value;
+                        this.activeLayers.beams = value;
+                        if (activeModel && value) {
+                            const beamObjs = activeModel.nodes.filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D' || n.type === 'StructuralObject3D');
+                            const allHidden = beamObjs.length > 0 && beamObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                            if (allHidden) {
+                                beamObjs.forEach((n: any) => {
+                                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showBeams: true, showRebar: true });
+                                });
+                            }
+                        }
+                        this.onLayerToggle?.('beams', value);
                     }
-                    this.onLayerToggle?.('beams', value);
                 } else if (key === 'femOpacity') {
                     nodeUpdates.beamOpacity = Number(value);
                     vpUpdates.beamOpacity = Number(value);
@@ -3342,18 +3383,29 @@ export class TransportController {
                     vpUpdates.femSmoothContours = sm;
                     this.onShadingChange?.('femSmoothContours', sm);
                 } else if (key === 'visibility') {
-                    nodeUpdates.showFEMMesh = value;
-                    nodeUpdates.visible = value;
-                    nodeUpdates.hidden = !value;
-                    vpUpdates.showFEMMesh = value;
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'FEMObject3D' || n.type === 'FEMDomain3D' || n.type === 'LSDynaImporter3D')
-                            .forEach((n: any) => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: value, hidden: !value, showFEMMesh: value });
-                            });
+                    if (selectedNode && (selectedNode.type === 'FEMObject3D' || selectedNode.type === 'LSDynaImporter3D')) {
+                        nodeUpdates.visible = value;
+                        nodeUpdates.hidden = !value;
+                        nodeUpdates.showFEMMesh = value;
+                        if (value) {
+                            vpUpdates.showFEMMesh = true;
+                            this.activeLayers.fem = true;
+                        }
+                    } else {
+                        nodeUpdates.showFEMMesh = value;
+                        vpUpdates.showFEMMesh = value;
+                        this.activeLayers.fem = value;
+                        if (activeModel && value) {
+                            const femObjs = activeModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+                            const allHidden = femObjs.length > 0 && femObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                            if (allHidden) {
+                                femObjs.forEach((n: any) => {
+                                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showFEMMesh: true });
+                                });
+                            }
+                        }
+                        this.onLayerToggle?.('fem', value);
                     }
-                    this.onLayerToggle?.('fem', value);
                 } else if (key === 'lighting') {
                     nodeUpdates.femLighting = value;
                     vpUpdates.femLighting = value;
@@ -3446,17 +3498,26 @@ export class TransportController {
                         this.onShadingChange?.('show_water_sleeve', value);
                         this.onShadingChange?.('show_soil_mpm', value);
                     }
-                } else {
-                    nodeUpdates.showMPMParticles = value;
+                } else if (selectedNode && (selectedNode.type === 'MPMObject3D' || selectedNode.type === 'MPMObject2D')) {
                     nodeUpdates.visible = value;
                     nodeUpdates.hidden = !value;
+                    nodeUpdates.showMPMParticles = value;
+                    if (value) {
+                        vpUpdates.showMPMParticles = true;
+                        this.activeLayers.mpm = true;
+                    }
+                } else {
+                    nodeUpdates.showMPMParticles = value;
                     vpUpdates.showMPMParticles = value;
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMDomain3D' || n.type === 'MPMObject2D')
-                            .forEach((n: any) => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: value, hidden: !value, showMPMParticles: value });
+                    this.activeLayers.mpm = value;
+                    if (activeModel && value) {
+                        const mpmObjs = activeModel.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
+                        const allHidden = mpmObjs.length > 0 && mpmObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                        if (allHidden) {
+                            mpmObjs.forEach((n: any) => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showMPMParticles: true });
                             });
+                        }
                     }
                     this.onLayerToggle?.('mpm', value);
                 }
@@ -3521,18 +3582,29 @@ export class TransportController {
                 vpUpdates.stl_wireframe = value;
                 this.onShadingChange?.('stl_wireframe', value);
             } else if (key === 'visibility') {
-                nodeUpdates.show_stl = value;
-                nodeUpdates.visible = value;
-                nodeUpdates.hidden = !value;
-                vpUpdates.show_stl = value;
-                if (activeModel) {
-                    activeModel.nodes
-                        .filter((n: any) => n.type === 'STLGeometry3D' || n.type === 'CADImporter3D')
-                        .forEach((n: any) => {
-                            this.stateManager.updateNodeParametersInPlace(n.id, { visible: value, hidden: !value, show_stl: value });
-                        });
+                if (selectedNode && selectedNode.id !== vpNode?.id) {
+                    nodeUpdates.visible = value;
+                    nodeUpdates.hidden = !value;
+                    nodeUpdates.show_stl = value;
+                    if (value) {
+                        vpUpdates.show_stl = true;
+                        this.activeLayers.stl = true;
+                    }
+                } else {
+                    nodeUpdates.show_stl = value;
+                    vpUpdates.show_stl = value;
+                    this.activeLayers.stl = value;
+                    if (activeModel && value) {
+                        const stlObjs = activeModel.nodes.filter((n: any) => n.type === 'STLGeometry' || n.type === 'STLGeometry3D' || n.type === 'CADImporter3D');
+                        const allHidden = stlObjs.length > 0 && stlObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                        if (allHidden) {
+                            stlObjs.forEach((n: any) => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_stl: true });
+                            });
+                        }
+                    }
+                    this.onLayerToggle?.('stl', value);
                 }
-                this.onLayerToggle?.('stl', value);
             } else if (key === 'lighting') {
                 nodeUpdates.stl_lighting = value;
                 vpUpdates.stl_lighting = value;
@@ -3602,18 +3674,29 @@ export class TransportController {
                 vpUpdates.obstacles_gridlines = value;
                 this.onShadingChange?.('obstacles_gridlines', value);
             } else if (key === 'visibility') {
-                nodeUpdates.show_obstacles = value;
-                nodeUpdates.visible = value;
-                nodeUpdates.hidden = !value;
-                vpUpdates.show_obstacles = value;
-                if (activeModel) {
-                    activeModel.nodes
-                        .filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'CSGObstacle3D' || n.type === 'ObstacleBox3D' || n.type === 'ObstacleCylinder3D' || n.type === 'ObstacleSphere3D')
-                        .forEach((n: any) => {
-                            this.stateManager.updateNodeParametersInPlace(n.id, { visible: value, hidden: !value, show_obstacles: value });
-                        });
+                if (selectedNode && selectedNode.id !== vpNode?.id && (selectedNode.type as string) !== 'ObstacleDomain3D') {
+                    nodeUpdates.visible = value;
+                    nodeUpdates.hidden = !value;
+                    nodeUpdates.show_obstacles = value;
+                    if (value) {
+                        vpUpdates.show_obstacles = true;
+                        this.activeLayers.obstacles = true;
+                    }
+                } else {
+                    nodeUpdates.show_obstacles = value;
+                    vpUpdates.show_obstacles = value;
+                    this.activeLayers.obstacles = value;
+                    if (activeModel && value) {
+                        const obsObjs = activeModel.nodes.filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'CSGObstacle3D' || n.type === 'ObstacleBox3D' || n.type === 'ObstacleCylinder3D' || n.type === 'ObstacleSphere3D' || n.type === 'PrimitiveGeometry3D' || n.type === 'Obstacle');
+                        const allHidden = obsObjs.length > 0 && obsObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                        if (allHidden) {
+                            obsObjs.forEach((n: any) => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_obstacles: true });
+                            });
+                        }
+                    }
+                    this.onLayerToggle?.('obstacles', value);
                 }
-                this.onLayerToggle?.('obstacles', value);
             } else if (key === 'lighting') {
                 nodeUpdates.obstacles_lighting = value;
                 vpUpdates.obstacles_lighting = value;
@@ -3632,16 +3715,26 @@ export class TransportController {
         } else if (ctx.targetType === 'detonator') {
             const vpUpdates: any = {};
             if (key === 'visibility') {
-                vpUpdates.show_detonators = value;
-                vpUpdates.show_detonator = value;
-                if (activeModel) {
-                    activeModel.nodes
-                        .filter((n: any) => n.type === 'DetonatorPoint3D' || n.type === 'DetonatorLine3D' || n.type === 'DetonatorPlane3D' || n.type === 'Detonator')
-                        .forEach((n: any) => {
-                            this.stateManager.updateNodeParametersInPlace(n.id, { visible: value, hidden: !value, show_detonator: value });
-                        });
+                if (selectedNode && selectedNode.id !== vpNode?.id) {
+                    this.stateManager.updateNodeParametersInPlace(selectedNode.id, { visible: value, hidden: !value, show_detonator: value });
+                    if (value) {
+                        vpUpdates.show_detonators = true;
+                        vpUpdates.show_detonator = true;
+                    }
+                } else {
+                    vpUpdates.show_detonators = value;
+                    vpUpdates.show_detonator = value;
+                    if (activeModel && value) {
+                        const detObjs = activeModel.nodes.filter((n: any) => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation' || n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorPoint3D' || n.type === 'DetonatorLine3D' || n.type === 'DetonatorPlane3D' || n.type === 'Detonator');
+                        const allHidden = detObjs.length > 0 && detObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                        if (allHidden) {
+                            detObjs.forEach((n: any) => {
+                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_detonator: true });
+                            });
+                        }
+                    }
+                    this.onLayerToggle?.('detonators', value);
                 }
-                this.onLayerToggle?.('detonators', value);
             } else if (key === 'showMeshLines') {
                 vpUpdates.detonator_wireframe = value;
                 vpUpdates.detonators_wireframe = value;
@@ -3852,10 +3945,19 @@ export class TransportController {
                     if (vpNode) this.stateManager.updateNodeParametersInPlace(vpNode.id, { showMPMParticles: value });
                     if (activeModel) {
                         activeModel.nodes
-                            .filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMDomain3D')
+                            .filter((n: any) => n.type === 'MPMDomain3D')
                             .forEach((n: any) => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: value, hidden: !value, showMPMParticles: value });
+                                this.stateManager.updateNodeParametersInPlace(n.id, { showMPMParticles: value });
                             });
+                        if (value) {
+                            const mpmObjs = activeModel.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
+                            const allHidden = mpmObjs.length > 0 && mpmObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                            if (allHidden) {
+                                mpmObjs.forEach((n: any) => {
+                                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showMPMParticles: true });
+                                });
+                            }
+                        }
                     }
                     this.onLayerToggle?.('mpm', value);
                 } else if (hasFEM && !hasCFD) {
@@ -3863,10 +3965,19 @@ export class TransportController {
                     if (vpNode) this.stateManager.updateNodeParametersInPlace(vpNode.id, { showFEMMesh: value });
                     if (activeModel) {
                         activeModel.nodes
-                            .filter((n: any) => n.type === 'FEMObject3D' || n.type === 'FEMDomain3D' || n.type === 'LSDynaImporter3D')
+                            .filter((n: any) => n.type === 'FEMDomain3D')
                             .forEach((n: any) => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { visible: value, hidden: !value, showFEMMesh: value });
+                                this.stateManager.updateNodeParametersInPlace(n.id, { showFEMMesh: value });
                             });
+                        if (value) {
+                            const femObjs = activeModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+                            const allHidden = femObjs.length > 0 && femObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                            if (allHidden) {
+                                femObjs.forEach((n: any) => {
+                                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showFEMMesh: true });
+                                });
+                            }
+                        }
                     }
                     this.onLayerToggle?.('fem', value);
                 } else {
@@ -4078,7 +4189,9 @@ export class TransportController {
             rowLevels.style.alignItems = 'center';
             rowLevels.style.gap = '6px';
 
-            const isSmooth = Boolean(ctx.smoothContours || (ctx.contourLevels !== undefined && ctx.contourLevels <= 1));
+            const isSmooth = ctx.smoothContours !== undefined
+                ? Boolean(ctx.smoothContours)
+                : (ctx.contourLevels === undefined || ctx.contourLevels <= 1);
             const curLvl = ctx.contourLevels && ctx.contourLevels > 1 ? ctx.contourLevels : 10;
 
             // Segmented mode toggle: Smooth vs Stepped
@@ -4102,6 +4215,7 @@ export class TransportController {
             smoothBtn.title = 'Render continuous, smooth scalar field gradient';
             smoothBtn.onclick = () => {
                 this.updateContextSetting('smoothContours', true);
+                this.updateContextSetting('contourLevels', 0);
             };
 
             const steppedBtn = document.createElement('button');
@@ -4118,9 +4232,7 @@ export class TransportController {
             steppedBtn.title = 'Render discretized isocontour bands';
             steppedBtn.onclick = () => {
                 this.updateContextSetting('smoothContours', false);
-                if (curLvl <= 1) {
-                    this.updateContextSetting('contourLevels', 10);
-                }
+                this.updateContextSetting('contourLevels', curLvl > 1 ? curLvl : 10);
             };
 
             modeToggleGroup.appendChild(smoothBtn);

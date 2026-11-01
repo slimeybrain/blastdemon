@@ -56,6 +56,22 @@ struct Stratified3DParams {
     double charge_y{0.0};
     double charge_z{0.0};
     double charge_radius{0.05};
+    double initial_temperature{288.15}; // Baseline ambient fluid temperature (K)
+    double water_temperature{288.15};   // Baseline seawater temperature (K)
+    double air_temperature{288.15};     // Baseline atmospheric air temperature (K)
+    double soil_temperature{288.15};    // Baseline soil/sediment temperature (K)
+};
+
+struct ZonalHandoff3DParams {
+    bool enabled{false};
+    bool is_cylinder{false};
+    double center_x{0.0};
+    double center_y{0.0};
+    double center_z{0.0};
+    double sleeve_radius{2.5};
+    double overlap_thickness{0.3};
+    double clip_z_min{-1.0e30};
+    double clip_z_max{1.0e30};
 };
 
 struct TaitEOSWater {
@@ -109,6 +125,10 @@ struct TaitEOSWater {
         T rho_safe = max(static_cast<T>(1.0), rho);
         T r0 = max(static_cast<T>(1.0), rho0_val);
         T rho_ratio = clamp_val(rho_safe / r0, static_cast<T>(0.05), static_cast<T>(10.0));
+        if (rho_ratio < static_cast<T>(1.0)) {
+            // Liquid water in expansion / cavitation cannot sustain tension or store elastic tensile strain energy
+            return static_cast<T>(0.0);
+        }
         T gm1 = gamma_val - static_cast<T>(1.0);
         T term1 = (static_cast<T>(1.0) / gm1) * pow(rho_ratio, gm1);
         T term2 = static_cast<T>(1.0) / rho_ratio;
@@ -121,8 +141,9 @@ struct TaitEOSWater {
                                                      T rho0_val = static_cast<T>(RHO0), T p0_val = static_cast<T>(0.0)) {
         using std::pow;
         using std::max;
+        T r0 = max(static_cast<T>(1.0), rho0_val);
         T p_eff = max(static_cast<T>(0.0), p - p0_val + B_val);
-        return rho0_val * pow(p_eff / B_val, static_cast<T>(1.0) / gamma_val);
+        return r0 * pow(p_eff / B_val, static_cast<T>(1.0) / gamma_val);
     }
 
     template <typename T>

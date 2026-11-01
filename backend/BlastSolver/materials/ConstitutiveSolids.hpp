@@ -515,8 +515,8 @@ HD_MAT_FUNC void update_constitutive_tait_fluid(
     using std::abs;
     using std::max;
 
-    // Density from Jacobian determinant J = V / V0 = rho0 / rho
-    T J_clamped = max(static_cast<T>(0.05), J);
+    // Density from Jacobian determinant J = V / V0 = rho0 / rho (Directive 19 asymptotic cutoff J >= 0.45 corresponding to physical water compression limit >60 GPa)
+    T J_clamped = max(static_cast<T>(0.45), J);
     T rho = rho0 / J_clamped;
 
     // Fluid cavitation floor: fluids cannot sustain macroscopic tension.
@@ -542,7 +542,15 @@ HD_MAT_FUNC void update_constitutive_tait_fluid(
 
     T q_visc = static_cast<T>(0.0);
     if (tr_D < static_cast<T>(0.0)) { // Compressive shock
-        q_visc = b1_visc * rho * c * h_elem * abs(tr_D) + b2_visc * rho * h_elem * h_elem * tr_D * tr_D;
+        // Only activate linear viscosity if compressive strain rate exceeds acoustic threshold
+        // to prevent overdamping smooth hydrodynamic flows (e.g. bubble pulsation/collapse).
+        T M_comp = h_elem * abs(tr_D) / max(static_cast<T>(1.0), c);
+        T b1_eff = (M_comp > static_cast<T>(0.02)) ? b1_visc : (b1_visc * static_cast<T>(50.0) * M_comp);
+        T b2_eff = (M_comp > static_cast<T>(0.05)) ? b2_visc : (b2_visc * (M_comp * static_cast<T>(20.0)));
+        q_visc = b1_eff * rho * c * h_elem * abs(tr_D) + b2_eff * rho * h_elem * h_elem * tr_D * tr_D;
+        using std::min;
+        T q_visc_max = static_cast<T>(1.5) * rho * c * min(static_cast<T>(2500.0), h_elem * abs(tr_D));
+        q_visc = min(q_visc_max, q_visc);
     }
     T p_total = max(p_cav_eff, p + q_visc);
     p_out = p_total;
@@ -557,6 +565,62 @@ HD_MAT_FUNC void update_constitutive_tait_fluid(
             sigma[i][j] = s_dev - delta_ij * p_total;
         }
     }
+}
+
+// --- Mie-Grüneisen compression pressure (mu = rho/rho0 - 1 > 0) ---
+// Shock-Hugoniot reference curve with a linear tangent extension beyond mu_max = 0.85 / (s - 1)
+// (keeps the denominator 1 - (s - 1)·mu away from its singularity).
+//
+//   p = p_H(mu) + Γ0 · ρ0 · e_pl
+//
+// For the MPM Johnson-Cook model the tracked specific internal energy e_pl contains ONLY the
+// dissipated plastic work (β = 0.9 Taylor-Quinney); reversible compression work is not integrated.
+// The total energy of a shocked state is therefore e ≈ e_H(mu) + e_pl, and the Grüneisen correction
+// relative to the Hugoniot reduces to Γ0·ρ0·e_pl. Using Γ0·ρ0·(e_pl - e_H) would subtract an energy
+// that was never added and place intact material BELOW its own Hugoniot.
+template <typename T>
+HD_MAT_FUNC T mie_gruneisen_compression_pressure(T rho0, T c0, T s, T gamma0, T mu_vol, T e_pl) {
+    using std::max; using std::min;
+    const T s_minus_1 = max(s - static_cast<T>(1.0), static_cast<T>(0.05));
+    const T mu_max = static_cast<T>(0.85) / s_minus_1;
+    const T mu_eff = min(mu_vol, mu_max);
+    const T denom = max(static_cast<T>(0.15), static_cast<T>(1.0) - s_minus_1 * mu_eff);
+    T p_H = (rho0 * c0 * c0 * mu_eff * (static_cast<T>(1.0) + (static_cast<T>(1.0) - static_cast<T>(0.5) * gamma0) * mu_eff)) / (denom * denom);
+    if (mu_vol > mu_max) {
+        const T K_high = rho0 * c0 * c0 * (static_cast<T>(1.0) + static_cast<T>(2.0) * s * mu_max);
+        p_H += K_high * (mu_vol - mu_max);
+    }
+    return p_H + gamma0 * rho0 * e_pl;
+}
+
+// --- Johnson-Cook triaxiality fracture-strain ratio ---
+//   ratio(σ*) = [d1 + d2·exp(d3·σ*)] / [d1 + d2·exp(d3/3)]
+// i.e. the JC fracture locus normalised to uniaxial tension (σ* = 1/3), so that the user's
+// calibrated `failure_strain` is the uniaxial-tension anchor and the full JC pressure dependence
+// is retained. Under confined compression (σ* << 0, d3 < 0) the ratio grows exponentially, which
+// is the physical reason hardened penetrator noses survive multi-GPa confinement.
+// Only a lower realizability floor is applied (no artificial upper cap).
+template <typename T>
+HD_MAT_FUNC T jc_fracture_triaxiality_ratio(T d1, T d2, T d3, T sigma_star) {
+    using std::max;
+    const T d_ref = max(static_cast<T>(0.05), d1 + d2 * std::exp(d3 * static_cast<T>(1.0 / 3.0)));
+    const T d_tri = max(static_cast<T>(0.02), d1 + d2 * std::exp(d3 * sigma_star));
+    return max(d_tri / d_ref, static_cast<T>(0.15));
+}
+
+// --- Residual shear strength of fractured (failed) metal ---
+// A fractured metal under compression is a confined, interlocked granular aggregate and transmits
+// shear by intergranular Coulomb friction (Drucker-Prager q <= M·p); it carries zero shear in
+// tension (open cracks) and zero shear once molten. The residual strength can never exceed the
+// intact quasi-static yield stress.
+//   q_res = min(M_FRACTURED_METAL · max(p, 0), sigma_y_intact),  M = 0.6 (φ ≈ 16°, conservative
+//   relative to Byerlee / dry metal-on-metal friction μ ≈ 0.6 which gives M ≈ 1.2).
+template <typename T>
+HD_MAT_FUNC T fractured_metal_residual_strength(T p_comp, T sigma_y_intact, bool melted) {
+    using std::max; using std::min;
+    if (melted) return static_cast<T>(0.0);
+    const T M_fractured_metal = static_cast<T>(0.60);
+    return min(M_fractured_metal * max(p_comp, static_cast<T>(0.0)), max(sigma_y_intact, static_cast<T>(0.0)));
 }
 
 } // namespace Blast::Materials

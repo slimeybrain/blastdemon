@@ -44,9 +44,9 @@ export interface DiscoveredFEMPart {
 function isMarineHarbourMPMActive(harbourNode: any): boolean {
     if (!harbourNode || harbourNode.type !== 'MarineHarbourDomain') return false;
     const waterMode = String(harbourNode.parameters?.water_discretization_mode || 'Spherical_MPM_Sleeve');
-    if (waterMode === 'Pure_FV' || waterMode === 'Pure FV') return false;
+    const isPureWater = (waterMode === 'Pure_FV' || waterMode === 'Pure FV' || waterMode === 'LPTP_Phase_Tracking_Sleeve' || waterMode === 'Full_Column_LPTP_Cylinder');
     const bedType = String(harbourNode.parameters?.seabed_mesh_type || 'Hybrid_MPM_Crater_FEM_FarField');
-    const hasWaterMPM = (Number(harbourNode.parameters?.nearfield_sleeve_radius ?? 2.5) > 0);
+    const hasWaterMPM = !isPureWater && (Number(harbourNode.parameters?.nearfield_sleeve_radius ?? 2.5) > 0);
     const hasBedMPM = (bedType !== 'Pure_FV' && bedType !== 'Pure FV' && bedType !== 'Pure_Hex8_FEM' && bedType !== 'Pure Hex8 FEM');
     return hasWaterMPM || hasBedMPM;
 }
@@ -109,6 +109,39 @@ export class Telemetry3DViewport {
     private windowResizeHandler: (() => void) | null = null;
     private cachedSTL: { vertices: Float32Array | null, meshId: string } | null = null;
     private cachedObstacles: { vertices: Float32Array | null, cells: Int32Array | null, meshId: string } | null = null;
+    private syncControlsScheduled: boolean = false;
+    private syncControlsPendingWorker: boolean = false;
+    private pendingWorkerConfig: Record<string, any> | null = null;
+
+    private queueWorkerConfig(data: Record<string, any>): void {
+        if (!data || Object.keys(data).length === 0) return;
+        if (!this.pendingWorkerConfig) {
+            this.pendingWorkerConfig = { ...data };
+            queueMicrotask(() => {
+                const payload = this.pendingWorkerConfig;
+                this.pendingWorkerConfig = null;
+                if (payload && this.worker) {
+                    this.worker.postMessage({ type: 'setConfig', data: payload });
+                }
+            });
+        } else {
+            Object.assign(this.pendingWorkerConfig, data);
+        }
+    }
+
+    private scheduleSyncControls(postToWorker: boolean = false): void {
+        if (postToWorker) {
+            this.syncControlsPendingWorker = true;
+        }
+        if (this.syncControlsScheduled) return;
+        this.syncControlsScheduled = true;
+        queueMicrotask(() => {
+            this.syncControlsScheduled = false;
+            const shouldPost = this.syncControlsPendingWorker;
+            this.syncControlsPendingWorker = false;
+            this.syncControls(shouldPost);
+        });
+    }
 
     private requestColorbarUpdate(): void {
         if (this.colorbarUpdateRafId !== null) return;
@@ -165,11 +198,19 @@ export class Telemetry3DViewport {
                 const workerData: any = {};
                 const p = parameters;
 
-                // 1. Layer Visibility & Visual Switches
                 if (p.showMPMParticles !== undefined) workerData.showMPMParticles = p.showMPMParticles;
+                if (p.showPhaseParticles !== undefined) workerData.showPhaseParticles = p.showPhaseParticles;
+                if (p.phaseParticleRenderMode !== undefined) workerData.phaseParticleRenderMode = p.phaseParticleRenderMode;
+                if (p.phaseParticleDiameter !== undefined) workerData.phaseParticleDiameter = Number(p.phaseParticleDiameter);
+                if (p.phaseParticleSize !== undefined) workerData.phaseParticleSize = Number(p.phaseParticleSize);
+                if (p.phaseParticleOpacity !== undefined) workerData.phaseParticleOpacity = Number(p.phaseParticleOpacity);
+                if (p.phaseParticleQuantity !== undefined) workerData.phaseParticleQuantity = p.phaseParticleQuantity;
+                if (p.phaseParticleColormap !== undefined) workerData.phaseParticleColormap = p.phaseParticleColormap;
+                if (p.phaseParticleStride !== undefined) workerData.phaseParticleStride = Number(p.phaseParticleStride);
                 if (p.showFEMMesh !== undefined) workerData.showFEMMesh = p.showFEMMesh;
                 if (p.femSolid !== undefined) workerData.femSolid = p.femSolid;
                 if (p.femWireframe !== undefined) workerData.femWireframe = p.femWireframe;
+                if (p.femResults !== undefined) workerData.femResults = Boolean(p.femResults);
                 if (p.femLighting !== undefined) workerData.femLighting = p.femLighting;
                 if (p.femOpacity !== undefined) workerData.femOpacity = Number(p.femOpacity);
                 if (p.femQuantity !== undefined) workerData.femQuantity = p.femQuantity;
@@ -178,6 +219,8 @@ export class Telemetry3DViewport {
                 if (p.femLogScale !== undefined) workerData.femLogScale = p.femLogScale;
                 if (p.femMinVal !== undefined) workerData.femMinVal = Number(p.femMinVal);
                 if (p.femMaxVal !== undefined) workerData.femMaxVal = Number(p.femMaxVal);
+                if (p.femContourLevels !== undefined) workerData.femContourLevels = Number(p.femContourLevels);
+                if (p.femSmoothContours !== undefined) workerData.femSmoothContours = Boolean(p.femSmoothContours);
 
                 if (p.showBeams !== undefined) workerData.showBeams = p.showBeams;
                 if (p.beamSolid !== undefined) workerData.beamSolid = p.beamSolid;
@@ -190,6 +233,8 @@ export class Telemetry3DViewport {
                 if (p.beamMinVal !== undefined) workerData.beamMinVal = Number(p.beamMinVal);
                 if (p.beamMaxVal !== undefined) workerData.beamMaxVal = Number(p.beamMaxVal);
                 if (p.beamOpacity !== undefined) workerData.beamOpacity = Number(p.beamOpacity);
+                if (p.beamContourLevels !== undefined) workerData.beamContourLevels = Number(p.beamContourLevels);
+                if (p.beamSmoothContours !== undefined) workerData.beamSmoothContours = Boolean(p.beamSmoothContours);
 
                 if (p.showRebar !== undefined) workerData.showRebar = p.showRebar;
                 if (p.rebarSolid !== undefined) workerData.rebarSolid = p.rebarSolid;
@@ -286,9 +331,13 @@ export class Telemetry3DViewport {
                 if (p.mpmParticleLogScale !== undefined) workerData.mpmParticleLogScale = p.mpmParticleLogScale;
                 if (p.mpmParticleMinVal !== undefined) workerData.mpmParticleMinVal = Number(p.mpmParticleMinVal);
                 if (p.mpmParticleMaxVal !== undefined) workerData.mpmParticleMaxVal = Number(p.mpmParticleMaxVal);
+                if (p.mpmContourLevels !== undefined) workerData.mpmContourLevels = Number(p.mpmContourLevels);
+                if (p.mpmSmoothContours !== undefined) workerData.mpmSmoothContours = Boolean(p.mpmSmoothContours);
 
                 if (p.show_slices !== undefined) workerData.showSlices = p.show_slices;
                 if (p.showSlices !== undefined) workerData.showSlices = p.showSlices;
+                if (p.sliceContourLevels !== undefined) workerData.sliceContourLevels = Number(p.sliceContourLevels);
+                if (p.sliceSmoothContours !== undefined) workerData.sliceSmoothContours = Boolean(p.sliceSmoothContours);
                 if (p.slices !== undefined) {
                     workerData.slices = p.slices;
                     workerData.sliceOpacities = p.slices.map((s: any) => s.opacity !== undefined ? s.opacity : 1.0);
@@ -335,6 +384,25 @@ export class Telemetry3DViewport {
                         }
                     } else if (['MPMObject3D', 'MPMObject2D', 'MarineHarbourDomain'].includes(changedNode.type)) {
                         workerData.mpmObjects = this.getDiscoveredMPMObjects(targetModel);
+                        const geomNode = this.getGeometryNode();
+                        if (geomNode) {
+                            workerData.stlTransform = {
+                                node_id: geomNode.id,
+                                stl_file: geomNode.parameters.stl_file || '',
+                                origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
+                                scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
+                                scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
+                                scale_z: Number(geomNode.parameters.scale_z ?? 1.0),
+                                pos_x: Number(geomNode.parameters.pos_x ?? 0.0),
+                                pos_y: Number(geomNode.parameters.pos_y ?? 0.0),
+                                pos_z: Number(geomNode.parameters.pos_z ?? 0.0),
+                                rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
+                                rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
+                                rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
+                                visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden,
+                                hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false
+                            };
+                        }
                         if (changedNode.type === 'MarineHarbourDomain' && !isMarineHarbourMPMActive(changedNode)) {
                             this.worker.postMessage({ type: 'clearMPM' });
                             workerData.showMPMParticles = false;
@@ -378,6 +446,8 @@ export class Telemetry3DViewport {
                         }));
                     } else if (changedNode.type === 'STLGeometry') {
                         workerData.stlTransform = {
+                            node_id: changedNode.id,
+                            stl_file: changedNode.parameters.stl_file || '',
                             origin_mode: changedNode.parameters.origin_mode || 'CAD Origin',
                             scale_x: Number(changedNode.parameters.scale_x ?? 1.0),
                             scale_y: Number(changedNode.parameters.scale_y ?? 1.0),
@@ -388,7 +458,8 @@ export class Telemetry3DViewport {
                             rot_x: Number(changedNode.parameters.rot_x ?? 0.0),
                             rot_y: Number(changedNode.parameters.rot_y ?? 0.0),
                             rot_z: Number(changedNode.parameters.rot_z ?? 0.0),
-                            visible: changedNode.parameters.visible !== false && !changedNode.parameters.hidden
+                            visible: changedNode.parameters.visible !== false && !changedNode.parameters.hidden,
+                            hidden: changedNode.parameters.hidden === true || changedNode.parameters.visible === false
                         };
                     } else if (['TriggerLocation3D', 'TriggerLocation', 'DetonatorLocation3D', 'DetonatorLocation'].includes(changedNode.type)) {
                         const detNodes = targetModel?.nodes.filter((n: any) => ['TriggerLocation3D', 'TriggerLocation', 'DetonatorLocation3D', 'DetonatorLocation'].includes(n.type)) || [];
@@ -420,9 +491,9 @@ export class Telemetry3DViewport {
                     }
                 }
 
-                if (Object.keys(workerData).length > 0) {
-                    this.worker.postMessage({ type: 'setConfig', data: workerData });
-                    this.worker.postMessage({ type: 'requestRender' });
+                const hasWorkerDelta = Object.keys(workerData).length > 0;
+                if (hasWorkerDelta) {
+                    this.queueWorkerConfig(workerData);
                 }
                 this.requestColorbarUpdate();
                 // Do NOT call syncControls(true) when the ONLY changed keys are pure camera
@@ -438,7 +509,7 @@ export class Telemetry3DViewport {
                 const isCameraOnlyChange = changedKeys.length > 0 &&
                     changedKeys.every(k => CAMERA_ONLY_KEYS.has(k));
                 if (!isCameraOnlyChange) {
-                    this.syncControls(true);
+                    this.scheduleSyncControls(!hasWorkerDelta);
                 }
             }
         });
@@ -872,6 +943,8 @@ export class Telemetry3DViewport {
                                 const flags = msg.subtractive_flags ? new Float32Array(msg.subtractive_flags) : null;
                                 const geomNode = this.getGeometryNode();
                                 const stlTransform = geomNode ? {
+                                    node_id: geomNode.id,
+                                    stl_file: geomNode.parameters.stl_file || '',
                                     origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
                                     scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
                                     scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
@@ -882,6 +955,8 @@ export class Telemetry3DViewport {
                                     rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
                                     rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
                                     rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
+                                    visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden,
+                                    hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false
                                 } : undefined;
                                 this.worker.postMessage({
                                     type: 'setSTLGeometry',
@@ -1740,11 +1815,14 @@ export class Telemetry3DViewport {
             if (latest) {
                 if (latest.sliceBuffer) {
                     this.pushFrame(latest.sliceBuffer, latest.modelId);
-                } else if (latest.buffer && latest.buffer !== latest.mpmBuffer && latest.buffer !== latest.femBuffer) {
+                } else if (latest.buffer && latest.buffer !== latest.mpmBuffer && latest.buffer !== latest.phaseParticlesBuffer && latest.buffer !== latest.femBuffer) {
                     this.pushFrame(latest.buffer, latest.modelId);
                 }
                 if (latest.mpmBuffer) {
                     this.pushFrame(latest.mpmBuffer, latest.modelId);
+                }
+                if (latest.phaseParticlesBuffer) {
+                    this.pushFrame(latest.phaseParticlesBuffer, latest.modelId);
                 }
                 if (latest.femBuffer) {
                     this.pushFrame(latest.femBuffer, latest.modelId);
@@ -5027,8 +5105,10 @@ export class Telemetry3DViewport {
             levelsBadge.style.textAlign = 'center';
             levelsBadge.style.display = 'inline-block';
             levelsBadge.style.boxSizing = 'border-box';
-            const isSmooth = Boolean(spec.smoothContours || (spec.contourLevels !== undefined && spec.contourLevels <= 1));
-            const curLevels = spec.contourLevels ?? 10;
+            const isSmooth = spec.smoothContours !== undefined
+                ? Boolean(spec.smoothContours)
+                : (spec.contourLevels === undefined || spec.contourLevels <= 1);
+            const curLevels = spec.contourLevels ?? 0;
             levelsBadge.textContent = isSmooth ? 'SMOOTH' : `${curLevels} BANDS`;
             levelsBadge.style.background = isSmooth ? 'rgba(255, 255, 255, 0.08)' : 'rgba(56, 189, 248, 0.2)';
             levelsBadge.style.color = isSmooth ? '#94a3b8' : '#38bdf8';
@@ -5041,7 +5121,7 @@ export class Telemetry3DViewport {
                 const levelsCycle = [0, 5, 8, 10, 12, 16, 20, 24, 32];
                 const curIdx = isSmooth ? 0 : levelsCycle.indexOf(curLevels);
                 const nextLevels = levelsCycle[(curIdx + 1) % levelsCycle.length];
-                if (nextLevels === 0) {
+                if (nextLevels <= 1) {
                     spec.onToggleSmooth?.(true);
                     spec.onSetContourLevels?.(0);
                 } else {
@@ -5054,7 +5134,9 @@ export class Telemetry3DViewport {
                 e.stopPropagation();
                 const newSmooth = !isSmooth;
                 spec.onToggleSmooth?.(newSmooth);
-                if (!newSmooth && curLevels <= 1) {
+                if (newSmooth) {
+                    spec.onSetContourLevels?.(0);
+                } else if (curLevels <= 1) {
                     spec.onSetContourLevels?.(10);
                 }
             };
@@ -5103,7 +5185,7 @@ export class Telemetry3DViewport {
         gradBar.style.border = '1px solid rgba(255, 255, 255, 0.2)';
         gradBar.style.boxShadow = 'inset 0 0 3px rgba(0,0,0,0.5)';
         gradBar.style.cursor = 'pointer';
-        const effectiveLevels = (spec.smoothContours || (spec.contourLevels !== undefined && spec.contourLevels <= 1)) ? 0 : (spec.contourLevels ?? 10);
+        const effectiveLevels = (spec.smoothContours !== false && (spec.contourLevels === undefined || spec.contourLevels <= 1)) ? 0 : (spec.contourLevels ?? 0);
         gradBar.style.background = this.getColormapCssGradient(spec.colormap, 'to top', effectiveLevels);
         gradBar.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
         gradBar.onclick = (e) => {
@@ -5207,8 +5289,10 @@ export class Telemetry3DViewport {
 
         const levelsBadge = card.querySelector('.viewport-colorbar-levels-badge') as HTMLElement;
         if (levelsBadge && (spec.contourLevels !== undefined || spec.onSetContourLevels)) {
-            const isSmooth = Boolean(spec.smoothContours || (spec.contourLevels !== undefined && spec.contourLevels <= 1));
-            const curLevels = spec.contourLevels ?? 10;
+            const isSmooth = spec.smoothContours !== undefined
+                ? Boolean(spec.smoothContours)
+                : (spec.contourLevels === undefined || spec.contourLevels <= 1);
+            const curLevels = spec.contourLevels ?? 0;
             levelsBadge.textContent = isSmooth ? 'SMOOTH' : `${curLevels} BANDS`;
             levelsBadge.style.background = isSmooth ? 'rgba(255, 255, 255, 0.08)' : 'rgba(56, 189, 248, 0.2)';
             levelsBadge.style.color = isSmooth ? '#94a3b8' : '#38bdf8';
@@ -5221,7 +5305,7 @@ export class Telemetry3DViewport {
                 const levelsCycle = [0, 5, 8, 10, 12, 16, 20, 24, 32];
                 const curIdx = isSmooth ? 0 : levelsCycle.indexOf(curLevels);
                 const nextLevels = levelsCycle[(curIdx + 1) % levelsCycle.length];
-                if (nextLevels === 0) {
+                if (nextLevels <= 1) {
                     spec.onToggleSmooth?.(true);
                     spec.onSetContourLevels?.(0);
                 } else {
@@ -5234,7 +5318,9 @@ export class Telemetry3DViewport {
                 e.stopPropagation();
                 const newSmooth = !isSmooth;
                 spec.onToggleSmooth?.(newSmooth);
-                if (!newSmooth && curLevels <= 1) {
+                if (newSmooth) {
+                    spec.onSetContourLevels?.(0);
+                } else if (curLevels <= 1) {
                     spec.onSetContourLevels?.(10);
                 }
             };
@@ -5256,7 +5342,7 @@ export class Telemetry3DViewport {
 
         const gradBar = card.querySelector('.viewport-colorbar-grad-bar') as HTMLElement;
         if (gradBar) {
-            const effectiveLevels = (spec.smoothContours || (spec.contourLevels !== undefined && spec.contourLevels <= 1)) ? 0 : (spec.contourLevels ?? 10);
+            const effectiveLevels = (spec.smoothContours !== false && (spec.contourLevels === undefined || spec.contourLevels <= 1)) ? 0 : (spec.contourLevels ?? 0);
             const expectedGrad = this.getColormapCssGradient(spec.colormap, 'to top', effectiveLevels);
             gradBar.style.background = expectedGrad;
             gradBar.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
@@ -5494,8 +5580,8 @@ export class Telemetry3DViewport {
                     isLocked: sliceIsLocked,
                     minVal: minVal,
                     maxVal: maxVal,
-                    contourLevels: slice.contour_levels ?? params.sliceContourLevels ?? 10,
-                    smoothContours: slice.smooth_contours ?? params.sliceSmoothContours ?? false,
+                    contourLevels: slice.contour_levels ?? params.sliceContourLevels ?? 0,
+                    smoothContours: slice.smooth_contours ?? params.sliceSmoothContours ?? true,
                     onSetContourLevels: (lvl: number) => {
                         this.updateSliceProperty(idx, { contour_levels: lvl, smooth_contours: lvl <= 1 });
                     },
@@ -5880,13 +5966,13 @@ export class Telemetry3DViewport {
             const defaultRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 500000000.0];
             let minVal = params.mpmParticleMinVal ?? defaultRange[0];
             let maxVal = params.mpmParticleMaxVal ?? defaultRange[1];
-            if (autoScale && (this.latestMPMRange || this.latestEmpiricalRange)) {
+            if (mpmIsLocked) {
+                minVal = defaultRange[0];
+                maxVal = defaultRange[1];
+            } else if (autoScale && (this.latestMPMRange || this.latestEmpiricalRange)) {
                 const r = this.latestMPMRange || this.latestEmpiricalRange!;
                 minVal = r.min;
                 maxVal = r.max;
-            } else if (mpmIsLocked) {
-                minVal = defaultRange[0];
-                maxVal = defaultRange[1];
             }
             specs.push({
                 id: 'mpm',
@@ -5898,8 +5984,8 @@ export class Telemetry3DViewport {
                 isLocked: mpmIsLocked,
                 minVal: minVal,
                 maxVal: maxVal,
-                contourLevels: params.mpmContourLevels ?? 10,
-                smoothContours: params.mpmSmoothContours ?? false,
+                contourLevels: params.mpmContourLevels ?? 0,
+                smoothContours: params.mpmSmoothContours ?? true,
                 onSetContourLevels: (lvl: number) => {
                     const sm = lvl <= 1;
                     this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmContourLevels: lvl, mpmSmoothContours: sm });
@@ -6047,8 +6133,8 @@ export class Telemetry3DViewport {
                 isLocked: femIsLocked,
                 minVal: minVal,
                 maxVal: maxVal,
-                contourLevels: params.femContourLevels ?? 10,
-                smoothContours: params.femSmoothContours ?? false,
+                contourLevels: params.femContourLevels ?? 0,
+                smoothContours: params.femSmoothContours ?? true,
                 onSetContourLevels: (lvl: number) => {
                     const sm = lvl <= 1;
                     this.stateManager.updateNodeParametersInPlace(vpNode.id, { femContourLevels: lvl, femSmoothContours: sm });
@@ -6193,8 +6279,8 @@ export class Telemetry3DViewport {
                 isLocked: beamIsLocked,
                 minVal: minVal,
                 maxVal: maxVal,
-                contourLevels: params.beamContourLevels ?? 10,
-                smoothContours: params.beamSmoothContours ?? false,
+                contourLevels: params.beamContourLevels ?? 0,
+                smoothContours: params.beamSmoothContours ?? true,
                 onSetContourLevels: (lvl: number) => {
                     const sm = lvl <= 1;
                     this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamContourLevels: lvl, beamSmoothContours: sm });
@@ -6351,7 +6437,7 @@ export class Telemetry3DViewport {
         if (this.latestEmpiricalSpacing > 0) {
             return this.latestEmpiricalSpacing * 0.8;
         }
-        const state = this.stateManager.getCurrentState();
+        const state = this.getTargetModel();
         if (state) {
             const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
             const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain');
@@ -6411,7 +6497,7 @@ export class Telemetry3DViewport {
         // Col 2: Layer Title
         const tdLayer = document.createElement('td');
         tdLayer.style.padding = '3px 4px';
-        const state = this.stateManager.getCurrentState();
+        const state = this.getTargetModel();
         let particleCountText = '';
         if (state) {
             let totalEst = 0;
@@ -6882,7 +6968,7 @@ export class Telemetry3DViewport {
         // Col 2: Layer Title
         const tdLayer = document.createElement('td');
         tdLayer.style.padding = '3px 4px';
-        const state = this.stateManager.getCurrentState();
+        const state = this.getTargetModel();
         let femCountText = '';
         if (state) {
             const femNodes = state.nodes.filter(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
@@ -7011,7 +7097,7 @@ export class Telemetry3DViewport {
         cbToggleBtn.title = 'Toggle Color Bar for FEM Mesh in 3D Viewport';
         cmapWrap.appendChild(cbToggleBtn);
 
-        const initLevels = vpNode ? (vpNode.parameters.femContourLevels ?? 10) : 10;
+        const initLevels = vpNode ? (vpNode.parameters.femContourLevels ?? 0) : 0;
         const lvlPill = document.createElement('div');
         lvlPill.id = this.getElId('viewport-fem-lvl-pill');
         lvlPill.style.fontSize = '8.5px';
@@ -7028,12 +7114,12 @@ export class Telemetry3DViewport {
             e.stopPropagation();
             const levelsCycle = [0, 5, 8, 10, 12, 16, 20, 32];
             const vp = this.getViewportNode();
-            const curLvl = vp?.parameters.femContourLevels ?? 10;
+            const curLvl = vp?.parameters.femContourLevels ?? 0;
             const curIdx = levelsCycle.indexOf(curLvl);
             const nextLvl = levelsCycle[(curIdx + 1) % levelsCycle.length];
             if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { femContourLevels: nextLvl });
-                this.worker.postMessage({ type: 'setConfig', data: { femContourLevels: nextLvl } });
+                this.stateManager.updateNodeParametersInPlace(vp.id, { femContourLevels: nextLvl, femSmoothContours: nextLvl <= 1 });
+                this.worker.postMessage({ type: 'setConfig', data: { femContourLevels: nextLvl, femSmoothContours: nextLvl <= 1 } });
                 this.syncControls(true);
             }
         };
@@ -7951,7 +8037,9 @@ export class Telemetry3DViewport {
             interpolate: false,
             min_val,
             max_val,
-            enabled: true
+            enabled: true,
+            smooth_contours: true,
+            contour_levels: 0
         });
         this.needsSlicesRebuild = true;
         this.updateSlices(slices);
@@ -8218,7 +8306,7 @@ export class Telemetry3DViewport {
 
         const femLvlPill = document.getElementById(this.getElId('viewport-fem-lvl-pill'));
         if (femLvlPill) {
-            const curLvl = vpNode.parameters.femContourLevels ?? 10;
+            const curLvl = vpNode.parameters.femContourLevels ?? 0;
             femLvlPill.textContent = curLvl > 1 ? `${curLvl}L` : 'CONT';
             femLvlPill.style.background = curLvl > 1 ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.08)';
             femLvlPill.style.color = curLvl > 1 ? '#38bdf8' : '#94a3b8';
@@ -8261,8 +8349,7 @@ export class Telemetry3DViewport {
             let nz = Number(domainMesh3D?.parameters.nz ?? Math.max(1, Math.round((zmax - zmin) / cellSize)));
 
             // Resolve the charge node via connections from the model-scoped solver or standalone node in model
-            const currentModelId = this.getCurrentModelId();
-            const modelState = currentModelId ? this.stateManager.getSimulationState(currentModelId) : null;
+            const modelState = currentTargetModel;
             const chargeConn = (solverNode3D && modelState) ? modelState.connections.find((c: any) => c.toNode === solverNode3D.id && c.toPort === 'charge') : null;
             const chargeNode = chargeConn
                 ? modelState?.nodes.find((n: any) => n.id === chargeConn.fromNode)
@@ -8451,6 +8538,8 @@ export class Telemetry3DViewport {
                     mpmObjects: mpmObjects,
                     femObjects: femObjects,
                     stlTransform: geomNode ? {
+                        node_id: geomNode.id,
+                        stl_file: geomNode.parameters.stl_file || '',
                         origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
                         scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
                         scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
@@ -8461,7 +8550,8 @@ export class Telemetry3DViewport {
                         rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
                         rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
                         rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
-                        visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden
+                        visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden,
+                        hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false
                     } : undefined,
                     submeshes: submeshes,
                     ppc: Number(modelState?.nodes.find((n: any) => n.type === 'MPMObject3D')?.parameters['ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain')?.parameters['nearfield_ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain')?.parameters['ppc'] ?? 8),
@@ -8496,7 +8586,14 @@ export class Telemetry3DViewport {
                     femAutoScale: vpNode.parameters.femAutoScale !== false,
                     femLogScale: vpNode.parameters.femLogScale === true,
                     femOpacity: vpNode.parameters.femOpacity ?? 1.0,
-                    femContourLevels: vpNode.parameters.femContourLevels ?? 10
+                    femContourLevels: vpNode.parameters.femContourLevels ?? 0,
+                    femSmoothContours: vpNode.parameters.femSmoothContours !== false,
+                    sliceContourLevels: vpNode.parameters.sliceContourLevels ?? 0,
+                    sliceSmoothContours: vpNode.parameters.sliceSmoothContours !== false,
+                    beamContourLevels: vpNode.parameters.beamContourLevels ?? 0,
+                    beamSmoothContours: vpNode.parameters.beamSmoothContours !== false,
+                    mpmContourLevels: vpNode.parameters.mpmContourLevels ?? 0,
+                    mpmSmoothContours: vpNode.parameters.mpmSmoothContours !== false
                 };
                 if (vpNode.parameters.min_val !== undefined) cfgData.minVal = Number(vpNode.parameters.min_val);
                 if (vpNode.parameters.max_val !== undefined) cfgData.maxVal = Number(vpNode.parameters.max_val);
@@ -8540,7 +8637,7 @@ export class Telemetry3DViewport {
         let geomHash = '';
         if (geomNode) {
             if (geomNode.type === 'STLGeometry' || geomNode.type === 'MPMObject3D') {
-                geomHash = (geomNode.parameters.stl_file || '') + '_' + (geomNode.parameters.geometry_hash || '');
+                geomHash = geomNode.id + '_' + (geomNode.parameters.stl_file || '') + '_' + (geomNode.parameters.geometry_hash || '');
             } else if (geomNode.type === 'PrimitiveGeometry3D') {
                 const primsStr = JSON.stringify(geomNode.parameters.primitives || []) + '_' + (geomNode.parameters.voxelization_method || 'watertight_floodfill');
                 let hash = 5381;
@@ -9659,17 +9756,22 @@ export class Telemetry3DViewport {
         }
         if (!targetModel) return null;
 
-        const findUpstreamGeom = (nodeId: string, visited = new Set<string>()): Node | null => {
+        const isGeomNode = (n: any) =>
+            n && (n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D' || (n.type === 'MPMObject3D' && n.parameters?.shape_type === 'STL' && n.parameters?.stl_file));
+        const isNodeVisible = (n: any) =>
+            n && n.parameters?.visible !== false && !n.parameters?.hidden;
+
+        const findUpstreamGeom = (nodeId: string, requireVisible: boolean, visited = new Set<string>()): Node | null => {
             if (visited.has(nodeId)) return null;
             visited.add(nodeId);
             const inConns = targetModel.connections.filter((c: any) => c.toNode === nodeId);
             for (const conn of inConns) {
                 const parent = targetModel.nodes.find((n: any) => n.id === conn.fromNode);
                 if (parent) {
-                    if (parent.type === 'STLGeometry' || parent.type === 'PrimitiveGeometry3D' || (parent.type === 'MPMObject3D' && parent.parameters?.shape_type === 'STL' && parent.parameters?.stl_file)) {
+                    if (isGeomNode(parent) && (!requireVisible || isNodeVisible(parent))) {
                         return parent;
                     }
-                    const found = findUpstreamGeom(parent.id, visited);
+                    const found = findUpstreamGeom(parent.id, requireVisible, visited);
                     if (found) return found;
                 }
             }
@@ -9677,11 +9779,19 @@ export class Telemetry3DViewport {
         };
 
         if (vpNode) {
-            const found = findUpstreamGeom(vpNode.id);
-            if (found) return found;
+            const foundVisible = findUpstreamGeom(vpNode.id, true);
+            if (foundVisible) return foundVisible;
         }
 
-        const geomNode = targetModel.nodes.find((n: any) => n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D' || (n.type === 'MPMObject3D' && n.parameters?.shape_type === 'STL' && n.parameters?.stl_file));
+        const visibleGeomNode = targetModel.nodes.find((n: any) => isGeomNode(n) && isNodeVisible(n));
+        if (visibleGeomNode) return visibleGeomNode;
+
+        if (vpNode) {
+            const foundAny = findUpstreamGeom(vpNode.id, false);
+            if (foundAny) return foundAny;
+        }
+
+        const geomNode = targetModel.nodes.find((n: any) => isGeomNode(n));
         if (geomNode) return geomNode;
 
         return null;
@@ -9802,6 +9912,8 @@ export class Telemetry3DViewport {
         }
         const geomNode = this.getGeometryNode();
         const stlTransform = geomNode ? {
+            node_id: geomNode.id,
+            stl_file: geomNode.parameters.stl_file || '',
             origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
             scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
             scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
@@ -9812,6 +9924,8 @@ export class Telemetry3DViewport {
             rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
             rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
             rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
+            visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden,
+            hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false
         } : undefined;
         this.worker.postMessage({
             type: 'setSTLGeometry',
@@ -10109,15 +10223,40 @@ export class Telemetry3DViewport {
     public getDiscoveredMPMObjects(targetModel?: any): any[] {
         const model = targetModel || this.getTargetModel();
         if (!model) return [];
-        const mpmNodes = model.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D') || [];
-        const mpmObjects: any[] = mpmNodes.map((n: any) => {
+        const allMpmNodes = model.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D') || [];
+        const mpmDomain = model.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D');
+        let orderedMpmNodes: any[] = [];
+        if (mpmDomain && Array.isArray(model.connections)) {
+            const connected = model.connections
+                .filter((c: any) => c.toNode === mpmDomain.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in'))
+                .map((c: any) => model.nodes.find((n: any) => n.id === c.fromNode))
+                .filter((n: any) => n && (n.type === 'MPMObject3D' || n.type === 'MPMObject2D'));
+            const seen = new Set<string>();
+            for (const n of connected) {
+                if (!seen.has(n.id)) {
+                    seen.add(n.id);
+                    orderedMpmNodes.push(n);
+                }
+            }
+            for (const n of allMpmNodes) {
+                if (!seen.has(n.id)) {
+                    seen.add(n.id);
+                    orderedMpmNodes.push(n);
+                }
+            }
+        } else {
+            orderedMpmNodes = allMpmNodes;
+        }
+        const mpmObjects: any[] = orderedMpmNodes.map((n: any, idx: number) => {
             const geom = this.extractObjectGeometryData(n);
             const isSTL = (geom?.shape_type === 'STL' || n.parameters?.shape_type === 'STL');
             const isCADOrigin = (geom?.origin_mode === 'CAD Origin' || n.parameters?.origin_mode === 'CAD Origin' || !n.parameters?.origin_mode);
             const defPos = (isSTL && isCADOrigin) ? 0.0 : 0.5;
+            const isVisible = n.parameters?.visible !== false && !n.parameters?.hidden;
             return {
                 id: n.id,
                 node_id: n.id,
+                object_id: idx + 1,
                 shape: geom?.shape || (isSTL ? 'STL' : 'Box'),
                 shape_type: geom?.shape_type || (isSTL ? 'STL' : 'Box'),
                 pos_x: geom?.pos_x ?? defPos,
@@ -10140,20 +10279,49 @@ export class Telemetry3DViewport {
                 rot_z: geom?.rot_z ?? 0.0,
                 origin_mode: geom?.origin_mode || n.parameters?.origin_mode || 'CAD Origin',
                 stl_file: geom?.stl_file || n.parameters?.stl_file || '',
-                visible: n.parameters?.visible !== false && !n.parameters?.hidden
+                visible: isVisible,
+                hidden: !isVisible
             };
         });
 
         const harbourNode = model.nodes.find((n: any) => n.type === 'MarineHarbourDomain');
         if (harbourNode && isMarineHarbourMPMActive(harbourNode)) {
-            const chgNode = model.nodes.find((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D');
-            const chgX = Number(chgNode?.parameters?.x ?? chgNode?.parameters?.charge_x ?? 0.0);
-            const chgY = Number(chgNode?.parameters?.y ?? chgNode?.parameters?.charge_y ?? 0.0);
-            const chgZ = Number(chgNode?.parameters?.z ?? chgNode?.parameters?.charge_z ?? 0.0);
+            // 1. Find connected or designated charge node
+            const chgConn = (model.connections || []).find((c: any) =>
+                (c.toNode === harbourNode.id && (c.toPort === 'charge' || c.toPort === 'explosive')) ||
+                (c.fromNode === harbourNode.id && (c.fromPort === 'charge' || c.fromPort === 'explosive'))
+            );
+            let chgNode = chgConn ? model.nodes.find((n: any) => n.id === (chgConn.toNode === harbourNode.id ? chgConn.fromNode : chgConn.toNode)) : null;
+            if (!chgNode && harbourNode.parameters?.explosive_charge) {
+                chgNode = model.nodes.find((n: any) => n.id === harbourNode.parameters.explosive_charge || n.name === harbourNode.parameters.explosive_charge);
+            }
+            if (!chgNode) {
+                chgNode = model.nodes.find((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D');
+            }
+
+            // 2. Find connected or designated detonator node
+            const detConn = (model.connections || []).find((c: any) =>
+                (c.toNode === harbourNode.id && (c.toPort === 'detonator' || c.toPort === 'trigger')) ||
+                (c.fromNode === harbourNode.id && (c.fromPort === 'detonator' || c.fromPort === 'trigger'))
+            );
+            let detNode = detConn ? model.nodes.find((n: any) => n.id === (detConn.toNode === harbourNode.id ? detConn.fromNode : detConn.toNode)) : null;
+            if (!detNode && harbourNode.parameters?.connected_detonators) {
+                detNode = model.nodes.find((n: any) => n.id === harbourNode.parameters.connected_detonators || n.name === harbourNode.parameters.connected_detonators);
+            }
+            if (!detNode) {
+                detNode = model.nodes.find((n: any) => n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D');
+            }
+
+            let chgX = Number(chgNode?.parameters?.charge_x ?? chgNode?.parameters?.pos_x ?? chgNode?.parameters?.x ?? detNode?.parameters?.detonator_x ?? 0.0);
+            let chgY = Number(chgNode?.parameters?.charge_y ?? chgNode?.parameters?.pos_y ?? chgNode?.parameters?.y ?? detNode?.parameters?.detonator_y ?? 0.0);
+            let chgZ = Number(chgNode?.parameters?.charge_z ?? chgNode?.parameters?.pos_z ?? chgNode?.parameters?.z ?? 0.0);
+            if (isNaN(chgZ) || chgZ === 0.0) {
+                chgZ = Number(detNode?.parameters?.detonator_z ?? detNode?.parameters?.trigger_z ?? detNode?.parameters?.z ?? 0.0);
+            }
             const chgR = Number(chgNode?.parameters?.radius ?? chgNode?.parameters?.charge_radius ?? 0.1);
 
             const waterMode = harbourNode.parameters?.water_discretization_mode || 'Spherical_MPM_Sleeve';
-            const isPureFV = (waterMode === 'Pure_FV' || waterMode === 'Pure FV');
+            const isPureFV = (waterMode === 'Pure_FV' || waterMode === 'Pure FV' || waterMode === 'LPTP_Phase_Tracking_Sleeve' || waterMode === 'Full_Column_LPTP_Cylinder');
             const sleeveR = Number(harbourNode.parameters?.nearfield_sleeve_radius ?? 2.5);
             const waterZ = Number(harbourNode.parameters?.water_surface_z ?? 10.0);
             const seabedZ = Number(harbourNode.parameters?.seabed_surface_z ?? 2.0);
@@ -10194,6 +10362,36 @@ export class Telemetry3DViewport {
                         origin_mode: 'Center',
                         visible: isWaterVisible
                     });
+
+                    const hasChargeMpm = mpmObjects.some(o =>
+                        (o.material_model && (o.material_model.includes('JWL') || o.material_model.includes('Explosive'))) ||
+                        (o.name && o.name.toLowerCase().includes('charge'))
+                    );
+                    if (!hasChargeMpm && chgR > 0) {
+                        mpmObjects.push({
+                            id: `${harbourNode.id}_explosive_charge`,
+                            node_id: harbourNode.id,
+                            child_id: 'explosive_charge',
+                            name: 'Nearfield Explosive Charge',
+                            shape: 'Sphere',
+                            shape_type: 'Sphere',
+                            pos_x: chgX,
+                            pos_y: chgY,
+                            pos_z: chgZ,
+                            x: chgX,
+                            y: chgY,
+                            z: chgZ,
+                            radius: chgR,
+                            inner_radius: 0.0,
+                            size_x: chgR * 2,
+                            size_y: chgR * 2,
+                            size_z: chgR * 2,
+                            rot_x: 0, rot_y: 0, rot_z: 0,
+                            scale_x: 1, scale_y: 1, scale_z: 1,
+                            origin_mode: 'Center',
+                            visible: harbourNode.parameters?.visible !== false && !harbourNode.parameters?.hidden
+                        });
+                    }
                 }
             }
 
@@ -11631,12 +11829,9 @@ export class Telemetry3DViewport {
 
         this.stateManager.updateNodeParametersInPlace(vp.id, updates);
         if (Object.keys(workerData).length > 0) {
-            this.worker.postMessage({
-                type: 'setConfig',
-                data: workerData
-            });
+            this.queueWorkerConfig(workerData);
         }
-        this.syncControls(true);
+        this.scheduleSyncControls(false);
         const tc = (window as any).transportController;
         if (tc) {
             tc.syncStateFromViewport?.();
@@ -11742,12 +11937,9 @@ export class Telemetry3DViewport {
 
         this.stateManager.updateNodeParametersInPlace(vp.id, updates);
         if (Object.keys(workerData).length > 0) {
-            this.worker.postMessage({
-                type: 'setConfig',
-                data: workerData
-            });
+            this.queueWorkerConfig(workerData);
         }
-        this.syncControls(true);
+        this.scheduleSyncControls(false);
         const tc = (window as any).transportController;
         if (tc) {
             tc.syncStateFromViewport?.();
@@ -11780,10 +11972,19 @@ export class Telemetry3DViewport {
             Object.assign(workerData, updates);
             if (activeModel) {
                 activeModel.nodes
-                    .filter((n: any) => n.type === 'FEMObject3D' || n.type === 'FEMDomain3D' || n.type === 'LSDynaImporter3D')
+                    .filter((n: any) => n.type === 'FEMDomain3D')
                     .forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, showFEMMesh: active });
+                        this.stateManager.updateNodeParametersInPlace(n.id, { showFEMMesh: active });
                     });
+                if (active) {
+                    const femObjs = activeModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+                    const allHidden = femObjs.length > 0 && femObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                    if (allHidden) {
+                        femObjs.forEach((n: any) => {
+                            this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showFEMMesh: true });
+                        });
+                    }
+                }
             }
         } else if (layer === 'beams') {
             updates.showBeams = active;
@@ -11797,42 +11998,65 @@ export class Telemetry3DViewport {
             workerData.showBeams = active;
             workerData.showRebar = active;
             Object.assign(workerData, updates);
-            if (activeModel) {
-                activeModel.nodes
-                    .filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D')
-                    .forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active });
+            if (activeModel && active) {
+                const beamObjs = activeModel.nodes.filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D' || n.type === 'StructuralObject3D');
+                const allHidden = beamObjs.length > 0 && beamObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                if (allHidden) {
+                    beamObjs.forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showBeams: true, showRebar: true });
                     });
+                }
             }
         } else if (layer === 'mpm') {
             updates.showMPMParticles = active;
             workerData.showMPMParticles = active;
             if (activeModel) {
                 activeModel.nodes
-                    .filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMDomain3D')
+                    .filter((n: any) => n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain')
                     .forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, showMPMParticles: active });
+                        if (n.type === 'MarineHarbourDomain') {
+                            this.stateManager.updateNodeParametersInPlace(n.id, {
+                                show_water_sleeve: active,
+                                show_soil_mpm: active
+                            });
+                        } else {
+                            this.stateManager.updateNodeParametersInPlace(n.id, { showMPMParticles: active });
+                        }
                     });
+                if (active) {
+                    const mpmObjs = activeModel.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
+                    const allHidden = mpmObjs.length > 0 && mpmObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                    if (allHidden) {
+                        mpmObjs.forEach((n: any) => {
+                            this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showMPMParticles: true });
+                        });
+                    }
+                }
+                workerData.mpmObjects = this.getDiscoveredMPMObjects(activeModel);
             }
         } else if (layer === 'stl') {
             updates.show_stl = active;
             workerData.showSTL = active;
-            if (activeModel) {
-                activeModel.nodes
-                    .filter((n: any) => n.type === 'STLGeometry3D' || n.type === 'CADImporter3D' || n.type === 'STLGeometry')
-                    .forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_stl: active });
+            if (activeModel && active) {
+                const stlObjs = activeModel.nodes.filter((n: any) => n.type === 'STLGeometry3D' || n.type === 'CADImporter3D' || n.type === 'STLGeometry' || n.type === 'CADDomain3D');
+                const allHidden = stlObjs.length > 0 && stlObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                if (allHidden) {
+                    stlObjs.forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_stl: true });
                     });
+                }
             }
         } else if (layer === 'obstacles') {
             updates.show_obstacles = active;
             workerData.showObstacles = active;
-            if (activeModel) {
-                activeModel.nodes
-                    .filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'CSGObstacle3D' || n.type === 'ObstacleBox3D' || n.type === 'ObstacleCylinder3D' || n.type === 'ObstacleSphere3D')
-                    .forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_obstacles: active });
+            if (activeModel && active) {
+                const obsObjs = activeModel.nodes.filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'CSGObstacle3D' || n.type === 'ObstacleBox3D' || n.type === 'ObstacleCylinder3D' || n.type === 'ObstacleSphere3D' || n.type === 'PrimitiveGeometry3D' || n.type === 'Obstacle3D' || n.type === 'ImmersedObstacle' || n.type === 'Obstacle');
+                const allHidden = obsObjs.length > 0 && obsObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                if (allHidden) {
+                    obsObjs.forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_obstacles: active });
                     });
+                }
             }
         } else if (layer === 'charge') {
             updates.show_charge = active;
@@ -11841,12 +12065,14 @@ export class Telemetry3DViewport {
             updates.show_detonators = active;
             updates.show_detonator = active;
             workerData.showDetonators = active;
-            if (activeModel) {
-                activeModel.nodes
-                    .filter((n: any) => n.type === 'DetonatorPoint3D' || n.type === 'DetonatorLine3D' || n.type === 'DetonatorPlane3D' || n.type === 'Detonator')
-                    .forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_detonator: active });
+            if (activeModel && active) {
+                const detObjs = activeModel.nodes.filter((n: any) => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation' || n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorPoint3D' || n.type === 'DetonatorLine3D' || n.type === 'DetonatorPlane3D' || n.type === 'Detonator');
+                const allHidden = detObjs.length > 0 && detObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                if (allHidden) {
+                    detObjs.forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_detonator: active });
                     });
+                }
             }
         } else if (layer === 'grid') {
             updates.show_grid = active;
@@ -11859,6 +12085,15 @@ export class Telemetry3DViewport {
         } else if (layer === 'gauges') {
             updates.show_gauges = active;
             workerData.showGauges = active;
+            if (activeModel && active) {
+                const gaugeObjs = activeModel.nodes.filter((n: any) => n.type === 'VirtualGauges3D' || n.type === 'VirtualGaugeProbe3D' || n.type === 'VirtualGauge' || n.type === 'VirtualGauges');
+                const allHidden = gaugeObjs.length > 0 && gaugeObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
+                if (allHidden) {
+                    gaugeObjs.forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_gauges: true });
+                    });
+                }
+            }
         } else if (layer === 'lighting') {
             updates.lightingEnabled = active;
             updates.aoEnabled = active;
@@ -11870,9 +12105,9 @@ export class Telemetry3DViewport {
         }
         this.stateManager.updateNodeParametersInPlace(vp.id, updates);
         if (Object.keys(workerData).length > 0) {
-            this.worker.postMessage({ type: 'setConfig', data: workerData });
+            this.queueWorkerConfig(workerData);
         }
-        this.syncControls(true);
+        this.scheduleSyncControls(false);
         const tc = (window as any).transportController;
         if (tc) {
             tc.syncStateFromViewport?.();
@@ -11892,7 +12127,7 @@ export class Telemetry3DViewport {
             stl_show_colorbar: visible,
             obstacles_show_colorbar: visible
         });
-        this.syncControls(false);
+        this.scheduleSyncControls(false);
     }
 
     public setRefreshRate(rate: number): void {
@@ -11904,7 +12139,7 @@ export class Telemetry3DViewport {
             this.stateManager.updateNodeParametersInPlace(vp.id, { refresh_rate: rate });
         }
         this.sendView3DConfig();
-        this.syncControls(true);
+        this.scheduleSyncControls(false);
     }
 
     public setShadingConfig(config: any): void {
@@ -11991,8 +12226,8 @@ export class Telemetry3DViewport {
             }
 
             this.stateManager.updateNodeParametersInPlace(vp.id, expandedConfig);
-            this.worker.postMessage({ type: 'setConfig', data: expandedConfig });
-            this.syncControls(true);
+            this.queueWorkerConfig(expandedConfig);
+            this.scheduleSyncControls(false);
         }
     }
 
@@ -12000,8 +12235,8 @@ export class Telemetry3DViewport {
         const vp = this.getViewportNode();
         if (vp) {
             this.stateManager.updateNodeParametersInPlace(vp.id, roi);
-            this.worker.postMessage({ type: 'setConfig', data: roi });
-            this.syncControls(true);
+            this.queueWorkerConfig(roi);
+            this.scheduleSyncControls(false);
         }
     }
 
@@ -12010,8 +12245,8 @@ export class Telemetry3DViewport {
         if (vp) {
             this.stateManager.updateNodeParametersInPlace(vp.id, filter);
         }
-        this.worker.postMessage({ type: 'setConfig', data: filter });
-        this.syncControls(true);
+        this.queueWorkerConfig(filter);
+        this.scheduleSyncControls(false);
     }
 }
 

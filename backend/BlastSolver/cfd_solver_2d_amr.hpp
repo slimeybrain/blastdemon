@@ -97,6 +97,7 @@ private:
     bool is_cartesian;
     double detonator_r_coord;
     double detonator_z_coord;
+    double detonator_start_time = 0.0;
 
     double ambient_rho_val;
     double ambient_p_val;
@@ -188,7 +189,7 @@ public:
     virtual int getTemporalOrder() const override { return temporal_order_val; }
     virtual void setBCTypes(BCType r_min, BCType r_max, BCType z_min, BCType z_max) override;
     virtual void setCoordinateSystemCartesian(bool cartesian) override { is_cartesian = cartesian; }
-    virtual void setDetonatorLocation(double r, double z) override { detonator_r_coord = r; detonator_z_coord = z; }
+    virtual void setDetonatorLocation(double r, double z, double start_time = 0.0) override { detonator_r_coord = r; detonator_z_coord = z; detonator_start_time = start_time; }
 
     virtual BCType getBCRmin() const override { return bc_r_min; }
     virtual BCType getBCRmax() const override { return bc_r_max; }

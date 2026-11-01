@@ -125,15 +125,23 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
 
         if (parameters['atm_pressure'] === undefined) parameters['atm_pressure'] = 101325.0;
         if (parameters['atm_temperature'] === undefined) parameters['atm_temperature'] = 288.15;
+        if (parameters['initial_temperature'] === undefined) parameters['initial_temperature'] = parameters['atm_temperature'];
         if (parameters['gamma'] === undefined) parameters['gamma'] = 1.4;
 
-        if (updatedKey === 'atm_pressure' || updatedKey === 'atm_temperature' || parameters['density'] === undefined) {
-            parameters['density'] = parameters['atm_pressure'] / (287.058 * parameters['atm_temperature']);
+        if (updatedKey === 'initial_temperature') {
+            parameters['atm_temperature'] = parameters['initial_temperature'];
+        } else if (updatedKey === 'atm_temperature') {
+            parameters['initial_temperature'] = parameters['atm_temperature'];
+        }
+
+        const curT = Number(parameters['initial_temperature'] ?? parameters['atm_temperature'] ?? 288.15);
+        if (updatedKey === 'atm_pressure' || updatedKey === 'atm_temperature' || updatedKey === 'initial_temperature' || parameters['density'] === undefined) {
+            parameters['density'] = parameters['atm_pressure'] / (287.058 * curT);
         }
         parameters['ambient_p'] = parameters['atm_pressure'];
         parameters['ambient_rho'] = parameters['density'];
 
-        const airKeys = ['atm_pressure', 'atm_temperature', 'gamma', 'density'];
+        const airKeys = ['atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'density'];
         if (updatedKey && airKeys.includes(updatedKey)) {
             parameters['preset'] = 'Custom';
         }
@@ -166,7 +174,27 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         if (parameters['ideal_gamma'] === undefined) parameters['ideal_gamma'] = 1.4;
         if (!parameters['composition']) parameters['composition'] = 'TNT';
 
-        const igKeys = ['ideal_rho_0', 'ideal_e_0', 'ideal_gamma'];
+        const gammaVal = Number(parameters['ideal_gamma'] ?? 1.4);
+        const cv = 287.058 / Math.max(0.01, gammaVal - 1.0);
+
+        if (parameters['initial_temperature'] === undefined) {
+            parameters['initial_temperature'] = Number(parameters['ideal_e_0']) / cv;
+        }
+
+        if (updatedKey === 'ideal_e_0' || updatedKey === 'detonation_energy') {
+            const e0 = Number(parameters[updatedKey]);
+            parameters['ideal_e_0'] = e0;
+            parameters['detonation_energy'] = e0;
+            parameters['initial_temperature'] = e0 / cv;
+        } else if (updatedKey === 'initial_temperature') {
+            const T = Number(parameters['initial_temperature']);
+            parameters['ideal_e_0'] = cv * T;
+            parameters['detonation_energy'] = parameters['ideal_e_0'];
+        } else if (updatedKey === 'ideal_gamma') {
+            parameters['initial_temperature'] = Number(parameters['ideal_e_0']) / cv;
+        }
+
+        const igKeys = ['ideal_rho_0', 'ideal_e_0', 'initial_temperature', 'ideal_gamma'];
         if (updatedKey && igKeys.includes(updatedKey)) {
             parameters['preset'] = 'Custom';
         }
@@ -207,7 +235,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress',
             'enable_timestep_erosion', 'timestep_erosion_factor',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
-            'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
+            'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'initial_temperature', 'Cp',
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
             'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
@@ -229,6 +257,15 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         if (updatedKey && materialKeys.includes(updatedKey)) {
             parameters['preset'] = 'Custom';
             parameters['provenance'] = 'user';
+        }
+        if (parameters['initial_temperature'] === undefined) {
+            parameters['initial_temperature'] = parameters['T_room'] ?? 288.15;
+        }
+        if (updatedKey === 'initial_temperature') {
+            parameters['T_room'] = parameters['initial_temperature'];
+            if (parameters['davis_t0'] !== undefined) parameters['davis_t0'] = parameters['initial_temperature'];
+        } else if (updatedKey === 'T_room') {
+            parameters['initial_temperature'] = parameters['T_room'];
         }
     }
 
@@ -449,6 +486,8 @@ export function syncFEMObjectParameters(
                         if (part.height !== undefined) targetNode.parameters['height'] = Number(part.height);
                         if (part.origin_mode) targetNode.parameters['origin_mode'] = part.origin_mode;
                         if (part.shape_type) targetNode.parameters['shape_type'] = part.shape_type;
+                        if (part.element_topology) targetNode.parameters['element_topology'] = part.element_topology;
+                        if (part.stl_file !== undefined) targetNode.parameters['stl_file'] = part.stl_file;
                     } else {
                         if (targetNode.parameters['nx'] !== undefined) part.nx = Math.max(1, Math.min(100, Number(targetNode.parameters['nx'])));
                         else if (part.nx !== undefined) targetNode.parameters['nx'] = Math.max(1, Math.min(100, Number(part.nx)));
@@ -491,6 +530,12 @@ export function syncFEMObjectParameters(
 
                         if (targetNode.parameters['shape_type']) part.shape_type = targetNode.parameters['shape_type'];
                         else if (part.shape_type) targetNode.parameters['shape_type'] = part.shape_type;
+
+                        if (targetNode.parameters['element_topology']) part.element_topology = targetNode.parameters['element_topology'];
+                        else if (part.element_topology) targetNode.parameters['element_topology'] = part.element_topology;
+
+                        if (targetNode.parameters['stl_file'] !== undefined) part.stl_file = targetNode.parameters['stl_file'];
+                        else if (part.stl_file !== undefined) targetNode.parameters['stl_file'] = part.stl_file;
                     }
                 }
             }
@@ -502,10 +547,30 @@ export function syncFEMObjectParameters(
         return;
     }
 
+    // If an STLGeometry node is wired to port 'stl', sync STL parameters into FEMObject3D
+    if (model && model.connections) {
+        const stlConn = model.connections.find(c => c.toNode === node.id && c.toPort === 'stl');
+        if (stlConn) {
+            const stlNode = model.nodes.find(n => n.id === stlConn.fromNode);
+            if (stlNode && stlNode.type === 'STLGeometry' && stlNode.parameters) {
+                if (stlNode.parameters['stl_file']) {
+                    parameters['stl_file'] = stlNode.parameters['stl_file'];
+                    parameters['shape_type'] = 'STL';
+                    parameters['mesh_source'] = 'STL File';
+                    parameters['element_topology'] = 'Tet4_ANP';
+                }
+            }
+        }
+    }
+
     if (updatedKey === 'shape_type' || (!parameters['mesh_source'] && parameters['shape_type'])) {
         const shape = parameters['shape_type'];
         if (shape === 'Cylinder') {
             parameters['mesh_source'] = 'Cylinder Generator';
+        } else if (shape === 'STL' || shape === 'STL File' || parameters['stl_file']) {
+            parameters['mesh_source'] = 'STL File';
+            parameters['shape_type'] = 'STL';
+            parameters['element_topology'] = 'Tet4_ANP';
         } else if (shape === 'LS-DYNA File' || shape === 'LS-DYNA Keyword File' || parameters['k_file']) {
             parameters['mesh_source'] = 'LS-DYNA Keyword File';
             parameters['shape_type'] = 'LS-DYNA File';
@@ -518,6 +583,10 @@ export function syncFEMObjectParameters(
         const src = parameters['mesh_source'];
         if (src === 'Cylinder Generator') {
             parameters['shape_type'] = 'Cylinder';
+        } else if (src === 'STL File' || parameters['stl_file'] || parameters['shape_type'] === 'STL') {
+            parameters['shape_type'] = 'STL';
+            parameters['mesh_source'] = 'STL File';
+            parameters['element_topology'] = 'Tet4_ANP';
         } else if (src === 'LS-DYNA Keyword File' || parameters['k_file'] || parameters['shape_type'] === 'LS-DYNA File') {
             parameters['shape_type'] = 'LS-DYNA File';
             parameters['mesh_source'] = 'LS-DYNA Keyword File';
@@ -558,6 +627,8 @@ export function syncFEMObjectParameters(
             if (p.height !== undefined) parameters['height'] = Number(p.height);
             if (p.origin_mode) parameters['origin_mode'] = p.origin_mode;
             if (p.shape_type) parameters['shape_type'] = p.shape_type;
+            if (p.element_topology) parameters['element_topology'] = p.element_topology;
+            if (p.stl_file !== undefined) parameters['stl_file'] = p.stl_file;
         } else {
             if (parameters['nx'] !== undefined) p.nx = Number(parameters['nx']);
             if (parameters['ny'] !== undefined) p.ny = Number(parameters['ny']);
@@ -573,13 +644,16 @@ export function syncFEMObjectParameters(
             if (parameters['height'] !== undefined) p.height = Number(parameters['height']);
             if (parameters['origin_mode']) p.origin_mode = parameters['origin_mode'];
             if (parameters['shape_type']) p.shape_type = parameters['shape_type'];
+            if (parameters['element_topology']) p.element_topology = parameters['element_topology'];
+            if (parameters['stl_file'] !== undefined) p.stl_file = parameters['stl_file'];
 
             const shape = p.shape_type || 'Box';
+            const isTet = p.element_topology === 'Tet4_ANP' || p.element_topology === 'Tet4';
             if (shape === 'Box') {
                 const nx = p.nx ?? 10;
                 const ny = p.ny ?? 10;
                 const nz = p.nz ?? 10;
-                p.num_elements = nx * ny * nz;
+                p.num_elements = isTet ? (6 * nx * ny * nz) : (nx * ny * nz);
                 p.num_nodes = (nx + 1) * (ny + 1) * (nz + 1);
                 const isCAD = p.origin_mode === 'CAD Origin' || p.origin_mode === 'Min Corner';
                 const sx = isCAD ? (p.pos_x ?? 0) : ((p.pos_x ?? 0) - 0.5 * (p.size_x ?? 1));
@@ -686,7 +760,7 @@ export function getCompatibleMaterialsForNode(targetNode: Node, candidateNodes: 
         if (n.type !== 'Material') return false;
         if (currentMatId && n.id === currentMatId) return true;
         if (isCharge) return isExplosiveMaterialNode(n);
-        if (isFEM) return isSolidMaterialNode(n);
+        if (isFEM) return isSolidMaterialNode(n) || isExplosiveMaterialNode(n);
         if (isMPM) return isSolidMaterialNode(n) || isExplosiveMaterialNode(n);
         return true;
     });
@@ -1010,6 +1084,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'Material': {
         material_model: 'Hypoelastic',
         preset: 'Structural Steel (A36)',
+        transfer_scheme: 'BSpline',
         solid_model: 'Mie-Grüneisen Shock Reactant',
         burn_model: 'Programmed Wavefront Burn',
         product_model: 'JWL Product Gas',
@@ -1043,6 +1118,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         jc_m: 1.03,
         T_melt: 1793.0,
         T_room: 293.0,
+        initial_temperature: 288.15,
         Cp: 486.0,
         mg_gamma0: 1.81,
         mg_c0: 4570.0,
@@ -1263,13 +1339,17 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'DetonatorLocation': {
         detonator_r: 0.0,
         detonator_z: 0.1,
-        detonator_radius: 0.001
+        detonator_radius: 0.001,
+        time_delay: 0.0,
+        track_mpm_velocity: false
     },
     'DetonatorLocation3D': {
         detonator_x: 0.5,
         detonator_y: 0.5,
         detonator_z: 0.5,
         detonator_radius: 0.01,
+        time_delay: 0.0,
+        track_mpm_velocity: false,
         visible: true,
         hidden: false
     },
@@ -1381,6 +1461,9 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         step_interval: 10,
         time_interval: 0.0001,
         vtk_format: 'Binary',
+        compression_level: 6,
+        float_precision: '12-bit Mantissa (~4 sig. digits)',
+        mpm_topology: 'Individual Vertices',
         qty_pressure: true,
         qty_density: true,
         qty_velocity: true,
@@ -1400,9 +1483,11 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         qty_mpm_stress: true,
         qty_mpm_strain: true,
         qty_mpm_damage: true,
+        qty_mpm_pressure: true,
+        qty_mpm_material_id: true,
+        qty_mpm_object_id: true,
         qty_mpm_temp: true,
         qty_mpm_vel: true,
-        qty_mpm_disp: true,
         roi_enabled: false,
         roi_xmin: 0.0,
         roi_xmax: 1.0,
@@ -1436,6 +1521,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         charge_rot_x: 0.0,
         charge_rot_y: 0.0,
         charge_rot_z: 0.0,
+        ppc: 64,
         visible: true,
         hidden: false
     },
@@ -1517,8 +1603,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         refresh_rate: 0.5,
         fps: 2,
         slices: [],
-        sliceContourLevels: 10,
-        sliceSmoothContours: false,
+        sliceContourLevels: 0,
+        sliceSmoothContours: true,
         log_scale: false,
         auto_scale: true,
         min_val: 101325.0,
@@ -1554,8 +1640,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         mpmParticleOpacity: 1.0,
         mpmParticleMinVal: 0.0,
         mpmParticleMaxVal: 500000000.0,
-        mpmContourLevels: 10,
-        mpmSmoothContours: false,
+        mpmContourLevels: 0,
+        mpmSmoothContours: true,
         // FEM Mesh Defaults
         showFEMMesh: true,
         femSolid: true,
@@ -1566,8 +1652,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         femAutoScale: true,
         femLogScale: false,
         femShowColorbar: true,
-        femContourLevels: 10,
-        femSmoothContours: false,
+        femContourLevels: 0,
+        femSmoothContours: true,
         femOpacity: 1.0,
         femMinVal: 0.0,
         // Beams & 1D Elements Defaults
@@ -1580,8 +1666,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         beamAutoScale: true,
         beamLogScale: false,
         beamShowColorbar: false,
-        beamContourLevels: 10,
-        beamSmoothContours: false,
+        beamContourLevels: 0,
+        beamSmoothContours: true,
         beamMinVal: 0.0,
         beamMaxVal: 0.05,
         show_stl: true,
@@ -1696,6 +1782,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         radius: 0.1, inner_radius: 0.0, height: 0.2,
         stl_file: '', scale_x: 1.0, scale_y: 1.0, scale_z: 1.0,
         rot_x: 0.0, rot_y: 0.0, rot_z: 0.0,
+        clip_z_min: -1.0e30, clip_z_max: 1.0e30,
         origin_mode: 'CAD Origin',
         voxelization_method: 'watertight_raycast',
         vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
@@ -1743,6 +1830,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         random_seed: 42,
         enable_directional_crack_band: true,
         enable_nonlocal_damage: true,
+        enable_cohesive_splitting: false,
+        cohesive_fracture_energy: 1000.0,
         cfl: 0.6,
         endtime: 1.0
     },
@@ -1750,6 +1839,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         material: '',
         shape_type: 'Box',
         mesh_source: 'Box Generator',
+        element_topology: 'Hex8',
         origin_mode: 'Center',
         boundary_condition: 'Free',
         pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
@@ -1757,6 +1847,9 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         radius: 0.1, inner_radius: 0.0, height: 0.2,
         nx: 10, ny: 10, nz: 10,
         vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
+        scale_x: 1.0, scale_y: 1.0, scale_z: 1.0,
+        rot_x: 0.0, rot_y: 0.0, rot_z: 0.0,
+        stl_file: '',
         k_file: '',
         visible: true,
         hidden: false
@@ -1812,8 +1905,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         seabed_foundation: '',
         explosive_charge: '',
         connected_detonators: '',
-        undex_coupling_method: 'ZonalHybrid_MPM_FV_FEM',
-        water_discretization_mode: 'Spherical_MPM_Sleeve',
+        undex_coupling_method: 'HighFidelityCFD',
+        water_discretization_mode: 'Pure_FV',
         init_mode: 'Hydrostatic_Stratified_3D',
         flux_scheme: 'AUSM+',
         space_time_scheme: 'ADER-2 (2nd-Order Space/Time)',
@@ -2458,7 +2551,7 @@ export class StateManager {
             id: 'view-' + Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 4),
             name: name || `View ${model.views.length + 1}`,
             camera: camera || (currentActive?.camera ? JSON.parse(JSON.stringify(currentActive.camera)) : { pitch: 0.42, yaw: 2.356, distance: 1.35, target: [0, 0, 0], usePerspective: true, fov: 45.0 }),
-            slices: slices || (currentActive?.slices ? JSON.parse(JSON.stringify(currentActive.slices)) : [{ axis: 'xy', offset: 0.5, quantity: 'pressure', enabled: true, colormap: 'rainbow', opacity: 1.0, stride: 1 }]),
+            slices: slices || (currentActive?.slices ? JSON.parse(JSON.stringify(currentActive.slices)) : [{ axis: 'xy', offset: 0.5, quantity: 'pressure', enabled: true, colormap: 'rainbow', opacity: 1.0, stride: 1, smooth_contours: true, contour_levels: 0 }]),
             toggles: toggles || (currentActive?.toggles ? JSON.parse(JSON.stringify(currentActive.toggles)) : { show_grid: true, show_grid_box: true, cell_edges: false, show_stl: true, stl_opacity: 0.5, show_obstacles: true, obstacles_opacity: 1.0 })
         };
         model.views.push(newView);
@@ -3350,6 +3443,7 @@ export class StateManager {
         }
 
         let found = false;
+        let foundNode: any = null;
         let changed = false;
         let targetModelId: string | null = null;
         let isPhysicalChange = false;
@@ -3357,6 +3451,7 @@ export class StateManager {
         for (const model of Object.values(this.appState.models)) {
             const node = model.nodes.find(n => n.id === nodeId);
             if (node) {
+                foundNode = node;
                 targetModelId = model.id;
                 const merged = { ...node.parameters, ...parameters };
                 const updatedKey = Object.keys(parameters).find(k => k === 'solid_model' || k === 'burn_model' || k === 'product_model' || k === 'material_model' || k === 'preset' || k === 'composition' || k === 'charge_mass' || k === 'device' || k === 'precision') || Object.keys(parameters)[0];
@@ -3463,8 +3558,7 @@ export class StateManager {
                 this.setModelStatus(targetModelId, 'UNINITIALIZED');
                 this.setModelProgress(targetModelId, 0);
             }
-            const activeNode = this.getCurrentState()?.nodes.find(n => n.id === nodeId);
-            if (activeNode?.type === 'TelemetryText') {
+            if (foundNode?.type === 'TelemetryText') {
                 this.reformatTelemetryTextNode(nodeId);
             }
             this.saveWorkspaceDebounced();
@@ -4258,7 +4352,7 @@ export class StateManager {
                 if (connectedNode.type === 'TelemetryGraph') {
                     const is3DBuf = data instanceof ArrayBuffer && data.byteLength >= 4 && (() => {
                         const m = new DataView(data).getUint32(0, true);
-                        return m === 0x46454d33 || m === 0x4d504d33 || m === 0x43494c53 || m === 0x4253544c || m === 0x424f4253;
+                        return m === 0x46454d33 || m === 0x4d504d33 || m === 0x50545033 || m === 0x43494c53 || m === 0x4253544c || m === 0x424f4253;
                     })();
                     if ((data instanceof ArrayBuffer && !is3DBuf) || (data && (data.type === 'TELEMETRY' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_MPM_2D' || data.type === 'TELEMETRY_FEM_3D'))) {
                          this.telemetryStore.set(connectedNode.id, data);
@@ -4325,6 +4419,7 @@ export class StateManager {
             }
             const visualNodes = nodes.filter(n => n.type === 'Telemetry3DViewport' || n.type === 'TelemetryContour');
             visualNodes.forEach(vNode => {
+                if (vNode.id === nodeId || updatedNodeIds.has(vNode.id)) return;
                 this.telemetryStore.set(vNode.id, data);
                 this.notifyTelemetryUpdate(vNode.id, data);
             });
@@ -4892,7 +4987,14 @@ export class StateManager {
                 }
             }
             const matConn = model.connections.find(c => (c.toNode === obj.id || c.fromNode === obj.id) && (c.toPort === 'material' || c.fromPort === 'material'));
-            if (!matConn) {
+            if (matConn) {
+                const connectedMatId = matConn.toNode === obj.id ? matConn.fromNode : matConn.toNode;
+                if (!obj.parameters) obj.parameters = {};
+                if (obj.parameters['material'] !== connectedMatId) {
+                    obj.parameters['material'] = connectedMatId;
+                    changed = true;
+                }
+            } else {
                 const matNodes = model.nodes.filter(n => n.type === 'Material');
                 let targetMat = null;
 
@@ -4959,12 +5061,15 @@ export class StateManager {
                     }
                 }
 
-                // 4. Fallback: only pick non-ideal-gas material if object is not explosive
+                // 4. Fallback ONLY if there is exactly 1 non-gas, non-air material in the model
                 if (!targetMat) {
                     const objNameStr = ((obj as any).name || obj.parameters?.name || obj.parameters?.stl_file || obj.id).toLowerCase();
                     const isObjExplosive = objNameStr.includes('explosive') || objNameStr.includes('charge');
                     if (!isObjExplosive) {
-                        targetMat = matNodes.find(m => m.parameters?.material_model !== 'Ideal Gas') || null;
+                        const candidateMaterials = matNodes.filter(m => m.parameters?.material_model !== 'Ideal Gas' && !isAirMaterialNode(m));
+                        if (candidateMaterials.length === 1) {
+                            targetMat = candidateMaterials[0];
+                        }
                     }
                 }
 
@@ -4975,6 +5080,7 @@ export class StateManager {
                         toNode: obj.id,
                         toPort: 'material'
                     });
+                    if (!obj.parameters) obj.parameters = {};
                     obj.parameters['material'] = targetMat.id;
                     changed = true;
                 }
@@ -4998,7 +5104,14 @@ export class StateManager {
             }
 
             const matConn = model.connections.find(c => (c.toNode === obj.id || c.fromNode === obj.id) && (c.toPort === 'material' || c.fromPort === 'material'));
-            if (!matConn) {
+            if (matConn) {
+                const connectedMatId = matConn.toNode === obj.id ? matConn.fromNode : matConn.toNode;
+                if (!obj.parameters) obj.parameters = {};
+                if (obj.parameters['material'] !== connectedMatId) {
+                    obj.parameters['material'] = connectedMatId;
+                    changed = true;
+                }
+            } else {
                 const matNodes = model.nodes.filter(n => n.type === 'Material');
                 let targetMat = null;
 
@@ -5018,9 +5131,12 @@ export class StateManager {
                     }
                 }
 
-                // 3. Fallback: find any non-air, non-explosive solid material
+                // 3. Fallback ONLY if there is exactly 1 non-gas, non-air, non-explosive solid material
                 if (!targetMat) {
-                    targetMat = matNodes.find(m => !isAirMaterialNode(m) && !isExplosiveMaterialNode(m) && m.parameters?.material_model !== 'Ideal Gas' && m.parameters?.material_model !== 'JWL Detonation Gas') || null;
+                    const candidateMaterials = matNodes.filter(m => !isAirMaterialNode(m) && !isExplosiveMaterialNode(m) && m.parameters?.material_model !== 'Ideal Gas' && m.parameters?.material_model !== 'JWL Detonation Gas');
+                    if (candidateMaterials.length === 1) {
+                        targetMat = candidateMaterials[0];
+                    }
                 }
 
                 if (targetMat) {
@@ -5122,7 +5238,10 @@ export class StateManager {
                 if (connectedWater && isWaterMaterialNode(connectedWater)) {
                     validWaterConn = true;
                     if (!harbour.parameters) harbour.parameters = {};
-                    harbour.parameters['seawater_material'] = connectedWater.id;
+                    if (harbour.parameters['seawater_material'] !== connectedWater.id) {
+                        harbour.parameters['seawater_material'] = connectedWater.id;
+                        changed = true;
+                    }
                 } else {
                     model.connections = model.connections.filter(c => c !== waterConn);
                     changed = true;
@@ -5152,7 +5271,10 @@ export class StateManager {
                 if (connectedSeabed && (isSeabedMaterialNode(connectedSeabed) || (isSolidMaterialNode(connectedSeabed) && !isAirMaterialNode(connectedSeabed) && !isWaterMaterialNode(connectedSeabed) && !isExplosiveMaterialNode(connectedSeabed)))) {
                     validSeabedConn = true;
                     if (!harbour.parameters) harbour.parameters = {};
-                    harbour.parameters['seabed_foundation'] = connectedSeabed.id;
+                    if (harbour.parameters['seabed_foundation'] !== connectedSeabed.id) {
+                        harbour.parameters['seabed_foundation'] = connectedSeabed.id;
+                        changed = true;
+                    }
                 } else {
                     model.connections = model.connections.filter(c => c !== seabedConn);
                     changed = true;
@@ -5175,8 +5297,18 @@ export class StateManager {
             }
 
             // Charge
-            const hasChargeConn = model.connections.some(c => (c.toNode === harbour.id && (c.toPort === 'charge' || c.toPort === 'explosive')) || (c.fromNode === harbour.id && (c.fromPort === 'charge' || c.fromPort === 'explosive')));
-            if (!hasChargeConn) {
+            const chargeConn = model.connections.find(c => (c.toNode === harbour.id && (c.toPort === 'charge' || c.toPort === 'explosive')) || (c.fromNode === harbour.id && (c.fromPort === 'charge' || c.fromPort === 'explosive')));
+            if (chargeConn) {
+                const otherId = chargeConn.toNode === harbour.id ? chargeConn.fromNode : chargeConn.toNode;
+                const connectedCharge = model.nodes.find(n => n.id === otherId);
+                if (connectedCharge && connectedCharge.type === 'Charge3D') {
+                    if (!harbour.parameters) harbour.parameters = {};
+                    if (harbour.parameters['explosive_charge'] !== connectedCharge.id) {
+                        harbour.parameters['explosive_charge'] = connectedCharge.id;
+                        changed = true;
+                    }
+                }
+            } else {
                 const chargeNode = model.nodes.find(n => n.type === 'Charge3D');
                 if (chargeNode) {
                     model.connections.push({
@@ -5187,6 +5319,33 @@ export class StateManager {
                     });
                     if (!harbour.parameters) harbour.parameters = {};
                     harbour.parameters['explosive_charge'] = chargeNode.id;
+                    changed = true;
+                }
+            }
+
+            // Detonator
+            const detConn = model.connections.find(c => (c.toNode === harbour.id && (c.toPort === 'detonator' || c.toPort === 'trigger')) || (c.fromNode === harbour.id && (c.fromPort === 'detonator' || c.fromPort === 'trigger')));
+            if (detConn) {
+                const otherId = detConn.toNode === harbour.id ? detConn.fromNode : detConn.toNode;
+                const connectedDet = model.nodes.find(n => n.id === otherId);
+                if (connectedDet && (connectedDet.type === 'DetonatorLocation3D' || connectedDet.type === 'TriggerLocation3D')) {
+                    if (!harbour.parameters) harbour.parameters = {};
+                    if (harbour.parameters['connected_detonators'] !== connectedDet.id) {
+                        harbour.parameters['connected_detonators'] = connectedDet.id;
+                        changed = true;
+                    }
+                }
+            } else {
+                const detNode = model.nodes.find(n => n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D');
+                if (detNode) {
+                    model.connections.push({
+                        fromNode: detNode.id,
+                        fromPort: 'detonator',
+                        toNode: harbour.id,
+                        toPort: 'detonator'
+                    });
+                    if (!harbour.parameters) harbour.parameters = {};
+                    harbour.parameters['connected_detonators'] = detNode.id;
                     changed = true;
                 }
             }
@@ -5201,14 +5360,20 @@ export class StateManager {
                 solver.parameters['explosive_charge'] = '';
             }
             const airConn = model.connections.find(c => (c.toNode === solver.id && (c.toPort === 'air' || c.toPort === 'ambient_air')) || (c.fromNode === solver.id && (c.fromPort === 'air' || c.fromPort === 'ambient_air')));
-            if (airConn && !solver.parameters['ambient_air_material']) {
-                solver.parameters['ambient_air_material'] = airConn.toNode === solver.id ? airConn.fromNode : airConn.toNode;
-                changed = true;
+            if (airConn) {
+                const connectedAirId = airConn.toNode === solver.id ? airConn.fromNode : airConn.toNode;
+                if (solver.parameters['ambient_air_material'] !== connectedAirId) {
+                    solver.parameters['ambient_air_material'] = connectedAirId;
+                    changed = true;
+                }
             }
             const chgConn = model.connections.find(c => (c.toNode === solver.id && (c.toPort === 'charge' || c.toPort === 'explosive')) || (c.fromNode === solver.id && (c.fromPort === 'charge' || c.fromPort === 'explosive')));
-            if (chgConn && !solver.parameters['explosive_charge']) {
-                solver.parameters['explosive_charge'] = chgConn.toNode === solver.id ? chgConn.fromNode : chgConn.toNode;
-                changed = true;
+            if (chgConn) {
+                const connectedChargeId = chgConn.toNode === solver.id ? chgConn.fromNode : chgConn.toNode;
+                if (solver.parameters['explosive_charge'] !== connectedChargeId) {
+                    solver.parameters['explosive_charge'] = connectedChargeId;
+                    changed = true;
+                }
             }
         }
         for (const charge of chargeNodes) {
@@ -5216,9 +5381,12 @@ export class StateManager {
                 charge.parameters['target_domain'] = '';
             }
             const targetConn = model.connections.find(c => (c.fromNode === charge.id && (c.toPort === 'charge' || c.toPort === 'explosive')) || (c.toNode === charge.id && (c.fromPort === 'charge' || c.fromPort === 'explosive')));
-            if (targetConn && !charge.parameters['target_domain']) {
-                charge.parameters['target_domain'] = targetConn.fromNode === charge.id ? targetConn.toNode : targetConn.fromNode;
-                changed = true;
+            if (targetConn) {
+                const connectedTargetId = targetConn.fromNode === charge.id ? targetConn.toNode : targetConn.fromNode;
+                if (charge.parameters['target_domain'] !== connectedTargetId) {
+                    charge.parameters['target_domain'] = connectedTargetId;
+                    changed = true;
+                }
             }
         }
         for (const mat of model.nodes.filter(n => n.type === 'Material')) {
@@ -5394,10 +5562,12 @@ export class StateManager {
                     colormap: s.colormap || 'rainbow',
                     opacity: s.opacity !== undefined ? Number(s.opacity) : 1.0,
                     enabled: s.enabled !== false,
-                    stride: s.stride !== undefined ? Number(s.stride) : 1
+                    stride: s.stride !== undefined ? Number(s.stride) : 1,
+                    smooth_contours: s.smooth_contours !== undefined ? Boolean(s.smooth_contours) : true,
+                    contour_levels: s.contour_levels !== undefined ? Number(s.contour_levels) : 0
                 }))
                 : [
-                    { axis: 'xy', offset: 0.5, quantity: 'pressure', colormap: 'rainbow', opacity: 1.0, enabled: true, stride: 1 }
+                    { axis: 'xy', offset: 0.5, quantity: 'pressure', colormap: 'rainbow', opacity: 1.0, enabled: true, stride: 1, smooth_contours: true, contour_levels: 0 }
                 ];
 
             const pitch = vpNode?.parameters?.camera_pitch !== undefined ? Number(vpNode.parameters.camera_pitch) : 0.42;
@@ -5596,6 +5766,11 @@ export class StateManager {
                     if (node.parameters.trigger_radius !== undefined && node.parameters.detonator_radius === undefined) {
                         node.parameters.detonator_radius = node.parameters.trigger_radius;
                     }
+                    if (node.parameters.time_delay === undefined && node.parameters.detonator_time !== undefined) {
+                        node.parameters.time_delay = Number(node.parameters.detonator_time);
+                    }
+                    if (node.parameters.time_delay === undefined) node.parameters.time_delay = 0.0;
+                    if (node.parameters.track_mpm_velocity === undefined) node.parameters.track_mpm_velocity = false;
                     delete node.parameters.trigger_r;
                     delete node.parameters.trigger_z;
                     delete node.parameters.trigger_radius;
@@ -5616,6 +5791,11 @@ export class StateManager {
                     if (node.parameters.trigger_radius !== undefined && node.parameters.detonator_radius === undefined) {
                         node.parameters.detonator_radius = node.parameters.trigger_radius;
                     }
+                    if (node.parameters.time_delay === undefined && node.parameters.detonator_time !== undefined) {
+                        node.parameters.time_delay = Number(node.parameters.detonator_time);
+                    }
+                    if (node.parameters.time_delay === undefined) node.parameters.time_delay = 0.0;
+                    if (node.parameters.track_mpm_velocity === undefined) node.parameters.track_mpm_velocity = false;
                     delete node.parameters.trigger_x;
                     delete node.parameters.trigger_y;
                     delete node.parameters.trigger_z;
@@ -5725,6 +5905,9 @@ export class StateManager {
                 if (!isAirMaterialNode(node)) {
                     delete node.parameters['ambient_air_target'];
                 }
+                if (node.parameters['transfer_scheme'] === 'Default') {
+                    node.parameters['transfer_scheme'] = 'BSpline';
+                }
             }
             if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
                 delete node.parameters['time_step'];
@@ -5765,13 +5948,16 @@ export class StateManager {
                 if (node.parameters['mesh_source'] && !node.parameters['shape_type']) {
                     const src = node.parameters['mesh_source'];
                     if (src === 'LS-DYNA Keyword File') node.parameters['shape_type'] = 'LS-DYNA File';
+                    else if (src === 'STL File') node.parameters['shape_type'] = 'STL';
                     else if (src === 'Cylinder Generator') node.parameters['shape_type'] = 'Cylinder';
+                    else if (src === 'Plate Generator') node.parameters['shape_type'] = 'Plate';
                     else if (src === 'Box Generator') node.parameters['shape_type'] = 'Box';
                 }
                 if (!node.parameters['shape_type']) node.parameters['shape_type'] = 'Box';
                 const st = node.parameters['shape_type'];
-                node.parameters['mesh_source'] = st === 'Cylinder' ? 'Cylinder Generator' : (st === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator');
+                node.parameters['mesh_source'] = st === 'Cylinder' ? 'Cylinder Generator' : (st === 'STL' ? 'STL File' : (st === 'Plate' || st === 'Shell' ? 'Plate Generator' : (st === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')));
                 if (!node.parameters['origin_mode']) node.parameters['origin_mode'] = 'Center';
+                if (!node.parameters['element_topology']) node.parameters['element_topology'] = st === 'STL' ? 'Tet4_ANP' : 'Hex8';
             }
             if (node.type === 'DomainMesh') {
                 delete node.parameters['dimension'];
@@ -5985,8 +6171,8 @@ export class StateManager {
             case 'MPMObject3D': return [{ id: 'material', label: 'Material' }, { id: 'stl', label: 'STL Geometry' }];
             case 'FSICoupler2D': return [{ id: 'cfd', label: 'CFD Solver' }, { id: 'mpm', label: 'MPM Solver' }];
             case 'FSICoupler3D': return [{ id: 'cfd', label: 'CFD Solver 3D' }, { id: 'mpm', label: 'MPM Solver 3D' }];
-            case 'FEMDomain3D': return [{ id: 'mesh', label: 'Structural Mesh / Parts' }, { id: 'material', label: 'Material' }];
-            case 'FEMObject3D': return [{ id: 'material', label: 'Material' }, { id: 'importer', label: 'LS-DYNA File' }];
+            case 'FEMDomain3D': return [{ id: 'mesh', label: 'Structural Mesh / Parts' }, { id: 'material', label: 'Material' }, { id: 'detonator', label: 'Detonator' }];
+            case 'FEMObject3D': return [{ id: 'material', label: 'Material' }, { id: 'stl', label: 'STL Geometry' }, { id: 'importer', label: 'LS-DYNA File' }];
             case 'FEMBeam3D':
             case 'FEMRebar3D': return [{ id: 'material', label: 'Material' }];
             case 'LSDynaImporter3D': return [{ id: 'material', label: 'Material' }];
@@ -5996,7 +6182,8 @@ export class StateManager {
                 { id: 'air', label: 'Atmospheric Air' },
                 { id: 'water', label: 'Seawater Column' },
                 { id: 'charge', label: 'Explosive Charge' },
-                { id: 'seabed', label: 'Seabed Foundation' }
+                { id: 'seabed', label: 'Seabed Foundation' },
+                { id: 'detonator', label: 'Detonator Spec' }
             ];
             default: return [];
         }
@@ -6861,16 +7048,14 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
                 return resolveDomain3DBounds(meshNode, state, model);
             }
         }
-        if (node.parameters?.xmin !== undefined && node.parameters?.xmax !== undefined) {
-            xmin = Number(node.parameters.xmin ?? 0.0);
-            xmax = Number(node.parameters.xmax ?? 1.0);
-            ymin = Number(node.parameters.ymin ?? 0.0);
-            ymax = Number(node.parameters.ymax ?? 1.0);
-            zmin = Number(node.parameters.zmin ?? 0.0);
-            zmax = Number(node.parameters.zmax ?? 1.0);
-            cellSize = Number(node.parameters.cell_size ?? node.parameters.dx ?? 0.01);
-            return { xmin, xmax, ymin, ymax, zmin, zmax, dim_x: Math.max(1e-5, xmax - xmin), dim_y: Math.max(1e-5, ymax - ymin), dim_z: Math.max(1e-5, zmax - zmin), cellSize };
-        }
+        xmin = Number(node.parameters?.xmin ?? -10.0);
+        xmax = Number(node.parameters?.xmax ?? 10.0);
+        ymin = Number(node.parameters?.ymin ?? -10.0);
+        ymax = Number(node.parameters?.ymax ?? 10.0);
+        zmin = Number(node.parameters?.zmin ?? 0.0);
+        zmax = Number(node.parameters?.zmax ?? 15.0);
+        cellSize = Number(node.parameters?.cell_size ?? node.parameters?.dx ?? 0.125);
+        return { xmin, xmax, ymin, ymax, zmin, zmax, dim_x: Math.max(1e-5, xmax - xmin), dim_y: Math.max(1e-5, ymax - ymin), dim_z: Math.max(1e-5, zmax - zmin), cellSize };
     }
 
     // Check upstream connection from node if provided
@@ -6912,16 +7097,14 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
                 return resolveDomain3DBounds(meshNode, state, model);
             }
         }
-        if (harbourDomain.parameters?.xmin !== undefined && harbourDomain.parameters?.xmax !== undefined) {
-            xmin = Number(harbourDomain.parameters.xmin ?? 0.0);
-            xmax = Number(harbourDomain.parameters.xmax ?? 1.0);
-            ymin = Number(harbourDomain.parameters.ymin ?? 0.0);
-            ymax = Number(harbourDomain.parameters.ymax ?? 1.0);
-            zmin = Number(harbourDomain.parameters.zmin ?? 0.0);
-            zmax = Number(harbourDomain.parameters.zmax ?? 1.0);
-            cellSize = Number(harbourDomain.parameters.cell_size ?? harbourDomain.parameters.dx ?? 0.01);
-            return { xmin, xmax, ymin, ymax, zmin, zmax, dim_x: Math.max(1e-5, xmax - xmin), dim_y: Math.max(1e-5, ymax - ymin), dim_z: Math.max(1e-5, zmax - zmin), cellSize };
-        }
+        xmin = Number(harbourDomain.parameters?.xmin ?? -10.0);
+        xmax = Number(harbourDomain.parameters?.xmax ?? 10.0);
+        ymin = Number(harbourDomain.parameters?.ymin ?? -10.0);
+        ymax = Number(harbourDomain.parameters?.ymax ?? 10.0);
+        zmin = Number(harbourDomain.parameters?.zmin ?? 0.0);
+        zmax = Number(harbourDomain.parameters?.zmax ?? 15.0);
+        cellSize = Number(harbourDomain.parameters?.cell_size ?? harbourDomain.parameters?.dx ?? 0.125);
+        return { xmin, xmax, ymin, ymax, zmin, zmax, dim_x: Math.max(1e-5, xmax - xmin), dim_y: Math.max(1e-5, ymax - ymin), dim_z: Math.max(1e-5, zmax - zmin), cellSize };
     }
 
     // Search model/state for MPMDomain3D
@@ -7252,19 +7435,22 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
     if (node.type === 'FEMObject3D') {
         meshSource = String(node.parameters['mesh_source'] || 'Box Generator');
         shapeType = String(node.parameters['shape_type'] || 'Box');
+        const elemTopo = String(node.parameters['element_topology'] || 'Hex8');
+        const tetMult = (elemTopo === 'Tet4_ANP' || elemTopo === 'Tet4' || shapeType === 'STL' || meshSource === 'STL File') ? 6 : 1;
 
         if (shapeType === 'Cylinder' || meshSource === 'Cylinder Generator') {
-            const nr = Math.max(1, Number(node.parameters['nr'] ?? 6));
-            const ntheta = Math.max(4, Number(node.parameters['ntheta'] ?? 16));
+            const nr = Math.max(1, Number(node.parameters['nr'] ?? node.parameters['nx'] ?? 6));
+            const ntheta = Math.max(4, Number(node.parameters['ntheta'] ?? node.parameters['ny'] ?? 16));
             const nz = Math.max(1, Number(node.parameters['nz'] ?? 10));
-            numElements = nr * ntheta * nz;
+            numElements = nr * ntheta * nz * tetMult;
             numNodes = (nr + 1) * ntheta * (nz + 1);
             numSolids = numElements;
 
             const r = Number(node.parameters['radius'] ?? 0.1);
+            const rInner = Math.max(0.0, Number(node.parameters['inner_radius'] ?? 0.0));
             const h = Number(node.parameters['height'] ?? 0.2);
-            volume = Math.PI * r * r * h;
-            dx = r / nr;
+            volume = Math.PI * (r * r - rInner * rInner) * h;
+            dx = (r - rInner) / nr;
             dy = r / nr;
             dz = h / nz;
 
@@ -7275,6 +7461,37 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
             const isCADOrigin = originMode === 'CAD Origin' || originMode === 'Min Corner';
             const startZ = isCADOrigin ? pz : (pz - 0.5 * h);
             bounds = [px - r, px + r, py - r, py + r, startZ, startZ + h];
+        } else if (shapeType === 'STL' || meshSource === 'STL File') {
+            let stlFile = String(node.parameters['stl_file'] || '');
+            if (!stlFile && state) {
+                const stlConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'stl');
+                if (stlConn) {
+                    const stlNode = state.nodes.find(n => n.id === stlConn.fromNode);
+                    if (stlNode) stlFile = String(stlNode.parameters['stl_file'] || '');
+                }
+            }
+            const nx = Math.max(2, Number(node.parameters['nx'] ?? 12));
+            const ny = Math.max(2, Number(node.parameters['ny'] ?? 12));
+            const nz = Math.max(2, Number(node.parameters['nz'] ?? 12));
+            const stlMeta = stlFile ? getSTLGeometryMeta(stlFile) : undefined;
+            if (stlMeta && stlMeta.bounds) {
+                const sx = (stlMeta.bounds[1] - stlMeta.bounds[0]) * Number(node.parameters['scale_x'] ?? 1.0);
+                const sy = (stlMeta.bounds[3] - stlMeta.bounds[2]) * Number(node.parameters['scale_y'] ?? 1.0);
+                const sz = (stlMeta.bounds[5] - stlMeta.bounds[4]) * Number(node.parameters['scale_z'] ?? 1.0);
+                dx = sx / nx;
+                dy = sy / ny;
+                dz = sz / nz;
+                volume = Math.max(1e-9, stlMeta.volume * Number(node.parameters['scale_x'] ?? 1.0) * Number(node.parameters['scale_y'] ?? 1.0) * Number(node.parameters['scale_z'] ?? 1.0));
+                const fillFrac = Math.min(1.0, Math.max(0.15, volume / Math.max(1e-9, sx * sy * sz)));
+                numElements = Math.max(6, Math.round(nx * ny * nz * 6 * fillFrac));
+                numNodes = Math.max(4, Math.round((nx + 1) * (ny + 1) * (nz + 1) * fillFrac));
+            } else {
+                numElements = Math.round(nx * ny * nz * 6 * 0.45);
+                numNodes = Math.round((nx + 1) * (ny + 1) * (nz + 1) * 0.55);
+                volume = 0.001;
+                dx = 0.01; dy = 0.01; dz = 0.01;
+            }
+            numSolids = numElements;
         } else if (shapeType === 'LS-DYNA File' || meshSource === 'LS-DYNA Keyword File') {
             if (node.parameters['k_file']) {
                 kFile = String(node.parameters['k_file']);
@@ -7318,7 +7535,7 @@ export function resolveFEMCounts(node: Node, state?: SimulationState): FEMCounts
             const nx = Math.max(1, Number(node.parameters['nx'] ?? 10));
             const ny = Math.max(1, Number(node.parameters['ny'] ?? 10));
             const nz = Math.max(1, Number(node.parameters['nz'] ?? 10));
-            numElements = nx * ny * nz;
+            numElements = nx * ny * nz * tetMult;
             numNodes = (nx + 1) * (ny + 1) * (nz + 1);
             numSolids = numElements;
 

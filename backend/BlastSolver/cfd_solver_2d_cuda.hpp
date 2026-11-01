@@ -55,7 +55,7 @@ public:
     virtual int getTemporalOrder() const = 0;
 
     virtual void setBCTypes(BCType r_min, BCType r_max, BCType z_min, BCType z_max) = 0;
-    virtual void setDetonatorLocation(double r, double z) = 0;
+    virtual void setDetonatorLocation(double r, double z, double start_time = 0.0) = 0;
 
     virtual std::vector<State2D> getStates() = 0;
     virtual std::vector<float> getTelemetry2D(int stride = 1) = 0;
@@ -134,9 +134,10 @@ public:
     void setBCTypes(BCType r_min, BCType r_max, BCType z_min, BCType z_max) override {
         bcRmin = r_min; bcRmax = r_max; bcZmin = z_min; bcZmax = z_max;
     }
-    void setDetonatorLocation(double r, double z) override {
+    void setDetonatorLocation(double r, double z, double start_time = 0.0) override {
         det_x = r;
         det_z = z;
+        det_start_time = start_time;
     }
 
     std::vector<State2D> getStates() override;
@@ -178,6 +179,7 @@ private:
     double det_x = 0.0;
     double det_y = 0.0;
     double det_z = 0.0;
+    double det_start_time = 0.0;
 
     void setCoordinateSystemCartesian(bool cartesian) override { is_cartesian = cartesian; }
     void setSolidVelocities(const double* v) override;

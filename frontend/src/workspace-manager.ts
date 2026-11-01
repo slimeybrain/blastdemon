@@ -695,11 +695,14 @@ export class WorkspaceManager {
             if (latestFrame && pane.instance) {
                 if (latestFrame.sliceBuffer) {
                     pane.instance.pushFrame(latestFrame.sliceBuffer, latestFrame.modelId);
-                } else if (latestFrame.buffer && latestFrame.buffer !== latestFrame.mpmBuffer && latestFrame.buffer !== latestFrame.femBuffer) {
+                } else if (latestFrame.buffer && latestFrame.buffer !== latestFrame.mpmBuffer && latestFrame.buffer !== latestFrame.phaseParticlesBuffer && latestFrame.buffer !== latestFrame.femBuffer) {
                     pane.instance.pushFrame(latestFrame.buffer, latestFrame.modelId);
                 }
                 if (latestFrame.mpmBuffer) {
                     pane.instance.pushFrame(latestFrame.mpmBuffer, latestFrame.modelId);
+                }
+                if (latestFrame.phaseParticlesBuffer) {
+                    pane.instance.pushFrame(latestFrame.phaseParticlesBuffer, latestFrame.modelId);
                 }
                 if (latestFrame.femBuffer) {
                     pane.instance.pushFrame(latestFrame.femBuffer, latestFrame.modelId);
@@ -1067,11 +1070,14 @@ export class WorkspaceManager {
                     if (typeof pane.instance.pushFrame === 'function') {
                         if (frame.sliceBuffer) {
                             pane.instance.pushFrame(frame.sliceBuffer, frame.modelId);
-                        } else if (frame.buffer && frame.buffer !== frame.mpmBuffer && frame.buffer !== frame.femBuffer) {
+                        } else if (frame.buffer && frame.buffer !== frame.mpmBuffer && frame.buffer !== frame.phaseParticlesBuffer && frame.buffer !== frame.femBuffer) {
                             pane.instance.pushFrame(frame.buffer, frame.modelId);
                         }
                         if (frame.mpmBuffer) {
                             pane.instance.pushFrame(frame.mpmBuffer, frame.modelId);
+                        }
+                        if (frame.phaseParticlesBuffer) {
+                            pane.instance.pushFrame(frame.phaseParticlesBuffer, frame.modelId);
                         }
                         if (frame.femBuffer) {
                             pane.instance.pushFrame(frame.femBuffer, frame.modelId);

@@ -61,6 +61,8 @@ struct BlastPhysicsParams {
     int random_seed{42};                        // Persistent random seed for exact deterministic repeatability
     bool enable_directional_crack_band{true};   // Global toggle for Bažant directional crack band angle normalization
     bool enable_nonlocal_damage{true};          // Global toggle for spatial non-local damage regularization
+    bool enable_cohesive_splitting{false};      // Option C: Topological cohesive facet node-splitting into independent Lagrangian fragments
+    T cohesive_fracture_energy{1000.0f};        // Mode-I/II cohesive fracture energy G_c (J/m^2) for inter-element softening
 };
 
 template <typename T>
@@ -104,7 +106,7 @@ struct alignas(32) FEMGaussPointHistory3D {
 
 template <typename T>
 struct alignas(32) FEMElement3D {
-    int node_ids[8];     // 8 node indices forming Hex8 element
+    int node_ids[8];     // 8 node indices forming Hex8 element (or {n0,n1,n2,n3,n3,n3,n3,n3} for Tet4)
     T V0{0.0f};          // Initial reference element volume
     T V{0.0f};           // Current element volume
     T dt0{1.0e30f};      // Baseline initial acoustic timestep at t=0
@@ -114,10 +116,15 @@ struct alignas(32) FEMElement3D {
     T ep_bar{0.0f};      // Equivalent plastic strain
     T temperature{293.0f}; // Local temperature (K)
     T damage{0.0f};      // Scalar damage D in [0, 1]
-    T lambda{0.0f};      // Modified damage scaling parameter (K&C / CSCM cap)
+    T lambda{0.0f};      // Reaction progress [0, 1] or modified damage scaling parameter (K&C / CSCM cap)
     T q_visc{0.0f};      // Artificial bulk viscosity pressure
+    T e_int{0.0f};       // Specific internal energy (J/kg) for JWL / Davis / Mie-Grüneisen
+    T t_arrival{1.0e30f};// Programmed burn detonation wavefront arrival time (s)
+    T s_shock{0.0f};     // Latched CREST shock entropy (J/(kg*K))
+    T v_min{1.0f};       // Minimum relative volume V/V0 reached during shock compression
     bool is_eroded{false};
     bool mpm_converted{false}; // Converted to MPM debris particles
+    bool is_detached{false};   // True once Option C cohesive node-splitting has detached this element
     int decay_step{0};   // Multi-step cohesive traction decay counter for soft stress release
     int mat_id{0};       // Material Table ID
     int part_id{0};      // LS-DYNA Part ID
@@ -227,9 +234,124 @@ struct SpatialHashBucket3D {
 };
 
 template <typename T>
-HD_FEM_FUNC inline T computeDilatationalWaveSpeed(const MaterialTable3D& mat) {
+HD_FEM_FUNC inline bool isTet4Element(const FEMElement3D<T>& elem) {
+    return (elem.node_ids[4] == elem.node_ids[3] &&
+            elem.node_ids[5] == elem.node_ids[3] &&
+            elem.node_ids[6] == elem.node_ids[3] &&
+            elem.node_ids[7] == elem.node_ids[3]);
+}
+
+template <typename T>
+HD_FEM_FUNC inline T computeTet4SignedVolume(const T x_nodes[4][3]) {
+    const T e10x = x_nodes[1][0] - x_nodes[0][0], e10y = x_nodes[1][1] - x_nodes[0][1], e10z = x_nodes[1][2] - x_nodes[0][2];
+    const T e20x = x_nodes[2][0] - x_nodes[0][0], e20y = x_nodes[2][1] - x_nodes[0][1], e20z = x_nodes[2][2] - x_nodes[0][2];
+    const T e30x = x_nodes[3][0] - x_nodes[0][0], e30y = x_nodes[3][1] - x_nodes[0][1], e30z = x_nodes[3][2] - x_nodes[0][2];
+    const T det6 = e10x * (e20y * e30z - e20z * e30y) -
+                   e10y * (e20x * e30z - e20z * e30x) +
+                   e10z * (e20x * e30y - e20y * e30x);
+    return det6 / static_cast<T>(6.0f);
+}
+
+template <typename T>
+HD_FEM_FUNC inline void computeTet4ShapeGradients(const T x_nodes[4][3], T dN_dx[4][3], T& V_out) {
+    const T e10x = x_nodes[1][0] - x_nodes[0][0], e10y = x_nodes[1][1] - x_nodes[0][1], e10z = x_nodes[1][2] - x_nodes[0][2];
+    const T e20x = x_nodes[2][0] - x_nodes[0][0], e20y = x_nodes[2][1] - x_nodes[0][1], e20z = x_nodes[2][2] - x_nodes[0][2];
+    const T e30x = x_nodes[3][0] - x_nodes[0][0], e30y = x_nodes[3][1] - x_nodes[0][1], e30z = x_nodes[3][2] - x_nodes[0][2];
+    const T det = e10x * (e20y * e30z - e20z * e30y) -
+                  e10y * (e20x * e30z - e20z * e30x) +
+                  e10z * (e20x * e30y - e20y * e30x);
+    V_out = (det >= static_cast<T>(0.0f) ? det : -det) / static_cast<T>(6.0f);
+    const T sign_det = (det >= static_cast<T>(0.0f)) ? static_cast<T>(1.0f) : static_cast<T>(-1.0f);
+    const T abs_det = (det >= static_cast<T>(0.0f) ? det : -det);
+    const T inv_det = sign_det / (abs_det > static_cast<T>(1.0e-18f) ? abs_det : static_cast<T>(1.0e-18f));
+    dN_dx[1][0] = (e20y * e30z - e20z * e30y) * inv_det;
+    dN_dx[1][1] = (e20z * e30x - e20x * e30z) * inv_det;
+    dN_dx[1][2] = (e20x * e30y - e20y * e30x) * inv_det;
+    dN_dx[2][0] = (e30y * e10z - e30z * e10y) * inv_det;
+    dN_dx[2][1] = (e30z * e10x - e30x * e10z) * inv_det;
+    dN_dx[2][2] = (e30x * e10y - e30y * e10x) * inv_det;
+    dN_dx[3][0] = (e10y * e20z - e10z * e20y) * inv_det;
+    dN_dx[3][1] = (e10z * e20x - e10x * e20z) * inv_det;
+    dN_dx[3][2] = (e10x * e20y - e10y * e20x) * inv_det;
+    dN_dx[0][0] = -(dN_dx[1][0] + dN_dx[2][0] + dN_dx[3][0]);
+    dN_dx[0][1] = -(dN_dx[1][1] + dN_dx[2][1] + dN_dx[3][1]);
+    dN_dx[0][2] = -(dN_dx[1][2] + dN_dx[2][2] + dN_dx[3][2]);
+}
+
+template <typename T>
+HD_FEM_FUNC inline T computeTet4CharacteristicLength(const T x_nodes[4][3], T V_elem) {
+    static const int TET4_FACES[4][3] = {
+        {0, 2, 1},
+        {0, 1, 3},
+        {1, 2, 3},
+        {2, 0, 3}
+    };
+    T max_area = static_cast<T>(0.0f);
+#if defined(__CUDA_ARCH__) || defined(__NVCC__)
+    #pragma unroll
+#endif
+    for (int f = 0; f < 4; ++f) {
+        int i0 = TET4_FACES[f][0], i1 = TET4_FACES[f][1], i2 = TET4_FACES[f][2];
+        T e1x = x_nodes[i1][0] - x_nodes[i0][0];
+        T e1y = x_nodes[i1][1] - x_nodes[i0][1];
+        T e1z = x_nodes[i1][2] - x_nodes[i0][2];
+        T e2x = x_nodes[i2][0] - x_nodes[i0][0];
+        T e2y = x_nodes[i2][1] - x_nodes[i0][1];
+        T e2z = x_nodes[i2][2] - x_nodes[i0][2];
+        T cx = e1y * e2z - e1z * e2y;
+        T cy = e1z * e2x - e1x * e2z;
+        T cz = e1x * e2y - e1y * e2x;
+        T area = static_cast<T>(0.5f) * sqrt(cx * cx + cy * cy + cz * cz);
+        if (area > max_area) max_area = area;
+    }
+    if (max_area > static_cast<T>(1.0e-12f) && V_elem > static_cast<T>(1.0e-18f)) {
+        return static_cast<T>(3.0f) * V_elem / max_area;
+    }
+    static const int TET4_EDGES[6][2] = {{0,1},{1,2},{2,0},{0,3},{1,3},{2,3}};
+    T h_min_sq = static_cast<T>(1.0e30f);
+#if defined(__CUDA_ARCH__) || defined(__NVCC__)
+    #pragma unroll
+#endif
+    for (int e = 0; e < 6; ++e) {
+        int n1 = TET4_EDGES[e][0], n2 = TET4_EDGES[e][1];
+        T dx = x_nodes[n1][0] - x_nodes[n2][0];
+        T dy = x_nodes[n1][1] - x_nodes[n2][1];
+        T dz = x_nodes[n1][2] - x_nodes[n2][2];
+        T len_sq = dx * dx + dy * dy + dz * dz;
+        if (len_sq < h_min_sq) h_min_sq = len_sq;
+    }
+    return sqrt(h_min_sq);
+}
+
+template <typename T>
+HD_FEM_FUNC inline T computeDilatationalWaveSpeed(const MaterialTable3D& mat, T v_rel = static_cast<T>(1.0f), T lambda = static_cast<T>(0.0f), T p_val = static_cast<T>(0.0f)) {
     if (mat.material_model == MPMMaterialModel::TaitWater) {
         return static_cast<T>(mat.tait_c0 > 0.0f ? mat.tait_c0 : 1482.0f);
+    }
+    if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn ||
+        mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
+        mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
+        bool use_davis_solid = (mat.solid_model == SolidReactantEOS::DavisSolid) || (mat.material_model == MPMMaterialModel::CRESTReactiveBurn);
+        bool use_davis_prod = (mat.product_model == DetonationProductEOS::DavisProduct) || (mat.material_model == MPMMaterialModel::CRESTReactiveBurn);
+        float C0 = use_davis_solid ? (mat.davis_c0 > 100.0f ? mat.davis_c0 : 2400.0f) : (mat.mg_c0 > 100.0f ? mat.mg_c0 : 2500.0f);
+        float c_det = use_davis_prod ? ((mat.davis_pc > 1.0e6f) ? 7500.0f : 6000.0f) : (mat.det_vel > 1000.0f ? mat.det_vel : 6930.0f);
+        if (lambda >= static_cast<T>(0.99f)) {
+            float vr = static_cast<float>(v_rel > static_cast<T>(0.05f) ? v_rel : static_cast<T>(0.05f));
+            float pp = static_cast<float>(p_val > static_cast<T>(1.0e5f) ? p_val : static_cast<T>(1.0e5f));
+            float rho_ref = (mat.density > 10.0f) ? mat.density : (use_davis_solid ? mat.davis_rho0 : 1630.0f);
+            float c_gas = c_det;
+            if (use_davis_prod) {
+                float gamma_eff = mat.davis_k + 1.0f;
+                float rho_cur = rho_ref / vr;
+                c_gas = sqrtf(fmaxf(C0 * C0, gamma_eff * pp / fmaxf(rho_cur, 1.0e-3f)));
+            } else {
+                c_gas = JWL::computeJWLSoundSpeed(vr, pp, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, rho_ref);
+            }
+            return static_cast<T>(fmaxf(c_gas, C0));
+        } else if (lambda > static_cast<T>(0.0f)) {
+            return static_cast<T>(fmaxf(c_det, C0));
+        }
+        return static_cast<T>(fmaxf(C0, 2000.0f));
     }
     T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
     T nu = static_cast<T>(mat.poissons_ratio);
@@ -317,6 +439,16 @@ HD_FEM_FUNC inline T computeHex8CharacteristicLength(const T x_nodes[8][3], T V_
     return sqrt(h_min_sq);
 }
 
+struct FEMDetonator3D {
+    float x{0.0f};
+    float y{0.0f};
+    float z{0.0f};
+    float radius{0.02f};
+    float time_delay{0.0f};
+    int target_part_id{-1};
+    bool fired{false};
+};
+
 template <typename T>
 class FEMSolver3D {
 public:
@@ -388,11 +520,33 @@ public:
     const FEMErosionCriteria<T>& getErosionCriteria() const { return m_erosion_criteria; }
     FEMErosionCriteria<T>& getErosionCriteria() { return m_erosion_criteria; }
 
-    // Mesh Builders (Structured Box & Cylinder Generators)
+    // Mesh Builders (Structured Box, Cylinder, Tet4-ANP, and STL Voxel/Tet Generators)
     void createStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, const std::string& boundary_condition = "Free");
     void addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), const std::string& boundary_condition = "Free");
+    void createStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, const std::string& boundary_condition = "Free");
+    void addStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), const std::string& boundary_condition = "Free");
     void createStructuredCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T inner_radius = static_cast<T>(0), const std::string& boundary_condition = "Free");
     void addStructuredCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), T inner_radius = static_cast<T>(0), const std::string& boundary_condition = "Free");
+    void addStructuredTetCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), T inner_radius = static_cast<T>(0), const std::string& boundary_condition = "Free");
+    void addSTLMesh(const std::string& stl_filepath, int nx, int ny, int nz, T pos_x, T pos_y, T pos_z, T scale_x, T scale_y, T scale_z, T rot_x, T rot_y, T rot_z, const std::string& origin_mode, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), bool use_tet4 = true, const std::string& boundary_condition = "Free");
+
+    // Energetic Detonator & Trigger Initiation
+    void clearDetonators() { m_detonators.clear(); }
+    void addDetonator(const FEMDetonator3D& det);
+    void addDetonator(T x, T y, T z, T radius, T delay = static_cast<T>(0), int target_part_id = -1) {
+        FEMDetonator3D det{};
+        det.x = static_cast<float>(x);
+        det.y = static_cast<float>(y);
+        det.z = static_cast<float>(z);
+        det.radius = static_cast<float>(radius);
+        det.time_delay = static_cast<float>(delay);
+        det.target_part_id = target_part_id;
+        det.fired = (delay <= static_cast<T>(0));
+        addDetonator(det);
+    }
+    void igniteDetonator(T det_x, T det_y, T det_z, T det_r, int target_part_id = -1, T time_delay = static_cast<T>(0));
+    const std::vector<FEMDetonator3D>& getDetonators() const { return m_detonators; }
+    std::vector<FEMDetonator3D>& getDetonators() { return m_detonators; }
     
     // Mesh Direct Loaders
     int addNode(T x, T y, T z, T mass = static_cast<T>(1.0f)) {
@@ -419,6 +573,7 @@ public:
     void computeLumpedMasses();
     void evaluateErosionCriteria();
     void processErodedElementsToMPM();
+    void splitFracturedElementNodes();
 
     // Dynamic Execution Control
     void step(T cfl = 0.6f);
@@ -511,6 +666,13 @@ private:
     void buildFaceConnectivity();
 
     std::vector<int> m_face_neighbors; // Size: m_elements.size() * 6. Stores neighbor element ID for each face (-1 if boundary).
+
+    // Pre-allocated buffers for Tet4-ANP (Average Nodal Pressure) and Option C Cohesive Node-Splitting
+    std::vector<T> m_nodal_vol_cur;
+    std::vector<T> m_nodal_vol_ref;
+    std::vector<int> m_node_elem_ref_count;
+    size_t m_max_nodes_capacity{0};
+    std::vector<FEMDetonator3D> m_detonators;
 
     // Geometric Shape Function Derivatives for Hex8
     void computeHex8BMatrix(const T x_nodes[8][3], T B[6][24], T& detJ) const;

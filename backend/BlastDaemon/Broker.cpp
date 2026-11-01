@@ -177,36 +177,42 @@ void send_websocket_frame(std::shared_ptr<ClientConnection> client, const void* 
     std::lock_guard<std::mutex> lock(client->send_mutex);
     if (client->fd == INVALID_SOCKET_HANDLE) return;
 
-    std::vector<uint8_t> frame;
-    frame.push_back(0x80 | (opcode & 0x0F)); // FIN + opcode
+    uint8_t header[10];
+    size_t header_len = 0;
+    header[header_len++] = static_cast<uint8_t>(0x80 | (opcode & 0x0F)); // FIN + opcode
 
     if (len <= 125) {
-        frame.push_back((uint8_t)len);
+        header[header_len++] = static_cast<uint8_t>(len);
     } else if (len <= 65535) {
-        frame.push_back(126);
-        frame.push_back((uint8_t)((len >> 8) & 0xFF));
-        frame.push_back((uint8_t)(len & 0xFF));
+        header[header_len++] = 126;
+        header[header_len++] = static_cast<uint8_t>((len >> 8) & 0xFF);
+        header[header_len++] = static_cast<uint8_t>(len & 0xFF);
     } else {
-        frame.push_back(127);
+        header[header_len++] = 127;
         for (int i = 7; i >= 0; --i) {
-            frame.push_back((uint8_t)((len >> (8 * i)) & 0xFF));
+            header[header_len++] = static_cast<uint8_t>((len >> (8 * i)) & 0xFF);
         }
     }
 
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
-    frame.insert(frame.end(), p, p + len);
-
-    size_t total_sent = 0;
-    while (total_sent < frame.size()) {
+    auto send_all = [&](const uint8_t* buf, size_t buf_len) -> bool {
+        size_t total_sent = 0;
+        while (total_sent < buf_len) {
 #ifdef _WIN32
-        int n = send(client->fd, (const char*)frame.data() + total_sent, (int)(frame.size() - total_sent), 0);
+            int n = send(client->fd, reinterpret_cast<const char*>(buf + total_sent), static_cast<int>(buf_len - total_sent), 0);
 #else
-        ssize_t n = send(client->fd, (const char*)frame.data() + total_sent, frame.size() - total_sent, MSG_NOSIGNAL);
+            ssize_t n = send(client->fd, reinterpret_cast<const char*>(buf + total_sent), buf_len - total_sent, MSG_NOSIGNAL);
 #endif
-        if (n <= 0) {
-            break; // Socket error or closed
+            if (n <= 0) {
+                return false; // Socket error or closed
+            }
+            total_sent += static_cast<size_t>(n);
         }
-        total_sent += n;
+        return true;
+    };
+
+    if (!send_all(header, header_len)) return;
+    if (len > 0 && data != nullptr) {
+        send_all(reinterpret_cast<const uint8_t*>(data), len);
     }
 }
 
@@ -834,9 +840,22 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
 #ifdef _WIN32
         solver_path = "BlastSolver.exe";
 #else
-        if (access(solver_path.c_str(), F_OK) != 0) {
-            if (access("./build/BlastSolver", F_OK) == 0) {
-                solver_path = "./build/BlastSolver";
+        std::vector<std::string> candidates = {
+            "./build/BlastSolver",
+            "./backend/build/BlastSolver",
+            "./BlastSolver"
+        };
+        std::filesystem::file_time_type newest_time{};
+        bool found = false;
+        for (const auto& cand : candidates) {
+            std::error_code ec;
+            if (std::filesystem::exists(cand, ec)) {
+                auto mtime = std::filesystem::last_write_time(cand, ec);
+                if (!found || (!ec && mtime > newest_time)) {
+                    newest_time = mtime;
+                    solver_path = cand;
+                    found = true;
+                }
             }
         }
 #endif
@@ -865,6 +884,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                         const std::vector<std::string> binary_markers = {
                             "BIN_FRAME_3D_SLICES ",
                             "BIN_MPM_3D_PARTICLES ",
+                            "BIN_PHASE_PARTICLES_3D ",
                             "BIN_FEM_3D_MESH ",
                             "BIN_FRAME_2D ",
                             "BIN_FRAME ",
@@ -905,6 +925,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                                 if (accumulator.size() < header_size + payload_size) break;
 
                                 std::vector<uint8_t> ws_payload;
+                                ws_payload.reserve(modelId.size() + 1 + payload_size);
                                 ws_payload.insert(ws_payload.end(), modelId.begin(), modelId.end());
                                 ws_payload.push_back('\0');
                                 ws_payload.insert(ws_payload.end(),

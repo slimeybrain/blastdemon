@@ -12,6 +12,7 @@ export interface BufferedFrame {
     buffer: ArrayBuffer;
     sliceBuffer?: ArrayBuffer;
     mpmBuffer?: ArrayBuffer;
+    phaseParticlesBuffer?: ArrayBuffer;
     femBuffer?: ArrayBuffer;
     metrics?: {
         dt?: number;
@@ -58,6 +59,7 @@ export class PlaybackRingBuffer {
         const timeSinceLast = now - this.lastRecordedTimestamp;
         const magic = rawBuffer.byteLength >= 4 ? new DataView(rawBuffer).getUint32(0, true) : 0;
         const isMPM = magic === 0x4d504d33; // 'MPM3'
+        const isPhase = magic === 0x50545033; // 'PTP3'
         const isFEM = magic === 0x46454d33; // 'FEM3'
         const isSlice = magic === 0x43494c53; // 'SLIC'
 
@@ -79,6 +81,21 @@ export class PlaybackRingBuffer {
                 }
                 const cloned = rawBuffer.slice(0);
                 this.lastRecordedFrame.mpmBuffer = cloned;
+                if (!this.lastRecordedFrame.buffer || this.lastRecordedFrame.buffer.byteLength === 0) {
+                    this.lastRecordedFrame.buffer = cloned;
+                }
+                this.lastRecordedFrame.byteSize += diff;
+                this.currentMemoryBytes += diff;
+                updated = true;
+            } else if (isPhase) {
+                const prevSize = this.lastRecordedFrame.phaseParticlesBuffer ? this.lastRecordedFrame.phaseParticlesBuffer.byteLength : 0;
+                diff = rawBuffer.byteLength - prevSize;
+                while (diff > 0 && this.frames.length > 1 && this.currentMemoryBytes + diff > this.maxMemoryBytes) {
+                    const evicted = this.frames.shift();
+                    if (evicted) this.currentMemoryBytes -= evicted.byteSize;
+                }
+                const cloned = rawBuffer.slice(0);
+                this.lastRecordedFrame.phaseParticlesBuffer = cloned;
                 if (!this.lastRecordedFrame.buffer || this.lastRecordedFrame.buffer.byteLength === 0) {
                     this.lastRecordedFrame.buffer = cloned;
                 }
@@ -139,7 +156,7 @@ export class PlaybackRingBuffer {
         }
 
         // At high streaming frequencies for identical single-modality streams, avoid cloning buffers faster than 30 FPS (~33ms)
-        if (!isStepZero && timeSinceLast < 32 && this.lastRecordedFrame && this.frames.length > 0 && sameModel && !isMPM && !isFEM) {
+        if (!isStepZero && timeSinceLast < 32 && this.lastRecordedFrame && this.frames.length > 0 && sameModel && !isMPM && !isPhase && !isFEM) {
             if (meta.step !== undefined && (meta.step > 0 || !this.lastRecordedFrame.step)) this.lastRecordedFrame.step = meta.step;
             if (meta.time !== undefined && (meta.time > 0 || !this.lastRecordedFrame.time)) this.lastRecordedFrame.time = meta.time;
             if (meta.metrics) {
@@ -205,6 +222,7 @@ export class PlaybackRingBuffer {
             buffer: clonedBuffer,
             sliceBuffer: isSlice ? clonedBuffer : undefined,
             mpmBuffer: isMPM ? clonedBuffer : undefined,
+            phaseParticlesBuffer: isPhase ? clonedBuffer : undefined,
             femBuffer: isFEM ? clonedBuffer : undefined,
             metrics,
             timestamp: now,
@@ -256,6 +274,10 @@ export class PlaybackRingBuffer {
                 const step = (this.lastRecordedFrame && this.lastRecordedFrame.step > 0) ? this.lastRecordedFrame.step : 0;
                 return { step, time: Number.isFinite(time) ? time : 0 };
             } else if (magic === 0x4d504d33) { // 'MPM3' (3D MPM Particles)
+                const time = dataView.getFloat32(4, true);
+                const step = (this.lastRecordedFrame && this.lastRecordedFrame.step > 0) ? this.lastRecordedFrame.step : 0;
+                return { step, time: Number.isFinite(time) ? time : 0 };
+            } else if (magic === 0x50545033) { // 'PTP3' (Phase Tracking Particles)
                 const time = dataView.getFloat32(4, true);
                 const step = (this.lastRecordedFrame && this.lastRecordedFrame.step > 0) ? this.lastRecordedFrame.step : 0;
                 return { step, time: Number.isFinite(time) ? time : 0 };

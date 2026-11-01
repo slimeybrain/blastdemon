@@ -227,6 +227,24 @@ namespace MultiMat {
 #ifdef __CUDACC__
 __host__ __device__
 #endif
+    inline RealType getMixturePressure(RealType E_internal, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted);
+
+    template <typename RealType>
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+    inline RealType getMixtureEnergy(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted);
+
+    template <typename RealType>
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+    inline RealType getMixtureSoundSpeed(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted);
+
+    template <typename RealType>
+#ifdef __CUDACC__
+__host__ __device__
+#endif
     inline RealType getEnergy_IdealGas(RealType p, RealType rho, RealType gamma) {
         return p / ((gamma - (RealType)1.0) * rho);
     }
@@ -285,47 +303,38 @@ __host__ __device__
         RealType alpha0 = (RealType)1.0 - alpha1 - alpha2;
         if (alpha0 < (RealType)0.0) alpha0 = (RealType)0.0;
 
-        RealType rho0_mat = (rho - arho1 - arho2) / fmax(alpha0, (RealType)1e-10);
-        // Bound intrinsic liquid water density in mixture to physically realistic liquid range [rho0_water, 1.40 * rho0_water]
-        // This prevents spurious cavitation and 1/rho divergence in Tait energy when alpha0 is small (interface cells)
-        rho0_mat = fmax((RealType)rho0_water, fmin((RealType)(1.40 * rho0_water), rho0_mat));
-        RealType rho1_mat = fmax((RealType)1e-6, arho1 / fmax(alpha1, (RealType)1e-10));
+        if (alpha0 < (RealType)1e-6) {
+            return getMixturePressure<RealType>(E_internal, rho, alpha1, alpha2, arho1, arho2, (RealType)1.4, products, unreacted);
+        }
 
+        RealType raw_rho0 = (rho - arho1 - arho2) / fmax(alpha0, (RealType)1e-10);
+        RealType rho0_mat = fmax((RealType)1e-3, fmin((RealType)(5.0 * rho0_water), raw_rho0));
         RealType p_isen = Blast::TaitEOSWater::compute_pressure_isentropic<RealType>(rho0_mat, B, gamma_tait, rho0_water, p_cav, p0);
         RealType e_isen = Blast::TaitEOSWater::compute_energy_isentropic<RealType>(rho0_mat, B, gamma_tait, rho0_water);
 
         if (alpha1 + alpha2 < (RealType)1e-8) {
-            RealType spec_e = E_internal / fmax((RealType)1e-6, rho);
-            RealType p = p_isen + gruneisen * rho * (spec_e - e_isen);
-            return fmax(p_cav, p);
+            return fmax(p_cav, p_isen);
         }
 
+        RealType alpha_gas = alpha1 + alpha2;
+        RealType rho1_mat = fmax((RealType)1e-6, arho1 / fmax(alpha1, (RealType)1e-10));
+
+        RealType V1 = fmax((RealType)1.0, (RealType)products.rho0 / fmax((RealType)1e-6, rho1_mat));
+        RealType f1 = (RealType)products.A * ((RealType)1.0 - (RealType)products.omega_over_R1 / V1) * exp(-(RealType)products.R1 * V1) +
+                      (RealType)products.B * ((RealType)1.0 - (RealType)products.omega_over_R2 / V1) * exp(-(RealType)products.R2 * V1);
         RealType omega0 = fmax((RealType)1e-4, gruneisen);
         RealType omega1 = fmax((RealType)1e-4, (RealType)products.omega);
         RealType omega2 = fmax((RealType)1e-4, (RealType)unreacted.omega);
 
-        RealType S0 = (alpha0 > (RealType)1e-10) ? fmin((RealType)1.0, alpha0 / (RealType)0.01) : (RealType)0.0;
-        RealType S1 = (alpha1 > (RealType)1e-10) ? fmin((RealType)1.0, alpha1 / (RealType)0.01) : (RealType)0.0;
-        RealType S2 = (alpha2 > (RealType)1e-10) ? fmin((RealType)1.0, alpha2 / (RealType)0.01) : (RealType)0.0;
-
-        RealType term1 = (S1 > (RealType)0.0) ? (alpha1 / omega1) : (RealType)0.0;
-        RealType term2 = (S2 > (RealType)0.0) ? (alpha2 / omega2) : (RealType)0.0;
-        RealType sum_alpha_omega = S0 * (alpha0 / omega0) + S1 * term1 + S2 * term2;
-        if (sum_alpha_omega < (RealType)1e-6) sum_alpha_omega = (RealType)1e-6;
-
         RealType f0 = p_isen - gruneisen * rho0_mat * e_isen;
-        RealType sum_alpha_f_omega = alpha0 * S0 * f0 / omega0;
 
-        if (S1 > (RealType)0.0) {
-            RealType V1 = fmax((RealType)1.0, (RealType)products.rho0 / fmax((RealType)1e-6, rho1_mat));
-            RealType f1 = (RealType)products.A * ((RealType)1.0 - (RealType)products.omega_over_R1 / V1) * exp(-(RealType)products.R1 * V1) +
-                          (RealType)products.B * ((RealType)1.0 - (RealType)products.omega_over_R2 / V1) * exp(-(RealType)products.R2 * V1);
-            sum_alpha_f_omega += alpha1 * S1 * f1 / omega1;
-        }
+        RealType sum_alpha_omega = (alpha0 / omega0) + (alpha1 / omega1) + (alpha2 / omega2);
+        if (sum_alpha_omega < (RealType)1e-4) sum_alpha_omega = (RealType)1e-4;
 
-        if (S2 > (RealType)0.0) {
+        RealType sum_alpha_f_omega = alpha0 * f0 / omega0 + (alpha1 * f1 / omega1);
+        if (alpha2 > (RealType)1e-10) {
             RealType f2 = fmax((RealType)0.0, (RealType)unreacted.f2_const);
-            sum_alpha_f_omega += alpha2 * S2 * f2 / omega2;
+            sum_alpha_f_omega += alpha2 * f2 / omega2;
         }
 
         RealType p = (E_internal + sum_alpha_f_omega) / sum_alpha_omega;
@@ -364,14 +373,15 @@ __host__ __device__
         using std::fmax;
         using std::fmin;
         using std::exp;
-
         RealType alpha0 = (RealType)1.0 - alpha1 - alpha2;
         if (alpha0 < (RealType)0.0) alpha0 = (RealType)0.0;
 
-        RealType rho0_mat = (rho - arho1 - arho2) / fmax(alpha0, (RealType)1e-10);
-        rho0_mat = fmax((RealType)rho0_water, fmin((RealType)(1.40 * rho0_water), rho0_mat));
-        RealType rho1_mat = fmax((RealType)1e-6, arho1 / fmax(alpha1, (RealType)1e-10));
+        if (alpha0 < (RealType)1e-6) {
+            return getMixtureEnergy<RealType>(p, rho, alpha1, alpha2, arho1, arho2, (RealType)1.4, products, unreacted);
+        }
 
+        RealType raw_rho0 = (rho - arho1 - arho2) / fmax(alpha0, (RealType)1e-10);
+        RealType rho0_mat = fmax((RealType)1e-3, fmin((RealType)(5.0 * rho0_water), raw_rho0));
         RealType p_isen = Blast::TaitEOSWater::compute_pressure_isentropic<RealType>(rho0_mat, B, gamma_tait, rho0_water, p_cav, p0);
         RealType e_isen = Blast::TaitEOSWater::compute_energy_isentropic<RealType>(rho0_mat, B, gamma_tait, rho0_water);
 
@@ -380,32 +390,23 @@ __host__ __device__
             return fmax((RealType)0.0, rho * e);
         }
 
+        RealType rho1_mat = fmax((RealType)1e-6, arho1 / fmax(alpha1, (RealType)1e-10));
+        RealType V1 = fmax((RealType)1.0, (RealType)products.rho0 / fmax((RealType)1e-6, rho1_mat));
+        RealType f1 = (RealType)products.A * ((RealType)1.0 - (RealType)products.omega_over_R1 / V1) * exp(-(RealType)products.R1 * V1) +
+                      (RealType)products.B * ((RealType)1.0 - (RealType)products.omega_over_R2 / V1) * exp(-(RealType)products.R2 * V1);
         RealType omega0 = fmax((RealType)1e-4, gruneisen);
         RealType omega1 = fmax((RealType)1e-4, (RealType)products.omega);
         RealType omega2 = fmax((RealType)1e-4, (RealType)unreacted.omega);
 
-        RealType S0 = (alpha0 > (RealType)1e-10) ? fmin((RealType)1.0, alpha0 / (RealType)0.01) : (RealType)0.0;
-        RealType S1 = (alpha1 > (RealType)1e-10) ? fmin((RealType)1.0, alpha1 / (RealType)0.01) : (RealType)0.0;
-        RealType S2 = (alpha2 > (RealType)1e-10) ? fmin((RealType)1.0, alpha2 / (RealType)0.01) : (RealType)0.0;
-
-        RealType term1 = (S1 > (RealType)0.0) ? (alpha1 / omega1) : (RealType)0.0;
-        RealType term2 = (S2 > (RealType)0.0) ? (alpha2 / omega2) : (RealType)0.0;
-        RealType sum_alpha_omega = S0 * (alpha0 / omega0) + S1 * term1 + S2 * term2;
-        if (sum_alpha_omega < (RealType)1e-6) sum_alpha_omega = (RealType)1e-6;
-
         RealType f0 = p_isen - gruneisen * rho0_mat * e_isen;
-        RealType sum_alpha_f_omega = alpha0 * S0 * f0 / omega0;
 
-        if (S1 > (RealType)0.0) {
-            RealType V1 = fmax((RealType)1.0, (RealType)products.rho0 / fmax((RealType)1e-6, rho1_mat));
-            RealType f1 = (RealType)products.A * ((RealType)1.0 - (RealType)products.omega_over_R1 / V1) * exp(-(RealType)products.R1 * V1) +
-                          (RealType)products.B * ((RealType)1.0 - (RealType)products.omega_over_R2 / V1) * exp(-(RealType)products.R2 * V1);
-            sum_alpha_f_omega += alpha1 * S1 * f1 / omega1;
-        }
+        RealType sum_alpha_omega = (alpha0 / omega0) + (alpha1 / omega1) + (alpha2 / omega2);
+        if (sum_alpha_omega < (RealType)1e-4) sum_alpha_omega = (RealType)1e-4;
 
-        if (S2 > (RealType)0.0) {
+        RealType sum_alpha_f_omega = alpha0 * f0 / omega0 + (alpha1 * f1 / omega1);
+        if (alpha2 > (RealType)1e-10) {
             RealType f2 = fmax((RealType)0.0, (RealType)unreacted.f2_const);
-            sum_alpha_f_omega += alpha2 * S2 * f2 / omega2;
+            sum_alpha_f_omega += alpha2 * f2 / omega2;
         }
 
         RealType E_internal = p * sum_alpha_omega - sum_alpha_f_omega;
@@ -449,8 +450,12 @@ __host__ __device__
         RealType alpha0 = (RealType)1.0 - alpha1 - alpha2;
         if (alpha0 < (RealType)0.0) alpha0 = (RealType)0.0;
 
+        if (alpha0 < (RealType)1e-6) {
+            return getMixtureSoundSpeed<RealType>(p, rho, alpha1, alpha2, arho1, arho2, (RealType)1.4, products, unreacted);
+        }
+
         RealType rho0_mat = (rho - arho1 - arho2) / fmax(alpha0, (RealType)1e-10);
-        rho0_mat = fmax((RealType)rho0_water, fmin((RealType)(1.40 * rho0_water), rho0_mat));
+        rho0_mat = fmax((RealType)50.0, fmin((RealType)(1.40 * rho0_water), rho0_mat));
         RealType rho1_mat = fmax((RealType)1e-6, arho1 / fmax(alpha1, (RealType)1e-10));
 
         RealType p_isen = Blast::TaitEOSWater::compute_pressure_isentropic<RealType>(rho0_mat, B, gamma_tait, rho0_water, p_cav, p0);
@@ -539,9 +544,8 @@ __host__ __device__
         RealType S1 = (alpha1 > (RealType)1e-10) ? fmin((RealType)1.0, alpha1 / (RealType)0.01) : (RealType)0.0;
         RealType S2 = (alpha2 > (RealType)1e-10) ? fmin((RealType)1.0, alpha2 / (RealType)0.01) : (RealType)0.0;
 
-        RealType term1 = (S1 > (RealType)0.0) ? (alpha1 / omega1) : (RealType)0.0;
-        RealType term2 = (S2 > (RealType)0.0) ? (alpha2 / omega2) : (RealType)0.0;
-        RealType sum_alpha_omega = (alpha0 / omega0) + S1 * term1 + S2 * term2;
+        RealType sum_alpha_omega = (alpha0 / omega0) + (alpha1 / omega1) + (alpha2 / omega2);
+        if (sum_alpha_omega < (RealType)1e-4) sum_alpha_omega = (RealType)1e-4;
         RealType sum_alpha_f_omega = (RealType)0.0;
 
         if (S1 > (RealType)0.0) {
@@ -586,9 +590,8 @@ __host__ __device__
         RealType S1 = (alpha1 > (RealType)1e-10) ? fmin((RealType)1.0, alpha1 / (RealType)0.01) : (RealType)0.0;
         RealType S2 = (alpha2 > (RealType)1e-10) ? fmin((RealType)1.0, alpha2 / (RealType)0.01) : (RealType)0.0;
 
-        RealType term1 = (S1 > (RealType)0.0) ? (alpha1 / omega1) : (RealType)0.0;
-        RealType term2 = (S2 > (RealType)0.0) ? (alpha2 / omega2) : (RealType)0.0;
-        RealType sum_alpha_omega = (alpha0 / omega0) + S1 * term1 + S2 * term2;
+        RealType sum_alpha_omega = (alpha0 / omega0) + (alpha1 / omega1) + (alpha2 / omega2);
+        if (sum_alpha_omega < (RealType)1e-4) sum_alpha_omega = (RealType)1e-4;
         RealType sum_alpha_f_omega = (RealType)0.0;
 
         if (S1 > (RealType)0.0) {

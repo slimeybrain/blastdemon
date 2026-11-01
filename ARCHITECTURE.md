@@ -429,6 +429,16 @@ To prevent artificial clustering and numerical surface tension in failed particl
 
 MPM supports direct explosive detonation and shock-to-detonation transition (SDT) via the CREST reactive burn model ([constitutive_crest_davis.hpp](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/constitutive_crest_davis.hpp)). Connecting a `DetonatorLocation3D` node to `MPMDomain3D` provides point-source hot-spot ignition, seeding initial shock entropy (`s_shock >= 1.5 * s_threshold`), setting full reaction progress (`λ = 1.0`), and releasing chemical detonation energy (`e_int = q_det`).
 
+### 7.4 Numerical Stability, Realizability Limiters & Physics Integrity
+
+The 3D MPM solver enforces rigorous continuum realizability and thermodynamic stability constraints, comprehensively documented in [MPM_SOLVER_NOTES.md](file:///home/chris/antigrav/blastdemon/backend/BlastSolver/MPM_SOLVER_NOTES.md):
+- **Decoupled P2G Plastic Strain Accumulation:** Background grid nodal plastic strain buffers strictly exclude fluid and energetic pressure quantities, preventing cross-material yield surface corruption (`ep <= 50.0`).
+- **Pole-Free Mie-Grüneisen Shock Hugoniot:** The shock Hugoniot equation of state transitions smoothly to linear high-pressure bulk compressibility beyond `mu_max = 0.85 / (s - 1)`, eliminating vertical asymptotic poles under large axisymmetrical compression.
+- **Physical Solid Volume Bounds:** Solid particle volumes are constrained to physical shock limits (`0.25 * V0 <= V <= 3.0 * V0`, `J >= 0.25`), preventing unphysical density compaction.
+- **CFL-Bounded DEM Contact Impulses:** Pairwise discrete element contact impulses are constrained to `min(|v_rel|, 0.5 * (dx / dt))` to prevent artificial kinetic energy generation in multi-particle clusters.
+- **Unbiased APIC Momentum Gradients:** Affine velocity tensors (`B_p`) and velocity gradients (`L_p`) in G2P strictly omit inverse weight scaling, preserving exact momentum conservation and preventing boundary particle yielding.
+- **Eulerian-Lagrangian Plastic Strain Regularization:** Grid-smoothed plastic strain fields are transferred to particles during G2P via non-local relaxation (`0.75 * ep_bar + 0.25 * ep_smoothed`), eliminating discrete sub-cell particle jitter.
+
 ---
 
 ## 8. Lagrangian 3D Hexahedral Finite Element (FEM) Solver Library

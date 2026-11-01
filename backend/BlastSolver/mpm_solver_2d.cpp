@@ -17,6 +17,7 @@ void MPMSolver2D::initializeGrid(int nx, int ny, float dx, float dy) {
 
     m_grid.resize(m_nx * m_ny);
     m_particles.clear();
+    m_terminated = false;
 }
 
 float MPMSolver2D::evalGIMP_S(float x_p, float x_i, float h, float l_p) const {
@@ -589,14 +590,44 @@ void MPMSolver2D::updateGridKinematics(float dt) {
             node.v[0] = node.v_old[0] + dt * (total_fx / m_eff);
             node.v[1] = node.v_old[1] + dt * (total_fy / m_eff);
 
-            // Domain Boundary Conditions (No-Slip Sticky)
-            if (i == 0 || i == m_nx - 1) {
-                node.v[0] = 0.0f;
-                node.v_old[0] = 0.0f;
+            // Domain Boundary Conditions
+            if (i == 0) {
+                if (m_bc_x_min == MPMBoundaryCondition2D::Sticky) {
+                    node.v[0] = 0.0f; node.v[1] = 0.0f;
+                    node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
+                } else if (m_bc_x_min == MPMBoundaryCondition2D::FreeSlip ||
+                           m_bc_x_min == MPMBoundaryCondition2D::Reflecting) {
+                    if (node.v[0] < 0.0f) node.v[0] = 0.0f;
+                    if (node.v_old[0] < 0.0f) node.v_old[0] = 0.0f;
+                }
+            } else if (i == m_nx - 1) {
+                if (m_bc_x_max == MPMBoundaryCondition2D::Sticky) {
+                    node.v[0] = 0.0f; node.v[1] = 0.0f;
+                    node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
+                } else if (m_bc_x_max == MPMBoundaryCondition2D::FreeSlip ||
+                           m_bc_x_max == MPMBoundaryCondition2D::Reflecting) {
+                    if (node.v[0] > 0.0f) node.v[0] = 0.0f;
+                    if (node.v_old[0] > 0.0f) node.v_old[0] = 0.0f;
+                }
             }
-            if (j == 0 || j == m_ny - 1) {
-                node.v[1] = 0.0f;
-                node.v_old[1] = 0.0f;
+            if (j == 0) {
+                if (m_bc_y_min == MPMBoundaryCondition2D::Sticky) {
+                    node.v[0] = 0.0f; node.v[1] = 0.0f;
+                    node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
+                } else if (m_bc_y_min == MPMBoundaryCondition2D::FreeSlip ||
+                           m_bc_y_min == MPMBoundaryCondition2D::Reflecting) {
+                    if (node.v[1] < 0.0f) node.v[1] = 0.0f;
+                    if (node.v_old[1] < 0.0f) node.v_old[1] = 0.0f;
+                }
+            } else if (j == m_ny - 1) {
+                if (m_bc_y_max == MPMBoundaryCondition2D::Sticky) {
+                    node.v[0] = 0.0f; node.v[1] = 0.0f;
+                    node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
+                } else if (m_bc_y_max == MPMBoundaryCondition2D::FreeSlip ||
+                           m_bc_y_max == MPMBoundaryCondition2D::Reflecting) {
+                    if (node.v[1] > 0.0f) node.v[1] = 0.0f;
+                    if (node.v_old[1] > 0.0f) node.v_old[1] = 0.0f;
+                }
             }
         }
     }
@@ -616,8 +647,8 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
 
         float v_pic_x = 0.0f;
         float v_pic_y = 0.0f;
-        float v_flip_x = p.v[0];
-        float v_flip_y = p.v[1];
+        float delta_v_grid_x = 0.0f;
+        float delta_v_grid_y = 0.0f;
         float weight_sum = 0.0f;
 
         float B_new[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
@@ -715,8 +746,8 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                         if (node.m > 1.0e-14f) {
                             v_pic_x += weight * node.v[0];
                             v_pic_y += weight * node.v[1];
-                            v_flip_x += weight * (node.v[0] - node.v_old[0]);
-                            v_flip_y += weight * (node.v[1] - node.v_old[1]);
+                            delta_v_grid_x += weight * (node.v[0] - node.v_old[0]);
+                            delta_v_grid_y += weight * (node.v[1] - node.v_old[1]);
                             weight_sum += weight;
 
                             float dc_x = node_x - xc;
@@ -819,8 +850,8 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                     if (node.m > 1.0e-14f) {
                         v_pic_x += weight * node.v[0];
                         v_pic_y += weight * node.v[1];
-                        v_flip_x += weight * (node.v[0] - node.v_old[0]);
-                        v_flip_y += weight * (node.v[1] - node.v_old[1]);
+                        delta_v_grid_x += weight * (node.v[0] - node.v_old[0]);
+                        delta_v_grid_y += weight * (node.v[1] - node.v_old[1]);
                         weight_sum += weight;
 
                         float dist_x = node_x - p.x[0];
@@ -843,9 +874,17 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
             }
         }
 
+        float v_flip_x = p.v[0];
+        float v_flip_y = p.v[1];
         if (weight_sum <= 1.0e-7f) {
             v_pic_x = p.v[0];
             v_pic_y = p.v[1];
+        } else {
+            float inv_w = 1.0f / weight_sum;
+            v_pic_x *= inv_w;
+            v_pic_y *= inv_w;
+            v_flip_x = p.v[0] + delta_v_grid_x * inv_w;
+            v_flip_y = p.v[1] + delta_v_grid_y * inv_w;
         }
 
         float target_vx = v_pic_x;
@@ -878,26 +917,79 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
         p.x[0] += dt * p.v[0];
         p.x[1] += dt * p.v[1];
 
-        // Domain Boundary Clamping
+        // Domain Boundary Conditions at Physical Domain Limits
+        float phys_min_x = 0.0f;
+        float phys_max_x = static_cast<float>(m_nx) * m_dx;
+        float phys_min_y = 0.0f;
+        float phys_max_y = static_cast<float>(m_ny) * m_dy;
         float min_margin_x = 1.5f * m_dx;
         float max_margin_x = (static_cast<float>(m_nx) - 1.5f) * m_dx;
         float min_margin_y = 1.5f * m_dy;
         float max_margin_y = (static_cast<float>(m_ny) - 1.5f) * m_dy;
 
-        if (p.x[0] < min_margin_x) {
+        bool passed_out = false;
+        if (m_bc_x_min == MPMBoundaryCondition2D::Terminate) {
+            if (p.x[0] < phys_min_x) { m_terminated = true; passed_out = true; }
+        } else if (m_bc_x_min == MPMBoundaryCondition2D::Transmitting ||
+                   m_bc_x_min == MPMBoundaryCondition2D::LysmerDashpot) {
+            if (p.x[0] < phys_min_x) { passed_out = true; }
+        } else if (m_bc_x_min == MPMBoundaryCondition2D::Reflecting) {
+            if (p.x[0] < phys_min_x) {
+                p.x[0] = 2.0f * phys_min_x - p.x[0];
+                if (p.x[0] < phys_min_x) p.x[0] = phys_min_x;
+                p.v[0] = std::abs(p.v[0]);
+            }
+        } else if (p.x[0] < min_margin_x) {
             p.x[0] = min_margin_x;
             if (p.v[0] < 0.0f) p.v[0] = 0.0f;
             p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
+        }
+
+        if (m_bc_x_max == MPMBoundaryCondition2D::Terminate) {
+            if (p.x[0] > phys_max_x) { m_terminated = true; passed_out = true; }
+        } else if (m_bc_x_max == MPMBoundaryCondition2D::Transmitting ||
+                   m_bc_x_max == MPMBoundaryCondition2D::LysmerDashpot) {
+            if (p.x[0] > phys_max_x) { passed_out = true; }
+        } else if (m_bc_x_max == MPMBoundaryCondition2D::Reflecting) {
+            if (p.x[0] > phys_max_x) {
+                p.x[0] = 2.0f * phys_max_x - p.x[0];
+                if (p.x[0] > phys_max_x) p.x[0] = phys_max_x;
+                p.v[0] = -std::abs(p.v[0]);
+            }
         } else if (p.x[0] > max_margin_x) {
             p.x[0] = max_margin_x;
             if (p.v[0] > 0.0f) p.v[0] = 0.0f;
             p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
         }
 
-        if (p.x[1] < min_margin_y) {
+        if (m_bc_y_min == MPMBoundaryCondition2D::Terminate) {
+            if (p.x[1] < phys_min_y) { m_terminated = true; passed_out = true; }
+        } else if (m_bc_y_min == MPMBoundaryCondition2D::Transmitting ||
+                   m_bc_y_min == MPMBoundaryCondition2D::LysmerDashpot) {
+            if (p.x[1] < phys_min_y) { passed_out = true; }
+        } else if (m_bc_y_min == MPMBoundaryCondition2D::Reflecting) {
+            if (p.x[1] < phys_min_y) {
+                p.x[1] = 2.0f * phys_min_y - p.x[1];
+                if (p.x[1] < phys_min_y) p.x[1] = phys_min_y;
+                p.v[1] = std::abs(p.v[1]);
+            }
+        } else if (p.x[1] < min_margin_y) {
             p.x[1] = min_margin_y;
             if (p.v[1] < 0.0f) p.v[1] = 0.0f;
-            p.B[1][0] = 0.0f; p.B[1][0] = 0.0f;
+            p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
+        }
+
+        if (m_bc_y_max == MPMBoundaryCondition2D::Terminate) {
+            if (p.x[1] > phys_max_y) { m_terminated = true; passed_out = true; }
+        } else if (m_bc_y_max == MPMBoundaryCondition2D::Transmitting ||
+                   m_bc_y_max == MPMBoundaryCondition2D::LysmerDashpot) {
+            if (p.x[1] > phys_max_y) { passed_out = true; }
+        } else if (m_bc_y_max == MPMBoundaryCondition2D::Reflecting) {
+            if (p.x[1] > phys_max_y) {
+                p.x[1] = 2.0f * phys_max_y - p.x[1];
+                if (p.x[1] > phys_max_y) p.x[1] = phys_max_y;
+                p.v[1] = -std::abs(p.v[1]);
+            }
         } else if (p.x[1] > max_margin_y) {
             p.x[1] = max_margin_y;
             if (p.v[1] > 0.0f) p.v[1] = 0.0f;
@@ -905,7 +997,8 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
         }
 
         // Domain Boundary Escape Check
-        if (p.x[0] < 0.0f || p.x[0] >= static_cast<float>(m_nx) * m_dx ||
+        if (passed_out ||
+            p.x[0] < 0.0f || p.x[0] >= static_cast<float>(m_nx) * m_dx ||
             p.x[1] < 0.0f || p.x[1] >= static_cast<float>(m_ny) * m_dy) {
             p.m = 0.0f;
             p.v[0] = 0.0f; p.v[1] = 0.0f;
@@ -949,7 +1042,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
             p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
 
-            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+            p.V = std::max(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), 1.0e-4f * p.V0);
 
             // 1. Bulk Pressure from Volumetric Compression J = V / V0
             const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
@@ -1013,7 +1106,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
                 w_factor = p.weibull_factor;
             }
 
-            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+            p.V = std::max(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), 1.0e-4f * p.V0);
             const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             const float mu_vol = (1.0f - J) / J;
 
@@ -1146,8 +1239,8 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             p.material_model == MPMMaterialModel::JWLProgrammedBurn ||
             p.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
 
-            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.02f * p.V0, 50.0f * p.V0);
-            const float v_rel = std::clamp(p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f), 0.02f, 50.0f);
+            p.V = std::max(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), 1.0e-4f * p.V0);
+            const float v_rel = std::max(p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f), 0.02f);
             float lam_curr = p.lambda;
             float lam_new = lam_curr;
 
@@ -1157,20 +1250,18 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
                 float s_calc = CrestDavis::computeDavisShockEntropy(p.v_min, p.davis_c0, p.davis_s1, p.davis_gamma0, p.davis_cv, p.davis_t0, p.davis_rho0);
                 p.s_shock = std::max(p.s_shock, s_calc);
 
+                float q_heat_trial = (p.product_model == DetonationProductEOS::DavisProduct) ? p.davis_q_det : p.detonation_energy;
+                float e_th_trial = std::max(0.0f, p.e_int - lam_curr * q_heat_trial);
                 float p_curr_comp = -0.5f * (p.sigma[0][0] + p.sigma[1][1]);
                 float p_react_trial = (p.solid_model == SolidReactantEOS::DavisSolid)
-                    ? CrestDavis::computeDavisReactantPressure(v_rel, p.e_int, p.davis_c0, p.davis_s1, p.davis_gamma0, p.davis_cv, p.davis_t0, p.davis_rho0)
-                    : JWL::computeSolidReactantPressure(v_rel, p.e_int, p.mg_c0, p.mg_s, p.mg_gamma0, p.density);
-                float p_eff_comp = std::max(p_curr_comp, p_react_trial);
+                    ? CrestDavis::computeDavisReactantPressure(v_rel, e_th_trial, p.davis_c0, p.davis_s1, p.davis_gamma0, p.davis_cv, p.davis_t0, p.davis_rho0)
+                    : JWL::computeSolidReactantPressure(v_rel, e_th_trial, p.mg_c0, p.mg_s, p.mg_gamma0, p.density);
+                float p_eff_comp = (lam_curr <= 1.0e-5f) ? std::max(p_curr_comp, p_react_trial) : p_react_trial;
                 if (p_eff_comp > 1.0e6f) {
                     float s_p = CrestDavis::computeDavisShockEntropyFromPressure(p_eff_comp, p.davis_c0, p.davis_s1, p.davis_cv, p.davis_t0, p.davis_rho0);
                     p.s_shock = std::max(p.s_shock, s_p);
                 }
 
-                if (p.temperature > p.davis_t0) {
-                    float s_therm = p.davis_cv * std::log(p.temperature / p.davis_t0);
-                    p.s_shock = std::max(p.s_shock, s_therm);
-                }
 
                 lam_new = CrestDavis::advanceCRESTProgress(dt, p.s_shock, p.lambda, p.crest_b1, p.crest_c1, p.crest_m1, p.crest_b2, p.crest_c2, p.crest_c3, p.crest_m2, p.crest_s0, p.crest_s_threshold);
             } else if (p.burn_model == ReactionKinetics::LeeTarverODE) {
@@ -1193,21 +1284,24 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             p.lambda = lam_new;
             float d_lam = std::max(0.0f, lam_new - lam_curr);
 
+            float q_heat = (p.product_model == DetonationProductEOS::DavisProduct) ? p.davis_q_det : p.detonation_energy;
+            float e_th = p.e_int - lam_curr * q_heat;
+            float e_prod = e_th + q_heat;
+
             // Pillar 1: Solid Reactant EOS
             float p_solid = 0.0f;
             if (p.solid_model == SolidReactantEOS::DavisSolid) {
-                p_solid = CrestDavis::computeDavisReactantPressure(v_rel, p.e_int, p.davis_c0, p.davis_s1, p.davis_gamma0, p.davis_cv, p.davis_t0, p.davis_rho0);
+                p_solid = CrestDavis::computeDavisReactantPressure(v_rel, e_th, p.davis_c0, p.davis_s1, p.davis_gamma0, p.davis_cv, p.davis_t0, p.davis_rho0);
             } else {
-                p_solid = JWL::computeSolidReactantPressure(v_rel, p.e_int, p.mg_c0, p.mg_s, p.mg_gamma0, p.density);
+                p_solid = JWL::computeSolidReactantPressure(v_rel, e_th, p.mg_c0, p.mg_s, p.mg_gamma0, p.density);
             }
 
             // Pillar 3: Detonation Products EOS
             float p_prod = 0.0f;
-            float q_heat = (p.product_model == DetonationProductEOS::DavisProduct) ? p.davis_q_det : p.detonation_energy;
             if (p.product_model == DetonationProductEOS::DavisProduct) {
-                p_prod = CrestDavis::computeDavisProductPressure(v_rel, p.e_int + q_heat, p.davis_a, p.davis_b, p.davis_k, p.davis_vc, p.davis_pc, p.davis_q_det, p.davis_rho0);
+                p_prod = CrestDavis::computeDavisProductPressure(v_rel, e_prod, p.davis_a, p.davis_b, p.davis_k, p.davis_vc, p.davis_pc, p.davis_q_det, p.davis_rho0);
             } else {
-                p_prod = JWL::computeJWLProductPressure(v_rel, p.e_int + q_heat, p.jwl_A, p.jwl_B, p.jwl_R1, p.jwl_R2, p.jwl_omega, p.density);
+                p_prod = JWL::computeJWLProductPressure(v_rel, e_prod, p.jwl_A, p.jwl_B, p.jwl_R1, p.jwl_R2, p.jwl_omega, p.density);
             }
 
             // Two-phase pressure blend
@@ -1223,10 +1317,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             float cv_eff = (p.solid_model == SolidReactantEOS::DavisSolid) ? (p.davis_cv > 1.0f ? p.davis_cv : 1000.0f) : (p.Cp > 1.0f ? p.Cp : 1000.0f);
             float t0_eff = (p.solid_model == SolidReactantEOS::DavisSolid) ? p.davis_t0 : p.T_room;
             p.temperature = t0_eff + p.e_int / cv_eff;
-            if (p.burn_model == ReactionKinetics::CRESTEntropy && p.temperature > p.davis_t0) {
-                float s_therm = p.davis_cv * std::log(p.temperature / p.davis_t0);
-                p.s_shock = std::max(p.s_shock, s_therm);
-            }
+
 
             // Jaumann rotation
             float W_xy = 0.5f * (L[0][1] - L[1][0]);
@@ -1349,7 +1440,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
             p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
 
-            p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+            p.V = std::max(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), 1.0e-4f * p.V0);
 
             const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
             float p_comp = 0.0f;
@@ -1371,7 +1462,7 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
         p.sigma *= soft_factor;
 
         // Update Volume incrementally using det(F) = 1 + tr(deps)
-        p.V = std::clamp(p.V * (1.0f + tr_deps), 0.1f * p.V0, 10.0f * p.V0);
+        p.V = std::max(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), 1.0e-4f * p.V0);
 }
 
 void MPMSolver2D::updateStressState(float dt) {
@@ -1464,9 +1555,9 @@ void MPMSolver2D::step(float cfl) {
     if (m_particles.empty()) return;
     float dt = computeStepSize(cfl);
     if (m_step_count == 0) {
-        dt = std::min(dt, 1.0e-7f);
+        dt = 0.5f * dt;
     } else {
-        dt = std::min(dt, 1.3f * (m_last_dt > 0.0f ? m_last_dt : 1.0e-7f));
+        dt = std::min(dt, 1.5f * (m_last_dt > 0.0f ? m_last_dt : dt));
     }
     m_last_cfl = cfl;
     stepWithDt(dt);
