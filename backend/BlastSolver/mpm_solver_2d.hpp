@@ -388,6 +388,8 @@ private:
     void updateParticleStress(MPMParticle2D& p, float dt, const float L[2][2]);
 
     // Shape Functions & Radial Kernels
+    float evalLinear_S(float x_p, float x_i, float h) const;
+    float evalLinear_dS(float x_p, float x_i, float h) const;
     float evalGIMP_S(float x_p, float x_i, float h, float l_p) const;
     float evalGIMP_dS(float x_p, float x_i, float h, float l_p) const;
     float evalBSpline_S(float x_p, float x_i, float h) const;

@@ -20,6 +20,18 @@ void MPMSolver2D::initializeGrid(int nx, int ny, float dx, float dy) {
     m_terminated = false;
 }
 
+float MPMSolver2D::evalLinear_S(float x_p, float x_i, float h) const {
+    float q = std::abs(x_p - x_i) / h;
+    return (q < 1.0f) ? (1.0f - q) : 0.0f;
+}
+
+float MPMSolver2D::evalLinear_dS(float x_p, float x_i, float h) const {
+    float diff = x_p - x_i;
+    float r = std::abs(diff);
+    if (r >= h || r == 0.0f) return 0.0f;
+    return (diff > 0.0f) ? (-1.0f / h) : (1.0f / h);
+}
+
 float MPMSolver2D::evalGIMP_S(float x_p, float x_i, float h, float l_p) const {
     float r = std::abs(x_p - x_i);
     if (r >= h + l_p) return 0.0f;
@@ -454,12 +466,12 @@ void MPMSolver2D::particleToGrid() {
                 for (int offset = -1; offset <= 2; ++offset) {
                     int idx = offset + 1;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
-                    Sx_arr[idx] = std::max(0.0f, 1.0f - std::abs(p.x[0] - nx_val) / m_dx);
-                    dSx_arr[idx] = (p.x[0] >= nx_val ? -1.0f / m_dx : 1.0f / m_dx);
+                    Sx_arr[idx] = evalLinear_S(p.x[0], nx_val, m_dx);
+                    dSx_arr[idx] = evalLinear_dS(p.x[0], nx_val, m_dx);
 
                     float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
-                    Sy_arr[idx] = std::max(0.0f, 1.0f - std::abs(p.x[1] - ny_val) / m_dy);
-                    dSy_arr[idx] = (p.x[1] >= ny_val ? -1.0f / m_dy : 1.0f / m_dy);
+                    Sy_arr[idx] = evalLinear_S(p.x[1], ny_val, m_dy);
+                    dSy_arr[idx] = evalLinear_dS(p.x[1], ny_val, m_dy);
                 }
             }
 
@@ -770,10 +782,10 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                 }
             }
         } else {
-            float d_scale = (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline) ||
-                             eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) ? 4.0f : 3.0f;
+            float d_scale = (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) ? 4.0f : 3.0f;
             float D_inv_x = d_scale / (m_dx * m_dx);
             float D_inv_y = d_scale / (m_dy * m_dy);
+            const bool is_standard = (eff_scheme == static_cast<int>(MPMTransferScheme::Standard));
 
             float Sx_arr[4], dSx_arr[4], Sy_arr[4], dSy_arr[4];
             if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
@@ -813,12 +825,12 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                 for (int offset = -1; offset <= 2; ++offset) {
                     int idx = offset + 1;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
-                    Sx_arr[idx] = std::max(0.0f, 1.0f - std::abs(p.x[0] - nx_val) / m_dx);
-                    dSx_arr[idx] = (p.x[0] >= nx_val ? -1.0f / m_dx : 1.0f / m_dx);
+                    Sx_arr[idx] = evalLinear_S(p.x[0], nx_val, m_dx);
+                    dSx_arr[idx] = evalLinear_dS(p.x[0], nx_val, m_dx);
 
                     float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
-                    Sy_arr[idx] = std::max(0.0f, 1.0f - std::abs(p.x[1] - ny_val) / m_dy);
-                    dSy_arr[idx] = (p.x[1] >= ny_val ? -1.0f / m_dy : 1.0f / m_dy);
+                    Sy_arr[idx] = evalLinear_S(p.x[1], ny_val, m_dy);
+                    dSy_arr[idx] = evalLinear_dS(p.x[1], ny_val, m_dy);
                 }
             }
 
@@ -860,10 +872,13 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                         float diff_vx = node.v[0] - p.v[0];
                         float diff_vy = node.v[1] - p.v[1];
 
-                        B_new[0][0] += weight * diff_vx * dist_x * D_inv_x;
-                        B_new[0][1] += weight * diff_vx * dist_y * D_inv_y;
-                        B_new[1][0] += weight * diff_vy * dist_x * D_inv_x;
-                        B_new[1][1] += weight * diff_vy * dist_y * D_inv_y;
+                        float b_grad_x = is_standard ? dN_dx : (weight * dist_x * D_inv_x);
+                        float b_grad_y = is_standard ? dN_dy : (weight * dist_y * D_inv_y);
+
+                        B_new[0][0] += diff_vx * b_grad_x;
+                        B_new[0][1] += diff_vx * b_grad_y;
+                        B_new[1][0] += diff_vy * b_grad_x;
+                        B_new[1][1] += diff_vy * b_grad_y;
 
                         L_new[0][0] += diff_vx * dN_dx;
                         L_new[0][1] += diff_vx * dN_dy;

@@ -735,6 +735,9 @@ private:
     void updateParticleStress(MPMParticle3D& p, float dt, const float L[3][3], const MaterialTable3D& mat, float ep_smoothed = 0.0f);
 
     // Shape Function Evaluators (1D & 3D)
+    float evalLinear_S(float x_p, float x_i, float h) const;
+    float evalLinear_dS(float x_p, float x_i, float h) const;
+
     float evalGIMP_S(float x_p, float x_i, float h, float l_p) const;
     float evalGIMP_dS(float x_p, float x_i, float h, float l_p) const;
 

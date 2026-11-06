@@ -183,6 +183,18 @@ void MPMSolver3D::setBoundaryConditions(MPMBoundaryCondition3D x_min, MPMBoundar
     m_bc_z_min = z_min; m_bc_z_max = z_max;
 }
 
+float MPMSolver3D::evalLinear_S(float x_p, float x_i, float h) const {
+    float q = std::abs(x_p - x_i) / h;
+    return (q < 1.0f) ? (1.0f - q) : 0.0f;
+}
+
+float MPMSolver3D::evalLinear_dS(float x_p, float x_i, float h) const {
+    float diff = x_p - x_i;
+    float r = std::abs(diff);
+    if (r >= h || r == 0.0f) return 0.0f;
+    return (diff > 0.0f) ? (-1.0f / h) : (1.0f / h);
+}
+
 float MPMSolver3D::evalGIMP_S(float x_p, float x_i, float h, float l_p) const {
     float r = std::abs(x_p - x_i);
     if (r >= h + l_p) return 0.0f;
@@ -1529,16 +1541,16 @@ void MPMSolver3D::particleToGrid() {
                 for (int offset = -1; offset <= 2; ++offset) {
                     int idx = offset + 1;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
-                    Sx_arr[idx] = std::max(0.0f, 1.0f - std::abs(px - nx_val) / m_dx);
-                    dSx_arr[idx] = (px >= nx_val ? -1.0f / m_dx : 1.0f / m_dx);
+                    Sx_arr[idx] = evalLinear_S(px, nx_val, m_dx);
+                    dSx_arr[idx] = evalLinear_dS(px, nx_val, m_dx);
 
                     float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
-                    Sy_arr[idx] = std::max(0.0f, 1.0f - std::abs(py - ny_val) / m_dy);
-                    dSy_arr[idx] = (py >= ny_val ? -1.0f / m_dy : 1.0f / m_dy);
+                    Sy_arr[idx] = evalLinear_S(py, ny_val, m_dy);
+                    dSy_arr[idx] = evalLinear_dS(py, ny_val, m_dy);
 
                     float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * m_dz;
-                    Sz_arr[idx] = std::max(0.0f, 1.0f - std::abs(pz - nz_val) / m_dz);
-                    dSz_arr[idx] = (pz >= nz_val ? -1.0f / m_dz : 1.0f / m_dz);
+                    Sz_arr[idx] = evalLinear_S(pz, nz_val, m_dz);
+                    dSz_arr[idx] = evalLinear_dS(pz, nz_val, m_dz);
                 }
             }
 
@@ -2494,6 +2506,7 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
         float D_inv_x = d_scale / (m_dx * m_dx);
         float D_inv_y = d_scale / (m_dy * m_dy);
         float D_inv_z = d_scale / (m_dz * m_dz);
+        const bool is_standard = (eff_scheme == static_cast<int>(MPMTransferScheme::Standard));
 
         int min_offset = -1;
         int max_offset = 2;
@@ -2516,8 +2529,8 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
                 Sx_arr[idx] = evalCubicBSpline_S(px, nx, m_dx);
                 dSx_arr[idx] = Sx_arr[idx] * D_inv_x * (nx - px);
             } else {
-                Sx_arr[idx] = std::max(0.0f, 1.0f - std::abs(px - nx) / m_dx);
-                dSx_arr[idx] = (px >= nx ? -1.0f / m_dx : 1.0f / m_dx);
+                Sx_arr[idx] = evalLinear_S(px, nx, m_dx);
+                dSx_arr[idx] = evalLinear_dS(px, nx, m_dx);
             }
 
             float ny = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
@@ -2531,8 +2544,8 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
                 Sy_arr[idx] = evalCubicBSpline_S(py, ny, m_dy);
                 dSy_arr[idx] = Sy_arr[idx] * D_inv_y * (ny - py);
             } else {
-                Sy_arr[idx] = std::max(0.0f, 1.0f - std::abs(py - ny) / m_dy);
-                dSy_arr[idx] = (py >= ny ? -1.0f / m_dy : 1.0f / m_dy);
+                Sy_arr[idx] = evalLinear_S(py, ny, m_dy);
+                dSy_arr[idx] = evalLinear_dS(py, ny, m_dy);
             }
 
             float nz = (static_cast<float>(base_k + offset) + 0.5f) * m_dz;
@@ -2546,8 +2559,8 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
                 Sz_arr[idx] = evalCubicBSpline_S(pz, nz, m_dz);
                 dSz_arr[idx] = Sz_arr[idx] * D_inv_z * (nz - pz);
             } else {
-                Sz_arr[idx] = std::max(0.0f, 1.0f - std::abs(pz - nz) / m_dz);
-                dSz_arr[idx] = (pz >= nz ? -1.0f / m_dz : 1.0f / m_dz);
+                Sz_arr[idx] = evalLinear_S(pz, nz, m_dz);
+                dSz_arr[idx] = evalLinear_dS(pz, nz, m_dz);
             }
         }
 
@@ -2672,9 +2685,13 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
                             sum_wyz += weight * dist_y * dist_z;
                             sum_wzz += weight * dist_z * dist_z;
 
-                            sum_b_grad_x += w_grad * weight * dist_x * D_inv_x;
-                            sum_b_grad_y += w_grad * weight * dist_y * D_inv_y;
-                            sum_b_grad_z += w_grad * weight * dist_z * D_inv_z;
+                            float b_grad_x = is_standard ? dN_dx : (weight * dist_x * D_inv_x);
+                            float b_grad_y = is_standard ? dN_dy : (weight * dist_y * D_inv_y);
+                            float b_grad_z = is_standard ? dN_dz : (weight * dist_z * D_inv_z);
+
+                            sum_b_grad_x += w_grad * b_grad_x;
+                            sum_b_grad_y += w_grad * b_grad_y;
+                            sum_b_grad_z += w_grad * b_grad_z;
                             sum_l_grad_x += w_grad * dN_dx;
                             sum_l_grad_y += w_grad * dN_dy;
                             sum_l_grad_z += w_grad * dN_dz;
@@ -2701,17 +2718,17 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
                             A_mat[2][1] += w_apic * weight * rel_vz * dist_y;
                             A_mat[2][2] += w_apic * weight * rel_vz * dist_z;
 
-                            kin.B_new[0][0] += w_apic * weight * rel_vx * dist_x * D_inv_x;
-                            kin.B_new[0][1] += w_apic * weight * rel_vx * dist_y * D_inv_y;
-                            kin.B_new[0][2] += w_apic * weight * rel_vx * dist_z * D_inv_z;
+                            kin.B_new[0][0] += w_apic * rel_vx * b_grad_x;
+                            kin.B_new[0][1] += w_apic * rel_vx * b_grad_y;
+                            kin.B_new[0][2] += w_apic * rel_vx * b_grad_z;
 
-                            kin.B_new[1][0] += w_apic * weight * rel_vy * dist_x * D_inv_x;
-                            kin.B_new[1][1] += w_apic * weight * rel_vy * dist_y * D_inv_y;
-                            kin.B_new[1][2] += w_apic * weight * rel_vy * dist_z * D_inv_z;
+                            kin.B_new[1][0] += w_apic * rel_vy * b_grad_x;
+                            kin.B_new[1][1] += w_apic * rel_vy * b_grad_y;
+                            kin.B_new[1][2] += w_apic * rel_vy * b_grad_z;
 
-                            kin.B_new[2][0] += w_apic * weight * rel_vz * dist_x * D_inv_x;
-                            kin.B_new[2][1] += w_apic * weight * rel_vz * dist_y * D_inv_y;
-                            kin.B_new[2][2] += w_apic * weight * rel_vz * dist_z * D_inv_z;
+                            kin.B_new[2][0] += w_apic * rel_vz * b_grad_x;
+                            kin.B_new[2][1] += w_apic * rel_vz * b_grad_y;
+                            kin.B_new[2][2] += w_apic * rel_vz * b_grad_z;
 
                             kin.L_new[0][0] += w_grad * rel_vx * dN_dx;
                             kin.L_new[0][1] += w_grad * rel_vx * dN_dy;
@@ -2791,7 +2808,7 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
                                         std::abs(delta_x) > 1.0e-4f * m_dx ||
                                         std::abs(delta_y) > 1.0e-4f * m_dy ||
                                         std::abs(delta_z) > 1.0e-4f * m_dz);
-            if (is_boundary_stencil || eff_scheme == static_cast<int>(MPMTransferScheme::Standard) || eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
+            if (is_boundary_stencil || eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
                 float D00 = sum_wxx - weight_sum * delta_x * delta_x;
                 float D01 = sum_wxy - weight_sum * delta_x * delta_y;
                 float D02 = sum_wxz - weight_sum * delta_x * delta_z;
@@ -4959,7 +4976,7 @@ bool MPMSolver3D::interpolateGridVelocity(float x, float y, float z, float& vx, 
             } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
                 Sx_arr[idx] = evalCubicBSpline_S(px, nx, m_dx);
             } else {
-                Sx_arr[idx] = std::max(0.0f, 1.0f - std::abs(px - nx) / m_dx);
+                Sx_arr[idx] = evalLinear_S(px, nx, m_dx);
             }
 
             float ny = (static_cast<float>(base_j + offset) + 0.5f) * m_dy;
@@ -4970,7 +4987,7 @@ bool MPMSolver3D::interpolateGridVelocity(float x, float y, float z, float& vx, 
             } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
                 Sy_arr[idx] = evalCubicBSpline_S(py, ny, m_dy);
             } else {
-                Sy_arr[idx] = std::max(0.0f, 1.0f - std::abs(py - ny) / m_dy);
+                Sy_arr[idx] = evalLinear_S(py, ny, m_dy);
             }
 
             float nz = (static_cast<float>(base_k + offset) + 0.5f) * m_dz;
@@ -4981,7 +4998,7 @@ bool MPMSolver3D::interpolateGridVelocity(float x, float y, float z, float& vx, 
             } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
                 Sz_arr[idx] = evalCubicBSpline_S(pz, nz, m_dz);
             } else {
-                Sz_arr[idx] = std::max(0.0f, 1.0f - std::abs(pz - nz) / m_dz);
+                Sz_arr[idx] = evalLinear_S(pz, nz, m_dz);
             }
         }
 

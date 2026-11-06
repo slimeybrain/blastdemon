@@ -38,19 +38,19 @@
   <text x="627" y="408" text-anchor="middle" class="tick">16.4</text>
   <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
   <text x="765" y="408" text-anchor="middle" class="tick">20</text>
-  <path class="corridor-yellow" d="M 75 -5.18e+06 L 152 -5.18e+06 L 228 -5.18e+06 L 305 -5.18e+06 L 382 -5.18e+06 L 458 -5.18e+06 L 535 -5.18e+06 L 612 -5.18e+06 L 688 -5.18e+06 L 765 -5.18e+06 L 765 5.18e+06 L 688 5.18e+06 L 612 5.18e+06 L 535 5.18e+06 L 458 5.18e+06 L 382 5.18e+06 L 305 5.18e+06 L 228 5.18e+06 L 152 5.18e+06 L 75 5.18e+06 Z"/>
-  <path class="corridor-green" d="M 75 -1.04e+06 L 152 -1.04e+06 L 228 -1.04e+06 L 305 -1.04e+06 L 382 -1.04e+06 L 458 -1.04e+06 L 535 -1.04e+06 L 612 -1.04e+06 L 688 -1.04e+06 L 765 -1.04e+06 L 765 1.04e+06 L 688 1.04e+06 L 612 1.04e+06 L 535 1.04e+06 L 458 1.04e+06 L 382 1.04e+06 L 305 1.04e+06 L 228 1.04e+06 L 152 1.04e+06 L 75 1.04e+06 Z"/>
+  <path class="corridor-yellow" d="M 75 -5.17e+06 L 152 -5.17e+06 L 228 -5.17e+06 L 305 -5.17e+06 L 382 -5.17e+06 L 458 -5.17e+06 L 535 -5.17e+06 L 612 -5.17e+06 L 688 -5.17e+06 L 765 -5.17e+06 L 765 5.17e+06 L 688 5.17e+06 L 612 5.17e+06 L 535 5.17e+06 L 458 5.17e+06 L 382 5.17e+06 L 305 5.17e+06 L 228 5.17e+06 L 152 5.17e+06 L 75 5.17e+06 Z"/>
+  <path class="corridor-green" d="M 75 -1.03e+06 L 152 -1.03e+06 L 228 -1.03e+06 L 305 -1.03e+06 L 382 -1.03e+06 L 458 -1.03e+06 L 535 -1.03e+06 L 612 -1.03e+06 L 688 -1.03e+06 L 765 -1.03e+06 L 765 1.03e+06 L 688 1.03e+06 L 612 1.03e+06 L 535 1.03e+06 L 458 1.03e+06 L 382 1.03e+06 L 305 1.03e+06 L 228 1.03e+06 L 152 1.03e+06 L 75 1.03e+06 Z"/>
   <path class="exact-curve" d="M 75 362 L 152 362 L 228 362 L 305 362 L 382 362 L 458 362 L 535 362 L 612 362 L 688 362 L 765 362 "/>
-  <path class="num-curve" d="M 75 340 L 152 313 L 228 286 L 305 257 L 382 230 L 458 199 L 535 167 L 612 134 L 688 106 L 765 78.3 "/>
-  <circle cx="75" cy="340" r="3.5" fill="#f0883e"/>
-  <circle cx="152" cy="313" r="3.5" fill="#f0883e"/>
-  <circle cx="228" cy="286" r="3.5" fill="#f0883e"/>
-  <circle cx="305" cy="257" r="3.5" fill="#f0883e"/>
-  <circle cx="382" cy="230" r="3.5" fill="#f0883e"/>
-  <circle cx="458" cy="199" r="3.5" fill="#f0883e"/>
-  <circle cx="535" cy="167" r="3.5" fill="#f0883e"/>
-  <circle cx="612" cy="134" r="3.5" fill="#f0883e"/>
-  <circle cx="688" cy="106" r="3.5" fill="#f0883e"/>
+  <path class="num-curve" d="M 75 346 L 152 316 L 228 290 L 305 260 L 382 232 L 458 202 L 535 168 L 612 136 L 688 108 L 765 78.3 "/>
+  <circle cx="75" cy="346" r="3.5" fill="#f0883e"/>
+  <circle cx="152" cy="316" r="3.5" fill="#f0883e"/>
+  <circle cx="228" cy="290" r="3.5" fill="#f0883e"/>
+  <circle cx="305" cy="260" r="3.5" fill="#f0883e"/>
+  <circle cx="382" cy="232" r="3.5" fill="#f0883e"/>
+  <circle cx="458" cy="202" r="3.5" fill="#f0883e"/>
+  <circle cx="535" cy="168" r="3.5" fill="#f0883e"/>
+  <circle cx="612" cy="136" r="3.5" fill="#f0883e"/>
+  <circle cx="688" cy="108" r="3.5" fill="#f0883e"/>
   <circle cx="765" cy="78.3" r="3.5" fill="#f0883e"/>
   <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
   <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>

@@ -54,6 +54,19 @@ __device__ inline float computeWeibullFactor_dev(float x, float y, float z, floa
 }
 
 // CUDA Device Helper Functions
+__device__ inline float evalLinear_S_dev(float x_p, float x_i, float h) {
+    float r = fabsf(x_p - x_i);
+    if (r >= h) return 0.0f;
+    return 1.0f - (r / h);
+}
+
+__device__ inline float evalLinear_dS_dev(float x_p, float x_i, float h) {
+    float diff = x_p - x_i;
+    float r = fabsf(diff);
+    if (r >= h || r < 1.0e-12f) return 0.0f;
+    return (diff > 0.0f) ? (-1.0f / h) : (1.0f / h);
+}
+
 __device__ inline float evalGIMP_S_dev(float x_p, float x_i, float h, float l_p) {
     float r = fabsf(x_p - x_i);
     if (r >= h + l_p) return 0.0f;
@@ -1118,23 +1131,20 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                 dSz_arr[idx] = Sz_arr[idx] * D_inv_z_b * (nz_val - pz);
             }
         } else {
-            float inv_dx = 1.0f / dx;
-            float inv_dy = 1.0f / dy;
-            float inv_dz = 1.0f / dz;
             #pragma unroll
             for (int offset = -1; offset <= 2; ++offset) {
                 int idx = offset + 1;
                 float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * dx;
-                Sx_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(px - nx_val) * inv_dx);
-                dSx_arr[idx] = (px >= nx_val ? -inv_dx : inv_dx);
+                Sx_arr[idx] = evalLinear_S_dev(px, nx_val, dx);
+                dSx_arr[idx] = evalLinear_dS_dev(px, nx_val, dx);
 
                 float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
-                Sy_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(py - ny_val) * inv_dy);
-                dSy_arr[idx] = (py >= ny_val ? -inv_dy : inv_dy);
+                Sy_arr[idx] = evalLinear_S_dev(py, ny_val, dy);
+                dSy_arr[idx] = evalLinear_dS_dev(py, ny_val, dy);
 
                 float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
-                Sz_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(pz - nz_val) * inv_dz);
-                dSz_arr[idx] = (pz >= nz_val ? -inv_dz : inv_dz);
+                Sz_arr[idx] = evalLinear_S_dev(pz, nz_val, dz);
+                dSz_arr[idx] = evalLinear_dS_dev(pz, nz_val, dz);
             }
         }
 
@@ -2715,6 +2725,7 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
             }
         }
     } else {
+        const bool is_standard = (eff_transfer_scheme == 0);
         float d_scale = (eff_transfer_scheme == 2) ? 4.0f : 3.0f;
         float D_inv_x = d_scale / (dx * dx);
         float D_inv_y = d_scale / (dy * dy);
@@ -2758,16 +2769,16 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
             for (int offset = -1; offset <= 2; ++offset) {
                 int idx = offset + 1;
                 float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * dx;
-                Sx_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(px - nx_val) / dx);
-                dSx_arr[idx] = (px >= nx_val ? -1.0f / dx : 1.0f / dx);
+                Sx_arr[idx] = evalLinear_S_dev(px, nx_val, dx);
+                dSx_arr[idx] = evalLinear_dS_dev(px, nx_val, dx);
 
                 float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
-                Sy_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(py - ny_val) / dy);
-                dSy_arr[idx] = (py >= ny_val ? -1.0f / dy : 1.0f / dy);
+                Sy_arr[idx] = evalLinear_S_dev(py, ny_val, dy);
+                dSy_arr[idx] = evalLinear_dS_dev(py, ny_val, dy);
 
                 float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
-                Sz_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(pz - nz_val) / dz);
-                dSz_arr[idx] = (pz >= nz_val ? -1.0f / dz : 1.0f / dz);
+                Sz_arr[idx] = evalLinear_S_dev(pz, nz_val, dz);
+                dSz_arr[idx] = evalLinear_dS_dev(pz, nz_val, dz);
             }
         }
 
@@ -2899,9 +2910,15 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                         sum_wyz += weight * dist_y * dist_z;
                         sum_wzz += weight * dist_z * dist_z;
 
-                        sum_b_grad_x += w_grad * weight * dist_x * D_inv_x;
-                        sum_b_grad_y += w_grad * weight * dist_y * D_inv_y;
-                        sum_b_grad_z += w_grad * weight * dist_z * D_inv_z;
+                        // For Standard (linear tent), D_xx = xi*(1-xi)*dx^2 cancels identically in
+                        // B_p * D_p^{-1} = sum v_i * dN_i on interior 2x2x2 stencils, avoiding 0/0 near nodes.
+                        float b_grad_x = is_standard ? dN_dx : (weight * dist_x * D_inv_x);
+                        float b_grad_y = is_standard ? dN_dy : (weight * dist_y * D_inv_y);
+                        float b_grad_z = is_standard ? dN_dz : (weight * dist_z * D_inv_z);
+
+                        sum_b_grad_x += w_grad * b_grad_x;
+                        sum_b_grad_y += w_grad * b_grad_y;
+                        sum_b_grad_z += w_grad * b_grad_z;
                         sum_l_grad_x += w_grad * dN_dx;
                         sum_l_grad_y += w_grad * dN_dy;
                         sum_l_grad_z += w_grad * dN_dz;
@@ -2922,17 +2939,17 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                         A_mat[2][1] += weight * rel_vz * dist_y;
                         A_mat[2][2] += weight * rel_vz * dist_z;
 
-                        B_new[0][0] += weight * rel_vx * dist_x * D_inv_x;
-                        B_new[0][1] += weight * rel_vx * dist_y * D_inv_y;
-                        B_new[0][2] += weight * rel_vx * dist_z * D_inv_z;
+                        B_new[0][0] += rel_vx * b_grad_x;
+                        B_new[0][1] += rel_vx * b_grad_y;
+                        B_new[0][2] += rel_vx * b_grad_z;
 
-                        B_new[1][0] += weight * rel_vy * dist_x * D_inv_x;
-                        B_new[1][1] += weight * rel_vy * dist_y * D_inv_y;
-                        B_new[1][2] += weight * rel_vy * dist_z * D_inv_z;
+                        B_new[1][0] += rel_vy * b_grad_x;
+                        B_new[1][1] += rel_vy * b_grad_y;
+                        B_new[1][2] += rel_vy * b_grad_z;
 
-                        B_new[2][0] += weight * rel_vz * dist_x * D_inv_x;
-                        B_new[2][1] += weight * rel_vz * dist_y * D_inv_y;
-                        B_new[2][2] += weight * rel_vz * dist_z * D_inv_z;
+                        B_new[2][0] += rel_vz * b_grad_x;
+                        B_new[2][1] += rel_vz * b_grad_y;
+                        B_new[2][2] += rel_vz * b_grad_z;
 
                         L_new[0][0] += rel_vx * dN_dx;
                         L_new[0][1] += rel_vx * dN_dy;
@@ -3005,12 +3022,13 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
             }
 
             // Detect boundary stencil truncation where centroid is offset from particle position,
-            // or transfer schemes (Standard trilinear / GIMP) where D is non-constant across cell.
+            // or GIMP transfer scheme where D is non-constant across cell.
+            // Note: Standard trilinear already evaluates exact B_new = L_new = sum v_i * dN_i on interior 2x2x2 stencils.
             bool is_boundary_stencil = (weight_sum < 0.999f ||
                                         fabsf(delta_x) > 1.0e-4f * dx ||
                                         fabsf(delta_y) > 1.0e-4f * dy ||
                                         fabsf(delta_z) > 1.0e-4f * dz);
-            if (is_boundary_stencil || eff_transfer_scheme == 0 || eff_transfer_scheme == 1) {
+            if (is_boundary_stencil || eff_transfer_scheme == 1) {
                 float D00 = sum_wxx - weight_sum * delta_x * delta_x;
                 float D01 = sum_wxy - weight_sum * delta_x * delta_y;
                 float D02 = sum_wxz - weight_sum * delta_x * delta_z;
@@ -4515,7 +4533,7 @@ __global__ void kernel_sample_grid_velocity_single(
             } else if (transfer_scheme == 4) { // CubicBSpline
                 Sx_arr[idx] = evalCubicBSpline_S_dev(px, nx_val, dx);
             } else { // Standard (Linear)
-                Sx_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(px - nx_val) / dx);
+                Sx_arr[idx] = evalLinear_S_dev(px, nx_val, dx);
             }
 
             float ny_val = (static_cast<float>(base_j + offset) + 0.5f) * dy;
@@ -4526,7 +4544,7 @@ __global__ void kernel_sample_grid_velocity_single(
             } else if (transfer_scheme == 4) {
                 Sy_arr[idx] = evalCubicBSpline_S_dev(py, ny_val, dy);
             } else {
-                Sy_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(py - ny_val) / dy);
+                Sy_arr[idx] = evalLinear_S_dev(py, ny_val, dy);
             }
 
             float nz_val = (static_cast<float>(base_k + offset) + 0.5f) * dz;
@@ -4537,7 +4555,7 @@ __global__ void kernel_sample_grid_velocity_single(
             } else if (transfer_scheme == 4) {
                 Sz_arr[idx] = evalCubicBSpline_S_dev(pz, nz_val, dz);
             } else {
-                Sz_arr[idx] = fmaxf(0.0f, 1.0f - fabsf(pz - nz_val) / dz);
+                Sz_arr[idx] = evalLinear_S_dev(pz, nz_val, dz);
             }
         }
 
@@ -6095,9 +6113,9 @@ __device__ inline void zonal_ghost_scatter_force(
             Sy[a] = evalGIMP_S_dev(py, yi, dy, lp); dSy[a] = evalGIMP_dS_dev(py, yi, dy, lp);
             Sz[a] = evalGIMP_S_dev(pz, zi, dz, lp); dSz[a] = evalGIMP_dS_dev(pz, zi, dz, lp);
         } else {
-            Sx[a] = fmaxf(0.0f, 1.0f - fabsf(px - xi) / dx); dSx[a] = (px >= xi ? -1.0f / dx : 1.0f / dx);
-            Sy[a] = fmaxf(0.0f, 1.0f - fabsf(py - yi) / dy); dSy[a] = (py >= yi ? -1.0f / dy : 1.0f / dy);
-            Sz[a] = fmaxf(0.0f, 1.0f - fabsf(pz - zi) / dz); dSz[a] = (pz >= zi ? -1.0f / dz : 1.0f / dz);
+            Sx[a] = evalLinear_S_dev(px, xi, dx); dSx[a] = evalLinear_dS_dev(px, xi, dx);
+            Sy[a] = evalLinear_S_dev(py, yi, dy); dSy[a] = evalLinear_dS_dev(py, yi, dy);
+            Sz[a] = evalLinear_S_dev(pz, zi, dz); dSz[a] = evalLinear_dS_dev(pz, zi, dz);
         }
     }
     for (int oi = o_lo; oi <= o_hi; ++oi) {

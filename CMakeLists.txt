@@ -59,6 +59,10 @@ set_target_properties(Broker PROPERTIES CXX_STANDARD 17)
 # Core Solver Library — 1D, 2D, and 3D CPU + CUDA solver components compiled once
 add_library(BlastSolverCore STATIC
     backend/BlastSolver/PrimitiveGeometryParser.cpp
+    backend/BlastSolver/services/SolverState.cpp
+    backend/BlastSolver/services/GaugeService.cpp
+    backend/BlastSolver/services/VTKService.cpp
+    backend/BlastSolver/services/TelemetryService.cpp
     backend/BlastSolver/system_memory_guard.cpp
     backend/BlastSolver/cfd_solver.cpp
     backend/BlastSolver/cfd_solver_init.cpp
@@ -114,6 +118,7 @@ add_library(BlastSolverCore STATIC
 target_include_directories(BlastSolverCore PUBLIC
     backend/BlastSolver
     backend/BlastSolver/include
+    backend/BlastSolver/services
     backend/BlastSolver/coupling
     backend/BlastSolver/ipc
     backend/BlastSolver/dispatch
