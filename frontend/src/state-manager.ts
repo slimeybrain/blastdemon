@@ -1486,6 +1486,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         qty_mpm_pressure: true,
         qty_mpm_material_id: true,
         qty_mpm_object_id: true,
+        qty_mpm_particle_density: true,
         qty_mpm_temp: true,
         qty_mpm_vel: true,
         roi_enabled: false,
@@ -1744,6 +1745,10 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         flip_blend: 0.95,
         smooth_plastic_strain: true,
         contact_method: 'Single-Velocity',
+        bardenhagen_grouping_policy: 'Per-Object Independent',
+        enable_impact_welding: false,
+        enable_frictional_heating: false,
+        enable_thermal_conduction: false,
         enable_dem_contact: false,
         dem_contact_mode: 'Gas-Solid Only',
         dem_velocity_threshold: 1.0,
@@ -1773,6 +1778,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     },
     'MPMObject3D': {
         material: '',
+        velocity_group: 'Independent (Auto)',
         shape_type: 'Box',
         particle_distribution: 'Cartesian',
         boundary_filling: 'Stairstepped',
@@ -1790,6 +1796,12 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         visible: true,
         hidden: false
     },
+    'MPMContactCoupler3D': {
+        name: 'Bardenhagen Coupler',
+        target_domain: '',
+        coupler_mode: 'Bonded (Single-Velocity)',
+        coupler_group_tag: 'Bonded Group A'
+    },
     'FSICoupler2D': {
         cfl: 0.6,
         endtime: 1.0
@@ -1802,6 +1814,9 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         device: 'cpu',
         precision: 'single',
         rebar_formulation: 'TimoshenkoBeam3D',
+        merge_coincident_nodes: false,
+        node_merge_tolerance: 1.0e-4,
+        embedded_rebar_coupling: true,
         failure_strain: 0.20,
         tensile_failure_stress: 400.0e6,
         timestep_erosion_factor: 0.10,
@@ -1857,6 +1872,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'LSDynaImporter3D': {
         k_file: '',
         scale_factor: 1.0,
+        pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+        rot_x: 0.0, rot_y: 0.0, rot_z: 0.0,
         visible: true,
         hidden: false
     },
@@ -1962,6 +1979,8 @@ export class StateManager {
     private sliceSelectionListeners: ((sliceIdx: number | null) => void)[] = [];
     public selectedGaugeIndex: number | null = null;
     private gaugeSelectionListeners: ((gaugeIdx: number | null) => void)[] = [];
+    public selectedFEMEntity: { type: 'part' | 'set' | 'bc' | 'contact'; id: number | string } | null = null;
+    private femEntitySelectionListeners: ((entity: { type: 'part' | 'set' | 'bc' | 'contact'; id: number | string } | null) => void)[] = [];
     public hoveredNodeId: string | null = null;
     public hoveredSliceIndex: number | null = null;
     private hoverListeners: ((nodeId: string | null, sliceIdx: number | null) => void)[] = [];
@@ -2988,6 +3007,7 @@ export class StateManager {
             'Obstacle3D': 'node-obstacle3d',
             'LSDynaImporter3D': 'node-lsdyna-importer3d',
             'FEMFSICoupler3D': 'node-fem-fsi-coupler3d',
+            'MPMContactCoupler3D': 'node-mpm-contact3d',
             'MarineHarbourDomain': 'node-marine-harbour'
         };
         const prefix = prefixMap[type] || `node-${type.toLowerCase()}`;
@@ -3696,6 +3716,7 @@ export class StateManager {
             this.selectedNodeId = nodeId;
             this.setSelectedSliceIndex(null);
             this.setSelectedGaugeIndex(null);
+            this.setSelectedFEMEntity(null);
             if (nodeId) {
                 const allModels = this.getWorkspaceModels();
                 const owningModel = allModels.find(m => m.nodes.some(n => n.id === nodeId));
@@ -3728,6 +3749,28 @@ export class StateManager {
 
     offGaugeSelectionChange(listener: (gaugeIdx: number | null) => void): void {
         this.gaugeSelectionListeners = this.gaugeSelectionListeners.filter(l => l !== listener);
+    }
+
+    setSelectedFEMEntity(entity: { type: 'part' | 'set' | 'bc' | 'contact'; id: number | string } | null): void {
+        const same = (this.selectedFEMEntity === null && entity === null) ||
+            (this.selectedFEMEntity !== null && entity !== null &&
+             this.selectedFEMEntity.type === entity.type && this.selectedFEMEntity.id === entity.id);
+        if (!same) {
+            this.selectedFEMEntity = entity ? { ...entity } : null;
+            this.femEntitySelectionListeners.forEach(l => l(this.selectedFEMEntity));
+        }
+    }
+
+    getSelectedFEMEntity(): { type: 'part' | 'set' | 'bc' | 'contact'; id: number | string } | null {
+        return this.selectedFEMEntity;
+    }
+
+    onFEMEntitySelectionChange(listener: (entity: { type: 'part' | 'set' | 'bc' | 'contact'; id: number | string } | null) => void): void {
+        this.femEntitySelectionListeners.push(listener);
+    }
+
+    offFEMEntitySelectionChange(listener: (entity: { type: 'part' | 'set' | 'bc' | 'contact'; id: number | string } | null) => void): void {
+        this.femEntitySelectionListeners = this.femEntitySelectionListeners.filter(l => l !== listener);
     }
 
     getSelectedNodeId(): string | null {
@@ -3865,6 +3908,12 @@ export class StateManager {
     }
 
     public setBinaryTelemetry(nodeId: string, buffer: ArrayBuffer, modelId?: string): void {
+        if (buffer.byteLength >= 4) {
+            const magic = new DataView(buffer).getUint32(0, true);
+            if (magic === 0x4d504d33 || magic === 0x50545033 || magic === 0x43494c53) {
+                return;
+            }
+        }
         this.telemetryStore.set(nodeId + "-binary", buffer);
         this.telemetryStore.set(nodeId, buffer);
         if (modelId) {
@@ -4330,6 +4379,13 @@ export class StateManager {
                 log.push(this.formatTelemetry(data, modelId));
                 if (log.length > 100) log.shift();
                 telemetryToStore = log;
+            }
+        }
+
+        if (data instanceof ArrayBuffer && data.byteLength >= 4) {
+            const magic = new DataView(data).getUint32(0, true);
+            if (magic === 0x4d504d33 || magic === 0x50545033 || magic === 0x43494c53) {
+                return;
             }
         }
 
@@ -6166,9 +6222,10 @@ export class StateManager {
             case 'Charge3D': return [{ id: 'material', label: 'Material' }];
             case 'Telemetry3DViewport': return [{ id: 'in', label: 'Data Stream' }];
             case 'MPMDomain2D': return [{ id: 'mesh', label: 'Grid' }, { id: 'detonator', label: 'Detonator' }, { id: 'objects', label: 'MPM Objects' }];
-            case 'MPMDomain3D': return [{ id: 'mesh', label: 'Grid' }, { id: 'detonator', label: 'Detonator' }, { id: 'objects', label: 'MPM Objects' }];
+            case 'MPMDomain3D': return [{ id: 'mesh', label: 'Grid' }, { id: 'detonator', label: 'Detonator' }, { id: 'objects', label: 'MPM Objects' }, { id: 'couplers', label: 'Contact Couplers' }];
             case 'MPMObject2D': return [{ id: 'material', label: 'Material' }];
             case 'MPMObject3D': return [{ id: 'material', label: 'Material' }, { id: 'stl', label: 'STL Geometry' }];
+            case 'MPMContactCoupler3D': return [{ id: 'objects', label: 'MPM Objects (Bonded)' }];
             case 'FSICoupler2D': return [{ id: 'cfd', label: 'CFD Solver' }, { id: 'mpm', label: 'MPM Solver' }];
             case 'FSICoupler3D': return [{ id: 'cfd', label: 'CFD Solver 3D' }, { id: 'mpm', label: 'MPM Solver 3D' }];
             case 'FEMDomain3D': return [{ id: 'mesh', label: 'Structural Mesh / Parts' }, { id: 'material', label: 'Material' }, { id: 'detonator', label: 'Detonator' }];
@@ -6216,6 +6273,7 @@ export class StateManager {
             case 'MPMDomain3D': return [{ id: 'telemetry', label: 'Telemetry' }, { id: 'mpm_out', label: 'MPM State' }];
             case 'MPMObject2D':
             case 'MPMObject3D': return [{ id: 'out', label: 'Object Spec' }];
+            case 'MPMContactCoupler3D': return [{ id: 'out', label: 'Coupled Group Spec' }];
             case 'FSICoupler2D':
             case 'FSICoupler3D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'FEMDomain3D': return [{ id: 'telemetry', label: 'Telemetry' }, { id: 'fem_out', label: 'FEM State' }];
@@ -8008,6 +8066,33 @@ export function getCouplerDisplayHTML(node: Node, state?: SimulationState): stri
                `<div>Eulerian CFD Solver: ${cfdLabel} (${counts.fluidCells.toLocaleString()} cells)</div>` +
                `<div>Lagrangian MPM Domain: ${mpmLabel} (${counts.solidParticles.toLocaleString()} MPM particles)</div>` +
                `</div>`;
+    } else if (node.type === 'MPMContactCoupler3D') {
+        const mode = node.parameters?.['coupler_mode'] || 'Bonded (Single-Velocity)';
+        const groupTag = node.parameters?.['coupler_group_tag'] || 'Bonded Group A';
+        const isBonded = !mode.includes('Independent');
+        const domConn = state?.connections.find(c => c.fromNode === node.id && (c.toPort === 'couplers' || c.toPort === 'objects'));
+        const domId = domConn?.toNode || node.parameters?.['target_domain'] || '';
+        const domNode = domId ? state?.nodes.find(n => n.id === domId) : state?.nodes.find(n => n.type === 'MPMDomain3D');
+        const domLabel = domNode
+            ? `<b style="color: #c084fc;">${(domNode as any).name || domNode.parameters?.name || domNode.type} [${domNode.id.substring(0, 8)}]</b>`
+            : `<span style="color: #f87171;">⚠️ Unwired</span>`;
+
+        const wiredObjConns = (state?.connections || []).filter(c => c.toNode === node.id && (c.toPort === 'objects' || !c.toPort));
+        const wiredObjs = wiredObjConns.map(c => state?.nodes.find(n => n.id === c.fromNode)).filter(Boolean) as Node[];
+        const tagMatchedObjs = isBonded
+            ? (state?.nodes || []).filter(n => n.type === 'MPMObject3D' && n.parameters?.['velocity_group'] === groupTag && !wiredObjs.some(w => w.id === n.id))
+            : [];
+        const allObjs = [...wiredObjs, ...tagMatchedObjs];
+        const objListStr = allObjs.length > 0
+            ? allObjs.map(o => `<b style="color:#e9d5ff;">${(o as any).name || o.parameters?.name || o.id.substring(0, 6)}</b>`).join(', ')
+            : `<span style="color:#fbbf24;">No parts assigned yet (Connect MPMObject3D or set Velocity Group)</span>`;
+
+        return `<div style="background: rgba(192, 132, 252, 0.08); border: 1px solid #c084fc; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
+               `<div style="color: #c084fc; font-weight: bold; margin-bottom: 3px;">🔗 Bardenhagen Velocity Field Coupler</div>` +
+               `<div>Target MPM Domain: ${domLabel}</div>` +
+               `<div>Kinematics Mode: <b style="color: ${isBonded ? '#4ade80' : '#38bdf8'};">${mode}</b>${isBonded ? ` · Tag: <b>${groupTag}</b>` : ''}</div>` +
+               `<div>Coupled Parts (${allObjs.length}): ${objListStr}</div>` +
+               `</div>`;
     }
     return '';
 }
@@ -8208,7 +8293,7 @@ export function getEntityStatsHTML(node: Node, state?: SimulationState): string 
     if (node.type === 'STLGeometry' || node.type === 'PrimitiveGeometry3D') {
         return getGeometryDisplayHTML(node, state);
     }
-    if (node.type === 'FEMFSICoupler3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D') {
+    if (node.type === 'FEMFSICoupler3D' || node.type === 'FSICoupler2D' || node.type === 'FSICoupler3D' || node.type === 'MPMContactCoupler3D') {
         return getCouplerDisplayHTML(node, state);
     }
     if (node.type === 'VirtualGauges' || node.type === 'VTKOutput' || node.type === 'Telemetry3DViewport' || node.type === 'TelemetryText') {

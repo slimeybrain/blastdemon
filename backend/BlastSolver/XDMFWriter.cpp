@@ -93,6 +93,7 @@ static void writeMPMGridBlock(std::ostream& xmf, const std::string& relH5Filenam
     if (snap.has_temp && !snap.temp.empty()) writeFloatAttr("Temperature", "/Temperature", 1);
     if (snap.has_object_id && !snap.obj_id.empty()) writeUInt8Attr("ObjectID", "/ObjectID");
     if (snap.has_material_id && !snap.material_id.empty()) writeUInt8Attr("Material_ID", "/Material_ID");
+    if (snap.has_particle_density && !snap.particle_density.empty()) writeUInt8Attr("Particle_Density", "/Particle_Density");
 
     xmf << "      </Grid>\n";
 }

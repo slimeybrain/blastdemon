@@ -1,4 +1,4 @@
-import { STAGE_THEMES, type Node, type PanelType, type StageThemeId } from './types.js';
+import { STAGE_THEMES, type Node, type Model, type PanelType, type StageThemeId } from './types.js';
 import { StateManager, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, resolveResourcePath, getSliceAxisLabel, getLSDynaDeckMeta } from './state-manager.js';
 
 function getFocusedQuantityAndRange(vpNode: any): { quantity: string, min: number, max: number } {
@@ -62,6 +62,8 @@ export class Telemetry3DViewport {
     private openListener: (() => void) | null = null;
     private currentSTLPath: string | null = null;
     private currentGeometryHash: string | null = null;
+    private cachedSTLs: Map<string, { vertices: Float32Array | null, flags?: Float32Array | null }> = new Map();
+    private stlGeometryHashes: Map<string, string> = new Map();
     private lastTelemetryGridKey: string = '';
     private debugOverlay: HTMLElement | null = null;
     private hasTelemetryGrid = false;
@@ -117,6 +119,9 @@ export class Telemetry3DViewport {
         if (!data || Object.keys(data).length === 0) return;
         if (!this.pendingWorkerConfig) {
             this.pendingWorkerConfig = { ...data };
+            if (data.stlTransforms && data.stlTransforms.length > 0) {
+                delete this.pendingWorkerConfig.stlTransform;
+            }
             queueMicrotask(() => {
                 const payload = this.pendingWorkerConfig;
                 this.pendingWorkerConfig = null;
@@ -126,6 +131,9 @@ export class Telemetry3DViewport {
             });
         } else {
             Object.assign(this.pendingWorkerConfig, data);
+            if (data.stlTransforms && data.stlTransforms.length > 0) {
+                delete this.pendingWorkerConfig.stlTransform;
+            }
         }
     }
 
@@ -198,7 +206,8 @@ export class Telemetry3DViewport {
                 const workerData: any = {};
                 const p = parameters;
 
-                if (p.showMPMParticles !== undefined) workerData.showMPMParticles = p.showMPMParticles;
+                if (isVpNode) {
+                    if (p.showMPMParticles !== undefined) workerData.showMPMParticles = p.showMPMParticles;
                 if (p.showPhaseParticles !== undefined) workerData.showPhaseParticles = p.showPhaseParticles;
                 if (p.phaseParticleRenderMode !== undefined) workerData.phaseParticleRenderMode = p.phaseParticleRenderMode;
                 if (p.phaseParticleDiameter !== undefined) workerData.phaseParticleDiameter = Number(p.phaseParticleDiameter);
@@ -360,6 +369,7 @@ export class Telemetry3DViewport {
                 if (p.quantity_auto_scales !== undefined || p.quantityAutoScales !== undefined) workerData.quantityAutoScales = p.quantity_auto_scales ?? p.quantityAutoScales;
                 if (p.quantity_log_scales !== undefined || p.quantityLogScales !== undefined) workerData.quantityLogScales = p.quantity_log_scales ?? p.quantityLogScales;
                 if (p.quantity_colormaps !== undefined || p.quantityColormaps !== undefined) workerData.quantityColormaps = p.quantity_colormaps ?? p.quantityColormaps;
+                }
 
                 // Check for charge or MPM geometry updates
                 const changedNode = targetModel?.nodes.find((n: any) => n.id === nodeId);
@@ -382,13 +392,14 @@ export class Telemetry3DViewport {
                         if (targetModel?.nodes.some((n: any) => n.type === 'MarineHarbourDomain')) {
                             workerData.mpmObjects = this.getDiscoveredMPMObjects(targetModel);
                         }
-                    } else if (['MPMObject3D', 'MPMObject2D', 'MarineHarbourDomain'].includes(changedNode.type)) {
+                    } else if (['MPMObject3D', 'MPMObject2D', 'MPMDomain3D', 'MPMDomain2D', 'MarineHarbourDomain'].includes(changedNode.type)) {
                         workerData.mpmObjects = this.getDiscoveredMPMObjects(targetModel);
-                        const geomNode = this.getGeometryNode();
+                        const geomNode = (changedNode.parameters?.stl_file || changedNode.parameters?.file_path) ? changedNode : this.getGeometryNode(changedNode.id);
                         if (geomNode) {
+                            const isGeomVis = geomNode.parameters.visible !== false && !geomNode.parameters.hidden && geomNode.parameters.show_stl !== false;
                             workerData.stlTransform = {
                                 node_id: geomNode.id,
-                                stl_file: geomNode.parameters.stl_file || '',
+                                stl_file: geomNode.parameters.stl_file || geomNode.parameters.file_path || '',
                                 origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
                                 scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
                                 scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
@@ -399,15 +410,15 @@ export class Telemetry3DViewport {
                                 rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
                                 rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
                                 rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
-                                visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden,
-                                hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false
+                                visible: isGeomVis,
+                                hidden: !isGeomVis
                             };
                         }
                         if (changedNode.type === 'MarineHarbourDomain' && !isMarineHarbourMPMActive(changedNode)) {
                             this.worker.postMessage({ type: 'clearMPM' });
                             workerData.showMPMParticles = false;
                         }
-                    } else if (['FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D'].includes(changedNode.type)) {
+                    } else if (['FEMObject3D', 'LSDynaImporter3D', 'FEMDomain3D', 'FEMBeam3D', 'FEMRebar3D', 'StructuralObject3D'].includes(changedNode.type)) {
                         const discovered = this.getDiscoveredFEMParts();
                         workerData.femObjects = discovered.map(p => ({
                             id: p.id,
@@ -444,10 +455,31 @@ export class Telemetry3DViewport {
                             is_line: p.isLine,
                             bounds: p.bounds
                         }));
-                    } else if (changedNode.type === 'STLGeometry') {
+                        const geomNode = (changedNode.parameters?.stl_file || changedNode.parameters?.file_path) ? changedNode : this.getGeometryNode(changedNode.id);
+                        if (geomNode) {
+                            const isGeomVis = geomNode.parameters.visible !== false && !geomNode.parameters.hidden && geomNode.parameters.show_stl !== false;
+                            workerData.stlTransform = {
+                                node_id: geomNode.id,
+                                stl_file: geomNode.parameters.stl_file || geomNode.parameters.file_path || '',
+                                origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
+                                scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
+                                scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
+                                scale_z: Number(geomNode.parameters.scale_z ?? 1.0),
+                                pos_x: Number(geomNode.parameters.pos_x ?? 0.0),
+                                pos_y: Number(geomNode.parameters.pos_y ?? 0.0),
+                                pos_z: Number(geomNode.parameters.pos_z ?? 0.0),
+                                rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
+                                rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
+                                rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
+                                visible: isGeomVis,
+                                hidden: !isGeomVis
+                            };
+                        }
+                    } else if (['STLGeometry', 'STLGeometry3D', 'CADImporter3D', 'CADDomain3D', 'PrimitiveGeometry3D'].includes(changedNode.type)) {
+                        const isVis = changedNode.parameters.visible !== false && !changedNode.parameters.hidden && changedNode.parameters.show_stl !== false;
                         workerData.stlTransform = {
                             node_id: changedNode.id,
-                            stl_file: changedNode.parameters.stl_file || '',
+                            stl_file: changedNode.parameters.stl_file || changedNode.parameters.file_path || '',
                             origin_mode: changedNode.parameters.origin_mode || 'CAD Origin',
                             scale_x: Number(changedNode.parameters.scale_x ?? 1.0),
                             scale_y: Number(changedNode.parameters.scale_y ?? 1.0),
@@ -458,11 +490,48 @@ export class Telemetry3DViewport {
                             rot_x: Number(changedNode.parameters.rot_x ?? 0.0),
                             rot_y: Number(changedNode.parameters.rot_y ?? 0.0),
                             rot_z: Number(changedNode.parameters.rot_z ?? 0.0),
-                            visible: changedNode.parameters.visible !== false && !changedNode.parameters.hidden,
-                            hidden: changedNode.parameters.hidden === true || changedNode.parameters.visible === false
+                            visible: isVis,
+                            hidden: !isVis
                         };
-                    } else if (['TriggerLocation3D', 'TriggerLocation', 'DetonatorLocation3D', 'DetonatorLocation'].includes(changedNode.type)) {
-                        const detNodes = targetModel?.nodes.filter((n: any) => ['TriggerLocation3D', 'TriggerLocation', 'DetonatorLocation3D', 'DetonatorLocation'].includes(n.type)) || [];
+                        workerData.mpmObjects = this.getDiscoveredMPMObjects(targetModel);
+                        const discovered = this.getDiscoveredFEMParts();
+                        workerData.femObjects = discovered.map(p => ({
+                            id: p.id,
+                            node_id: p.nodeId,
+                            type: p.isLine ? 'FEMBeam3D' : 'FEMObject3D',
+                            part_type: p.isLine ? 'beam' : 'solid',
+                            name: p.name,
+                            visible: p.visible,
+                            render_mode: p.renderMode,
+                            opacity: p.opacity,
+                            color: p.color,
+                            shape: p.shapeType || 'Box',
+                            shape_type: p.shapeType || 'Box',
+                            mesh_source: (p.shapeType === 'Cylinder' ? 'Cylinder Generator' : (p.shapeType === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')),
+                            origin_mode: p.originMode || 'Center',
+                            x: p.x,
+                            y: p.y,
+                            z: p.z,
+                            pos_x: p.x,
+                            pos_y: p.y,
+                            pos_z: p.z,
+                            size_x: p.sizeX,
+                            size_y: p.sizeY,
+                            size_z: p.sizeZ,
+                            radius: p.radius ?? 0.1,
+                            inner_radius: p.innerRadius ?? 0.0,
+                            height: p.height ?? 0.2,
+                            nx: p.nx ?? 10,
+                            ny: p.ny ?? 10,
+                            nz: p.nz ?? 10,
+                            rot_x: 0.0,
+                            rot_y: 0.0,
+                            rot_z: 0.0,
+                            is_line: p.isLine,
+                            bounds: p.bounds
+                        }));
+                    } else if (['TriggerLocation3D', 'TriggerLocation', 'DetonatorLocation3D', 'DetonatorLocation', 'DetonatorPoint3D', 'DetonatorLine3D', 'DetonatorPlane3D', 'Detonator'].includes(changedNode.type)) {
+                        const detNodes = targetModel?.nodes.filter((n: any) => ['TriggerLocation3D', 'TriggerLocation', 'DetonatorLocation3D', 'DetonatorLocation', 'DetonatorPoint3D', 'DetonatorLine3D', 'DetonatorPlane3D', 'Detonator'].includes(n.type)) || [];
                         workerData.detonators = detNodes.map((n: any) => ({
                             id: n.id,
                             x: Number(n.parameters?.detonator_x ?? n.parameters?.trigger_x ?? n.parameters?.det_x ?? n.parameters?.pos_x ?? n.parameters?.x ?? 0),
@@ -471,23 +540,32 @@ export class Telemetry3DViewport {
                             radius: Number(n.parameters?.detonator_radius ?? n.parameters?.trigger_radius ?? n.parameters?.det_radius ?? n.parameters?.radius ?? 0.01),
                             visible: n.parameters.visible !== false && !n.parameters.hidden
                         }));
-                    } else if (['VirtualGauges3D', 'VirtualGauge', 'VirtualGaugeArray'].includes(changedNode.type)) {
-                        const vgNodes = targetModel?.nodes.filter((n: any) => ['VirtualGauges3D', 'VirtualGauge', 'VirtualGaugeArray'].includes(n.type)) || [];
-                        const allGauges: any[] = [];
-                        for (const vgn of vgNodes) {
-                            const isNodeVis = (vgn.parameters.visible !== false && !vgn.parameters.hidden);
-                            if (vgn.parameters.gauges && Array.isArray(vgn.parameters.gauges)) {
-                                for (const g of vgn.parameters.gauges) {
-                                    allGauges.push({
-                                        ...g,
-                                        visible: isNodeVis && (g.visible !== false && !g.hidden)
-                                    });
-                                }
+                    } else if (['VirtualGauges', 'VirtualGauges3D', 'VirtualGaugeProbe3D', 'VirtualGauge', 'VirtualGaugeArray'].includes(changedNode.type)) {
+                        workerData.gauges = this.getVirtualGauges();
+                    } else if (['Obstacle3D', 'ImmersedObstacle', 'Obstacle', 'ObstacleDomain3D', 'CSGObstacle3D', 'ObstacleBox3D', 'ObstacleCylinder3D', 'ObstacleSphere3D'].includes(changedNode.type)) {
+                        workerData.showObstacles = (changedNode.parameters.visible !== false && !changedNode.parameters.hidden);
+                    } else if (['DomainMesh3D', 'DomainMesh', 'DomainMesh2D'].includes(changedNode.type)) {
+                        if (p.visible !== undefined || p.hidden !== undefined) {
+                            const isVis = changedNode.parameters.visible !== false && !changedNode.parameters.hidden;
+                            workerData.showGrid = isVis;
+                            workerData.showGridBox = isVis;
+                        }
+                        if (p.slices !== undefined && Array.isArray(changedNode.parameters.slices)) {
+                            workerData.slices = changedNode.parameters.slices;
+                            if (vpNode && vpNode.id !== changedNode.id) {
+                                vpNode.parameters.slices = changedNode.parameters.slices;
                             }
                         }
-                        workerData.gauges = allGauges;
-                    } else if (['Obstacle3D', 'ImmersedObstacle', 'Obstacle'].includes(changedNode.type)) {
-                        workerData.showObstacles = (changedNode.parameters.visible !== false && !changedNode.parameters.hidden);
+                    } else if (['CFDSolver3D', 'CFDSolver2D'].includes(changedNode.type)) {
+                        if (p.visible !== undefined || p.hidden !== undefined || p.show_slices !== undefined) {
+                            const isVis = changedNode.parameters.visible !== false && !changedNode.parameters.hidden && changedNode.parameters.show_slices !== false;
+                            workerData.showSlices = isVis;
+                        }
+                    }
+                    const allTransforms = this.getAllSTLGeometryNodes(targetModel).map(e => e.transform);
+                    if (allTransforms.length > 0) {
+                        workerData.stlTransforms = allTransforms;
+                        delete workerData.stlTransform;
                     }
                 }
 
@@ -587,6 +665,15 @@ export class Telemetry3DViewport {
         this.container.appendChild(this.overlayCanvas);
 
         this.worker = new Worker(new URL('./ViewportWorker.ts?t=' + Date.now(), import.meta.url), { type: 'module' });
+
+        this.worker.onerror = (e) => {
+            console.error("[ViewportWorker System Error]", e);
+            if (this.workerTimer) {
+                clearTimeout(this.workerTimer);
+                this.workerTimer = null;
+            }
+            this.isWorkerBusy = false;
+        };
 
         this.worker.onmessage = (e) => {
             const { type, renderer, min, max } = e.data;
@@ -923,6 +1010,7 @@ export class Telemetry3DViewport {
                 // Force geometry re-request on every new broker connection
                 this.currentGeometryHash = null;
                 this.currentSTLPath = null;
+                this.stlGeometryHashes.clear();
                 this.syncControls();
             };
             net.onOpen(this.openListener);
@@ -941,27 +1029,51 @@ export class Telemetry3DViewport {
                                 }
                                 const verts = new Float32Array(msg.vertices);
                                 const flags = msg.subtractive_flags ? new Float32Array(msg.subtractive_flags) : null;
-                                const geomNode = this.getGeometryNode();
-                                const stlTransform = geomNode ? {
-                                    node_id: geomNode.id,
-                                    stl_file: geomNode.parameters.stl_file || '',
-                                    origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
-                                    scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
-                                    scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
-                                    scale_z: Number(geomNode.parameters.scale_z ?? 1.0),
-                                    pos_x: Number(geomNode.parameters.pos_x ?? 0.0),
-                                    pos_y: Number(geomNode.parameters.pos_y ?? 0.0),
-                                    pos_z: Number(geomNode.parameters.pos_z ?? 0.0),
-                                    rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
-                                    rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
-                                    rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
-                                    visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden,
-                                    hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false
-                                } : undefined;
-                                this.worker.postMessage({
-                                    type: 'setSTLGeometry',
-                                    data: { vertices: verts, subtractive_flags: flags, stlTransform }
-                                });
+                                const filePath = msg.filePath || '';
+                                if (filePath) {
+                                    this.cachedSTLs.set(filePath, { vertices: verts, flags });
+                                }
+                                this.cachedSTL = { vertices: verts, meshId: filePath };
+                                const curModel = this.stateManager.getAllModels().find(m => m.id === (msg.modelId || this.getCurrentModelId()));
+                                const stlNodes = this.getAllSTLGeometryNodes(curModel);
+                                const matchingEntries = stlNodes.filter(e => e.filePath === filePath || resolveResourcePath(e.filePath, curModel?.filename) === filePath);
+                                if (matchingEntries.length > 0) {
+                                    for (const entry of matchingEntries) {
+                                        this.worker.postMessage({
+                                            type: 'setSTLGeometry',
+                                            data: {
+                                                id: entry.node.id,
+                                                meshId: filePath,
+                                                filePath: entry.filePath,
+                                                vertices: verts,
+                                                subtractive_flags: flags,
+                                                stlTransform: entry.transform
+                                            }
+                                        });
+                                    }
+                                } else {
+                                    const geomNode = this.getGeometryNode();
+                                    const stlTransform = geomNode ? {
+                                        node_id: geomNode.id,
+                                        stl_file: geomNode.parameters.stl_file || '',
+                                        origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
+                                        scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
+                                        scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
+                                        scale_z: Number(geomNode.parameters.scale_z ?? 1.0),
+                                        pos_x: Number(geomNode.parameters.pos_x ?? 0.0),
+                                        pos_y: Number(geomNode.parameters.pos_y ?? 0.0),
+                                        pos_z: Number(geomNode.parameters.pos_z ?? 0.0),
+                                        rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
+                                        rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
+                                        rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
+                                        visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden,
+                                        hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false
+                                    } : undefined;
+                                    this.worker.postMessage({
+                                        type: 'setSTLGeometry',
+                                        data: { id: geomNode?.id || filePath, meshId: filePath, vertices: verts, subtractive_flags: flags, stlTransform }
+                                    });
+                                }
                             } else {
                                 if (this.debugOverlay) {
                                     this.debugOverlay.innerHTML = `Load: ERROR (${msg.error})`;
@@ -3573,12 +3685,8 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-obs-show-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_obstacles: showCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showObstacles: showCb.checked } });
-                this.sendView3DConfig();
-            }
+            this.setLayerVisibility('obstacles', showCb.checked);
+            this.sendView3DConfig();
         };
         this.bindEditingEvents(showCb);
         tdVis.appendChild(showCb);
@@ -3808,12 +3916,8 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-stl-show-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_stl: showCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showSTL: showCb.checked } });
-                this.sendView3DConfig();
-            }
+            this.setLayerVisibility('stl', showCb.checked);
+            this.sendView3DConfig();
         };
         this.bindEditingEvents(showCb);
         tdVis.appendChild(showCb);
@@ -4038,12 +4142,8 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-charge-show-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_charge: showCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showCharge: showCb.checked } });
-                this.sendView3DConfig();
-            }
+            this.setLayerVisibility('charge', showCb.checked);
+            this.sendView3DConfig();
         };
         this.bindEditingEvents(showCb);
         tdVis.appendChild(showCb);
@@ -4148,12 +4248,8 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-det-show-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_detonators: showCb.checked, show_detonator: showCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showDetonators: showCb.checked } });
-                this.sendView3DConfig();
-            }
+            this.setLayerVisibility('detonators', showCb.checked);
+            this.sendView3DConfig();
         };
         this.bindEditingEvents(showCb);
         tdVis.appendChild(showCb);
@@ -4259,11 +4355,7 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-grid-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_grid: showCb.checked, show_grid_user_enabled: showCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showGrid: showCb.checked } });
-            }
+            this.setLayerVisibility('grid', showCb.checked);
         };
         this.bindEditingEvents(showCb);
         tdVis.appendChild(showCb);
@@ -4364,12 +4456,7 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-gauges-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_gauges: showCb.checked });
-                const gauges = this.getVirtualGauges();
-                this.worker.postMessage({ type: 'setConfig', data: { showGauges: showCb.checked, gauges } });
-            }
+            this.setLayerVisibility('gauges', showCb.checked);
         };
         this.bindEditingEvents(showCb);
         tdVis.appendChild(showCb);
@@ -5971,8 +6058,14 @@ export class Telemetry3DViewport {
                 maxVal = defaultRange[1];
             } else if (autoScale && (this.latestMPMRange || this.latestEmpiricalRange)) {
                 const r = this.latestMPMRange || this.latestEmpiricalRange!;
-                minVal = r.min;
-                maxVal = r.max;
+                const isFraction = (qty === 'plastic_strain' || qty === 'damage' || qty === 'has_failed' || qty === 'species1' || qty === 'species2' || qty === 'species3' || qty === 'solid');
+                if (isFraction && r.max <= 1e-4) {
+                    minVal = defaultRange[0];
+                    maxVal = defaultRange[1];
+                } else {
+                    minVal = r.min;
+                    maxVal = r.max;
+                }
             }
             specs.push({
                 id: 'mpm',
@@ -6117,8 +6210,14 @@ export class Telemetry3DViewport {
             let maxVal = params.femMaxVal ?? defaultRange[1];
             if (autoScale && (this.latestFEMRange || this.latestEmpiricalRange)) {
                 const r = this.latestFEMRange || this.latestEmpiricalRange!;
-                minVal = r.min;
-                maxVal = r.max;
+                const isFraction = (qty === 'plastic_strain' || qty === 'damage' || qty === 'has_failed');
+                if (isFraction && r.max <= 1e-4) {
+                    minVal = defaultRange[0];
+                    maxVal = defaultRange[1];
+                } else {
+                    minVal = r.min;
+                    maxVal = r.max;
+                }
             } else if (femIsLocked) {
                 minVal = defaultRange[0];
                 maxVal = defaultRange[1];
@@ -6263,8 +6362,14 @@ export class Telemetry3DViewport {
             let maxVal = params.beamMaxVal ?? defaultRange[1];
             if (autoScale && (this.latestBeamRange || this.latestEmpiricalRange)) {
                 const r = this.latestBeamRange || this.latestEmpiricalRange!;
-                minVal = r.min;
-                maxVal = r.max;
+                const isFraction = (qty === 'plastic_strain' || qty === 'damage' || qty === 'has_failed');
+                if (isFraction && r.max <= 1e-4) {
+                    minVal = defaultRange[0];
+                    maxVal = defaultRange[1];
+                } else {
+                    minVal = r.min;
+                    maxVal = r.max;
+                }
             } else if (beamIsLocked) {
                 minVal = defaultRange[0];
                 maxVal = defaultRange[1];
@@ -6484,11 +6589,7 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-mpm-particles-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { showMPMParticles: showCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showMPMParticles: showCb.checked } });
-            }
+            this.setLayerVisibility('mpm', showCb.checked);
         };
         this.bindEditingEvents(showCb);
         tdVis.appendChild(showCb);
@@ -6955,11 +7056,7 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-fem-mesh-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { showFEMMesh: showCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showFEMMesh: showCb.checked } });
-            }
+            this.setLayerVisibility('fem', showCb.checked);
         };
         this.bindEditingEvents(showCb);
         tdVis.appendChild(showCb);
@@ -7271,11 +7368,7 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-beam-mesh-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { showBeams: showCb.checked, showRebar: showCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showBeams: showCb.checked, showRebar: showCb.checked } });
-            }
+            this.setLayerVisibility('beams', showCb.checked);
         };
         this.bindEditingEvents(showCb);
         tdVis.appendChild(showCb);
@@ -8322,6 +8415,9 @@ export class Telemetry3DViewport {
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-beam-cb-btn')), vpNode.parameters.beamShowColorbar !== false);
         this.syncToggleBtnState(document.getElementById(this.getElId('viewport-beam-auto-btn')), vpNode.parameters.beamAutoScale !== false);
 
+        const modelState = currentTargetModel;
+        const allStlEntries = this.getAllSTLGeometryNodes(modelState);
+
         if (postToWorker) {
             const qCmaps = vpNode.parameters.quantity_colormaps || {};
             const stlQty = vpNode.parameters.stl_quantity || 'pressure';
@@ -8349,7 +8445,6 @@ export class Telemetry3DViewport {
             let nz = Number(domainMesh3D?.parameters.nz ?? Math.max(1, Math.round((zmax - zmin) / cellSize)));
 
             // Resolve the charge node via connections from the model-scoped solver or standalone node in model
-            const modelState = currentTargetModel;
             const chargeConn = (solverNode3D && modelState) ? modelState.connections.find((c: any) => c.toNode === solverNode3D.id && c.toPort === 'charge') : null;
             const chargeNode = chargeConn
                 ? modelState?.nodes.find((n: any) => n.id === chargeConn.fromNode)
@@ -8537,9 +8632,9 @@ export class Telemetry3DViewport {
                     detonators: detonatorsList,
                     mpmObjects: mpmObjects,
                     femObjects: femObjects,
-                    stlTransform: geomNode ? {
+                    stlTransform: (allStlEntries.length === 0 && geomNode) ? {
                         node_id: geomNode.id,
-                        stl_file: geomNode.parameters.stl_file || '',
+                        stl_file: geomNode.parameters.stl_file || geomNode.parameters.file_path || '',
                         origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
                         scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
                         scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
@@ -8550,9 +8645,10 @@ export class Telemetry3DViewport {
                         rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
                         rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
                         rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
-                        visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden,
-                        hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false
+                        visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden && geomNode.parameters.show_stl !== false,
+                        hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false || geomNode.parameters.show_stl === false
                     } : undefined,
+                    stlTransforms: allStlEntries.map(e => e.transform),
                     submeshes: submeshes,
                     ppc: Number(modelState?.nodes.find((n: any) => n.type === 'MPMObject3D')?.parameters['ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain')?.parameters['nearfield_ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain')?.parameters['ppc'] ?? 8),
                     showMPMParticles: vpNode.parameters.showMPMParticles !== false,
@@ -8634,38 +8730,53 @@ export class Telemetry3DViewport {
             }
         }
 
-        let geomHash = '';
-        if (geomNode) {
-            if (geomNode.type === 'STLGeometry' || geomNode.type === 'MPMObject3D') {
-                geomHash = geomNode.id + '_' + (geomNode.parameters.stl_file || '') + '_' + (geomNode.parameters.geometry_hash || '');
-            } else if (geomNode.type === 'PrimitiveGeometry3D') {
-                const primsStr = JSON.stringify(geomNode.parameters.primitives || []) + '_' + (geomNode.parameters.voxelization_method || 'watertight_floodfill');
-                let hash = 5381;
-                for (let i = 0; i < primsStr.length; i++) {
-                    hash = ((hash << 5) + hash) + primsStr.charCodeAt(i);
-                    hash = hash & hash;
+        const curModel = this.stateManager.getAllModels().find(m => m.id === this.getCurrentModelId()) || modelState;
+        const net = (window as any).networkManager;
+
+        if (geomNode && geomNode.type === 'PrimitiveGeometry3D') {
+            const primsStr = JSON.stringify(geomNode.parameters.primitives || []) + '_' + (geomNode.parameters.voxelization_method || 'watertight_floodfill');
+            let hash = 5381;
+            for (let i = 0; i < primsStr.length; i++) {
+                hash = ((hash << 5) + hash) + primsStr.charCodeAt(i);
+                hash = hash & hash;
+            }
+            const primHash = 'prims_' + Math.abs(hash).toString(16);
+            if (primHash !== this.currentGeometryHash) {
+                if (net && net.isConnected()) {
+                    this.currentGeometryHash = primHash;
+                    net.send({ command: "LOAD_PRIMITIVE_GEOMETRY", primitives: geomNode.parameters.primitives || [], voxelization_method: geomNode.parameters.voxelization_method || 'watertight_floodfill', modelId: this.getCurrentModelId() });
                 }
-                geomHash = 'prims_' + Math.abs(hash).toString(16);
             }
         }
 
-        if (geomHash !== this.currentGeometryHash) {
-            if (geomNode) {
-                const net = (window as any).networkManager;
-                if (net && net.isConnected()) {
-                    // Only stamp hash AFTER successfully dispatching the request
-                    this.currentGeometryHash = geomHash;
-                    if (geomNode.type === 'STLGeometry' || geomNode.type === 'MPMObject3D') {
-                        const curModel = this.stateManager.getAllModels().find(m => m.id === this.getCurrentModelId());
-                        const resolvedPath = resolveResourcePath(geomNode.parameters.stl_file || '', curModel?.filename);
+        if (allStlEntries.length > 0) {
+            for (const entry of allStlEntries) {
+                const resolvedPath = resolveResourcePath(entry.filePath, curModel?.filename);
+                const entryHash = entry.node.id + '_' + resolvedPath + '_' + (entry.node.parameters.geometry_hash || '');
+                if (entryHash !== this.stlGeometryHashes.get(entry.node.id)) {
+                    const cached = this.cachedSTLs.get(resolvedPath) || this.cachedSTLs.get(entry.filePath);
+                    if (cached && cached.vertices) {
+                        this.stlGeometryHashes.set(entry.node.id, entryHash);
+                        this.worker.postMessage({
+                            type: 'setSTLGeometry',
+                            data: {
+                                id: entry.node.id,
+                                meshId: resolvedPath,
+                                filePath: entry.filePath,
+                                vertices: cached.vertices,
+                                subtractive_flags: cached.flags,
+                                stlTransform: entry.transform
+                            }
+                        });
+                    } else if (net && net.isConnected()) {
+                        this.stlGeometryHashes.set(entry.node.id, entryHash);
                         net.send({ command: "LOAD_STL_GEOMETRY", filePath: resolvedPath, modelId: this.getCurrentModelId() });
-                    } else if (geomNode.type === 'PrimitiveGeometry3D') {
-                        net.send({ command: "LOAD_PRIMITIVE_GEOMETRY", primitives: geomNode.parameters.primitives || [], voxelization_method: geomNode.parameters.voxelization_method || 'watertight_floodfill', modelId: this.getCurrentModelId() });
                     }
                 }
-                // If not connected, do NOT update hash so we retry when connected
-            } else {
-                this.currentGeometryHash = geomHash;
+            }
+        } else if (!geomNode || geomNode.type !== 'PrimitiveGeometry3D') {
+            if (this.currentGeometryHash !== '') {
+                this.currentGeometryHash = '';
                 this.worker.postMessage({ type: 'setSTLGeometry', data: { vertices: null } });
             }
         }
@@ -9259,7 +9370,8 @@ export class Telemetry3DViewport {
         return false;
     }
 
-    public pushFrame(buffer: ArrayBuffer, modelId?: string) {
+    public pushFrame(buffer: ArrayBuffer, modelId?: string, transferable: boolean = false) {
+        if (!buffer || buffer.byteLength === 0) return;
         if (this.container && !this.container.isConnected && this.container.offsetWidth === 0) return;
         if (modelId) {
             const currentId = this.getCurrentModelId();
@@ -9269,30 +9381,33 @@ export class Telemetry3DViewport {
         }
         const magic = buffer.byteLength >= 4 ? new DataView(buffer).getUint32(0, true) : 0;
         if (this.isWorkerBusy) {
-            this.pendingFrames.set(magic, { buffer, modelId });
+            this.pendingFrames.set(magic, { buffer, modelId, transferable } as any);
             return;
         }
         this.isWorkerBusy = true;
         if (this.workerTimer) clearTimeout(this.workerTimer);
         this.workerTimer = setTimeout(() => {
             if (this.isWorkerBusy) {
-                console.warn("[Telemetry3DViewport] Worker timeout detected, resetting busy flag");
+                console.warn("[Telemetry3DViewport] Worker watchdog: frame processing exceeded 30s timeout, resetting busy flag");
                 this.isWorkerBusy = false;
                 this.drainNextPendingFrame();
             }
-        }, 1500);
-        const bufToSend = buffer.slice(0);
-        this.worker.postMessage({ type: 'frame', data: { buffer: bufToSend } }, [bufToSend]);
+        }, 30000);
+        if (transferable) {
+            this.worker.postMessage({ type: 'frame', data: { buffer } }, [buffer]);
+        } else {
+            this.worker.postMessage({ type: 'frame', data: { buffer } });
+        }
     }
 
     private drainNextPendingFrame() {
         if (this.pendingFrames.size > 0) {
             const firstKey = this.pendingFrames.keys().next().value;
             if (firstKey !== undefined) {
-                const next = this.pendingFrames.get(firstKey);
+                const next = this.pendingFrames.get(firstKey) as any;
                 this.pendingFrames.delete(firstKey);
-                if (next) {
-                    this.pushFrame(next.buffer, next.modelId);
+                if (next && next.buffer && next.buffer.byteLength > 0) {
+                    this.pushFrame(next.buffer, next.modelId, next.transferable);
                 }
             }
         }
@@ -9404,11 +9519,7 @@ export class Telemetry3DViewport {
         showCb.type = 'checkbox';
         showCb.id = this.getElId('viewport-stl-show-cb');
         showCb.onchange = () => {
-            const vpNode = this.getViewportNode();
-            if (vpNode) {
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { show_stl: showCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showSTL: showCb.checked } });
-            }
+            this.setLayerVisibility('stl', showCb.checked);
         };
         showRow.appendChild(showCb);
         showRow.appendChild(document.createTextNode('Show STL Mesh'));
@@ -9506,41 +9617,7 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-obs-show-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_obstacles: showCb.checked });
-                this.worker.postMessage({ type: 'setConfig', data: { showObstacles: showCb.checked } });
-                // Re-send slices config because the virtual obstacles slice is appended dynamically based on show_obstacles
-                const net = (window as any).networkManager;
-                if (net && net.isConnected()) {
-                    let targetModelId = vp.id;
-                    const models = this.stateManager.getAppState().models;
-                    for (const [mid, m] of Object.entries(models)) {
-                        if (m.nodes.some(n => n.id === vp.id)) {
-                            targetModelId = mid;
-                            break;
-                        }
-                    }
-                    const obstaclesQuantity = vp.parameters.obstacles_quantity || 'pressure';
-                    const slices = [...(vp.parameters.slices || [])];
-                    if (showCb.checked) {
-                        slices.push({
-                            axis: 'obstacles',
-                            offset: 0.0,
-                            quantities: [obstaclesQuantity],
-                            stride: 1
-                        });
-                    }
-                    const persistentRate = targetModelId ? this.stateManager.getModelRefreshRate(targetModelId) : Number(vp.parameters.refresh_rate ?? 0.5);
-                    net.send({
-                        command: "VIEW3D_CONFIG",
-                        modelId: targetModelId,
-                        slices: slices,
-                        refresh_rate: persistentRate
-                    });
-                }
-                this.syncControls(true);
-            }
+            this.setLayerVisibility('obstacles', showCb.checked);
         };
         this.bindEditingEvents(showCb);
         showRow.appendChild(showCb);
@@ -9688,47 +9765,140 @@ export class Telemetry3DViewport {
         parent.appendChild(opacWrap);
     }
 
-    private getSTLFilePath(): string | null {
+    private getAllSTLGeometryNodes(targetModel?: Model | null): Array<{
+        node: Node;
+        filePath: string;
+        transform: any;
+    }> {
         const vpNode = this.getViewportNode();
-        if (!vpNode) return null;
-
         const allModels = this.stateManager.getAllModels();
-        let targetModel: any = null;
+        let model: any = targetModel;
+
         const currentModelId = this.getCurrentModelId();
-        if (currentModelId) {
-            targetModel = allModels.find(m => m.id === currentModelId) || null;
+        if (!model && currentModelId) {
+            model = allModels.find(m => m.id === currentModelId) || null;
         }
-        if (!targetModel) {
+        if (!model && vpNode) {
             for (const m of Object.values(allModels)) {
                 if (m.nodes.some(n => n.id === vpNode.id)) {
-                    targetModel = m;
+                    model = m;
                     break;
                 }
             }
         }
-        if (!targetModel) return null;
+        if (!model && this.viewportNodeId) {
+            model = allModels.find(m => m.id === this.viewportNodeId) || null;
+        }
+        if (!model) {
+            const ws = this.stateManager.getActiveWorkspace();
+            if (ws && ws.activeModelId) {
+                model = allModels.find(m => m.id === ws.activeModelId) || null;
+            }
+        }
+        if (!model || !model.nodes) return [];
 
-        const connToViewport = targetModel.connections.find((c: any) => c.toNode === vpNode.id);
-        if (connToViewport) {
-            const solverNode = targetModel.nodes.find((n: any) => n.id === connToViewport.fromNode);
-            if (solverNode && solverNode.type === 'CFDSolver3D') {
-                const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'stl');
-                if (connToSolver) {
-                    const stlNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
-                    if (stlNode && stlNode.type === 'STLGeometry') {
-                        return stlNode.parameters.stl_file || null;
+        const isDedicatedSTLNode = (n: any) => {
+            if (!n) return false;
+            const t = n.type as string;
+            return t === 'STLGeometry' || t === 'STLGeometry3D' || t === 'CADImporter3D' || t === 'CADDomain3D';
+        };
+
+        const isGeomNode = (n: any) => {
+            if (!n) return false;
+            const t = n.type as string;
+            return (
+                isDedicatedSTLNode(n) ||
+                ((t === 'MPMObject3D' || t === 'MPMObject2D') && (n.parameters?.shape_type === 'STL' || n.parameters?.stl_file || n.parameters?.file_path)) ||
+                ((t === 'FEMObject3D' || t === 'LSDynaImporter3D' || t === 'FEMDomain3D') && (n.parameters?.shape_type === 'STL' || n.parameters?.mesh_source === 'STL Tetrahedral Mesher' || n.parameters?.stl_file || n.parameters?.file_path)) ||
+                (t === 'Obstacle3D' && (n.parameters?.shape_type === 'STL' || n.parameters?.stl_file))
+            );
+        };
+
+        const dedicatedSTLNodes = model.nodes.filter((n: any) => isDedicatedSTLNode(n));
+        const results: Array<{ node: Node; filePath: string; transform: any }> = [];
+
+        for (const n of model.nodes) {
+            if (!isGeomNode(n)) continue;
+
+            // If this is a simulation/obstacle node that is connected to a dedicated STLGeometry node
+            // or shares its stl_file with a dedicated STLGeometry node in the model, skip it here
+            // so the STL mesh is registered only once under the dedicated STLGeometry node's ID.
+            if (!isDedicatedSTLNode(n)) {
+                const conns = (model.connections || []).filter((c: any) =>
+                    (c.toNode === n.id && (c.toPort === 'stl' || c.toPort === 'geometry' || c.toPort === 'cad')) ||
+                    (c.fromNode === n.id && (c.fromPort === 'stl' || c.fromPort === 'geometry' || c.fromPort === 'cad'))
+                );
+                let hasConnectedDedicatedSTL = false;
+                for (const c of conns) {
+                    const partnerId = c.toNode === n.id ? c.fromNode : c.toNode;
+                    const partner = model.nodes.find((other: any) => other.id === partnerId);
+                    if (partner && isDedicatedSTLNode(partner)) {
+                        hasConnectedDedicatedSTL = true;
+                        break;
+                    }
+                }
+                if (hasConnectedDedicatedSTL) continue;
+
+                const inlinePath = (n.parameters?.stl_file || n.parameters?.file_path || '') as string;
+                if (inlinePath && dedicatedSTLNodes.some((sn: any) => (sn.parameters?.stl_file === inlinePath || sn.parameters?.file_path === inlinePath))) {
+                    continue;
+                }
+            }
+
+            let filePath = (n.parameters?.stl_file || n.parameters?.file_path || '') as string;
+            if (!filePath && model.connections) {
+                const conns = model.connections.filter((c: any) =>
+                    (c.toNode === n.id && (c.toPort === 'stl' || c.toPort === 'geometry' || c.toPort === 'cad')) ||
+                    (c.fromNode === n.id && (c.fromPort === 'stl' || c.fromPort === 'geometry' || c.fromPort === 'cad'))
+                );
+                for (const c of conns) {
+                    const partnerId = c.toNode === n.id ? c.fromNode : c.toNode;
+                    const partner = model.nodes.find((other: any) => other.id === partnerId);
+                    if (partner && (partner.parameters?.stl_file || partner.parameters?.file_path)) {
+                        filePath = partner.parameters.stl_file || partner.parameters.file_path;
+                        break;
                     }
                 }
             }
+
+            if (!filePath) continue;
+
+            const isNodeVis = n.parameters.visible !== false && !n.parameters.hidden;
+            const isShowStl = n.parameters.show_stl !== false;
+            const isVis = isNodeVis && isShowStl;
+
+            const transform = {
+                node_id: n.id,
+                stl_file: filePath,
+                origin_mode: n.parameters.origin_mode || 'CAD Origin',
+                scale_x: Number(n.parameters.scale_x ?? 1.0),
+                scale_y: Number(n.parameters.scale_y ?? 1.0),
+                scale_z: Number(n.parameters.scale_z ?? 1.0),
+                pos_x: Number(n.parameters.pos_x ?? n.parameters.x ?? 0.0),
+                pos_y: Number(n.parameters.pos_y ?? n.parameters.y ?? 0.0),
+                pos_z: Number(n.parameters.pos_z ?? n.parameters.z ?? 0.0),
+                rot_x: Number(n.parameters.rot_x ?? 0.0),
+                rot_y: Number(n.parameters.rot_y ?? 0.0),
+                rot_z: Number(n.parameters.rot_z ?? 0.0),
+                visible: isVis,
+                hidden: !isVis
+            };
+
+            results.push({ node: n, filePath, transform });
         }
-        const fallbackStlNode = targetModel.nodes.find((n: any) => n.type === 'STLGeometry');
-        if (fallbackStlNode) {
-            return fallbackStlNode.parameters.stl_file || null;
+
+        return results;
+    }
+
+    private getSTLFilePath(): string | null {
+        const geomNode = this.getGeometryNode();
+        if (geomNode) {
+            return geomNode.parameters?.stl_file || geomNode.parameters?.file_path || null;
         }
         return null;
     }
 
-    private getGeometryNode(): Node | null {
+    private getGeometryNode(forNodeId?: string): Node | null {
         const vpNode = this.getViewportNode();
         const allModels = this.stateManager.getAllModels();
         let targetModel: any = null;
@@ -9756,10 +9926,56 @@ export class Telemetry3DViewport {
         }
         if (!targetModel) return null;
 
-        const isGeomNode = (n: any) =>
-            n && (n.type === 'STLGeometry' || n.type === 'PrimitiveGeometry3D' || (n.type === 'MPMObject3D' && n.parameters?.shape_type === 'STL' && n.parameters?.stl_file));
+        const isGeomNode = (n: any) => {
+            if (!n) return false;
+            const t = n.type as string;
+            return (
+                t === 'STLGeometry' ||
+                t === 'STLGeometry3D' ||
+                t === 'CADImporter3D' ||
+                t === 'CADDomain3D' ||
+                t === 'PrimitiveGeometry3D' ||
+                ((t === 'MPMObject3D' || t === 'MPMObject2D') && (n.parameters?.shape_type === 'STL' || n.parameters?.stl_file || n.parameters?.file_path)) ||
+                ((t === 'FEMObject3D' || t === 'LSDynaImporter3D' || t === 'FEMDomain3D') && (n.parameters?.shape_type === 'STL' || n.parameters?.mesh_source === 'STL Tetrahedral Mesher' || n.parameters?.stl_file || n.parameters?.file_path)) ||
+                (t === 'Obstacle3D' && (n.parameters?.shape_type === 'STL' || n.parameters?.stl_file))
+            );
+        };
         const isNodeVisible = (n: any) =>
-            n && n.parameters?.visible !== false && !n.parameters?.hidden;
+            n && n.parameters?.visible !== false && !n.parameters?.hidden && n.parameters?.show_stl !== false;
+
+        if (forNodeId) {
+            const focusNode = targetModel.nodes.find((n: any) => n.id === forNodeId);
+            if (focusNode) {
+                if (isGeomNode(focusNode)) {
+                    // Check if it has a connected dedicated STL node
+                    const conns = targetModel.connections.filter((c: any) =>
+                        (c.toNode === focusNode.id && (c.toPort === 'stl' || c.toPort === 'geometry' || c.toPort === 'cad')) ||
+                        (c.fromNode === focusNode.id && (c.fromPort === 'stl' || c.fromPort === 'geometry' || c.fromPort === 'cad'))
+                    );
+                    for (const c of conns) {
+                        const partnerId = c.toNode === focusNode.id ? c.fromNode : c.toNode;
+                        const partner = targetModel.nodes.find((n: any) => n.id === partnerId);
+                        if (partner && isGeomNode(partner)) return partner;
+                    }
+                    return focusNode;
+                }
+                // Check connected nodes for geometry
+                const conns = targetModel.connections.filter((c: any) => c.toNode === focusNode.id || c.fromNode === focusNode.id);
+                for (const c of conns) {
+                    const partnerId = c.toNode === focusNode.id ? c.fromNode : c.toNode;
+                    const partner = targetModel.nodes.find((n: any) => n.id === partnerId);
+                    if (partner && isGeomNode(partner)) {
+                        return partner;
+                    }
+                }
+                const focusFile = focusNode.parameters?.stl_file || focusNode.parameters?.file_path;
+                if (focusFile) {
+                    const matching = targetModel.nodes.find((n: any) => isGeomNode(n) && (n.parameters?.stl_file === focusFile || n.parameters?.file_path === focusFile));
+                    if (matching) return matching;
+                }
+            }
+            return null;
+        }
 
         const findUpstreamGeom = (nodeId: string, requireVisible: boolean, visited = new Set<string>()): Node | null => {
             if (visited.has(nodeId)) return null;
@@ -9823,12 +10039,25 @@ export class Telemetry3DViewport {
         }
         if (!targetModel) return [];
 
-        const vgNode = targetModel.nodes.find((n: any) => n.type === 'VirtualGauges');
-        if (vgNode && vgNode.parameters?.gauges && Array.isArray(vgNode.parameters.gauges)) {
-            return vgNode.parameters.gauges;
+        const vgNodes = targetModel.nodes.filter((n: any) =>
+            ['VirtualGauges', 'VirtualGauges3D', 'VirtualGaugeProbe3D', 'VirtualGauge', 'VirtualGaugeArray'].includes(n.type)
+        );
+        const allGauges: any[] = [];
+        for (const vgNode of vgNodes) {
+            const isNodeVis = vgNode.parameters?.visible !== false && !vgNode.parameters?.hidden;
+            if (vgNode.parameters?.gauges && Array.isArray(vgNode.parameters.gauges)) {
+                for (const g of vgNode.parameters.gauges) {
+                    const gVis = isNodeVis && g.visible !== false && !g.hidden && g.plot !== false && g.active !== false;
+                    allGauges.push({
+                        ...g,
+                        visible: gVis,
+                        hidden: !gVis
+                    });
+                }
+            }
         }
 
-        return [];
+        return allGauges;
     }
 
     private buildGaugeControls(parent: HTMLElement) {
@@ -9848,12 +10077,7 @@ export class Telemetry3DViewport {
         showCb.id = this.getElId('viewport-gauges-show-cb');
         showCb.checked = initShow;
         showCb.onchange = () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { show_gauges: showCb.checked });
-                const gauges = this.getVirtualGauges();
-                this.worker.postMessage({ type: 'setConfig', data: { showGauges: showCb.checked, gauges } });
-            }
+            this.setLayerVisibility('gauges', showCb.checked);
         };
         showRow.appendChild(showCb);
         showRow.appendChild(document.createTextNode('Show Gauge Locations'));
@@ -9906,31 +10130,62 @@ export class Telemetry3DViewport {
             const myModelId = this.getCurrentModelId();
             if (myModelId && myModelId !== modelId) return;
         }
+        if (meshId && meshId !== 'default') {
+            this.cachedSTLs.set(meshId, { vertices });
+        }
         this.cachedSTL = { vertices, meshId };
         if (this.debugOverlay) {
             this.debugOverlay.innerHTML = `Load STL: OK (${(vertices ? vertices.length / 3 : 0).toFixed(0)} verts, mesh: ${meshId})`;
         }
-        const geomNode = this.getGeometryNode();
-        const stlTransform = geomNode ? {
-            node_id: geomNode.id,
-            stl_file: geomNode.parameters.stl_file || '',
-            origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
-            scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
-            scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
-            scale_z: Number(geomNode.parameters.scale_z ?? 1.0),
-            pos_x: Number(geomNode.parameters.pos_x ?? 0.0),
-            pos_y: Number(geomNode.parameters.pos_y ?? 0.0),
-            pos_z: Number(geomNode.parameters.pos_z ?? 0.0),
-            rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
-            rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
-            rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
-            visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden,
-            hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false
-        } : undefined;
-        this.worker.postMessage({
-            type: 'setSTLGeometry',
-            data: { vertices, meshId, stlTransform }
-        });
+        const curModel = this.stateManager.getAllModels().find(m => m.id === (modelId || this.getCurrentModelId()));
+        const stlNodes = this.getAllSTLGeometryNodes(curModel);
+        const matchingEntries = stlNodes.filter(e =>
+            e.filePath === meshId ||
+            resolveResourcePath(e.filePath, curModel?.filename) === meshId ||
+            e.node.id === meshId
+        );
+        if (matchingEntries.length > 0) {
+            for (const entry of matchingEntries) {
+                this.worker.postMessage({
+                    type: 'setSTLGeometry',
+                    data: {
+                        id: entry.node.id,
+                        meshId: meshId,
+                        filePath: entry.filePath,
+                        vertices,
+                        stlTransform: entry.transform
+                    }
+                });
+            }
+        } else {
+            const geomNode = this.getGeometryNode(meshId !== 'default' ? meshId : undefined);
+            const stlTransform = geomNode ? {
+                node_id: geomNode.id,
+                stl_file: geomNode.parameters.stl_file || geomNode.parameters.file_path || '',
+                origin_mode: geomNode.parameters.origin_mode || 'CAD Origin',
+                scale_x: Number(geomNode.parameters.scale_x ?? 1.0),
+                scale_y: Number(geomNode.parameters.scale_y ?? 1.0),
+                scale_z: Number(geomNode.parameters.scale_z ?? 1.0),
+                pos_x: Number(geomNode.parameters.pos_x ?? 0.0),
+                pos_y: Number(geomNode.parameters.pos_y ?? 0.0),
+                pos_z: Number(geomNode.parameters.pos_z ?? 0.0),
+                rot_x: Number(geomNode.parameters.rot_x ?? 0.0),
+                rot_y: Number(geomNode.parameters.rot_y ?? 0.0),
+                rot_z: Number(geomNode.parameters.rot_z ?? 0.0),
+                visible: geomNode.parameters.visible !== false && !geomNode.parameters.hidden && geomNode.parameters.show_stl !== false,
+                hidden: geomNode.parameters.hidden === true || geomNode.parameters.visible === false || geomNode.parameters.show_stl === false
+            } : undefined;
+            this.worker.postMessage({
+                type: 'setSTLGeometry',
+                data: {
+                    id: geomNode?.id || meshId,
+                    meshId,
+                    filePath: geomNode?.parameters?.stl_file || meshId,
+                    vertices,
+                    stlTransform
+                }
+            });
+        }
     }
 
     public setObstaclesGeometry(vertices: Float32Array | null, cells: Int32Array | null, modelId?: string, meshId: string = 'default'): void {
@@ -10045,8 +10300,30 @@ export class Telemetry3DViewport {
         const parts: DiscoveredFEMPart[] = [];
         const nodes = targetModel.nodes || [];
 
+        const femDomainNode = nodes.find((nd: any) => nd.type === 'FEMDomain3D' || nd.type === 'FEMDomain2D');
+        const isDomainVis = !femDomainNode || (femDomainNode.parameters?.visible !== false && !femDomainNode.parameters?.hidden);
+
+        const resolveSetupPartVis = (nodeId: string, isLine: boolean): boolean | undefined => {
+            for (const nd of nodes) {
+                const setupParts = nd.parameters?.fem_setup?.parts;
+                if (Array.isArray(setupParts)) {
+                    const matched = setupParts.find((sp: any) =>
+                        sp.node_id === nodeId &&
+                        ((sp.section_type === 'Beam3D' || sp.section_type === 'Truss1D') === isLine)
+                    ) || setupParts.find((sp: any) => sp.node_id === nodeId);
+                    if (matched && (matched.visible !== undefined || matched.suppressed !== undefined)) {
+                        return matched.visible !== false && !matched.suppressed;
+                    }
+                }
+            }
+            return undefined;
+        };
+
         for (const n of nodes) {
-            if (!['FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D'].includes(n.type)) continue;
+            if (!['FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D', 'StructuralObject3D'].includes(n.type)) continue;
+
+            const isNodeVis = isDomainVis && (n.parameters?.visible !== false && !n.parameters?.hidden && n.parameters?.showFEMMesh !== false);
+            const isBeamVis = isDomainVis && (n.parameters?.visible !== false && !n.parameters?.hidden && n.parameters?.showBeams !== false && n.parameters?.showRebar !== false);
 
             const kFile = String(n.parameters?.k_file || '');
             const deck = getLSDynaDeckMeta(kFile);
@@ -10059,7 +10336,8 @@ export class Telemetry3DViewport {
                     const p = n.parameters.fem_parts[pIdx];
                     const partId = `${n.id}_part_${p.id || pIdx}`;
                     const isLine = p.is_line === true || p.type === 'beam' || p.type === 'rebar';
-                    const partVis = visOverrides[partId] ?? (p.visible !== false && n.parameters?.visible !== false);
+                    const setupVis = resolveSetupPartVis(n.id, isLine);
+                    const partVis = (isLine ? isBeamVis : isNodeVis) && (visOverrides[partId] ?? setupVis ?? (p.visible !== false));
                     const partMode = modeOverrides[partId] ?? (p.render_mode || (isLine ? 'solid' : 'both'));
                     const partOpacity = opacityOverrides[partId] ?? (p.opacity ?? 1.0);
                     const isSelfPart = (n.parameters.fem_parts.length === 1 || p.node_id === n.id || p.id === n.id);
@@ -10115,7 +10393,8 @@ export class Telemetry3DViewport {
 
                 // Part 1: Solid elements (e.g. Concrete)
                 const solidPartId = `${n.id}_solids`;
-                const solidVis = visOverrides[solidPartId] ?? (n.parameters?.visible !== false && !n.parameters?.hidden);
+                const solidSetupVis = resolveSetupPartVis(n.id, false);
+                const solidVis = isNodeVis && (visOverrides[solidPartId] ?? solidSetupVis ?? true);
                 const solidMode = modeOverrides[solidPartId] ?? 'both';
                 const solidOpacity = opacityOverrides[solidPartId] ?? 1.0;
                 parts.push({
@@ -10136,7 +10415,8 @@ export class Telemetry3DViewport {
 
                 // Part 2: Beam elements (e.g. Rebar Cage)
                 const beamPartId = `${n.id}_beams`;
-                const beamVis = visOverrides[beamPartId] ?? (n.parameters?.visible !== false && !n.parameters?.hidden);
+                const beamSetupVis = resolveSetupPartVis(n.id, true);
+                const beamVis = isBeamVis && (visOverrides[beamPartId] ?? beamSetupVis ?? true);
                 const beamMode = modeOverrides[beamPartId] ?? 'solid';
                 const beamOpacity = opacityOverrides[beamPartId] ?? 1.0;
                 parts.push({
@@ -10189,7 +10469,8 @@ export class Telemetry3DViewport {
             }
 
             const partId = n.id;
-            const partVis = visOverrides[partId] ?? (n.parameters?.visible !== false && !n.parameters?.hidden);
+            const setupVis = resolveSetupPartVis(n.id, isLineNode);
+            const partVis = (isLineNode ? isBeamVis : isNodeVis) && (visOverrides[partId] ?? setupVis ?? true);
             const partMode = modeOverrides[partId] ?? defaultMode;
             const partOpacity = opacityOverrides[partId] ?? 1.0;
 
@@ -10225,6 +10506,7 @@ export class Telemetry3DViewport {
         if (!model) return [];
         const allMpmNodes = model.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D') || [];
         const mpmDomain = model.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D');
+        const isDomainVis = !mpmDomain || (mpmDomain.parameters?.visible !== false && !mpmDomain.parameters?.hidden && mpmDomain.parameters?.showMPMParticles !== false);
         let orderedMpmNodes: any[] = [];
         if (mpmDomain && Array.isArray(model.connections)) {
             const connected = model.connections
@@ -10252,7 +10534,8 @@ export class Telemetry3DViewport {
             const isSTL = (geom?.shape_type === 'STL' || n.parameters?.shape_type === 'STL');
             const isCADOrigin = (geom?.origin_mode === 'CAD Origin' || n.parameters?.origin_mode === 'CAD Origin' || !n.parameters?.origin_mode);
             const defPos = (isSTL && isCADOrigin) ? 0.0 : 0.5;
-            const isVisible = n.parameters?.visible !== false && !n.parameters?.hidden;
+            const isVisible = isDomainVis && (n.parameters?.visible !== false && !n.parameters?.hidden) && (n.parameters?.showMPMParticles !== false);
+            const isStlVis = (n.parameters?.visible !== false && !n.parameters?.hidden) && (n.parameters?.show_stl !== false);
             return {
                 id: n.id,
                 node_id: n.id,
@@ -10279,6 +10562,7 @@ export class Telemetry3DViewport {
                 rot_z: geom?.rot_z ?? 0.0,
                 origin_mode: geom?.origin_mode || n.parameters?.origin_mode || 'CAD Origin',
                 stl_file: geom?.stl_file || n.parameters?.stl_file || '',
+                show_stl: isStlVis,
                 visible: isVisible,
                 hidden: !isVisible
             };
@@ -10473,12 +10757,94 @@ export class Telemetry3DViewport {
         this.worker.postMessage({ type: 'requestRender' });
     }
 
+    private syncPartVisibilityToModel(visMap: Record<string, boolean>) {
+        const targetModel = this.getTargetModel();
+        if (!targetModel) return;
+        for (const [pId, vis] of Object.entries(visMap)) {
+            if (pId.endsWith('_solids')) {
+                const nodeId = pId.slice(0, -'_solids'.length);
+                const cNode = targetModel.nodes.find((n: any) => n.id === nodeId);
+                if (cNode) {
+                    this.stateManager.updateNodeParametersInPlace(cNode.id, { showFEMMesh: vis });
+                }
+                for (const nd of targetModel.nodes) {
+                    if (Array.isArray(nd.parameters?.fem_setup?.parts)) {
+                        const copy = JSON.parse(JSON.stringify(nd.parameters.fem_setup));
+                        let changed = false;
+                        for (const sp of copy.parts) {
+                            if (sp.node_id === nodeId && sp.section_type !== 'Beam3D' && sp.section_type !== 'Truss1D') {
+                                sp.visible = vis;
+                                changed = true;
+                            }
+                        }
+                        if (changed) this.stateManager.updateNodeParametersInPlace(nd.id, { fem_setup: copy });
+                    }
+                }
+            } else if (pId.endsWith('_beams')) {
+                const nodeId = pId.slice(0, -'_beams'.length);
+                const cNode = targetModel.nodes.find((n: any) => n.id === nodeId);
+                if (cNode) {
+                    this.stateManager.updateNodeParametersInPlace(cNode.id, { showBeams: vis, showRebar: vis });
+                }
+                for (const nd of targetModel.nodes) {
+                    if (Array.isArray(nd.parameters?.fem_setup?.parts)) {
+                        const copy = JSON.parse(JSON.stringify(nd.parameters.fem_setup));
+                        let changed = false;
+                        for (const sp of copy.parts) {
+                            if (sp.node_id === nodeId && (sp.section_type === 'Beam3D' || sp.section_type === 'Truss1D')) {
+                                sp.visible = vis;
+                                changed = true;
+                            }
+                        }
+                        if (changed) this.stateManager.updateNodeParametersInPlace(nd.id, { fem_setup: copy });
+                    }
+                }
+            } else {
+                const cNode = targetModel.nodes.find((n: any) => n.id === pId);
+                if (cNode) {
+                    const isBeamNode = cNode.type === 'FEMBeam3D' || cNode.type === 'FEMRebar3D';
+                    const upd: Record<string, any> = { visible: vis, hidden: !vis };
+                    if (isBeamNode) {
+                        upd.showBeams = vis;
+                        upd.showRebar = vis;
+                    } else {
+                        upd.showFEMMesh = vis;
+                    }
+                    this.stateManager.updateNodeParametersInPlace(cNode.id, upd);
+                }
+                for (const nd of targetModel.nodes) {
+                    if (Array.isArray(nd.parameters?.fem_setup?.parts)) {
+                        const copy = JSON.parse(JSON.stringify(nd.parameters.fem_setup));
+                        let changed = false;
+                        for (const sp of copy.parts) {
+                            if (sp.node_id === pId) {
+                                sp.visible = vis;
+                                changed = true;
+                            }
+                        }
+                        if (changed) this.stateManager.updateNodeParametersInPlace(nd.id, { fem_setup: copy });
+                    }
+                }
+            }
+        }
+    }
+
     public setPartVisibility(partId: string, visible: boolean) {
         const vpNode = this.getViewportNode();
         if (!vpNode) return;
         const current = { ...(vpNode.parameters.fem_part_visibility || {}) };
         current[partId] = visible;
-        this.stateManager.updateNodeParametersInPlace(vpNode.id, { fem_part_visibility: current });
+        const vpUpdates: Record<string, any> = { fem_part_visibility: current };
+        if (visible) {
+            if (partId.endsWith('_beams')) {
+                vpUpdates.showBeams = true;
+                vpUpdates.showRebar = true;
+            } else {
+                vpUpdates.showFEMMesh = true;
+            }
+        }
+        this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
+        this.syncPartVisibilityToModel({ [partId]: visible });
         this.dispatchFEMObjectsToWorker();
         this.syncControls(false);
     }
@@ -10516,7 +10882,8 @@ export class Telemetry3DViewport {
         } else {
             for (const p of parts) nextVis[p.id] = (p.id === partId);
         }
-        this.stateManager.updateNodeParametersInPlace(vpNode.id, { fem_part_visibility: nextVis });
+        this.stateManager.updateNodeParametersInPlace(vpNode.id, { fem_part_visibility: nextVis, showFEMMesh: true, showBeams: true, showRebar: true });
+        this.syncPartVisibilityToModel(nextVis);
         this.dispatchFEMObjectsToWorker();
         this.syncControls(false);
     }
@@ -11956,11 +12323,21 @@ export class Telemetry3DViewport {
 
         if (layer === 'slices') {
             const currentSlices = vp.parameters.slices || [];
-            const slices = currentSlices.map((s: any) => ({ ...s, enabled: active }));
+            const slices = currentSlices.map((s: any) => ({ ...s, enabled: active, visible: active }));
             updates.slices = slices;
             updates.show_slices = active;
             workerData.showSlices = active;
             workerData.slices = slices;
+            if (activeModel) {
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D')
+                    .forEach((n: any) => {
+                        const nodeSlices = Array.isArray(n.parameters?.slices)
+                            ? n.parameters.slices.map((s: any) => ({ ...s, enabled: active, visible: active }))
+                            : slices;
+                        this.stateManager.updateNodeParametersInPlace(n.id, { slices: nodeSlices, show_slices: active });
+                    });
+            }
             this.updateSlices(slices);
         } else if (layer === 'fem') {
             updates.showFEMMesh = active;
@@ -11974,17 +12351,21 @@ export class Telemetry3DViewport {
                 activeModel.nodes
                     .filter((n: any) => n.type === 'FEMDomain3D')
                     .forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { showFEMMesh: active });
+                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, showFEMMesh: active });
                     });
-                if (active) {
-                    const femObjs = activeModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
-                    const allHidden = femObjs.length > 0 && femObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
-                    if (allHidden) {
-                        femObjs.forEach((n: any) => {
-                            this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showFEMMesh: true });
-                        });
-                    }
+                const femObjs = activeModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+                femObjs.forEach((n: any) => {
+                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, showFEMMesh: active });
+                });
+                const parts = this.getDiscoveredFEMParts().filter(p => !p.isLine);
+                const partVis = { ...(vp.parameters.fem_part_visibility || {}) };
+                for (const p of parts) {
+                    partVis[p.id] = active;
+                    partVis[String(p.id)] = active;
                 }
+                updates.fem_part_visibility = partVis;
+                this.syncPartVisibilityToModel(partVis);
+                this.dispatchFEMObjectsToWorker();
             }
         } else if (layer === 'beams') {
             updates.showBeams = active;
@@ -11998,14 +12379,25 @@ export class Telemetry3DViewport {
             workerData.showBeams = active;
             workerData.showRebar = active;
             Object.assign(workerData, updates);
-            if (activeModel && active) {
+            if (activeModel) {
                 const beamObjs = activeModel.nodes.filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D' || n.type === 'StructuralObject3D');
-                const allHidden = beamObjs.length > 0 && beamObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
-                if (allHidden) {
-                    beamObjs.forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showBeams: true, showRebar: true });
+                beamObjs.forEach((n: any) => {
+                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, showBeams: active, showRebar: active });
+                });
+                activeModel.nodes
+                    .filter((n: any) => n.type === 'LSDynaImporter3D' || n.type === 'FEMDomain3D')
+                    .forEach((n: any) => {
+                        this.stateManager.updateNodeParametersInPlace(n.id, { showBeams: active, showRebar: active });
                     });
+                const parts = this.getDiscoveredFEMParts().filter(p => p.isLine);
+                const partVis = { ...(vp.parameters.fem_part_visibility || {}) };
+                for (const p of parts) {
+                    partVis[p.id] = active;
+                    partVis[String(p.id)] = active;
                 }
+                updates.fem_part_visibility = partVis;
+                this.syncPartVisibilityToModel(partVis);
+                this.dispatchFEMObjectsToWorker();
             }
         } else if (layer === 'mpm') {
             updates.showMPMParticles = active;
@@ -12020,79 +12412,147 @@ export class Telemetry3DViewport {
                                 show_soil_mpm: active
                             });
                         } else {
-                            this.stateManager.updateNodeParametersInPlace(n.id, { showMPMParticles: active });
+                            this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, showMPMParticles: active });
                         }
                     });
-                if (active) {
-                    const mpmObjs = activeModel.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
-                    const allHidden = mpmObjs.length > 0 && mpmObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
-                    if (allHidden) {
-                        mpmObjs.forEach((n: any) => {
-                            this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, showMPMParticles: true });
-                        });
-                    }
-                }
+                const mpmObjs = activeModel.nodes.filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
+                mpmObjs.forEach((n: any) => {
+                    const hasSTL = !!n.parameters?.stl_file || n.parameters?.shape_type === 'STL';
+                    const stlVis = hasSTL && n.parameters?.show_stl !== false;
+                    const nodeVis = active ? true : stlVis;
+                    this.stateManager.updateNodeParametersInPlace(n.id, {
+                        showMPMParticles: active,
+                        visible: nodeVis,
+                        hidden: !nodeVis
+                    });
+                });
                 workerData.mpmObjects = this.getDiscoveredMPMObjects(activeModel);
             }
         } else if (layer === 'stl') {
             updates.show_stl = active;
             workerData.showSTL = active;
-            if (activeModel && active) {
+            if (activeModel) {
                 const stlObjs = activeModel.nodes.filter((n: any) => n.type === 'STLGeometry3D' || n.type === 'CADImporter3D' || n.type === 'STLGeometry' || n.type === 'CADDomain3D');
-                const allHidden = stlObjs.length > 0 && stlObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
-                if (allHidden) {
-                    stlObjs.forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_stl: true });
-                    });
+                stlObjs.forEach((n: any) => {
+                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_stl: active });
+                });
+                const inlineStlObjs = activeModel.nodes.filter((n: any) =>
+                    ((n.type === 'MPMObject3D' || n.type === 'MPMObject2D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMDomain3D' || n.type === 'Obstacle3D') &&
+                     (n.parameters?.shape_type === 'STL' || n.parameters?.mesh_source === 'STL Tetrahedral Mesher' || !!n.parameters?.stl_file || !!n.parameters?.file_path))
+                );
+                inlineStlObjs.forEach((n: any) => {
+                    const nodeUpd: Record<string, any> = { show_stl: active };
+                    if (active) {
+                        nodeUpd.visible = true;
+                        nodeUpd.hidden = false;
+                    } else if (n.type === 'MPMObject3D' || n.type === 'MPMObject2D') {
+                        if (n.parameters?.showMPMParticles === false) {
+                            nodeUpd.visible = false;
+                            nodeUpd.hidden = true;
+                        }
+                    }
+                    this.stateManager.updateNodeParametersInPlace(n.id, nodeUpd);
+                });
+                const allGeoNodes = this.getAllSTLGeometryNodes(activeModel);
+                if (allGeoNodes.length > 0) {
+                    workerData.stlTransforms = allGeoNodes.map((entry: any) => entry.transform);
+                    delete workerData.stlTransform;
                 }
             }
         } else if (layer === 'obstacles') {
             updates.show_obstacles = active;
             workerData.showObstacles = active;
-            if (activeModel && active) {
+            if (activeModel) {
                 const obsObjs = activeModel.nodes.filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'CSGObstacle3D' || n.type === 'ObstacleBox3D' || n.type === 'ObstacleCylinder3D' || n.type === 'ObstacleSphere3D' || n.type === 'PrimitiveGeometry3D' || n.type === 'Obstacle3D' || n.type === 'ImmersedObstacle' || n.type === 'Obstacle');
-                const allHidden = obsObjs.length > 0 && obsObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
-                if (allHidden) {
-                    obsObjs.forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_obstacles: active });
+                obsObjs.forEach((n: any) => {
+                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_obstacles: active });
+                });
+            }
+            const net = (window as any).networkManager;
+            if (net && net.isConnected()) {
+                let targetModelId = vp.id;
+                const models = this.stateManager.getAppState().models;
+                for (const [mid, m] of Object.entries(models)) {
+                    if (m.nodes.some(n => n.id === vp.id)) {
+                        targetModelId = mid;
+                        break;
+                    }
+                }
+                const obstaclesQuantity = vp.parameters.obstacles_quantity || 'pressure';
+                const slices = [...(vp.parameters.slices || [])];
+                if (active) {
+                    slices.push({
+                        axis: 'obstacles',
+                        offset: 0.0,
+                        quantities: [obstaclesQuantity],
+                        stride: 1
                     });
                 }
+                const persistentRate = targetModelId ? this.stateManager.getModelRefreshRate(targetModelId) : Number(vp.parameters.refresh_rate ?? 0.5);
+                net.send({
+                    command: "VIEW3D_CONFIG",
+                    modelId: targetModelId,
+                    slices: slices,
+                    refresh_rate: persistentRate
+                });
             }
         } else if (layer === 'charge') {
             updates.show_charge = active;
             workerData.showCharge = active;
+            if (activeModel) {
+                const chargeObjs = activeModel.nodes.filter((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'ExplosiveMaterial' || n.type === 'Charge');
+                chargeObjs.forEach((n: any) => {
+                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_charge: active });
+                });
+            }
         } else if (layer === 'detonator' || layer === 'detonators') {
             updates.show_detonators = active;
             updates.show_detonator = active;
             workerData.showDetonators = active;
-            if (activeModel && active) {
+            if (activeModel) {
                 const detObjs = activeModel.nodes.filter((n: any) => n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation' || n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorPoint3D' || n.type === 'DetonatorLine3D' || n.type === 'DetonatorPlane3D' || n.type === 'Detonator');
-                const allHidden = detObjs.length > 0 && detObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
-                if (allHidden) {
-                    detObjs.forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_detonator: active });
-                    });
-                }
+                detObjs.forEach((n: any) => {
+                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_detonator: active, show_detonators: active });
+                });
             }
         } else if (layer === 'grid') {
             updates.show_grid = active;
             workerData.showGrid = active;
             updates.show_grid_box = active;
             workerData.showGridBox = active;
+            if (activeModel) {
+                const gridObjs = activeModel.nodes.filter((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+                gridObjs.forEach((n: any) => {
+                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_grid: active, show_grid_box: active });
+                });
+            }
         } else if (layer === 'gridBox') {
             updates.show_grid_box = active;
             workerData.showGridBox = active;
+            if (activeModel) {
+                const gridObjs = activeModel.nodes.filter((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+                gridObjs.forEach((n: any) => {
+                    this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_grid_box: active });
+                });
+            }
         } else if (layer === 'gauges') {
             updates.show_gauges = active;
             workerData.showGauges = active;
-            if (activeModel && active) {
-                const gaugeObjs = activeModel.nodes.filter((n: any) => n.type === 'VirtualGauges3D' || n.type === 'VirtualGaugeProbe3D' || n.type === 'VirtualGauge' || n.type === 'VirtualGauges');
-                const allHidden = gaugeObjs.length > 0 && gaugeObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
-                if (allHidden) {
-                    gaugeObjs.forEach((n: any) => {
-                        this.stateManager.updateNodeParametersInPlace(n.id, { visible: true, hidden: false, show_gauges: true });
-                    });
-                }
+            if (activeModel) {
+                const gaugeObjs = activeModel.nodes.filter((n: any) => n.type === 'VirtualGauges3D' || n.type === 'VirtualGaugeProbe3D' || n.type === 'VirtualGauge' || n.type === 'VirtualGauges' || n.type === 'VirtualGaugeArray');
+                gaugeObjs.forEach((n: any) => {
+                    const nodeUpdates: any = { visible: active, hidden: !active, show_gauges: active };
+                    if (Array.isArray(n.parameters?.gauges)) {
+                        nodeUpdates.gauges = n.parameters.gauges.map((g: any) => ({
+                            ...g,
+                            visible: active,
+                            hidden: !active,
+                            plot: active
+                        }));
+                    }
+                    this.stateManager.updateNodeParametersInPlace(n.id, nodeUpdates);
+                });
+                workerData.gauges = this.getVirtualGauges();
             }
         } else if (layer === 'lighting') {
             updates.lightingEnabled = active;
@@ -12215,8 +12675,8 @@ export class Telemetry3DViewport {
             if (config.mpmParticleRenderMode !== undefined) {
                 expandedConfig.mpmParticleRenderMode = config.mpmParticleRenderMode;
             }
-            if (config.mpmParticleWireframe !== undefined) {
-                expandedConfig.mpmParticleRenderMode = config.mpmParticleWireframe ? 'points' : 'spheres';
+            if (config.mpmParticleWireframe !== undefined && config.mpmParticleRenderMode === undefined) {
+                expandedConfig.mpmParticleRenderMode = config.mpmParticleWireframe ? 'points' : 'auto';
             }
             if (config.mpmParticleOpacity !== undefined) {
                 expandedConfig.mpmParticleOpacity = Number(config.mpmParticleOpacity);

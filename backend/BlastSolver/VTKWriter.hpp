@@ -142,6 +142,7 @@ struct MPMVTKSnapshot3D {
     bool has_pressure = true;
     bool has_material_id = true;
     bool has_object_id = true;
+    bool has_particle_density = true;
     int compression_level = 6;
     std::string float_precision = "12-bit Mantissa (~4 sig. digits)";
     std::string mpm_topology = "Individual Vertices";
@@ -155,6 +156,7 @@ struct MPMVTKSnapshot3D {
     std::vector<float> temp;          // num_particles
     std::vector<uint8_t> obj_id;      // num_particles (1 B/particle UInt8)
     std::vector<uint8_t> material_id; // num_particles (1 B/particle UInt8)
+    std::vector<uint8_t> particle_density; // num_particles (1 B/particle UInt8, 3x3x3 cell count)
 };
 
 void apply_mpm_bit_grooming(MPMVTKSnapshot3D& snap);
@@ -168,7 +170,8 @@ void export_vtu_phase_particles_3d_snapshot(const std::string& filename, const B
 void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPMParticle3D>& particles, const std::string& format = "Binary",
                        bool has_vel = true, bool has_disp = false, bool has_stress = true,
                        bool has_strain = true, bool has_damage = true, bool has_temp = true,
-                       bool has_pressure = true, bool has_material_id = true, bool has_object_id = true);
+                       bool has_pressure = true, bool has_material_id = true, bool has_object_id = true,
+                       bool has_particle_density = true);
 
 struct ObstacleSurfaceSnapshot3D {
     int num_faces = 0;

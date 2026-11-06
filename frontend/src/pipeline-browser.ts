@@ -4,7 +4,7 @@
  * parent-child entity nesting, visibility toggles, filter pipelines, and execution.
  */
 
-import { StateManager, prepareModelSavePayload, getSliceAxisLabel, isExplosiveMaterialNode, isSeabedMaterialNode, isWaterMaterialNode, isSolidMaterialNode, resolveFEMCounts } from './state-manager.js';
+import { StateManager, prepareModelSavePayload, getSliceAxisLabel, isExplosiveMaterialNode, isSeabedMaterialNode, isWaterMaterialNode, isSolidMaterialNode, resolveFEMCounts, getLSDynaDeckMeta } from './state-manager.js';
 import { Model, Node, NodeType, SimulationStatus, SimulationState } from './types.js';
 import { PlatformBridge } from './PlatformBridge.js';
 import { CustomDialog } from './custom-dialog.js';
@@ -12,6 +12,7 @@ import { HostFileBrowserModal } from './host-file-browser.js';
 import { GaugeManagerModal } from './gauge-manager-modal.js';
 import { PipelineConnectionModal } from './pipeline-connection-modal.js';
 import { FEMSetupModal } from './fem-setup-modal.js';
+import { syncModelFEMSetup, FEMSetupConfig, FEMPartConfig, FEMEntitySet, FEMBoundaryCondition, FEMContactConfig, FEMSectionType, getPartColor } from './fem-setup-types.js';
 import { isAirMaterialNode, isJWLMaterialNode, isIdealGasMaterialNode } from './serialization.js';
 
 interface EntityCategory {
@@ -79,7 +80,7 @@ const CATEGORIES: EntityCategory[] = [
         label: 'Multiphysics Couplers',
         icon: '🔗',
         color: '#ce93d8',
-        types: ['FSICoupler2D', 'FSICoupler3D', 'FEMFSICoupler3D']
+        types: ['FSICoupler2D', 'FSICoupler3D', 'FEMFSICoupler3D', 'MPMContactCoupler3D']
     },
     {
         id: 'remap',
@@ -194,41 +195,14 @@ export class PipelineBrowser {
         };
         this.modelStatusListener = () => this.renderHeader();
         this.inPlaceListener = (nodeId: string, params: Record<string, any>) => {
-            if (params.visible !== undefined || params.hidden !== undefined) {
-                const item = this.rootElement?.querySelector(`.pipeline-item[data-node-id="${nodeId}"]`);
-                if (item) {
-                    const eyeBtn = item.querySelector('.pipeline-eye-btn') as HTMLElement;
-                    if (eyeBtn) {
-                        const isVisible = params.visible !== false && !params.hidden;
-                        eyeBtn.className = `pipeline-eye-btn ${isVisible ? 'visible' : 'hidden'}`;
-                        eyeBtn.innerHTML = isVisible ? EYE_OPEN_SVG : EYE_CLOSED_SVG;
-                        eyeBtn.title = isVisible ? 'Hide in viewports' : 'Show in viewports';
-                    }
-                }
-            }
-            if (params.show_water_sleeve !== undefined) {
-                const sleeveEl = this.rootElement?.querySelector(`.pipeline-child-item[data-node-id="${nodeId}"][data-child-id="water_sleeve"]`);
-                if (sleeveEl) {
-                    const eyeBtn = sleeveEl.querySelector('.pipeline-eye-btn') as HTMLElement;
-                    if (eyeBtn) {
-                        const isVisible = params.show_water_sleeve !== false;
-                        eyeBtn.className = `pipeline-eye-btn ${isVisible ? 'visible' : 'hidden'}`;
-                        eyeBtn.innerHTML = isVisible ? EYE_OPEN_SVG : EYE_CLOSED_SVG;
-                        eyeBtn.title = isVisible ? 'Hide Water Discretization' : 'Show Water Discretization';
-                    }
-                }
-            }
-            if (params.show_soil_mpm !== undefined) {
-                const soilEl = this.rootElement?.querySelector(`.pipeline-child-item[data-node-id="${nodeId}"][data-child-id="seabed_soil"]`);
-                if (soilEl) {
-                    const eyeBtn = soilEl.querySelector('.pipeline-eye-btn') as HTMLElement;
-                    if (eyeBtn) {
-                        const isVisible = params.show_soil_mpm !== false;
-                        eyeBtn.className = `pipeline-eye-btn ${isVisible ? 'visible' : 'hidden'}`;
-                        eyeBtn.innerHTML = isVisible ? EYE_OPEN_SVG : EYE_CLOSED_SVG;
-                        eyeBtn.title = isVisible ? 'Hide Soil Scour Zone' : 'Show Soil Scour Zone';
-                    }
-                }
+            const visKeys = [
+                'visible', 'hidden', 'showMPMParticles', 'showFEMMesh', 'showBeams', 'showRebar',
+                'show_stl', 'show_obstacles', 'show_charge', 'show_detonators', 'show_detonator',
+                'show_gauges', 'show_grid', 'show_grid_box', 'show_slices', 'slices', 'gauges',
+                'fem_part_visibility', 'fem_parts', 'fem_setup', 'show_water_sleeve', 'show_soil_mpm'
+            ];
+            if (visKeys.some(k => params[k] !== undefined)) {
+                this.render({ scrollSelectedIntoView: false });
             }
         };
 
@@ -237,6 +211,7 @@ export class PipelineBrowser {
         this.stateManager.onSelectionChange(this.selectionListener);
         this.stateManager.onSliceSelectionChange(this.sliceSelectionListener);
         this.stateManager.onGaugeSelectionChange(this.gaugeSelectionListener);
+        this.stateManager.onFEMEntitySelectionChange(() => this.render({ scrollSelectedIntoView: false }));
         this.stateManager.onModelStatusChange(this.modelStatusListener);
         this.stateManager.onModelTelemetry((modelId, step, simTime) => {
             const models = this.stateManager.getWorkspaceModels();
@@ -1686,6 +1661,14 @@ export class PipelineBrowser {
 
         // Visibility Toggle (Eye)
         let isVisible = node.parameters.visible !== false && !node.parameters.hidden;
+        if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D') {
+            const hasSTL = !!node.parameters?.stl_file || node.parameters?.shape_type === 'STL';
+            const mpmVis = node.parameters.showMPMParticles !== false;
+            const stlVis = hasSTL ? (node.parameters.show_stl !== false) : false;
+            if (!mpmVis && !stlVis) {
+                isVisible = false;
+            }
+        }
         const eyeBtn = document.createElement('button');
         eyeBtn.className = `pipeline-eye-btn ${isVisible ? 'visible' : 'hidden'}`;
         eyeBtn.innerHTML = isVisible ? EYE_OPEN_SVG : EYE_CLOSED_SVG;
@@ -1693,10 +1676,7 @@ export class PipelineBrowser {
         eyeBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             isVisible = !isVisible;
-            this.stateManager.updateNodeParametersInPlace(node.id, { visible: isVisible, hidden: !isVisible });
-            eyeBtn.innerHTML = isVisible ? EYE_OPEN_SVG : EYE_CLOSED_SVG;
-            eyeBtn.className = `pipeline-eye-btn ${isVisible ? 'visible' : 'hidden'}`;
-            eyeBtn.title = isVisible ? 'Hide in viewports' : 'Show in viewports';
+            this.toggle3DObjectVisibility(node, isVisible, model);
         });
 
         // Type color badge
@@ -1872,10 +1852,121 @@ export class PipelineBrowser {
             nodeContainer.appendChild(childList);
         }
 
-        // FEM Structural Rebar Sub-items under LSDynaImporter3D or FEMDomain3D
-        if (node.type === 'LSDynaImporter3D' || node.type === 'FEMDomain3D') {
-            const femCounts = resolveFEMCounts(node, model as any);
-            if (femCounts.numBeams && femCounts.numBeams > 0) {
+        // MPM Object Hierarchical Representations (Particles & CAD / STL Geometry - Directive 18)
+        const curConns: any[] = model.connections || (this.stateManager.getCurrentState()?.connections) || [];
+        const nType = node.type as string;
+
+        if (nType === 'MPMObject3D' || nType === 'MPMObject2D') {
+            const stlConn = curConns.find((c: any) => (c.toNode === node.id && (c.toPort === 'stl' || c.toPort === 'geometry' || c.toPort === 'cad')) || (c.fromNode === node.id && (c.fromPort === 'stl' || c.fromPort === 'geometry')));
+            const stlNode = stlConn ? model.nodes.find(n => n.id === (stlConn.toNode === node.id ? stlConn.fromNode : stlConn.toNode)) : null;
+            const hasSTL = !!stlNode || !!node.parameters?.stl_file || node.parameters?.shape_type === 'STL';
+
+            let childList = nodeContainer.querySelector('.pipeline-child-list') as HTMLElement;
+            if (!childList) {
+                childList = document.createElement('div');
+                childList.className = 'pipeline-child-list';
+                nodeContainer.appendChild(childList);
+            }
+
+            // Sub-item 1: MPM Particles & Preview Cloud
+            const isParticlesVis = (node.parameters.showMPMParticles !== false) && (node.parameters.visible !== false && !node.parameters.hidden);
+            const particlesItem = this.createMarineLayerItem({
+                branch: hasSTL ? '├──' : '└──',
+                icon: '✨',
+                title: 'MPM Particles & Cloud',
+                subtitle: `Particle Cloud representation (PPC: ${node.parameters.ppc || 8})`,
+                methodTag: 'Particles',
+                tagText: `PPC ${node.parameters.ppc || 8}`,
+                tagColor: '#38bdf8',
+                visible: isParticlesVis,
+                onToggleVisible: (vis) => {
+                    const stlStillVis = hasSTL && (stlNode ? (stlNode.parameters.visible !== false && !stlNode.parameters.hidden && stlNode.parameters.show_stl !== false) : (node.parameters.show_stl !== false));
+                    const nodeVis = vis ? true : stlStillVis;
+                    const updates: Record<string, any> = {
+                        showMPMParticles: vis,
+                        visible: nodeVis,
+                        hidden: !nodeVis
+                    };
+                    this.stateManager.updateNodeParametersInPlace(node.id, updates);
+                    if (vis) {
+                        for (const vp of model.nodes.filter(n => n.type === 'Telemetry3DViewport')) {
+                            this.stateManager.updateNodeParametersInPlace(vp.id, { showMPMParticles: true });
+                        }
+                    } else {
+                        const mpmObjs = model.nodes.filter(n => n.type === 'MPMObject3D' || n.type === 'MPMObject2D');
+                        const anyParticlesVis = mpmObjs.some(n => (n.id === node.id ? vis : (n.parameters.showMPMParticles !== false && n.parameters.visible !== false && !n.parameters.hidden)));
+                        if (!anyParticlesVis) {
+                            for (const vp of model.nodes.filter(n => n.type === 'Telemetry3DViewport')) {
+                                this.stateManager.updateNodeParametersInPlace(vp.id, { showMPMParticles: false });
+                            }
+                        }
+                    }
+                    this.render({ scrollSelectedIntoView: false });
+                },
+                onSelect: () => this.stateManager.selectNode(model.id, node.id)
+            });
+            childList.appendChild(particlesItem);
+
+            // Sub-item 2: Associated CAD / STL Surface Mesh
+            if (hasSTL) {
+                const stlName = stlNode ? (stlNode.parameters?.name || stlNode.id) : (String(node.parameters?.stl_file || '').split('/').pop() || 'STL Surface');
+                const isStlVis = stlNode
+                    ? (stlNode.parameters.visible !== false && !stlNode.parameters.hidden && stlNode.parameters.show_stl !== false)
+                    : ((node.parameters.show_stl !== false) && (node.parameters.visible !== false && !node.parameters.hidden));
+                const stlItem = this.createMarineLayerItem({
+                    branch: '└──',
+                    icon: '📐',
+                    title: `CAD / STL Surface: ${stlName}`,
+                    subtitle: `CAD Surface boundary mesh${stlNode ? ` (${stlNode.id})` : ''}`,
+                    methodTag: 'CAD Surface',
+                    tagText: 'STL CAD',
+                    tagColor: '#f59e0b',
+                    visible: isStlVis,
+                    onToggleVisible: (vis) => {
+                        const particlesStillVis = node.parameters.showMPMParticles !== false;
+                        const nodeVis = vis ? true : particlesStillVis;
+                        this.stateManager.updateNodeParametersInPlace(node.id, {
+                            show_stl: vis,
+                            visible: nodeVis,
+                            hidden: !nodeVis
+                        });
+                        if (stlNode) {
+                            this.stateManager.updateNodeParametersInPlace(stlNode.id, { visible: vis, hidden: !vis, show_stl: vis });
+                        }
+                        if (vis) {
+                            for (const vp of model.nodes.filter(n => n.type === 'Telemetry3DViewport')) {
+                                this.stateManager.updateNodeParametersInPlace(vp.id, { show_stl: true });
+                            }
+                        }
+                        this.render({ scrollSelectedIntoView: false });
+                    },
+                    onSelect: () => {
+                        if (stlNode) this.stateManager.selectNode(model.id, stlNode.id);
+                        else this.stateManager.selectNode(model.id, node.id);
+                    }
+                });
+                childList.appendChild(stlItem);
+            }
+        }
+
+        // FEM Assembly & Part Hierarchy (Parts, Sets, Boundary Conditions, Contacts, and STL - Proposal A / Directive 18)
+        if (nType === 'FEMObject3D' || nType === 'LSDynaImporter3D' || nType === 'FEMDomain3D' || nType === 'FEMBeam3D' || nType === 'FEMRebar3D') {
+            this.renderFEMAssemblySubtree(nodeContainer, node, model, curConns);
+        }
+
+        // CAD / STL Geometry Hierarchical Partner Representations (Directive 18)
+        if (nType === 'STLGeometry' || nType === 'STLGeometry3D' || nType === 'CADImporter3D' || nType === 'PrimitiveGeometry3D') {
+            const partnerConns = curConns.filter((c: any) => (c.toNode === node.id || c.fromNode === node.id));
+            const partnerIds = new Set<string>();
+            for (const c of partnerConns) {
+                const pId = c.toNode === node.id ? c.fromNode : c.toNode;
+                const pNode = model.nodes.find(n => n.id === pId);
+                if (pNode && ['MPMObject3D', 'MPMObject2D', 'FEMObject3D', 'LSDynaImporter3D', 'FEMDomain3D', 'Obstacle3D', 'CFDSolver3D'].includes(pNode.type as string)) {
+                    partnerIds.add(pId);
+                }
+            }
+
+            if (partnerIds.size > 0) {
                 let childList = nodeContainer.querySelector('.pipeline-child-list') as HTMLElement;
                 if (!childList) {
                     childList = document.createElement('div');
@@ -1883,44 +1974,60 @@ export class PipelineBrowser {
                     nodeContainer.appendChild(childList);
                 }
 
-                const diamStr = ((femCounts.rebarDiameter ?? 0.00953) * 1000).toFixed(2);
-
-                const rebarItem = document.createElement('div');
-                rebarItem.className = 'pipeline-node-item pipeline-child-item';
-                rebarItem.style.cursor = 'pointer';
-
-                const branch = document.createElement('span');
-                branch.className = 'pipeline-branch-symbol';
-                branch.textContent = '└─';
-
-                const icon = document.createElement('span');
-                icon.className = 'pipeline-slice-icon';
-                icon.textContent = '⛓️';
-
-                const label = document.createElement('span');
-                label.className = 'pipeline-node-label';
-                label.textContent = `Rebar Cage (${femCounts.numBeams.toLocaleString()} beams · Ø${diamStr} mm)`;
-                label.title = `Reinforcing Steel Beams: Ø${diamStr} mm (Kim et al. 2022 / HD10 specification). Click to configure in FEM Setup.`;
-
-                const tag = document.createElement('span');
-                tag.className = 'pipeline-slice-tag';
-                tag.style.background = 'rgba(245, 158, 11, 0.2)';
-                tag.style.color = '#fbbf24';
-                tag.style.borderColor = 'rgba(245, 158, 11, 0.4)';
-                tag.textContent = `Ø${diamStr}mm`;
-
-                rebarItem.appendChild(branch);
-                rebarItem.appendChild(icon);
-                rebarItem.appendChild(label);
-                rebarItem.appendChild(tag);
-
-                rebarItem.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this.stateManager.selectNode(model.id, node.id);
-                    new FEMSetupModal(this.stateManager, node, model, () => this.render());
+                // Sub-item 1: CAD Surface Triangles
+                const isCadVis = (node.parameters.visible !== false && !node.parameters.hidden && node.parameters.show_stl !== false);
+                const cadItem = this.createMarineLayerItem({
+                    branch: partnerIds.size > 0 ? '├──' : '└──',
+                    icon: '📐',
+                    title: 'CAD Surface Triangles',
+                    subtitle: 'Boundary surface triangles representation',
+                    methodTag: 'CAD Surface',
+                    tagText: 'STL Geometry',
+                    tagColor: '#f59e0b',
+                    visible: isCadVis,
+                    onToggleVisible: (vis) => {
+                        this.stateManager.updateNodeParametersInPlace(node.id, { show_stl: vis, visible: vis, hidden: !vis });
+                        if (vis) {
+                            for (const vp of model.nodes.filter(n => n.type === 'Telemetry3DViewport')) {
+                                this.stateManager.updateNodeParametersInPlace(vp.id, { show_stl: true });
+                            }
+                        }
+                        this.render({ scrollSelectedIntoView: false });
+                    },
+                    onSelect: () => this.stateManager.selectNode(model.id, node.id)
                 });
+                childList.appendChild(cadItem);
 
-                childList.appendChild(rebarItem);
+                // Sub-items for associated simulation partners
+                const pIdArr = Array.from(partnerIds);
+                pIdArr.forEach((pId, idx) => {
+                    const pNode = model.nodes.find(n => n.id === pId);
+                    if (!pNode) return;
+                    const isLast = idx === pIdArr.length - 1;
+                    const pVis = pNode.parameters.visible !== false && !pNode.parameters.hidden;
+                    const isPMPM = pNode.type === 'MPMObject3D' || pNode.type === 'MPMObject2D';
+                    const isPFEM = pNode.type === 'FEMObject3D' || pNode.type === 'LSDynaImporter3D' || pNode.type === 'FEMDomain3D';
+                    const icon = isPMPM ? '✨' : (isPFEM ? '🧱' : '🛡️');
+                    const partnerItem = this.createMarineLayerItem({
+                        branch: isLast ? '└──' : '├──',
+                        icon: icon,
+                        title: `Associated ${pNode.parameters?.name || pNode.id}`,
+                        subtitle: `Connected ${pNode.type} multi-physics representation`,
+                        methodTag: isPMPM ? 'MPM Particles' : (isPFEM ? 'FEM Mesh' : pNode.type),
+                        tagText: pNode.type,
+                        tagColor: isPMPM ? '#38bdf8' : (isPFEM ? '#60a5fa' : '#34d399'),
+                        visible: pVis,
+                        onToggleVisible: (vis) => {
+                            const pUpdates: Record<string, any> = { visible: vis, hidden: !vis };
+                            if (isPMPM) pUpdates.showMPMParticles = vis;
+                            if (isPFEM) pUpdates.showFEMMesh = vis;
+                            this.stateManager.updateNodeParametersInPlace(pNode.id, pUpdates);
+                            this.render({ scrollSelectedIntoView: false });
+                        },
+                        onSelect: () => this.stateManager.selectNode(model.id, pNode.id)
+                    });
+                    childList.appendChild(partnerItem);
+                });
             }
         }
 
@@ -2729,6 +2836,964 @@ export class PipelineBrowser {
         return subtitle;
     }
 
+    private collapsedFEMSections: Set<string> = new Set();
+
+    private saveFEMSetupToModel(model: Model, femSetup: FEMSetupConfig, primaryNode?: Node, invalidateModel: boolean = true): void {
+        const state = this.stateManager.getCurrentState();
+        const setupCopy = JSON.parse(JSON.stringify(femSetup)) as FEMSetupConfig;
+
+        // 1. Update FEMDomain3D / FEMFSICoupler3D / LSDynaImporter3D / primaryNode with fem_setup SSOT
+        const targets = model.nodes.filter(n =>
+            n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D' || n.type === 'LSDynaImporter3D' || (primaryNode && n.id === primaryNode.id)
+        );
+        for (const tNode of targets) {
+            const tUpdates: Record<string, any> = { fem_setup: JSON.parse(JSON.stringify(setupCopy)) };
+            if (tNode.type === 'FEMDomain3D') {
+                if (setupCopy.merge_coincident_nodes !== undefined) tUpdates.merge_coincident_nodes = setupCopy.merge_coincident_nodes;
+                if (setupCopy.node_merge_tolerance !== undefined) tUpdates.node_merge_tolerance = setupCopy.node_merge_tolerance;
+                if (setupCopy.embedded_rebar_coupling !== undefined) tUpdates.embedded_rebar_coupling = setupCopy.embedded_rebar_coupling;
+            }
+            this.stateManager.updateNodeParametersInPlace(tNode.id, tUpdates);
+        }
+
+        // 2. Bidirectionally sync part properties back to their linked canvas nodes (Directive 18)
+        const vpNodes = model.nodes.filter(n => n.type === 'Telemetry3DViewport' || n.parameters?.fem_part_visibility);
+        for (const part of setupCopy.parts) {
+            const partVis = part.visible !== false && !part.suppressed;
+            if (!part.node_id) continue;
+            const cNode = model.nodes.find(n => n.id === part.node_id);
+            if (!cNode) continue;
+            const matDef = setupCopy.materials.find(m =>
+                m.node_id === part.material_assignment ||
+                `DECK_MAT_${m.mat_id}` === part.material_assignment ||
+                String(m.mat_id) === String(part.material_assignment)
+            );
+            const updates: Record<string, any> = {};
+            const isRebarPart = part.section_type === 'Beam3D' || part.section_type === 'Truss1D';
+
+            if (cNode.type === 'LSDynaImporter3D') {
+                if (isRebarPart) {
+                    if (matDef?.node_id) updates.rebar_material = matDef.node_id;
+                    if (part.section_properties?.diameter !== undefined) updates.rebar_diameter = part.section_properties.diameter;
+                    updates.showBeams = partVis;
+                    updates.showRebar = partVis;
+                } else {
+                    if (matDef?.node_id) updates.material = matDef.node_id;
+                    updates.showFEMMesh = partVis;
+                }
+            } else {
+                if (part.name) updates.name = part.name;
+                if (matDef?.node_id) updates.material = matDef.node_id;
+                if (part.section_type === 'SolidHex8') updates.element_topology = 'Hex8';
+                else if (part.section_type === 'SolidHex8_SRI') updates.element_topology = 'Hex8_SRI';
+                else if (part.section_type === 'SolidHex8_Full') updates.element_topology = 'Hex8_Full';
+                else if (part.section_type === 'SolidTet4') updates.element_topology = 'Tet4';
+                else if (part.section_type === 'SolidTet4_ANP') updates.element_topology = 'Tet4_ANP';
+                else if (part.section_type === 'SolidWedge6') updates.element_topology = 'Wedge6';
+                else if (part.section_type === 'Shell4') updates.element_topology = 'Shell4';
+                updates.visible = partVis;
+                updates.hidden = !partVis;
+                if (isRebarPart) {
+                    updates.showBeams = partVis;
+                    updates.showRebar = partVis;
+                } else {
+                    updates.showFEMMesh = partVis;
+                }
+            }
+            this.stateManager.updateNodeParametersInPlace(cNode.id, updates);
+
+            for (const vp of vpNodes) {
+                const curVis = { ...(vp.parameters?.fem_part_visibility || {}) };
+                if (cNode.type === 'LSDynaImporter3D') {
+                    curVis[isRebarPart ? `${cNode.id}_beams` : `${cNode.id}_solids`] = partVis;
+                } else {
+                    curVis[cNode.id] = partVis;
+                }
+                const vpUpd: Record<string, any> = { fem_part_visibility: curVis };
+                if (partVis) {
+                    if (isRebarPart) {
+                        vpUpd.showBeams = true;
+                        vpUpd.showRebar = true;
+                    } else {
+                        vpUpd.showFEMMesh = true;
+                    }
+                }
+                this.stateManager.updateNodeParametersInPlace(vp.id, vpUpd);
+            }
+        }
+
+        if (invalidateModel) {
+            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+            if (state) {
+                this.stateManager.pushState(state);
+            }
+        }
+        this.render({ scrollSelectedIntoView: false });
+    }
+
+    private renderFEMAssemblySubtree(nodeContainer: HTMLElement, node: Node, model: Model, curConns: any[]): void {
+        const nType = node.type;
+        const femSetup = syncModelFEMSetup(model, getLSDynaDeckMeta);
+        const selectedFEMEntity = this.stateManager.getSelectedFEMEntity();
+
+        let childList = nodeContainer.querySelector('.pipeline-child-list') as HTMLElement;
+        if (!childList) {
+            childList = document.createElement('div');
+            childList.className = 'pipeline-child-list';
+            nodeContainer.appendChild(childList);
+        }
+
+        const sectionChoices: { id: FEMSectionType; label: string; sublabel: string }[] = [
+            { id: 'SolidHex8', label: '🧱 SolidHex8 (1-pt B-Bar + Hourglass)', sublabel: 'Standard explicit 8-node hexahedron with physical hourglass control' },
+            { id: 'SolidHex8_SRI', label: '🛡️ SolidHex8_SRI (Selective Reduced 2x2x2)', sublabel: 'Locking-free 8-pt deviatoric + 1-pt volumetric (zero hourglass energy)' },
+            { id: 'SolidHex8_Full', label: '📐 SolidHex8_Full (Full 2x2x2 Gauss)', sublabel: 'Full 8-point Gauss quadrature hexahedron' },
+            { id: 'SolidTet4', label: '🔺 SolidTet4 (4-Node Tetrahedron)', sublabel: '1-point constant strain tetrahedron with nodal pressure stabilization' },
+            { id: 'SolidTet4_ANP', label: '💎 SolidTet4_ANP (Avg Nodal Pressure)', sublabel: 'Locking-free Joldes-Wittek-Miller average nodal pressure Tet4' },
+            { id: 'SolidWedge6', label: '📐 SolidWedge6 (6-Node Prism)', sublabel: '2-point axial × 1-point triangle prism element' },
+            { id: 'Shell4', label: '📄 Shell4 (Belytschko-Tsay Mindlin Shell)', sublabel: '4-node corotational shell with 5 through-thickness Lobatto points' },
+            { id: 'Beam3D', label: '⛓️ Beam3D (Hughes-Liu 3D Beam / Rebar)', sublabel: '6-DOF 2-node structural frame or embedded reinforcing bar' },
+            { id: 'Truss1D', label: '📏 Truss1D (Axial Cable / Tie Rod)', sublabel: '3-DOF axial tension/compression bar element' }
+        ];
+
+        const resolveMaterialDef = (part: FEMPartConfig) => {
+            return femSetup.materials.find(m =>
+                m.node_id === part.material_assignment ||
+                `DECK_MAT_${m.mat_id}` === part.material_assignment ||
+                String(m.mat_id) === String(part.material_assignment)
+            );
+        };
+
+        const renderPartRow = (part: FEMPartConfig, isLast: boolean, ownerNode: Node) => {
+            const matDef = resolveMaterialDef(part);
+            const matName = matDef ? matDef.name : (part.material_assignment || 'Unassigned');
+            const isSelected = this.stateManager.getSelectedNodeId() === ownerNode.id &&
+                               selectedFEMEntity?.type === 'part' &&
+                               Number(selectedFEMEntity.id) === Number(part.part_id);
+
+            const row = document.createElement('div');
+            row.className = `pipeline-node-item pipeline-child-item ${isSelected ? 'selected' : ''}`;
+            row.style.cursor = 'pointer';
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.gap = '4px';
+
+            const branch = document.createElement('span');
+            branch.className = 'pipeline-branch-symbol';
+            branch.textContent = isLast ? '└──' : '├──';
+            row.appendChild(branch);
+
+            // Visibility / Suppression toggle
+            const isVis = part.visible !== false && !part.suppressed;
+            const eyeBtn = document.createElement('button');
+            eyeBtn.className = `pipeline-eye-btn ${isVis ? 'visible' : 'hidden'}`;
+            eyeBtn.innerHTML = isVis ? EYE_OPEN_SVG : EYE_CLOSED_SVG;
+            eyeBtn.title = isVis ? `Hide / Suppress Part "${part.name}"` : `Show / Unsuppress Part "${part.name}"`;
+            eyeBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                part.visible = !isVis;
+                this.saveFEMSetupToModel(model, femSetup, ownerNode, false);
+            });
+            row.appendChild(eyeBtn);
+
+            // Color dot + Part Icon
+            const colorDot = document.createElement('span');
+            colorDot.style.width = '8px';
+            colorDot.style.height = '8px';
+            colorDot.style.borderRadius = '50%';
+            colorDot.style.background = part.color || getPartColor(part.part_id - 1);
+            colorDot.style.flexShrink = '0';
+            colorDot.style.boxShadow = `0 0 4px ${part.color || '#38bdf8'}88`;
+            row.appendChild(colorDot);
+
+            const label = document.createElement('span');
+            label.className = 'pipeline-node-label';
+            label.style.flex = '1';
+            label.style.minWidth = '60px';
+            label.style.overflow = 'hidden';
+            label.style.textOverflow = 'ellipsis';
+            label.style.whiteSpace = 'nowrap';
+            label.textContent = `P${part.part_id}: ${part.name}`;
+            label.title = `Part ${part.part_id}: ${part.name} (${(part.num_elements || 0).toLocaleString()} elements · ${part.section_type} · ${matName}). Click to inspect in Property Grid.`;
+            row.appendChild(label);
+
+            // 1-Click Section Type Chip
+            const secChip = document.createElement('span');
+            secChip.className = 'pipeline-sub-chip';
+            secChip.style.cursor = 'pointer';
+            secChip.textContent = part.section_type.replace('Solid', '');
+            secChip.title = `Section Formulation: ${part.section_type} (Click to change element formulation)`;
+            secChip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.showQuickAssignPopup({
+                    anchorEl: secChip,
+                    title: `Section Formulation — ${part.name}`,
+                    currentId: part.section_type,
+                    hideNoneOption: true,
+                    model,
+                    candidateNodes: sectionChoices.map(sc => ({
+                        id: sc.id,
+                        label: sc.label,
+                        sublabel: sc.sublabel
+                    })),
+                    onSelect: (newSec) => {
+                        if (newSec) {
+                            part.section_type = newSec as FEMSectionType;
+                            this.saveFEMSetupToModel(model, femSetup, ownerNode);
+                        }
+                    }
+                });
+            });
+            row.appendChild(secChip);
+
+            // 1-Click Material Assignment Chip
+            const matChip = document.createElement('span');
+            matChip.className = 'pipeline-slice-tag';
+            const matColor = matDef ? '#81c784' : '#f87171';
+            matChip.style.background = `${matColor}20`;
+            matChip.style.color = matColor;
+            matChip.style.borderColor = `${matColor}66`;
+            matChip.style.cursor = 'pointer';
+            matChip.style.maxWidth = '95px';
+            matChip.style.overflow = 'hidden';
+            matChip.style.textOverflow = 'ellipsis';
+            matChip.style.whiteSpace = 'nowrap';
+            matChip.textContent = `🧪 ${matName}`;
+            matChip.title = `Assigned Material: ${matName} (Click to reassign or create material)`;
+            matChip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const candidates: { id: string; label: string; sublabel?: string }[] = femSetup.materials.map(m => ({
+                    id: m.node_id || `DECK_MAT_${m.mat_id}`,
+                    label: `🧪 ${m.name}`,
+                    sublabel: `${m.model_type} · ρ=${m.density} kg/m³ · E=${(m.youngs_modulus / 1e9).toFixed(1)} GPa`
+                }));
+                candidates.push({
+                    id: 'create_rc_concrete',
+                    label: '➕ Create RHT Concrete (48 MPa) Material',
+                    sublabel: 'Add a new RHT Concrete Material node and assign to this part'
+                });
+                candidates.push({
+                    id: 'create_rebar_steel',
+                    label: '➕ Create Rebar Steel (HD10 / SD400) Material',
+                    sublabel: 'Add a new Johnson-Cook / Elasto-Plastic Steel Material node and assign'
+                });
+                candidates.push({
+                    id: 'create_rha_armor',
+                    label: '➕ Create RHA Armor Steel Material',
+                    sublabel: 'Add a new Rolled Homogeneous Armor Steel Material node and assign'
+                });
+                this.showQuickAssignPopup({
+                    anchorEl: matChip,
+                    title: `Assign Material — ${part.name}`,
+                    currentId: part.material_assignment,
+                    hideNoneOption: true,
+                    model,
+                    candidateNodes: candidates,
+                    onSelect: (sel) => {
+                        if (!sel) return;
+                        if (!sel.startsWith('create_')) {
+                            part.material_assignment = sel;
+                            femSetup.material_assignments[part.part_id] = sel;
+                            this.saveFEMSetupToModel(model, femSetup, ownerNode);
+                        } else {
+                            const presetMap: Record<string, { name: string; model: string; preset: string; rho: number; E: number; nu: number; sigY: number }> = {
+                                'create_rc_concrete': { name: 'RHT Concrete (48 MPa)', model: 'RHT Concrete', preset: 'Concrete (48 MPa - Kim et al.)', rho: 2314, E: 32.0e9, nu: 0.20, sigY: 48.0e6 },
+                                'create_rebar_steel': { name: 'Rebar Steel (HD10)', model: 'Johnson-Cook', preset: 'Reinforcing Steel (SD400 / HD10)', rho: 7850, E: 200.0e9, nu: 0.30, sigY: 400.0e6 },
+                                'create_rha_armor': { name: 'RHA Armor Steel', model: 'Johnson-Cook', preset: 'RHA Armor Steel', rho: 7850, E: 205.0e9, nu: 0.29, sigY: 1150.0e6 }
+                            };
+                            const spec = presetMap[sel];
+                            if (spec) {
+                                const newNodeId = `mat_${Date.now().toString(36).slice(-4)}`;
+                                const newMatNode: Node = {
+                                    id: newNodeId,
+                                    type: 'Material',
+                                    x: ownerNode.x - 220,
+                                    y: ownerNode.y + (femSetup.materials.length * 60),
+                                    parameters: {
+                                        name: spec.name,
+                                        material_type: 'Solid',
+                                        material_model: spec.model,
+                                        preset: spec.preset,
+                                        density: spec.rho,
+                                        youngs_modulus: spec.E,
+                                        poissons_ratio: spec.nu,
+                                        yield_stress: spec.sigY
+                                    },
+                                    inputs: [],
+                                    outputs: [{ id: 'material', label: 'Material' }]
+                                };
+                                model.nodes.push(newMatNode);
+                                const state = this.stateManager.getCurrentState();
+                                if (state) state.nodes.push(JSON.parse(JSON.stringify(newMatNode)));
+                                const nextMatId = femSetup.materials.reduce((mx, m) => Math.max(mx, m.mat_id), 0) + 1;
+                                femSetup.materials.push({
+                                    mat_id: nextMatId,
+                                    name: spec.name,
+                                    source: 'canvas_node',
+                                    node_id: newNodeId,
+                                    model_type: spec.model,
+                                    density: spec.rho,
+                                    youngs_modulus: spec.E,
+                                    poissons_ratio: spec.nu,
+                                    yield_stress: spec.sigY,
+                                    hardening_modulus: 1.5e9,
+                                    failure_strain: 0.20,
+                                    parameters: { preset: spec.preset, node_id: newNodeId }
+                                });
+                                part.material_assignment = newNodeId;
+                                femSetup.material_assignments[part.part_id] = newNodeId;
+                                this.saveFEMSetupToModel(model, femSetup, ownerNode);
+                            }
+                        }
+                    }
+                });
+            });
+            row.appendChild(matChip);
+
+            row.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.stateManager.setActiveModel(model.id);
+                this.stateManager.selectNode(model.id, ownerNode.id);
+                this.stateManager.setSelectedFEMEntity({ type: 'part', id: part.part_id });
+            });
+
+            return row;
+        };
+
+        // For individual FEMObject3D / LSDynaImporter3D / FEMBeam3D / FEMRebar3D nodes:
+        // Show their linked part(s) and any associated STL CAD surface
+        if (nType !== 'FEMDomain3D') {
+            const linkedParts = femSetup.parts.filter(p => p.node_id === node.id);
+            const stlConn = curConns.find((c: any) => (c.toNode === node.id && (c.toPort === 'stl' || c.toPort === 'geometry' || c.toPort === 'cad')) || (c.fromNode === node.id && (c.fromPort === 'stl' || c.fromPort === 'geometry')));
+            const stlNode = stlConn ? model.nodes.find(n => n.id === (stlConn.toNode === node.id ? stlConn.fromNode : stlConn.toNode)) : null;
+            const hasSTL = !!stlNode || !!node.parameters?.stl_file || node.parameters?.shape_type === 'STL' || node.parameters?.mesh_source === 'STL Tetrahedral Mesher';
+
+            linkedParts.forEach((p, idx) => {
+                const isLast = (idx === linkedParts.length - 1) && !hasSTL;
+                childList.appendChild(renderPartRow(p, isLast, node));
+            });
+
+            if (hasSTL) {
+                const stlName = stlNode ? (stlNode.parameters?.name || stlNode.id) : (String(node.parameters?.stl_file || '').split('/').pop() || 'STL Surface');
+                const isStlVis = stlNode
+                    ? (stlNode.parameters.visible !== false && !stlNode.parameters.hidden && stlNode.parameters.show_stl !== false)
+                    : ((node.parameters.show_stl !== false) && (node.parameters.visible !== false && !node.parameters.hidden));
+                const stlItem = this.createMarineLayerItem({
+                    branch: '└──',
+                    icon: '📐',
+                    title: `CAD / STL Surface: ${stlName}`,
+                    subtitle: `CAD Surface boundary mesh${stlNode ? ` (${stlNode.id})` : ''}`,
+                    methodTag: 'CAD Surface',
+                    tagText: 'STL CAD',
+                    tagColor: '#f59e0b',
+                    visible: isStlVis,
+                    onToggleVisible: (vis) => {
+                        this.stateManager.updateNodeParametersInPlace(node.id, { show_stl: vis });
+                        if (stlNode) {
+                            this.stateManager.updateNodeParametersInPlace(stlNode.id, { visible: vis, hidden: !vis, show_stl: vis });
+                        }
+                        if (vis) {
+                            for (const vp of model.nodes.filter(n => n.type === 'Telemetry3DViewport')) {
+                                this.stateManager.updateNodeParametersInPlace(vp.id, { show_stl: true });
+                            }
+                        }
+                        this.render({ scrollSelectedIntoView: false });
+                    },
+                    onSelect: () => {
+                        if (stlNode) this.stateManager.selectNode(model.id, stlNode.id);
+                        else this.stateManager.selectNode(model.id, node.id);
+                    }
+                });
+                childList.appendChild(stlItem);
+            }
+            return;
+        }
+
+        // For FEMDomain3D: Render the full 4-section interactive FEM Assembly Hierarchy (Proposal A)
+        const createSectionHeader = (secKey: string, icon: string, title: string, countText: string, badgeColor: string, onQuickAdd: (btnEl: HTMLElement) => void) => {
+            const fullKey = `${node.id}:${secKey}`;
+            const isCollapsed = this.collapsedFEMSections.has(fullKey);
+            const hdr = document.createElement('div');
+            hdr.className = 'pipeline-node-item pipeline-child-item';
+            hdr.style.cursor = 'pointer';
+            hdr.style.background = 'rgba(255,255,255,0.025)';
+            hdr.style.borderTop = '1px solid rgba(255,255,255,0.05)';
+            hdr.style.fontWeight = '600';
+
+            const arrow = document.createElement('span');
+            arrow.className = 'pipeline-branch-symbol';
+            arrow.textContent = isCollapsed ? '▸' : '▾';
+            hdr.appendChild(arrow);
+
+            const ic = document.createElement('span');
+            ic.className = 'pipeline-slice-icon';
+            ic.textContent = icon;
+            hdr.appendChild(ic);
+
+            const lbl = document.createElement('span');
+            lbl.className = 'pipeline-node-label';
+            lbl.style.flex = '1';
+            lbl.style.color = '#e2e8f0';
+            lbl.textContent = title;
+            hdr.appendChild(lbl);
+
+            const cnt = document.createElement('span');
+            cnt.className = 'pipeline-sub-chip';
+            cnt.style.color = badgeColor;
+            cnt.textContent = countText;
+            hdr.appendChild(cnt);
+
+            const addBtn = document.createElement('button');
+            addBtn.type = 'button';
+            addBtn.className = 'pipeline-slice-tag';
+            addBtn.style.background = `${badgeColor}22`;
+            addBtn.style.color = badgeColor;
+            addBtn.style.borderColor = `${badgeColor}66`;
+            addBtn.style.cursor = 'pointer';
+            addBtn.style.padding = '1px 6px';
+            addBtn.textContent = '+ Add';
+            addBtn.title = `Add new item to ${title}`;
+            addBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                onQuickAdd(addBtn);
+            });
+            hdr.appendChild(addBtn);
+
+            hdr.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (this.collapsedFEMSections.has(fullKey)) {
+                    this.collapsedFEMSections.delete(fullKey);
+                } else {
+                    this.collapsedFEMSections.add(fullKey);
+                }
+                this.render({ scrollSelectedIntoView: false });
+            });
+
+            return { hdr, isCollapsed };
+        };
+
+        // 1. PARTS & COMPONENTS SECTION
+        const partsHdr = createSectionHeader(
+            'parts',
+            '🧱',
+            'Parts & Components',
+            `${femSetup.parts.length} parts`,
+            '#38bdf8',
+            (btnEl) => {
+                this.showQuickAssignPopup({
+                    anchorEl: btnEl,
+                    title: 'Add Structural Part or Mesh to Assembly',
+                    currentId: '',
+                    hideNoneOption: true,
+                    model,
+                    candidateNodes: [
+                        { id: 'box_hex8', label: '🧊 Add Primitive Hex8 Box Part', sublabel: 'Structured 8-node hexahedral block (SolidHex8 / SolidHex8_SRI)' },
+                        { id: 'plate_shell4', label: '📄 Add Belytschko-Tsay Shell4 Plate Part', sublabel: '4-node corotational Mindlin-Reissner armor/hull plate' },
+                        { id: 'cyl_hex8', label: '🛢️ Add Cylindrical Column / Pipe Part', sublabel: 'Structured cylindrical solid or shell component' },
+                        { id: 'rebar_beam', label: '⛓️ Add 1D Embedded Rebar / Beam Part', sublabel: 'Hughes-Liu 3D beam reinforcement cage or frame member' },
+                        { id: 'import_lsdyna', label: '📂 Import LS-DYNA Keyword Mesh (.k)', sublabel: 'Add an LSDynaImporter3D deck to this multi-part assembly' }
+                    ],
+                    onSelect: (choice) => {
+                        const nextPartId = femSetup.parts.reduce((mx, p) => Math.max(mx, p.part_id), 0) + 1;
+                        const defaultMatAssign = femSetup.materials[0]?.node_id || (femSetup.materials[0] ? `DECK_MAT_${femSetup.materials[0].mat_id}` : 'DECK_MAT_1');
+                        if (choice === 'import_lsdyna') {
+                            const newImpId = `lsdyna_${Date.now().toString(36).slice(-4)}`;
+                            const newImpNode: Node = {
+                                id: newImpId,
+                                type: 'LSDynaImporter3D',
+                                x: node.x - 240,
+                                y: node.y + (femSetup.parts.length * 70),
+                                parameters: {
+                                    name: `LS-DYNA Mesh #${nextPartId}`,
+                                    keyword_file: 'concrete_cubicle_30mm.k',
+                                    scale_factor: 1.0,
+                                    pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+                                    rot_x: 0.0, rot_y: 0.0, rot_z: 0.0,
+                                    target_domain: node.id
+                                },
+                                inputs: [
+                                    { id: 'material', label: 'Material' },
+                                    { id: 'rebar_material', label: 'Rebar Material' }
+                                ],
+                                outputs: [{ id: 'out', label: 'Output' }]
+                            };
+                            model.nodes.push(newImpNode);
+                            model.connections.push({ fromNode: newImpId, fromPort: 'out', toNode: node.id, toPort: 'mesh' });
+                            const state = this.stateManager.getCurrentState();
+                            if (state) {
+                                state.nodes.push(JSON.parse(JSON.stringify(newImpNode)));
+                                state.connections.push({ fromNode: newImpId, fromPort: 'out', toNode: node.id, toPort: 'mesh' });
+                            }
+                            const updatedSetup = syncModelFEMSetup(model, getLSDynaDeckMeta);
+                            this.saveFEMSetupToModel(model, updatedSetup, node);
+                            return;
+                        }
+
+                        const isShell = choice === 'plate_shell4';
+                        const isCyl = choice === 'cyl_hex8';
+                        const isBeam = choice === 'rebar_beam';
+                        const newObjId = `fem_obj_${Date.now().toString(36).slice(-4)}`;
+                        const newPartName = isShell ? `Shell Plate #${nextPartId}` : (isCyl ? `Cylinder #${nextPartId}` : (isBeam ? `Rebar Frame #${nextPartId}` : `Solid Block #${nextPartId}`));
+                        const secType: FEMSectionType = isShell ? 'Shell4' : (isBeam ? 'Beam3D' : 'SolidHex8');
+                        const shapeType = isShell ? 'Plate' : (isCyl ? 'Cylinder' : 'Box');
+
+                        const newObjNode: Node = {
+                            id: newObjId,
+                            type: isBeam ? 'FEMBeam3D' : 'FEMObject3D',
+                            x: node.x - 240,
+                            y: node.y + (femSetup.parts.length * 70),
+                            parameters: {
+                                name: newPartName,
+                                mesh_source: 'Primitive Box/Cylinder',
+                                shape_type: shapeType,
+                                element_topology: isShell ? 'Shell4' : 'Hex8',
+                                pos_x: 0.0, pos_y: 0.0, pos_z: 0.5,
+                                size_x: 1.0, size_y: isShell ? 0.02 : 0.3, size_z: 1.0,
+                                nx: 10, ny: isShell ? 1 : 4, nz: 10,
+                                target_domain: node.id
+                            },
+                            inputs: [
+                                { id: 'material', label: 'Material' },
+                                { id: 'stl', label: 'STL' }
+                            ],
+                            outputs: [{ id: 'out', label: 'Output' }]
+                        };
+                        model.nodes.push(newObjNode);
+                        model.connections.push({ fromNode: newObjId, fromPort: 'out', toNode: node.id, toPort: 'mesh' });
+                        const state = this.stateManager.getCurrentState();
+                        if (state) {
+                            state.nodes.push(JSON.parse(JSON.stringify(newObjNode)));
+                            state.connections.push({ fromNode: newObjId, fromPort: 'out', toNode: node.id, toPort: 'mesh' });
+                        }
+                        femSetup.parts.push({
+                            part_id: nextPartId,
+                            name: newPartName,
+                            node_id: newObjId,
+                            source: 'canvas_node',
+                            section_type: secType,
+                            section_properties: {
+                                thickness: isShell ? 0.02 : 0.04,
+                                diameter: isBeam ? 0.012 : 0.01,
+                                hourglass_coeff: 0.03
+                            },
+                            material_assignment: defaultMatAssign,
+                            num_elements: isShell ? 100 : 400,
+                            num_nodes: isShell ? 121 : 605,
+                            bounds: [-0.5, 0.5, -0.15, 0.15, 0.0, 1.0],
+                            initial_velocity: [0, 0, 0],
+                            visible: true,
+                            suppressed: false,
+                            color: getPartColor(nextPartId - 1),
+                            shape_type: shapeType,
+                            pos_x: 0.0, pos_y: 0.0, pos_z: 0.5,
+                            size_x: 1.0, size_y: isShell ? 0.02 : 0.3, size_z: 1.0,
+                            nx: 10, ny: isShell ? 1 : 4, nz: 10
+                        });
+                        this.saveFEMSetupToModel(model, femSetup, node);
+                        this.stateManager.selectNode(model.id, node.id);
+                        this.stateManager.setSelectedFEMEntity({ type: 'part', id: nextPartId });
+                    }
+                });
+            }
+        );
+        childList.appendChild(partsHdr.hdr);
+        if (!partsHdr.isCollapsed) {
+            femSetup.parts.forEach((p, idx) => {
+                childList.appendChild(renderPartRow(p, idx === femSetup.parts.length - 1, node));
+            });
+        }
+
+        // 2. NODE & ELEMENT SETS SECTION
+        const setsHdr = createSectionHeader(
+            'sets',
+            '📍',
+            'Node & Element Sets',
+            `${femSetup.sets.length} sets`,
+            '#a78bfa',
+            (btnEl) => {
+                this.showQuickAssignPopup({
+                    anchorEl: btnEl,
+                    title: 'Create Parametric Node or Element Set',
+                    currentId: '',
+                    hideNoneOption: true,
+                    model,
+                    candidateNodes: [
+                        { id: 'plane_z_min', label: '📍 Bottom Base Nodes (Plane z = 0.0 m)', sublabel: 'Selects all nodes on the bottom support plane within ±5 mm' },
+                        { id: 'plane_z_max', label: '📍 Top Roof Nodes (Plane z = z_max)', sublabel: 'Selects all nodes on the top horizontal plane' },
+                        { id: 'plane_x_min', label: '📍 Left / Front Face Nodes (Plane x = 0.0 m)', sublabel: 'Selects all nodes on the x = 0 plane' },
+                        { id: 'box_region', label: '📦 Coordinate Bounding Box Node Set', sublabel: 'Selects all nodes inside [xmin, xmax, ymin, ymax, zmin, zmax]' },
+                        { id: 'cyl_region', label: '🛢️ Cylindrical Radial Node Set', sublabel: 'Selects all nodes within radius R around an axis' },
+                        ...femSetup.parts.map(p => ({
+                            id: `part_set_${p.part_id}`,
+                            label: `🧱 Part P${p.part_id} (${p.name}) Node Set`,
+                            sublabel: `Selects all nodes belonging to Part ${p.part_id}`
+                        }))
+                    ],
+                    onSelect: (choice) => {
+                        const nextSetId = femSetup.sets.reduce((mx, s) => Math.max(mx, s.set_id), 0) + 1;
+                        let newSet: FEMEntitySet;
+                        if (choice === 'plane_z_min') {
+                            newSet = { set_id: nextSetId, name: `Bottom Base Plane (z=0)`, set_type: 'NODE', source: 'user_plane', entity_ids: [], filter_params: { plane: 'z_min', plane_coord: 0.0, tolerance: 0.005 } };
+                        } else if (choice === 'plane_z_max') {
+                            newSet = { set_id: nextSetId, name: `Top Plane (z=1.0m)`, set_type: 'NODE', source: 'user_plane', entity_ids: [], filter_params: { plane: 'z_max', plane_coord: 1.0, tolerance: 0.005 } };
+                        } else if (choice === 'plane_x_min') {
+                            newSet = { set_id: nextSetId, name: `Front Face Plane (x=0)`, set_type: 'NODE', source: 'user_plane', entity_ids: [], filter_params: { plane: 'x_min', plane_coord: 0.0, tolerance: 0.005 } };
+                        } else if (choice === 'box_region') {
+                            newSet = { set_id: nextSetId, name: `Box Selection #${nextSetId}`, set_type: 'NODE', source: 'user_box', entity_ids: [], filter_params: { box: [-0.5, 0.5, -0.5, 0.5, -0.05, 0.05] } };
+                        } else if (choice === 'cyl_region') {
+                            newSet = { set_id: nextSetId, name: `Cylindrical Zone #${nextSetId}`, set_type: 'NODE', source: 'user_cylinder', entity_ids: [], filter_params: { cylinder: { cx: 0.0, cy: 0.0, zmin: -10.0, zmax: 10.0, r_min: 0.0, r_max: 0.25 } } };
+                        } else if (choice.startsWith('part_set_')) {
+                            const pid = parseInt(choice.replace('part_set_', ''), 10);
+                            const pObj = femSetup.parts.find(p => p.part_id === pid);
+                            newSet = { set_id: nextSetId, name: `${pObj?.name || `Part ${pid}`} Nodes`, set_type: 'NODE', source: 'user_part', filter_part_id: pid, entity_ids: [] };
+                        } else {
+                            return;
+                        }
+                        femSetup.sets.push(newSet);
+                        this.saveFEMSetupToModel(model, femSetup, node);
+                        this.stateManager.selectNode(model.id, node.id);
+                        this.stateManager.setSelectedFEMEntity({ type: 'set', id: nextSetId });
+                    }
+                });
+            }
+        );
+        childList.appendChild(setsHdr.hdr);
+        if (!setsHdr.isCollapsed) {
+            femSetup.sets.forEach((s, idx) => {
+                const isSelected = this.stateManager.getSelectedNodeId() === node.id &&
+                                   selectedFEMEntity?.type === 'set' &&
+                                   Number(selectedFEMEntity.id) === Number(s.set_id);
+                const row = document.createElement('div');
+                row.className = `pipeline-node-item pipeline-child-item ${isSelected ? 'selected' : ''}`;
+                row.style.cursor = 'pointer';
+
+                const branch = document.createElement('span');
+                branch.className = 'pipeline-branch-symbol';
+                branch.textContent = idx === femSetup.sets.length - 1 ? '└──' : '├──';
+                row.appendChild(branch);
+
+                const icon = document.createElement('span');
+                icon.className = 'pipeline-slice-icon';
+                icon.textContent = s.set_type === 'NODE' ? '📍' : '🧱';
+                row.appendChild(icon);
+
+                const lbl = document.createElement('span');
+                lbl.className = 'pipeline-node-label';
+                lbl.style.flex = '1';
+                lbl.textContent = `S${s.set_id}: ${s.name}`;
+                row.appendChild(lbl);
+
+                const srcChip = document.createElement('span');
+                srcChip.className = 'pipeline-sub-chip';
+                const srcMap: Record<string, string> = {
+                    'deck': 'Deck ID',
+                    'user_plane': `Plane ${s.filter_params?.plane || 'z_min'}=${s.filter_params?.plane_coord ?? 0}m`,
+                    'user_box': 'Coord Box',
+                    'user_cylinder': `Cyl R≤${s.filter_params?.cylinder?.r_max ?? 0.25}m`,
+                    'user_part': `Part #${s.filter_part_id ?? 1}`
+                };
+                srcChip.textContent = srcMap[s.source] || s.source;
+                row.appendChild(srcChip);
+
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'pipeline-Delete-btn';
+                delBtn.textContent = '×';
+                delBtn.title = `Delete Set "${s.name}"`;
+                delBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    femSetup.sets = femSetup.sets.filter(item => item.set_id !== s.set_id);
+                    this.saveFEMSetupToModel(model, femSetup, node);
+                });
+                row.appendChild(delBtn);
+
+                row.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.stateManager.setActiveModel(model.id);
+                    this.stateManager.selectNode(model.id, node.id);
+                    this.stateManager.setSelectedFEMEntity({ type: 'set', id: s.set_id });
+                });
+                childList.appendChild(row);
+            });
+        }
+
+        // 3. BOUNDARY CONDITIONS & LOADS SECTION
+        const bcsHdr = createSectionHeader(
+            'bcs',
+            '🔒',
+            'Boundary Conditions & Loads',
+            `${femSetup.boundary_conditions.length} BCs`,
+            '#f59e0b',
+            (btnEl) => {
+                this.showQuickAssignPopup({
+                    anchorEl: btnEl,
+                    title: 'Add Boundary Condition or Initial Load',
+                    currentId: '',
+                    hideNoneOption: true,
+                    model,
+                    candidateNodes: [
+                        { id: 'spc_fixed', label: '🔒 Fixed Clamp SPC (All 6 DOFs Locked)', sublabel: 'Clamps translational (Tx,Ty,Tz) and rotational (Rx,Ry,Rz) DOFs' },
+                        { id: 'spc_pinned', label: '📌 Pinned Support SPC (Tx,Ty,Tz Locked)', sublabel: 'Fixes translations while allowing free rotation' },
+                        { id: 'spc_sym_z', label: '🪞 Roller / Symmetry Plane Z (Tz Locked)', sublabel: 'Vertical support allowing horizontal sliding' },
+                        { id: 'init_vel', label: '🚀 Initial Velocity Vector [Vx, Vy, Vz]', sublabel: 'Applies initial impact velocity to a Part or Node Set' },
+                        { id: 'prescribed_vel', label: '⚙️ Prescribed Constant Velocity [Vx, Vy, Vz]', sublabel: 'Drives target nodes at constant velocity throughout simulation' },
+                        { id: 'non_reflecting', label: '🌊 Non-Reflecting Lysmer-Kuhlemeyer Boundary', sublabel: 'Absorbs outgoing elastic stress waves on infinite half-space boundaries' }
+                    ],
+                    onSelect: (choice) => {
+                        const bcId = `bc_${Date.now().toString(36).slice(-4)}`;
+                        const defaultSetId = femSetup.sets[0]?.set_id || 1;
+                        const defaultPartId = femSetup.parts[0]?.part_id || 1;
+                        let newBC: FEMBoundaryCondition;
+                        if (choice === 'spc_fixed') {
+                            newBC = { id: bcId, name: 'Fixed Clamp SPC', bc_type: 'SPC', target_type: 'NODE_SET', target_id: defaultSetId, dofs: [true, true, true, true, true, true], active: true };
+                        } else if (choice === 'spc_pinned') {
+                            newBC = { id: bcId, name: 'Pinned Support SPC', bc_type: 'SPC', target_type: 'NODE_SET', target_id: defaultSetId, dofs: [true, true, true, false, false, false], active: true };
+                        } else if (choice === 'spc_sym_z') {
+                            newBC = { id: bcId, name: 'Roller Support (Tz)', bc_type: 'SPC', target_type: 'NODE_SET', target_id: defaultSetId, dofs: [false, false, true, false, false, false], active: true };
+                        } else if (choice === 'init_vel') {
+                            newBC = { id: bcId, name: 'Initial Impact Velocity', bc_type: 'INITIAL_VELOCITY', target_type: 'PART', target_id: defaultPartId, dofs: [false, false, true, false, false, false], velocity: [0, 0, -50.0], active: true };
+                        } else if (choice === 'prescribed_vel') {
+                            newBC = { id: bcId, name: 'Prescribed Velocity', bc_type: 'PRESCRIBED_VELOCITY', target_type: 'NODE_SET', target_id: defaultSetId, dofs: [false, false, true, false, false, false], velocity: [0, 0, -10.0], active: true };
+                        } else {
+                            newBC = { id: bcId, name: 'Non-Reflecting Boundary', bc_type: 'NON_REFLECTING', target_type: 'NODE_SET', target_id: defaultSetId, dofs: [true, true, true, false, false, false], active: true };
+                        }
+                        femSetup.boundary_conditions.push(newBC);
+                        this.saveFEMSetupToModel(model, femSetup, node);
+                        this.stateManager.selectNode(model.id, node.id);
+                        this.stateManager.setSelectedFEMEntity({ type: 'bc', id: bcId });
+                    }
+                });
+            }
+        );
+        childList.appendChild(bcsHdr.hdr);
+        if (!bcsHdr.isCollapsed) {
+            femSetup.boundary_conditions.forEach((bc, idx) => {
+                const isSelected = this.stateManager.getSelectedNodeId() === node.id &&
+                                   selectedFEMEntity?.type === 'bc' &&
+                                   String(selectedFEMEntity.id) === String(bc.id);
+                const row = document.createElement('div');
+                row.className = `pipeline-node-item pipeline-child-item ${isSelected ? 'selected' : ''}`;
+                row.style.cursor = 'pointer';
+
+                const branch = document.createElement('span');
+                branch.className = 'pipeline-branch-symbol';
+                branch.textContent = idx === femSetup.boundary_conditions.length - 1 ? '└──' : '├──';
+                row.appendChild(branch);
+
+                const eyeBtn = document.createElement('button');
+                eyeBtn.className = `pipeline-eye-btn ${bc.active ? 'visible' : 'hidden'}`;
+                eyeBtn.innerHTML = bc.active ? EYE_OPEN_SVG : EYE_CLOSED_SVG;
+                eyeBtn.title = bc.active ? `Disable BC "${bc.name}"` : `Enable BC "${bc.name}"`;
+                eyeBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    bc.active = !bc.active;
+                    this.saveFEMSetupToModel(model, femSetup, node);
+                });
+                row.appendChild(eyeBtn);
+
+                const lbl = document.createElement('span');
+                lbl.className = 'pipeline-node-label';
+                lbl.style.flex = '1';
+                lbl.textContent = bc.name;
+                row.appendChild(lbl);
+
+                // DOF / Type Chip
+                const dofChip = document.createElement('span');
+                dofChip.className = 'pipeline-sub-chip';
+                if (bc.bc_type === 'SPC') {
+                    const d = Array.isArray(bc.dofs) ? bc.dofs : [true, true, true, false, false, false];
+                    const tStr = `${d[0] ? 'X' : ''}${d[1] ? 'Y' : ''}${d[2] ? 'Z' : ''}`;
+                    const rStr = `${d[3] ? 'Rx' : ''}${d[4] ? 'Ry' : ''}${d[5] ? 'Rz' : ''}`;
+                    dofChip.textContent = `SPC [${tStr}${rStr ? '+' + rStr : ''}]`;
+                } else if (bc.bc_type === 'INITIAL_VELOCITY' || bc.bc_type === 'PRESCRIBED_VELOCITY') {
+                    const v = bc.velocity || [0, 0, 0];
+                    dofChip.textContent = `V=[${v[0]},${v[1]},${v[2]}]`;
+                } else {
+                    dofChip.textContent = bc.bc_type;
+                }
+                row.appendChild(dofChip);
+
+                // 1-Click Target Set / Part Chip
+                const targetChip = document.createElement('span');
+                targetChip.className = 'pipeline-slice-tag';
+                targetChip.style.background = 'rgba(245, 158, 11, 0.16)';
+                targetChip.style.color = '#fbbf24';
+                targetChip.style.borderColor = 'rgba(245, 158, 11, 0.45)';
+                targetChip.style.cursor = 'pointer';
+                const targetSet = bc.target_type === 'NODE_SET' ? femSetup.sets.find(s => s.set_id === Number(bc.target_id)) : null;
+                const targetPart = bc.target_type === 'PART' ? femSetup.parts.find(p => p.part_id === Number(bc.target_id)) : null;
+                targetChip.textContent = targetSet ? `📍 S${targetSet.set_id}` : (targetPart ? `🧱 P${targetPart.part_id}` : `Target #${bc.target_id}`);
+                targetChip.title = 'Click to change target Node Set or Part for this Boundary Condition';
+                targetChip.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const candidates: { id: string; label: string; sublabel?: string }[] = [
+                        ...femSetup.sets.map(s => ({
+                            id: `set_${s.set_id}`,
+                            label: `📍 Node Set S${s.set_id}: ${s.name}`,
+                            sublabel: `Apply boundary condition to ${s.name}`
+                        })),
+                        ...femSetup.parts.map(p => ({
+                            id: `part_${p.part_id}`,
+                            label: `🧱 Part P${p.part_id}: ${p.name}`,
+                            sublabel: `Apply boundary condition to all nodes of ${p.name}`
+                        }))
+                    ];
+                    this.showQuickAssignPopup({
+                        anchorEl: targetChip,
+                        title: `Target Set / Part — ${bc.name}`,
+                        currentId: bc.target_type === 'PART' ? `part_${bc.target_id}` : `set_${bc.target_id}`,
+                        hideNoneOption: true,
+                        model,
+                        candidateNodes: candidates,
+                        onSelect: (sel) => {
+                            if (sel.startsWith('set_')) {
+                                bc.target_type = 'NODE_SET';
+                                bc.target_id = parseInt(sel.replace('set_', ''), 10);
+                            } else if (sel.startsWith('part_')) {
+                                bc.target_type = 'PART';
+                                bc.target_id = parseInt(sel.replace('part_', ''), 10);
+                            }
+                            this.saveFEMSetupToModel(model, femSetup, node);
+                        }
+                    });
+                });
+                row.appendChild(targetChip);
+
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'pipeline-Delete-btn';
+                delBtn.textContent = '×';
+                delBtn.title = `Delete Boundary Condition "${bc.name}"`;
+                delBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    femSetup.boundary_conditions = femSetup.boundary_conditions.filter(item => item.id !== bc.id);
+                    this.saveFEMSetupToModel(model, femSetup, node);
+                });
+                row.appendChild(delBtn);
+
+                row.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.stateManager.setActiveModel(model.id);
+                    this.stateManager.selectNode(model.id, node.id);
+                    this.stateManager.setSelectedFEMEntity({ type: 'bc', id: bc.id });
+                });
+                childList.appendChild(row);
+            });
+        }
+
+        // 4. CONTACTS & REBAR COUPLING SECTION
+        const contactsHdr = createSectionHeader(
+            'contacts',
+            '🤝',
+            'Contacts & Rebar Coupling',
+            `${femSetup.contacts.length} pairs`,
+            '#34d399',
+            (btnEl) => {
+                this.showQuickAssignPopup({
+                    anchorEl: btnEl,
+                    title: 'Add Contact or Rebar Coupling Interface',
+                    currentId: '',
+                    hideNoneOption: true,
+                    model,
+                    candidateNodes: [
+                        { id: 'single_surface', label: '🤝 Automatic Single Surface Contact', sublabel: 'All-with-all self and multi-part penalty contact with Coulomb friction' },
+                        { id: 'eroding_single', label: '💥 Eroding Single Surface Contact', sublabel: 'Rebuilds exterior contact facets dynamically as solid elements erode' },
+                        { id: 'surface_to_surface', label: '🔗 Master-Slave Surface-to-Surface Contact', sublabel: 'Two-way penalty contact between specific Part IDs' },
+                        { id: 'tied_interface', label: '🧲 Tied Interface Contact', sublabel: 'Kinematic tie constraint welding two non-matching part meshes' },
+                        { id: 'embedded_rebar', label: '⛓️ Embedded Rebar-in-Solid Coupling', sublabel: 'Constrained Lagrangian-in-Solid coupling for 1D rebar inside Hex8/Tet4 concrete' }
+                    ],
+                    onSelect: (choice) => {
+                        const ctId = `ct_${Date.now().toString(36).slice(-4)}`;
+                        const typeMap: Record<string, { name: string; type: FEMContactConfig['contact_type'] }> = {
+                            'single_surface': { name: 'Auto Single Surface', type: 'AUTOMATIC_SINGLE_SURFACE' },
+                            'eroding_single': { name: 'Eroding Single Surface', type: 'ERODING_SINGLE_SURFACE' },
+                            'surface_to_surface': { name: 'Part-to-Part Contact', type: 'SURFACE_TO_SURFACE' },
+                            'tied_interface': { name: 'Tied Part Interface', type: 'TIED' },
+                            'embedded_rebar': { name: 'Embedded Rebar Coupling', type: 'EMBEDDED_REBAR' }
+                        };
+                        const spec = typeMap[choice] || typeMap['single_surface'];
+                        femSetup.contacts.push({
+                            id: ctId,
+                            name: spec.name,
+                            contact_type: spec.type,
+                            master_id: femSetup.parts[0]?.part_id || 0,
+                            slave_id: femSetup.parts[1]?.part_id || femSetup.parts[0]?.part_id || 0,
+                            friction_static: 0.30,
+                            friction_kinetic: 0.20,
+                            penalty_scale: 0.10,
+                            active: true
+                        });
+                        if (spec.type === 'EMBEDDED_REBAR') {
+                            femSetup.embedded_rebar_coupling = true;
+                        }
+                        this.saveFEMSetupToModel(model, femSetup, node);
+                        this.stateManager.selectNode(model.id, node.id);
+                        this.stateManager.setSelectedFEMEntity({ type: 'contact', id: ctId });
+                    }
+                });
+            }
+        );
+        childList.appendChild(contactsHdr.hdr);
+        if (!contactsHdr.isCollapsed) {
+            femSetup.contacts.forEach((ct, idx) => {
+                const isSelected = this.stateManager.getSelectedNodeId() === node.id &&
+                                   selectedFEMEntity?.type === 'contact' &&
+                                   String(selectedFEMEntity.id) === String(ct.id);
+                const row = document.createElement('div');
+                row.className = `pipeline-node-item pipeline-child-item ${isSelected ? 'selected' : ''}`;
+                row.style.cursor = 'pointer';
+
+                const branch = document.createElement('span');
+                branch.className = 'pipeline-branch-symbol';
+                branch.textContent = idx === femSetup.contacts.length - 1 ? '└──' : '├──';
+                row.appendChild(branch);
+
+                const icon = document.createElement('span');
+                icon.className = 'pipeline-slice-icon';
+                icon.textContent = ct.contact_type === 'EMBEDDED_REBAR' ? '⛓️' : '🤝';
+                row.appendChild(icon);
+
+                const lbl = document.createElement('span');
+                lbl.className = 'pipeline-node-label';
+                lbl.style.flex = '1';
+                lbl.textContent = ct.name;
+                row.appendChild(lbl);
+
+                const typeChip = document.createElement('span');
+                typeChip.className = 'pipeline-sub-chip';
+                typeChip.textContent = ct.contact_type.replace('AUTOMATIC_', '');
+                row.appendChild(typeChip);
+
+                const fricTag = document.createElement('span');
+                fricTag.className = 'pipeline-slice-tag';
+                fricTag.style.background = 'rgba(52, 211, 153, 0.16)';
+                fricTag.style.color = '#34d399';
+                fricTag.style.borderColor = 'rgba(52, 211, 153, 0.45)';
+                fricTag.textContent = ct.contact_type === 'EMBEDDED_REBAR' ? `P${ct.slave_id ?? 0}→P${ct.master_id ?? 0}` : `μ=${ct.friction_static}`;
+                row.appendChild(fricTag);
+
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'pipeline-Delete-btn';
+                delBtn.textContent = '×';
+                delBtn.title = `Delete Contact "${ct.name}"`;
+                delBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    femSetup.contacts = femSetup.contacts.filter(item => item.id !== ct.id);
+                    this.saveFEMSetupToModel(model, femSetup, node);
+                });
+                row.appendChild(delBtn);
+
+                row.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.stateManager.setActiveModel(model.id);
+                    this.stateManager.selectNode(model.id, node.id);
+                    this.stateManager.setSelectedFEMEntity({ type: 'contact', id: ct.id });
+                });
+                childList.appendChild(row);
+            });
+        }
+    }
+
     private createGaugeItem(vgNode: Node, gauge: any, idx: number, model: Model, isExternal: boolean = false): HTMLElement {
         const item = document.createElement('div');
         item.className = 'pipeline-node-item pipeline-child-item';
@@ -2746,23 +3811,43 @@ export class PipelineBrowser {
         branch.textContent = '└─';
 
         // Visibility / Plotting Toggle (Eye)
-        let isVisible = gauge.plot !== false && gauge.active !== false;
+        let isVisible = gauge.visible !== false && !gauge.hidden && gauge.plot !== false && gauge.active !== false && (vgNode.parameters.visible !== false && !vgNode.parameters.hidden);
         const eyeBtn = document.createElement('button');
         eyeBtn.className = `pipeline-eye-btn ${isVisible ? 'visible' : 'hidden'}`;
         eyeBtn.innerHTML = isVisible ? EYE_OPEN_SVG : EYE_CLOSED_SVG;
-        eyeBtn.title = isVisible ? 'Disable gauge plotting' : 'Enable gauge plotting';
+        eyeBtn.title = isVisible ? 'Hide gauge in viewport & disable plotting' : 'Show gauge in viewport & enable plotting';
         eyeBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             isVisible = !isVisible;
             gauge.plot = isVisible;
+            gauge.visible = isVisible;
+            gauge.hidden = !isVisible;
             if (!isExternal) {
                 const currentGauges = [...(vgNode.parameters.gauges || [])];
-                currentGauges[idx] = { ...gauge, plot: isVisible };
-                this.stateManager.updateNodeParametersInPlace(vgNode.id, { gauges: currentGauges });
+                currentGauges[idx] = { ...gauge, plot: isVisible, visible: isVisible, hidden: !isVisible };
+                const vgUpdates: Record<string, any> = { gauges: currentGauges };
+                if (isVisible) {
+                    vgUpdates.visible = true;
+                    vgUpdates.hidden = false;
+                } else if (currentGauges.length > 0 && currentGauges.every((g: any) => g.visible === false || g.hidden === true || g.plot === false)) {
+                    vgUpdates.visible = false;
+                    vgUpdates.hidden = true;
+                }
+                this.stateManager.updateNodeParametersInPlace(vgNode.id, vgUpdates);
+                const vpNodes = model.nodes.filter(n => n.type === 'Telemetry3DViewport');
+                if (isVisible) {
+                    for (const vp of vpNodes) {
+                        this.stateManager.updateNodeParametersInPlace(vp.id, { show_gauges: true });
+                    }
+                } else if (vgUpdates.visible === false) {
+                    for (const vp of vpNodes) {
+                        this.stateManager.updateNodeParametersInPlace(vp.id, { show_gauges: false });
+                    }
+                }
             }
             eyeBtn.innerHTML = isVisible ? EYE_OPEN_SVG : EYE_CLOSED_SVG;
             eyeBtn.className = `pipeline-eye-btn ${isVisible ? 'visible' : 'hidden'}`;
-            eyeBtn.title = isVisible ? 'Disable gauge plotting' : 'Enable gauge plotting';
+            eyeBtn.title = isVisible ? 'Hide gauge in viewport & disable plotting' : 'Show gauge in viewport & enable plotting';
         });
 
         // Gauge Icon
@@ -3880,6 +4965,7 @@ export class PipelineBrowser {
             case 'FEMFSICoupler3D': return 'FEM-FSI Coupler';
             case 'FSICoupler3D': return 'FSI Coupler 3D';
             case 'FSICoupler2D': return 'FSI Coupler 2D';
+            case 'MPMContactCoupler3D': return 'Bardenhagen Coupler';
             case 'DomainMesh3D': return 'Domain Mesh 3D';
             case 'DomainMesh2D': return 'Domain Mesh 2D';
             case 'DomainMesh': return 'Domain Mesh 1D';
@@ -3908,8 +4994,13 @@ export class PipelineBrowser {
                 return '1D CFD';
             case 'FEMDomain3D':
                 return `${(node.parameters.device || 'CUDA').toUpperCase()} FEM`;
-            case 'MPMDomain3D':
-                return `${(node.parameters.device || 'CUDA').toUpperCase()} MPM`;
+            case 'MPMDomain3D': {
+                const dev = (node.parameters.device || 'CUDA').toUpperCase();
+                const cm = String(node.parameters.contact_method || 'Single-Velocity');
+                const isBard = cm.includes('Bardenhagen') || cm.includes('Multi-Velocity');
+                const weldTag = node.parameters.enable_impact_welding ? ' · Weld' : '';
+                return isBard ? `${dev} MPM (Multi-Vel${weldTag})` : `${dev} MPM${weldTag}`;
+            }
             case 'Material':
             case 'MPMMaterialSteel' as any:
             case 'MPMMaterial' as any:
@@ -3948,6 +5039,11 @@ export class PipelineBrowser {
                 return '3D CFD-MPM';
             case 'FEMFSICoupler3D':
                 return '3D CFD-FEM';
+            case 'MPMContactCoupler3D': {
+                const mode = String(node.parameters?.coupler_mode || 'Bonded (Single-Velocity)');
+                const tag = String(node.parameters?.coupler_group_tag || 'Bonded Group A');
+                return mode.includes('Independent') ? 'Independent' : tag.replace('Bonded ', '');
+            }
             case 'MPMObject2D':
                 return node.parameters.shape_type || 'MPM 2D';
             case 'MPMObject3D':
@@ -3994,7 +5090,7 @@ export class PipelineBrowser {
             if (preset.includes('Water') || preset.includes('Tait')) return 'Tait Water';
             if (preset.includes('Air')) return 'Air (STP)';
             if (preset.includes('TNT') || preset.includes('JWL')) return 'JWL TNT';
-            if (preset.includes('Steel') || preset.includes('4150') || preset.includes('4340') || preset.includes('Krupp') || preset.includes('E22')) return 'Steel';
+            if (preset.includes('Steel') || preset.includes('4150') || preset.includes('4340') || preset.includes('Krupp') || preset.includes('E22') || preset.includes('RHA') || preset.includes('AXS-488')) return 'Steel';
             if (preset.includes('Concrete')) return 'Concrete';
             if (preset.includes('Soil') || preset.includes('Sand')) return 'Soil';
             if (preset.length > 14) return preset.slice(0, 13) + '…';
@@ -4132,8 +5228,17 @@ export class PipelineBrowser {
             group.className = 'pipeline-conn-chip-group';
 
             const domainConn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'parts' || c.toPort === 'elements' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects' || c.toPort === 'in'));
-            const currentDomId = domainConn ? domainConn.toNode : (node.parameters?.target_domain || '');
-            const domain = model.nodes.find(n => n.id === currentDomId);
+            let currentDomId = domainConn ? domainConn.toNode : (node.parameters?.target_domain || '');
+            let domain = model.nodes.find(n => n.id === currentDomId);
+            if (domain && domain.type === 'MPMContactCoupler3D') {
+                const couplerDomConn = state.connections.find(c => c.fromNode === domain!.id && (c.toPort === 'couplers' || c.toPort === 'objects' || c.toPort === 'in'));
+                const resolvedDomId = couplerDomConn ? couplerDomConn.toNode : (domain.parameters?.target_domain || '');
+                const resolvedDom = model.nodes.find(n => n.id === resolvedDomId);
+                if (resolvedDom) {
+                    currentDomId = resolvedDom.id;
+                    domain = resolvedDom;
+                }
+            }
 
             const domChip = document.createElement('span');
             domChip.className = 'pipeline-conn-chip';
@@ -4198,6 +5303,63 @@ export class PipelineBrowser {
                     });
                 });
                 group.appendChild(matChip);
+            }
+
+            if (node.type === 'MPMObject3D') {
+                const couplerConn = state.connections.find(c => c.fromNode === node.id && model.nodes.some(n => n.id === c.toNode && n.type === 'MPMContactCoupler3D'));
+                const couplerNode = couplerConn ? model.nodes.find(n => n.id === couplerConn.toNode) : undefined;
+                const vgParam = String(node.parameters?.velocity_group || 'Independent (Auto)');
+                const isBonded = Boolean(couplerNode && !String(couplerNode.parameters?.coupler_mode || '').includes('Independent')) || (vgParam !== 'Independent (Auto)' && vgParam !== 'Independent');
+
+                const vgChip = document.createElement('span');
+                vgChip.className = 'pipeline-conn-chip connected';
+                if (couplerNode) {
+                    vgChip.style.borderColor = '#c084fc';
+                    vgChip.style.background = 'rgba(192, 132, 252, 0.18)';
+                    vgChip.style.color = '#e9d5ff';
+                    vgChip.textContent = `🔗 ${this.getCleanEntityName(couplerNode.parameters?.name || couplerNode.parameters?.coupler_group_tag || 'Coupler')}`;
+                    vgChip.title = `Wired to Bardenhagen Coupler [${couplerNode.parameters?.name || couplerNode.id}]. Click to change velocity group or uncouple.`;
+                } else if (isBonded) {
+                    vgChip.style.borderColor = '#c084fc';
+                    vgChip.style.background = 'rgba(192, 132, 252, 0.18)';
+                    vgChip.style.color = '#e9d5ff';
+                    vgChip.textContent = `🔗 ${vgParam.replace('Bonded ', '')}`;
+                    vgChip.title = `Assigned to single-velocity ${vgParam}. All MPM parts with this group share a bonded velocity field while colliding with other objects via Bardenhagen contact. Click to change.`;
+                } else {
+                    vgChip.textContent = `⚡ Indep. Vel`;
+                    vgChip.title = `Independent Bardenhagen velocity field (${vgParam}). Click to bond with other parts via a Velocity Group or Bardenhagen Coupler.`;
+                }
+
+                vgChip.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const existingCouplers = model.nodes.filter(n => n.type === 'MPMContactCoupler3D');
+                    const candidates: Array<{ id: string; label: string; sublabel?: string }> = [
+                        { id: 'vg:Independent (Auto)', label: '⚡ Independent (Auto)', sublabel: 'Separate Bardenhagen velocity field per object' },
+                        ...existingCouplers.map(c => ({
+                            id: `coupler:${c.id}`,
+                            label: `🔗 Coupler: ${c.parameters?.name || c.id}`,
+                            sublabel: `${c.parameters?.coupler_mode || 'Bonded'} · ${c.parameters?.coupler_group_tag || 'Group A'}`
+                        })),
+                        { id: 'vg:Bonded Group A', label: '🔗 Bonded Group A', sublabel: 'Share single velocity field with Group A parts' },
+                        { id: 'vg:Bonded Group B', label: '🔗 Bonded Group B', sublabel: 'Share single velocity field with Group B parts' },
+                        { id: 'vg:Bonded Group C', label: '🔗 Bonded Group C', sublabel: 'Share single velocity field with Group C parts' },
+                        { id: 'vg:Bonded Group D', label: '🔗 Bonded Group D', sublabel: 'Share single velocity field with Group D parts' },
+                        { id: 'vg:Bonded Group E', label: '🔗 Bonded Group E', sublabel: 'Share single velocity field with Group E parts' },
+                        { id: 'vg:Bonded Group F', label: '🔗 Bonded Group F', sublabel: 'Share single velocity field with Group F parts' },
+                        { id: '__create_coupler__', label: '➕ Create & Wire New Bardenhagen Coupler', sublabel: 'Adds an MPMContactCoupler3D node to this model' }
+                    ];
+                    const activeSelection = couplerNode ? `coupler:${couplerNode.id}` : `vg:${vgParam}`;
+                    this.showQuickAssignPopup({
+                        anchorEl: vgChip,
+                        title: 'Velocity Group / Bardenhagen Coupler',
+                        currentId: activeSelection,
+                        candidateNodes: candidates,
+                        hideNoneOption: true,
+                        model,
+                        onSelect: (selectedId) => this.assignMPMObjectVelocityGroup(node, selectedId, model)
+                    });
+                });
+                group.appendChild(vgChip);
             }
 
             if (node.type === 'FEMObject3D' || node.type === 'MPMObject3D') {
@@ -4577,6 +5739,83 @@ export class PipelineBrowser {
                 group.appendChild(partChip);
             }
 
+            // 1c. Contact & Impact Welding Chip for MPMDomain3D
+            if (node.type === 'MPMDomain3D') {
+                const cm = String(node.parameters?.contact_method || 'Single-Velocity');
+                const isBard = cm.includes('Bardenhagen') || cm.includes('Multi-Velocity');
+                const isDem = cm.includes('DEM') || cm.includes('Discrete Element');
+                const weld = Boolean(node.parameters?.enable_impact_welding);
+                const fricHeat = Boolean(node.parameters?.enable_frictional_heating);
+                const cond = Boolean(node.parameters?.enable_thermal_conduction);
+                const groupingPolicy = String(node.parameters?.bardenhagen_grouping_policy || 'Per-Object Independent');
+                const contactChip = document.createElement('span');
+                contactChip.className = 'pipeline-conn-chip connected';
+                const flags: string[] = [];
+                if (weld) flags.push('Weld');
+                if (fricHeat) flags.push('FricHeat');
+                if (cond) flags.push('Cond');
+                const flagSuffix = flags.length > 0 ? ` [${flags.join('+')}]` : '';
+                const cmShort = isBard ? 'Multi-Vel' : (isDem ? 'DEM' : 'Single-Vel');
+                contactChip.textContent = `🔥 ${cmShort}${flagSuffix}`;
+                contactChip.title = `MPM 3D Contact & Fusion Physics: ${cm}${flagSuffix} (Grouping: ${groupingPolicy}). Click to configure contact method, Bardenhagen velocity grouping, impact welding, frictional heating, and thermal conduction.`;
+                contactChip.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const candidates = [
+                        { id: 'single_vel', label: 'Single-Velocity (Standard MPM)', sublabel: 'Continuous shared velocity field' },
+                        { id: 'bardenhagen_std', label: 'Multi-Velocity (Bardenhagen)', sublabel: 'Separable Coulomb contact without welding' },
+                        { id: 'bardenhagen_weld_full', label: 'Multi-Velocity + Full Impact Welding', sublabel: 'Enables Impact Welding + Frictional Heating + Thermal Conduction' },
+                        { id: 'policy_per_obj', label: `${groupingPolicy === 'Per-Object Independent' ? '✓ ' : ''}Grouping: Per-Object Independent`, sublabel: 'Each uncoupled MPMObject3D gets its own velocity field' },
+                        { id: 'policy_by_mat', label: `${groupingPolicy === 'By Material Node' ? '✓ ' : ''}Grouping: By Material Node`, sublabel: 'Uncoupled parts sharing a Material node share a velocity field' },
+                        { id: 'add_coupler', label: '➕ Add Bardenhagen Contact Coupler', sublabel: 'Create an MPMContactCoupler3D node to bond selected parts' },
+                        { id: 'toggle_weld', label: `${weld ? '✓ ' : ''}Toggle Impact Welding`, sublabel: `Currently ${weld ? 'Enabled' : 'Disabled'} (T* / plastic shear fusion + sintering)` },
+                        { id: 'toggle_fric_heat', label: `${fricHeat ? '✓ ' : ''}Toggle Frictional Heating`, sublabel: `Currently ${fricHeat ? 'Enabled' : 'Disabled'} (contact ΔK -> thermal energy)` },
+                        { id: 'toggle_cond', label: `${cond ? '✓ ' : ''}Toggle Grid Thermal Conduction`, sublabel: `Currently ${cond ? 'Enabled' : 'Disabled'} (Fourier heat diffusion & quenching)` }
+                    ];
+                    const currentPresetId = isBard ? (weld && fricHeat && cond ? 'bardenhagen_weld_full' : 'bardenhagen_std') : 'single_vel';
+                    this.showQuickAssignPopup({
+                        anchorEl: contactChip,
+                        title: 'MPM Contact & Impact Welding',
+                        currentId: currentPresetId,
+                        candidateNodes: candidates,
+                        model,
+                        onSelect: (selectedId) => {
+                            if (!selectedId) return;
+                            if (selectedId === 'add_coupler') {
+                                this.createBardenhagenCouplerForDomain(node, model);
+                                return;
+                            }
+                            const nextParams: Record<string, any> = { ...node.parameters };
+                            if (selectedId === 'single_vel') {
+                                nextParams.contact_method = 'Single-Velocity';
+                            } else if (selectedId === 'bardenhagen_std') {
+                                nextParams.contact_method = 'Multi-Velocity (Bardenhagen)';
+                                nextParams.enable_impact_welding = false;
+                                nextParams.enable_frictional_heating = false;
+                                nextParams.enable_thermal_conduction = false;
+                            } else if (selectedId === 'bardenhagen_weld_full') {
+                                nextParams.contact_method = 'Multi-Velocity (Bardenhagen)';
+                                nextParams.enable_impact_welding = true;
+                                nextParams.enable_frictional_heating = true;
+                                nextParams.enable_thermal_conduction = true;
+                            } else if (selectedId === 'policy_per_obj') {
+                                nextParams.bardenhagen_grouping_policy = 'Per-Object Independent';
+                            } else if (selectedId === 'policy_by_mat') {
+                                nextParams.bardenhagen_grouping_policy = 'By Material Node';
+                            } else if (selectedId === 'toggle_weld') {
+                                nextParams.enable_impact_welding = !weld;
+                            } else if (selectedId === 'toggle_fric_heat') {
+                                nextParams.enable_frictional_heating = !fricHeat;
+                            } else if (selectedId === 'toggle_cond') {
+                                nextParams.enable_thermal_conduction = !cond;
+                            }
+                            this.stateManager.updateNodeParameters(node.id, nextParams);
+                            this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                        }
+                    });
+                });
+                group.appendChild(contactChip);
+            }
+
             // 2. Air Material Chip (for CFD solvers)
             if (isCFD) {
                 const airConn = state.connections.find(c => (c.toNode === node.id && c.toPort === 'air') || (c.fromNode === node.id && c.fromPort === 'air'));
@@ -4838,6 +6077,149 @@ export class PipelineBrowser {
                 });
             });
             group.appendChild(matChip);
+
+            return group;
+        }
+
+        // 7a. MPM Bardenhagen Contact Couplers
+        if (node.type === 'MPMContactCoupler3D') {
+            const group = document.createElement('span');
+            group.className = 'pipeline-conn-chip-group';
+
+            // 1. Target MPM Domain Chip
+            const domConn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'couplers' || c.toPort === 'objects' || c.toPort === 'in'));
+            const currentDomId = domConn ? domConn.toNode : (node.parameters?.target_domain || '');
+            const domNode = model.nodes.find(n => n.id === currentDomId);
+            const domChip = document.createElement('span');
+            domChip.className = 'pipeline-conn-chip';
+            if (domNode) {
+                domChip.classList.add('connected');
+                domChip.textContent = `🔗 ${this.getCleanEntityName(domNode.parameters?.name || domNode.type)}`;
+                domChip.title = `Coupler wired to MPM Domain [${domNode.parameters?.name || domNode.id}]. Click to reassign.`;
+            } else {
+                domChip.classList.add('unconnected');
+                domChip.textContent = '⚠️ Assign MPM Domain';
+                domChip.title = 'Coupler is not connected to an MPMDomain3D! Click to assign.';
+            }
+            domChip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const candidates = model.nodes
+                    .filter(n => n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain')
+                    .map(n => ({ id: n.id, label: n.parameters?.name || n.type, sublabel: n.type }));
+                this.showQuickAssignPopup({
+                    anchorEl: domChip,
+                    title: 'Target MPM 3D Domain',
+                    currentId: currentDomId,
+                    candidateNodes: candidates,
+                    model,
+                    onSelect: (selectedId) => this.assignCouplerTargetDomain(node, selectedId, model)
+                });
+            });
+            group.appendChild(domChip);
+
+            // 2. Coupler Mode & Velocity Group Tag Chip
+            const mode = String(node.parameters?.coupler_mode || 'Bonded (Single-Velocity)');
+            const tag = String(node.parameters?.coupler_group_tag || 'Bonded Group A');
+            const isIndep = mode.includes('Independent');
+            const modeChip = document.createElement('span');
+            modeChip.className = 'pipeline-conn-chip connected';
+            modeChip.style.borderColor = '#c084fc';
+            modeChip.style.background = 'rgba(192, 132, 252, 0.18)';
+            modeChip.style.color = '#e9d5ff';
+            modeChip.textContent = isIndep ? '⚡ Independent' : `🔗 ${tag}`;
+            modeChip.title = `Coupler Mode: ${mode} (${tag}). Click to switch velocity group tag or coupling mode.`;
+            modeChip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const candidates = [
+                    { id: 'Bonded Group A', label: '🔗 Bonded (Single-Velocity): Group A', sublabel: 'Merge connected parts into velocity field Group A' },
+                    { id: 'Bonded Group B', label: '🔗 Bonded (Single-Velocity): Group B', sublabel: 'Merge connected parts into velocity field Group B' },
+                    { id: 'Bonded Group C', label: '🔗 Bonded (Single-Velocity): Group C', sublabel: 'Merge connected parts into velocity field Group C' },
+                    { id: 'Bonded Group D', label: '🔗 Bonded (Single-Velocity): Group D', sublabel: 'Merge connected parts into velocity field Group D' },
+                    { id: 'Bonded Group E', label: '🔗 Bonded (Single-Velocity): Group E', sublabel: 'Merge connected parts into velocity field Group E' },
+                    { id: 'Bonded Group F', label: '🔗 Bonded (Single-Velocity): Group F', sublabel: 'Merge connected parts into velocity field Group F' },
+                    { id: 'Independent', label: '⚡ Independent (Bardenhagen)', sublabel: 'Force connected parts onto separate Bardenhagen velocity fields' }
+                ];
+                this.showQuickAssignPopup({
+                    anchorEl: modeChip,
+                    title: 'Bardenhagen Coupler Mode & Group',
+                    currentId: isIndep ? 'Independent' : tag,
+                    candidateNodes: candidates,
+                    hideNoneOption: true,
+                    model,
+                    onSelect: (selectedId) => {
+                        if (!selectedId) return;
+                        const nextParams: Record<string, any> = { ...node.parameters };
+                        if (selectedId === 'Independent') {
+                            nextParams.coupler_mode = 'Independent (Bardenhagen)';
+                        } else {
+                            nextParams.coupler_mode = 'Bonded (Single-Velocity)';
+                            nextParams.coupler_group_tag = selectedId;
+                        }
+                        this.stateManager.updateNodeParameters(node.id, nextParams);
+                        // Sync velocity_group on connected MPMObject3D parts
+                        const coupledIds = state.connections.filter(c => c.toNode === node.id).map(c => c.fromNode);
+                        for (const objId of coupledIds) {
+                            this.syncParamInStateAndModel(state, model, objId, {
+                                velocity_group: selectedId === 'Independent' ? 'Independent (Auto)' : selectedId
+                            });
+                        }
+                        this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+                        this.render();
+                    }
+                });
+            });
+            group.appendChild(modeChip);
+
+            // 3. Coupled MPMObject3D Parts Chip
+            const coupledObjs = model.nodes.filter(n =>
+                n.type === 'MPMObject3D' && (
+                    state.connections.some(c => c.fromNode === n.id && c.toNode === node.id) ||
+                    (!isIndep && n.parameters?.velocity_group === tag)
+                )
+            );
+            const partsChip = document.createElement('span');
+            partsChip.className = `pipeline-conn-chip ${coupledObjs.length >= 2 ? 'connected' : 'unconnected'}`;
+            if (coupledObjs.length > 0) {
+                const names = coupledObjs.slice(0, 2).map(o => this.getCleanEntityName(o.parameters?.name || o.id)).join(' + ');
+                const extra = coupledObjs.length > 2 ? ` +${coupledObjs.length - 2}` : '';
+                partsChip.textContent = `🏗️ ${coupledObjs.length} Parts (${names}${extra})`;
+                partsChip.title = `${coupledObjs.length} MPMObject3D part(s) coupled in this velocity group. Click to toggle parts in/out of this coupler.`;
+            } else {
+                partsChip.textContent = '➕ Assign MPM Parts';
+                partsChip.title = 'Click to select MPMObject3D bodies to bond together in this coupler.';
+            }
+            partsChip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const allMpmObjs = model.nodes.filter(n => n.type === 'MPMObject3D');
+                const candidates = allMpmObjs.map(obj => {
+                    const isCoupled = coupledObjs.some(co => co.id === obj.id);
+                    return {
+                        id: obj.id,
+                        label: `${isCoupled ? '✓ ' : ''}${obj.parameters?.name || obj.id}`,
+                        sublabel: isCoupled ? `Coupled in ${tag} (click to remove)` : `Currently ${obj.parameters?.velocity_group || 'Independent'} (click to add)`
+                    };
+                });
+                this.showQuickAssignPopup({
+                    anchorEl: partsChip,
+                    title: 'Toggle Coupled MPM 3D Parts',
+                    currentId: coupledObjs[0]?.id || '',
+                    candidateNodes: candidates,
+                    hideNoneOption: true,
+                    model,
+                    onSelect: (selectedObjId) => {
+                        if (!selectedObjId) return;
+                        const targetObj = model.nodes.find(n => n.id === selectedObjId);
+                        if (!targetObj) return;
+                        const alreadyCoupled = coupledObjs.some(co => co.id === selectedObjId);
+                        if (alreadyCoupled) {
+                            this.assignMPMObjectVelocityGroup(targetObj, 'vg:Independent (Auto)', model);
+                        } else {
+                            this.assignMPMObjectVelocityGroup(targetObj, `coupler:${node.id}`, model);
+                        }
+                    }
+                });
+            });
+            group.appendChild(partsChip);
 
             return group;
         }
@@ -5631,6 +7013,133 @@ export class PipelineBrowser {
         this.render();
     }
 
+    private assignCouplerTargetDomain(coupler: Node, newDomainId: string, model: Model): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+        state.connections = state.connections.filter(c => !(c.fromNode === coupler.id && (c.toPort === 'couplers' || c.toPort === 'objects' || c.toPort === 'in')));
+        if (newDomainId) {
+            state.connections.push({
+                fromNode: coupler.id,
+                fromPort: 'out',
+                toNode: newDomainId,
+                toPort: 'couplers'
+            });
+        }
+        this.syncParamInStateAndModel(state, model, coupler.id, { target_domain: newDomainId });
+        this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
+    private createBardenhagenCouplerForDomain(mpmDomain: Node, model: Model): Node | null {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return null;
+
+        const existingCouplers = model.nodes.filter(n => n.type === 'MPMContactCoupler3D');
+        const groupLetters = ['A', 'B', 'C', 'D', 'E', 'F'];
+        const nextLetter = groupLetters[existingCouplers.length % groupLetters.length];
+        const nextGroupTag = `Bonded Group ${nextLetter}`;
+        const couplerName = `Bardenhagen Coupler ${nextLetter}`;
+
+        const id = this.stateManager.generateUniqueNodeId('MPMContactCoupler3D');
+        const inputs = this.stateManager.getDefaultInputs('MPMContactCoupler3D');
+        const outputs = this.stateManager.getDefaultOutputs('MPMContactCoupler3D');
+        const defaultParams = this.stateManager.getDefaultParameters('MPMContactCoupler3D') || {};
+
+        const newCoupler: Node = {
+            id,
+            type: 'MPMContactCoupler3D',
+            x: (mpmDomain.x || 300) - 180,
+            y: (mpmDomain.y || 200) + 120 + existingCouplers.length * 90,
+            inputs,
+            outputs,
+            parameters: {
+                ...defaultParams,
+                name: couplerName,
+                coupler_mode: 'Bonded (Single-Velocity)',
+                coupler_group_tag: nextGroupTag,
+                target_domain: mpmDomain.id
+            }
+        };
+
+        state.nodes.push(newCoupler);
+        if (!model.nodes.some(n => n.id === newCoupler.id)) {
+            model.nodes.push(newCoupler);
+        }
+        state.connections.push({
+            fromNode: newCoupler.id,
+            fromPort: 'out',
+            toNode: mpmDomain.id,
+            toPort: 'couplers'
+        });
+        // Ensure MPMDomain3D contact_method is set to Multi-Velocity (Bardenhagen) when adding a coupler
+        const curCm = String(mpmDomain.parameters?.contact_method || 'Single-Velocity');
+        if (!curCm.includes('Bardenhagen') && !curCm.includes('Multi-Velocity')) {
+            this.syncParamInStateAndModel(state, model, mpmDomain.id, {
+                contact_method: 'Multi-Velocity (Bardenhagen)'
+            });
+        }
+        this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+        this.stateManager.pushState(state);
+        this.render();
+        return newCoupler;
+    }
+
+    private assignMPMObjectVelocityGroup(body: Node, selection: string, model: Model): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        // Find the target MPMDomain3D in this model
+        const mpmDomain = model.nodes.find(n => n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain');
+
+        if (selection === '__create_coupler__') {
+            if (mpmDomain) {
+                const newCoupler = this.createBardenhagenCouplerForDomain(mpmDomain, model);
+                if (newCoupler) {
+                    this.assignMPMObjectVelocityGroup(body, `coupler:${newCoupler.id}`, model);
+                }
+            }
+            return;
+        }
+
+        // Remove any existing connection from body to any MPMContactCoupler3D
+        const couplerIds = new Set(model.nodes.filter(n => n.type === 'MPMContactCoupler3D').map(n => n.id));
+        state.connections = state.connections.filter(c => !(c.fromNode === body.id && couplerIds.has(c.toNode)));
+
+        if (selection.startsWith('coupler:')) {
+            const couplerId = selection.substring('coupler:'.length);
+            const couplerNode = model.nodes.find(n => n.id === couplerId);
+            if (couplerNode) {
+                state.connections.push({
+                    fromNode: body.id,
+                    fromPort: 'out',
+                    toNode: couplerNode.id,
+                    toPort: 'objects'
+                });
+                const isIndep = String(couplerNode.parameters?.coupler_mode || '').includes('Independent');
+                const tag = isIndep ? 'Independent (Auto)' : String(couplerNode.parameters?.coupler_group_tag || 'Bonded Group A');
+                this.syncParamInStateAndModel(state, model, body.id, { velocity_group: tag });
+            }
+        } else if (selection.startsWith('vg:')) {
+            const vg = selection.substring('vg:'.length);
+            this.syncParamInStateAndModel(state, model, body.id, { velocity_group: vg });
+            // Ensure body remains directly connected to MPMDomain3D if not already
+            if (mpmDomain && !state.connections.some(c => c.fromNode === body.id && c.toNode === mpmDomain.id)) {
+                state.connections.push({
+                    fromNode: body.id,
+                    fromPort: 'out',
+                    toNode: mpmDomain.id,
+                    toPort: 'objects'
+                });
+                this.syncParamInStateAndModel(state, model, body.id, { target_domain: mpmDomain.id });
+            }
+        }
+
+        this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
+        this.stateManager.pushState(state);
+        this.render();
+    }
+
     private assignWaterToSolver(solver: Node, waterMatId: string, model: Model): void {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
@@ -5765,6 +7274,311 @@ export class PipelineBrowser {
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
+    }
+
+    public toggle3DObjectVisibility(node: Node, isVisible: boolean, model: Model): void {
+        const state = this.stateManager.getCurrentState();
+        if (!state) return;
+
+        // 1. Determine updates for the target node itself
+        const nodeUpdates: Record<string, any> = {
+            visible: isVisible,
+            hidden: !isVisible
+        };
+
+        const myType = node.type as string;
+        const isMPM = myType === 'MPMObject3D' || myType === 'MPMObject2D';
+        const isMPMDomain = myType === 'MPMDomain3D' || myType === 'MPMDomain2D';
+        const isFEMSolid = myType === 'FEMObject3D' || myType === 'LSDynaImporter3D';
+        const isFEMBeam = myType === 'FEMBeam3D' || myType === 'FEMRebar3D' || myType === 'StructuralObject3D';
+        const isFEMDomain = myType === 'FEMDomain3D' || myType === 'FEMDomain2D';
+        const isFEM = isFEMSolid || isFEMBeam || isFEMDomain;
+        const isSTL = myType === 'STLGeometry' || myType === 'STLGeometry3D' || myType === 'CADImporter3D' || myType === 'CADDomain3D' || myType === 'PrimitiveGeometry3D';
+        const isObstacle = myType === 'Obstacle3D' || myType === 'ImmersedObstacle' || myType === 'Obstacle' || myType === 'ObstacleDomain3D' || myType === 'CSGObstacle3D' || myType === 'ObstacleBox3D' || myType === 'ObstacleCylinder3D' || myType === 'ObstacleSphere3D';
+        const isCharge = myType === 'Charge3D' || myType === 'Charge2D' || myType === 'ExplosiveMaterial';
+        const isDetonator = myType === 'DetonatorLocation3D' || myType === 'DetonatorLocation' || myType === 'TriggerLocation3D' || myType === 'TriggerLocation' || myType === 'DetonatorPoint3D' || myType === 'DetonatorLine3D' || myType === 'DetonatorPlane3D' || myType === 'Detonator';
+        const isGauges = myType === 'VirtualGauges' || myType === 'VirtualGauges3D' || myType === 'VirtualGaugeProbe3D' || myType === 'VirtualGauge' || myType === 'VirtualGaugeArray';
+        const isGrid = myType === 'DomainMesh3D' || myType === 'DomainMesh' || myType === 'DomainMesh2D';
+        const isCFD = myType === 'CFDSolver3D' || myType === 'CFDSolver2D' || myType === 'CFDSolver1D';
+        const isHarbour = myType === 'MarineHarbourDomain';
+
+        if (isMPM || isMPMDomain) {
+            nodeUpdates.showMPMParticles = isVisible;
+            if (isMPM && (!!node.parameters?.stl_file || node.parameters?.shape_type === 'STL')) {
+                nodeUpdates.show_stl = isVisible;
+            }
+        } else if (isFEMSolid || isFEMDomain) {
+            nodeUpdates.showFEMMesh = isVisible;
+            if (myType === 'LSDynaImporter3D' || isFEMDomain) {
+                nodeUpdates.showBeams = isVisible;
+                nodeUpdates.showRebar = isVisible;
+            }
+            if (Array.isArray(node.parameters?.fem_parts)) {
+                nodeUpdates.fem_parts = node.parameters.fem_parts.map((p: any) => ({ ...p, visible: isVisible }));
+            }
+            if (node.parameters?.fem_setup && Array.isArray(node.parameters.fem_setup.parts)) {
+                const updatedSetup = JSON.parse(JSON.stringify(node.parameters.fem_setup));
+                for (const p of updatedSetup.parts) {
+                    if (isFEMDomain || p.node_id === node.id || !p.node_id) {
+                        p.visible = isVisible;
+                    }
+                }
+                nodeUpdates.fem_setup = updatedSetup;
+            }
+        } else if (isFEMBeam) {
+            nodeUpdates.showBeams = isVisible;
+            nodeUpdates.showRebar = isVisible;
+        } else if (isSTL) {
+            nodeUpdates.show_stl = isVisible;
+        } else if (isObstacle) {
+            nodeUpdates.show_obstacles = isVisible;
+        } else if (isCharge) {
+            nodeUpdates.show_charge = isVisible;
+        } else if (isDetonator) {
+            nodeUpdates.show_detonators = isVisible;
+            nodeUpdates.show_detonator = isVisible;
+        } else if (isGauges) {
+            nodeUpdates.show_gauges = isVisible;
+            if (Array.isArray(node.parameters?.gauges)) {
+                nodeUpdates.gauges = node.parameters.gauges.map((g: any) => ({
+                    ...g,
+                    visible: isVisible,
+                    hidden: !isVisible,
+                    plot: isVisible
+                }));
+            }
+        } else if (isGrid) {
+            nodeUpdates.show_grid = isVisible;
+            nodeUpdates.show_grid_box = isVisible;
+            if (Array.isArray(node.parameters?.slices)) {
+                nodeUpdates.slices = node.parameters.slices.map((s: any) => ({ ...s, enabled: isVisible }));
+            }
+        } else if (isCFD) {
+            nodeUpdates.show_slices = isVisible;
+            if (Array.isArray(node.parameters?.slices)) {
+                nodeUpdates.slices = node.parameters.slices.map((s: any) => ({ ...s, enabled: isVisible }));
+            }
+        } else if (isHarbour) {
+            nodeUpdates.show_water_sleeve = isVisible;
+            nodeUpdates.show_soil_mpm = isVisible;
+        }
+
+        this.stateManager.updateNodeParametersInPlace(node.id, nodeUpdates);
+
+        // 2. If toggling a domain container node (MPMDomain3D, FEMDomain3D, CFDSolver3D), propagate to its child objects
+        const affectedFEMNodeIds: string[] = [];
+        if (isFEM) affectedFEMNodeIds.push(node.id);
+
+        if (isMPMDomain) {
+            for (const n of model.nodes) {
+                if (n.type === 'MPMObject3D' || n.type === 'MPMObject2D') {
+                    const hasStlChild = !!n.parameters?.stl_file || n.parameters?.shape_type === 'STL';
+                    const stlChildVis = hasStlChild && n.parameters?.show_stl !== false;
+                    const childNodeVis = isVisible ? true : stlChildVis;
+                    this.stateManager.updateNodeParametersInPlace(n.id, {
+                        visible: childNodeVis,
+                        hidden: !childNodeVis,
+                        showMPMParticles: isVisible
+                    });
+                }
+            }
+        } else if (isFEMDomain) {
+            for (const n of model.nodes) {
+                if (['FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D', 'StructuralObject3D'].includes(n.type as string)) {
+                    affectedFEMNodeIds.push(n.id);
+                    const childUpd: Record<string, any> = {
+                        visible: isVisible,
+                        hidden: !isVisible
+                    };
+                    if ((n.type as string) === 'FEMBeam3D' || (n.type as string) === 'FEMRebar3D' || (n.type as string) === 'StructuralObject3D') {
+                        childUpd.showBeams = isVisible;
+                        childUpd.showRebar = isVisible;
+                    } else {
+                        childUpd.showFEMMesh = isVisible;
+                        if (n.type === 'LSDynaImporter3D') {
+                            childUpd.showBeams = isVisible;
+                            childUpd.showRebar = isVisible;
+                        }
+                    }
+                    if (Array.isArray(n.parameters?.fem_parts)) {
+                        childUpd.fem_parts = n.parameters.fem_parts.map((p: any) => ({ ...p, visible: isVisible }));
+                    }
+                    this.stateManager.updateNodeParametersInPlace(n.id, childUpd);
+                }
+            }
+        } else if (isFEMSolid || isFEMBeam) {
+            // Also sync fem_setup.parts on any FEMDomain3D / LSDynaImporter3D node in the model
+            for (const domNode of model.nodes) {
+                if (domNode.parameters?.fem_setup && Array.isArray(domNode.parameters.fem_setup.parts)) {
+                    const updatedSetup = JSON.parse(JSON.stringify(domNode.parameters.fem_setup));
+                    let changed = false;
+                    for (const p of updatedSetup.parts) {
+                        if (p.node_id === node.id) {
+                            p.visible = isVisible;
+                            changed = true;
+                        }
+                    }
+                    if (changed) {
+                        this.stateManager.updateNodeParametersInPlace(domNode.id, { fem_setup: updatedSetup });
+                    }
+                }
+            }
+        }
+
+        // 3. Synchronize Telemetry3DViewport layer flags and FEM part visibility overrides
+        const vpNodes = model.nodes.filter(n => n.type === 'Telemetry3DViewport' || n.parameters?.fem_part_visibility);
+        const isNodeVisHelper = (n: Node) => n.parameters?.visible !== false && !n.parameters?.hidden;
+
+        for (const vp of vpNodes) {
+            const vpUpdates: Record<string, any> = {};
+
+            if (affectedFEMNodeIds.length > 0) {
+                const curVis = { ...(vp.parameters?.fem_part_visibility || {}) };
+                for (const tId of affectedFEMNodeIds) {
+                    curVis[tId] = isVisible;
+                    curVis[`${tId}_solids`] = isVisible;
+                    curVis[`${tId}_beams`] = isVisible;
+                    for (const k of Object.keys(curVis)) {
+                        if (k.startsWith(`${tId}_`)) {
+                            curVis[k] = isVisible;
+                        }
+                    }
+                }
+                vpUpdates.fem_part_visibility = curVis;
+            }
+
+            if (isMPM || isMPMDomain || isHarbour) {
+                if (isVisible) {
+                    vpUpdates.showMPMParticles = true;
+                    if (isMPM && (!!node.parameters?.stl_file || node.parameters?.shape_type === 'STL')) {
+                        vpUpdates.show_stl = true;
+                    }
+                } else {
+                    const mpmObjs = model.nodes.filter(n => n.type === 'MPMObject3D' || n.type === 'MPMObject2D' || n.type === 'MarineHarbourDomain');
+                    const anyMpmVis = mpmObjs.some(n => isNodeVisHelper(n) && n.parameters?.showMPMParticles !== false);
+                    if (isMPMDomain || !anyMpmVis) {
+                        vpUpdates.showMPMParticles = false;
+                    }
+                }
+            }
+
+            if (isFEMSolid || isFEMDomain) {
+                if (isVisible) {
+                    vpUpdates.showFEMMesh = true;
+                    if (myType === 'LSDynaImporter3D' || isFEMDomain) {
+                        vpUpdates.showBeams = true;
+                        vpUpdates.showRebar = true;
+                    }
+                } else {
+                    const femSolids = model.nodes.filter(n => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
+                    if (isFEMDomain || femSolids.every(n => !isNodeVisHelper(n))) {
+                        vpUpdates.showFEMMesh = false;
+                    }
+                    if (isFEMDomain) {
+                        vpUpdates.showBeams = false;
+                        vpUpdates.showRebar = false;
+                    }
+                }
+            }
+
+            if (isFEMBeam) {
+                if (isVisible) {
+                    vpUpdates.showBeams = true;
+                    vpUpdates.showRebar = true;
+                } else {
+                    const beamObjs = model.nodes.filter(n => ['FEMBeam3D', 'FEMRebar3D', 'StructuralObject3D'].includes(n.type as string));
+                    if (beamObjs.every(n => !isNodeVisHelper(n))) {
+                        vpUpdates.showBeams = false;
+                        vpUpdates.showRebar = false;
+                    }
+                }
+            }
+
+            if (isSTL) {
+                if (isVisible) {
+                    vpUpdates.show_stl = true;
+                } else {
+                    const stlObjs = model.nodes.filter(n => ['STLGeometry', 'STLGeometry3D', 'CADImporter3D', 'CADDomain3D', 'PrimitiveGeometry3D'].includes(n.type as string));
+                    if (stlObjs.every(n => !isNodeVisHelper(n))) {
+                        vpUpdates.show_stl = false;
+                    }
+                }
+            }
+
+            if (isObstacle) {
+                if (isVisible) {
+                    vpUpdates.show_obstacles = true;
+                } else {
+                    const obsObjs = model.nodes.filter(n => ['Obstacle3D', 'ImmersedObstacle', 'Obstacle', 'ObstacleDomain3D', 'CSGObstacle3D', 'ObstacleBox3D', 'ObstacleCylinder3D', 'ObstacleSphere3D'].includes(n.type as string));
+                    if (obsObjs.every(n => !isNodeVisHelper(n))) {
+                        vpUpdates.show_obstacles = false;
+                    }
+                }
+            }
+
+            if (isCharge) {
+                vpUpdates.show_charge = isVisible;
+            }
+
+            if (isDetonator) {
+                if (isVisible) {
+                    vpUpdates.show_detonators = true;
+                    vpUpdates.show_detonator = true;
+                } else {
+                    const detObjs = model.nodes.filter(n => ['DetonatorLocation3D', 'DetonatorLocation', 'TriggerLocation3D', 'TriggerLocation', 'DetonatorPoint3D', 'DetonatorLine3D', 'DetonatorPlane3D', 'Detonator'].includes(n.type as string));
+                    if (detObjs.every(n => !isNodeVisHelper(n))) {
+                        vpUpdates.show_detonators = false;
+                        vpUpdates.show_detonator = false;
+                    }
+                }
+            }
+
+            if (isGauges) {
+                vpUpdates.show_gauges = isVisible;
+            }
+
+            if (isGrid) {
+                vpUpdates.show_grid = isVisible;
+                vpUpdates.show_grid_user_enabled = isVisible;
+                vpUpdates.show_grid_box = isVisible;
+                vpUpdates.show_grid_box_user_enabled = isVisible;
+                if (Array.isArray(nodeUpdates.slices)) {
+                    vpUpdates.slices = nodeUpdates.slices;
+                    vpUpdates.show_slices = isVisible;
+                    (window as any).transportController?.onSliceConfigChange?.(nodeUpdates.slices);
+                }
+            }
+
+            if (isCFD) {
+                vpUpdates.show_slices = isVisible;
+                if (Array.isArray(vp.parameters?.slices)) {
+                    const updatedSlices = vp.parameters.slices.map((s: any) => ({ ...s, enabled: isVisible }));
+                    vpUpdates.slices = updatedSlices;
+                    (window as any).transportController?.onSliceConfigChange?.(updatedSlices);
+                }
+                for (const meshNode of model.nodes.filter(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh')) {
+                    if (Array.isArray(meshNode.parameters?.slices)) {
+                        const updatedMeshSlices = meshNode.parameters.slices.map((s: any) => ({ ...s, enabled: isVisible }));
+                        this.stateManager.updateNodeParametersInPlace(meshNode.id, { slices: updatedMeshSlices });
+                        vpUpdates.slices = updatedMeshSlices;
+                        (window as any).transportController?.onSliceConfigChange?.(updatedMeshSlices);
+                    }
+                }
+            }
+
+            if (Object.keys(vpUpdates).length > 0) {
+                this.stateManager.updateNodeParametersInPlace(vp.id, vpUpdates);
+            }
+        }
+
+        const tc = (window as any).transportController;
+        if (tc) {
+            tc.syncStateFromViewport?.();
+            tc.requestTabRender?.();
+        }
+
+        // 4. Re-render pipeline browser to keep all eye toggles visually synchronized
+        this.render({ scrollSelectedIntoView: false });
     }
 
     private assignSTLToTarget(stlNode: Node, newTargetId: string, model: Model): void {
@@ -6491,6 +8305,17 @@ export class PipelineBrowser {
             }
         });
         menu.appendChild(renameItem);
+
+        // Toggle Visibility (Object & Associated CAD)
+        const isCurrentlyVisible = node.parameters?.visible !== false && !node.parameters?.hidden;
+        const visItem = document.createElement('div');
+        visItem.className = 'context-menu-item';
+        visItem.innerHTML = isCurrentlyVisible ? '<span>👁️ Hide 3D Object & CAD Geometry</span>' : '<span>👁️ Show 3D Object & CAD Geometry</span>';
+        visItem.addEventListener('click', () => {
+            menu.remove();
+            this.toggle3DObjectVisibility(node, !isCurrentlyVisible, model);
+        });
+        menu.appendChild(visItem);
 
         if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
             const addGaugeItem = document.createElement('div');

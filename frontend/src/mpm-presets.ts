@@ -1655,6 +1655,7 @@ export const MPM_MATERIAL_CATEGORIES: MPMCategoryGroup[] = [
             'AISI 4340 (Q&T 540°C / 36 HRC)',
             'AISI 4340 (Q&T 650°C / 27 HRC)',
             'Krupp E22 Steel',
+            'US Class 4 RHA (WWII AXS-488)',
             'Q1N (HY-80 Naval Steel)',
             'HY-100 Steel',
             'RHA (Rolled Homogeneous Armor)',
@@ -2132,6 +2133,76 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
         category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
+    },
+    'US Class 4 RHA (WWII AXS-488)': {
+        density: 7850.0, youngs_modulus: 206.0e9, poissons_ratio: 0.29, yield_stress: 700.0e6, hardening_modulus: 1.10e9, failure_strain: 0.24, tensile_failure_stress: 860.0e6,
+        jc_A: 700.0e6, jc_B: 460.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.08, jc_d2: 3.80, jc_d3: -2.00, jc_d4: 0.003, jc_d5: 0.61,
+        weibull_modulus: 10.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
+    },
+    'US RHA (WWII AXS-488)': {
+        density: 7850.0, youngs_modulus: 206.0e9, poissons_ratio: 0.29, yield_stress: 700.0e6, hardening_modulus: 1.10e9, failure_strain: 0.24, tensile_failure_stress: 860.0e6,
+        jc_A: 700.0e6, jc_B: 460.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.08, jc_d2: 3.80, jc_d3: -2.00, jc_d4: 0.003, jc_d5: 0.61,
+        weibull_modulus: 10.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
+    },
+    'US Class 4 RHA (WWII)': {
+        density: 7850.0, youngs_modulus: 206.0e9, poissons_ratio: 0.29, yield_stress: 700.0e6, hardening_modulus: 1.10e9, failure_strain: 0.24, tensile_failure_stress: 860.0e6,
+        jc_A: 700.0e6, jc_B: 460.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.08, jc_d2: 3.80, jc_d3: -2.00, jc_d4: 0.003, jc_d5: 0.61,
+        weibull_modulus: 10.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
+    },
+    'US WWII RHA': {
+        density: 7850.0, youngs_modulus: 206.0e9, poissons_ratio: 0.29, yield_stress: 700.0e6, hardening_modulus: 1.10e9, failure_strain: 0.24, tensile_failure_stress: 860.0e6,
+        jc_A: 700.0e6, jc_B: 460.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.08, jc_d2: 3.80, jc_d3: -2.00, jc_d4: 0.003, jc_d5: 0.61,
+        weibull_modulus: 10.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
+    },
+    'AXS-488 Steel': {
+        density: 7850.0, youngs_modulus: 206.0e9, poissons_ratio: 0.29, yield_stress: 700.0e6, hardening_modulus: 1.10e9, failure_strain: 0.24, tensile_failure_stress: 860.0e6,
+        jc_A: 700.0e6, jc_B: 460.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.08, jc_d2: 3.80, jc_d3: -2.00, jc_d4: 0.003, jc_d5: 0.61,
+        weibull_modulus: 10.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
+    },
+    'AXS-488': {
+        density: 7850.0, youngs_modulus: 206.0e9, poissons_ratio: 0.29, yield_stress: 700.0e6, hardening_modulus: 1.10e9, failure_strain: 0.24, tensile_failure_stress: 860.0e6,
+        jc_A: 700.0e6, jc_B: 460.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.08, jc_d2: 3.80, jc_d3: -2.00, jc_d4: 0.003, jc_d5: 0.61,
+        weibull_modulus: 10.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
+    },
+    'US Class 4 RHA': {
+        density: 7850.0, youngs_modulus: 206.0e9, poissons_ratio: 0.29, yield_stress: 700.0e6, hardening_modulus: 1.10e9, failure_strain: 0.24, tensile_failure_stress: 860.0e6,
+        jc_A: 700.0e6, jc_B: 460.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.08, jc_d2: 3.80, jc_d3: -2.00, jc_d4: 0.003, jc_d5: 0.61,
+        weibull_modulus: 10.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
+        T_melt: 1780.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        provenance: 'experimental',
+        test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
+        solid_model: 'Mie-Grüneisen Shock Reactant',
+        category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
     },
     'Q1N (HY-80 Naval Steel)': {
         density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 550.0e6, hardening_modulus: 1.1e9, failure_strain: 0.22, tensile_failure_stress: 700.0e6,
@@ -3819,11 +3890,12 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
                 'AISI 4150 Steel',
                 'AISI 4340 Steel',
                 'Krupp E22 Steel',
+                'US Class 4 RHA (WWII AXS-488)',
                 'Aluminum 6061-T6 (Elastic)',
                 'Titanium Ti-6Al-4V (Elastic)',
                 'Structural Concrete C30 (Elastic)',
                 'Tempered Glass (Elastic)'
-            ].concat(getSolidPresets().filter(p => !['Structural Steel (A36)', 'Steel S275', 'Steel S355', 'AISI 4150 Steel', 'AISI 4340 Steel', 'Steel 4340', 'Krupp E22 Steel', 'Krupp E22 Formula', 'Custom'].includes(p))).concat(['Custom']);
+            ].concat(getSolidPresets().filter(p => !['Structural Steel (A36)', 'Steel S275', 'Steel S355', 'AISI 4150 Steel', 'AISI 4340 Steel', 'Steel 4340', 'Krupp E22 Steel', 'Krupp E22 Formula', 'US Class 4 RHA (WWII AXS-488)', 'Custom'].includes(p))).concat(['Custom']);
 
         case 'Hypoelastic':
         case 'Johnson-Cook + Mie-Grüneisen':

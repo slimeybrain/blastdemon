@@ -879,7 +879,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 }
             }
             const objConn = state.connections.find(c => 
-                (c.toNode === node.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in')) ||
+                (c.toNode === node.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'couplers' || c.toPort === 'in')) ||
                 (c.fromNode === node.id && (c.fromPort === 'objects' || c.fromPort === 'out'))
             );
             if (!objConn) {
@@ -1000,6 +1000,24 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             const femConn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'fem' || c.toPort === 'fem_domain' || c.toPort === 'fem_solver'));
             if (!femConn) {
                 addMessage(node.id, 'error', "No FEM Domain 3D connected to FEM-CFD FSI Coupler 3D.");
+            }
+        }
+
+        if (node.type === 'MPMContactCoupler3D') {
+            const domConn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'couplers' || c.toPort === 'objects' || c.toPort === 'in'));
+            const hasTargetDom = Boolean(domConn || node.parameters?.target_domain);
+            if (!hasTargetDom) {
+                addMessage(node.id, 'warning', "MPM Bardenhagen Coupler 3D is not connected to an MPM Domain 3D.");
+            }
+            const tag = String(node.parameters?.coupler_group_tag || 'Bonded Group A');
+            const coupledParts = state.nodes.filter(n =>
+                n.type === 'MPMObject3D' && (
+                    state.connections.some(c => c.fromNode === n.id && c.toNode === node.id) ||
+                    n.parameters?.velocity_group === tag
+                )
+            );
+            if (coupledParts.length === 0) {
+                addMessage(node.id, 'warning', "No MPM Object 3D parts assigned to this Bardenhagen Coupler.");
             }
         }
 

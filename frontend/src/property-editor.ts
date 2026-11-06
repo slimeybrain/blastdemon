@@ -175,15 +175,28 @@ export class PropertyEditor {
                         (el as HTMLInputElement).checked = !!value;
                     } else if (el.tagName === 'SELECT') {
                         const sel = el as HTMLSelectElement;
-                        const strVal = String(value ?? '');
+                        let strVal = String(value ?? '');
+                        let hasEnabledDisabled = false;
+                        for (let i = 0; i < sel.options.length; i++) {
+                            if (sel.options[i].value === 'Enabled' || sel.options[i].value === 'Disabled') {
+                                hasEnabledDisabled = true;
+                                break;
+                            }
+                        }
+                        if (hasEnabledDisabled) {
+                            if (value === true || strVal === 'true' || strVal === 'Enabled') strVal = 'Enabled';
+                            else if (value === false || strVal === 'false' || strVal === 'Disabled') strVal = 'Disabled';
+                        }
                         let found = false;
                         for (let i = 0; i < sel.options.length; i++) {
                             const optVal = sel.options[i].value;
-                            if (strVal && (
-                                optVal.toLowerCase() === strVal.toLowerCase() ||
+                            if (
                                 optVal === strVal ||
-                                (!isNaN(Number(optVal)) && !isNaN(Number(strVal)) && Math.abs(Number(optVal) - Number(strVal)) < 0.001)
-                            )) {
+                                (strVal && (
+                                    optVal.toLowerCase() === strVal.toLowerCase() ||
+                                    (!isNaN(Number(optVal)) && !isNaN(Number(strVal)) && Math.abs(Number(optVal) - Number(strVal)) < 0.001)
+                                ))
+                            ) {
                                 sel.selectedIndex = i;
                                 found = true;
                                 break;
@@ -1764,6 +1777,7 @@ export class PropertyEditor {
                     { k: 'qty_mpm_pressure', l: 'Hydrostatic Pressure' },
                     { k: 'qty_mpm_material_id', l: 'Material ID (UInt8)' },
                     { k: 'qty_mpm_object_id', l: 'Object / Part ID (UInt8)' },
+                    { k: 'qty_mpm_particle_density', l: 'Particle Density (UInt8)' },
                     { k: 'qty_mpm_temp', l: 'Temperature' },
                     { k: 'qty_mpm_vel', l: 'Velocity Vector' }
                 ];
@@ -2431,7 +2445,7 @@ export class PropertyEditor {
             'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
             'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
             // FEM keys
-            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy',
+            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy', 'node_merge_tolerance',
             'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
             'rebarRadius', 'viewport_refresh_rate', 'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
             'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
@@ -2592,6 +2606,13 @@ export class PropertyEditor {
             'smooth_plastic_strain': ['Enabled', 'Disabled'],
             'enable_sdf_barrier': ['Enabled', 'Disabled'],
             'contact_method': ['Single-Velocity', 'Discrete Element (DEM)', 'Multi-Velocity (Bardenhagen)'],
+            'bardenhagen_grouping_policy': ['Per-Object Independent', 'By Material Node'],
+            'velocity_group': ['Independent (Auto)', 'Bonded Group A', 'Bonded Group B', 'Bonded Group C', 'Bonded Group D', 'Bonded Group E', 'Bonded Group F'],
+            'coupler_mode': ['Bonded (Single-Velocity)', 'Independent (Bardenhagen)'],
+            'coupler_group_tag': ['Bonded Group A', 'Bonded Group B', 'Bonded Group C', 'Bonded Group D', 'Bonded Group E', 'Bonded Group F'],
+            'enable_impact_welding': ['Disabled', 'Enabled'],
+            'enable_frictional_heating': ['Disabled', 'Enabled'],
+            'enable_thermal_conduction': ['Disabled', 'Enabled'],
             'enable_dem_contact': ['Disabled', 'Enabled'],
             'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
             'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
@@ -2906,7 +2927,7 @@ export class PropertyEditor {
             return select;
         }
 
-        if (key === 'target_domain' && (node.type === 'MPMObject3D' || node.type === 'MPMObject2D' || node.type === 'FEMObject3D' || node.type === 'LSDynaImporter3D' || node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D')) {
+        if (key === 'target_domain' && (node.type === 'MPMObject3D' || node.type === 'MPMObject2D' || node.type === 'MPMContactCoupler3D' || node.type === 'FEMObject3D' || node.type === 'LSDynaImporter3D' || node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D')) {
             const select = document.createElement('select');
             select.style.width = '100%';
             select.style.background = '#252526';
@@ -2924,11 +2945,12 @@ export class PropertyEditor {
             const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
             const isMPM3D = node.type === 'MPMObject3D';
             const isMPM2D = node.type === 'MPMObject2D';
-            const targetDomains = candidateNodes.filter(n => isMPM3D ? (n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain') : (isMPM2D ? n.type === 'MPMDomain2D' : (n.type === 'FEMDomain3D' || n.type === 'MarineHarbourDomain')));
+            const isCoupler3D = node.type === 'MPMContactCoupler3D';
+            const targetDomains = candidateNodes.filter(n => isCoupler3D ? (n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain') : (isMPM3D ? (n.type === 'MPMDomain3D' || n.type === 'MPMContactCoupler3D' || n.type === 'MarineHarbourDomain') : (isMPM2D ? n.type === 'MPMDomain2D' : (n.type === 'FEMDomain3D' || n.type === 'MarineHarbourDomain'))));
 
             let currentDomId = node.parameters['target_domain'] || '';
             if (!currentDomId && state) {
-                const conn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects' || c.toPort === 'parts'));
+                const conn = state.connections.find(c => c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'couplers' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects' || c.toPort === 'parts'));
                 if (conn) currentDomId = conn.toNode;
             }
 
@@ -2956,10 +2978,10 @@ export class PropertyEditor {
                 const newDomId = select.value;
                 this.updateParameter('target_domain', newDomId);
                 if (state) {
-                    state.connections = state.connections.filter(c => !(c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects' || c.toPort === 'parts')));
+                    state.connections = state.connections.filter(c => !(c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'couplers' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects' || c.toPort === 'parts')));
                     if (newDomId) {
                         const targetDom = candidateNodes.find(n => n.id === newDomId);
-                        const toPort = (targetDom?.type === 'FEMDomain3D') ? 'mesh' : 'objects';
+                        const toPort = (targetDom?.type === 'FEMDomain3D') ? 'mesh' : (node.type === 'MPMContactCoupler3D' ? 'couplers' : 'objects');
                         state.connections.push({
                             fromNode: node.id,
                             fromPort: 'out',
@@ -5374,17 +5396,18 @@ export class PropertyEditor {
             }
         }
 
+        const isDomainNode = (node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D' || node.type === 'FEMDomain3D');
         const vpNode = state?.nodes.find((n: any) => n.type === 'Telemetry3DViewport');
-        if (vpNode && vpNode.id !== node.id) {
+        if (isDomainNode && vpNode && vpNode.id !== node.id) {
             const vpSharedKeys = new Set([
-                'showMPMParticles', 'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleQuantity',
+                'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleQuantity',
                 'mpmParticleColormap', 'mpmParticleOpacity', 'mpmParticleAutoScale', 'mpmParticleLogScale',
                 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleWireframe', 'mpmParticleRenderMode',
                 'mpmParticleShowColorbar', 'mpmContourLevels', 'mpmSmoothContours',
-                'showFEMMesh', 'femSolid', 'femWireframe', 'femResults', 'femQuantity',
+                'femSolid', 'femWireframe', 'femResults', 'femQuantity',
                 'femColormap', 'femOpacity', 'femLighting', 'femAutoScale', 'femLogScale',
                 'femShowColorbar', 'femMinVal', 'femMaxVal', 'femContourLevels', 'femSmoothContours',
-                'showBeams', 'showRebar', 'beamSolid', 'beamWireframe', 'rebarSolid', 'rebarWireframe',
+                'beamSolid', 'beamWireframe', 'rebarSolid', 'rebarWireframe',
                 'beamOpacity', 'rebarOpacity', 'beamRadius', 'rebarRadius', 'beamQuantity', 'beamColormap',
                 'beamAutoScale', 'beamLogScale', 'beamMinVal', 'beamMaxVal', 'beamContourLevels', 'beamSmoothContours'
             ]);
@@ -5393,11 +5416,19 @@ export class PropertyEditor {
             }
         }
         if (node.type === 'Telemetry3DViewport') {
-            const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
-            if (owningModel) {
-                const mpmNodes = owningModel.nodes.filter((n: any) => n.type.startsWith('MPM'));
-                for (const mn of mpmNodes) {
-                    this.stateManager.updateNodeParametersInPlace(mn.id, { [key]: value });
+            const vpToDomainKeys = new Set([
+                'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleQuantity',
+                'mpmParticleColormap', 'mpmParticleOpacity', 'mpmParticleAutoScale', 'mpmParticleLogScale',
+                'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleWireframe', 'mpmParticleRenderMode',
+                'mpmParticleShowColorbar', 'mpmContourLevels', 'mpmSmoothContours'
+            ]);
+            if (vpToDomainKeys.has(key)) {
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                if (owningModel) {
+                    const mpmDomainNodes = owningModel.nodes.filter((n: any) => n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D');
+                    for (const mn of mpmDomainNodes) {
+                        this.stateManager.updateNodeParametersInPlace(mn.id, { [key]: value });
+                    }
                 }
             }
         }
@@ -5583,7 +5614,7 @@ export class PropertyEditor {
             'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion',
             'enable_heterogeneity', 'enable_anisotropy', 'kc_auto_generate',
             'dimension', 'charge_shape', 'init_mode', 'velocity_scheme', 'trigger_type',
-            'contact_method', 'enable_dem_contact', 'dem_contact_mode'
+            'contact_method', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode'
         ];
         this.render(structuralKeys.includes(key));
     }
@@ -5911,7 +5942,7 @@ export class PropertyEditor {
         styleSelect.className = 'property-select';
         styleSelect.style.fontSize = '10px';
         styleSelect.style.padding = '2px 4px';
-        const curStyle = p.mpmParticleRenderMode || (p.mpmParticleWireframe ? 'points' : 'spheres');
+        const curStyle = p.mpmParticleRenderMode || (p.mpmParticleWireframe ? 'points' : 'auto');
         [
             { value: 'auto', label: 'Auto (Adaptive)' },
             { value: 'spheres', label: 'Billboard Spheres' },

@@ -561,6 +561,8 @@ public:
     void setNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const MaterialTable3D& mat);
     void setNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const std::vector<MaterialTable3D>& materials);
     void appendNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const MaterialTable3D& mat);
+    void appendNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const std::vector<MaterialTable3D>& materials);
+    int mergeCoincidentNodes(T tolerance = static_cast<T>(1.0e-4f));
 
     // Rebar Truss & 3D Beam Mesh Direct Loaders
     void addTruss(int n1, int n2, T area, const MaterialTable3D& mat, T failure_strain = static_cast<T>(0.20f), int64_t lsdyna_id = -1);

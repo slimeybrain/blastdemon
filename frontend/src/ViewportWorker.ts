@@ -2079,6 +2079,8 @@ let rawSTLSubtractiveFlags: Float32Array | null = null;
 let transformedSTLVertices: Float32Array | null = null;
 let transformedRawSTLVertices: Float32Array | null = null;
 let stlTransform: {
+    node_id?: string;
+    stl_file?: string;
     origin_mode: string;
     scale_x: number;
     scale_y: number;
@@ -2110,6 +2112,42 @@ let gpuSTLIndexBuffer: any = null;
 let stlBuffer: WebGLBuffer | null = null;
 let stlIndexBuffer: WebGLBuffer | null = null;
 let stlIndexCount = 0;
+
+interface LoadedSTLMesh {
+    id: string;
+    meshId: string;
+    filePath: string;
+    rawVertices: Float32Array;
+    rawSubtractiveFlags?: Float32Array | null;
+    transformedVertices: Float32Array | null;
+    transformedRawVertices: Float32Array | null;
+    gpuBuffer?: any;
+    gpuIndexBuffer?: any;
+    glBuffer?: WebGLBuffer | null;
+    glIndexBuffer?: WebGLBuffer | null;
+    indexCount: number;
+    transform: {
+        node_id?: string;
+        stl_file?: string;
+        origin_mode: string;
+        scale_x: number;
+        scale_y: number;
+        scale_z: number;
+        pos_x: number;
+        pos_y: number;
+        pos_z: number;
+        rot_x: number;
+        rot_y: number;
+        rot_z: number;
+        visible: boolean;
+        hidden: boolean;
+    };
+    bvh?: any;
+    aabb?: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number } | null;
+    lastTransformJson?: string;
+}
+
+const loadedSTLMeshes: Map<string, LoadedSTLMesh> = new Map();
 
 let showSTL = true;
 let stlWireframe = false;
@@ -2530,7 +2568,172 @@ function updateAxesGeometry() {
     }
 }
 
+function updateSingleSTLGeometry(mesh: LoadedSTLMesh) {
+    if (!mesh.rawVertices || mesh.rawVertices.length === 0) {
+        mesh.transformedVertices = null;
+        mesh.transformedRawVertices = null;
+        mesh.bvh = null;
+        mesh.aabb = null;
+        if (mesh.gpuBuffer) {
+            mesh.gpuBuffer.destroy();
+            mesh.gpuBuffer = null;
+        }
+        if (mesh.gpuIndexBuffer) {
+            mesh.gpuIndexBuffer.destroy();
+            mesh.gpuIndexBuffer = null;
+        }
+        if (gl) {
+            if (mesh.glBuffer) {
+                gl.deleteBuffer(mesh.glBuffer);
+                mesh.glBuffer = null;
+            }
+            if (mesh.glIndexBuffer) {
+                gl.deleteBuffer(mesh.glIndexBuffer);
+                mesh.glIndexBuffer = null;
+            }
+        }
+        mesh.indexCount = 0;
+        return;
+    }
+
+    const count = mesh.rawVertices.length / 3;
+    let rawMinX = Infinity, rawMinY = Infinity, rawMinZ = Infinity;
+    let rawMaxX = -Infinity, rawMaxY = -Infinity, rawMaxZ = -Infinity;
+    for (let i = 0; i < count; i++) {
+        const x = mesh.rawVertices[i * 3 + 0];
+        const y = mesh.rawVertices[i * 3 + 1];
+        const z = mesh.rawVertices[i * 3 + 2];
+        if (x < rawMinX) rawMinX = x; if (x > rawMaxX) rawMaxX = x;
+        if (y < rawMinY) rawMinY = y; if (y > rawMaxY) rawMaxY = y;
+        if (z < rawMinZ) rawMinZ = z; if (z > rawMaxZ) rawMaxZ = z;
+    }
+    const rawCenterX = (rawMinX + rawMaxX) * 0.5;
+    const rawCenterY = (rawMinY + rawMaxY) * 0.5;
+    const rawCenterZ = (rawMinZ + rawMaxZ) * 0.5;
+
+    const t = mesh.transform;
+    const isCentered = (t.origin_mode || 'CAD Origin') === 'Center';
+    const anchorX = isCentered ? rawCenterX : 0.0;
+    const anchorY = isCentered ? rawCenterY : 0.0;
+    const anchorZ = isCentered ? rawCenterZ : 0.0;
+
+    const sx = (t.scale_x !== 0.0 && !isNaN(t.scale_x)) ? t.scale_x : 1.0;
+    const sy = (t.scale_y !== 0.0 && !isNaN(t.scale_y)) ? t.scale_y : 1.0;
+    const sz = (t.scale_z !== 0.0 && !isNaN(t.scale_z)) ? t.scale_z : 1.0;
+
+    const ax = (Number(t.rot_x) || 0.0) * Math.PI / 180.0;
+    const ay = (Number(t.rot_y) || 0.0) * Math.PI / 180.0;
+    const az = (Number(t.rot_z) || 0.0) * Math.PI / 180.0;
+
+    const posX = Number(t.pos_x) || 0.0;
+    const posY = Number(t.pos_y) || 0.0;
+    const posZ = Number(t.pos_z) || 0.0;
+
+    const data = new Float32Array(count * 7);
+    const rawTransformed = new Float32Array(count * 3);
+
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (let i = 0; i < count; i++) {
+        const vx = mesh.rawVertices[i * 3 + 0] - anchorX;
+        const vy = mesh.rawVertices[i * 3 + 1] - anchorY;
+        const vz = mesh.rawVertices[i * 3 + 2] - anchorZ;
+
+        const scaledX = vx * sx;
+        const scaledY = vy * sy;
+        const scaledZ = vz * sz;
+
+        const [rx, ry, rz] = rotatePointEuler(scaledX, scaledY, scaledZ, ax, ay, az);
+
+        const worldX = rx + posX;
+        const worldY = ry + posY;
+        const worldZ = rz + posZ;
+
+        rawTransformed[i * 3 + 0] = worldX;
+        rawTransformed[i * 3 + 1] = worldY;
+        rawTransformed[i * 3 + 2] = worldZ;
+
+        if (worldX < minX) minX = worldX; if (worldX > maxX) maxX = worldX;
+        if (worldY < minY) minY = worldY; if (worldY > maxY) maxY = worldY;
+        if (worldZ < minZ) minZ = worldZ; if (worldZ > maxZ) maxZ = worldZ;
+
+        data[i * 7 + 0] = worldX;
+        data[i * 7 + 1] = worldY;
+        data[i * 7 + 2] = worldZ;
+
+        const triVertexIndex = i % 3;
+        if (triVertexIndex === 0) {
+            data[i * 7 + 3] = 1.0;
+            data[i * 7 + 4] = 0.0;
+            data[i * 7 + 5] = 0.0;
+        } else if (triVertexIndex === 1) {
+            data[i * 7 + 3] = 0.0;
+            data[i * 7 + 4] = 1.0;
+            data[i * 7 + 5] = 0.0;
+        } else {
+            data[i * 7 + 3] = 0.0;
+            data[i * 7 + 4] = 0.0;
+            data[i * 7 + 5] = 1.0;
+        }
+        data[i * 7 + 6] = (mesh.rawSubtractiveFlags && i < mesh.rawSubtractiveFlags.length) ? mesh.rawSubtractiveFlags[i] : 0.0;
+    }
+
+    mesh.aabb = { minX, maxX, minY, maxY, minZ, maxZ };
+    mesh.transformedVertices = data;
+    mesh.transformedRawVertices = rawTransformed;
+    mesh.bvh = buildMeshBVH(mesh.transformedRawVertices, 9);
+
+    const numTriangles = count / 3;
+    const indices = new Uint32Array(numTriangles * 6);
+    for (let i = 0; i < numTriangles; i++) {
+        indices[i * 6 + 0] = i * 3 + 0;
+        indices[i * 6 + 1] = i * 3 + 1;
+        indices[i * 6 + 2] = i * 3 + 1;
+        indices[i * 6 + 3] = i * 3 + 2;
+        indices[i * 6 + 4] = i * 3 + 2;
+        indices[i * 6 + 5] = i * 3 + 0;
+    }
+    mesh.indexCount = indices.length;
+
+    if (isWebGPU && gpuDevice) {
+        if (mesh.gpuBuffer) mesh.gpuBuffer.destroy();
+        mesh.gpuBuffer = gpuDevice.createBuffer({
+            size: data.byteLength,
+            usage: 32 | 8,
+            mappedAtCreation: true
+        });
+        new Float32Array(mesh.gpuBuffer.getMappedRange()).set(data);
+        mesh.gpuBuffer.unmap();
+
+        if (mesh.gpuIndexBuffer) mesh.gpuIndexBuffer.destroy();
+        mesh.gpuIndexBuffer = gpuDevice.createBuffer({
+            size: indices.byteLength,
+            usage: 16 | 8,
+            mappedAtCreation: true
+        });
+        new Uint32Array(mesh.gpuIndexBuffer.getMappedRange()).set(indices);
+        mesh.gpuIndexBuffer.unmap();
+    } else if (gl) {
+        if (!mesh.glBuffer) {
+            mesh.glBuffer = gl.createBuffer();
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, mesh.glBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+
+        if (!mesh.glIndexBuffer) {
+            mesh.glIndexBuffer = gl.createBuffer();
+        }
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.glIndexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+    }
+}
+
 function updateSTLGeometry() {
+    for (const mesh of loadedSTLMeshes.values()) {
+        updateSingleSTLGeometry(mesh);
+    }
+
     if (!rawSTLVertices || rawSTLVertices.length === 0) {
         transformedSTLVertices = null;
         transformedRawSTLVertices = null;
@@ -3164,7 +3367,19 @@ async function initContext(canvas: OffscreenCanvas) {
                 if (adapter.features.has('float32-filterable')) {
                     requiredFeatures.push('float32-filterable');
                 }
-                gpuDevice = await adapter.requestDevice({ requiredFeatures: requiredFeatures as any });
+                const requiredLimits: Record<string, number> = {};
+                if (adapter.limits) {
+                    if (adapter.limits.maxBufferSize) {
+                        requiredLimits.maxBufferSize = adapter.limits.maxBufferSize;
+                    }
+                    if (adapter.limits.maxStorageBufferBindingSize) {
+                        requiredLimits.maxStorageBufferBindingSize = adapter.limits.maxStorageBufferBindingSize;
+                    }
+                }
+                gpuDevice = await adapter.requestDevice({
+                    requiredFeatures: requiredFeatures as any,
+                    requiredLimits: Object.keys(requiredLimits).length > 0 ? (requiredLimits as any) : undefined
+                });
                 gpuContext = canvas.getContext('webgpu') as any;
                 if (gpuContext && gpuDevice) {
                     gpuContext.configure({
@@ -3177,6 +3392,11 @@ async function initContext(canvas: OffscreenCanvas) {
                         console.error("WebGPU error:", event.error.message);
                         self.postMessage({ type: 'error', message: "WebGPU Error: " + event.error.message });
                     };
+
+                    gpuDevice.lost.then((info: any) => {
+                        console.warn("[ViewportWorker] WebGPU device lost:", info?.message || info);
+                        self.postMessage({ type: 'error', message: "WebGPU Device Lost: " + (info?.message || 'Device disconnected') });
+                    });
 
                     // Compile Shaders
                     const shaderModule = gpuDevice.createShaderModule({ code: WGSL_SOURCE });
@@ -3463,11 +3683,11 @@ async function initContext(canvas: OffscreenCanvas) {
                             module: shaderModule,
                             entryPoint: 'vs_main',
                             buffers: [{
-                                arrayStride: 28,
+                                arrayStride: 16,
                                 attributes: [
                                     { shaderLocation: 0, offset: 0, format: 'float32x3' },
-                                    { shaderLocation: 1, offset: 12, format: 'float32x2' },
-                                    { shaderLocation: 2, offset: 20, format: 'float32x2' }
+                                    { shaderLocation: 1, offset: 12, format: 'unorm8x2' },
+                                    { shaderLocation: 2, offset: 14, format: 'unorm8x2' }
                                 ]
                             }]
                         },
@@ -3498,12 +3718,12 @@ async function initContext(canvas: OffscreenCanvas) {
                             module: shaderModule,
                             entryPoint: 'vs_particle_billboard',
                             buffers: [{
-                                arrayStride: 28,
+                                arrayStride: 16,
                                 stepMode: 'instance',
                                 attributes: [
                                     { shaderLocation: 0, offset: 0, format: 'float32x3' },
-                                    { shaderLocation: 1, offset: 12, format: 'float32x2' },
-                                    { shaderLocation: 2, offset: 20, format: 'float32x2' }
+                                    { shaderLocation: 1, offset: 12, format: 'unorm8x2' },
+                                    { shaderLocation: 2, offset: 14, format: 'unorm8x2' }
                                 ]
                             }]
                         },
@@ -4334,20 +4554,24 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
             }
         }
     }
-    if (!isFinite(empiricalMin) || !isFinite(empiricalMax) || empiricalMax <= empiricalMin) {
-        empiricalMin = 0.0;
-        empiricalMax = 1.0;
+    const cFemQ = canonicalizeQuantity(femQuantity);
+    const defaultFemRange = quantityRanges[cFemQ] || quantityRanges[femQuantity] || DEFAULT_QUANTITY_RANGES[cFemQ] || DEFAULT_QUANTITY_RANGES[femQuantity] || [0.0, (cFemQ === 'plastic_strain' ? 1.0 : 500000000.0)];
+    const isFemFraction = (cFemQ === 'plastic_strain' || cFemQ === 'damage' || cFemQ === 'has_failed');
+    if (!isFinite(empiricalMin) || !isFinite(empiricalMax) || empiricalMax <= empiricalMin || (isFemFraction && empiricalMax <= 1.0e-4)) {
+        empiricalMin = defaultFemRange[0];
+        empiricalMax = defaultFemRange[1];
     }
-    if (!isFinite(beamEmpiricalMin) || !isFinite(beamEmpiricalMax) || beamEmpiricalMax <= beamEmpiricalMin) {
-        beamEmpiricalMin = 0.0;
-        beamEmpiricalMax = (canonicalizeQuantity(beamQuantity) === 'plastic_strain') ? 0.05 : 1.0;
+    const cBeamQ = canonicalizeQuantity(beamQuantity);
+    const defaultBeamRange = quantityRanges[cBeamQ] || quantityRanges[beamQuantity] || DEFAULT_QUANTITY_RANGES[cBeamQ] || DEFAULT_QUANTITY_RANGES[beamQuantity] || [0.0, (cBeamQ === 'plastic_strain' ? 0.05 : 1000.0)];
+    const isBeamFraction = (cBeamQ === 'plastic_strain' || cBeamQ === 'damage' || cBeamQ === 'has_failed');
+    if (!isFinite(beamEmpiricalMin) || !isFinite(beamEmpiricalMax) || beamEmpiricalMax <= beamEmpiricalMin || (isBeamFraction && beamEmpiricalMax <= 1.0e-4)) {
+        beamEmpiricalMin = defaultBeamRange[0];
+        beamEmpiricalMax = defaultBeamRange[1];
     }
 
     self.postMessage({ type: 'femRangeUpdated', min: empiricalMin, max: empiricalMax });
     self.postMessage({ type: 'beamRangeUpdated', min: beamEmpiricalMin, max: beamEmpiricalMax });
 
-    const cFemQ = canonicalizeQuantity(femQuantity);
-    const defaultFemRange = quantityRanges[cFemQ] || quantityRanges[femQuantity] || DEFAULT_QUANTITY_RANGES[cFemQ] || DEFAULT_QUANTITY_RANGES[femQuantity] || [0.0, (cFemQ === 'plastic_strain' ? 1.0 : 500000000.0)];
     const isFemLocked = lockQuantityRanges && (femLockQuantityRange !== false);
     const isFemAuto = isFemLocked ? ((quantityAutoScales[cFemQ] ?? quantityAutoScales[femQuantity]) !== false) : (femAutoScale !== false);
     let minScalar = femMinVal ?? defaultFemRange[0];
@@ -4362,8 +4586,6 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
     const useFemLog = isFemLocked ? (quantityLogScales[cFemQ] ?? quantityLogScales[femQuantity] ?? femLogScale) : femLogScale;
     const effectiveFemCmap = isFemLocked ? (quantityColormaps[cFemQ] || quantityColormaps[femQuantity] || femColormap) : femColormap;
 
-    const cBeamQ = canonicalizeQuantity(beamQuantity);
-    const defaultBeamRange = quantityRanges[cBeamQ] || quantityRanges[beamQuantity] || DEFAULT_QUANTITY_RANGES[cBeamQ] || DEFAULT_QUANTITY_RANGES[beamQuantity] || [0.0, (cBeamQ === 'plastic_strain' ? 0.05 : 1000.0)];
     const isBeamLocked = lockQuantityRanges && (beamLockQuantityRange !== false);
     const isBeamAuto = isBeamLocked ? ((quantityAutoScales[cBeamQ] ?? quantityAutoScales[beamQuantity]) !== false) : (beamAutoScale !== false);
     let minBeamScalar = beamMinVal ?? defaultBeamRange[0];
@@ -4769,9 +4991,97 @@ function sampleColormapDirect(v: number, cmapName: string, out: Float32Array, of
     }
 }
 
+const COLORMAP_LUT_SIZE = 256;
+const colormapLUTs = new Map<string, Float32Array>();
+
+function getColormapLUT(cmapName: string): Float32Array {
+    let lut = colormapLUTs.get(cmapName);
+    if (!lut) {
+        lut = new Float32Array(COLORMAP_LUT_SIZE * 3);
+        for (let i = 0; i < COLORMAP_LUT_SIZE; i++) {
+            const v = i / (COLORMAP_LUT_SIZE - 1);
+            sampleColormapDirect(v, cmapName, lut, i * 3);
+        }
+        colormapLUTs.set(cmapName, lut);
+    }
+    return lut;
+}
+
+function sampleColormapFast(v: number, lut: Float32Array, out: Float32Array, offset: number): void {
+    const idx = Math.max(0, Math.min(255, (v * 255) | 0)) * 3;
+    out[offset] = lut[idx];
+    out[offset + 1] = lut[idx + 1];
+    out[offset + 2] = lut[idx + 2];
+}
+
+function unpackHalfToFloat(h: number): number {
+    const s = (h & 0x8000) >> 15;
+    const e = (h & 0x7C00) >> 10;
+    const f = h & 0x03FF;
+    if (e === 0) {
+        return (s ? -1 : 1) * 5.960464477539063e-8 * f;
+    } else if (e === 0x1F) {
+        return f ? NaN : (s ? -Infinity : Infinity);
+    }
+    return (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + f / 1024);
+}
+
+let cachedMPMParticlesUint32View: Uint32Array | null = null;
+let cachedMPMParticlesUint32Buffer: ArrayBufferLike | null = null;
+let cachedMPMParticlesUint32Offset = -1;
+
+function getMPMParticlesUint32View(data: Float32Array): Uint32Array {
+    if (!cachedMPMParticlesUint32View || cachedMPMParticlesUint32Buffer !== data.buffer || cachedMPMParticlesUint32Offset !== data.byteOffset || cachedMPMParticlesUint32View.length !== data.length) {
+        cachedMPMParticlesUint32View = new Uint32Array(data.buffer, data.byteOffset, data.length);
+        cachedMPMParticlesUint32Buffer = data.buffer;
+        cachedMPMParticlesUint32Offset = data.byteOffset;
+    }
+    return cachedMPMParticlesUint32View;
+}
+
+function getMPMParticleObjectId(data: Float32Array, u32View: Uint32Array, base: number, stride: number): number {
+    if (stride === 8) {
+        return ((u32View[base + 7] >>> 8) & 0x7F);
+    }
+    return Math.round(data[base + 12]);
+}
+
+function getMPMParticleHasFailed(data: Float32Array, u32View: Uint32Array, base: number, stride: number): boolean {
+    if (stride === 8) {
+        return ((u32View[base + 7] & 0x8000) !== 0);
+    }
+    return data[base + 11] > 0.5;
+}
+
+function getMPMParticleDamage(data: Float32Array, u32View: Uint32Array, base: number, stride: number): number {
+    if (stride === 8) {
+        return (u32View[base + 7] & 0xFF) / 255.0;
+    }
+    return data[base + 10];
+}
+
 function getParticleQuantityValue(data: Float32Array, idx: number, qty: string): number {
-    const stride = (data.length % 14 === 0) ? 14 : ((data.length % 13 === 0) ? 13 : (latestMPMFloatsPerParticle || 14));
+    const stride = latestMPMFloatsPerParticle || 14;
     const base = idx * stride;
+    if (stride === 8) {
+        if (qty === 'vonMises' || qty === 'von_mises') return data[base + 3];
+        if (qty === 'pressure') return data[base + 4];
+        if (qty === 'velocity' || qty === 'speed') return data[base + 5];
+        const u32 = getMPMParticlesUint32View(data);
+        if (qty === 'plastic_strain' || qty === 'plasticStrain' || qty === 'species1' || qty === 'species_1' || qty === 'species' || qty === 'products' || qty === 'detonation_products' || qty === 'detonation' || qty === 'reacted' || qty === 'reacted_gas' || qty === 'alpha1' || qty === 'alpha_1' || qty === 'burn_fraction' || qty === 'lambda') {
+            return unpackHalfToFloat(u32[base + 6] & 0xFFFF);
+        }
+        if (qty === 'density') {
+            return unpackHalfToFloat(u32[base + 6] >>> 16);
+        }
+        if (qty === 'damage') return (u32[base + 7] & 0xFF) / 255.0;
+        if (qty === 'has_failed') return (u32[base + 7] & 0x8000) ? 1.0 : 0.0;
+        if (qty === 'object_id') return (u32[base + 7] >>> 8) & 0x7F;
+        if (qty === 'cluster_id' || qty === 'cluster' || qty === 'fragment' || qty === 'fragments') {
+            return u32[base + 7] >>> 16;
+        }
+        return data[base + 3];
+    }
     if (qty === 'vonMises' || qty === 'von_mises') return data[base + 6];
     if (qty === 'plastic_strain' || qty === 'plasticStrain' || qty === 'species1' || qty === 'species_1' || qty === 'species' || qty === 'products' || qty === 'detonation_products' || qty === 'detonation' || qty === 'reacted' || qty === 'reacted_gas' || qty === 'alpha1' || qty === 'alpha_1' || qty === 'burn_fraction' || qty === 'lambda') return data[base + 7];
     if (qty === 'density') return data[base + 8];
@@ -4782,11 +5092,19 @@ function getParticleQuantityValue(data: Float32Array, idx: number, qty: string):
     if (qty === 'cluster_id' || qty === 'cluster' || qty === 'fragment' || qty === 'fragments') {
         return (stride >= 14) ? data[base + 13] : data[base + 12];
     }
-    if (qty === 'velocity') {
+    if (qty === 'velocity' || qty === 'speed') {
         const vx = data[base + 3], vy = data[base + 4], vz = data[base + 5];
         return Math.sqrt(vx * vx + vy * vy + vz * vz);
     }
     return data[base + 6];
+}
+
+function sampleColormapPackedU32(v: number, lut: Float32Array): number {
+    const idx = Math.max(0, Math.min(255, (v * 255) | 0)) * 3;
+    const r = Math.max(0, Math.min(255, (lut[idx] * 255 + 0.5) | 0));
+    const g = Math.max(0, Math.min(255, (lut[idx + 1] * 255 + 0.5) | 0));
+    const b = Math.max(0, Math.min(255, (lut[idx + 2] * 255 + 0.5) | 0));
+    return (r | (g << 8) | (b << 16)) >>> 0;
 }
 
 function updateMPMParticlesGeometry(data?: Float32Array) {
@@ -4803,8 +5121,9 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         return;
     }
 
-    const stride = (latestMPMParticlesData.length % 14 === 0) ? 14 : ((latestMPMParticlesData.length % 13 === 0) ? 13 : (latestMPMFloatsPerParticle || 14));
+    const stride = latestMPMFloatsPerParticle || 14;
     const nParticles = Math.floor(latestMPMParticlesData.length / stride);
+    const u32Data = getMPMParticlesUint32View(latestMPMParticlesData);
     const sizeX = getDimX();
     const sizeY = getDimY();
     const sizeZ = getDimZ();
@@ -4815,20 +5134,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     const ty = -ymin * sy - 0.5;
     const tz = -zmin * sz - 0.5;
 
-    let qtyOffset = 6;
-    let isVelocity = false;
-    let isFragment = false;
-    if (mpmParticleQuantity === 'plastic_strain' || mpmParticleQuantity === 'plasticStrain' || mpmParticleQuantity === 'species1' || mpmParticleQuantity === 'species_1' || mpmParticleQuantity === 'species' || mpmParticleQuantity === 'products' || mpmParticleQuantity === 'detonation_products' || mpmParticleQuantity === 'detonation' || mpmParticleQuantity === 'reacted' || mpmParticleQuantity === 'reacted_gas' || mpmParticleQuantity === 'alpha1' || mpmParticleQuantity === 'alpha_1' || mpmParticleQuantity === 'burn_fraction' || mpmParticleQuantity === 'lambda') qtyOffset = 7;
-    else if (mpmParticleQuantity === 'density') qtyOffset = 8;
-    else if (mpmParticleQuantity === 'pressure') qtyOffset = 9;
-    else if (mpmParticleQuantity === 'damage') qtyOffset = 10;
-    else if (mpmParticleQuantity === 'has_failed') qtyOffset = 11;
-    else if (mpmParticleQuantity === 'object_id') qtyOffset = 12;
-    else if (mpmParticleQuantity === 'cluster_id' || mpmParticleQuantity === 'cluster' || mpmParticleQuantity === 'fragment' || mpmParticleQuantity === 'fragments') {
-        qtyOffset = (stride >= 14) ? 13 : 12;
-        isFragment = true;
-    }
-    else if (mpmParticleQuantity === 'velocity' || mpmParticleQuantity === 'speed') isVelocity = true;
+    const isFragment = (mpmParticleQuantity === 'cluster_id' || mpmParticleQuantity === 'cluster' || mpmParticleQuantity === 'fragment' || mpmParticleQuantity === 'fragments');
 
     let minScalar = mpmParticleMinVal;
     let maxScalar = mpmParticleMaxVal;
@@ -4836,17 +5142,20 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     let empiricalMin = Infinity;
     let empiricalMax = -Infinity;
 
-    const isMpmObjVisible: boolean[] = [];
+    const mpmObjVisMap = new Map<number, boolean>();
+    let anyMpmObjVisible = false;
     if (mpmObjectsData && mpmObjectsData.length > 0) {
         for (let o = 0; o < mpmObjectsData.length; o++) {
             const obj = mpmObjectsData[o];
             const isVis = (obj.visible !== false && !obj.hidden);
-            isMpmObjVisible[o] = isVis;
-            if (obj.object_id !== undefined && Number(obj.object_id) > 0) {
-                isMpmObjVisible[Number(obj.object_id) - 1] = isVis;
+            if (isVis) anyMpmObjVisible = true;
+            const rawObjId = (obj.object_id !== undefined) ? Number(obj.object_id) : (o + 1);
+            mpmObjVisMap.set(rawObjId, isVis);
+            if (o === 0 && rawObjId !== 0) {
+                mpmObjVisMap.set(0, isVis);
             }
         }
-        if (isMpmObjVisible.every(v => !v)) {
+        if (!anyMpmObjVisible) {
             mpmParticlesCount = 0;
             cachedMpmAABB = null;
             if (data) render(); else requestRender();
@@ -4854,30 +5163,28 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         }
     }
 
-    for (let i = 0; i < nParticles; i++) {
+    const rangeSampleStep = (nParticles > 10000) ? Math.ceil(nParticles / 10000) : 1;
+    for (let i = 0; i < nParticles; i += rangeSampleStep) {
         const base = i * stride;
-        if (isMpmObjVisible.length > 0) {
-            const rawId = Math.round(latestMPMParticlesData[base + 12]);
-            const objIdx = rawId > 0 ? (rawId - 1) : 0;
-            if (objIdx >= 0 && objIdx < isMpmObjVisible.length) {
-                if (!isMpmObjVisible[objIdx]) continue;
+        if (mpmObjVisMap.size > 0) {
+            const rawId = getMPMParticleObjectId(latestMPMParticlesData, u32Data, base, stride);
+            if (mpmObjVisMap.has(rawId) && !mpmObjVisMap.get(rawId)) {
+                continue;
             }
         }
 
-        let val = 0.0;
-        if (isVelocity) {
-            const vx = latestMPMParticlesData[base + 3], vy = latestMPMParticlesData[base + 4], vz = latestMPMParticlesData[base + 5];
-            val = Math.sqrt(vx * vx + vy * vy + vz * vz);
-        } else {
-            val = latestMPMParticlesData[base + qtyOffset];
-        }
+        const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmParticleQuantity);
         if (val < empiricalMin) empiricalMin = val;
         if (val > empiricalMax) empiricalMax = val;
     }
 
-    if (!isFinite(empiricalMin) || !isFinite(empiricalMax) || empiricalMax <= empiricalMin) {
-        empiricalMin = 0.0;
-        empiricalMax = 1.0;
+    const cMpmQ = canonicalizeQuantity(mpmParticleQuantity);
+    const defaultMpmRange = quantityRanges[cMpmQ] || quantityRanges[mpmParticleQuantity] || DEFAULT_QUANTITY_RANGES[cMpmQ] || DEFAULT_QUANTITY_RANGES[mpmParticleQuantity] || [0.0, 500000000.0];
+    const isMpmFraction = (cMpmQ === 'plastic_strain' || cMpmQ === 'damage' || cMpmQ === 'has_failed' || cMpmQ === 'species1' || cMpmQ === 'species2' || cMpmQ === 'species3' || cMpmQ === 'solid');
+
+    if (!isFinite(empiricalMin) || !isFinite(empiricalMax) || empiricalMax <= empiricalMin || (isMpmFraction && empiricalMax <= 1.0e-4)) {
+        empiricalMin = defaultMpmRange[0];
+        empiricalMax = defaultMpmRange[1];
     }
 
     self.postMessage({ type: 'mpmRangeUpdated', min: empiricalMin, max: empiricalMax });
@@ -4906,8 +5213,6 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         }
     }
 
-    const cMpmQ = canonicalizeQuantity(mpmParticleQuantity);
-    const defaultMpmRange = quantityRanges[cMpmQ] || quantityRanges[mpmParticleQuantity] || DEFAULT_QUANTITY_RANGES[cMpmQ] || DEFAULT_QUANTITY_RANGES[mpmParticleQuantity] || [0.0, 500000000.0];
     const isMpmLocked = lockQuantityRanges && (mpmLockQuantityRange !== false);
     const isMpmAuto = isMpmLocked ? ((quantityAutoScales[cMpmQ] ?? quantityAutoScales[mpmParticleQuantity]) !== false) : (mpmParticleAutoScale !== false);
     if (isMpmLocked) {
@@ -4921,17 +5226,20 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         maxScalar = mpmParticleMaxVal !== undefined ? mpmParticleMaxVal : empiricalMax;
     }
 
-    const neededFloats = nParticles * 7;
+    // 16 bytes (4 floats) per particle: [x, y, z, packedRGBA_u32]
+    const neededFloats = nParticles * 4;
     if (!cachedMPMVertexData || cachedMPMVertexData.length < neededFloats) {
-        cachedMPMVertexData = new Float32Array(Math.max(neededFloats, Math.floor(neededFloats * 1.25)));
+        cachedMPMVertexData = new Float32Array(neededFloats);
     }
     const vertexData = cachedMPMVertexData;
+    const vertexU32 = new Uint32Array(vertexData.buffer, vertexData.byteOffset, vertexData.length);
 
     const useLog = isMpmLocked ? (quantityLogScales[cMpmQ] ?? quantityLogScales[mpmParticleQuantity] ?? mpmParticleLogScale) : mpmParticleLogScale;
     const logMin = useLog ? Math.log(Math.max(minScalar, 1e-5)) : 0;
     const logMax = useLog ? Math.log(Math.max(maxScalar, 1e-5)) : 0;
     const denom = useLog ? Math.max(1e-9, logMax - logMin) : Math.max(1e-9, maxScalar - minScalar);
     const cmap = isMpmLocked ? (quantityColormaps[cMpmQ] || quantityColormaps[mpmParticleQuantity] || mpmParticleColormap) : mpmParticleColormap;
+    const cmapLUT = getColormapLUT(cmap);
 
     let mpmMinX = Infinity, mpmMaxX = -Infinity;
     let mpmMinY = Infinity, mpmMaxY = -Infinity;
@@ -4942,16 +5250,15 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
 
     for (let i = 0; i < nParticles; i += userStep) {
         const base = i * stride;
-        if (isMpmObjVisible.length > 0) {
-            const rawId = Math.round(latestMPMParticlesData[base + 12]);
-            const objIdx = rawId > 0 ? (rawId - 1) : 0;
-            if (objIdx >= 0 && objIdx < isMpmObjVisible.length) {
-                if (!isMpmObjVisible[objIdx]) continue;
+        if (mpmObjVisMap.size > 0) {
+            const rawId = getMPMParticleObjectId(latestMPMParticlesData, u32Data, base, stride);
+            if (mpmObjVisMap.has(rawId) && !mpmObjVisMap.get(rawId)) {
+                continue;
             }
         }
         if (mpmParticleHideEroded) {
-            const hasFailed = latestMPMParticlesData[base + 11] > 0.5;
-            const damage = latestMPMParticlesData[base + 10];
+            const hasFailed = getMPMParticleHasFailed(latestMPMParticlesData, u32Data, base, stride);
+            const damage = getMPMParticleDamage(latestMPMParticlesData, u32Data, base, stride);
             if (hasFailed || damage >= 1.0) {
                 continue;
             }
@@ -4965,25 +5272,17 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         if (py < mpmMinY) mpmMinY = py; if (py > mpmMaxY) mpmMaxY = py;
         if (pz < mpmMinZ) mpmMinZ = pz; if (pz > mpmMaxZ) mpmMaxZ = pz;
 
-        const vIdx = writtenParticles * 7;
+        const vIdx = writtenParticles * 4;
         vertexData[vIdx + 0] = px * sx + tx;
         vertexData[vIdx + 1] = py * sy + ty;
         vertexData[vIdx + 2] = pz * sz + tz;
 
-        let val = 0.0;
-        if (isVelocity) {
-            const vx = latestMPMParticlesData[base + 3], vy = latestMPMParticlesData[base + 4], vz = latestMPMParticlesData[base + 5];
-            val = Math.sqrt(vx * vx + vy * vy + vz * vz);
-        } else {
-            val = latestMPMParticlesData[base + qtyOffset];
-        }
+        const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmParticleQuantity);
 
         if (isFragment) {
             const cid = Math.round(val);
             if (cid <= 0) {
-                vertexData[vIdx + 3] = 0.45;
-                vertexData[vIdx + 4] = 0.45;
-                vertexData[vIdx + 5] = 0.45;
+                vertexU32[vIdx + 3] = (115 | (115 << 8) | (115 << 16)) >>> 0;
             } else {
                 const hue = ((cid * 0.618033988749895) % 1.0) * 360;
                 const s = 0.85;
@@ -4998,9 +5297,10 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
                 else if (hue < 240) { r1 = 0; g1 = x_val; b1 = c_val; }
                 else if (hue < 300) { r1 = x_val; g1 = 0; b1 = c_val; }
                 else { r1 = c_val; g1 = 0; b1 = x_val; }
-                vertexData[vIdx + 3] = r1 + m_val;
-                vertexData[vIdx + 4] = g1 + m_val;
-                vertexData[vIdx + 5] = b1 + m_val;
+                const rb = Math.max(0, Math.min(255, ((r1 + m_val) * 255 + 0.5) | 0));
+                const gb = Math.max(0, Math.min(255, ((g1 + m_val) * 255 + 0.5) | 0));
+                const bb = Math.max(0, Math.min(255, ((b1 + m_val) * 255 + 0.5) | 0));
+                vertexU32[vIdx + 3] = (rb | (gb << 8) | (bb << 16)) >>> 0;
             }
         } else {
             let normVal = 0.0;
@@ -5017,9 +5317,8 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
                 normVal = (band + 0.5) / effectiveMpmLevels;
             }
 
-            sampleColormapDirect(normVal, cmap, vertexData, vIdx + 3);
+            vertexU32[vIdx + 3] = sampleColormapPackedU32(normVal, cmapLUT);
         }
-        vertexData[vIdx + 6] = 0.0;
         writtenParticles++;
     }
 
@@ -5029,23 +5328,26 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         cachedMpmAABB = null;
     }
 
-    const particleBytes = writtenParticles * 7 * 4;
+    const particleBytes = writtenParticles * 16;
     if (gl) {
         if (!mpmParticlesBuffer) mpmParticlesBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, vertexData.subarray(0, writtenParticles * 7), gl.DYNAMIC_DRAW);
+        gl.bufferData(gl.ARRAY_BUFFER, vertexData.subarray(0, writtenParticles * 4), gl.DYNAMIC_DRAW);
     }
     if (isWebGPU && gpuDevice) {
+        const maxAllowedBuffer = gpuDevice.limits?.maxBufferSize || 268435456;
+        const targetSize = Math.min(maxAllowedBuffer, Math.max(16, particleBytes));
         if (!gpuMPMParticlesBuffer || gpuMPMParticlesBufferSize < particleBytes) {
             if (gpuMPMParticlesBuffer) gpuMPMParticlesBuffer.destroy();
-            gpuMPMParticlesBufferSize = Math.max(particleBytes, Math.floor(particleBytes * 1.25));
+            gpuMPMParticlesBufferSize = targetSize;
             gpuMPMParticlesBuffer = gpuDevice.createBuffer({
                 size: gpuMPMParticlesBufferSize,
                 usage: 32 | 8 // VERTEX | COPY_DST
             });
         }
-        if (particleBytes > 0) {
-            gpuDevice.queue.writeBuffer(gpuMPMParticlesBuffer, 0, vertexData.buffer, vertexData.byteOffset, particleBytes);
+        const bytesToWrite = Math.min(particleBytes, gpuMPMParticlesBufferSize);
+        if (bytesToWrite > 0) {
+            gpuDevice.queue.writeBuffer(gpuMPMParticlesBuffer, 0, vertexData.buffer, vertexData.byteOffset, bytesToWrite);
         }
     }
     mpmParticlesCount = writtenParticles;
@@ -5101,7 +5403,8 @@ function updatePhaseParticlesGeometry(data?: Float32Array) {
     let vMax = 100.0;
     if (isVelocity) {
         let maxV = 0.0;
-        for (let i = 0; i < nParticles; i++) {
+        const pSampleStep = (nParticles > 10000) ? Math.ceil(nParticles / 10000) : 1;
+        for (let i = 0; i < nParticles; i += pSampleStep) {
             const base = i * stride;
             const vx = latestPhaseParticlesData[base + 3];
             const vy = latestPhaseParticlesData[base + 4];
@@ -5112,11 +5415,13 @@ function updatePhaseParticlesGeometry(data?: Float32Array) {
         vMax = Math.max(1.0, maxV);
     }
 
-    const neededFloats = nParticles * 7;
+    const neededFloats = nParticles * 4;
     if (!cachedPhaseVertexData || cachedPhaseVertexData.length < neededFloats) {
-        cachedPhaseVertexData = new Float32Array(Math.max(neededFloats, Math.floor(neededFloats * 1.25)));
+        cachedPhaseVertexData = new Float32Array(neededFloats);
     }
     const vertexData = cachedPhaseVertexData;
+    const vertexU32 = new Uint32Array(vertexData.buffer, vertexData.byteOffset, vertexData.length);
+    const phaseCmapLUT = getColormapLUT(phaseParticleColormap);
 
     let writtenParticles = 0;
     const userStep = Math.max(1, phaseParticleUserStride);
@@ -5128,7 +5433,7 @@ function updatePhaseParticlesGeometry(data?: Float32Array) {
         const pz = latestPhaseParticlesData[base + 2];
         const phaseId = Math.round(latestPhaseParticlesData[base + 6]);
 
-        const vIdx = writtenParticles * 7;
+        const vIdx = writtenParticles * 4;
         vertexData[vIdx + 0] = px * sx + tx;
         vertexData[vIdx + 1] = py * sy + ty;
         vertexData[vIdx + 2] = pz * sz + tz;
@@ -5139,35 +5444,38 @@ function updatePhaseParticlesGeometry(data?: Float32Array) {
             const vz = latestPhaseParticlesData[base + 5];
             const spd = Math.sqrt(vx * vx + vy * vy + vz * vz);
             const normVal = Math.max(0.0, Math.min(1.0, (spd - vMin) / (vMax - vMin)));
-            sampleColormapDirect(normVal, phaseParticleColormap, vertexData, vIdx + 3);
+            vertexU32[vIdx + 3] = sampleColormapPackedU32(normVal, phaseCmapLUT);
         } else {
             const pIdx = Math.max(0, Math.min(PHASE_COLORS.length - 1, phaseId));
             const color = PHASE_COLORS[pIdx];
-            vertexData[vIdx + 3] = color[0];
-            vertexData[vIdx + 4] = color[1];
-            vertexData[vIdx + 5] = color[2];
+            const rb = Math.max(0, Math.min(255, (color[0] * 255 + 0.5) | 0));
+            const gb = Math.max(0, Math.min(255, (color[1] * 255 + 0.5) | 0));
+            const bb = Math.max(0, Math.min(255, (color[2] * 255 + 0.5) | 0));
+            vertexU32[vIdx + 3] = (rb | (gb << 8) | (bb << 16)) >>> 0;
         }
-        vertexData[vIdx + 6] = 0.0;
         writtenParticles++;
     }
 
-    const particleBytes = writtenParticles * 7 * 4;
+    const particleBytes = writtenParticles * 16;
     if (gl) {
         if (!phaseParticlesBuffer) phaseParticlesBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, phaseParticlesBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, vertexData.subarray(0, writtenParticles * 7), gl.DYNAMIC_DRAW);
+        gl.bufferData(gl.ARRAY_BUFFER, vertexData.subarray(0, writtenParticles * 4), gl.DYNAMIC_DRAW);
     }
     if (isWebGPU && gpuDevice) {
+        const maxAllowedBuffer = gpuDevice.limits?.maxBufferSize || 268435456;
+        const targetSize = Math.min(maxAllowedBuffer, Math.max(16, particleBytes));
         if (!gpuPhaseParticlesBuffer || gpuPhaseParticlesBufferSize < particleBytes) {
             if (gpuPhaseParticlesBuffer) gpuPhaseParticlesBuffer.destroy();
-            gpuPhaseParticlesBufferSize = Math.max(particleBytes, Math.floor(particleBytes * 1.25));
+            gpuPhaseParticlesBufferSize = targetSize;
             gpuPhaseParticlesBuffer = gpuDevice.createBuffer({
                 size: gpuPhaseParticlesBufferSize,
                 usage: 32 | 8 // VERTEX | COPY_DST
             });
         }
-        if (particleBytes > 0) {
-            gpuDevice.queue.writeBuffer(gpuPhaseParticlesBuffer, 0, vertexData.buffer, vertexData.byteOffset, particleBytes);
+        const bytesToWrite = Math.min(particleBytes, gpuPhaseParticlesBufferSize);
+        if (bytesToWrite > 0) {
+            gpuDevice.queue.writeBuffer(gpuPhaseParticlesBuffer, 0, vertexData.buffer, vertexData.byteOffset, bytesToWrite);
         }
     }
     phaseParticlesCount = writtenParticles;
@@ -5589,16 +5897,41 @@ function updateMPMPreviewGeometry() {
             const wire = getSphereWireframeVertices(px, py, pz, r / dimX, r / dimY, r / dimZ);
             allVerts.push(...wire);
         } else if (shape === 'STL') {
-            const stlT: any = stlTransform;
-            const matchesLoadedSTL = !stlT?.node_id || obj.id === stlT.node_id || obj.node_id === stlT.node_id || (stlT.stl_file && obj.stl_file === stlT.stl_file);
-            if (matchesLoadedSTL && rawSTLVertices && rawSTLVertices.length >= 9) {
-                const count = rawSTLVertices.length / 3;
+            let targetMesh: LoadedSTLMesh | undefined;
+            if (obj.id && loadedSTLMeshes.has(obj.id)) targetMesh = loadedSTLMeshes.get(obj.id);
+            else if (obj.node_id && loadedSTLMeshes.has(obj.node_id)) targetMesh = loadedSTLMeshes.get(obj.node_id);
+            else if (obj.stl_file && loadedSTLMeshes.has(obj.stl_file)) targetMesh = loadedSTLMeshes.get(obj.stl_file);
+            else {
+                const getBaseName = (p?: string | null) => p ? p.replace(/\\/g, '/').split('/').pop() || '' : '';
+                const isPathMatch = (p1?: string | null, p2?: string | null) => {
+                    if (!p1 || !p2) return false;
+                    if (p1 === p2) return true;
+                    const b1 = getBaseName(p1);
+                    const b2 = getBaseName(p2);
+                    return b1 !== '' && b1 === b2;
+                };
+                for (const m of loadedSTLMeshes.values()) {
+                    if (obj.id && (m.id === obj.id || m.transform?.node_id === obj.id)) {
+                        targetMesh = m;
+                        break;
+                    } else if (obj.node_id && (m.id === obj.node_id || m.transform?.node_id === obj.node_id)) {
+                        targetMesh = m;
+                        break;
+                    } else if (obj.stl_file && (isPathMatch(m.filePath, obj.stl_file) || isPathMatch(m.meshId, obj.stl_file) || isPathMatch(m.transform?.stl_file, obj.stl_file))) {
+                        targetMesh = m;
+                        break;
+                    }
+                }
+            }
+            const stlVerts = targetMesh ? targetMesh.rawVertices : (loadedSTLMeshes.size === 0 ? rawSTLVertices : null);
+            if (stlVerts && stlVerts.length >= 9) {
+                const count = stlVerts.length / 3;
                 let rawMinX = Infinity, rawMinY = Infinity, rawMinZ = Infinity;
                 let rawMaxX = -Infinity, rawMaxY = -Infinity, rawMaxZ = -Infinity;
                 for (let i = 0; i < count; i++) {
-                    const x = rawSTLVertices[i * 3 + 0];
-                    const y = rawSTLVertices[i * 3 + 1];
-                    const z = rawSTLVertices[i * 3 + 2];
+                    const x = stlVerts[i * 3 + 0];
+                    const y = stlVerts[i * 3 + 1];
+                    const z = stlVerts[i * 3 + 2];
                     if (x < rawMinX) rawMinX = x; if (x > rawMaxX) rawMaxX = x;
                     if (y < rawMinY) rawMinY = y; if (y > rawMaxY) rawMaxY = y;
                     if (z < rawMinZ) rawMinZ = z; if (z > rawMaxZ) rawMaxZ = z;
@@ -5624,7 +5957,7 @@ function updateMPMPreviewGeometry() {
                 const posY = Number(obj.pos_y ?? obj.y ?? 0.0);
                 const posZ = Number(obj.pos_z ?? obj.z ?? 0.0);
 
-                const numTris = Math.floor(rawSTLVertices.length / 9);
+                const numTris = Math.floor(stlVerts.length / 9);
                 const stride = numTris > 1500 ? Math.ceil(numTris / 1500) : 1;
 
                 const addLineWire = (p1x: number, p1y: number, p1z: number, p2x: number, p2y: number, p2z: number) => {
@@ -5641,9 +5974,9 @@ function updateMPMPreviewGeometry() {
                         const [rx, ry, rz] = rotatePointEuler(lvx, lvy, lvz, ax, ay, az);
                         return [rx + posX, ry + posY, rz + posZ];
                     };
-                    const [v0x, v0y, v0z] = transformV(rawSTLVertices[b + 0], rawSTLVertices[b + 1], rawSTLVertices[b + 2]);
-                    const [v1x, v1y, v1z] = transformV(rawSTLVertices[b + 3], rawSTLVertices[b + 4], rawSTLVertices[b + 5]);
-                    const [v2x, v2y, v2z] = transformV(rawSTLVertices[b + 6], rawSTLVertices[b + 7], rawSTLVertices[b + 8]);
+                    const [v0x, v0y, v0z] = transformV(stlVerts[b + 0], stlVerts[b + 1], stlVerts[b + 2]);
+                    const [v1x, v1y, v1z] = transformV(stlVerts[b + 3], stlVerts[b + 4], stlVerts[b + 5]);
+                    const [v2x, v2y, v2z] = transformV(stlVerts[b + 6], stlVerts[b + 7], stlVerts[b + 8]);
                     addLineWire(v0x, v0y, v0z, v1x, v1y, v1z);
                     addLineWire(v1x, v1y, v1z, v2x, v2y, v2z);
                     addLineWire(v2x, v2y, v2z, v0x, v0y, v0z);
@@ -6493,26 +6826,10 @@ function recomputeActiveRanges() {
             const mpmQ = mpmParticleQuantity || 'vonMises';
             const pStride = latestMPMFloatsPerParticle || 14;
             const totalP = Math.floor(latestMPMParticlesData.length / pStride);
-            const isVel = (mpmQ === 'velocity' || mpmQ === 'speed');
-            let qOff = 6;
-            if (mpmQ === 'plastic_strain' || mpmQ === 'plasticStrain') qOff = 7;
-            else if (mpmQ === 'density') qOff = 8;
-            else if (mpmQ === 'pressure') qOff = 9;
-            else if (mpmQ === 'damage') qOff = 10;
-            else if (mpmQ === 'has_failed') qOff = 11;
-            else if (mpmQ === 'object_id') qOff = 12;
-            else if (mpmQ === 'cluster_id' || mpmQ === 'cluster' || mpmQ === 'fragment' || mpmQ === 'fragments') qOff = (pStride >= 14) ? 13 : 12;
 
             const sampleStep = totalP > 32768 ? Math.floor(totalP / 16384) : 1;
             for (let i = 0; i < totalP; i += sampleStep) {
-                const base = i * pStride;
-                let val = 0.0;
-                if (isVel) {
-                    const vx = latestMPMParticlesData[base + 3], vy = latestMPMParticlesData[base + 4], vz = latestMPMParticlesData[base + 5];
-                    val = Math.sqrt(vx * vx + vy * vy + vz * vz);
-                } else {
-                    val = latestMPMParticlesData[base + qOff];
-                }
+                const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmQ);
                 if (isFinite(val)) {
                     recordQtyVal(mpmQ, val);
                 }
@@ -6548,10 +6865,25 @@ function recomputeActiveRanges() {
         for (const [rawQ, ext] of Object.entries(qtyDynamicExtents)) {
             const q = canonicalizeQuantity(rawQ);
             const isAuto = (quantityAutoScales[q] ?? quantityAutoScales[rawQ]) !== false;
-            if (ext.hasData && ext.min < ext.max && (ext.max - ext.min) > Math.max(1e-4 * Math.abs(ext.max), 1e-4)) {
+            const isFraction = (q === 'plastic_strain' || q === 'damage' || q === 'has_failed' || q === 'species1' || q === 'species2' || q === 'species3' || q === 'solid');
+            if (ext.hasData && isFraction && ext.max <= 1e-4) {
+                if (isAuto) {
+                    const defRange = DEFAULT_QUANTITY_RANGES[q] || [0.0, 1.0];
+                    if (quantityRanges[q]?.[1] !== defRange[1] || quantityRanges[q]?.[0] !== defRange[0]) {
+                        quantityRanges[q] = [defRange[0], defRange[1]];
+                        quantityRanges[rawQ] = [defRange[0], defRange[1]];
+                        if (q === 'plastic_strain') quantityRanges['plasticStrain'] = [defRange[0], defRange[1]];
+                        quantityRangesModified = true;
+                    }
+                }
+            } else if (ext.hasData && ext.min < ext.max && (ext.max - ext.min) > Math.max(1e-4 * Math.abs(ext.max), 1e-4)) {
                 if (isAuto) {
                     let rangeMin = ext.min;
                     let rangeMax = ext.max;
+                    if (isFraction && rangeMax <= 1e-4) {
+                        rangeMin = DEFAULT_QUANTITY_RANGES[q]?.[0] ?? 0.0;
+                        rangeMax = DEFAULT_QUANTITY_RANGES[q]?.[1] ?? 1.0;
+                    }
                     const isLog = (quantityLogScales[q] ?? quantityLogScales[rawQ]) === true || (q === 'peak_overpressure' || q === 'energy');
                     if (isLog && rangeMin <= 0 && rangeMax > 0) {
                         const dynamicFloor = rangeMax / 1000000.0;
@@ -7875,13 +8207,14 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
 
     function addMPMParticleHighlights(targetObjIdx: number): boolean {
         if (!latestMPMParticlesData || latestMPMParticlesData.length === 0) return false;
-        const stride = (latestMPMParticlesData.length % 14 === 0) ? 14 : ((latestMPMParticlesData.length % 13 === 0) ? 13 : (latestMPMFloatsPerParticle || 14));
+        const stride = latestMPMFloatsPerParticle || 14;
         const nParticles = Math.floor(latestMPMParticlesData.length / stride);
         if (nParticles === 0) return false;
+        const u32Data = getMPMParticlesUint32View(latestMPMParticlesData);
 
         const hasMultipleObjects = (mpmObjectsData && mpmObjectsData.length > 1);
-        const targetStr1 = String(targetObjIdx);
-        const targetStr2 = String(targetObjIdx + 1);
+        const targetObj = (mpmObjectsData && mpmObjectsData[targetObjIdx]) ? mpmObjectsData[targetObjIdx] : null;
+        const expectedObjId = (targetObj && targetObj.object_id !== undefined) ? Number(targetObj.object_id) : (targetObjIdx + 1);
 
         let minX = Infinity, minY = Infinity, minZ = Infinity;
         let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
@@ -7892,8 +8225,8 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
         for (let i = 0; i < nParticles; i += sampleStep) {
             const base = i * stride;
             if (hasMultipleObjects) {
-                const pObjId = latestMPMParticlesData[base + 12] !== undefined ? String(Math.round(latestMPMParticlesData[base + 12])) : undefined;
-                if (pObjId !== undefined && pObjId !== targetStr1 && pObjId !== targetStr2) {
+                const rawObjId = getMPMParticleObjectId(latestMPMParticlesData, u32Data, base, stride);
+                if (isFinite(rawObjId) && rawObjId !== expectedObjId && !(targetObjIdx === 0 && rawObjId === 0)) {
                     continue;
                 }
             }
@@ -7940,8 +8273,8 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
         for (let i = 0; i < nParticles && sampled < maxSample; i += drawStep) {
             const base = i * stride;
             if (hasMultipleObjects) {
-                const pObjId = latestMPMParticlesData[base + 12] !== undefined ? String(Math.round(latestMPMParticlesData[base + 12])) : undefined;
-                if (pObjId !== undefined && pObjId !== targetStr1 && pObjId !== targetStr2) {
+                const rawObjId = getMPMParticleObjectId(latestMPMParticlesData, u32Data, base, stride);
+                if (isFinite(rawObjId) && rawObjId !== expectedObjId && !(targetObjIdx === 0 && rawObjId === 0)) {
                     continue;
                 }
             }
@@ -8568,27 +8901,59 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
     }
 
     // 5. STL Solid CAD Mesh (Spatial BVH with Exact Triangle Intersection)
-    if (showSTL && stlTransform?.visible !== false && !stlTransform?.hidden && transformedRawSTLVertices && transformedRawSTLVertices.length >= 9) {
-        if (!stlBVH) {
-            stlBVH = buildMeshBVH(transformedRawSTLVertices, 9);
-        }
-        if (stlBVH) {
-            const tPhys = raycastBVH(
-                stlBVH, transformedRawSTLVertices, 9,
-                O_phys_x, O_phys_y, O_phys_z,
-                D_phys_x, D_phys_y, D_phys_z,
-                minSolidT * maxSize
-            );
-            if (tPhys !== null) {
-                const tWorld = tPhys / maxSize;
-                if (tWorld > 1e-4 && tWorld < minSolidT) {
-                    minSolidT = tWorld;
-                    solidHit = {
-                        t: tWorld,
-                        hitPoint: [O[0] + tWorld * D[0], O[1] + tWorld * D[1], O[2] + tWorld * D[2]],
-                        objectType: 'STLGeometry',
-                        label: 'CAD Geometry (STL)'
-                    };
+    if (showSTL) {
+        if (loadedSTLMeshes.size > 0) {
+            for (const mesh of loadedSTLMeshes.values()) {
+                if (mesh.transform && (mesh.transform.visible === false || mesh.transform.hidden === true)) continue;
+                if (!mesh.transformedRawVertices || mesh.transformedRawVertices.length < 9) continue;
+                if (!mesh.bvh) {
+                    mesh.bvh = buildMeshBVH(mesh.transformedRawVertices, 9);
+                }
+                if (mesh.bvh) {
+                    const tPhys = raycastBVH(
+                        mesh.bvh, mesh.transformedRawVertices, 9,
+                        O_phys_x, O_phys_y, O_phys_z,
+                        D_phys_x, D_phys_y, D_phys_z,
+                        minSolidT * maxSize
+                    );
+                    if (tPhys !== null) {
+                        const tWorld = tPhys / maxSize;
+                        if (tWorld > 1e-4 && tWorld < minSolidT) {
+                            minSolidT = tWorld;
+                            solidHit = {
+                                t: tWorld,
+                                hitPoint: [O[0] + tWorld * D[0], O[1] + tWorld * D[1], O[2] + tWorld * D[2]],
+                                objectType: 'STLGeometry',
+                                objectId: mesh.id || mesh.transform?.node_id,
+                                label: 'CAD Geometry (STL)'
+                            };
+                        }
+                    }
+                }
+            }
+        } else if (stlTransform?.visible !== false && !stlTransform?.hidden && transformedRawSTLVertices && transformedRawSTLVertices.length >= 9) {
+            if (!stlBVH) {
+                stlBVH = buildMeshBVH(transformedRawSTLVertices, 9);
+            }
+            if (stlBVH) {
+                const tPhys = raycastBVH(
+                    stlBVH, transformedRawSTLVertices, 9,
+                    O_phys_x, O_phys_y, O_phys_z,
+                    D_phys_x, D_phys_y, D_phys_z,
+                    minSolidT * maxSize
+                );
+                if (tPhys !== null) {
+                    const tWorld = tPhys / maxSize;
+                    if (tWorld > 1e-4 && tWorld < minSolidT) {
+                        minSolidT = tWorld;
+                        solidHit = {
+                            t: tWorld,
+                            hitPoint: [O[0] + tWorld * D[0], O[1] + tWorld * D[1], O[2] + tWorld * D[2]],
+                            objectType: 'STLGeometry',
+                            objectId: stlTransform?.node_id,
+                            label: 'CAD Geometry (STL)'
+                        };
+                    }
                 }
             }
         }
@@ -9256,9 +9621,19 @@ function render() {
         let stlDrawnThisFrameWebGPU = false;
         const drawSTLWebGPU = () => {
             if (stlDrawnThisFrameWebGPU) return;
-            if (!showSTL || (stlTransform && (stlTransform.visible === false || stlTransform.hidden === true)) || !gpuSTLBuffer || !transformedSTLVertices || transformedSTLVertices.length === 0) return;
-            const count = transformedSTLVertices.length / 7;
-            if (count === 0) return;
+            if (!showSTL) return;
+
+            const meshesToDraw: LoadedSTLMesh[] = [];
+            if (loadedSTLMeshes.size > 0) {
+                for (const m of loadedSTLMeshes.values()) {
+                    if (m.transform && (m.transform.visible === false || m.transform.hidden === true)) continue;
+                    if (m.gpuBuffer && m.transformedVertices && m.transformedVertices.length > 0) {
+                        meshesToDraw.push(m);
+                    }
+                }
+            }
+            const hasLegacySTL = (loadedSTLMeshes.size === 0) && (!stlTransform || (stlTransform.visible !== false && !stlTransform.hidden)) && gpuSTLBuffer && transformedSTLVertices && transformedSTLVertices.length > 0;
+            if (meshesToDraw.length === 0 && !hasLegacySTL) return;
 
             if (!gpuSTLUniformSolid && gpuDevice) {
                 gpuSTLUniformSolid = gpuDevice.createBuffer({
@@ -9339,18 +9714,33 @@ function render() {
                 });
 
                 const pipelineToUse = gpuSTLPipelineFront || gpuPipeline;
-                if (stlOpacity < 0.999 && gpuSTLPipelineBack) {
-                    // Pass 1: Draw interior/back faces first so they appear behind
-                    passEncoder.setPipeline(gpuSTLPipelineBack);
+                if (meshesToDraw.length > 0) {
+                    for (const mesh of meshesToDraw) {
+                        const count = mesh.transformedVertices!.length / 7;
+                        if (stlOpacity < 0.999 && gpuSTLPipelineBack) {
+                            passEncoder.setPipeline(gpuSTLPipelineBack);
+                            passEncoder.setBindGroup(0, solidBindGroup);
+                            passEncoder.setVertexBuffer(0, mesh.gpuBuffer);
+                            passEncoder.draw(count);
+                        }
+                        passEncoder.setPipeline(pipelineToUse);
+                        passEncoder.setBindGroup(0, solidBindGroup);
+                        passEncoder.setVertexBuffer(0, mesh.gpuBuffer);
+                        passEncoder.draw(count);
+                    }
+                } else if (hasLegacySTL) {
+                    const count = transformedSTLVertices!.length / 7;
+                    if (stlOpacity < 0.999 && gpuSTLPipelineBack) {
+                        passEncoder.setPipeline(gpuSTLPipelineBack);
+                        passEncoder.setBindGroup(0, solidBindGroup);
+                        passEncoder.setVertexBuffer(0, gpuSTLBuffer);
+                        passEncoder.draw(count);
+                    }
+                    passEncoder.setPipeline(pipelineToUse);
                     passEncoder.setBindGroup(0, solidBindGroup);
                     passEncoder.setVertexBuffer(0, gpuSTLBuffer);
                     passEncoder.draw(count);
                 }
-                // Pass 2 (or Opaque pass): Draw front faces cleanly on top with depth test
-                passEncoder.setPipeline(pipelineToUse);
-                passEncoder.setBindGroup(0, solidBindGroup);
-                passEncoder.setVertexBuffer(0, gpuSTLBuffer);
-                passEncoder.draw(count);
             } else if (stlWireframe && (gpuSTLLinePipeline || gpuPipeline)) {
                 stlDrawnThisFrameWebGPU = true;
                 const uWire = new Float32Array(uniformData);
@@ -9377,10 +9767,21 @@ function render() {
                     ]
                 });
 
-                passEncoder.setPipeline(gpuSTLLinePipeline || gpuPipeline);
-                passEncoder.setBindGroup(0, wireBindGroup);
-                passEncoder.setVertexBuffer(0, gpuSTLBuffer);
-                passEncoder.draw(count);
+                if (meshesToDraw.length > 0) {
+                    for (const mesh of meshesToDraw) {
+                        const count = mesh.transformedVertices!.length / 7;
+                        passEncoder.setPipeline(gpuSTLLinePipeline || gpuPipeline);
+                        passEncoder.setBindGroup(0, wireBindGroup);
+                        passEncoder.setVertexBuffer(0, mesh.gpuBuffer);
+                        passEncoder.draw(count);
+                    }
+                } else if (hasLegacySTL) {
+                    const count = transformedSTLVertices!.length / 7;
+                    passEncoder.setPipeline(gpuSTLLinePipeline || gpuPipeline);
+                    passEncoder.setBindGroup(0, wireBindGroup);
+                    passEncoder.setVertexBuffer(0, gpuSTLBuffer);
+                    passEncoder.draw(count);
+                }
             }
         };
 
@@ -9578,7 +9979,8 @@ function render() {
             }
 
             const usePointRendering = (mpmParticleRenderMode === 'points') ||
-                (mpmParticleRenderMode === 'auto' && mpmParticlesCount > 10000000) ||
+                (mpmParticleRenderMode === 'auto' && mpmParticlesCount > 50000) ||
+                (mpmParticlesCount > 250000) ||
                 !gpuParticleBillboardPipeline;
 
             if (gpuPointPipeline && usePointRendering) {
@@ -9639,7 +10041,8 @@ function render() {
             }
 
             const usePointRendering = (phaseParticleRenderMode === 'points') ||
-                (phaseParticleRenderMode === 'auto' && phaseParticlesCount > 10000000) ||
+                (phaseParticleRenderMode === 'auto' && phaseParticlesCount > 50000) ||
+                (phaseParticlesCount > 250000) ||
                 !gpuParticleBillboardPipeline;
 
             if (gpuPointPipeline && usePointRendering) {
@@ -10145,7 +10548,16 @@ function render() {
                     pEnc.drawIndexed(obstacleTriIndexCount);
                 }
             } else if (objectType === 'STLGeometry') {
-                if (gpuSTLBuffer && transformedSTLVertices && transformedSTLVertices.length > 0) {
+                const targetMesh = targetObj.objectId
+                    ? (loadedSTLMeshes.get(targetObj.objectId) || Array.from(loadedSTLMeshes.values()).find(m => m.id === targetObj.objectId || m.transform.node_id === targetObj.objectId))
+                    : null;
+                if (targetMesh && targetMesh.gpuBuffer && targetMesh.transformedVertices && targetMesh.transformedVertices.length > 0) {
+                    const count = targetMesh.transformedVertices.length / 7;
+                    pEnc.setPipeline(pipelineToUse);
+                    pEnc.setBindGroup(0, highlightSurfaceBindGroup);
+                    pEnc.setVertexBuffer(0, targetMesh.gpuBuffer);
+                    pEnc.draw(count);
+                } else if (gpuSTLBuffer && transformedSTLVertices && transformedSTLVertices.length > 0) {
                     const count = transformedSTLVertices.length / 7;
                     pEnc.setPipeline(pipelineToUse);
                     pEnc.setBindGroup(0, highlightSurfaceBindGroup);
@@ -10267,10 +10679,20 @@ function render() {
     let stlDrawnThisFrameWebGL = false;
     const drawSTLWebGL = () => {
         if (stlDrawnThisFrameWebGL) return;
-        if (!gl || !showSTL || (stlTransform && (stlTransform.visible === false || stlTransform.hidden === true)) || !stlBuffer || !transformedSTLVertices || transformedSTLVertices.length === 0) return;
+        if (!gl || !showSTL) return;
+
+        const meshesToDraw: LoadedSTLMesh[] = [];
+        if (loadedSTLMeshes.size > 0) {
+            for (const m of loadedSTLMeshes.values()) {
+                if (m.transform && (m.transform.visible === false || m.transform.hidden === true)) continue;
+                if (m.glBuffer && m.transformedVertices && m.transformedVertices.length > 0) {
+                    meshesToDraw.push(m);
+                }
+            }
+        }
+        const hasLegacySTL = (loadedSTLMeshes.size === 0) && (!stlTransform || (stlTransform.visible !== false && !stlTransform.hidden)) && stlBuffer && transformedSTLVertices && transformedSTLVertices.length > 0;
+        if (meshesToDraw.length === 0 && !hasLegacySTL) return;
         const activeGl = gl;
-        const count = transformedSTLVertices.length / 7;
-        if (count === 0) return;
 
         const sizeX = getDimX();
         const sizeY = getDimY();
@@ -10303,13 +10725,6 @@ function render() {
         ]);
         if (glUniforms.uStlMatrix) activeGl.uniformMatrix4fv(glUniforms.uStlMatrix, false, stlModelMat);
 
-        activeGl.bindBuffer(activeGl.ARRAY_BUFFER, stlBuffer);
-        activeGl.vertexAttribPointer(0, 3, activeGl.FLOAT, false, 28, 0);
-        activeGl.enableVertexAttribArray(0);
-        activeGl.vertexAttribPointer(1, 2, activeGl.FLOAT, false, 28, 12);
-        activeGl.enableVertexAttribArray(1);
-        activeGl.vertexAttribPointer(2, 2, activeGl.FLOAT, false, 28, 20);
-        activeGl.enableVertexAttribArray(2);
         if (glVolume3DTexture && activeGl.TEXTURE_3D) {
             activeGl.activeTexture(activeGl.TEXTURE1);
             activeGl.bindTexture(activeGl.TEXTURE_3D, glVolume3DTexture);
@@ -10359,21 +10774,72 @@ function render() {
             if (uAlpha) activeGl.uniform1f(uAlpha, stlOpacity);
 
             activeGl.enable(activeGl.CULL_FACE);
-            if (stlOpacity < 0.999) {
-                // Pass 1: Draw interior/back faces first so they appear behind
-                activeGl.cullFace(activeGl.FRONT);
+            if (meshesToDraw.length > 0) {
+                for (const mesh of meshesToDraw) {
+                    const count = mesh.transformedVertices!.length / 7;
+                    activeGl.bindBuffer(activeGl.ARRAY_BUFFER, mesh.glBuffer!);
+                    activeGl.vertexAttribPointer(0, 3, activeGl.FLOAT, false, 28, 0);
+                    activeGl.enableVertexAttribArray(0);
+                    activeGl.vertexAttribPointer(1, 2, activeGl.FLOAT, false, 28, 12);
+                    activeGl.enableVertexAttribArray(1);
+                    activeGl.vertexAttribPointer(2, 2, activeGl.FLOAT, false, 28, 20);
+                    activeGl.enableVertexAttribArray(2);
+                    if (stlOpacity < 0.999) {
+                        // Pass 1: Draw interior/back faces first so they appear behind
+                        activeGl.cullFace(activeGl.FRONT);
+                        activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
+                    }
+                    // Pass 2 (or Opaque pass): Draw front faces cleanly on top with depth test
+                    activeGl.cullFace(activeGl.BACK);
+                    activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
+                }
+            } else if (hasLegacySTL) {
+                const count = transformedSTLVertices!.length / 7;
+                activeGl.bindBuffer(activeGl.ARRAY_BUFFER, stlBuffer);
+                activeGl.vertexAttribPointer(0, 3, activeGl.FLOAT, false, 28, 0);
+                activeGl.enableVertexAttribArray(0);
+                activeGl.vertexAttribPointer(1, 2, activeGl.FLOAT, false, 28, 12);
+                activeGl.enableVertexAttribArray(1);
+                activeGl.vertexAttribPointer(2, 2, activeGl.FLOAT, false, 28, 20);
+                activeGl.enableVertexAttribArray(2);
+                if (stlOpacity < 0.999) {
+                    // Pass 1: Draw interior/back faces first so they appear behind
+                    activeGl.cullFace(activeGl.FRONT);
+                    activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
+                }
+                // Pass 2 (or Opaque pass): Draw front faces cleanly on top with depth test
+                activeGl.cullFace(activeGl.BACK);
                 activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
             }
-            // Pass 2 (or Opaque pass): Draw front faces cleanly on top with depth test
-            activeGl.cullFace(activeGl.BACK);
-            activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
             activeGl.disable(activeGl.CULL_FACE);
         } else if (stlWireframe) {
             stlDrawnThisFrameWebGL = true;
             activeGl.depthMask(true);
             if (uIsWF) activeGl.uniform1i(uIsWF, 6); // 6 = Wireframe only
             if (uAlpha) activeGl.uniform1f(uAlpha, 0.0);
-            activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
+            if (meshesToDraw.length > 0) {
+                for (const mesh of meshesToDraw) {
+                    const count = mesh.transformedVertices!.length / 7;
+                    activeGl.bindBuffer(activeGl.ARRAY_BUFFER, mesh.glBuffer!);
+                    activeGl.vertexAttribPointer(0, 3, activeGl.FLOAT, false, 28, 0);
+                    activeGl.enableVertexAttribArray(0);
+                    activeGl.vertexAttribPointer(1, 2, activeGl.FLOAT, false, 28, 12);
+                    activeGl.enableVertexAttribArray(1);
+                    activeGl.vertexAttribPointer(2, 2, activeGl.FLOAT, false, 28, 20);
+                    activeGl.enableVertexAttribArray(2);
+                    activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
+                }
+            } else if (hasLegacySTL) {
+                const count = transformedSTLVertices!.length / 7;
+                activeGl.bindBuffer(activeGl.ARRAY_BUFFER, stlBuffer);
+                activeGl.vertexAttribPointer(0, 3, activeGl.FLOAT, false, 28, 0);
+                activeGl.enableVertexAttribArray(0);
+                activeGl.vertexAttribPointer(1, 2, activeGl.FLOAT, false, 28, 12);
+                activeGl.enableVertexAttribArray(1);
+                activeGl.vertexAttribPointer(2, 2, activeGl.FLOAT, false, 28, 20);
+                activeGl.enableVertexAttribArray(2);
+                activeGl.drawArrays(activeGl.TRIANGLES, 0, count);
+            }
         }
 
         // Restore base model matrix for slices and reset uStlMatrix
@@ -10701,17 +11167,20 @@ function render() {
                 pDiam = fallbackDx / Math.cbrt(8.0);
             }
         }
-        const isPhysical = (pDiam > 0.0 && maxSize > 0.0);
+        const isPointMode = (mpmParticleRenderMode === 'points') ||
+            (mpmParticleRenderMode === 'auto' && mpmParticlesCount > 50000) ||
+            (mpmParticlesCount > 250000);
+        const isPhysical = !isPointMode && (pDiam > 0.0 && maxSize > 0.0);
         const viewDiam = isPhysical ? Math.max(1e-7, pDiam / maxSize) : 0.0;
         if (glUniforms.uParticleDiameter) gl.uniform1f(glUniforms.uParticleDiameter, viewDiam);
         if (glUniforms.uViewportHeight) gl.uniform1f(glUniforms.uViewportHeight, canvasHeight());
 
         gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
-        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);  // position (x, y, z)
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0);          // position (x, y, z)
         gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12); // texCoord = (r, g)
+        gl.vertexAttribPointer(1, 2, gl.UNSIGNED_BYTE, true, 16, 12);  // texCoord = (r, g)
         gl.enableVertexAttribArray(1);
-        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20); // sliceSize = (b, 0)
+        gl.vertexAttribPointer(2, 2, gl.UNSIGNED_BYTE, true, 16, 14);  // sliceSize = (b, 0)
         gl.enableVertexAttribArray(2);
         gl.drawArrays(gl.POINTS, 0, mpmParticlesCount);
     }
@@ -10729,17 +11198,20 @@ function render() {
             const fallbackDx = (typeof dx === 'number' && dx > 0) ? dx : (maxSize / 100.0);
             pDiam = fallbackDx / Math.cbrt(8.0);
         }
-        const isPhysical = (pDiam > 0.0 && maxSize > 0.0);
+        const isPhasePointMode = (phaseParticleRenderMode === 'points') ||
+            (phaseParticleRenderMode === 'auto' && phaseParticlesCount > 50000) ||
+            (phaseParticlesCount > 250000);
+        const isPhysical = !isPhasePointMode && (pDiam > 0.0 && maxSize > 0.0);
         const viewDiam = isPhysical ? Math.max(1e-7, pDiam / maxSize) : 0.0;
         if (glUniforms.uParticleDiameter) gl.uniform1f(glUniforms.uParticleDiameter, viewDiam);
         if (glUniforms.uViewportHeight) gl.uniform1f(glUniforms.uViewportHeight, canvasHeight());
 
         gl.bindBuffer(gl.ARRAY_BUFFER, phaseParticlesBuffer);
-        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);  // position (x, y, z)
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0);          // position (x, y, z)
         gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12); // texCoord = (r, g)
+        gl.vertexAttribPointer(1, 2, gl.UNSIGNED_BYTE, true, 16, 12);  // texCoord = (r, g)
         gl.enableVertexAttribArray(1);
-        gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20); // sliceSize = (b, 0)
+        gl.vertexAttribPointer(2, 2, gl.UNSIGNED_BYTE, true, 16, 14);  // sliceSize = (b, 0)
         gl.enableVertexAttribArray(2);
         gl.drawArrays(gl.POINTS, 0, phaseParticlesCount);
     }
@@ -10955,8 +11427,13 @@ function render() {
                 if (uModel) gl.uniformMatrix4fv(uModel, false, modelMatrix);
             }
         } else if (objectType === 'STLGeometry') {
-            if (stlBuffer && transformedSTLVertices && transformedSTLVertices.length > 0) {
-                const count = transformedSTLVertices.length / 7;
+            const targetMesh = targetObj.objectId
+                ? (loadedSTLMeshes.get(targetObj.objectId) || Array.from(loadedSTLMeshes.values()).find(m => m.id === targetObj.objectId || m.transform.node_id === targetObj.objectId))
+                : null;
+            const targetBuf = targetMesh?.glBuffer || stlBuffer;
+            const targetVerts = targetMesh?.transformedVertices || transformedSTLVertices;
+            if (targetBuf && targetVerts && targetVerts.length > 0) {
+                const count = targetVerts.length / 7;
                 const sizeX = getDimX();
                 const sizeY = getDimY();
                 const sizeZ = getDimZ();
@@ -10974,7 +11451,7 @@ function render() {
                 ]);
                 if (uModel) gl.uniformMatrix4fv(uModel, false, stlFinalModelMat);
 
-                gl.bindBuffer(gl.ARRAY_BUFFER, stlBuffer);
+                gl.bindBuffer(gl.ARRAY_BUFFER, targetBuf);
                 gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
                 gl.enableVertexAttribArray(0);
                 gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
@@ -11469,28 +11946,93 @@ self.onmessage = async (e) => {
             updateMatrices(finalW, finalH);
             render();
         } else if (type === "setSTLGeometry") {
-            rawSTLVertices = data.vertices;
-            rawSTLSubtractiveFlags = data.subtractive_flags;
-            if (data.stlTransform) {
-                stlTransform = {
-                    origin_mode: data.stlTransform.origin_mode || 'CAD Origin',
-                    scale_x: Number(data.stlTransform.scale_x ?? 1.0),
-                    scale_y: Number(data.stlTransform.scale_y ?? 1.0),
-                    scale_z: Number(data.stlTransform.scale_z ?? 1.0),
-                    pos_x: Number(data.stlTransform.pos_x ?? 0.0),
-                    pos_y: Number(data.stlTransform.pos_y ?? 0.0),
-                    pos_z: Number(data.stlTransform.pos_z ?? 0.0),
-                    rot_x: Number(data.stlTransform.rot_x ?? 0.0),
-                    rot_y: Number(data.stlTransform.rot_y ?? 0.0),
-                    rot_z: Number(data.stlTransform.rot_z ?? 0.0),
-                    visible: data.stlTransform.visible !== false && !data.stlTransform.hidden,
-                    hidden: data.stlTransform.hidden === true || data.stlTransform.visible === false
+            const meshKey = data.id || data.node_id || data.stlTransform?.node_id || data.meshId || data.filePath || 'default';
+            if (data.vertices) {
+                let mesh = loadedSTLMeshes.get(meshKey);
+                const meshTransform = {
+                    node_id: data.stlTransform?.node_id || data.node_id || data.id,
+                    stl_file: data.stlTransform?.stl_file || data.filePath || data.meshId,
+                    origin_mode: data.stlTransform?.origin_mode || 'CAD Origin',
+                    scale_x: Number(data.stlTransform?.scale_x ?? 1.0),
+                    scale_y: Number(data.stlTransform?.scale_y ?? 1.0),
+                    scale_z: Number(data.stlTransform?.scale_z ?? 1.0),
+                    pos_x: Number(data.stlTransform?.pos_x ?? 0.0),
+                    pos_y: Number(data.stlTransform?.pos_y ?? 0.0),
+                    pos_z: Number(data.stlTransform?.pos_z ?? 0.0),
+                    rot_x: Number(data.stlTransform?.rot_x ?? 0.0),
+                    rot_y: Number(data.stlTransform?.rot_y ?? 0.0),
+                    rot_z: Number(data.stlTransform?.rot_z ?? 0.0),
+                    visible: data.stlTransform?.visible !== false && !data.stlTransform?.hidden,
+                    hidden: data.stlTransform?.hidden === true || data.stlTransform?.visible === false
                 };
-                lastStlTransformJson = JSON.stringify(stlTransform);
-            } else {
-                lastStlTransformJson = '';
+                if (!mesh) {
+                    mesh = {
+                        id: meshKey,
+                        meshId: data.meshId || data.filePath || meshKey,
+                        filePath: data.filePath || data.meshId || '',
+                        rawVertices: data.vertices,
+                        rawSubtractiveFlags: data.subtractive_flags,
+                        transformedVertices: null,
+                        transformedRawVertices: null,
+                        indexCount: 0,
+                        transform: meshTransform,
+                        lastTransformJson: JSON.stringify(meshTransform)
+                    };
+                    loadedSTLMeshes.set(meshKey, mesh);
+                } else {
+                    mesh.rawVertices = data.vertices;
+                    mesh.rawSubtractiveFlags = data.subtractive_flags;
+                    mesh.transform = meshTransform;
+                    mesh.lastTransformJson = JSON.stringify(meshTransform);
+                }
+                updateSingleSTLGeometry(mesh);
+            } else if (data.vertices === null) {
+                if (meshKey !== 'default' && loadedSTLMeshes.has(meshKey)) {
+                    const m = loadedSTLMeshes.get(meshKey)!;
+                    if (m.gpuBuffer) m.gpuBuffer.destroy();
+                    if (m.gpuIndexBuffer) m.gpuIndexBuffer.destroy();
+                    if (gl) {
+                        if (m.glBuffer) gl.deleteBuffer(m.glBuffer);
+                        if (m.glIndexBuffer) gl.deleteBuffer(m.glIndexBuffer);
+                    }
+                    loadedSTLMeshes.delete(meshKey);
+                } else if (meshKey === 'default') {
+                    for (const m of loadedSTLMeshes.values()) {
+                        if (m.gpuBuffer) m.gpuBuffer.destroy();
+                        if (m.gpuIndexBuffer) m.gpuIndexBuffer.destroy();
+                        if (gl) {
+                            if (m.glBuffer) gl.deleteBuffer(m.glBuffer);
+                            if (m.glIndexBuffer) gl.deleteBuffer(m.glIndexBuffer);
+                        }
+                    }
+                    loadedSTLMeshes.clear();
+                }
             }
-            updateSTLGeometry();
+
+            if (meshKey === 'default' || loadedSTLMeshes.size <= 1) {
+                rawSTLVertices = data.vertices;
+                rawSTLSubtractiveFlags = data.subtractive_flags;
+                if (data.stlTransform) {
+                    stlTransform = {
+                        origin_mode: data.stlTransform.origin_mode || 'CAD Origin',
+                        scale_x: Number(data.stlTransform.scale_x ?? 1.0),
+                        scale_y: Number(data.stlTransform.scale_y ?? 1.0),
+                        scale_z: Number(data.stlTransform.scale_z ?? 1.0),
+                        pos_x: Number(data.stlTransform.pos_x ?? 0.0),
+                        pos_y: Number(data.stlTransform.pos_y ?? 0.0),
+                        pos_z: Number(data.stlTransform.pos_z ?? 0.0),
+                        rot_x: Number(data.stlTransform.rot_x ?? 0.0),
+                        rot_y: Number(data.stlTransform.rot_y ?? 0.0),
+                        rot_z: Number(data.stlTransform.rot_z ?? 0.0),
+                        visible: data.stlTransform.visible !== false && !data.stlTransform.hidden,
+                        hidden: data.stlTransform.hidden === true || data.stlTransform.visible === false
+                    };
+                    lastStlTransformJson = JSON.stringify(stlTransform);
+                } else {
+                    lastStlTransformJson = '';
+                }
+                updateSTLGeometry();
+            }
             updateMPMPreviewGeometry();
             requestRender();
         } else if (type === "setFEMObjects") {
@@ -12073,7 +12615,72 @@ self.onmessage = async (e) => {
                 }
             }
 
-            if (data.stlTransform !== undefined) {
+            if (data.stlTransforms && Array.isArray(data.stlTransforms)) {
+                let anyChanged = false;
+                const getBaseName = (p?: string | null) => p ? p.replace(/\\/g, '/').split('/').pop() || '' : '';
+                const isPathMatch = (p1?: string | null, p2?: string | null) => {
+                    if (!p1 || !p2) return false;
+                    if (p1 === p2) return true;
+                    const b1 = getBaseName(p1);
+                    const b2 = getBaseName(p2);
+                    return b1 !== '' && b1 === b2;
+                };
+                for (const t of data.stlTransforms) {
+                    if (!t) continue;
+                    let targetMesh: LoadedSTLMesh | undefined;
+                    if (t.node_id && loadedSTLMeshes.has(t.node_id)) {
+                        targetMesh = loadedSTLMeshes.get(t.node_id);
+                    } else if (t.id && loadedSTLMeshes.has(t.id)) {
+                        targetMesh = loadedSTLMeshes.get(t.id);
+                    } else if (t.stl_file && loadedSTLMeshes.has(t.stl_file)) {
+                        targetMesh = loadedSTLMeshes.get(t.stl_file);
+                    } else {
+                        for (const m of loadedSTLMeshes.values()) {
+                            if (t.node_id && (m.id === t.node_id || m.transform?.node_id === t.node_id)) {
+                                targetMesh = m;
+                                break;
+                            } else if (t.id && (m.id === t.id || m.transform?.node_id === t.id)) {
+                                targetMesh = m;
+                                break;
+                            } else if (t.stl_file && (isPathMatch(m.filePath, t.stl_file) || isPathMatch(m.meshId, t.stl_file) || isPathMatch(m.transform?.stl_file, t.stl_file))) {
+                                targetMesh = m;
+                                break;
+                            }
+                        }
+                    }
+                    if (targetMesh) {
+                        const nextT = {
+                            node_id: t.node_id || targetMesh.transform.node_id,
+                            stl_file: t.stl_file || targetMesh.transform.stl_file,
+                            origin_mode: t.origin_mode || 'CAD Origin',
+                            scale_x: Number(t.scale_x ?? 1.0),
+                            scale_y: Number(t.scale_y ?? 1.0),
+                            scale_z: Number(t.scale_z ?? 1.0),
+                            pos_x: Number(t.pos_x ?? 0.0),
+                            pos_y: Number(t.pos_y ?? 0.0),
+                            pos_z: Number(t.pos_z ?? 0.0),
+                            rot_x: Number(t.rot_x ?? 0.0),
+                            rot_y: Number(t.rot_y ?? 0.0),
+                            rot_z: Number(t.rot_z ?? 0.0),
+                            visible: t.visible !== false && !t.hidden,
+                            hidden: t.hidden === true || t.visible === false
+                        };
+                        const jsonStr = JSON.stringify(nextT);
+                        if (targetMesh.lastTransformJson !== jsonStr) {
+                            targetMesh.lastTransformJson = jsonStr;
+                            targetMesh.transform = nextT;
+                            updateSingleSTLGeometry(targetMesh);
+                            anyChanged = true;
+                        }
+                    }
+                }
+                if (anyChanged) {
+                    updateMPMPreviewGeometry();
+                    requestRender();
+                }
+            }
+
+            if (data.stlTransform !== undefined && (!data.stlTransforms || data.stlTransforms.length === 0)) {
                 const nextStlTransform = {
                     origin_mode: data.stlTransform.origin_mode || 'CAD Origin',
                     scale_x: Number(data.stlTransform.scale_x ?? 1.0),
@@ -12092,7 +12699,15 @@ self.onmessage = async (e) => {
                 if (stlJson !== lastStlTransformJson) {
                     lastStlTransformJson = stlJson;
                     stlTransform = nextStlTransform;
-                    updateSTLGeometry();
+                    if (data.stlTransform.node_id && loadedSTLMeshes.has(data.stlTransform.node_id)) {
+                        const m = loadedSTLMeshes.get(data.stlTransform.node_id)!;
+                        m.transform = { ...nextStlTransform, node_id: data.stlTransform.node_id, stl_file: data.stlTransform.stl_file };
+                        m.lastTransformJson = JSON.stringify(m.transform);
+                        updateSingleSTLGeometry(m);
+                    }
+                    if (loadedSTLMeshes.size === 0) {
+                        updateSTLGeometry();
+                    }
                     updateMPMPreviewGeometry();
                     requestRender();
                 }
@@ -12343,15 +12958,9 @@ self.onmessage = async (e) => {
                 mpmParticleMaxVal = data.mpmParticleMaxVal;
                 mpmChanged = true;
             }
-            if (data.stride !== undefined) {
-                const nextStride = Math.max(1, parseInt(data.stride, 10) || 1);
-                if (mpmParticleUserStride !== nextStride) {
-                    mpmParticleUserStride = nextStride;
-                    mpmChanged = true;
-                }
-            }
-            if (data.particleStride !== undefined) {
-                const nextStride = Math.max(1, parseInt(data.particleStride, 10) || 1);
+            if (data.particleStride !== undefined || data.mpmParticleStride !== undefined) {
+                const rawStrideVal = data.mpmParticleStride !== undefined ? data.mpmParticleStride : data.particleStride;
+                const nextStride = Math.max(1, parseInt(rawStrideVal, 10) || 1);
                 if (mpmParticleUserStride !== nextStride) {
                     mpmParticleUserStride = nextStride;
                     mpmChanged = true;

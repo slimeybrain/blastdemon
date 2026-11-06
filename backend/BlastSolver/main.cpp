@@ -25,6 +25,8 @@
 
 #include <omp.h>
 #include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
 #include "PrimitiveGeometry.hpp"
 #include "ImmersedBoundary.hpp"
 #include <set>
@@ -773,20 +775,40 @@ inline void loadAndTransformLSDynaMesh(
         }
     }
 
-    bool is_fixed_base = (bc_cond == "Fixed Base");
-    bool is_fixed_entire = (bc_cond == "Fixed Entire");
-    T min_z = static_cast<T>(1e30);
-    if (is_fixed_base) {
-        for (const auto& nd : out_nodes) {
-            T z_val = nd.x[2] * scale_z + pos_z;
-            if (z_val < min_z) min_z = z_val;
-        }
+    T rot_x_deg = static_cast<T>(0), rot_y_deg = static_cast<T>(0), rot_z_deg = static_cast<T>(0);
+    if (obj_json && obj_json->is_object()) {
+        rot_x_deg = static_cast<T>(get_json_double(*obj_json, "rot_x", 0.0));
+        rot_y_deg = static_cast<T>(get_json_double(*obj_json, "rot_y", 0.0));
+        rot_z_deg = static_cast<T>(get_json_double(*obj_json, "rot_z", 0.0));
     }
+    const bool has_rot = (std::abs(rot_x_deg) > static_cast<T>(1e-6) ||
+                          std::abs(rot_y_deg) > static_cast<T>(1e-6) ||
+                          std::abs(rot_z_deg) > static_cast<T>(1e-6));
+    constexpr double DEG_TO_RAD = 3.14159265358979323846 / 180.0;
+    const T cx = static_cast<T>(std::cos(static_cast<double>(rot_x_deg) * DEG_TO_RAD));
+    const T sx = static_cast<T>(std::sin(static_cast<double>(rot_x_deg) * DEG_TO_RAD));
+    const T cy = static_cast<T>(std::cos(static_cast<double>(rot_y_deg) * DEG_TO_RAD));
+    const T sy = static_cast<T>(std::sin(static_cast<double>(rot_y_deg) * DEG_TO_RAD));
+    const T cz = static_cast<T>(std::cos(static_cast<double>(rot_z_deg) * DEG_TO_RAD));
+    const T sz = static_cast<T>(std::sin(static_cast<double>(rot_z_deg) * DEG_TO_RAD));
 
     for (auto& nd : out_nodes) {
-        nd.x[0] = nd.x[0] * scale_x + pos_x;
-        nd.x[1] = nd.x[1] * scale_y + pos_y;
-        nd.x[2] = nd.x[2] * scale_z + pos_z;
+        T x = nd.x[0] * scale_x;
+        T y = nd.x[1] * scale_y;
+        T z = nd.x[2] * scale_z;
+        if (has_rot) {
+            // Rotate X, then Y, then Z
+            T y1 = cx * y - sx * z;
+            T z1 = sx * y + cx * z;
+            T x2 = cy * x + sy * z1;
+            T z2 = -sy * x + cy * z1;
+            T x3 = cz * x2 - sz * y1;
+            T y3 = sz * x2 + cz * y1;
+            x = x3; y = y3; z = z2;
+        }
+        nd.x[0] = x + pos_x;
+        nd.x[1] = y + pos_y;
+        nd.x[2] = z + pos_z;
         nd.x0[0] = nd.x[0];
         nd.x0[1] = nd.x[1];
         nd.x0[2] = nd.x[2];
@@ -796,21 +818,35 @@ inline void loadAndTransformLSDynaMesh(
             nd.v[1] += vel_y;
             nd.v[2] += vel_z;
         }
+    }
 
-        if (is_fixed_entire || (is_fixed_base && std::abs(nd.x[2] - min_z) < static_cast<T>(1e-4))) {
-            nd.is_fixed[0] = true;
-            nd.is_fixed[1] = true;
-            nd.is_fixed[2] = true;
+    bool is_fixed_base = (bc_cond == "Fixed Base");
+    bool is_fixed_entire = (bc_cond == "Fixed Entire");
+    T min_z = static_cast<T>(1e30);
+    if (is_fixed_base) {
+        for (const auto& nd : out_nodes) {
+            if (nd.x[2] < min_z) min_z = nd.x[2];
+        }
+    }
+    if (is_fixed_base || is_fixed_entire) {
+        for (auto& nd : out_nodes) {
+            if (is_fixed_entire || (is_fixed_base && std::abs(nd.x[2] - min_z) < static_cast<T>(1e-4))) {
+                nd.is_fixed[0] = true;
+                nd.is_fixed[1] = true;
+                nd.is_fixed[2] = true;
+            }
         }
     }
 
     if (!part_velocities.empty()) {
+        std::unordered_set<int> visited_vel_nodes;
         for (const auto& el : out_elements) {
             if (part_velocities.count(el.part_id)) {
                 const auto& pv = part_velocities[el.part_id];
+                if (pv[0] == static_cast<T>(0) && pv[1] == static_cast<T>(0) && pv[2] == static_cast<T>(0)) continue;
                 for (int n = 0; n < 8; ++n) {
                     int nid = el.node_ids[n];
-                    if (nid >= 0 && nid < static_cast<int>(out_nodes.size())) {
+                    if (nid >= 0 && nid < static_cast<int>(out_nodes.size()) && visited_vel_nodes.insert(nid).second) {
                         out_nodes[nid].v[0] += pv[0];
                         out_nodes[nid].v[1] += pv[1];
                         out_nodes[nid].v[2] += pv[2];
@@ -824,6 +860,7 @@ inline void loadAndTransformLSDynaMesh(
         if (obj_json->contains("boundary_conditions") && (*obj_json)["boundary_conditions"].is_array()) {
             for (const auto& bc : (*obj_json)["boundary_conditions"]) {
                 if (!bc.value("active", true)) continue;
+                std::string bc_type = bc.value("bc_type", "SPC");
                 std::string target_type = bc.value("target_type", "NODE_SET");
                 bool dofx = false, dofy = false, dofz = false;
                 if (bc.contains("dofs") && bc["dofs"].is_array() && bc["dofs"].size() >= 3) {
@@ -831,17 +868,39 @@ inline void loadAndTransformLSDynaMesh(
                     dofy = bc["dofs"][1].template get<bool>();
                     dofz = bc["dofs"][2].template get<bool>();
                 }
+                T bvx = static_cast<T>(0), bvy = static_cast<T>(0), bvz = static_cast<T>(0);
+                if (bc.contains("velocity") && bc["velocity"].is_array() && bc["velocity"].size() >= 3) {
+                    bvx = static_cast<T>(bc["velocity"][0].template get<double>());
+                    bvy = static_cast<T>(bc["velocity"][1].template get<double>());
+                    bvz = static_cast<T>(bc["velocity"][2].template get<double>());
+                }
+
+                auto apply_bc_to_node = [&](int idx) {
+                    if (idx < 0 || idx >= static_cast<int>(out_nodes.size())) return;
+                    if (bc_type == "INITIAL_VELOCITY") {
+                        out_nodes[idx].v[0] = bvx;
+                        out_nodes[idx].v[1] = bvy;
+                        out_nodes[idx].v[2] = bvz;
+                    } else if (bc_type == "PRESCRIBED_VELOCITY") {
+                        out_nodes[idx].v[0] = bvx;
+                        out_nodes[idx].v[1] = bvy;
+                        out_nodes[idx].v[2] = bvz;
+                        if (dofx) out_nodes[idx].is_fixed[0] = true;
+                        if (dofy) out_nodes[idx].is_fixed[1] = true;
+                        if (dofz) out_nodes[idx].is_fixed[2] = true;
+                    } else {
+                        if (dofx) out_nodes[idx].is_fixed[0] = true;
+                        if (dofy) out_nodes[idx].is_fixed[1] = true;
+                        if (dofz) out_nodes[idx].is_fixed[2] = true;
+                    }
+                };
+
                 if (target_type == "NODE_SET") {
                     int sid = bc.value("target_id", 1);
                     if (reader.getSets().count(sid)) {
                         for (int64_t lsdyna_nid : reader.getSets().at(sid).ids) {
                             if (reader.getNodeIdToIndex().count(lsdyna_nid)) {
-                                int idx = reader.getNodeIdToIndex().at(lsdyna_nid);
-                                if (idx >= 0 && idx < static_cast<int>(out_nodes.size())) {
-                                    if (dofx) out_nodes[idx].is_fixed[0] = true;
-                                    if (dofy) out_nodes[idx].is_fixed[1] = true;
-                                    if (dofz) out_nodes[idx].is_fixed[2] = true;
-                                }
+                                apply_bc_to_node(reader.getNodeIdToIndex().at(lsdyna_nid));
                             }
                         }
                     }
@@ -850,12 +909,7 @@ inline void loadAndTransformLSDynaMesh(
                     for (const auto& el : out_elements) {
                         if (el.part_id == pid) {
                             for (int n = 0; n < 8; ++n) {
-                                int idx = el.node_ids[n];
-                                if (idx >= 0 && idx < static_cast<int>(out_nodes.size())) {
-                                    if (dofx) out_nodes[idx].is_fixed[0] = true;
-                                    if (dofy) out_nodes[idx].is_fixed[1] = true;
-                                    if (dofz) out_nodes[idx].is_fixed[2] = true;
-                                }
+                                apply_bc_to_node(el.node_ids[n]);
                             }
                         }
                     }
@@ -863,16 +917,13 @@ inline void loadAndTransformLSDynaMesh(
                     std::string plane = bc.value("plane", "z_min");
                     T plane_coord = static_cast<T>(bc.value("plane_coord", 0.0));
                     T tol = static_cast<T>(bc.value("tolerance", 1e-4));
-                    for (auto& nd : out_nodes) {
+                    for (int idx = 0; idx < static_cast<int>(out_nodes.size()); ++idx) {
+                        const auto& nd = out_nodes[idx];
                         bool match = false;
                         if (plane == "z_min" || plane == "z_max") match = std::abs(nd.x[2] - plane_coord) < tol;
                         else if (plane == "x_min" || plane == "x_max") match = std::abs(nd.x[0] - plane_coord) < tol;
                         else if (plane == "y_min" || plane == "y_max") match = std::abs(nd.x[1] - plane_coord) < tol;
-                        if (match) {
-                            if (dofx) nd.is_fixed[0] = true;
-                            if (dofy) nd.is_fixed[1] = true;
-                            if (dofz) nd.is_fixed[2] = true;
-                        }
+                        if (match) apply_bc_to_node(idx);
                     }
                 }
             }
@@ -1091,29 +1142,34 @@ inline void ingestFEMObjectsAndDetonators(SolverPtr& fem, const nlohmann::json& 
                 std::vector<Blast::FEMElement3D<T>> elements;
                 std::vector<Blast::FEMTrussElement3D<T>> trusses;
                 std::vector<Blast::FEMBeam3DElement<T>> beams;
+                std::vector<Blast::MaterialTable3D> local_mats;
+                int base_node_idx = static_cast<int>(fem->getNodes().size());
+                int mat_offset = static_cast<int>(fem->getMaterialTables().size());
                 T scale_x = static_cast<T>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                 T scale_y = static_cast<T>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                 T scale_z = static_cast<T>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                loadAndTransformLSDynaMesh<T>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &fem->getMaterialTables());
-                fem->setNodesAndElements(nodes, elements, fem->getMaterialTables());
+                loadAndTransformLSDynaMesh<T>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &local_mats);
+                fem->appendNodesAndElements(nodes, elements, local_mats);
                 const auto& mat_tables = fem->getMaterialTables();
                 std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
                 for (const auto& t : trusses) {
-                    const auto& t_mat = (t.mat_id >= 0 && t.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[t.mat_id] : obj_mat;
+                    int mat_idx = t.mat_id + mat_offset;
+                    const auto& t_mat = (mat_idx >= 0 && mat_idx < static_cast<int>(mat_tables.size())) ? mat_tables[mat_idx] : obj_mat;
                     if (rebar_form == "TimoshenkoBeam3D") {
                         T d_eq = static_cast<T>(std::sqrt(4.0 * static_cast<double>(t.A) / 3.141592653589793));
-                        fem->addBeam3D(t.node_ids[0], t.node_ids[1], d_eq, t_mat, t.failure_strain, t.lsdyna_id);
+                        fem->addBeam3D(t.node_ids[0] + base_node_idx, t.node_ids[1] + base_node_idx, d_eq, t_mat, t.failure_strain, t.lsdyna_id);
                     } else {
-                        fem->addTruss(t.node_ids[0], t.node_ids[1], t.A, t_mat, t.failure_strain, t.lsdyna_id);
+                        fem->addTruss(t.node_ids[0] + base_node_idx, t.node_ids[1] + base_node_idx, t.A, t_mat, t.failure_strain, t.lsdyna_id);
                     }
                 }
                 for (const auto& b : beams) {
-                    const auto& b_mat = (b.mat_id >= 0 && b.mat_id < static_cast<int>(mat_tables.size())) ? mat_tables[b.mat_id] : obj_mat;
+                    int mat_idx = b.mat_id + mat_offset;
+                    const auto& b_mat = (mat_idx >= 0 && mat_idx < static_cast<int>(mat_tables.size())) ? mat_tables[mat_idx] : obj_mat;
                     if (rebar_form == "AxialTruss1D") {
                         T a_eq = static_cast<T>(0.25 * 3.141592653589793 * static_cast<double>(b.d) * static_cast<double>(b.d));
-                        fem->addTruss(b.node_ids[0], b.node_ids[1], a_eq, b_mat, b.failure_strain, b.lsdyna_id);
+                        fem->addTruss(b.node_ids[0] + base_node_idx, b.node_ids[1] + base_node_idx, a_eq, b_mat, b.failure_strain, b.lsdyna_id);
                     } else {
-                        fem->addBeam3D(b.node_ids[0], b.node_ids[1], b.d, b_mat, b.failure_strain, b.lsdyna_id);
+                        fem->addBeam3D(b.node_ids[0] + base_node_idx, b.node_ids[1] + base_node_idx, b.d, b_mat, b.failure_strain, b.lsdyna_id);
                     }
                 }
                 char log_buf[256];
@@ -1159,6 +1215,196 @@ inline void ingestFEMObjectsAndDetonators(SolverPtr& fem, const nlohmann::json& 
                 pending_detonators.push_back(pre_det);
             }
             obj_part_id++;
+        }
+    }
+
+    // Optional Coincident Node Merging across multi-part assembly interfaces
+    if (get_json_bool(msg, "merge_coincident_nodes", false)) {
+        T merge_tol = static_cast<T>(get_json_double(msg, "node_merge_tolerance", 1.0e-4));
+        int merged_count = fem->mergeCoincidentNodes(merge_tol);
+        if (merged_count > 0) {
+            char log_buf[160];
+            snprintf(log_buf, sizeof(log_buf), "FEM Assembly Welder: Merged %d coincident nodes across part boundaries (tol = %.2e m)", merged_count, static_cast<double>(merge_tol));
+            emit_kernel_log("INFO", log_buf, 0.0, "fem_3d", 0);
+        }
+    }
+
+    // Evaluate top-level Entity Sets (fem_sets) and Boundary Conditions (boundary_conditions) across the entire assembled mesh
+    if (msg.contains("boundary_conditions") && msg["boundary_conditions"].is_array() && !msg["boundary_conditions"].empty()) {
+        auto& all_nodes = fem->getNodes();
+        auto& all_elems = fem->getElements();
+        std::unordered_map<int, std::vector<int>> assembly_node_sets;
+        std::unordered_map<int, std::vector<int>> assembly_elem_sets;
+
+        if (msg.contains("fem_sets") && msg["fem_sets"].is_array()) {
+            for (const auto& s : msg["fem_sets"]) {
+                int set_id = get_json_int(s, "id", -1);
+                if (set_id < 0) continue;
+                std::string stype = s.value("type", "NODE");
+                std::string src = s.value("source", "deck");
+                std::vector<int> matched_indices;
+
+                if (src == "user_plane" && s.contains("filter_params") && s["filter_params"].contains("plane")) {
+                    const auto& pl = s["filter_params"]["plane"];
+                    std::string axis = pl.value("axis", "Z");
+                    T val = static_cast<T>(get_json_double(pl, "val", 0.0));
+                    T tol = static_cast<T>(get_json_double(pl, "tol", 0.01));
+                    int ax_idx = (axis == "X" || axis == "x") ? 0 : (axis == "Y" || axis == "y") ? 1 : 2;
+                    if (stype == "NODE") {
+                        for (size_t ni = 0; ni < all_nodes.size(); ++ni) {
+                            if (std::abs(all_nodes[ni].x[ax_idx] - val) <= tol) matched_indices.push_back(static_cast<int>(ni));
+                        }
+                    } else {
+                        for (size_t ei = 0; ei < all_elems.size(); ++ei) {
+                            T c = static_cast<T>(0);
+                            int n_cnt = Blast::isTet4Element(all_elems[ei]) ? 4 : 8;
+                            for (int k = 0; k < n_cnt; ++k) c += all_nodes[all_elems[ei].node_ids[k]].x[ax_idx];
+                            c /= static_cast<T>(n_cnt);
+                            if (std::abs(c - val) <= tol) matched_indices.push_back(static_cast<int>(ei));
+                        }
+                    }
+                } else if (src == "user_box" && s.contains("filter_params") && s["filter_params"].contains("box")) {
+                    const auto& bx = s["filter_params"]["box"];
+                    if (bx.is_array() && bx.size() >= 6) {
+                        T x0 = static_cast<T>(bx[0].get<double>()), y0 = static_cast<T>(bx[1].get<double>()), z0 = static_cast<T>(bx[2].get<double>());
+                        T x1 = static_cast<T>(bx[3].get<double>()), y1 = static_cast<T>(bx[4].get<double>()), z1 = static_cast<T>(bx[5].get<double>());
+                        if (stype == "NODE") {
+                            for (size_t ni = 0; ni < all_nodes.size(); ++ni) {
+                                T nx = all_nodes[ni].x[0], ny = all_nodes[ni].x[1], nz = all_nodes[ni].x[2];
+                                if (nx >= x0 && nx <= x1 && ny >= y0 && ny <= y1 && nz >= z0 && nz <= z1) matched_indices.push_back(static_cast<int>(ni));
+                            }
+                        } else {
+                            for (size_t ei = 0; ei < all_elems.size(); ++ei) {
+                                T cx = 0, cy = 0, cz = 0;
+                                int n_cnt = Blast::isTet4Element(all_elems[ei]) ? 4 : 8;
+                                for (int k = 0; k < n_cnt; ++k) {
+                                    cx += all_nodes[all_elems[ei].node_ids[k]].x[0];
+                                    cy += all_nodes[all_elems[ei].node_ids[k]].x[1];
+                                    cz += all_nodes[all_elems[ei].node_ids[k]].x[2];
+                                }
+                                cx /= static_cast<T>(n_cnt); cy /= static_cast<T>(n_cnt); cz /= static_cast<T>(n_cnt);
+                                if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 && cz >= z0 && cz <= z1) matched_indices.push_back(static_cast<int>(ei));
+                            }
+                        }
+                    }
+                } else if (src == "user_cylinder" && s.contains("filter_params") && s["filter_params"].contains("cylinder")) {
+                    const auto& cyl = s["filter_params"]["cylinder"];
+                    std::string axis = cyl.value("axis", "Z");
+                    T cx = static_cast<T>(get_json_double(cyl, "cx", 0.0));
+                    T cy = static_cast<T>(get_json_double(cyl, "cy", 0.0));
+                    T r = static_cast<T>(get_json_double(cyl, "r", 0.5));
+                    T min_val = static_cast<T>(get_json_double(cyl, "min_val", -1.0e9));
+                    T max_val = static_cast<T>(get_json_double(cyl, "max_val", 1.0e9));
+                    auto in_cyl = [&](T px, T py, T pz) -> bool {
+                        T d1 = (axis == "X") ? (py - cx) : (px - cx);
+                        T d2 = (axis == "Z") ? (py - cy) : (pz - cy);
+                        T ax_v = (axis == "X") ? px : (axis == "Y") ? py : pz;
+                        return (d1 * d1 + d2 * d2 <= r * r) && (ax_v >= min_val && ax_v <= max_val);
+                    };
+                    if (stype == "NODE") {
+                        for (size_t ni = 0; ni < all_nodes.size(); ++ni) {
+                            if (in_cyl(all_nodes[ni].x[0], all_nodes[ni].x[1], all_nodes[ni].x[2])) matched_indices.push_back(static_cast<int>(ni));
+                        }
+                    } else {
+                        for (size_t ei = 0; ei < all_elems.size(); ++ei) {
+                            T ex = 0, ey = 0, ez = 0;
+                            int n_cnt = Blast::isTet4Element(all_elems[ei]) ? 4 : 8;
+                            for (int k = 0; k < n_cnt; ++k) {
+                                ex += all_nodes[all_elems[ei].node_ids[k]].x[0];
+                                ey += all_nodes[all_elems[ei].node_ids[k]].x[1];
+                                ez += all_nodes[all_elems[ei].node_ids[k]].x[2];
+                            }
+                            ex /= static_cast<T>(n_cnt); ey /= static_cast<T>(n_cnt); ez /= static_cast<T>(n_cnt);
+                            if (in_cyl(ex, ey, ez)) matched_indices.push_back(static_cast<int>(ei));
+                        }
+                    }
+                } else if (src == "user_part") {
+                    int filter_pid = get_json_int(s, "filter_part_id", 1);
+                    if (stype == "NODE") {
+                        std::unordered_set<int> p_nodes;
+                        for (const auto& el : all_elems) {
+                            if (el.part_id == filter_pid) {
+                                int n_cnt = Blast::isTet4Element(el) ? 4 : 8;
+                                for (int k = 0; k < n_cnt; ++k) p_nodes.insert(el.node_ids[k]);
+                            }
+                        }
+                        matched_indices.assign(p_nodes.begin(), p_nodes.end());
+                    } else {
+                        for (size_t ei = 0; ei < all_elems.size(); ++ei) {
+                            if (all_elems[ei].part_id == filter_pid) matched_indices.push_back(static_cast<int>(ei));
+                        }
+                    }
+                } else if (s.contains("entities") && s["entities"].is_array()) {
+                    std::unordered_set<int64_t> id_lookup;
+                    for (const auto& ent : s["entities"]) {
+                        if (ent.is_number()) id_lookup.insert(ent.get<int64_t>());
+                    }
+                    if (stype == "NODE") {
+                        for (size_t ni = 0; ni < all_nodes.size(); ++ni) {
+                            if (id_lookup.count(all_nodes[ni].lsdyna_id) || id_lookup.count(static_cast<int64_t>(ni + 1))) {
+                                matched_indices.push_back(static_cast<int>(ni));
+                            }
+                        }
+                    } else {
+                        for (size_t ei = 0; ei < all_elems.size(); ++ei) {
+                            if (id_lookup.count(all_elems[ei].lsdyna_id) || id_lookup.count(static_cast<int64_t>(ei + 1))) {
+                                matched_indices.push_back(static_cast<int>(ei));
+                            }
+                        }
+                    }
+                }
+
+                if (stype == "NODE") assembly_node_sets[set_id] = std::move(matched_indices);
+                else assembly_elem_sets[set_id] = std::move(matched_indices);
+            }
+        }
+
+        for (const auto& bc : msg["boundary_conditions"]) {
+            std::string btype = bc.value("type", "");
+            int target_set = get_json_int(bc, "target_set_id", get_json_int(bc, "set_id", -1));
+            if (btype == "SPC") {
+                bool fx = false, fy = false, fz = false;
+                if (bc.contains("dofs") && bc["dofs"].is_array() && bc["dofs"].size() >= 3) {
+                    fx = bc["dofs"][0].is_boolean() ? bc["dofs"][0].get<bool>() : (bc["dofs"][0].get<int>() != 0);
+                    fy = bc["dofs"][1].is_boolean() ? bc["dofs"][1].get<bool>() : (bc["dofs"][1].get<int>() != 0);
+                    fz = bc["dofs"][2].is_boolean() ? bc["dofs"][2].get<bool>() : (bc["dofs"][2].get<int>() != 0);
+                } else if (bc.contains("dofs") && bc["dofs"].is_object()) {
+                    fx = bc["dofs"].value("tx", false);
+                    fy = bc["dofs"].value("ty", false);
+                    fz = bc["dofs"].value("tz", false);
+                }
+                auto it = assembly_node_sets.find(target_set);
+                if (it != assembly_node_sets.end()) {
+                    for (int ni : it->second) {
+                        if (ni >= 0 && ni < static_cast<int>(all_nodes.size())) {
+                            if (fx) { all_nodes[ni].is_fixed[0] = true; all_nodes[ni].v[0] = static_cast<T>(0); }
+                            if (fy) { all_nodes[ni].is_fixed[1] = true; all_nodes[ni].v[1] = static_cast<T>(0); }
+                            if (fz) { all_nodes[ni].is_fixed[2] = true; all_nodes[ni].v[2] = static_cast<T>(0); }
+                        }
+                    }
+                }
+            } else if (btype == "INITIAL_VELOCITY" || btype == "PRESCRIBED_VELOCITY") {
+                T bvx = static_cast<T>(0), bvy = static_cast<T>(0), bvz = static_cast<T>(0);
+                if (bc.contains("velocity") && bc["velocity"].is_array() && bc["velocity"].size() >= 3) {
+                    bvx = static_cast<T>(bc["velocity"][0].get<double>());
+                    bvy = static_cast<T>(bc["velocity"][1].get<double>());
+                    bvz = static_cast<T>(bc["velocity"][2].get<double>());
+                } else if (bc.contains("values") && bc["values"].is_object()) {
+                    bvx = static_cast<T>(get_json_double(bc["values"], "vx", 0.0));
+                    bvy = static_cast<T>(get_json_double(bc["values"], "vy", 0.0));
+                    bvz = static_cast<T>(get_json_double(bc["values"], "vz", 0.0));
+                }
+                auto it = assembly_node_sets.find(target_set);
+                if (it != assembly_node_sets.end()) {
+                    for (int ni : it->second) {
+                        if (ni >= 0 && ni < static_cast<int>(all_nodes.size())) {
+                            all_nodes[ni].v[0] = bvx;
+                            all_nodes[ni].v[1] = bvy;
+                            all_nodes[ni].v[2] = bvz;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1452,6 +1698,7 @@ struct VTKOutputConfig {
     bool qty_mpm_pressure = true;
     bool qty_mpm_material_id = true;
     bool qty_mpm_object_id = true;
+    bool qty_mpm_particle_density = true;
     // Spatial ROI & Strides
     bool roi_enabled = false;
     double roi_xmin = 0.0;
@@ -1466,9 +1713,60 @@ struct VTKOutputConfig {
 
 inline bool should_write_vtk(int step_count, double sim_time, double last_vtk_time) {
     if (global_vtk_config.trigger_type == "time" || global_vtk_config.trigger_type == "Time Interval") {
-        return (global_vtk_config.time_interval > 0.0 && (sim_time - last_vtk_time >= global_vtk_config.time_interval));
+        if (global_vtk_config.time_interval <= 0.0) return false;
+        return (sim_time - last_vtk_time >= global_vtk_config.time_interval - 1e-12);
     } else {
         return (global_vtk_config.step_interval > 0 && (step_count % global_vtk_config.step_interval == 0));
+    }
+}
+
+inline void update_last_vtk_time(std::atomic<double>& last_vtk_time_atomic, double current_time) {
+    if (global_vtk_config.trigger_type == "time" || global_vtk_config.trigger_type == "Time Interval") {
+        double interval = global_vtk_config.time_interval;
+        if (interval > 0.0) {
+            double last_t = last_vtk_time_atomic.load();
+            double nominal_time = std::round(current_time / interval) * interval;
+            last_vtk_time_atomic = (nominal_time > last_t) ? nominal_time : current_time;
+            return;
+        }
+    }
+    last_vtk_time_atomic = current_time;
+}
+
+inline bool should_write_final_vtk(double final_time, double last_time) {
+    if (global_vtk_config.trigger_type == "time" || global_vtk_config.trigger_type == "Time Interval") {
+        double interval = global_vtk_config.time_interval;
+        if (interval > 0.0) {
+            double nominal_final = std::round(final_time / interval) * interval;
+            return (nominal_final > last_time + 1e-12);
+        }
+        return (final_time > last_time + 1e-12);
+    } else {
+        return (final_time > last_time + 1e-12);
+    }
+}
+
+inline std::string get_vtk_frame_tag(int step, double time) {
+    if (global_vtk_config.trigger_type == "time" || global_vtk_config.trigger_type == "Time Interval") {
+        double interval = global_vtk_config.time_interval;
+        double effective_time = time;
+        if (interval > 0.0) {
+            double nominal_time = std::round(time / interval) * interval;
+            if (std::abs(time - nominal_time) <= 0.5 * interval) {
+                effective_time = nominal_time;
+            }
+        }
+        // 10 digits zero-padded with 0.1 µs resolution (100 ns = 1e-7 s)
+        // 1.0 s = 10,000,000 units of 0.1 µs; supports multi-second runs up to ~1,000 physical seconds
+        int64_t stamp_units = static_cast<int64_t>(std::llround(std::max(0.0, effective_time) * 1.0e7));
+        std::ostringstream ss;
+        ss << std::setw(10) << std::setfill('0') << stamp_units;
+        return ss.str();
+    } else {
+        // Step Interval: 10 digits zero-padded step number for consistent chronological sorting
+        std::ostringstream ss;
+        ss << std::setw(10) << std::setfill('0') << step;
+        return ss.str();
     }
 }
 
@@ -1832,6 +2130,7 @@ void write_gauge_files() {
 
 void write_vtk_outputs(int step, double time) {
     auto vtk_start = std::chrono::steady_clock::now();
+    std::string tag = get_vtk_frame_tag(step, time);
     std::string default_dir = ".";
     try {
         if (std::filesystem::current_path().filename() == "build") {
@@ -1885,7 +2184,7 @@ void write_vtk_outputs(int step, double time) {
             for (size_t i = 0; i < global_slices_3d.size(); ++i) {
                 if (!global_slices_3d[i].enabled) continue; // Skip deactivated slices
                 if (global_slices_3d[i].axis != "xy" && global_slices_3d[i].axis != "xz" && global_slices_3d[i].axis != "yz") continue;
-                std::string rel_filename = global_vtk_config.custom_filename + "_slice_" + global_slices_3d[i].axis + "_" + std::to_string(i) + "_" + std::to_string(step) + ".vtu";
+                std::string rel_filename = global_vtk_config.custom_filename + "_slice_" + global_slices_3d[i].axis + "_" + std::to_string(i) + "_" + tag + ".vtu";
                 std::string filename = out_dir + "/" + rel_filename;
                 std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_cfd_slice_" + std::to_string(i) + ".pvd";
                 bool export_pvd = global_vtk_config.export_pvd;
@@ -1951,7 +2250,7 @@ void write_vtk_outputs(int step, double time) {
 
         // 1B. Volumes
         if (global_vtk_config.export_volumes) {
-            std::string rel_filename = global_vtk_config.custom_filename + "_volume_" + std::to_string(step) + ".vtu";
+            std::string rel_filename = global_vtk_config.custom_filename + "_volume_" + tag + ".vtu";
             std::string filename = out_dir + "/" + rel_filename;
             std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_cfd_volume.pvd";
             bool export_pvd = global_vtk_config.export_pvd;
@@ -2037,7 +2336,7 @@ void write_vtk_outputs(int step, double time) {
 
         // 1C. Obstacle Surfaces (STL / CSG Primitives)
         if (global_vtk_config.export_obstacles && !global_obstacle_faces.empty()) {
-            std::string rel_filename = global_vtk_config.custom_filename + "_obstacles_" + std::to_string(step) + ".vtu";
+            std::string rel_filename = global_vtk_config.custom_filename + "_obstacles_" + tag + ".vtu";
             std::string filename = out_dir + "/" + rel_filename;
             std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_obstacles.pvd";
             bool export_pvd = global_vtk_config.export_pvd;
@@ -2089,7 +2388,7 @@ void write_vtk_outputs(int step, double time) {
 
         // 1D. True CAD STL Faces (Mapped CFD Results)
         if (global_vtk_config.export_stl_faces && !active_stl_triangles.empty()) {
-            std::string rel_filename = global_vtk_config.custom_filename + "_stl_faces_" + std::to_string(step) + ".vtu";
+            std::string rel_filename = global_vtk_config.custom_filename + "_stl_faces_" + tag + ".vtu";
             std::string filename = out_dir + "/" + rel_filename;
             std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_stl_faces.pvd";
             bool export_pvd = global_vtk_config.export_pvd;
@@ -2230,7 +2529,7 @@ void write_vtk_outputs(int step, double time) {
     if (global_vtk_config.export_fem) {
         auto export_fem_instance = [&](const std::string& key, auto* fem_ptr) {
             if (!fem_ptr || (fem_ptr->getElements().empty() && fem_ptr->getTrusses().empty() && fem_ptr->getBeams().empty())) return;
-            std::string rel_filename = global_vtk_config.custom_filename + "_fem_" + key + "_" + std::to_string(step) + ".vtu";
+            std::string rel_filename = global_vtk_config.custom_filename + "_fem_" + key + "_" + tag + ".vtu";
             std::string filename = out_dir + "/" + rel_filename;
             std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_fem_" + key + ".pvd";
             bool export_pvd = global_vtk_config.export_pvd;
@@ -2278,6 +2577,7 @@ void write_vtk_outputs(int step, double time) {
             snap.has_material_id = global_vtk_config.qty_mpm_material_id;
             snap.has_pressure = global_vtk_config.qty_mpm_pressure;
             snap.has_object_id = global_vtk_config.qty_mpm_object_id;
+            snap.has_particle_density = global_vtk_config.qty_mpm_particle_density;
             snap.compression_level = global_vtk_config.compression_level;
             snap.float_precision = global_vtk_config.float_precision;
             snap.mpm_topology = global_vtk_config.mpm_topology;
@@ -2286,9 +2586,9 @@ void write_vtk_outputs(int step, double time) {
             std::string format = global_vtk_config.vtk_format;
 
             if (format == "XDMF + HDF5") {
-                std::string rel_h5_filename = global_vtk_config.custom_filename + "_mpm_" + std::to_string(step) + ".h5";
+                std::string rel_h5_filename = global_vtk_config.custom_filename + "_mpm_" + tag + ".h5";
                 std::string h5_filename = out_dir + "/" + rel_h5_filename;
-                std::string step_xdmf_filename = out_dir + "/" + global_vtk_config.custom_filename + "_mpm_" + std::to_string(step) + ".xdmf";
+                std::string step_xdmf_filename = out_dir + "/" + global_vtk_config.custom_filename + "_mpm_" + tag + ".xdmf";
                 std::string master_xdmf_filename = out_dir + "/" + global_vtk_config.custom_filename + "_mpm.xdmf";
 
                 Blast::AsyncVTKWriter::getInstance().enqueue([h5_filename, step_xdmf_filename, master_xdmf_filename, rel_h5_filename, snap = std::move(snap), export_pvd, step, time]() mutable {
@@ -2301,7 +2601,7 @@ void write_vtk_outputs(int step, double time) {
                     }
                 });
             } else {
-                std::string rel_filename = global_vtk_config.custom_filename + "_mpm_" + std::to_string(step) + ".vtu";
+                std::string rel_filename = global_vtk_config.custom_filename + "_mpm_" + tag + ".vtu";
                 std::string filename = out_dir + "/" + rel_filename;
                 std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_mpm.pvd";
 
@@ -2326,7 +2626,8 @@ void write_vtk_outputs(int step, double time) {
                 global_vtk_config.qty_mpm_temp,
                 global_vtk_config.qty_mpm_pressure,
                 global_vtk_config.qty_mpm_material_id,
-                global_vtk_config.qty_mpm_object_id
+                global_vtk_config.qty_mpm_object_id,
+                global_vtk_config.qty_mpm_particle_density
             ));
         } else if (global_solver_mpm_3d) {
             enqueue_mpm_snap(global_solver_mpm_3d->extractVTKSnapshot(
@@ -2337,7 +2638,8 @@ void write_vtk_outputs(int step, double time) {
                 global_vtk_config.qty_mpm_temp,
                 global_vtk_config.qty_mpm_pressure,
                 global_vtk_config.qty_mpm_material_id,
-                global_vtk_config.qty_mpm_object_id
+                global_vtk_config.qty_mpm_object_id,
+                global_vtk_config.qty_mpm_particle_density
             ));
         }
     }
@@ -2349,7 +2651,7 @@ void write_vtk_outputs(int step, double time) {
         }
         Blast::PhaseTrackingVTKSnapshot3D snap;
         global_phase_particles_3d->extractVTKSnapshot(snap);
-        std::string rel_filename = global_vtk_config.custom_filename + "_phase_particles_" + std::to_string(step) + ".vtu";
+        std::string rel_filename = global_vtk_config.custom_filename + "_phase_particles_" + tag + ".vtu";
         std::string filename = out_dir + "/" + rel_filename;
         std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_phase_particles.pvd";
         bool export_pvd = global_vtk_config.export_pvd;
@@ -2365,7 +2667,7 @@ void write_vtk_outputs(int step, double time) {
 
     // 4. 2D Domain
     if (global_vtk_config.export_cfd_2d && (global_solver_2d_cuda || global_solver_2d)) {
-        std::string rel_filename = global_vtk_config.custom_filename + "_" + std::to_string(step) + ".vtu";
+        std::string rel_filename = global_vtk_config.custom_filename + "_" + tag + ".vtu";
         std::string filename = out_dir + "/" + rel_filename;
         std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_cfd_2d.pvd";
         if (global_solver_2d_cuda) {
@@ -2526,6 +2828,7 @@ void parse_vtk_config(const nlohmann::json& msg) {
                     global_vtk_config.qty_mpm_pressure = get_json_bool(params, "qty_mpm_pressure", true);
                     global_vtk_config.qty_mpm_material_id = get_json_bool(params, "qty_mpm_material_id", true);
                     global_vtk_config.qty_mpm_object_id = get_json_bool(params, "qty_mpm_object_id", true);
+                    global_vtk_config.qty_mpm_particle_density = get_json_bool(params, "qty_mpm_particle_density", true);
                     // Spatial ROI & Strides
                     global_vtk_config.roi_enabled = get_json_bool(params, "roi_enabled", false);
                     global_vtk_config.roi_xmin = params.value("roi_xmin", 0.0);
@@ -2572,6 +2875,7 @@ void parse_vtk_config(const nlohmann::json& msg) {
         if (params.contains("qty_mpm_pressure")) global_vtk_config.qty_mpm_pressure = get_json_bool(params, "qty_mpm_pressure", global_vtk_config.qty_mpm_pressure);
         if (params.contains("qty_mpm_material_id")) global_vtk_config.qty_mpm_material_id = get_json_bool(params, "qty_mpm_material_id", global_vtk_config.qty_mpm_material_id);
         if (params.contains("qty_mpm_object_id")) global_vtk_config.qty_mpm_object_id = get_json_bool(params, "qty_mpm_object_id", global_vtk_config.qty_mpm_object_id);
+        if (params.contains("qty_mpm_particle_density")) global_vtk_config.qty_mpm_particle_density = get_json_bool(params, "qty_mpm_particle_density", global_vtk_config.qty_mpm_particle_density);
     }
 
     if (msg.contains("trigger_type") && msg["trigger_type"].is_string()) global_vtk_config.trigger_type = msg["trigger_type"].get<std::string>();
@@ -2600,6 +2904,7 @@ void parse_vtk_config(const nlohmann::json& msg) {
     if (msg.contains("qty_mpm_pressure")) global_vtk_config.qty_mpm_pressure = get_json_bool(msg, "qty_mpm_pressure", global_vtk_config.qty_mpm_pressure);
     if (msg.contains("qty_mpm_material_id")) global_vtk_config.qty_mpm_material_id = get_json_bool(msg, "qty_mpm_material_id", global_vtk_config.qty_mpm_material_id);
     if (msg.contains("qty_mpm_object_id")) global_vtk_config.qty_mpm_object_id = get_json_bool(msg, "qty_mpm_object_id", global_vtk_config.qty_mpm_object_id);
+    if (msg.contains("qty_mpm_particle_density")) global_vtk_config.qty_mpm_particle_density = get_json_bool(msg, "qty_mpm_particle_density", global_vtk_config.qty_mpm_particle_density);
 
     std::string default_dir = ".";
     try {
@@ -3110,7 +3415,7 @@ void worker_thread_func() {
             double last_time = global_last_vtk_time_1d.load();
             if (should_write_vtk(global_step_1d.load(), global_t, last_time)) {
                 write_vtk_outputs(global_step_1d.load(), global_t);
-                global_last_vtk_time_1d = global_t;
+                update_last_vtk_time(global_last_vtk_time_1d, global_t);
             }
         }
         auto io_end = std::chrono::steady_clock::now();
@@ -3202,9 +3507,9 @@ void worker_thread_func() {
         emit_kernel_log("INFO", "Worker thread execution cycle ended.", global_t, "1d", global_step_1d.load());
     }
     write_gauge_files();
-    if (global_enable_vtk.load() && reached_end && global_t > global_last_vtk_time_1d.load() + 1e-12) {
+    if (global_enable_vtk.load() && reached_end && should_write_final_vtk(global_t, global_last_vtk_time_1d.load())) {
         write_vtk_outputs(global_step_1d.load(), global_t);
-        global_last_vtk_time_1d = global_t;
+        update_last_vtk_time(global_last_vtk_time_1d, global_t);
     }
     sim_running = false;
         sim_paused = false;
@@ -4129,7 +4434,7 @@ void worker_3d_thread_func() {
             double last_time = global_last_vtk_time_3d.load();
             if (should_write_vtk(global_step_3d.load(), global_t3d, last_time)) {
                 write_vtk_outputs(global_step_3d.load(), global_t3d);
-                global_last_vtk_time_3d = global_t3d;
+                update_last_vtk_time(global_last_vtk_time_3d, global_t3d);
             }
         }
         auto io_end = std::chrono::steady_clock::now();
@@ -4225,9 +4530,9 @@ void worker_3d_thread_func() {
     }
 
     write_gauge_files();
-    if (global_enable_vtk.load() && reached_end && global_t3d > global_last_vtk_time_3d.load() + 1e-12) {
+    if (global_enable_vtk.load() && reached_end && should_write_final_vtk(global_t3d, global_last_vtk_time_3d.load())) {
         write_vtk_outputs(global_step_3d.load(), global_t3d);
-        global_last_vtk_time_3d = global_t3d;
+        update_last_vtk_time(global_last_vtk_time_3d, global_t3d);
     }
 
         sim3d_running = false;
@@ -4350,7 +4655,7 @@ void worker_2d_thread_func() {
             double last_time = global_last_vtk_time_2d.load();
             if (should_write_vtk(global_step_2d.load(), global_t2d, last_time)) {
                 write_vtk_outputs(global_step_2d.load(), global_t2d);
-                global_last_vtk_time_2d = global_t2d;
+                update_last_vtk_time(global_last_vtk_time_2d, global_t2d);
             }
         }
         auto io_end = std::chrono::steady_clock::now();
@@ -4448,9 +4753,9 @@ void worker_2d_thread_func() {
         emit_kernel_log("INFO", "2D worker thread execution cycle ended.", global_t2d, "2d", global_step_2d.load());
     }
     write_gauge_files();
-    if (global_enable_vtk.load() && reached_end && global_t2d > global_last_vtk_time_2d.load() + 1e-12) {
+    if (global_enable_vtk.load() && reached_end && should_write_final_vtk(global_t2d, global_last_vtk_time_2d.load())) {
         write_vtk_outputs(global_step_2d.load(), global_t2d);
-        global_last_vtk_time_2d = global_t2d;
+        update_last_vtk_time(global_last_vtk_time_2d, global_t2d);
     }
         sim2d_running = false;
         sim2d_paused = false;
@@ -4697,7 +5002,7 @@ void worker_mpm_3d_thread_func() {
                 double last_time = global_last_vtk_time_mpm_3d.load();
                 if (should_write_vtk(current_step, sim_time, last_time)) {
                     write_vtk_outputs(current_step, sim_time);
-                    global_last_vtk_time_mpm_3d = sim_time;
+                    update_last_vtk_time(global_last_vtk_time_mpm_3d, sim_time);
                 }
             }
             auto io_end = std::chrono::steady_clock::now();
@@ -4800,7 +5105,7 @@ void worker_mpm_3d_thread_func() {
                 double last_time = global_last_vtk_time_mpm_3d.load();
                 if (should_write_vtk(current_step, sim_time, last_time)) {
                     write_vtk_outputs(current_step, sim_time);
-                    global_last_vtk_time_mpm_3d = sim_time;
+                    update_last_vtk_time(global_last_vtk_time_mpm_3d, sim_time);
                 }
             }
             auto io_end = std::chrono::steady_clock::now();
@@ -4899,9 +5204,9 @@ void worker_mpm_3d_thread_func() {
     bool reached_end = (end_time > 0.0 && final_sim_time >= end_time - 1e-12);
     bool term_mpm_3d = !reached_end && ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->is_terminated()) ||
                                         (global_solver_mpm_3d && global_solver_mpm_3d->is_terminated()));
-    if (global_enable_vtk.load() && reached_end && final_sim_time > global_last_vtk_time_mpm_3d.load() + 1e-12) {
+    if (global_enable_vtk.load() && reached_end && should_write_final_vtk(final_sim_time, global_last_vtk_time_mpm_3d.load())) {
         write_vtk_outputs(final_step, final_sim_time);
-        global_last_vtk_time_mpm_3d = final_sim_time;
+        update_last_vtk_time(global_last_vtk_time_mpm_3d, final_sim_time);
     }
     if (interval_steps > 0) {
         int steps_in_interval = std::max(1, interval_steps);
@@ -5089,7 +5394,7 @@ void worker_fem_3d_thread_func() {
                 double last_time = global_last_vtk_time_fem_3d.load();
                 if (should_write_vtk(current_step, sim_time, last_time)) {
                     write_vtk_outputs(current_step, sim_time);
-                    global_last_vtk_time_fem_3d = sim_time;
+                    update_last_vtk_time(global_last_vtk_time_fem_3d, sim_time);
                 }
             }
             auto io_end = std::chrono::steady_clock::now();
@@ -5269,9 +5574,9 @@ void worker_fem_3d_thread_func() {
 
         double final_end_time = global_endtime_fem_3d.load();
         bool reached_end = (final_end_time > 0.0 && final_sim_time >= final_end_time - 1e-12);
-        if (global_enable_vtk.load() && reached_end && final_sim_time > global_last_vtk_time_fem_3d.load() + 1e-12) {
+        if (global_enable_vtk.load() && reached_end && should_write_final_vtk(final_sim_time, global_last_vtk_time_fem_3d.load())) {
             write_vtk_outputs(final_step, final_sim_time);
-            global_last_vtk_time_fem_3d = final_sim_time;
+            update_last_vtk_time(global_last_vtk_time_fem_3d, final_sim_time);
         }
         if (interval_steps > 0) {
             int steps_in_interval = std::max(1, interval_steps);
@@ -6079,7 +6384,7 @@ void worker_fsi_3d_thread_func() {
                 double last_time = global_last_vtk_time_fsi_3d.load();
                 if (should_write_vtk(global_step_fsi_3d.load(), global_t3d, last_time)) {
                     write_vtk_outputs(global_step_fsi_3d.load(), global_t3d);
-                    global_last_vtk_time_fsi_3d = global_t3d;
+                    update_last_vtk_time(global_last_vtk_time_fsi_3d, global_t3d);
                 }
             }
             auto io_end = std::chrono::steady_clock::now();
@@ -6158,9 +6463,9 @@ void worker_fsi_3d_thread_func() {
     bool term_fsi_3d = !reached_end && ((global_solver_3d && global_solver_3d->is_terminated()) ||
                                         (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->is_terminated()) ||
                                         (global_solver_mpm_3d && global_solver_mpm_3d->is_terminated()));
-    if (global_enable_vtk.load() && reached_end && final_sim_time > global_last_vtk_time_fsi_3d.load() + 1e-12) {
+    if (global_enable_vtk.load() && reached_end && should_write_final_vtk(final_sim_time, global_last_vtk_time_fsi_3d.load())) {
         write_vtk_outputs(global_step_fsi_3d.load(), final_sim_time);
-        global_last_vtk_time_fsi_3d = final_sim_time;
+        update_last_vtk_time(global_last_vtk_time_fsi_3d, final_sim_time);
     }
     if (interval_steps > 0) {
         int steps_in_interval = std::max(1, interval_steps);
@@ -6347,7 +6652,7 @@ void worker_fem_fsi_3d_thread_func() {
                 double last_time = global_last_vtk_time_fem_fsi_3d.load();
                 if (should_write_vtk(current_step, global_t3d, last_time)) {
                     write_vtk_outputs(current_step, global_t3d);
-                    global_last_vtk_time_fem_fsi_3d = global_t3d;
+                    update_last_vtk_time(global_last_vtk_time_fem_fsi_3d, global_t3d);
                 }
             }
             auto io_end = std::chrono::steady_clock::now();
@@ -6439,9 +6744,9 @@ void worker_fem_fsi_3d_thread_func() {
         bool term_fem_fsi_3d = !reached_end && ((global_solver_3d && global_solver_3d->is_terminated()) ||
                                                 (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->is_terminated()) ||
                                                 (global_solver_mpm_3d && global_solver_mpm_3d->is_terminated()));
-        if (global_enable_vtk.load() && reached_end && final_sim_time > global_last_vtk_time_fem_fsi_3d.load() + 1e-12) {
+        if (global_enable_vtk.load() && reached_end && should_write_final_vtk(final_sim_time, global_last_vtk_time_fem_fsi_3d.load())) {
             write_vtk_outputs(final_step, final_sim_time);
-            global_last_vtk_time_fem_fsi_3d = final_sim_time;
+            update_last_vtk_time(global_last_vtk_time_fem_fsi_3d, final_sim_time);
         }
         if (interval_steps > 0) {
             int steps_in_interval = std::max(1, interval_steps);
@@ -7238,7 +7543,7 @@ void async_telemetry_thread_func() {
             if (!payload->mpm_particles.empty()) {
                 const uint32_t magic = 0x4d504d33; // "MPM3"
                 const float time_f = static_cast<float>(payload->elapsed);
-                const uint32_t n_floats_per_particle = 14;
+                const uint32_t n_floats_per_particle = 8;
                 const uint32_t n_particles = static_cast<uint32_t>(payload->mpm_particles.size() / n_floats_per_particle);
                 size_t particle_header_bytes = sizeof(uint32_t) * 3 + sizeof(float);
                 size_t particle_payload_bytes = payload->mpm_particles.size() * sizeof(float);
@@ -7319,7 +7624,7 @@ void async_telemetry_thread_func() {
             if (!payload->mpm_particles.empty()) {
                 const uint32_t magic = 0x4d504d33; // "MPM3"
                 const float time_f = static_cast<float>(payload->elapsed);
-                const uint32_t n_floats_per_particle = 14;
+                const uint32_t n_floats_per_particle = 8;
                 const uint32_t n_particles = static_cast<uint32_t>(payload->mpm_particles.size() / n_floats_per_particle);
                 size_t particle_header_bytes = sizeof(uint32_t) * 3 + sizeof(float);
                 size_t particle_payload_bytes = payload->mpm_particles.size() * sizeof(float);
@@ -7681,6 +7986,53 @@ static size_t estimateMPMTotalParticles(const nlohmann::json& msg, float dx, flo
     return std::max<size_t>(total_particles, 1000);
 }
 
+static inline void appendCompactMPMParticle(
+    std::vector<float>& out,
+    float x, float y, float z,
+    float vx, float vy, float vz,
+    float von_mises, float press, float ep_or_lambda, float den,
+    float damage, bool has_failed, int object_id, int cluster_id)
+{
+    auto packHalf = [](float val) -> uint16_t {
+        uint32_t fbits = 0;
+        std::memcpy(&fbits, &val, sizeof(float));
+        uint32_t sign = (fbits >> 16) & 0x8000u;
+        int32_t exp = static_cast<int32_t>((fbits >> 23) & 0xFFu) - 127 + 15;
+        uint32_t mant = fbits & 0x007FFFFFu;
+        if (exp <= 0) {
+            if (exp < -10) return static_cast<uint16_t>(sign);
+            mant = (mant | 0x00800000u) >> (1 - exp);
+            return static_cast<uint16_t>(sign | (mant >> 13));
+        } else if (exp == 0xFF - 127 + 15) {
+            return static_cast<uint16_t>(sign | 0x7C00u | (mant ? 0x0200u : 0u));
+        } else if (exp > 30) {
+            return static_cast<uint16_t>(sign | 0x7BFFu);
+        }
+        return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13));
+    };
+    auto bitsToFloat = [](uint32_t u) -> float {
+        float f = 0.0f;
+        std::memcpy(&f, &u, sizeof(float));
+        return f;
+    };
+    float speed = std::sqrt(vx * vx + vy * vy + vz * vz);
+    uint32_t word6 = static_cast<uint32_t>(packHalf(ep_or_lambda)) | (static_cast<uint32_t>(packHalf(den)) << 16);
+    uint32_t dmg_u8 = static_cast<uint32_t>(std::clamp(std::lround(std::clamp(damage, 0.0f, 1.0f) * 255.0f), 0l, 255l));
+    uint32_t obj_u7 = static_cast<uint32_t>(std::max(0, object_id)) & 0x7Fu;
+    uint32_t fail_u1 = has_failed ? 0x80u : 0x00u;
+    uint32_t clus_u16 = static_cast<uint32_t>(std::max(0, cluster_id)) & 0xFFFFu;
+    uint32_t word7 = dmg_u8 | ((obj_u7 | fail_u1) << 8) | (clus_u16 << 16);
+
+    out.push_back(x);
+    out.push_back(y);
+    out.push_back(z);
+    out.push_back(von_mises);
+    out.push_back(press);
+    out.push_back(speed);
+    out.push_back(bitsToFloat(word6));
+    out.push_back(bitsToFloat(word7));
+}
+
 void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool include_particles) {
     if (!global_solver_mpm_3d && !global_solver_mpm_3d_cuda) return;
 
@@ -7817,7 +8169,7 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool in
             stride = static_cast<size_t>(user_stride);
         }
         size_t visual_count = (total_particles + stride - 1) / stride;
-        payload->mpm_particles.reserve(visual_count * 14);
+        payload->mpm_particles.reserve(visual_count * 8);
         for (size_t idx = 0; idx < total_particles; idx += stride) {
             const auto& p = particles[idx];
             if (p.m <= 0.0f || p.state == 2) continue;
@@ -7833,20 +8185,12 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool in
             bool is_energetic = (mat_tbl.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn ||
                                  mat_tbl.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn ||
                                  mat_tbl.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth);
-            payload->mpm_particles.push_back(p.x[0]);
-            payload->mpm_particles.push_back(p.x[1]);
-            payload->mpm_particles.push_back(p.x[2]);
-            payload->mpm_particles.push_back(p.v[0]);
-            payload->mpm_particles.push_back(p.v[1]);
-            payload->mpm_particles.push_back(p.v[2]);
-            payload->mpm_particles.push_back(von_mises);
-            payload->mpm_particles.push_back(is_energetic ? p.lambda : p.ep_bar);
-            payload->mpm_particles.push_back(den);
-            payload->mpm_particles.push_back(press);
-            payload->mpm_particles.push_back(p.damage);
-            payload->mpm_particles.push_back(p.has_failed ? 1.0f : 0.0f);
-            payload->mpm_particles.push_back(static_cast<float>(p.object_id));
-            payload->mpm_particles.push_back(static_cast<float>(p.cluster_id));
+            float ep_or_lambda = is_energetic ? p.lambda : p.ep_bar;
+            appendCompactMPMParticle(payload->mpm_particles,
+                p.x[0], p.x[1], p.x[2],
+                p.v[0], p.v[1], p.v[2],
+                von_mises, press, ep_or_lambda, den,
+                p.damage, p.has_failed, p.object_id, p.cluster_id);
         }
     }
 
@@ -7899,15 +8243,9 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
             mpm_sol_cuda->syncParticlesToHost();
             const auto& pts = mpm_sol_cuda->getParticles();
             payload->mpm_particles.clear();
-            payload->mpm_particles.reserve(pts.size() * 14);
+            payload->mpm_particles.reserve(pts.size() * 8);
             for (size_t i = 0; i < pts.size(); ++i) {
                 if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-                payload->mpm_particles.push_back(pts[i].x[0]);
-                payload->mpm_particles.push_back(pts[i].x[1]);
-                payload->mpm_particles.push_back(pts[i].x[2]);
-                payload->mpm_particles.push_back(pts[i].v[0]);
-                payload->mpm_particles.push_back(pts[i].v[1]);
-                payload->mpm_particles.push_back(pts[i].v[2]);
                 float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
                 float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
                 float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
@@ -7917,27 +8255,18 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
                 if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol_cuda->getMaterialTables().size())) {
                     den = mpm_sol_cuda->getMaterialTables()[pts[i].object_id].density;
                 }
-                payload->mpm_particles.push_back(p_vm);
-                payload->mpm_particles.push_back(pts[i].ep_bar);
-                payload->mpm_particles.push_back(den);
-                payload->mpm_particles.push_back(p_press);
-                payload->mpm_particles.push_back(pts[i].damage);
-                payload->mpm_particles.push_back(pts[i].has_failed ? 1.0f : 0.0f);
-                payload->mpm_particles.push_back(static_cast<float>(pts[i].object_id));
-                payload->mpm_particles.push_back(static_cast<float>(pts[i].cluster_id));
+                appendCompactMPMParticle(payload->mpm_particles,
+                    pts[i].x[0], pts[i].x[1], pts[i].x[2],
+                    pts[i].v[0], pts[i].v[1], pts[i].v[2],
+                    p_vm, p_press, pts[i].ep_bar, den,
+                    pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
             }
         } else if (mpm_sol && !mpm_sol->getParticles().empty()) {
             const auto& pts = mpm_sol->getParticles();
             payload->mpm_particles.clear();
-            payload->mpm_particles.reserve(pts.size() * 14);
+            payload->mpm_particles.reserve(pts.size() * 8);
             for (size_t i = 0; i < pts.size(); ++i) {
                 if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-                payload->mpm_particles.push_back(pts[i].x[0]);
-                payload->mpm_particles.push_back(pts[i].x[1]);
-                payload->mpm_particles.push_back(pts[i].x[2]);
-                payload->mpm_particles.push_back(pts[i].v[0]);
-                payload->mpm_particles.push_back(pts[i].v[1]);
-                payload->mpm_particles.push_back(pts[i].v[2]);
                 float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
                 float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
                 float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
@@ -7947,14 +8276,11 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
                 if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol->getMaterialTables().size())) {
                     den = mpm_sol->getMaterialTables()[pts[i].object_id].density;
                 }
-                payload->mpm_particles.push_back(p_vm);
-                payload->mpm_particles.push_back(pts[i].ep_bar);
-                payload->mpm_particles.push_back(den);
-                payload->mpm_particles.push_back(p_press);
-                payload->mpm_particles.push_back(pts[i].damage);
-                payload->mpm_particles.push_back(pts[i].has_failed ? 1.0f : 0.0f);
-                payload->mpm_particles.push_back(static_cast<float>(pts[i].object_id));
-                payload->mpm_particles.push_back(static_cast<float>(pts[i].cluster_id));
+                appendCompactMPMParticle(payload->mpm_particles,
+                    pts[i].x[0], pts[i].x[1], pts[i].x[2],
+                    pts[i].v[0], pts[i].v[1], pts[i].v[2],
+                    p_vm, p_press, pts[i].ep_bar, den,
+                    pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
             }
         }
 
@@ -8005,15 +8331,9 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
             mpm_sol_cuda->syncParticlesToHost();
             const auto& pts = mpm_sol_cuda->getParticles();
             payload->mpm_particles.clear();
-            payload->mpm_particles.reserve(pts.size() * 14);
+            payload->mpm_particles.reserve(pts.size() * 8);
             for (size_t i = 0; i < pts.size(); ++i) {
                 if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-                payload->mpm_particles.push_back(pts[i].x[0]);
-                payload->mpm_particles.push_back(pts[i].x[1]);
-                payload->mpm_particles.push_back(pts[i].x[2]);
-                payload->mpm_particles.push_back(pts[i].v[0]);
-                payload->mpm_particles.push_back(pts[i].v[1]);
-                payload->mpm_particles.push_back(pts[i].v[2]);
                 float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
                 float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
                 float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
@@ -8023,27 +8343,18 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
                 if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol_cuda->getMaterialTables().size())) {
                     den = mpm_sol_cuda->getMaterialTables()[pts[i].object_id].density;
                 }
-                payload->mpm_particles.push_back(p_vm);
-                payload->mpm_particles.push_back(pts[i].ep_bar);
-                payload->mpm_particles.push_back(den);
-                payload->mpm_particles.push_back(p_press);
-                payload->mpm_particles.push_back(pts[i].damage);
-                payload->mpm_particles.push_back(pts[i].has_failed ? 1.0f : 0.0f);
-                payload->mpm_particles.push_back(static_cast<float>(pts[i].object_id));
-                payload->mpm_particles.push_back(static_cast<float>(pts[i].cluster_id));
+                appendCompactMPMParticle(payload->mpm_particles,
+                    pts[i].x[0], pts[i].x[1], pts[i].x[2],
+                    pts[i].v[0], pts[i].v[1], pts[i].v[2],
+                    p_vm, p_press, pts[i].ep_bar, den,
+                    pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
             }
         } else if (mpm_sol && !mpm_sol->getParticles().empty()) {
             const auto& pts = mpm_sol->getParticles();
             payload->mpm_particles.clear();
-            payload->mpm_particles.reserve(pts.size() * 14);
+            payload->mpm_particles.reserve(pts.size() * 8);
             for (size_t i = 0; i < pts.size(); ++i) {
                 if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-                payload->mpm_particles.push_back(pts[i].x[0]);
-                payload->mpm_particles.push_back(pts[i].x[1]);
-                payload->mpm_particles.push_back(pts[i].x[2]);
-                payload->mpm_particles.push_back(pts[i].v[0]);
-                payload->mpm_particles.push_back(pts[i].v[1]);
-                payload->mpm_particles.push_back(pts[i].v[2]);
                 float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
                 float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
                 float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
@@ -8053,14 +8364,11 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
                 if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol->getMaterialTables().size())) {
                     den = mpm_sol->getMaterialTables()[pts[i].object_id].density;
                 }
-                payload->mpm_particles.push_back(p_vm);
-                payload->mpm_particles.push_back(pts[i].ep_bar);
-                payload->mpm_particles.push_back(den);
-                payload->mpm_particles.push_back(p_press);
-                payload->mpm_particles.push_back(pts[i].damage);
-                payload->mpm_particles.push_back(pts[i].has_failed ? 1.0f : 0.0f);
-                payload->mpm_particles.push_back(static_cast<float>(pts[i].object_id));
-                payload->mpm_particles.push_back(static_cast<float>(pts[i].cluster_id));
+                appendCompactMPMParticle(payload->mpm_particles,
+                    pts[i].x[0], pts[i].x[1], pts[i].x[2],
+                    pts[i].v[0], pts[i].v[1], pts[i].v[2],
+                    p_vm, p_press, pts[i].ep_bar, den,
+                    pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
             }
         }
 
@@ -8272,19 +8580,36 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
         }
     }
 
+    Blast::MPMSolver3DCUDA* mpm_sol_cuda = global_solver_mpm_3d_cuda.get();
     Blast::MPMSolver3D* mpm_sol = fem_float ? fem_float->getMPMSolver() : (fem_double ? fem_double->getMPMSolver() : global_solver_mpm_3d.get());
-    if (mpm_sol && !mpm_sol->getParticles().empty()) {
-        const auto& pts = mpm_sol->getParticles();
+    if (mpm_sol_cuda && mpm_sol_cuda->getParticleCount() > 0) {
+        mpm_sol_cuda->syncParticlesToHost();
+        const auto& pts = mpm_sol_cuda->getParticles();
         payload->mpm_particles.clear();
-        payload->mpm_particles.reserve(pts.size() * 14);
+        payload->mpm_particles.reserve(pts.size() * 8);
         for (size_t i = 0; i < pts.size(); ++i) {
             if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-            payload->mpm_particles.push_back(pts[i].x[0]);
-            payload->mpm_particles.push_back(pts[i].x[1]);
-            payload->mpm_particles.push_back(pts[i].x[2]);
-            payload->mpm_particles.push_back(pts[i].v[0]);
-            payload->mpm_particles.push_back(pts[i].v[1]);
-            payload->mpm_particles.push_back(pts[i].v[2]);
+            float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
+            float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
+            float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
+            float p_vm = std::sqrt(std::max(0.0f, 0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) + 3.0f * (sxy * sxy + syz * syz + sxz * sxz)));
+            float p_press = -(sxx + syy + szz) / 3.0f;
+            float den = 2400.0f;
+            if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol_cuda->getMaterialTables().size())) {
+                den = mpm_sol_cuda->getMaterialTables()[pts[i].object_id].density;
+            }
+            appendCompactMPMParticle(payload->mpm_particles,
+                pts[i].x[0], pts[i].x[1], pts[i].x[2],
+                pts[i].v[0], pts[i].v[1], pts[i].v[2],
+                p_vm, p_press, pts[i].ep_bar, den,
+                pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
+        }
+    } else if (mpm_sol && !mpm_sol->getParticles().empty()) {
+        const auto& pts = mpm_sol->getParticles();
+        payload->mpm_particles.clear();
+        payload->mpm_particles.reserve(pts.size() * 8);
+        for (size_t i = 0; i < pts.size(); ++i) {
+            if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
             float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
             float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
             float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
@@ -8294,14 +8619,11 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
             if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol->getMaterialTables().size())) {
                 den = mpm_sol->getMaterialTables()[pts[i].object_id].density;
             }
-            payload->mpm_particles.push_back(p_vm);
-            payload->mpm_particles.push_back(pts[i].ep_bar);
-            payload->mpm_particles.push_back(den);
-            payload->mpm_particles.push_back(p_press);
-            payload->mpm_particles.push_back(pts[i].damage);
-            payload->mpm_particles.push_back(pts[i].has_failed ? 1.0f : 0.0f);
-            payload->mpm_particles.push_back(static_cast<float>(pts[i].object_id));
-            payload->mpm_particles.push_back(static_cast<float>(pts[i].cluster_id));
+            appendCompactMPMParticle(payload->mpm_particles,
+                pts[i].x[0], pts[i].x[1], pts[i].x[2],
+                pts[i].v[0], pts[i].v[1], pts[i].v[2],
+                p_vm, p_press, pts[i].ep_bar, den,
+                pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
         }
     }
 
@@ -8353,7 +8675,7 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
                 stride = static_cast<size_t>(user_stride);
             }
             size_t visual_count = (total_particles + stride - 1) / stride;
-            payload->mpm_particles.reserve(visual_count * 14);
+            payload->mpm_particles.reserve(visual_count * 8);
             for (size_t idx = 0; idx < total_particles; idx += stride) {
                 const auto& p = particles[idx];
                 if (p.m <= 0.0f || p.state == 2) continue;
@@ -8369,20 +8691,11 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
                 bool is_energetic = (mat_tbl.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn ||
                                      mat_tbl.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn ||
                                      mat_tbl.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth);
-                payload->mpm_particles.push_back(p.x[0]);
-                payload->mpm_particles.push_back(p.x[1]);
-                payload->mpm_particles.push_back(p.x[2]);
-                payload->mpm_particles.push_back(p.v[0]);
-                payload->mpm_particles.push_back(p.v[1]);
-                payload->mpm_particles.push_back(p.v[2]);
-                payload->mpm_particles.push_back(von_mises);
-                payload->mpm_particles.push_back(is_energetic ? p.lambda : p.ep_bar);
-                payload->mpm_particles.push_back(den);
-                payload->mpm_particles.push_back(press);
-                payload->mpm_particles.push_back(p.damage);
-                payload->mpm_particles.push_back(p.has_failed ? 1.0f : 0.0f);
-                payload->mpm_particles.push_back(static_cast<float>(p.object_id));
-                payload->mpm_particles.push_back(static_cast<float>(p.cluster_id));
+                appendCompactMPMParticle(payload->mpm_particles,
+                    p.x[0], p.x[1], p.x[2],
+                    p.v[0], p.v[1], p.v[2],
+                    von_mises, press, is_energetic ? p.lambda : p.ep_bar, den,
+                    p.damage, p.has_failed, p.object_id, p.cluster_id);
             }
         }
     }
@@ -8905,38 +9218,111 @@ static void populate_mpm_objects_from_json(const nlohmann::json& msg, bool use_g
         if (global_solver_mpm_3d) global_solver_mpm_3d->initMaterialHeterogeneity(obj_idx);
     }
 
-    // Phase 4: Contact mapping
-    std::unordered_map<std::string, int> mat_name_to_id;
+    // Phase 4: Contact mapping (supports hybrid Bardenhagen Multi-Velocity + Single-Velocity Bonded Groups)
+    std::string grouping_policy = msg.value("bardenhagen_grouping_policy", "Per-Object Independent");
+    std::unordered_map<std::string, int> group_key_to_id;
     std::vector<int> obj_to_mat;
     obj_to_mat.push_back(0);
     int next_mat_id = 0;
+    size_t map_obj_idx = 0;
     for (const auto& obj : msg["mpm_objects"]) {
+        map_obj_idx++;
+        std::string vel_group = obj.value("velocity_group", "Independent (Auto)");
         std::string m_name = obj.value("material_name", "");
-        if (m_name.empty()) m_name = obj.value("material_id", "mat_" + std::to_string(obj_to_mat.size()));
-        auto it = mat_name_to_id.find(m_name);
-        if (it == mat_name_to_id.end()) {
+        if (m_name.empty()) m_name = obj.value("material_id", "mat_" + std::to_string(map_obj_idx));
+
+        std::string group_key;
+        if (!vel_group.empty() && vel_group != "Independent (Auto)" && vel_group != "Independent") {
+            group_key = "GROUP::" + vel_group;
+        } else if (vel_group == "Independent" || grouping_policy == "Per-Object Independent") {
+            group_key = "OBJ::" + std::to_string(map_obj_idx);
+        } else {
+            group_key = "MAT::" + m_name;
+        }
+
+        auto it = group_key_to_id.find(group_key);
+        if (it == group_key_to_id.end()) {
             int new_id = next_mat_id++;
-            mat_name_to_id[m_name] = new_id;
+            group_key_to_id[group_key] = new_id;
             obj_to_mat.push_back(new_id);
         } else {
             obj_to_mat.push_back(it->second);
         }
     }
     int num_unique_materials = std::max(1, next_mat_id);
+    std::string contact_method_str = msg.value("contact_method", "Single-Velocity");
     Blast::MPMContactMethod contact_method = Blast::MPMContactMethod::SingleVelocity;
+    if (contact_method_str.find("Bardenhagen") != std::string::npos ||
+        contact_method_str.find("Multi-Velocity") != std::string::npos ||
+        contact_method_str == "MultiVelocityBardenhagen") {
+        contact_method = Blast::MPMContactMethod::MultiVelocityBardenhagen;
+    } else if (contact_method_str.find("DEM") != std::string::npos) {
+        contact_method = Blast::MPMContactMethod::SubGridDEM;
+    }
+    bool enable_impact_welding = get_json_bool(msg, "enable_impact_welding", false);
+    bool enable_frictional_heating = get_json_bool(msg, "enable_frictional_heating", false);
+    bool enable_thermal_conduction = get_json_bool(msg, "enable_thermal_conduction", false);
     if (global_solver_mpm_3d_cuda) {
         global_solver_mpm_3d_cuda->setContactMethod(contact_method);
+        global_solver_mpm_3d_cuda->setImpactWelding(enable_impact_welding);
+        global_solver_mpm_3d_cuda->setFrictionalHeating(enable_frictional_heating);
+        global_solver_mpm_3d_cuda->setThermalConduction(enable_thermal_conduction);
         global_solver_mpm_3d_cuda->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
         global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
         global_solver_mpm_3d_cuda->syncToDevice();
     } else if (global_solver_mpm_3d) {
         global_solver_mpm_3d->setContactMethod(contact_method);
+        global_solver_mpm_3d->setImpactWelding(enable_impact_welding);
+        global_solver_mpm_3d->setFrictionalHeating(enable_frictional_heating);
+        global_solver_mpm_3d->setThermalConduction(enable_thermal_conduction);
         global_solver_mpm_3d->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
         global_solver_mpm_3d->particleToGrid();
     }
 
     size_t n_p = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles().size() : (global_solver_mpm_3d ? global_solver_mpm_3d->getParticles().size() : 0);
     emit_kernel_log("SYSTEM", "Initialized " + std::to_string(n_p) + " MPM particles (" + std::to_string(obj_idx) + " objects) for coupled 3-way multi-physics.", 0.0, scope_tag, 0);
+}
+
+static int build_mpm_object_material_mapping(const nlohmann::json& msg, std::vector<int>& obj_to_mat) {
+    obj_to_mat.clear();
+    obj_to_mat.push_back(0); // Index 0 dummy so that obj_to_mat[obj_idx] directly matches 1-based p.object_id
+    std::string grouping_policy = msg.value("bardenhagen_grouping_policy", "Per-Object Independent");
+    std::unordered_map<std::string, int> group_key_to_id;
+    int next_mat_id = 0;
+    if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
+        size_t obj_idx = 0;
+        for (const auto& obj : msg["mpm_objects"]) {
+            obj_idx++;
+            std::string vel_group = obj.value("velocity_group", "Independent (Auto)");
+            std::string m_name = obj.value("material_name", "");
+            if (m_name.empty()) {
+                m_name = obj.value("material_id", "mat_" + std::to_string(obj_idx));
+            }
+            std::string group_key;
+            if (!vel_group.empty() && vel_group != "Independent (Auto)" && vel_group != "Independent") {
+                group_key = "GROUP::" + vel_group;
+            } else if (vel_group == "Independent" || grouping_policy == "Per-Object Independent") {
+                group_key = "OBJ::" + std::to_string(obj_idx);
+            } else {
+                group_key = "MAT::" + m_name;
+            }
+            auto it = group_key_to_id.find(group_key);
+            if (it == group_key_to_id.end()) {
+                int new_id = next_mat_id++;
+                group_key_to_id[group_key] = new_id;
+                obj_to_mat.push_back(new_id);
+            } else {
+                obj_to_mat.push_back(it->second);
+            }
+        }
+    }
+    int num_unique_materials = std::max(1, next_mat_id);
+    std::cout << "[BlastSolver] Configured " << num_unique_materials << " Bardenhagen velocity field(s) for "
+              << (obj_to_mat.size() > 1 ? obj_to_mat.size() - 1 : 0) << " object(s) [Policy: " << grouping_policy << "]." << std::endl;
+    for (size_t oi = 1; oi < obj_to_mat.size(); ++oi) {
+        std::cout << "  [BlastSolver] Object " << oi << " -> Velocity Field " << obj_to_mat[oi] << std::endl;
+    }
+    return num_unique_materials;
 }
 
 static Blast::MPMBoundaryCondition3D parse_bc_mpm3d(const std::string& str) {
@@ -10184,6 +10570,10 @@ int main() {
                     float sdf_friction = static_cast<float>(get_json_double(msg, "sdf_barrier_friction", 0.25));
                     float sdf_skin = static_cast<float>(get_json_double(msg, "sdf_barrier_skin", 0.15));
 
+                    bool enable_impact_welding = get_json_bool(msg, "enable_impact_welding", false);
+                    bool enable_frictional_heating = get_json_bool(msg, "enable_frictional_heating", false);
+                    bool enable_thermal_conduction = get_json_bool(msg, "enable_thermal_conduction", false);
+
                     if (global_solver_mpm_3d_cuda) {
                         global_solver_mpm_3d_cuda->setTransferScheme(ts);
                         global_solver_mpm_3d_cuda->setVelocityScheme(vs);
@@ -10192,6 +10582,9 @@ int main() {
                         global_solver_mpm_3d_cuda->setSmoothPlasticStrain(smooth_ps);
                         global_solver_mpm_3d_cuda->setDemContact(enable_dem_contact, dem_friction, dem_restitution, dem_contact_scale, dem_mode, dem_v_thresh);
                         global_solver_mpm_3d_cuda->setContactMethod(contact_method);
+                        global_solver_mpm_3d_cuda->setImpactWelding(enable_impact_welding);
+                        global_solver_mpm_3d_cuda->setFrictionalHeating(enable_frictional_heating);
+                        global_solver_mpm_3d_cuda->setThermalConduction(enable_thermal_conduction);
                         global_solver_mpm_3d_cuda->setSdfBarrier(enable_sdf_barrier, sdf_restitution, sdf_friction, sdf_skin);
                     } else {
                         global_solver_mpm_3d->setTransferScheme(ts);
@@ -10201,6 +10594,9 @@ int main() {
                         global_solver_mpm_3d->setSmoothPlasticStrain(smooth_ps);
                         global_solver_mpm_3d->setDemContact(enable_dem_contact, dem_friction, dem_restitution, dem_contact_scale, dem_mode, dem_v_thresh);
                         global_solver_mpm_3d->setContactMethod(contact_method);
+                        global_solver_mpm_3d->setImpactWelding(enable_impact_welding);
+                        global_solver_mpm_3d->setFrictionalHeating(enable_frictional_heating);
+                        global_solver_mpm_3d->setThermalConduction(enable_thermal_conduction);
                         global_solver_mpm_3d->setSdfBarrier(enable_sdf_barrier, sdf_restitution, sdf_friction, sdf_skin);
                     }
 
@@ -10615,34 +11011,9 @@ int main() {
                         }
                     }
 
-                    // Material-based contact mapping (Bardenhagen partition per material)
-                    // Note: Objects are 1-indexed (obj_idx = 1, 2, ...), so index 0 is reserved.
-                    std::unordered_map<std::string, int> mat_name_to_id;
+                    // Material-based / Coupler-based contact mapping (hybrid Bardenhagen Multi-Velocity + Single-Velocity Bonded Groups)
                     std::vector<int> obj_to_mat;
-                    obj_to_mat.push_back(0); // Index 0 dummy so that obj_to_mat[obj_idx] directly matches 1-based p.object_id
-                    int next_mat_id = 0;
-                    if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
-                        for (const auto& obj : msg["mpm_objects"]) {
-                            std::string m_name = obj.value("material_name", "");
-                            if (m_name.empty()) {
-                                m_name = obj.value("material_id", "mat_" + std::to_string(obj_to_mat.size()));
-                            }
-                            auto it = mat_name_to_id.find(m_name);
-                            if (it == mat_name_to_id.end()) {
-                                int new_id = next_mat_id++;
-                                mat_name_to_id[m_name] = new_id;
-                                obj_to_mat.push_back(new_id);
-                            } else {
-                                obj_to_mat.push_back(it->second);
-                            }
-                        }
-                    }
-                    int num_unique_materials = std::max(1, next_mat_id);
-                    std::cout << "[BlastSolver] Configured " << num_unique_materials << " unique material field(s) for "
-                              << (obj_to_mat.size() > 1 ? obj_to_mat.size() - 1 : 0) << " object(s)." << std::endl;
-                    for (size_t oi = 1; oi < obj_to_mat.size(); ++oi) {
-                        std::cout << "  [BlastSolver] Object " << oi << " -> Material Field " << obj_to_mat[oi] << std::endl;
-                    }
+                    int num_unique_materials = build_mpm_object_material_mapping(msg, obj_to_mat);
 
                     if (global_solver_mpm_3d_cuda) {
                         global_solver_mpm_3d_cuda->setContactMethod(contact_method);
@@ -11410,6 +11781,10 @@ int main() {
                         contact_method = Blast::MPMContactMethod::SubGridDEM;
                     }
 
+                    bool enable_impact_welding = get_json_bool(msg, "enable_impact_welding", false);
+                    bool enable_frictional_heating = get_json_bool(msg, "enable_frictional_heating", false);
+                    bool enable_thermal_conduction = get_json_bool(msg, "enable_thermal_conduction", false);
+
                     if (global_solver_mpm_3d_cuda) {
                         global_solver_mpm_3d_cuda->setTransferScheme(ts);
                         global_solver_mpm_3d_cuda->setVelocityScheme(vs);
@@ -11418,6 +11793,9 @@ int main() {
                         global_solver_mpm_3d_cuda->setSmoothPlasticStrain(smooth_ps);
                         global_solver_mpm_3d_cuda->setDemContact(enable_dem_contact, dem_friction, dem_restitution, dem_contact_scale, dem_mode, dem_v_thresh);
                         global_solver_mpm_3d_cuda->setContactMethod(contact_method);
+                        global_solver_mpm_3d_cuda->setImpactWelding(enable_impact_welding);
+                        global_solver_mpm_3d_cuda->setFrictionalHeating(enable_frictional_heating);
+                        global_solver_mpm_3d_cuda->setThermalConduction(enable_thermal_conduction);
                     } else {
                         global_solver_mpm_3d->setTransferScheme(ts);
                         global_solver_mpm_3d->setVelocityScheme(vs);
@@ -11426,6 +11804,9 @@ int main() {
                         global_solver_mpm_3d->setSmoothPlasticStrain(smooth_ps);
                         global_solver_mpm_3d->setDemContact(enable_dem_contact, dem_friction, dem_restitution, dem_contact_scale, dem_mode, dem_v_thresh);
                         global_solver_mpm_3d->setContactMethod(contact_method);
+                        global_solver_mpm_3d->setImpactWelding(enable_impact_welding);
+                        global_solver_mpm_3d->setFrictionalHeating(enable_frictional_heating);
+                        global_solver_mpm_3d->setThermalConduction(enable_thermal_conduction);
                     }
 
                     auto mpm_bc1 = parse_bc_mpm3d(msg.value("bc_x_min", "Reflecting"));
@@ -11857,29 +12238,9 @@ int main() {
                         std::cout << "[BlastSolver] No MPM objects defined in INIT_FSI_3D payload; MPM domain initialized with 0 particles." << std::endl;
                     }
 
-                    // Material-based contact mapping (Bardenhagen partition per material)
-                    // Note: Objects are 1-indexed (obj_idx = 1, 2, ...), so index 0 is reserved.
-                    std::unordered_map<std::string, int> mat_name_to_id;
+                    // Material-based / Coupler-based contact mapping (hybrid Bardenhagen Multi-Velocity + Single-Velocity Bonded Groups)
                     std::vector<int> obj_to_mat;
-                    obj_to_mat.push_back(0); // Index 0 dummy so that obj_to_mat[obj_idx] directly matches 1-based p.object_id
-                    int next_mat_id = 0;
-                    if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
-                        for (const auto& obj : msg["mpm_objects"]) {
-                            std::string m_name = obj.value("material_name", "");
-                            if (m_name.empty()) {
-                                m_name = obj.value("material_id", "mat_" + std::to_string(obj_to_mat.size()));
-                            }
-                            auto it = mat_name_to_id.find(m_name);
-                            if (it == mat_name_to_id.end()) {
-                                int new_id = next_mat_id++;
-                                mat_name_to_id[m_name] = new_id;
-                                obj_to_mat.push_back(new_id);
-                            } else {
-                                obj_to_mat.push_back(it->second);
-                            }
-                        }
-                    }
-                    int num_unique_materials = std::max(1, next_mat_id);
+                    int num_unique_materials = build_mpm_object_material_mapping(msg, obj_to_mat);
 
                     if (global_solver_mpm_3d_cuda) {
                         global_solver_mpm_3d_cuda->setContactMethod(contact_method);

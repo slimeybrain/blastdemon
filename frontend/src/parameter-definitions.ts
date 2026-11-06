@@ -1222,7 +1222,68 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'Contact Formulation & Method',
         category: 'MPM Particle Mechanics',
         shortDesc: 'Selects the multi-body contact algorithm for inter-material and inter-body interactions',
-        detailedDesc: 'Governs how interacting bodies and materials are handled: (1) Single-Velocity (Standard MPM): All particles share a single lumped velocity field at each grid node; touching bodies naturally stick/weld together with continuous velocity. (2) Discrete Element (DEM): Pairwise kinematic impulse contact between Lagrangian particles to prevent high-speed debris and gaseous detonation products from tunneling through solid structures. (3) Multi-Velocity (Bardenhagen): Formulates distinct velocity and momentum fields per material on the background grid (Bardenhagen et al. 2000/2001). Resolves normal non-penetration and tangential Coulomb friction at interface nodes where multiple materials overlap, while allowing natural separation and rebound without numerical sticking.'
+        detailedDesc: 'Governs how interacting bodies and materials are handled: (1) Single-Velocity (Standard MPM): All particles share a single lumped velocity field at each grid node; touching bodies naturally stick/weld together with continuous velocity. (2) Discrete Element (DEM): Pairwise kinematic impulse contact between Lagrangian particles to prevent high-speed debris and gaseous detonation products from tunneling through solid structures. (3) Multi-Velocity (Bardenhagen): Formulates distinct velocity and momentum fields per material/part group on the background grid (Bardenhagen et al. 2000/2001). Resolves normal non-penetration and tangential Coulomb friction at interface nodes where multiple velocity fields overlap, while allowing natural separation and rebound without numerical sticking.'
+    },
+    'bardenhagen_grouping_policy': {
+        key: 'bardenhagen_grouping_policy',
+        label: 'Uncoupled Part Grouping Policy',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Determines how uncoupled MPM parts are assigned to Bardenhagen velocity fields by default',
+        detailedDesc: 'Controls the default velocity field partitioning when Multi-Velocity (Bardenhagen) contact is active: (1) Per-Object Independent (Default): Every uncoupled MPMObject3D part receives its own distinct velocity field, ensuring two separate parts made of the same material (e.g., two steel plates) still collide and separate via Bardenhagen contact unless explicitly bonded via an MPMContactCoupler3D node or shared Velocity Group tag. (2) By Material Node: Parts sharing the same Material node share a single velocity field unless overridden.',
+        allowedValues: ['Per-Object Independent', 'By Material Node'],
+        defaultVal: 'Per-Object Independent',
+        solverScope: 'MPM'
+    },
+    'velocity_group': {
+        key: 'velocity_group',
+        label: 'Velocity Field / Bonded Group',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Assigns this MPM part to an independent Bardenhagen velocity field or a bonded Single-Velocity group',
+        detailedDesc: 'Specifies the velocity field partition for this MPMObject3D when Multi-Velocity (Bardenhagen) contact is enabled on the domain. Setting to "Independent (Auto)" gives this part its own separable Bardenhagen velocity field (unless wired to an MPMContactCoupler3D node). Assigning multiple parts to the same group (e.g. "Bonded Group A", "Bonded Group B", etc.) merges them into a shared Single-Velocity continuum field so they remain monolithically bonded at their interface while interacting with all other parts/groups via Bardenhagen multi-velocity contact.',
+        allowedValues: ['Independent (Auto)', 'Bonded Group A', 'Bonded Group B', 'Bonded Group C', 'Bonded Group D', 'Bonded Group E', 'Bonded Group F'],
+        defaultVal: 'Independent (Auto)',
+        solverScope: 'MPM'
+    },
+    'coupler_mode': {
+        key: 'coupler_mode',
+        label: 'Coupler Kinematics Mode',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Selects whether coupled MPM parts share a bonded Single-Velocity field or remain Independent',
+        detailedDesc: 'Governs how the MPMObject3D parts wired to this MPMContactCoupler3D node interact: (1) Bonded (Single-Velocity): All connected parts are mapped to a single shared velocity field on the background grid while preserving each part\'s individual constitutive material model (e.g. Steel liner bonded to Concrete wall, or Explosive charge bonded to Metal casing). Zero internal contact overhead is incurred between the bonded parts, while the composite assembly interacts with all external parts via Bardenhagen Multi-Velocity contact. (2) Independent (Bardenhagen): Connected parts retain separate velocity fields.',
+        allowedValues: ['Bonded (Single-Velocity)', 'Independent (Bardenhagen)'],
+        defaultVal: 'Bonded (Single-Velocity)',
+        solverScope: 'MPM'
+    },
+    'coupler_group_tag': {
+        key: 'coupler_group_tag',
+        label: 'Bonded Group Identifier',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Group tag shared by parts wired to this Bardenhagen contact coupler',
+        detailedDesc: 'Identifier linking this MPMContactCoupler3D node with the per-part velocity_group tag. Parts wired to this coupler or assigned to the matching Bonded Group tag share the same Single-Velocity grid field.',
+        allowedValues: ['Bonded Group A', 'Bonded Group B', 'Bonded Group C', 'Bonded Group D', 'Bonded Group E', 'Bonded Group F'],
+        defaultVal: 'Bonded Group A',
+        solverScope: 'MPM'
+    },
+    'enable_impact_welding': {
+        key: 'enable_impact_welding',
+        label: 'Thermo-Mechanical Impact Welding',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Enables metallurgical fusion bonding and thermal sintering across high-velocity multi-material interfaces',
+        detailedDesc: 'Enables thermo-mechanical cohesive fusion bonding during Multi-Velocity (Bardenhagen) contact and solid-state thermal sintering across both CPU and GPU backends. When contacting materials reach elevated homologous temperature (T* = (T - T_room) / (T_melt - T_room) >= 0.45) or intense interfacial plastic shear strain (eps_p >= 0.25), a smooth thermo-mechanical weld factor alpha_weld in [0, 1] locks separating and tangential velocities toward the shared center-of-mass velocity v_cm while conserving exact linear momentum. Additionally enables solid-state sintering healing when compressed particles exceed 0.75 * T_melt, restoring damaged/spalled interface zones.'
+    },
+    'enable_frictional_heating': {
+        key: 'enable_frictional_heating',
+        label: 'Interfacial Frictional Heating',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Converts Bardenhagen contact and Coulomb sliding kinetic energy dissipation into interfacial thermal energy',
+        detailedDesc: 'Enforces First-Law total energy conservation at multi-velocity contact interfaces by converting kinetic energy dissipated during inelastic normal collision and tangential Coulomb frictional sliding (Delta_K_fric = K_pre - K_post >= 0) directly into specific internal thermal energy (q_fric = Delta_K_fric / m_node). Gathered back to contacting particles during G2P (e_int += q_fric, T = T_room + e_int / Cp), capturing intense localized surface flash heating during oblique high-velocity impact and explosive welding.'
+    },
+    'enable_thermal_conduction': {
+        key: 'enable_thermal_conduction',
+        label: 'Grid Thermal Conduction & Quenching',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Enables background grid thermal diffusion so molten/heated interfaces cool and re-solidify into bulk metal',
+        detailedDesc: 'Activates explicit Fourier thermal diffusion across the Eulerian background grid during the grid update step. Heat concentrated in thin shock-heated or frictionally melted interface layers (T >= T_melt, where Johnson-Cook thermal softening reduces flow stress toward zero) conducts into the adjacent cold metallic bulk and across dissimilar metal boundaries. As the interface quenches back below T_melt, it recovers solid Johnson-Cook shear strength and locks in a metallurgical bond.'
     },
     'enable_dem_contact': {
         key: 'enable_dem_contact',
@@ -1428,7 +1489,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'Material Property Preset',
         category: 'Material Constitutive',
         shortDesc: 'Pre-calibrated empirical parameters from literature for the selected model',
-        detailedDesc: 'Loads peer-reviewed, laboratory-calibrated material properties dynamically filtered for the active constitutive formulation: structural & armor steels (A36, S275, S355, S460, 1006, 1020, AISI 4150, AISI 4340 and heat-treated variants [Penetrator Nose 55-58 HRC, Shell Base 32-36 HRC, Annealed, Normalized, Q&T 315-650°C], Krupp E22, HY-80, HY-100, RHA, Armox, Weldox, stainless steels), light alloys, concrete/masonry grades, soils & geomaterials (marine clay, silty clay, saturated mud/slurry, sand, granite, basalt, sandstone, limestone, shale, ice), soft materials & bio-surrogates (10% & 20% ballistic gelatins, hydrodynamic water, silicone tissue simulant, hydrogel), polymers, ceramics, unreacted explosive solids, CFD ideal gases, and JWL detonation products (or Custom).'
+        detailedDesc: 'Loads peer-reviewed, laboratory-calibrated material properties dynamically filtered for the active constitutive formulation: structural & armor steels (A36, S275, S355, S460, 1006, 1020, AISI 4150, AISI 4340 and heat-treated variants [Penetrator Nose 55-58 HRC, Shell Base 32-36 HRC, Annealed, Normalized, Q&T 315-650°C], Krupp E22, US Class 4 RHA [WWII AXS-488 / 240 HB], HY-80, HY-100, RHA [MIL-A-12560], Armox, Weldox, stainless steels), light alloys, concrete/masonry grades, soils & geomaterials (marine clay, silty clay, saturated mud/slurry, sand, granite, basalt, sandstone, limestone, shale, ice), soft materials & bio-surrogates (10% & 20% ballistic gelatins, hydrodynamic water, silicone tissue simulant, hydrogel), polymers, ceramics, unreacted explosive solids, CFD ideal gases, and JWL detonation products (or Custom).'
     },
     'solid_model': {
         key: 'solid_model',
@@ -2544,12 +2605,37 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     },
     'element_topology': {
         key: 'element_topology',
-        label: 'Solid Element Topology',
-        allowedValues: ['Hex8', 'Tet4_ANP'],
+        label: 'Solid / Shell Element Topology',
+        allowedValues: ['Hex8', 'Hex8_SRI', 'Hex8_Full', 'Tet4', 'Tet4_ANP', 'Wedge6', 'Shell4'],
         defaultVal: 'Hex8',
         category: 'FEM Structural Dynamics',
-        shortDesc: 'Solid element formulation: Hex8 vs Tet4_ANP (Average Nodal Pressure)',
-        detailedDesc: 'Selects the 3D Lagrangian finite element topology and volumetric stabilization: Hex8 (8-node hexahedral brick with Flanagan-Belytschko hourglass control) or Tet4_ANP (4-node tetrahedral element with 2-pass Bonet-Burton Average Nodal Pressure stabilization, eliminating volumetric locking in incompressible J2 metal plasticity and energetic detonation with zero hourglass modes).'
+        shortDesc: 'Element formulation: Hex8, Hex8_SRI (B-Bar), Tet4_ANP (Average Nodal Pressure), Wedge6, or Shell4',
+        detailedDesc: 'Selects the 3D Lagrangian finite element topology and volumetric stabilization: Hex8 (1-point Flanagan-Belytschko hourglass control), Hex8_SRI (Selective Reduced Integration / Hughes B-Bar locking-free), Hex8_Full (8-point 2x2x2 Gauss quadrature), Tet4 (standard 4-node linear tetrahedron), Tet4_ANP (2-pass Bonet-Burton Average Nodal Pressure stabilization eliminating volumetric locking), Wedge6 (6-node pentahedral prism), or Shell4 (4-node Belytschko-Tsay co-rotational Mindlin-Reissner shell).'
+    },
+    'merge_coincident_nodes': {
+        key: 'merge_coincident_nodes',
+        label: 'Merge Coincident Assembly Nodes',
+        defaultVal: false,
+        category: 'FEM Structural Dynamics',
+        shortDesc: 'Automatically weld coincident boundary nodes across separate FEM parts and meshes',
+        detailedDesc: 'When enabled, performs a spatial proximity search across all imported and generated FEM components during assembly initialization and welds coincident interface nodes within node_merge_tolerance into shared degrees of freedom.'
+    },
+    'node_merge_tolerance': {
+        key: 'node_merge_tolerance',
+        label: 'Coincident Node Merge Tolerance',
+        unit: 'm',
+        defaultVal: 1.0e-4,
+        category: 'FEM Structural Dynamics',
+        shortDesc: 'Spatial distance threshold for welding coincident nodes across parts',
+        detailedDesc: 'Maximum Euclidean distance (meters) within which boundary nodes belonging to adjacent FEM parts or imported meshes are merged into a single shared node when Merge Coincident Assembly Nodes is enabled.'
+    },
+    'embedded_rebar_coupling': {
+        key: 'embedded_rebar_coupling',
+        label: 'Constrained / Embedded Rebar Coupling',
+        defaultVal: true,
+        category: 'FEM Structural Dynamics',
+        shortDesc: 'Couple non-coincident 1D beam/truss reinforcement to host 3D solid elements',
+        detailedDesc: 'Automatically couples 1D beam and truss reinforcement nodes (FEMBeam3D, FEMRebar3D, or imported rebar cages) that lie inside 3D solid elements via isoparametric shape-function kinematic/force interpolation (*CONSTRAINED_LAGRANGE_IN_SOLID / embedded reinforcement) even when rebar and solid mesh nodes do not coincide.'
     },
     'enable_cohesive_splitting': {
         key: 'enable_cohesive_splitting',
@@ -2970,7 +3056,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'Output File Prefix',
         category: 'VTK Output',
         shortDesc: 'Base filename for saved datasets',
-        detailedDesc: 'Custom prefix string for output files (e.g. "blast_run_01" -> "blast_run_01_00010.vtu").'
+        detailedDesc: 'Custom prefix string for output files. Snapshots are tagged with a 10-digit zero-padded suffix (e.g. "blast_run_01_volume_0000000100.vtu" corresponding to 10.0 µs rounded to the nominal output interval with 0.1 µs resolution for Time Interval triggering, or a 10-digit step index for Step Interval triggering). This guarantees that repeated simulation runs cleanly overwrite previous files.'
     },
     'vtk_dir': {
         key: 'vtk_dir',
@@ -3265,6 +3351,14 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'VTK Output Fields',
         shortDesc: 'Include compact 1-byte object/part identifier on material points',
         detailedDesc: 'Exports compact UInt8 (1 byte/particle) object/part identification index on MPM particles for per-body filtering in ParaView.'
+    },
+    'qty_mpm_particle_density': {
+        key: 'qty_mpm_particle_density',
+        label: 'MPM Particle Density (UInt8)',
+        unit: 'count',
+        category: 'VTK Output Fields',
+        shortDesc: 'Include compact 1-byte same-object local neighbor count within 1.8 * d_p (1..255)',
+        detailedDesc: 'Exports compact UInt8 (1 byte/particle) local coordination count [1..255] within exact Euclidean radius r <= 1.8 * d_p filtered by matching object_id and failure state, with zero persistent memory footprint. Separates isolated flyers (=1), surface-smeared single particles (=1..4), thin monolayers (<=9), intact solid surfaces (~18), and 3D continuum bulk (~27).'
     },
     'qty_mpm_temp': {
         key: 'qty_mpm_temp',
@@ -4493,6 +4587,9 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
             <div class="node-doc-section">
                 <div class="node-doc-heading">Key Parameter Tuning Guide</div>
                 <ul>
+                    <li><code>enable_impact_welding</code>: Enables thermo-mechanical fusion bonding in Multi-Velocity (Bardenhagen) contact and solid-state sintering healing when interface homologous temperature or plastic strain exceeds bonding thresholds.</li>
+                    <li><code>enable_frictional_heating</code>: Converts kinetic energy dissipated during multi-velocity contact and Coulomb friction into interfacial thermal energy.</li>
+                    <li><code>enable_thermal_conduction</code>: Enables grid-mediated Fourier thermal diffusion so molten interface layers quench into adjacent cold bulk metal and recover solid shear strength.</li>
                     <li><code>enable_dem_contact</code>: Toggle to unconditionally prevent gaseous detonation products or high-velocity debris from tunneling through solid structures.</li>
                     <li><code>dem_contact_mode</code>: Multi-scenario interaction mode ('Gas-Solid Only' for cased explosives; 'Ballistic Impacts & Gas' for projectiles, armor impacts, and shrapnel; 'All Dynamic Contacts' for general multi-body collisions).</li>
                     <li><code>dem_velocity_threshold</code>: Minimum closing speed (default 1.0 m/s) to trigger DEM impulse. Prevents static CAD boundaries at rest from experiencing artificial explosive shocks at t = 0.</li>
@@ -4620,6 +4717,38 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
             <div class="node-doc-section">
                 <div class="node-doc-heading">Governing Physics & Formulations</div>
                 <p>Implements two-way staggered explicit coupling with conservative pressure boundary transmission and adaptive timestep ramping.</p>
+            </div>
+        `
+    },
+
+    'MPMContactCoupler3D': {
+        type: 'MPMContactCoupler3D',
+        title: '3D MPM Bardenhagen Contact Coupler',
+        category: 'Lagrangian MPM Particle Dynamics',
+        shortDesc: 'Couples a group of 3D MPM parts into a shared Single-Velocity continuum assembly while preserving Bardenhagen Multi-Velocity contact against all other parts.',
+        fullDescHtml: `
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Overview & Role</div>
+                <p>The <strong>MPMContactCoupler3D</strong> ("Bardenhagen Coupler") node enables hybrid <strong>Single-Velocity + Multi-Velocity (Bardenhagen)</strong> simulations in 3D MPM. While uncoupled MPM parts interact via separable Bardenhagen Coulomb contact on independent velocity fields, any group of <strong>MPMObject3D</strong> parts wired into a Bardenhagen Coupler (or assigned to its Bonded Group tag) are merged into a single shared grid velocity field.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Each coupled part retains its own constitutive material model and state history (<code>p.object_id</code> -> <code>m_material_tables[obj_id]</code>), allowing dissimilar materials (such as a steel liner bonded to a concrete wall, or an explosive charge bonded to a metal casing) to share a continuous nodal velocity field (<code>p.material_id = m_group</code>) during P2G and G2P without internal slip or separation. Meanwhile, the bonded assembly interacts with all external parts and groups via Bardenhagen normal non-penetration and Coulomb friction.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <p>Connect two or more <strong>MPMObject3D</strong> nodes to the <code>objects</code> port, and optionally wire the coupler output to the target <strong>MPMDomain3D</strong> node (or assign parts directly via the 1-click chips in the Pipeline Browser).</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <p>Emits velocity field partition mappings (<code>obj_to_mat</code>) to the 3D MPM solver during initialization. Compact multi-material slot storage automatically treats internal nodes of the bonded group as fast single-material nodes.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>coupler_mode</code>: Set to <code>Bonded (Single-Velocity)</code> to lock connected parts into a shared velocity field, or <code>Independent (Bardenhagen)</code> to temporarily unbond them without deleting wires.</li>
+                    <li><code>coupler_group_tag</code>: Links the coupler node with the <code>velocity_group</code> tag on <strong>MPMObject3D</strong> nodes (<code>Bonded Group A</code> through <code>Bonded Group F</code>).</li>
+                </ul>
             </div>
         `
     },
@@ -4812,7 +4941,7 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
     if (nodeType === 'FEMDomain3D' || nodeType === 'FEMObject3D' || nodeType === 'LSDynaImporter3D') {
         return 'FEM';
     }
-    if (nodeType === 'MPMDomain2D' || nodeType === 'MPMDomain3D' || nodeType === 'MPMObject2D' || nodeType === 'MPMObject3D') {
+    if (nodeType === 'MPMDomain2D' || nodeType === 'MPMDomain3D' || nodeType === 'MPMObject2D' || nodeType === 'MPMObject3D' || nodeType === 'MPMContactCoupler3D') {
         return 'MPM';
     }
     if (nodeType === 'CFDSolver' || nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver3D' || 
@@ -4831,7 +4960,8 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
 
     // Material parameters key-based mapping
     const mpmOnlyKeys = [
-        'transfer_scheme', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume'
+        'transfer_scheme', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
+        'bardenhagen_grouping_policy', 'velocity_group', 'coupler_mode', 'coupler_group_tag'
     ];
     if (mpmOnlyKeys.includes(key)) return 'MPM';
 
@@ -5347,17 +5477,20 @@ export function getParamKeysForNode(
     } else if (nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver') {
         keys = ['ambient_air_material', 'explosive_charge', 'connected_detonators', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
     } else if (nodeType === 'MPMDomain3D') {
-        keys = ['device', 'precision', 'transfer_scheme', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'contact_method', 'enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale', 'cfl', 'endtime'];
+        keys = ['device', 'precision', 'transfer_scheme', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'contact_method', 'bardenhagen_grouping_policy', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale', 'cfl', 'endtime'];
     } else if (nodeType === 'MPMDomain2D') {
         keys = ['precision', 'transfer_scheme', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
     } else if (nodeType === 'MPMObject2D') {
         keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'pos_x', 'pos_y', 'size_x', 'size_y', 'radius', 'vel_x', 'vel_y', 'angular_vel'];
     } else if (nodeType === 'MPMObject3D') {
-        keys = ['target_domain', 'material', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'voxelization_method', 'stl_file', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'clip_z_min', 'clip_z_max', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
+        keys = ['target_domain', 'material', 'velocity_group', 'shape_type', 'particle_distribution', 'boundary_filling', 'ppc', 'voxelization_method', 'stl_file', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'clip_z_min', 'clip_z_max', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z'];
+    } else if (nodeType === 'MPMContactCoupler3D') {
+        keys = ['target_domain', 'coupler_mode', 'coupler_group_tag'];
     } else if (nodeType === 'FEMDomain3D') {
         keys = [
             'device', 'precision', 'connected_detonators', 'cfl', 'endtime',
             'integration_scheme', 'hourglass_model', 'hourglass_coeff',
+            'merge_coincident_nodes', 'node_merge_tolerance', 'embedded_rebar_coupling',
             'enable_cohesive_splitting', 'cohesive_fracture_energy',
             'enable_directional_crack_band', 'enable_nonlocal_damage',
             'enable_heterogeneity', 'material_heterogeneity',
@@ -5399,7 +5532,7 @@ export function getParamKeysForNode(
             'export_cfd_2d', 'export_slices', 'export_volumes', 'export_obstacles', 'export_stl_faces', 'stl_outside_domain', 'tessellate_stl_faces', 'tessellation_max_edge', 'export_fem', 'export_mpm', 'export_pvd',
             'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_materials', 'qty_water', 'qty_soil', 'qty_overpressure', 'qty_impulse',
             'qty_fem_stress', 'qty_fem_strain', 'qty_fem_pressure', 'qty_fem_temp', 'qty_fem_damage', 'qty_fem_vel', 'qty_fem_disp',
-            'qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id', 'qty_mpm_temp', 'qty_mpm_vel',
+            'qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id', 'qty_mpm_particle_density', 'qty_mpm_temp', 'qty_mpm_vel',
             'roi_enabled', 'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride'
         ];
     } else if (nodeType === 'Telemetry3DViewport') {
@@ -5418,7 +5551,7 @@ export function getParamKeysForNode(
     } else if (nodeType === 'STLGeometry') {
         keys = ['stl_file', 'voxelization_method', 'origin_mode', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z'];
     } else if (nodeType === 'LSDynaImporter3D') {
-        keys = ['k_file', 'scale_factor'];
+        keys = ['k_file', 'scale_factor', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z'];
     } else if (nodeType === 'RemapNode' || nodeType === 'Remap1DTo2DNode') {
         keys = ['source_model_id', 'target_solver', 'explosive_r', 'explosive_z', 'remap_radius', 'trigger_type', 'trigger_val'];
     } else if (nodeType === 'Remap1DTo3DNode' || nodeType === 'Remap2DTo3DNode') {
@@ -5495,6 +5628,7 @@ export function resolveModelContext(
     const hasMPM = nodes.some(n => 
         n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'MPMObject2D' || n.type === 'MPMObject3D' || 
         n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' ||
+        (n.type === 'FEMDomain3D' && Boolean(n.parameters?.convert_failed_elements_to_mpm)) ||
         (n.type === 'MarineHarbourDomain' && (n.parameters?.water_discretization_mode !== 'Pure_FV' || ['Hybrid_MPM_Crater_FEM_FarField', 'Full_Domain_MPM', 'Local_Crater_MPM'].includes(n.parameters?.seabed_mesh_type)))
     );
 
@@ -5737,6 +5871,8 @@ export function shouldSkipNodeParameter(
             const isDemPrimary = method.includes('DEM') || method.includes('Discrete Element');
             const hasDemToggle = Boolean(parameters['enable_dem_contact']);
 
+            if (!isBardenhagen && key === 'bardenhagen_grouping_policy') return true;
+
             if (isBardenhagen) {
                 if (!hasDemToggle && ['dem_contact_mode', 'dem_velocity_threshold', 'dem_contact_scale'].includes(key)) return true;
             } else if (isDemPrimary) {
@@ -5762,9 +5898,12 @@ export function shouldSkipNodeParameter(
         } else if (shape === 'STL') {
             if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'clip_z_min', 'clip_z_max'].includes(key)) return true;
         }
+    } else if (nodeType === 'MPMContactCoupler3D') {
+        if (key === 'coupler_group_tag' && parameters['coupler_mode'] === 'Independent (Bardenhagen)') return true;
     } else if (nodeType === 'FEMDomain3D') {
         const scheme = parameters['integration_scheme'] || 'OnePointFB';
         if ((scheme === 'FullGauss8' || scheme === 'SelectiveReduced') && (key === 'hourglass_model' || key === 'hourglass_coeff')) return true;
+        if (key === 'node_merge_tolerance' && !parameters['merge_coincident_nodes']) return true;
         if (key === 'cohesive_fracture_energy' && !parameters['enable_cohesive_splitting']) return true;
         if (key === 'mpm_particles_per_failed_element' && !parameters['convert_failed_elements_to_mpm']) return true;
         if (['material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size'].includes(key) && !parameters['enable_heterogeneity']) return true;
@@ -5926,6 +6065,8 @@ export function getNodeSectionInfo(
         if (key === 'particle_distribution' || key === 'boundary_filling' || key === 'ppc') return { title: 'PARTICLE DISCRETIZATION & SEEDING', color: '#c084fc', defaultCollapsed: false };
         if (key === 'pos_x' || key === 'size_x' || key === 'radius' || key === 'stl_file' || key === 'shape_type' || key === 'voxelization_method' || key === 'origin_mode') return { title: 'SPATIAL EXTENT & GEOMETRY', color: '#c084fc', defaultCollapsed: false };
         if (key === 'vel_x') return { title: 'INITIAL VELOCITY & MOTION', color: '#c084fc', defaultCollapsed: true };
+    } else if (nodeType === 'MPMContactCoupler3D') {
+        if (key === 'target_domain' || key === 'coupler_mode') return { title: 'BARDENHAGEN VELOCITY FIELD COUPLING', color: '#c084fc', defaultCollapsed: false };
     } else if (nodeType === 'STLGeometry') {
         if (key === 'stl_file') return { title: 'CAD FILE & VOXELIZATION', color: '#569cd6', defaultCollapsed: false };
         if (key === 'origin_mode') return { title: 'TRANSFORM & ORIENTATION', color: '#c084fc', defaultCollapsed: false };

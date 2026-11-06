@@ -15,17 +15,17 @@
   <rect width="800" height="450" fill="#0d1117" rx="8"/>
   <text x="400" y="30" text-anchor="middle" class="title">VV-L3-15: MPM-to-Hex8 FEM Foundation Shock Wave Profile (MPa vs X)</text>
   <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
-  <text x="67" y="394" text-anchor="end" class="tick">-1</text>
+  <text x="67" y="394" text-anchor="end" class="tick">-1.06</text>
   <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
-  <text x="67" y="326" text-anchor="end" class="tick">1.4</text>
+  <text x="67" y="326" text-anchor="end" class="tick">1.48</text>
   <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
-  <text x="67" y="258" text-anchor="end" class="tick">3.8</text>
+  <text x="67" y="258" text-anchor="end" class="tick">4.02</text>
   <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
-  <text x="67" y="190" text-anchor="end" class="tick">6.2</text>
+  <text x="67" y="190" text-anchor="end" class="tick">6.56</text>
   <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
-  <text x="67" y="122" text-anchor="end" class="tick">8.6</text>
+  <text x="67" y="122" text-anchor="end" class="tick">9.1</text>
   <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
-  <text x="67" y="54" text-anchor="end" class="tick">11</text>
+  <text x="67" y="54" text-anchor="end" class="tick">11.6</text>
   <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
   <text x="75" y="408" text-anchor="middle" class="tick">0.01</text>
   <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
@@ -38,30 +38,30 @@
   <text x="627" y="408" text-anchor="middle" class="tick">0.314</text>
   <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
   <text x="765" y="408" text-anchor="middle" class="tick">0.39</text>
-  <path class="corridor-yellow" d="M 75 64.2 L 111 64.2 L 148 64.2 L 184 64.2 L 220 64.2 L 257 64.2 L 293 64.2 L 329 64.2 L 366 64.2 L 402 64.2 L 438 64.2 L 474 64.2 L 511 64.2 L 547 64.2 L 583 64.2 L 620 64.2 L 656 362 L 692 362 L 729 362 L 765 362 L 765 362 L 729 362 L 692 362 L 656 362 L 620 92.5 L 583 92.5 L 547 92.5 L 511 92.5 L 474 92.5 L 438 92.5 L 402 92.5 L 366 92.5 L 329 92.5 L 293 92.5 L 257 92.5 L 220 92.5 L 184 92.5 L 148 92.5 L 111 92.5 L 75 92.5 Z"/>
-  <path class="corridor-green" d="M 75 75.5 L 111 75.5 L 148 75.5 L 184 75.5 L 220 75.5 L 257 75.5 L 293 75.5 L 329 75.5 L 366 75.5 L 402 75.5 L 438 75.5 L 474 75.5 L 511 75.5 L 547 75.5 L 583 75.5 L 620 75.5 L 656 362 L 692 362 L 729 362 L 765 362 L 765 362 L 729 362 L 692 362 L 656 362 L 620 81.2 L 583 81.2 L 547 81.2 L 511 81.2 L 474 81.2 L 438 81.2 L 402 81.2 L 366 81.2 L 329 81.2 L 293 81.2 L 257 81.2 L 220 81.2 L 184 81.2 L 148 81.2 L 111 81.2 L 75 81.2 Z"/>
-  <path class="exact-curve" d="M 75 78.3 L 111 78.3 L 148 78.3 L 184 78.3 L 220 78.3 L 257 78.3 L 293 78.3 L 329 78.3 L 366 78.3 L 402 78.3 L 438 78.3 L 474 78.3 L 511 78.3 L 547 78.3 L 583 78.3 L 620 78.3 L 656 362 L 692 362 L 729 362 L 765 362 "/>
-  <path class="num-curve" d="M 75 354 L 111 264 L 148 90.3 L 184 90.3 L 220 203 L 257 234 L 293 242 L 329 257 L 366 274 L 402 219 L 438 249 L 474 249 L 511 250 L 547 250 L 583 249 L 620 248 L 656 248 L 692 253 L 729 282 L 765 333 "/>
+  <path class="corridor-yellow" d="M 75 80.6 L 111 80.6 L 148 80.6 L 184 80.6 L 220 80.6 L 257 80.6 L 293 80.6 L 329 80.6 L 366 80.6 L 402 80.6 L 438 80.6 L 474 80.6 L 511 80.6 L 547 80.6 L 583 80.6 L 620 80.6 L 656 362 L 692 362 L 729 362 L 765 362 L 765 362 L 729 362 L 692 362 L 656 362 L 620 107 L 583 107 L 547 107 L 511 107 L 474 107 L 438 107 L 402 107 L 366 107 L 329 107 L 293 107 L 257 107 L 220 107 L 184 107 L 148 107 L 111 107 L 75 107 Z"/>
+  <path class="corridor-green" d="M 75 91.3 L 111 91.3 L 148 91.3 L 184 91.3 L 220 91.3 L 257 91.3 L 293 91.3 L 329 91.3 L 366 91.3 L 402 91.3 L 438 91.3 L 474 91.3 L 511 91.3 L 547 91.3 L 583 91.3 L 620 91.3 L 656 362 L 692 362 L 729 362 L 765 362 L 765 362 L 729 362 L 692 362 L 656 362 L 620 96.6 L 583 96.6 L 547 96.6 L 511 96.6 L 474 96.6 L 438 96.6 L 402 96.6 L 366 96.6 L 329 96.6 L 293 96.6 L 257 96.6 L 220 96.6 L 184 96.6 L 148 96.6 L 111 96.6 L 75 96.6 Z"/>
+  <path class="exact-curve" d="M 75 93.9 L 111 93.9 L 148 93.9 L 184 93.9 L 220 93.9 L 257 93.9 L 293 93.9 L 329 93.9 L 366 93.9 L 402 93.9 L 438 93.9 L 474 93.9 L 511 93.9 L 547 93.9 L 583 93.9 L 620 93.9 L 656 362 L 692 362 L 729 362 L 765 362 "/>
+  <path class="num-curve" d="M 75 354 L 111 269 L 148 105 L 184 78.3 L 220 113 L 257 141 L 293 145 L 329 155 L 366 166 L 402 132 L 438 138 L 474 139 L 511 140 L 547 140 L 583 140 L 620 140 L 656 157 L 692 232 L 729 304 L 765 347 "/>
   <circle cx="75" cy="354" r="3.5" fill="#f0883e"/>
-  <circle cx="111" cy="264" r="3.5" fill="#f0883e"/>
-  <circle cx="148" cy="90.3" r="3.5" fill="#f0883e"/>
-  <circle cx="184" cy="90.3" r="3.5" fill="#f0883e"/>
-  <circle cx="220" cy="203" r="3.5" fill="#f0883e"/>
-  <circle cx="257" cy="234" r="3.5" fill="#f0883e"/>
-  <circle cx="293" cy="242" r="3.5" fill="#f0883e"/>
-  <circle cx="329" cy="257" r="3.5" fill="#f0883e"/>
-  <circle cx="366" cy="274" r="3.5" fill="#f0883e"/>
-  <circle cx="402" cy="219" r="3.5" fill="#f0883e"/>
-  <circle cx="438" cy="249" r="3.5" fill="#f0883e"/>
-  <circle cx="474" cy="249" r="3.5" fill="#f0883e"/>
-  <circle cx="511" cy="250" r="3.5" fill="#f0883e"/>
-  <circle cx="547" cy="250" r="3.5" fill="#f0883e"/>
-  <circle cx="583" cy="249" r="3.5" fill="#f0883e"/>
-  <circle cx="620" cy="248" r="3.5" fill="#f0883e"/>
-  <circle cx="656" cy="248" r="3.5" fill="#f0883e"/>
-  <circle cx="692" cy="253" r="3.5" fill="#f0883e"/>
-  <circle cx="729" cy="282" r="3.5" fill="#f0883e"/>
-  <circle cx="765" cy="333" r="3.5" fill="#f0883e"/>
+  <circle cx="111" cy="269" r="3.5" fill="#f0883e"/>
+  <circle cx="148" cy="105" r="3.5" fill="#f0883e"/>
+  <circle cx="184" cy="78.3" r="3.5" fill="#f0883e"/>
+  <circle cx="220" cy="113" r="3.5" fill="#f0883e"/>
+  <circle cx="257" cy="141" r="3.5" fill="#f0883e"/>
+  <circle cx="293" cy="145" r="3.5" fill="#f0883e"/>
+  <circle cx="329" cy="155" r="3.5" fill="#f0883e"/>
+  <circle cx="366" cy="166" r="3.5" fill="#f0883e"/>
+  <circle cx="402" cy="132" r="3.5" fill="#f0883e"/>
+  <circle cx="438" cy="138" r="3.5" fill="#f0883e"/>
+  <circle cx="474" cy="139" r="3.5" fill="#f0883e"/>
+  <circle cx="511" cy="140" r="3.5" fill="#f0883e"/>
+  <circle cx="547" cy="140" r="3.5" fill="#f0883e"/>
+  <circle cx="583" cy="140" r="3.5" fill="#f0883e"/>
+  <circle cx="620" cy="140" r="3.5" fill="#f0883e"/>
+  <circle cx="656" cy="157" r="3.5" fill="#f0883e"/>
+  <circle cx="692" cy="232" r="3.5" fill="#f0883e"/>
+  <circle cx="729" cy="304" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="347" r="3.5" fill="#f0883e"/>
   <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
   <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
   <text x="400" y="435" text-anchor="middle" class="axis-label">Longitudinal Coordinate X (m)</text>

@@ -273,6 +273,7 @@ bool HDF5Writer::writeMPMSnapshot3D(const std::string& filename, const MPMVTKSna
     if (src.has_temp && !src.temp.empty()) writeFloatScalar("/Temperature", src.temp);
     if (src.has_object_id && !src.obj_id.empty()) writeUInt8Scalar("/ObjectID", src.obj_id);
     if (src.has_material_id && !src.material_id.empty()) writeUInt8Scalar("/Material_ID", src.material_id);
+    if (src.has_particle_density && !src.particle_density.empty()) writeUInt8Scalar("/Particle_Density", src.particle_density);
 
     if (H5Fclose(file_id) < 0) {
         write_ok = false;

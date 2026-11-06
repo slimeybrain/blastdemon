@@ -3383,7 +3383,7 @@ export class TransportController {
                     vpUpdates.femSmoothContours = sm;
                     this.onShadingChange?.('femSmoothContours', sm);
                 } else if (key === 'visibility') {
-                    if (selectedNode && (selectedNode.type === 'FEMObject3D' || selectedNode.type === 'LSDynaImporter3D')) {
+                    if (selectedNode && (selectedNode.type === 'FEMObject3D' || selectedNode.type === 'LSDynaImporter3D' || selectedNode.type === 'FEMDomain3D')) {
                         nodeUpdates.visible = value;
                         nodeUpdates.hidden = !value;
                         nodeUpdates.showFEMMesh = value;
@@ -3595,7 +3595,10 @@ export class TransportController {
                     vpUpdates.show_stl = value;
                     this.activeLayers.stl = value;
                     if (activeModel && value) {
-                        const stlObjs = activeModel.nodes.filter((n: any) => n.type === 'STLGeometry' || n.type === 'STLGeometry3D' || n.type === 'CADImporter3D');
+                        const stlObjs = activeModel.nodes.filter((n: any) => {
+                            const nt = n.type as string;
+                            return nt === 'STLGeometry' || nt === 'STLGeometry3D' || nt === 'CADImporter3D';
+                        });
                         const allHidden = stlObjs.length > 0 && stlObjs.every((n: any) => n.parameters?.visible === false || n.parameters?.hidden === true);
                         if (allHidden) {
                             stlObjs.forEach((n: any) => {

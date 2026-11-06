@@ -264,3 +264,15 @@ Testing/
 /fix3.py
 /verify_contact.py
 /sc*.txt
+
+# Floorplan & House renovation scratch files
+*Floorplan*
+House_Renovations*
+
+# Local test scratch binaries & logs
+/test_sleeve_cells*
+/solver_out.txt
+/blast_last_*.json
+backend/BlastSolver/VERIFICATION_MANUAL.md
+backend/BlastSolver/vv_*.svg
+backend/VERIFICATION_MANUAL.md

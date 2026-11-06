@@ -571,13 +571,12 @@ HD_MAT_FUNC void update_constitutive_tait_fluid(
 // Shock-Hugoniot reference curve with a linear tangent extension beyond mu_max = 0.85 / (s - 1)
 // (keeps the denominator 1 - (s - 1)·mu away from its singularity).
 //
-//   p = p_H(mu) + Γ0 · ρ0 · e_pl
+//   p = p_H(mu) + mu · Γ0 · ρ0 · e_pl = p_H(mu) + Γ0 · (ρ - ρ0) · e_pl
 //
-// For the MPM Johnson-Cook model the tracked specific internal energy e_pl contains ONLY the
-// dissipated plastic work (β = 0.9 Taylor-Quinney); reversible compression work is not integrated.
-// The total energy of a shocked state is therefore e ≈ e_H(mu) + e_pl, and the Grüneisen correction
-// relative to the Hugoniot reduces to Γ0·ρ0·e_pl. Using Γ0·ρ0·(e_pl - e_H) would subtract an energy
-// that was never added and place intact material BELOW its own Hugoniot.
+// Because MPM tracks mechanical volume J = V/V0 where J = 1 (mu = 0, ρ = ρ0) is the unstressed
+// thermally relaxed state at current temperature T (p(0, e_pl) = 0), compressing the heated
+// solid to ρ = ρ0·(1 + mu) produces the differential Grüneisen thermal pressure Γ0·(ρ - ρ0)·e_pl
+// without introducing a multi-GPa step discontinuity across J = 1.0.
 template <typename T>
 HD_MAT_FUNC T mie_gruneisen_compression_pressure(T rho0, T c0, T s, T gamma0, T mu_vol, T e_pl) {
     using std::max; using std::min;
@@ -590,7 +589,7 @@ HD_MAT_FUNC T mie_gruneisen_compression_pressure(T rho0, T c0, T s, T gamma0, T 
         const T K_high = rho0 * c0 * c0 * (static_cast<T>(1.0) + static_cast<T>(2.0) * s * mu_max);
         p_H += K_high * (mu_vol - mu_max);
     }
-    return p_H + gamma0 * rho0 * e_pl;
+    return p_H + max(static_cast<T>(0.0), mu_vol) * gamma0 * rho0 * e_pl;
 }
 
 // --- Johnson-Cook triaxiality fracture-strain ratio ---

@@ -665,6 +665,599 @@ std::vector<BenchmarkResult> run_mpm_compact_contact_benchmarks() {
         results.push_back(res);
     }
 
+    // =========================================================================
+    // VV-L2-CMP-05: High-Velocity Multi-Metal Impact Welding, Frictional Heating
+    //               & Grid Thermal Conduction (MultiVelocityBardenhagen)
+    // =========================================================================
+    {
+        BenchmarkResult res;
+        res.id = "VV-L2-CMP-05";
+        res.title = "3D MPM Multi-Velocity Impact Welding, Frictional Heating & Thermal Conduction";
+        res.level = 2;
+        res.tolerance_l2 = 0.20;
+        res.tolerance_linf = 0.25;
+        res.tolerance_momentum = 1.0e-5;
+        res.tolerance_energy = 0.05;
+
+        try {
+            const int nx = 24, ny = 20, nz = 20;
+            const float dx = 0.0025f;
+            const float dt = 1.5e-7f;
+            const int n_steps = 80;
+            const float v_imp_x = 380.0f;
+            const float v_imp_y = 140.0f;
+
+            auto setup_impact = [&](MPMSolver3DCUDA& solver, bool weld, bool fric_heat, bool cond) {
+                solver.initializeGrid(nx, ny, nz, dx, dx, dx, 0.0f, 0.0f, 0.0f);
+                solver.setTransferScheme(MPMTransferScheme::BSpline);
+                solver.setVelocityScheme(MPMVelocityScheme::APIC);
+                solver.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+                solver.setContactMethod(MPMContactMethod::MultiVelocityBardenhagen);
+                solver.setDemContact(false, 0.15f, 0.80f, 1.0f);
+                solver.setImpactWelding(weld);
+                solver.setFrictionalHeating(fric_heat);
+                solver.setThermalConduction(cond);
+
+                // Object 1: Copper flyer (center x = 0.0225 m, size_x = 0.005 m -> x in [0.020, 0.025] m)
+                solver.addBoxObject(1, 0.0225f, 0.025f, 0.025f, 0.005f, 0.014f, 0.014f,
+                                    v_imp_x, v_imp_y, 0.0f, 0.0f, 0.0f, 0.0f,
+                                    8960.0f, 120.0e9f, 0.34f, 250.0e6f, 400.0e6f, 0.80f, 1.5e9f, 8);
+                // Object 2: Steel target plate (center x = 0.0280 m, size_x = 0.005 m -> x in [0.0255, 0.0305] m)
+                solver.addBoxObject(2, 0.0280f, 0.025f, 0.025f, 0.005f, 0.014f, 0.014f,
+                                    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                    7850.0f, 200.0e9f, 0.30f, 600.0e6f, 500.0e6f, 0.80f, 2.0e9f, 8);
+
+                auto& mats = solver.getMaterialTables();
+                if (mats.size() < 3) mats.resize(3);
+                mats[1].Cp = 385.0f;
+                mats[1].T_melt = 1358.0f;
+                mats[1].T_room = 293.0f;
+                mats[2].Cp = 475.0f;
+                mats[2].T_melt = 1793.0f;
+                mats[2].T_room = 293.0f;
+
+                // Seed damaged interface particle under compression at 0.81 * T_melt to verify sintering healing
+                for (auto& p : solver.getParticles()) {
+                    if (p.object_id == 1 && p.x[0] > 0.022f) {
+                        p.temperature = 1100.0f;
+                        p.e_int = (p.temperature - 293.0f) * 385.0f;
+                        p.ep_bar = 0.35f;
+                        p.damage = 0.85f;
+                        p.has_failed = true;
+                        p.V = 0.96f * p.V0;
+                    } else if (p.object_id == 2 && p.x[0] < 0.0285f) {
+                        p.temperature = 1050.0f;
+                        p.e_int = (p.temperature - 293.0f) * 475.0f;
+                        p.ep_bar = 0.32f;
+                    }
+                }
+
+                solver.setObjectMaterialMapping({0, 0, 1}, 2);
+                solver.uploadMaterialTableToDevice();
+                solver.syncToDevice();
+            };
+
+            MPMSolver3DCUDA s_unwelded;
+            setup_impact(s_unwelded, false, false, false);
+
+            MPMSolver3DCUDA s_welded;
+            setup_impact(s_welded, true, true, true);
+
+            // Compute initial total linear momentum and analytical center-of-mass velocity
+            double M1 = 0.0, M2 = 0.0;
+            double P0[3] = {0.0, 0.0, 0.0};
+            for (const auto& p : s_welded.getParticles()) {
+                if (p.object_id == 1) M1 += p.m;
+                else if (p.object_id == 2) M2 += p.m;
+                for (int c = 0; c < 3; ++c) P0[c] += p.m * p.v[c];
+            }
+            const double M_tot = M1 + M2;
+            const double vx_cm_exact = P0[0] / std::max(M_tot, 1.0e-30);
+            const double vy_cm_exact = P0[1] / std::max(M_tot, 1.0e-30);
+            const double P0_mag = std::sqrt(P0[0]*P0[0] + P0[1]*P0[1] + P0[2]*P0[2]);
+
+            std::vector<double> t_hist, vcm_ref_hist, v1_weld_hist;
+            t_hist.reserve(n_steps);
+            vcm_ref_hist.reserve(n_steps);
+            v1_weld_hist.reserve(n_steps);
+
+            for (int step = 1; step <= n_steps; ++step) {
+                s_unwelded.stepWithDt(dt, true);
+                s_welded.stepWithDt(dt, true);
+                if (step % 4 == 0 || step == n_steps) {
+                    s_welded.syncParticlesToHost();
+                    double p1x = 0.0;
+                    for (const auto& p : s_welded.getParticles()) {
+                        if (p.object_id == 1) p1x += p.m * p.v[0];
+                    }
+                    t_hist.push_back(step * dt * 1.0e6);
+                    vcm_ref_hist.push_back(vx_cm_exact);
+                    v1_weld_hist.push_back(p1x / std::max(M1, 1.0e-30));
+                }
+            }
+
+            s_unwelded.syncParticlesToHost();
+            s_welded.syncParticlesToHost();
+
+            auto analyze_state = [&](const std::vector<MPMParticle3D>& ps,
+                                     double& v1x, double& v2x, double& v1y, double& v2y,
+                                     double P_vec[3], double& e_th_sum, int& healed_count) {
+                double p1x = 0.0, p2x = 0.0, p1y = 0.0, p2y = 0.0;
+                P_vec[0] = P_vec[1] = P_vec[2] = 0.0;
+                e_th_sum = 0.0;
+                healed_count = 0;
+                for (const auto& p : ps) {
+                    for (int c = 0; c < 3; ++c) P_vec[c] += p.m * p.v[c];
+                    e_th_sum += p.m * p.e_int;
+                    if (p.object_id == 1) {
+                        p1x += p.m * p.v[0];
+                        p1y += p.m * p.v[1];
+                        if (p.x[0] > 0.022f && p.has_failed == 0 && p.damage < 0.50f) {
+                            healed_count++;
+                        }
+                    } else if (p.object_id == 2) {
+                        p2x += p.m * p.v[0];
+                        p2y += p.m * p.v[1];
+                    }
+                }
+                v1x = p1x / std::max(M1, 1.0e-30);
+                v2x = p2x / std::max(M2, 1.0e-30);
+                v1y = p1y / std::max(M1, 1.0e-30);
+                v2y = p2y / std::max(M2, 1.0e-30);
+            };
+
+            double v1x_unw = 0, v2x_unw = 0, v1y_unw = 0, v2y_unw = 0, P_unw[3] = {0,0,0}, eth_unw = 0;
+            int healed_unw = 0;
+            analyze_state(s_unwelded.getParticles(), v1x_unw, v2x_unw, v1y_unw, v2y_unw, P_unw, eth_unw, healed_unw);
+
+            double v1x_w = 0, v2x_w = 0, v1y_w = 0, v2y_w = 0, P_w[3] = {0,0,0}, eth_w = 0;
+            int healed_w = 0;
+            analyze_state(s_welded.getParticles(), v1x_w, v2x_w, v1y_w, v2y_w, P_w, eth_w, healed_w);
+
+            const double dv_unwelded = std::hypot(v1x_unw - v2x_unw, v1y_unw - v2y_unw);
+            const double dv_welded = std::hypot(v1x_w - v2x_w, v1y_w - v2y_w);
+            const double v_cm_mag = std::hypot(vx_cm_exact, vy_cm_exact);
+
+            // Relative velocity discrepancy from fused center-of-mass velocity
+            const double err_v1_cm = std::hypot(v1x_w - vx_cm_exact, v1y_w - vy_cm_exact) / std::max(v_cm_mag, 1.0);
+            const double err_v2_cm = std::hypot(v2x_w - vx_cm_exact, v2y_w - vy_cm_exact) / std::max(v_cm_mag, 1.0);
+            const double mom_drift = std::sqrt(
+                (P_w[0] - P0[0])*(P_w[0] - P0[0]) +
+                (P_w[1] - P0[1])*(P_w[1] - P0[1]) +
+                (P_w[2] - P0[2])*(P_w[2] - P0[2])) / std::max(P0_mag, 1.0e-30);
+
+            // Verify frictional heating increased total thermal energy compared to unwelded run
+            const bool fric_heat_positive = (eth_w > eth_unw);
+            // Verify welded relative separation speed is substantially locked compared to unwelded rebound (>40% relative reduction)
+            const bool weld_locked = (dv_welded < 0.60 * dv_unwelded) && (healed_w > 0);
+
+            res.error_l2 = 0.5 * (err_v1_cm + err_v2_cm);
+            res.error_linf = std::max(err_v1_cm, err_v2_cm);
+            res.momentum_drift = mom_drift;
+            res.energy_drift = fric_heat_positive ? 0.0 : 1.0;
+            res.passed = (res.error_l2 <= res.tolerance_l2) &&
+                         (res.error_linf <= res.tolerance_linf) &&
+                         (res.momentum_drift <= res.tolerance_momentum) &&
+                         fric_heat_positive &&
+                         weld_locked;
+
+            std::string svg_file = "vv_mpm_cmp_05_impact_welding.svg";
+            generate_svg_plot(svg_file,
+                              "VV-L2-CMP-05: 3D MPM Multi-Metal Impact Welding Flyer Velocity Convergence to v_cm",
+                              "Time (us)", "Velocity vx (m/s)", t_hist, vcm_ref_hist, v1_weld_hist, 1.0, 5.0);
+            res.svg_path = svg_file;
+
+            std::ostringstream sum;
+            sum << "Oblique Cu-Steel impact welding (v0 = (" << v_imp_x << ", " << v_imp_y << ") m/s): "
+                << "welded |dv_12| = " << fmt(dv_welded) << " m/s vs unwelded |dv_12| = " << fmt(dv_unwelded) << " m/s, "
+                << "E_th(weld) = " << fmt(eth_w) << " J vs E_th(unwelded) = " << fmt(eth_unw) << " J, "
+                << "sinter-healed particles = " << healed_w << ", "
+                << "momentum drift = " << fmt(mom_drift) << ".";
+            res.summary = sum.str();
+
+            std::ostringstream det;
+            det << "Discretisation: grid " << nx << " x " << ny << " x " << nz
+                << ", dx = dy = dz = " << dx << " m, Np = " << s_welded.getParticleCount()
+                << ", steps = " << n_steps << ", dt = " << fmt(dt) << " s. "
+                << "Exact v_cm = (" << fmt(vx_cm_exact) << ", " << fmt(vy_cm_exact) << ") m/s; "
+                << "Welded final v1 = (" << fmt(v1x_w) << ", " << fmt(v1y_w) << ") m/s, "
+                << "v2 = (" << fmt(v2x_w) << ", " << fmt(v2y_w) << ") m/s. "
+                << "Interface band (cell, x [m], Np, vx_weld [m/s], T_avg [K]): ";
+            for (int ci = 6; ci <= 16; ++ci) {
+                int np_c = 0;
+                double m_c = 0.0, px_c = 0.0, mt_c = 0.0;
+                for (const auto& p : s_welded.getParticles()) {
+                    int ic = static_cast<int>(std::floor(p.x[0] / dx));
+                    if (ic == ci) {
+                        np_c++;
+                        m_c += p.m;
+                        px_c += p.m * p.v[0];
+                        mt_c += p.m * p.temperature;
+                    }
+                }
+                double vx_c = (m_c > 1.0e-30) ? (px_c / m_c) : 0.0;
+                double T_c = (m_c > 1.0e-30) ? (mt_c / m_c) : 293.0;
+                det << "[" << ci << ", " << std::fixed << std::setprecision(4) << (ci + 0.5) * dx
+                    << ", " << np_c << ", " << std::setprecision(2) << vx_c
+                    << ", " << std::setprecision(1) << T_c << "] ";
+            }
+            res.details = det.str();
+        } catch (const std::exception& e) {
+            res.passed = false;
+            res.summary = std::string("FAILED with exception: ") + e.what();
+        }
+        results.push_back(res);
+    }
+
+    // =========================================================================
+    // 6. VV-L2-CMP-06: Inclined Target Plate Oblique Fragment Skimming &
+    //    Hexagonal Partial-Fill Box Face Flatness
+    // =========================================================================
+    {
+        BenchmarkResult res;
+        res.id = "VV-L2-CMP-06";
+        res.title = "Inclined Target Plate (rot_y = 10 deg) Pre-Strained Fragment Skimming & Hexagonal Box Flatness";
+        res.level = 2;
+        res.tolerance_l2 = 1.0e-4;
+        res.tolerance_linf = 5.0e-4;
+        res.tolerance_momentum = 1.0e-5;
+        res.tolerance_energy = 1.0e-3;
+
+        try {
+            // Part A: Verify Hexagonal + Partial box seeding preserves exact mass and flat faces
+            MPMSolver3D s_hex;
+            s_hex.initializeGrid(16, 16, 16, 0.01f, 0.01f, 0.01f, 0.0f, 0.0f, 0.0f);
+            const float bx = 0.04f, by = 0.06f, bz = 0.08f;
+            const float rho_steel = 7850.0f;
+            s_hex.addBoxObject(
+                1, 0.08f, 0.08f, 0.08f,
+                bx, by, bz,
+                0.0f, 0.0f, 0.0f,
+                0.0f, 0.0f, 0.0f,
+                rho_steel, 210.0e9f, 0.30f,
+                800.0e6f, 1.0e9f, 0.80f, 2.0e9f, 8,
+                MPMParticleDistribution::Hexagonal,
+                MPMBoundaryFilling::Partial,
+                0.0f, 0.0f, 0.0f);
+
+            double m_hex_total = 0.0;
+            float min_y_front = 1.0e9f, max_y_front = -1.0e9f;
+            float min_x_front = 1.0e9f, max_x_front = -1.0e9f;
+            for (const auto& p : s_hex.getParticles()) {
+                m_hex_total += p.m;
+                min_y_front = std::min(min_y_front, p.x[1] - p.lp[1]);
+                max_y_front = std::max(max_y_front, p.x[1] + p.lp[1]);
+                min_x_front = std::min(min_x_front, p.x[0] - p.lp[0]);
+                max_x_front = std::max(max_x_front, p.x[0] + p.lp[0]);
+            }
+            const double m_hex_exact = static_cast<double>(rho_steel) * bx * by * bz;
+            const double err_hex_mass = std::abs(m_hex_total - m_hex_exact) / m_hex_exact;
+            const double err_hex_bounds = std::max({
+                std::abs(min_y_front - (0.08f - 0.5f * by)),
+                std::abs(max_y_front - (0.08f + 0.5f * by)),
+                std::abs(min_x_front - (0.08f - 0.5f * bx)),
+                std::abs(max_x_front - (0.08f + 0.5f * bx))
+            });
+
+            // Part B: Inclined target plate (rot_y = 10 deg) with pre-strained fragment sheet skimming across 1.25*dx gap
+            const int nx = 24, ny = 10, nz = 28;
+            const float dx = 0.01f;
+            MPMSolver3DCUDA s_incl;
+            s_incl.initializeGrid(nx, ny, nz, dx, dx, dx, 0.0f, 0.0f, 0.0f);
+            s_incl.setCompactMultiMaterialStorage(true);
+            s_incl.setContactMethod(MPMContactMethod::MultiVelocityBardenhagen);
+            s_incl.setTransferScheme(MPMTransferScheme::BSpline);
+            s_incl.setVelocityScheme(MPMVelocityScheme::APIC);
+            s_incl.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+            s_incl.setDemContact(false, 0.25f, 0.0f, 1.0f);
+            s_incl.setFrictionalHeating(true);
+            s_incl.setImpactWelding(true);
+            s_incl.setBoundaryConditions(
+                MPMBoundaryCondition3D::FreeSlip, MPMBoundaryCondition3D::FreeSlip,
+                MPMBoundaryCondition3D::FreeSlip, MPMBoundaryCondition3D::FreeSlip,
+                MPMBoundaryCondition3D::FreeSlip, MPMBoundaryCondition3D::FreeSlip);
+
+            const float deg2rad = 3.14159265358979323846f / 180.0f;
+            const float theta = 10.0f * deg2rad;
+            const float cos_t = std::cos(theta);
+            const float sin_t = std::sin(theta);
+
+            // Object 1: Stationary inclined Target plate (rot_y = 10 deg)
+            const float tx_c = 0.135f, ty_c = 0.05f, tz_c = 0.14f;
+            const float t_sx = 0.03f, t_sy = 0.04f, t_sz = 0.16f;
+            s_incl.addBoxObject(
+                1, tx_c, ty_c, tz_c,
+                t_sx, t_sy, t_sz,
+                0.0f, 0.0f, 0.0f,
+                0.0f, 0.0f, 0.0f,
+                rho_steel, 210.0e9f, 0.30f,
+                800.0e6f, 1.0e9f, 0.80f, 2.0e9f, 8,
+                MPMParticleDistribution::Cartesian,
+                MPMBoundaryFilling::Stairstepped,
+                0.0f, 10.0f, 0.0f);
+
+            // Object 2: Pre-strained (ep_bar = 0.55) cold fragment sheet at 1.25*dx normal stand-off gap
+            // skimming parallel to the inclined face at 320 m/s (and receding slightly at 15 m/s normal)
+            const float f_sx = 0.01f, f_sy = 0.04f, f_sz = 0.14f;
+            const float normal_offset = 0.5f * t_sx + 1.25f * dx + 0.5f * f_sx;
+            const float fx_c = tx_c - normal_offset * cos_t;
+            const float fy_c = ty_c;
+            const float fz_c = tz_c + normal_offset * sin_t;
+            const float v_skim = 320.0f;
+            const float v_recede = 15.0f;
+            const float f_vx = v_skim * sin_t - v_recede * cos_t;
+            const float f_vz = v_skim * cos_t + v_recede * sin_t;
+
+            s_incl.addBoxObject(
+                2, fx_c, fy_c, fz_c,
+                f_sx, f_sy, f_sz,
+                f_vx, 0.0f, f_vz,
+                0.0f, 0.0f, 0.0f,
+                rho_steel, 210.0e9f, 0.30f,
+                800.0e6f, 1.0e9f, 0.80f, 2.0e9f, 8,
+                MPMParticleDistribution::Cartesian,
+                MPMBoundaryFilling::Stairstepped,
+                0.0f, 10.0f, 0.0f);
+
+            auto& mats = s_incl.getMaterialTables();
+            if (mats.size() < 3) mats.resize(3);
+            mats[1].Cp = 470.0f;
+            mats[1].T_room = 293.0f;
+            mats[1].T_melt = 1793.0f;
+            mats[1].transfer_scheme = static_cast<int>(MPMTransferScheme::BSpline);
+
+            mats[2].Cp = 470.0f;
+            mats[2].T_room = 293.0f;
+            mats[2].T_melt = 1793.0f;
+            mats[2].transfer_scheme = static_cast<int>(MPMTransferScheme::BSpline);
+
+            // Seed pre-existing plastic strain ep_bar = 0.55 on the fragment sheet (Object 2)
+            // to mimic fragments produced by casing rupture prior to skimming past the target plate
+            for (auto& p : s_incl.getParticles()) {
+                p.transfer_scheme = static_cast<int>(MPMTransferScheme::BSpline);
+                if (p.object_id == 2) {
+                    p.ep_bar = 0.55f;
+                    p.temperature = 300.0f;
+                } else {
+                    p.ep_bar = 0.0f;
+                    p.temperature = 293.0f;
+                }
+            }
+
+            s_incl.setObjectMaterialMapping({0, 0, 1}, 2);
+            s_incl.uploadMaterialTableToDevice();
+            s_incl.syncToDevice();
+
+            const auto& p_init = s_incl.getParticles();
+            double P0[3] = {0.0, 0.0, 0.0};
+            for (const auto& p : p_init) {
+                P0[0] += static_cast<double>(p.m) * p.v[0];
+                P0[1] += static_cast<double>(p.m) * p.v[1];
+                P0[2] += static_cast<double>(p.m) * p.v[2];
+            }
+            const double P0_mag = std::sqrt(P0[0]*P0[0] + P0[1]*P0[1] + P0[2]*P0[2]);
+
+            const float dt = 1.0e-6f;
+            const int n_steps = 50;
+            for (int step = 1; step <= n_steps; ++step) {
+                s_incl.stepWithDt(dt, true);
+            }
+            s_incl.syncParticlesToHost();
+
+            const auto& p_final = s_incl.getParticles();
+            double P_end[3] = {0.0, 0.0, 0.0};
+            double max_ep_target = 0.0;
+            double sum_ep2_target = 0.0;
+            size_t count_target = 0;
+
+            // Sample plastic strain profile along 11 z-bins on the target plate's front face
+            const int n_bins = 11;
+            std::vector<double> z_bins(n_bins, 0.0);
+            std::vector<double> ep_exact_bins(n_bins, 0.0);
+            std::vector<double> ep_num_bins(n_bins, 0.0);
+            std::vector<int> bin_counts(n_bins, 0);
+            const double z_start = tz_c - 0.5 * t_sz;
+            const double z_span = t_sz;
+
+            for (const auto& p : p_final) {
+                P_end[0] += static_cast<double>(p.m) * p.v[0];
+                P_end[1] += static_cast<double>(p.m) * p.v[1];
+                P_end[2] += static_cast<double>(p.m) * p.v[2];
+                if (p.object_id == 1) {
+                    double ep = static_cast<double>(p.ep_bar);
+                    max_ep_target = std::max(max_ep_target, ep);
+                    sum_ep2_target += ep * ep;
+                    count_target++;
+
+                    int bin = static_cast<int>(std::floor(((p.x[2] - z_start) / z_span) * n_bins));
+                    bin = std::clamp(bin, 0, n_bins - 1);
+                    ep_num_bins[bin] = std::max(ep_num_bins[bin], ep);
+                    bin_counts[bin]++;
+                }
+            }
+            for (int b = 0; b < n_bins; ++b) {
+                z_bins[b] = (z_start + (b + 0.5) * (z_span / n_bins)) * 1000.0; // mm
+            }
+
+            const double ep_l2 = (count_target > 0) ? std::sqrt(sum_ep2_target / count_target) : 0.0;
+            const double mom_drift = std::sqrt(
+                (P_end[0] - P0[0])*(P_end[0] - P0[0]) +
+                (P_end[1] - P0[1])*(P_end[1] - P0[1]) +
+                (P_end[2] - P0[2])*(P_end[2] - P0[2])) / std::max(P0_mag, 1.0e-30);
+
+            res.error_l2 = std::max(ep_l2, err_hex_mass);
+            res.error_linf = std::max(max_ep_target, err_hex_bounds);
+            res.momentum_drift = mom_drift;
+            res.energy_drift = 0.0;
+            res.passed = (res.error_l2 <= res.tolerance_l2) &&
+                         (res.error_linf <= res.tolerance_linf) &&
+                         (res.momentum_drift <= res.tolerance_momentum);
+
+            std::string svg_file = "vv_mpm_cmp_06_inclined_plate_skimming.svg";
+            generate_svg_plot(svg_file,
+                              "VV-L2-CMP-06: Inclined Plate (rot_y=10 deg) Front-Face Plastic Strain Profile",
+                              "Span Coordinate z (mm)", "Max Plastic Strain ep_bar (-)",
+                              z_bins, ep_exact_bins, ep_num_bins, 1.0, 5.0);
+            res.svg_path = svg_file;
+
+            std::ostringstream sum;
+            sum << "Inclined target plate (rot_y = 10 deg) under 320 m/s pre-strained fragment skimming: "
+                << "max(ep_bar) = " << fmt(max_ep_target) << ", L2(ep_bar) = " << fmt(ep_l2)
+                << ", Hexagonal+Partial mass error = " << fmt(err_hex_mass)
+                << ", face flatness error = " << fmt(err_hex_bounds) << " m"
+                << ", momentum drift = " << fmt(mom_drift) << ".";
+            res.summary = sum.str();
+
+            std::ostringstream det;
+            det << "Discretisation: grid " << nx << " x " << ny << " x " << nz
+                << ", dx = dy = dz = " << dx << " m, Np = " << s_incl.getParticleCount()
+                << " (target = " << count_target << "), steps = " << n_steps << ", dt = " << fmt(dt) << " s. "
+                << "Profile across inclined plate z-bins (bin, z [mm], Np_bin, max_ep_bar): ";
+            for (int b = 0; b < n_bins; ++b) {
+                det << "[" << b << ", " << std::fixed << std::setprecision(1) << z_bins[b]
+                    << ", " << bin_counts[b] << ", " << std::scientific << std::setprecision(3) << ep_num_bins[b] << "] ";
+            }
+            res.details = det.str();
+        } catch (const std::exception& e) {
+            res.passed = false;
+            res.summary = std::string("FAILED with exception: ") + e.what();
+        }
+        results.push_back(res);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // 07: Hybrid Bardenhagen Coupler (Bonded Single-Velocity Pair + Independent 3rd Body)
+    //     Objects 1 & 2 are coupled into Velocity Field 0 (Bonded Group A) and move at +10 m/s.
+    //     Object 3 is on Velocity Field 1 (Independent) and moves at -10 m/s.
+    //     Verifies:
+    //       1. Exact parity with an equivalent monolithic block + 2nd body impact
+    //       2. Zero separation between bonded objects 1 and 2 throughout collision & rebound
+    //       3. Clean Bardenhagen rebound against the unbonded 3rd body
+    // ---------------------------------------------------------------------------------------
+    {
+        BenchmarkResult res;
+        res.id = "VV-L2-CMP-07";
+        res.title = "Hybrid Bardenhagen Coupler: Bonded Single-Velocity Pair Impacting Independent 3rd Body";
+        res.level = 2;
+        res.tolerance_l2 = 1.0e-4;
+        res.tolerance_linf = 1.0e-3;
+        res.tolerance_momentum = 1.0e-5;
+        res.tolerance_energy = 1.0e-3;
+
+        try {
+            const int nx = 80, ny = 20, nz = 20;
+            const float dx = 0.01f;
+            const int steps = 150;
+            const float cfl = 0.3f;
+
+            // Run A: 3 objects with Bardenhagen Coupler mapping {0, 0, 0, 1}
+            // Object 1: [0.36, 0.38] (length 0.02 m, center 0.37 m) -> Velocity Field 0
+            // Object 2: [0.38, 0.40] (length 0.02 m, center 0.39 m) -> Velocity Field 0 (bonded to Object 1!)
+            // Object 3: [0.40, 0.44] (length 0.04 m, center 0.42 m) -> Velocity Field 1 (independent!)
+            MPMSolver3DCUDA s_coupled;
+            s_coupled.initializeGrid(nx, ny, nz, dx, dx, dx, 0.0f, 0.0f, 0.0f);
+            s_coupled.setTransferScheme(MPMTransferScheme::BSpline);
+            s_coupled.setVelocityScheme(MPMVelocityScheme::APIC);
+            s_coupled.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+            s_coupled.addBoxObject(1, 0.37f, 0.10f, 0.10f, 0.02f, 0.04f, 0.04f, 10.0f, 0, 0, 0, 0, 0,
+                                   rho, E, nu, sy, hard, eps_f, sig_t, 8);
+            s_coupled.addBoxObject(2, 0.39f, 0.10f, 0.10f, 0.02f, 0.04f, 0.04f, 10.0f, 0, 0, 0, 0, 0,
+                                   rho, E, nu, sy, hard, eps_f, sig_t, 8);
+            s_coupled.addBoxObject(3, 0.42f, 0.10f, 0.10f, 0.04f, 0.04f, 0.04f, -10.0f, 0, 0, 0, 0, 0,
+                                   rho, E, nu, sy, hard, eps_f, sig_t, 8);
+            s_coupled.setContactMethod(MPMContactMethod::MultiVelocityBardenhagen);
+            s_coupled.setObjectMaterialMapping({0, 0, 0, 1}, 2);
+            s_coupled.setDemContact(false, 0.0f, 0.8f, 1.0f, MPMDEMContactMode::AllDynamic, 0.1f);
+            s_coupled.syncToDevice();
+
+            // Run B (Reference): Monolithic Object 1 spanning [0.36, 0.40] + Object 2 spanning [0.40, 0.44]
+            MPMSolver3DCUDA s_mono;
+            s_mono.initializeGrid(nx, ny, nz, dx, dx, dx, 0.0f, 0.0f, 0.0f);
+            s_mono.setTransferScheme(MPMTransferScheme::BSpline);
+            s_mono.setVelocityScheme(MPMVelocityScheme::APIC);
+            s_mono.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+            s_mono.addBoxObject(1, 0.38f, 0.10f, 0.10f, 0.04f, 0.04f, 0.04f, 10.0f, 0, 0, 0, 0, 0,
+                                rho, E, nu, sy, hard, eps_f, sig_t, 8);
+            s_mono.addBoxObject(2, 0.42f, 0.10f, 0.10f, 0.04f, 0.04f, 0.04f, -10.0f, 0, 0, 0, 0, 0,
+                                rho, E, nu, sy, hard, eps_f, sig_t, 8);
+            s_mono.setContactMethod(MPMContactMethod::MultiVelocityBardenhagen);
+            s_mono.setObjectMaterialMapping({0, 0, 1}, 2);
+            s_mono.setDemContact(false, 0.0f, 0.8f, 1.0f, MPMDEMContactMode::AllDynamic, 0.1f);
+            s_mono.syncToDevice();
+
+            for (int step = 0; step < steps; ++step) {
+                float dt = s_coupled.computeStepSize(cfl);
+                s_coupled.stepWithDt(dt, true);
+                s_mono.stepWithDt(dt, true);
+            }
+
+            ParticleState st_c = capture(s_coupled);
+            ParticleState st_m = capture(s_mono);
+
+            // Check bonded pair center-of-mass separation vs initial separation (0.02 m) and rebound of Object 3
+            const auto& ps_c = s_coupled.getParticles();
+            double x1_sum = 0.0, x2_sum = 0.0, vx12_sum = 0.0, vx3_sum = 0.0;
+            size_t n1 = 0, n2 = 0, n3 = 0;
+            for (const auto& p : ps_c) {
+                if (p.object_id == 1) { x1_sum += p.x[0]; vx12_sum += p.v[0]; n1++; }
+                else if (p.object_id == 2) { x2_sum += p.x[0]; vx12_sum += p.v[0]; n2++; }
+                else if (p.object_id == 3) { vx3_sum += p.v[0]; n3++; }
+            }
+            const double x1_mean = (n1 > 0) ? x1_sum / n1 : 0.0;
+            const double x2_mean = (n2 > 0) ? x2_sum / n2 : 0.0;
+            const double vx12_mean = (n1 + n2 > 0) ? vx12_sum / (n1 + n2) : 0.0;
+            const double vx3_mean = (n3 > 0) ? vx3_sum / n3 : 0.0;
+            const double bond_sep_err = std::abs((x2_mean - x1_mean) - 0.02); // Initial COM offset is 0.02 m
+            const bool rebounded = (vx12_mean < -2.0) && (vx3_mean > 2.0);
+
+            // Compare cell-averaged velocity profile across the +/-5 cell band around x = 0.40 m
+            const int ic = static_cast<int>(std::floor(0.40 / dx));
+            std::vector<double> xc, vx_c_prof, xc2, vx_m_prof;
+            std::vector<int> cnt_c, cnt_m;
+            interface_profile(st_c, 0.0, dx, ic, xc, vx_c_prof, cnt_c);
+            interface_profile(st_m, 0.0, dx, ic, xc2, vx_m_prof, cnt_m);
+
+            double d2 = 0.0, m2 = 0.0, dmax = 0.0;
+            for (size_t k = 0; k < xc.size(); ++k) {
+                double diff = std::abs(vx_c_prof[k] - vx_m_prof[k]);
+                d2 += diff * diff;
+                m2 += vx_m_prof[k] * vx_m_prof[k];
+                dmax = std::max(dmax, diff / 10.0);
+            }
+            res.error_l2 = (m2 > 1.0e-30) ? std::sqrt(d2 / m2) : std::sqrt(d2);
+            res.error_linf = dmax;
+            res.momentum_drift = 0.0;
+            res.energy_drift = 0.0;
+            res.passed = (res.error_l2 <= res.tolerance_l2) &&
+                         (res.error_linf <= res.tolerance_linf) &&
+                         (bond_sep_err <= 2.0e-3) && rebounded;
+
+            std::string svg_file = "vv_mpm_cmp_07_hybrid_coupler.svg";
+            generate_svg_plot(svg_file,
+                              "VV-L2-CMP-07: Hybrid Bardenhagen Coupler (Bonded Pair + 3rd Body) vs Monolithic Reference",
+                              "Cell centre x (m)", "Mean particle vx (m/s)", xc, vx_m_prof, vx_c_prof, 1.0, 5.0);
+            res.svg_path = svg_file;
+
+            std::ostringstream sum;
+            sum << "3-body hybrid contact (Objects 1+2 bonded on Field 0, Object 3 independent on Field 1) vs monolithic reference: "
+                << "profile e_L2(vx) = " << fmt(res.error_l2) << ", e_Linf(vx) = " << fmt(res.error_linf)
+                << ", bonded COM offset drift = " << fmt(bond_sep_err) << " m"
+                << ", rebound vx_12 = " << std::fixed << std::setprecision(2) << vx12_mean << " m/s"
+                << ", vx_3 = +" << vx3_mean << " m/s.";
+            res.summary = sum.str();
+
+            std::ostringstream det;
+            det << "Discretisation: grid " << nx << " x " << ny << " x " << nz
+                << ", dx = dy = dz = " << dx << " m, Np = " << s_coupled.getParticleCount()
+                << " (Obj1=" << n1 << ", Obj2=" << n2 << ", Obj3=" << n3 << "), velocity fields M = 2, steps = " << steps << ".";
+            res.details = det.str();
+        } catch (const std::exception& e) {
+            res.passed = false;
+            res.summary = std::string("FAILED with exception: ") + e.what();
+        }
+        results.push_back(res);
+    }
+
     return results;
 }
 

@@ -1340,7 +1340,7 @@ void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
     const int field_comp_level = (snap.num_particles > 50000) ? std::min(snap.compression_level, 1) : std::clamp(snap.compression_level, 1, 9);
 
     std::string points_raw, conn_raw, off_raw, types_raw;
-    std::string vel_raw, vm_raw, p_raw, ep_raw, dmg_raw, temp_raw, obj_raw, mat_raw;
+    std::string vel_raw, vm_raw, p_raw, ep_raw, dmg_raw, temp_raw, obj_raw, mat_raw, pd_raw;
 
     if (format != "ASCII") {
         #pragma omp parallel sections
@@ -1369,6 +1369,8 @@ void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
             { if (snap.has_object_id && !snap.obj_id.empty()) obj_raw = zlib_encode_raw_block(snap.obj_id, 1); }
             #pragma omp section
             { if (snap.has_material_id && !snap.material_id.empty()) mat_raw = zlib_encode_raw_block(snap.material_id, 1); }
+            #pragma omp section
+            { if (snap.has_particle_density && !snap.particle_density.empty()) pd_raw = zlib_encode_raw_block(snap.particle_density, 1); }
         }
     }
 
@@ -1448,6 +1450,7 @@ void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
     if (snap.has_temp) writeFloatPointData("Temperature", snap.temp, temp_raw, 1);
     if (snap.has_object_id) writeUInt8PointData("ObjectID", snap.obj_id, obj_raw);
     if (snap.has_material_id) writeUInt8PointData("Material_ID", snap.material_id, mat_raw);
+    if (snap.has_particle_density) writeUInt8PointData("Particle_Density", snap.particle_density, pd_raw);
 
     out << "      </PointData>\n";
     out << "    </Piece>\n";
@@ -1504,7 +1507,7 @@ void export_vtp_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
     const int field_comp_level = (snap.num_particles > 50000) ? std::min(snap.compression_level, 1) : std::clamp(snap.compression_level, 1, 9);
 
     std::string points_raw, conn_raw, off_raw;
-    std::string vel_raw, vm_raw, p_raw, ep_raw, dmg_raw, temp_raw, obj_raw, mat_raw;
+    std::string vel_raw, vm_raw, p_raw, ep_raw, dmg_raw, temp_raw, obj_raw, mat_raw, pd_raw;
 
     if (format != "ASCII") {
         #pragma omp parallel sections
@@ -1531,6 +1534,8 @@ void export_vtp_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
             { if (snap.has_object_id && !snap.obj_id.empty()) obj_raw = zlib_encode_raw_block(snap.obj_id, 1); }
             #pragma omp section
             { if (snap.has_material_id && !snap.material_id.empty()) mat_raw = zlib_encode_raw_block(snap.material_id, 1); }
+            #pragma omp section
+            { if (snap.has_particle_density && !snap.particle_density.empty()) pd_raw = zlib_encode_raw_block(snap.particle_density, 1); }
         }
     }
 
@@ -1610,6 +1615,7 @@ void export_vtp_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
     if (snap.has_temp) writeFloatPointData("Temperature", snap.temp, temp_raw, 1);
     if (snap.has_object_id) writeUInt8PointData("ObjectID", snap.obj_id, obj_raw);
     if (snap.has_material_id) writeUInt8PointData("Material_ID", snap.material_id, mat_raw);
+    if (snap.has_particle_density) writeUInt8PointData("Particle_Density", snap.particle_density, pd_raw);
 
     out << "      </PointData>\n";
     out << "    </Piece>\n";
@@ -1629,7 +1635,8 @@ void export_vtp_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
 void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPMParticle3D>& particles, const std::string& format,
                        bool has_vel, bool has_disp, bool has_stress,
                        bool has_strain, bool has_damage, bool has_temp,
-                       bool has_pressure, bool has_material_id, bool has_object_id) {
+                       bool has_pressure, bool has_material_id, bool has_object_id,
+                       bool has_particle_density) {
     MPMVTKSnapshot3D snap;
     snap.num_particles = static_cast<int>(particles.size());
     snap.has_vel = has_vel;
@@ -1641,6 +1648,7 @@ void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPM
     snap.has_pressure = has_pressure;
     snap.has_material_id = has_material_id;
     snap.has_object_id = has_object_id;
+    snap.has_particle_density = has_particle_density;
 
     if (snap.num_particles <= 0) return;
 
@@ -1653,6 +1661,7 @@ void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPM
     if (has_temp) snap.temp.resize(snap.num_particles);
     if (has_object_id) snap.obj_id.resize(snap.num_particles);
     if (has_material_id) snap.material_id.resize(snap.num_particles);
+    if (has_particle_density) snap.particle_density.assign(snap.num_particles, 1);
 
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < snap.num_particles; ++i) {

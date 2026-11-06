@@ -59,7 +59,7 @@ export class WorkspaceManager {
      *  → buildStage → saveStageOptions → ... (infinite recursion / CPU spin). */
     private _initializing: boolean = false;
 
-    private stlGeometries: Map<string, { vertices: Float32Array | null, meshId: string }> = new Map();
+    private stlGeometries: Map<string, Map<string, { vertices: Float32Array | null, meshId: string }>> = new Map();
     private obstacleGeometries: Map<string, { vertices: Float32Array | null, cells: Int32Array | null, meshId: string }> = new Map();
     private windowResizeListener: (() => void) | null = null;
     private themeListener: ((e: any) => void) | null = null;
@@ -679,9 +679,11 @@ export class WorkspaceManager {
                 pane.instance.setGridVisible(this.showStudioGrid);
             }
             // Replay cached STL and Obstacles geometry if available
-            const cachedSTL = modelId ? this.stlGeometries.get(modelId) : null;
-            if (cachedSTL && pane.instance) {
-                pane.instance.setSTLGeometry?.(cachedSTL.vertices, modelId, cachedSTL.meshId);
+            const modelSTLs = modelId ? this.stlGeometries.get(modelId) : null;
+            if (modelSTLs && pane.instance) {
+                modelSTLs.forEach(cachedSTL => {
+                    pane.instance.setSTLGeometry?.(cachedSTL.vertices, modelId, cachedSTL.meshId);
+                });
             } else if (pane.instance) {
                 pane.instance.setSTLGeometry?.(null, modelId || undefined);
             }
@@ -1059,6 +1061,15 @@ export class WorkspaceManager {
     public dispatchFrame(frame: BufferedFrame, isLive: boolean): void {
         const activeWs = this.stateManager.getActiveWorkspace();
         const activeModelId = activeWs?.activeModelId;
+        const isHistoryDisabled = this.playbackBuffer.getMaxFrames() <= 1;
+
+        const matching3DPanes = this.panes.filter(pane => {
+            const paneModelId = pane.modelId || activeModelId;
+            if (frame.modelId && paneModelId && frame.modelId !== paneModelId) return false;
+            if (pane.modelId && !frame.modelId) return false;
+            return pane.viewType === '3D_VIEWPORT' && pane.instance && typeof pane.instance.pushFrame === 'function';
+        });
+        const canTransfer3D = isLive && isHistoryDisabled && matching3DPanes.length === 1;
 
         this.panes.forEach(pane => {
             const paneModelId = pane.modelId || activeModelId;
@@ -1068,24 +1079,24 @@ export class WorkspaceManager {
             try {
                 if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                     if (typeof pane.instance.pushFrame === 'function') {
-                        if (frame.sliceBuffer) {
-                            pane.instance.pushFrame(frame.sliceBuffer, frame.modelId);
-                        } else if (frame.buffer && frame.buffer !== frame.mpmBuffer && frame.buffer !== frame.phaseParticlesBuffer && frame.buffer !== frame.femBuffer) {
-                            pane.instance.pushFrame(frame.buffer, frame.modelId);
+                        if (frame.sliceBuffer && frame.sliceBuffer.byteLength > 0) {
+                            pane.instance.pushFrame(frame.sliceBuffer, frame.modelId, canTransfer3D);
+                        } else if (frame.buffer && frame.buffer.byteLength > 0 && frame.buffer !== frame.mpmBuffer && frame.buffer !== frame.phaseParticlesBuffer && frame.buffer !== frame.femBuffer) {
+                            pane.instance.pushFrame(frame.buffer, frame.modelId, canTransfer3D);
                         }
-                        if (frame.mpmBuffer) {
-                            pane.instance.pushFrame(frame.mpmBuffer, frame.modelId);
+                        if (frame.mpmBuffer && frame.mpmBuffer.byteLength > 0) {
+                            pane.instance.pushFrame(frame.mpmBuffer, frame.modelId, canTransfer3D);
                         }
-                        if (frame.phaseParticlesBuffer) {
-                            pane.instance.pushFrame(frame.phaseParticlesBuffer, frame.modelId);
+                        if (frame.phaseParticlesBuffer && frame.phaseParticlesBuffer.byteLength > 0) {
+                            pane.instance.pushFrame(frame.phaseParticlesBuffer, frame.modelId, canTransfer3D);
                         }
-                        if (frame.femBuffer) {
-                            pane.instance.pushFrame(frame.femBuffer, frame.modelId);
+                        if (frame.femBuffer && frame.femBuffer.byteLength > 0) {
+                            pane.instance.pushFrame(frame.femBuffer, frame.modelId, false);
                         }
-                    } else if (typeof pane.instance.handleBinaryTelemetry === 'function') {
+                    } else if (typeof pane.instance.handleBinaryTelemetry === 'function' && frame.buffer && frame.buffer.byteLength > 0) {
                         pane.instance.handleBinaryTelemetry(frame.buffer);
                     }
-                } else if ((pane.viewType === '2D_CONTOUR' || pane.viewType === '1D_CHART') && pane.worker) {
+                } else if ((pane.viewType === '2D_CONTOUR' || pane.viewType === '1D_CHART') && pane.worker && frame.buffer && frame.buffer.byteLength > 0) {
                     const copy = frame.buffer.slice(0);
                     pane.worker.postMessage(copy, [copy]);
                 }
@@ -1281,7 +1292,12 @@ export class WorkspaceManager {
      */
     public setSTLGeometry(vertices: Float32Array | null, modelId?: string, meshId: string = 'default'): void {
         if (modelId) {
-            this.stlGeometries.set(modelId, { vertices, meshId });
+            let modelMap = this.stlGeometries.get(modelId);
+            if (!modelMap) {
+                modelMap = new Map();
+                this.stlGeometries.set(modelId, modelMap);
+            }
+            modelMap.set(meshId, { vertices, meshId });
         }
         this.panes.forEach(pane => {
             if (modelId && pane.modelId && modelId !== pane.modelId) return;

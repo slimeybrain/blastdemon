@@ -15,15 +15,15 @@
   <rect width="800" height="450" fill="#0d1117" rx="8"/>
   <text x="400" y="30" text-anchor="middle" class="title">VV-L2-CMP-03: Interface-band particle vx, dense (reference) vs compact storage</text>
   <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
-  <text x="67" y="394" text-anchor="end" class="tick">-3.58</text>
+  <text x="67" y="394" text-anchor="end" class="tick">-4.2</text>
   <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
-  <text x="67" y="326" text-anchor="end" class="tick">-0.632</text>
+  <text x="67" y="326" text-anchor="end" class="tick">-1.12</text>
   <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
-  <text x="67" y="258" text-anchor="end" class="tick">2.32</text>
+  <text x="67" y="258" text-anchor="end" class="tick">1.95</text>
   <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
-  <text x="67" y="190" text-anchor="end" class="tick">5.27</text>
+  <text x="67" y="190" text-anchor="end" class="tick">5.03</text>
   <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
-  <text x="67" y="122" text-anchor="end" class="tick">8.22</text>
+  <text x="67" y="122" text-anchor="end" class="tick">8.1</text>
   <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
   <text x="67" y="54" text-anchor="end" class="tick">11.2</text>
   <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
@@ -38,21 +38,21 @@
   <text x="627" y="408" text-anchor="middle" class="tick">0.435</text>
   <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
   <text x="765" y="408" text-anchor="middle" class="tick">0.455</text>
-  <path class="corridor-yellow" d="M 75 364 L 144 318 L 213 259 L 282 209 L 351 184 L 420 122 L 489 66.9 L 558 79.6 L 627 84.1 L 696 81.1 L 765 307 L 765 307 L 696 103 L 627 105 L 558 101 L 489 89.8 L 420 140 L 351 195 L 282 218 L 213 264 L 144 317 L 75 359 Z"/>
-  <path class="corridor-green" d="M 75 362 L 144 318 L 213 261 L 282 212 L 351 188 L 420 129 L 489 76 L 558 88.3 L 627 92.6 L 696 89.7 L 765 307 L 765 307 L 696 94 L 627 96.8 L 558 92.6 L 489 80.6 L 420 133 L 351 191 L 282 214 L 213 262 L 144 317 L 75 361 Z"/>
-  <path class="exact-curve" d="M 75 362 L 144 318 L 213 262 L 282 213 L 351 190 L 420 131 L 489 78.3 L 558 90.4 L 627 94.7 L 696 91.9 L 765 307 "/>
-  <path class="num-curve" d="M 75 362 L 144 318 L 213 262 L 282 213 L 351 190 L 420 131 L 489 78.3 L 558 90.4 L 627 94.7 L 696 91.9 L 765 307 "/>
+  <path class="corridor-yellow" d="M 75 365 L 144 317 L 213 254 L 282 202 L 351 175 L 420 118 L 489 67.4 L 558 76.3 L 627 78 L 696 74.2 L 765 297 L 765 297 L 696 95.4 L 627 98.8 L 558 97.3 L 489 89.3 L 420 135 L 351 187 L 282 211 L 213 258 L 144 315 L 75 358 Z"/>
+  <path class="corridor-green" d="M 75 362 L 144 316 L 213 255 L 282 206 L 351 180 L 420 124 L 489 76.1 L 558 84.7 L 627 86.3 L 696 82.7 L 765 297 L 765 297 L 696 86.9 L 627 90.5 L 558 88.9 L 489 80.5 L 420 128 L 351 182 L 282 208 L 213 256 L 144 316 L 75 361 Z"/>
+  <path class="exact-curve" d="M 75 362 L 144 316 L 213 256 L 282 207 L 351 181 L 420 126 L 489 78.3 L 558 86.8 L 627 88.4 L 696 84.8 L 765 297 "/>
+  <path class="num-curve" d="M 75 362 L 144 316 L 213 256 L 282 207 L 351 181 L 420 126 L 489 78.3 L 558 86.8 L 627 88.4 L 696 84.8 L 765 297 "/>
   <circle cx="75" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="144" cy="318" r="3.5" fill="#f0883e"/>
-  <circle cx="213" cy="262" r="3.5" fill="#f0883e"/>
-  <circle cx="282" cy="213" r="3.5" fill="#f0883e"/>
-  <circle cx="351" cy="190" r="3.5" fill="#f0883e"/>
-  <circle cx="420" cy="131" r="3.5" fill="#f0883e"/>
+  <circle cx="144" cy="316" r="3.5" fill="#f0883e"/>
+  <circle cx="213" cy="256" r="3.5" fill="#f0883e"/>
+  <circle cx="282" cy="207" r="3.5" fill="#f0883e"/>
+  <circle cx="351" cy="181" r="3.5" fill="#f0883e"/>
+  <circle cx="420" cy="126" r="3.5" fill="#f0883e"/>
   <circle cx="489" cy="78.3" r="3.5" fill="#f0883e"/>
-  <circle cx="558" cy="90.4" r="3.5" fill="#f0883e"/>
-  <circle cx="627" cy="94.7" r="3.5" fill="#f0883e"/>
-  <circle cx="696" cy="91.9" r="3.5" fill="#f0883e"/>
-  <circle cx="765" cy="307" r="3.5" fill="#f0883e"/>
+  <circle cx="558" cy="86.8" r="3.5" fill="#f0883e"/>
+  <circle cx="627" cy="88.4" r="3.5" fill="#f0883e"/>
+  <circle cx="696" cy="84.8" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="297" r="3.5" fill="#f0883e"/>
   <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
   <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
   <text x="400" y="435" text-anchor="middle" class="axis-label">Cell centre x (m)</text>

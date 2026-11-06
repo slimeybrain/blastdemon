@@ -208,6 +208,76 @@ int main() {
         std::cout << "  CPU 2D Transmitting & Terminate BCs PASSED!\n\n";
     }
 
+    // -------------------------------------------------------------------------
+    // [6/6] CPU & GPU 3D MPM: Option D Same-Object Exact-Radius Particle Density (UInt8)
+    // -------------------------------------------------------------------------
+    std::cout << "[6/6] Testing CPU & GPU 3D MPM Option D Particle Density (UInt8)...\n";
+    {
+        Blast::MPMSolver3D cpu_solver;
+        cpu_solver.initializeGrid(nx, ny, nz, dx, dy, dz, xmin, ymin, zmin);
+        // Add a 3x3x3 cell block (0.03m x 0.03m x 0.03m) at (0.105, 0.105, 0.105) with 8 PPC -> 27 * 8 = 216 particles
+        // Particle spacing d_p = 0.005m (lp = 0.0025m). Block spans [0.090, 0.120]^3.
+        cpu_solver.addBoxObject(1, 0.105f, 0.105f, 0.105f, 0.03f, 0.03f, 0.03f,
+                                0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                2700.0f, 70.0e9f, 0.33f, 200.0e6f, 1.0e8f, 0.25f, 300.0e6f, 8);
+
+        // 1. Single isolated flyer far away at (0.255, 0.255, 0.255)
+        Blast::MPMParticle3D flyer{};
+        flyer.x[0] = 0.255f; flyer.x[1] = 0.255f; flyer.x[2] = 0.255f;
+        flyer.lp[0] = 0.0025f; flyer.lp[1] = 0.0025f; flyer.lp[2] = 0.0025f;
+        flyer.m = 1.0e-5f; flyer.V0 = 1.25e-7f; flyer.V = 1.25e-7f;
+        flyer.object_id = 2; flyer.material_id = 0;
+
+        // 2. Single foreign particle (object_id = 2) smeared right onto the top face of solid Object 1 at (0.105, 0.105, 0.121)
+        Blast::MPMParticle3D smeared_foreign = flyer;
+        smeared_foreign.x[0] = 0.105f; smeared_foreign.x[1] = 0.105f; smeared_foreign.x[2] = 0.121f;
+        smeared_foreign.object_id = 2;
+
+        // 3. Single failed/spall particle of the SAME object (object_id = 1, has_failed = true) smeared on the solid surface
+        Blast::MPMParticle3D smeared_failed = flyer;
+        smeared_failed.x[0] = 0.105f; smeared_failed.x[1] = 0.105f; smeared_failed.x[2] = 0.089f;
+        smeared_failed.object_id = 1;
+        smeared_failed.has_failed = true;
+        smeared_failed.damage = 1.0f;
+
+        cpu_solver.addParticlesDirect({flyer, smeared_foreign, smeared_failed});
+
+        Blast::MPMSolver3DCUDA gpu_solver;
+        gpu_solver.initializeGrid(nx, ny, nz, dx, dy, dz, xmin, ymin, zmin);
+        gpu_solver.addParticlesDirect(cpu_solver.getParticles());
+        gpu_solver.syncToDevice();
+
+        MPMVTKSnapshot3D cpu_snap = cpu_solver.extractVTKSnapshot();
+        MPMVTKSnapshot3D gpu_snap = gpu_solver.extractVTKSnapshot();
+
+        VERIFY_CHECK(cpu_snap.particle_density.size() == static_cast<size_t>(cpu_snap.num_particles), "CPU particle_density vector size matches num_particles");
+        VERIFY_CHECK(gpu_snap.particle_density.size() == static_cast<size_t>(gpu_snap.num_particles), "GPU particle_density vector size matches num_particles");
+
+        const size_t n_total = cpu_snap.particle_density.size();
+        for (size_t i = 0; i < n_total; ++i) {
+            VERIFY_CHECK(cpu_snap.particle_density[i] == gpu_snap.particle_density[i], "CPU vs GPU particle_density exact parity");
+        }
+
+        uint8_t cpu_flyer_pd = cpu_snap.particle_density[n_total - 3];
+        uint8_t cpu_smeared_foreign_pd = cpu_snap.particle_density[n_total - 2];
+        uint8_t cpu_smeared_failed_pd = cpu_snap.particle_density[n_total - 1];
+
+        uint8_t cpu_max_pd = 0, gpu_max_pd = 0;
+        for (size_t i = 0; i < n_total - 3; ++i) {
+            if (cpu_snap.particle_density[i] > cpu_max_pd) cpu_max_pd = cpu_snap.particle_density[i];
+            if (gpu_snap.particle_density[i] > gpu_max_pd) gpu_max_pd = gpu_snap.particle_density[i];
+        }
+        std::cout << "  Isolated flyer -> " << static_cast<int>(cpu_flyer_pd)
+                  << " | Smeared foreign on surface -> " << static_cast<int>(cpu_smeared_foreign_pd)
+                  << " | Smeared failed spall on surface -> " << static_cast<int>(cpu_smeared_failed_pd)
+                  << " | Core 3D solid max -> " << static_cast<int>(cpu_max_pd) << "\n";
+        VERIFY_CHECK(cpu_flyer_pd == 1, "Isolated flyer must have Particle_Density == 1");
+        VERIFY_CHECK(cpu_smeared_foreign_pd == 1, "Single foreign particle smeared on solid surface must have Particle_Density == 1");
+        VERIFY_CHECK(cpu_smeared_failed_pd == 1, "Single failed spall particle smeared on intact surface must have Particle_Density == 1");
+        VERIFY_CHECK(cpu_max_pd == 27 && gpu_max_pd == 27, "Interior of 3D lattice must have Particle_Density == 27 (3x3x3 first-shell coordination)");
+        std::cout << "  CPU & GPU Option D Particle_Density PASSED!\n\n";
+    }
+
     std::cout << "=====================================================================\n";
     std::cout << "ALL MPM TRANSMITTING & TERMINATE BC TESTS PASSED SUCCESSFULLY!\n";
     std::cout << "=====================================================================\n";

@@ -98,6 +98,14 @@ public:
     // during a run). Lowering it below the current capacity resets the slot buffer.
     void setInitialMultiMaterialSlotCapacity(size_t slots);
 
+    // Thermo-Mechanical Bonding, Frictional Heating & Thermal Conduction Toggles
+    void setImpactWelding(bool enable) { m_enable_impact_welding = enable; }
+    bool getEnableImpactWelding() const { return m_enable_impact_welding; }
+    void setFrictionalHeating(bool enable) { m_enable_frictional_heating = enable; }
+    bool getEnableFrictionalHeating() const { return m_enable_frictional_heating; }
+    void setThermalConduction(bool enable) { m_enable_thermal_conduction = enable; }
+    bool getEnableThermalConduction() const { return m_enable_thermal_conduction; }
+
     // Retained for backward API compatibility (Clean Single-Grid Continuum Contact)
     void setSdfBarrier([[maybe_unused]] bool enable = false,
                        [[maybe_unused]] float restitution = 0.10f,
@@ -230,7 +238,7 @@ public:
     void syncParticlesToHost();
     void syncGridToHost();
     void syncToDevice();
-    MPMVTKSnapshot3D extractVTKSnapshot(bool has_vel = true, bool has_stress = true, bool has_strain = true, bool has_damage = true, bool has_temp = true, bool has_pressure = true, bool has_material_id = true, bool has_object_id = true);
+    MPMVTKSnapshot3D extractVTKSnapshot(bool has_vel = true, bool has_stress = true, bool has_strain = true, bool has_damage = true, bool has_temp = true, bool has_pressure = true, bool has_material_id = true, bool has_object_id = true, bool has_particle_density = true);
     void uploadGridToDevice();
     void uploadMaterialTableToDevice();
 
@@ -274,7 +282,7 @@ public:
     void addDetonator(const MPMDetonator3D& det) { m_detonators.push_back(det); }
     const std::vector<MPMDetonator3D>& getDetonators() const { return m_detonators; }
     std::vector<MPMDetonator3D>& getDetonators() { return m_detonators; }
-    bool interpolateGridVelocityDevice(float x, float y, float z, float& vx, float& vy, float& vz) const;
+    bool interpolateGridVelocityDevice(float x, float y, float z, float& vx, float& vy, float& vz, int target_object_id = -1) const;
     void updateDetonators(float dt);
     void fireDetonator(MPMDetonator3D& det);
 
@@ -337,6 +345,9 @@ private:
     MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::Leapfrog};
     float m_flip_blend{0.95f};
     bool m_smooth_plastic_strain{true};
+    bool m_enable_impact_welding{false};
+    bool m_enable_frictional_heating{false};
+    bool m_enable_thermal_conduction{false};
 
     MPMBoundaryCondition3D m_bc_x_min{MPMBoundaryCondition3D::Sticky};
     MPMBoundaryCondition3D m_bc_x_max{MPMBoundaryCondition3D::Sticky};

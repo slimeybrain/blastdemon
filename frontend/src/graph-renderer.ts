@@ -1472,6 +1472,7 @@ export class GraphRenderer {
                 name: 'MPM Simulation (3D)',
                 items: [
                     { label: 'MPM Domain 3D', type: 'MPMDomain3D' },
+                    { label: 'MPM Bardenhagen Coupler 3D', type: 'MPMContactCoupler3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: 'MPM Object 3D (Box)', type: 'MPMObject3D', defaultParams: { shape_type: 'Box' } },
                     { label: 'MPM Object 3D (Sphere)', type: 'MPMObject3D', defaultParams: { shape_type: 'Sphere' } },
@@ -1494,7 +1495,8 @@ export class GraphRenderer {
                 items: [
                     { label: 'FSI Coupler 2D (CFD-MPM)', type: 'FSICoupler2D' },
                     { label: 'FSI Coupler 3D (CFD-MPM)', type: 'FSICoupler3D' },
-                    { label: 'FEM-CFD FSI Coupler 3D', type: 'FEMFSICoupler3D' }
+                    { label: 'FEM-CFD FSI Coupler 3D', type: 'FEMFSICoupler3D' },
+                    { label: 'MPM Bardenhagen Coupler 3D', type: 'MPMContactCoupler3D' }
                 ]
             },
             {
@@ -4437,22 +4439,36 @@ export class GraphRenderer {
                     if (el) {
                         if (el.classList.contains('custom-select-container')) {
                             const trigger = el.querySelector('.custom-select-trigger');
-                            const optElSelected = el.querySelector(`.custom-select-option[data-value="${value.toString()}"]`) as HTMLElement;
-                            if (trigger) {
-                                trigger.textContent = optElSelected ? optElSelected.textContent : value.toString();
+                            let strVal = String(value ?? '');
+                            const optionEls = Array.from(el.querySelectorAll('.custom-select-option')) as HTMLElement[];
+                            const hasEnabledDisabled = optionEls.some(o => o.dataset.value === 'Enabled' || o.dataset.value === 'Disabled');
+                            const hasTrueFalse = optionEls.some(o => o.dataset.value === 'true' || o.dataset.value === 'false');
+                            if (hasEnabledDisabled) {
+                                if (value === true || strVal === 'true' || strVal === 'Enabled') strVal = 'Enabled';
+                                else if (value === false || strVal === 'false' || strVal === 'Disabled') strVal = 'Disabled';
+                            } else if (hasTrueFalse) {
+                                if (value === true || strVal === 'true' || strVal === 'Enabled') strVal = 'true';
+                                else if (value === false || strVal === 'false' || strVal === 'Disabled') strVal = 'false';
                             }
-                            el.querySelectorAll('.custom-select-option').forEach(opt => {
-                                const optEl = opt as HTMLElement;
-                                if (optEl.dataset.value === value.toString()) {
+                            let matchedOpt: HTMLElement | undefined;
+                            optionEls.forEach(optEl => {
+                                const optVal = optEl.dataset.value ?? '';
+                                if (optVal === strVal || (strVal !== '' && optVal.toLowerCase() === strVal.toLowerCase())) {
                                     optEl.classList.add('selected');
+                                    matchedOpt = optEl;
                                 } else {
                                     optEl.classList.remove('selected');
                                 }
                             });
+                            if (trigger) {
+                                trigger.textContent = matchedOpt ? (matchedOpt.textContent || strVal) : strVal;
+                            }
                         } else {
                             const input = el as HTMLInputElement;
-                            if (document.activeElement !== input) {
-                                input.value = typeof value === 'number' ? parseFloat(value.toPrecision(7)).toString() : value.toString();
+                            if (input.type === 'checkbox') {
+                                input.checked = Boolean(value);
+                            } else if (document.activeElement !== input && value !== undefined && value !== null) {
+                                input.value = typeof value === 'number' ? parseFloat(value.toPrecision(7)).toString() : String(value);
                             }
                         }
                     }
@@ -4897,6 +4913,7 @@ export class GraphRenderer {
                     'qty_mpm_pressure': 'PRESSURE',
                     'qty_mpm_material_id': 'MATERIAL ID',
                     'qty_mpm_object_id': 'OBJECT ID',
+                    'qty_mpm_particle_density': 'PARTICLE DENSITY',
                     'qty_mpm_temp': 'TEMPERATURE',
                     'qty_mpm_vel': 'VELOCITY',
                     'roi_enabled': 'CROP ROI',
@@ -5023,6 +5040,13 @@ export class GraphRenderer {
                 'smooth_plastic_strain': ['Enabled', 'Disabled'],
                 'enable_sdf_barrier': ['Enabled', 'Disabled'],
                 'contact_method': ['Single-Velocity', 'Discrete Element (DEM)', 'Multi-Velocity (Bardenhagen)'],
+                'bardenhagen_grouping_policy': ['Per-Object Independent', 'By Material Node'],
+                'velocity_group': ['Independent (Auto)', 'Bonded Group A', 'Bonded Group B', 'Bonded Group C', 'Bonded Group D', 'Bonded Group E', 'Bonded Group F'],
+                'coupler_mode': ['Bonded (Single-Velocity)', 'Independent (Bardenhagen)'],
+                'coupler_group_tag': ['Bonded Group A', 'Bonded Group B', 'Bonded Group C', 'Bonded Group D', 'Bonded Group E', 'Bonded Group F'],
+                'enable_impact_welding': ['Disabled', 'Enabled'],
+                'enable_frictional_heating': ['Disabled', 'Enabled'],
+                'enable_thermal_conduction': ['Disabled', 'Enabled'],
                 'enable_dem_contact': ['Disabled', 'Enabled'],
                 'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
                 'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
@@ -5194,18 +5218,20 @@ export class GraphRenderer {
                     },
                     key
                 );
-            } else if (key === 'target_domain' && (node.type === 'MPMObject2D' || node.type === 'MPMObject3D' || node.type === 'FEMObject3D' || node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D' || node.type === 'LSDynaImporter3D')) {
+            } else if (key === 'target_domain' && (node.type === 'MPMObject2D' || node.type === 'MPMObject3D' || node.type === 'MPMContactCoupler3D' || node.type === 'FEMObject3D' || node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D' || node.type === 'LSDynaImporter3D')) {
                 const state = this.stateManager.getCurrentState();
                 const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
                 const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
                 const is3D = node.type.endsWith('3D');
-                const targetDomains = candidateNodes.filter(n => is3D
-                    ? ['MPMDomain3D', 'MarineHarbourDomain', 'CFDSolver3D'].includes(n.type)
-                    : ['MPMDomain2D', 'CFDSolver2D'].includes(n.type));
+                const targetDomains = candidateNodes.filter(n => node.type === 'MPMContactCoupler3D'
+                    ? (n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain')
+                    : (is3D
+                        ? ['MPMDomain3D', 'MPMContactCoupler3D', 'MarineHarbourDomain', 'CFDSolver3D'].includes(n.type)
+                        : ['MPMDomain2D', 'CFDSolver2D'].includes(n.type)));
 
                 let currentDomainId = node.parameters['target_domain'] || '';
                 if (!currentDomainId && state) {
-                    const conn = state.connections.find(c => (c.fromNode === node.id && c.toPort === 'in') || (c.toNode === node.id && c.fromPort === 'in'));
+                    const conn = state.connections.find(c => (c.fromNode === node.id && (c.toPort === 'in' || c.toPort === 'objects' || c.toPort === 'couplers')) || (c.toNode === node.id && c.fromPort === 'in'));
                     if (conn) currentDomainId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
                 }
 
@@ -5229,13 +5255,14 @@ export class GraphRenderer {
                     (newVal) => {
                         this.stateManager.updateNodeParameters(node.id, { target_domain: newVal });
                         if (state) {
-                            state.connections = state.connections.filter(c => !(c.fromNode === node.id && c.toPort === 'in'));
+                            state.connections = state.connections.filter(c => !(c.fromNode === node.id && (c.toPort === 'in' || c.toPort === 'objects' || c.toPort === 'couplers')));
                             if (newVal) {
+                                const toPort = node.type === 'MPMContactCoupler3D' ? 'couplers' : 'objects';
                                 state.connections.push({
                                     fromNode: node.id,
                                     fromPort: 'out',
                                     toNode: newVal,
-                                    toPort: 'in'
+                                    toPort
                                 });
                             }
                             if (owningModel) {
@@ -5699,7 +5726,7 @@ export class GraphRenderer {
                             'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
                             'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
                             // FEM keys
-                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy',
+                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy', 'node_merge_tolerance',
                             'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
                             'rebarRadius', 'viewport_refresh_rate', 'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
                             'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',

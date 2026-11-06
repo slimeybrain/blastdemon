@@ -319,6 +319,17 @@ public:
         syncToDevice();
     }
 
+    void appendNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const std::vector<MaterialTable3D>& materials) {
+        m_cpu_solver.appendNodesAndElements(nodes, elements, materials);
+        syncToDevice();
+    }
+
+    int mergeCoincidentNodes(T tolerance = static_cast<T>(1.0e-4f)) {
+        int merged = m_cpu_solver.mergeCoincidentNodes(tolerance);
+        if (merged > 0) syncToDevice();
+        return merged;
+    }
+
     void setNodeFixed(int node_idx, bool fix_x, bool fix_y, bool fix_z) {
         m_cpu_solver.setNodeFixed(node_idx, fix_x, fix_y, fix_z);
         if (m_d_nodes) syncToDevice();

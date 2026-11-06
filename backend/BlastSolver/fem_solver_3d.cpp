@@ -1255,6 +1255,213 @@ void FEMSolver3D<T>::appendNodesAndElements(const std::vector<FEMNode3D<T>>& nod
 }
 
 template <typename T>
+void FEMSolver3D<T>::appendNodesAndElements(const std::vector<FEMNode3D<T>>& nodes, const std::vector<FEMElement3D<T>>& elements, const std::vector<MaterialTable3D>& materials) {
+    if (m_nodes.empty() && m_elements.empty()) {
+        setNodesAndElements(nodes, elements, materials);
+        int max_pid = 1;
+        for (const auto& el : m_elements) {
+            if (el.part_id > max_pid) max_pid = el.part_id;
+        }
+        m_next_part_id = max_pid + 1;
+        return;
+    }
+
+    int mat_offset = static_cast<int>(m_material_tables.size());
+    if (materials.empty()) {
+        MaterialTable3D def_mat{};
+        m_material_tables.push_back(def_mat);
+    } else {
+        m_material_tables.insert(m_material_tables.end(), materials.begin(), materials.end());
+    }
+
+    int max_existing_pid = 0;
+    for (const auto& el : m_elements) {
+        if (el.part_id > max_existing_pid) max_existing_pid = el.part_id;
+    }
+    int part_offset = std::max(max_existing_pid, m_next_part_id - 1);
+
+    int base_node_idx = static_cast<int>(m_nodes.size());
+    int base_elem_idx = static_cast<int>(m_elements.size());
+
+    m_nodes.insert(m_nodes.end(), nodes.begin(), nodes.end());
+    for (size_t n = base_node_idx; n < m_nodes.size(); ++n) {
+        m_nodes[n].x0[0] = m_nodes[n].x[0];
+        m_nodes[n].x0[1] = m_nodes[n].x[1];
+        m_nodes[n].x0[2] = m_nodes[n].x[2];
+    }
+
+    int max_new_pid = part_offset;
+    for (auto elem : elements) {
+        for (int n = 0; n < 8; ++n) {
+            elem.node_ids[n] += base_node_idx;
+        }
+        int local_pid = (elem.part_id > 0) ? elem.part_id : 1;
+        elem.part_id = part_offset + local_pid;
+        if (elem.part_id > max_new_pid) max_new_pid = elem.part_id;
+
+        int local_mid = (elem.mat_id >= 0) ? elem.mat_id : 0;
+        elem.mat_id = std::clamp(mat_offset + local_mid, 0, static_cast<int>(m_material_tables.size()) - 1);
+        m_elements.push_back(elem);
+    }
+    m_next_part_id = max_new_pid + 1;
+
+    for (size_t e = base_elem_idx; e < m_elements.size(); ++e) {
+        auto& elem = m_elements[e];
+        const auto& mat_tb = m_material_tables[elem.mat_id];
+        T cd = computeDilatationalWaveSpeed<T>(mat_tb);
+
+        if (isTet4Element(elem)) {
+            int n0 = elem.node_ids[0], n1 = elem.node_ids[1], n2 = elem.node_ids[2], n3 = elem.node_ids[3];
+            T x_tet[4][3] = {
+                {m_nodes[n0].x[0], m_nodes[n0].x[1], m_nodes[n0].x[2]},
+                {m_nodes[n1].x[0], m_nodes[n1].x[1], m_nodes[n1].x[2]},
+                {m_nodes[n2].x[0], m_nodes[n2].x[1], m_nodes[n2].x[2]},
+                {m_nodes[n3].x[0], m_nodes[n3].x[1], m_nodes[n3].x[2]}
+            };
+            T v_signed = computeTet4SignedVolume(x_tet);
+            if (v_signed < static_cast<T>(0.0f)) {
+                std::swap(elem.node_ids[2], elem.node_ids[3]);
+                elem.node_ids[4] = elem.node_ids[5] = elem.node_ids[6] = elem.node_ids[7] = elem.node_ids[3];
+                std::swap(x_tet[2][0], x_tet[3][0]);
+                std::swap(x_tet[2][1], x_tet[3][1]);
+                std::swap(x_tet[2][2], x_tet[3][2]);
+                v_signed = -v_signed;
+            }
+            elem.V0 = std::max(v_signed, static_cast<T>(1.0e-18f));
+            elem.V = elem.V0;
+            T L_e = computeTet4CharacteristicLength(x_tet, elem.V0);
+            elem.dt0 = L_e / cd;
+        } else {
+            T x_nodes[8][3];
+            for (int n = 0; n < 8; ++n) {
+                int nid = elem.node_ids[n];
+                x_nodes[n][0] = m_nodes[nid].x[0];
+                x_nodes[n][1] = m_nodes[nid].x[1];
+                x_nodes[n][2] = m_nodes[nid].x[2];
+            }
+            T B[6][24], detJ;
+            computeHex8BMatrix(x_nodes, B, detJ);
+            elem.V0 = std::abs(detJ) * static_cast<T>(8.0f);
+            elem.V = elem.V0;
+            T L_e = computeHex8CharacteristicLength(x_nodes, elem.V0);
+            elem.dt0 = L_e / cd;
+        }
+    }
+    ensureGaussPointHistory();
+
+    m_surface_facets_dirty = true;
+    computeLumpedMasses();
+    extractBoundaryFacets();
+    computeGlobalEnergy();
+}
+
+template <typename T>
+int FEMSolver3D<T>::mergeCoincidentNodes(T tolerance) {
+    if (m_nodes.size() < 2 || tolerance <= static_cast<T>(0.0f)) return 0;
+
+    const T tol2 = tolerance * tolerance;
+    const T inv_cell = static_cast<T>(1.0f) / std::max(tolerance * static_cast<T>(2.0f), static_cast<T>(1.0e-7f));
+
+    struct GridKey {
+        int64_t ix, iy, iz;
+        bool operator==(const GridKey& o) const { return ix == o.ix && iy == o.iy && iz == o.iz; }
+    };
+    struct GridKeyHash {
+        size_t operator()(const GridKey& k) const {
+            size_t h = static_cast<size_t>(k.ix) * 73856093ULL;
+            h ^= static_cast<size_t>(k.iy) * 19349663ULL;
+            h ^= static_cast<size_t>(k.iz) * 83492791ULL;
+            return h;
+        }
+    };
+
+    std::unordered_map<GridKey, std::vector<int>, GridKeyHash> spatial_bins;
+    std::vector<int> old_to_new(m_nodes.size(), -1);
+    std::vector<FEMNode3D<T>> welded_nodes;
+    welded_nodes.reserve(m_nodes.size());
+
+    int merged_count = 0;
+    for (size_t i = 0; i < m_nodes.size(); ++i) {
+        const auto& nd = m_nodes[i];
+        int64_t bx = static_cast<int64_t>(std::floor(nd.x[0] * inv_cell));
+        int64_t by = static_cast<int64_t>(std::floor(nd.x[1] * inv_cell));
+        int64_t bz = static_cast<int64_t>(std::floor(nd.x[2] * inv_cell));
+
+        int matched_idx = -1;
+        for (int64_t dz = -1; dz <= 1 && matched_idx < 0; ++dz) {
+            for (int64_t dy = -1; dy <= 1 && matched_idx < 0; ++dy) {
+                for (int64_t dx = -1; dx <= 1 && matched_idx < 0; ++dx) {
+                    auto it = spatial_bins.find({bx + dx, by + dy, bz + dz});
+                    if (it == spatial_bins.end()) continue;
+                    for (int cand_idx : it->second) {
+                        const auto& cn = welded_nodes[cand_idx];
+                        T ddx = nd.x[0] - cn.x[0];
+                        T ddy = nd.x[1] - cn.x[1];
+                        T ddz = nd.x[2] - cn.x[2];
+                        if (ddx * ddx + ddy * ddy + ddz * ddz <= tol2) {
+                            matched_idx = cand_idx;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (matched_idx >= 0) {
+            old_to_new[i] = matched_idx;
+            for (int d = 0; d < 3; ++d) {
+                if (nd.is_fixed[d]) welded_nodes[matched_idx].is_fixed[d] = true;
+            }
+            ++merged_count;
+        } else {
+            int new_idx = static_cast<int>(welded_nodes.size());
+            welded_nodes.push_back(nd);
+            old_to_new[i] = new_idx;
+            spatial_bins[{bx, by, bz}].push_back(new_idx);
+        }
+    }
+
+    if (merged_count == 0) return 0;
+
+    m_nodes = std::move(welded_nodes);
+    for (auto& elem : m_elements) {
+        for (int n = 0; n < 8; ++n) {
+            int old_id = elem.node_ids[n];
+            if (old_id >= 0 && old_id < static_cast<int>(old_to_new.size())) {
+                elem.node_ids[n] = old_to_new[old_id];
+            }
+        }
+    }
+    for (auto& tr : m_trusses) {
+        for (int n = 0; n < 2; ++n) {
+            int old_id = tr.node_ids[n];
+            if (old_id >= 0 && old_id < static_cast<int>(old_to_new.size())) {
+                tr.node_ids[n] = old_to_new[old_id];
+            }
+        }
+    }
+    for (auto& bm : m_beams) {
+        for (int n = 0; n < 2; ++n) {
+            int old_id = bm.node_ids[n];
+            if (old_id >= 0 && old_id < static_cast<int>(old_to_new.size())) {
+                bm.node_ids[n] = old_to_new[old_id];
+            }
+        }
+    }
+    for (auto& rn : m_rot_nodes) {
+        if (rn.global_node_id >= 0 && rn.global_node_id < static_cast<int>(old_to_new.size())) {
+            rn.global_node_id = old_to_new[rn.global_node_id];
+        }
+    }
+
+    m_surface_facets_dirty = true;
+    computeLumpedMasses();
+    extractBoundaryFacets();
+    computeGlobalEnergy();
+    return merged_count;
+}
+
+template <typename T>
 void FEMSolver3D<T>::addTruss(int n1, int n2, T area, const MaterialTable3D& mat, T failure_strain, int64_t lsdyna_id) {
     if (n1 < 0 || n1 >= static_cast<int>(m_nodes.size()) || n2 < 0 || n2 >= static_cast<int>(m_nodes.size()) || n1 == n2) {
         return;

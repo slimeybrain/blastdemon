@@ -17,7 +17,8 @@ import {
     FEMSectionType,
     CAD_PALETTE,
     createDefaultFEMSetupConfig,
-    getPartColor
+    getPartColor,
+    syncModelFEMSetup
 } from './fem-setup-types.js';
 import { FEMDeckParser, ParsedFEMPreview } from './fem-deck-parser.js';
 
@@ -156,37 +157,33 @@ export class FEMSetupModal {
     }
 
     private loadInitialConfig(): FEMSetupConfig {
-        const structuralNodes = this.model.nodes.filter(n =>
-            ['FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D'].includes(n.type)
-        );
+        const config = syncModelFEMSetup(this.model, getLSDynaDeckMeta);
 
-        // Check if fem_setup is already saved on femNode or on a domain node in this model
-        let existingSetup: FEMSetupConfig | null = null;
-        if (this.femNode.parameters.fem_setup && typeof this.femNode.parameters.fem_setup === 'object') {
-            existingSetup = this.femNode.parameters.fem_setup;
-        } else {
-            const domainNode = this.model.nodes.find(n => n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D');
-            if (domainNode?.parameters.fem_setup && typeof domainNode.parameters.fem_setup === 'object') {
-                existingSetup = domainNode.parameters.fem_setup;
+        // Preselect the active FEM entity from StateManager if set, otherwise the clicked node's part
+        const activeEntity = this.stateManager.getSelectedFEMEntity();
+        if (activeEntity) {
+            if (activeEntity.type === 'part') {
+                this.activeTab = 'parts';
+                this.selectedPartId = Number(activeEntity.id);
+            } else if (activeEntity.type === 'set') {
+                this.activeTab = 'sets';
+                this.selectedSetId = Number(activeEntity.id);
+            } else if (activeEntity.type === 'bc') {
+                this.activeTab = 'bcs';
+                this.selectedBCId = String(activeEntity.id);
+            } else if (activeEntity.type === 'contact') {
+                this.activeTab = 'contacts';
+                this.selectedContactId = String(activeEntity.id);
             }
         }
 
-        const config: FEMSetupConfig = existingSetup
-            ? JSON.parse(JSON.stringify(existingSetup))
-            : createDefaultFEMSetupConfig();
-
-        // 1. Synchronize Canvas Materials into this.config.materials
-        this.syncModelMaterialsIntoConfig(config);
-
-        // 2. Synchronize Model Structural Nodes into this.config.parts
-        this.syncModelNodesIntoParts(config, structuralNodes);
-
-        // 3. Preselect the appropriate part (the clicked node, or the first part)
-        const matchingPart = config.parts.find(p => p.node_id === this.femNode.id);
-        if (matchingPart) {
-            this.selectedPartId = matchingPart.part_id;
-        } else if (config.parts.length > 0) {
-            this.selectedPartId = config.parts[0].part_id;
+        if (this.selectedPartId === null) {
+            const matchingPart = config.parts.find(p => p.node_id === this.femNode.id);
+            if (matchingPart) {
+                this.selectedPartId = matchingPart.part_id;
+            } else if (config.parts.length > 0) {
+                this.selectedPartId = config.parts[0].part_id;
+            }
         }
 
         return config;

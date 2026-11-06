@@ -842,6 +842,8 @@ function render(): void {
 
         const pRadius = Math.max(0.6, 1.1 / zoom);
         const numParticles = currentParticles.length / 2;
+        const useFastRect = numParticles > 2000;
+        const diam = pRadius * 2;
 
         context.beginPath();
         for (let k = 0; k < numParticles; ++k) {
@@ -853,21 +855,31 @@ function render(): void {
                 const pyR = dy + (1.0 - yp / max_z) * dh;
                 const pxL = dx + dw / 2 - (xp / max_r) * (dw / 2);
 
-                context.moveTo(pxR + pRadius, pyR);
-                context.arc(pxR, pyR, pRadius, 0, 2 * Math.PI);
-
-                context.moveTo(pxL + pRadius, pyR);
-                context.arc(pxL, pyR, pRadius, 0, 2 * Math.PI);
+                if (useFastRect) {
+                    context.rect(pxR - pRadius, pyR - pRadius, diam, diam);
+                    context.rect(pxL - pRadius, pyR - pRadius, diam, diam);
+                } else {
+                    context.moveTo(pxR + pRadius, pyR);
+                    context.arc(pxR, pyR, pRadius, 0, 2 * Math.PI);
+                    context.moveTo(pxL + pRadius, pyR);
+                    context.arc(pxL, pyR, pRadius, 0, 2 * Math.PI);
+                }
             } else {
                 const px = dx + (xp / max_r) * dw;
                 const py = dy + (1.0 - yp / max_z) * dh;
 
-                context.moveTo(px + pRadius, py);
-                context.arc(px, py, pRadius, 0, 2 * Math.PI);
+                if (useFastRect) {
+                    context.rect(px - pRadius, py - pRadius, diam, diam);
+                } else {
+                    context.moveTo(px + pRadius, py);
+                    context.arc(px, py, pRadius, 0, 2 * Math.PI);
+                }
             }
         }
         context.fill();
-        context.stroke();
+        if (!useFastRect) {
+            context.stroke();
+        }
         context.restore();
     }
 

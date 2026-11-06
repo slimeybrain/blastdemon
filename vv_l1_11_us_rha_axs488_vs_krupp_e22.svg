@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; fill: #c9d1d9; }
+    .title { font-size: 16px; font-weight: 600; fill: #f0f6fc; }
+    .axis-label { font-size: 12px; fill: #8b949e; }
+    .tick { font-size: 10px; fill: #8b949e; }
+    .grid { stroke: #30363d; stroke-width: 1; stroke-dasharray: 4,4; }
+    .axis-line { stroke: #484f58; stroke-width: 1.5; }
+    .exact-curve { fill: none; stroke: #58a6ff; stroke-width: 2.5; }
+    .num-curve { fill: none; stroke: #f0883e; stroke-width: 2.0; stroke-dasharray: 6,3; }
+    .corridor-yellow { fill: rgba(210, 153, 34, 0.18); }
+    .corridor-green { fill: rgba(46, 160, 67, 0.30); }
+  </style>
+  <rect width="800" height="450" fill="#0d1117" rx="8"/>
+  <text x="400" y="30" text-anchor="middle" class="title">VV-L1-11: RHA Viscoplasticity at 1000 s^-1: US AXS-488 (240 HB) vs German Krupp E22 (285 HB)</text>
+  <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
+  <text x="67" y="394" text-anchor="end" class="tick">733</text>
+  <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
+  <text x="67" y="326" text-anchor="end" class="tick">816</text>
+  <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
+  <text x="67" y="258" text-anchor="end" class="tick">898</text>
+  <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
+  <text x="67" y="190" text-anchor="end" class="tick">980</text>
+  <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
+  <text x="67" y="122" text-anchor="end" class="tick">1.06e+03</text>
+  <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
+  <text x="67" y="54" text-anchor="end" class="tick">1.14e+03</text>
+  <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
+  <text x="75" y="408" text-anchor="middle" class="tick">0</text>
+  <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
+  <text x="213" y="408" text-anchor="middle" class="tick">0.05</text>
+  <line x1="351" y1="50" x2="351" y2="390" class="grid"/>
+  <text x="351" y="408" text-anchor="middle" class="tick">0.1</text>
+  <line x1="489" y1="50" x2="489" y2="390" class="grid"/>
+  <text x="489" y="408" text-anchor="middle" class="tick">0.15</text>
+  <line x1="627" y1="50" x2="627" y2="390" class="grid"/>
+  <text x="627" y="408" text-anchor="middle" class="tick">0.2</text>
+  <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
+  <text x="765" y="408" text-anchor="middle" class="tick">0.25</text>
+  <path class="corridor-yellow" d="M 75 330 L 88.8 230 L 103 209 L 116 195 L 130 183 L 144 174 L 158 166 L 172 158 L 185 152 L 199 146 L 213 140 L 227 135 L 241 130 L 254 126 L 268 122 L 282 118 L 296 114 L 310 110 L 323 106 L 337 103 L 351 99.7 L 365 96.5 L 379 93.5 L 392 90.5 L 406 87.7 L 420 84.9 L 434 82.2 L 448 79.5 L 461 77 L 475 74.5 L 489 72 L 503 69.7 L 517 67.3 L 530 65.1 L 544 62.8 L 558 60.7 L 572 58.5 L 586 56.4 L 599 54.4 L 613 52.4 L 627 50.4 L 641 48.5 L 655 46.6 L 668 44.7 L 682 42.8 L 696 41 L 710 39.2 L 724 37.5 L 737 35.8 L 751 34.1 L 765 32.4 L 765 124 L 751 126 L 737 127 L 724 129 L 710 130 L 696 132 L 682 134 L 668 135 L 655 137 L 641 139 L 627 141 L 613 142 L 599 144 L 586 146 L 572 148 L 558 150 L 544 152 L 530 154 L 517 156 L 503 158 L 489 160 L 475 162 L 461 165 L 448 167 L 434 169 L 420 172 L 406 174 L 392 177 L 379 180 L 365 182 L 351 185 L 337 188 L 323 191 L 310 194 L 296 198 L 282 201 L 268 205 L 254 209 L 241 213 L 227 217 L 213 222 L 199 227 L 185 232 L 172 238 L 158 245 L 144 252 L 130 261 L 116 271 L 103 284 L 88.8 303 L 75 393 Z"/>
+  <path class="corridor-green" d="M 75 355 L 88.8 260 L 103 239 L 116 225 L 130 214 L 144 205 L 158 197 L 172 190 L 185 184 L 199 178 L 213 173 L 227 168 L 241 163 L 254 159 L 268 155 L 282 151 L 296 147 L 310 144 L 323 140 L 337 137 L 351 134 L 365 131 L 379 128 L 392 125 L 406 122 L 420 120 L 434 117 L 448 114 L 461 112 L 475 110 L 489 107 L 503 105 L 517 103 L 530 101 L 544 98.4 L 558 96.3 L 572 94.3 L 586 92.3 L 599 90.3 L 613 88.4 L 627 86.5 L 641 84.6 L 655 82.8 L 668 81 L 682 79.2 L 696 77.5 L 710 75.7 L 724 74.1 L 737 72.4 L 751 70.8 L 765 69.1 L 765 87.5 L 751 89.1 L 737 90.7 L 724 92.3 L 710 94 L 696 95.7 L 682 97.4 L 668 99.1 L 655 101 L 641 103 L 627 105 L 613 106 L 599 108 L 586 110 L 572 112 L 558 114 L 544 116 L 530 118 L 517 120 L 503 123 L 489 125 L 475 127 L 461 130 L 448 132 L 434 134 L 420 137 L 406 140 L 392 142 L 379 145 L 365 148 L 351 151 L 337 154 L 323 157 L 310 161 L 296 164 L 282 168 L 268 172 L 254 176 L 241 180 L 227 184 L 213 189 L 199 194 L 185 200 L 172 206 L 158 213 L 144 221 L 130 230 L 116 240 L 103 254 L 88.8 274 L 75 368 Z"/>
+  <path class="exact-curve" d="M 75 362 L 88.8 267 L 103 247 L 116 233 L 130 222 L 144 213 L 158 205 L 172 198 L 185 192 L 199 186 L 213 181 L 227 176 L 241 172 L 254 167 L 268 163 L 282 159 L 296 156 L 310 152 L 323 149 L 337 146 L 351 142 L 365 139 L 379 137 L 392 134 L 406 131 L 420 128 L 434 126 L 448 123 L 461 121 L 475 118 L 489 116 L 503 114 L 517 112 L 530 109 L 544 107 L 558 105 L 572 103 L 586 101 L 599 99.3 L 613 97.4 L 627 95.5 L 641 93.6 L 655 91.8 L 668 90 L 682 88.3 L 696 86.6 L 710 84.9 L 724 83.2 L 737 81.6 L 751 79.9 L 765 78.3 "/>
+  <path class="num-curve" d="M 75 362 L 88.8 267 L 103 247 L 116 233 L 130 222 L 144 213 L 158 205 L 172 198 L 185 192 L 199 186 L 213 181 L 227 176 L 241 172 L 254 167 L 268 163 L 282 159 L 296 156 L 310 152 L 323 149 L 337 146 L 351 142 L 365 139 L 379 137 L 392 134 L 406 131 L 420 128 L 434 126 L 448 123 L 461 121 L 475 118 L 489 116 L 503 114 L 517 112 L 530 109 L 544 107 L 558 105 L 572 103 L 586 101 L 599 99.3 L 613 97.4 L 627 95.5 L 641 93.6 L 655 91.8 L 668 90 L 682 88.3 L 696 86.6 L 710 84.9 L 724 83.2 L 737 81.6 L 751 79.9 L 765 78.3 "/>
+  <circle cx="75" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="88.8" cy="267" r="3.5" fill="#f0883e"/>
+  <circle cx="103" cy="247" r="3.5" fill="#f0883e"/>
+  <circle cx="116" cy="233" r="3.5" fill="#f0883e"/>
+  <circle cx="130" cy="222" r="3.5" fill="#f0883e"/>
+  <circle cx="144" cy="213" r="3.5" fill="#f0883e"/>
+  <circle cx="158" cy="205" r="3.5" fill="#f0883e"/>
+  <circle cx="172" cy="198" r="3.5" fill="#f0883e"/>
+  <circle cx="185" cy="192" r="3.5" fill="#f0883e"/>
+  <circle cx="199" cy="186" r="3.5" fill="#f0883e"/>
+  <circle cx="213" cy="181" r="3.5" fill="#f0883e"/>
+  <circle cx="227" cy="176" r="3.5" fill="#f0883e"/>
+  <circle cx="241" cy="172" r="3.5" fill="#f0883e"/>
+  <circle cx="254" cy="167" r="3.5" fill="#f0883e"/>
+  <circle cx="268" cy="163" r="3.5" fill="#f0883e"/>
+  <circle cx="282" cy="159" r="3.5" fill="#f0883e"/>
+  <circle cx="296" cy="156" r="3.5" fill="#f0883e"/>
+  <circle cx="310" cy="152" r="3.5" fill="#f0883e"/>
+  <circle cx="323" cy="149" r="3.5" fill="#f0883e"/>
+  <circle cx="337" cy="146" r="3.5" fill="#f0883e"/>
+  <circle cx="351" cy="142" r="3.5" fill="#f0883e"/>
+  <circle cx="365" cy="139" r="3.5" fill="#f0883e"/>
+  <circle cx="379" cy="137" r="3.5" fill="#f0883e"/>
+  <circle cx="392" cy="134" r="3.5" fill="#f0883e"/>
+  <circle cx="406" cy="131" r="3.5" fill="#f0883e"/>
+  <circle cx="420" cy="128" r="3.5" fill="#f0883e"/>
+  <circle cx="434" cy="126" r="3.5" fill="#f0883e"/>
+  <circle cx="448" cy="123" r="3.5" fill="#f0883e"/>
+  <circle cx="461" cy="121" r="3.5" fill="#f0883e"/>
+  <circle cx="475" cy="118" r="3.5" fill="#f0883e"/>
+  <circle cx="489" cy="116" r="3.5" fill="#f0883e"/>
+  <circle cx="503" cy="114" r="3.5" fill="#f0883e"/>
+  <circle cx="517" cy="112" r="3.5" fill="#f0883e"/>
+  <circle cx="530" cy="109" r="3.5" fill="#f0883e"/>
+  <circle cx="544" cy="107" r="3.5" fill="#f0883e"/>
+  <circle cx="558" cy="105" r="3.5" fill="#f0883e"/>
+  <circle cx="572" cy="103" r="3.5" fill="#f0883e"/>
+  <circle cx="586" cy="101" r="3.5" fill="#f0883e"/>
+  <circle cx="599" cy="99.3" r="3.5" fill="#f0883e"/>
+  <circle cx="613" cy="97.4" r="3.5" fill="#f0883e"/>
+  <circle cx="627" cy="95.5" r="3.5" fill="#f0883e"/>
+  <circle cx="641" cy="93.6" r="3.5" fill="#f0883e"/>
+  <circle cx="655" cy="91.8" r="3.5" fill="#f0883e"/>
+  <circle cx="668" cy="90" r="3.5" fill="#f0883e"/>
+  <circle cx="682" cy="88.3" r="3.5" fill="#f0883e"/>
+  <circle cx="696" cy="86.6" r="3.5" fill="#f0883e"/>
+  <circle cx="710" cy="84.9" r="3.5" fill="#f0883e"/>
+  <circle cx="724" cy="83.2" r="3.5" fill="#f0883e"/>
+  <circle cx="737" cy="81.6" r="3.5" fill="#f0883e"/>
+  <circle cx="751" cy="79.9" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="78.3" r="3.5" fill="#f0883e"/>
+  <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
+  <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
+  <text x="400" y="435" text-anchor="middle" class="axis-label">Equivalent Plastic Strain ep_bar (-)</text>
+  <text x="20" y="225" text-anchor="middle" transform="rotate(-90 20 225)" class="axis-label">Flow Stress sigma_flow (MPa)</text>
+  <rect x="570" y="55" width="195" height="85" fill="#161b22" stroke="#30363d" rx="4"/>
+  <line x1="580" y1="73" x2="605" y2="73" stroke="#58a6ff" stroke-width="2.5"/>
+  <text x="612" y="77" font-size="11">Analytical / Exact</text>
+  <line x1="580" y1="93" x2="605" y2="93" stroke="#f0883e" stroke-width="2.0" stroke-dasharray="4,2"/>
+  <circle cx="592" cy="93" r="3" fill="#f0883e"/>
+  <text x="612" y="97" font-size="11">Numerical Result</text>
+  <rect x="580" y="107" width="25" height="10" fill="rgba(46,160,67,0.5)"/>
+  <text x="612" y="116" font-size="10">Acceptance Corridor ±1%</text>
+  <rect x="580" y="123" width="25" height="10" fill="rgba(210,153,34,0.3)"/>
+  <text x="612" y="132" font-size="10">Tolerance Corridor ±5%</text>
+</svg>

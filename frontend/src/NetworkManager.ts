@@ -32,7 +32,17 @@ export class NetworkManager {
                     if (data.type === 'IO_SUCCESS') {
                         const formattedTime = (typeof data.time === 'number') ? data.time.toExponential(6) : data.time;
                         this.log(`[System] Frame written to disk at t=${formattedTime}s`, 'system');
-                    } else if (data.type !== 'TELEMETRY' && data.type !== 'progress') {
+                    } else if (
+                        data.type !== 'TELEMETRY' &&
+                        data.type !== 'TELEMETRY_2D' &&
+                        data.type !== 'TELEMETRY_3D' &&
+                        data.type !== 'TELEMETRY_MPM_2D' &&
+                        data.type !== 'TELEMETRY_FEM_3D' &&
+                        data.type !== 'progress' &&
+                        data.type !== 'progress_2d' &&
+                        data.type !== 'progress_3d' &&
+                        data.type !== 'resource_pulse'
+                    ) {
                         this.log(JSON.stringify(data), 'default');
                     }
                 } catch (e) {
@@ -116,6 +126,9 @@ export class NetworkManager {
 
         line.textContent = message;
         this.terminal.appendChild(line);
+        while (this.terminal.childNodes.length > 500) {
+            this.terminal.removeChild(this.terminal.firstChild!);
+        }
         this.terminal.scrollTop = this.terminal.scrollHeight;
     }
 }

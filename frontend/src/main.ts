@@ -150,7 +150,7 @@ const stateManager = new StateManager(initialState);
 const savedState = stateManager.loadWorkspace();
 const activeState = stateManager.getCurrentState() || savedState || initialState;
 
-const playbackBuffer = new PlaybackRingBuffer(20, 128);
+const playbackBuffer = new PlaybackRingBuffer(1, 0);
 (window as any).playbackBuffer = playbackBuffer;
 
 const platformBridge = PlatformBridge.getInstance();
@@ -2429,18 +2429,23 @@ networkManager.onMessage(async (data) => {
         const model = stateManager.getAllModels().find(m => m.id === (modelId || targetModelId));
         const solverNodes = model?.nodes.filter(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain2D' || n.type === 'MPMDomain3D' || n.type === 'FSICoupler2D' || n.type === 'FSICoupler3D' || n.type === 'FEMDomain3D' || n.type === 'FEMFSICoupler3D') || [];
         if (solverNodes.length > 0) {
-            stateManager.pushTelemetry(solverNodes[0].id, payloadBuffer, targetModelId);
-            stateManager.setBinaryTelemetry(solverNodes[0].id, payloadBuffer, targetModelId);
+            const frameMagic = payloadBuffer.byteLength >= 4 ? new DataView(payloadBuffer).getUint32(0, true) : 0;
+            const isHeavy3DStream = frameMagic === 0x4d504d33 || frameMagic === 0x50545033 || frameMagic === 0x43494c53;
+            if (!isHeavy3DStream) {
+                stateManager.pushTelemetry(solverNodes[0].id, payloadBuffer, targetModelId);
+                stateManager.setBinaryTelemetry(solverNodes[0].id, payloadBuffer, targetModelId);
+            }
             const curStep = (targetModelId ? stateManager.getModelStep(targetModelId) : 0) || 0;
             const curTime = (targetModelId ? stateManager.getModelSimTime(targetModelId) : 0) || 0;
             const curDt = (targetModelId ? stateManager.getModelDt(targetModelId) : 0) || 0;
             const bufferedFrame = playbackBuffer.addFrame(payloadBuffer, { modelId: targetModelId, step: curStep, time: curTime, metrics: { dt: curDt } });
             const hasViewport = Array.from(layoutManager.components.values()).some((c: any) => c.type === 'VIEWPORT' || c.type === 'MULTI_VIEW_STAGE');
+            const telemetry3DCount = Array.from(layoutManager.components.values()).filter((c: any) => c.type === 'TELEMETRY_3D' && c.instance).length;
             layoutManager.components.forEach(comp => {
                 if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
                     comp.instance.dispatchFrame(bufferedFrame, true);
                 } else if (comp.type === 'TELEMETRY_3D' && comp.instance && !hasViewport) {
-                    comp.instance.pushFrame(payloadBuffer, targetModelId);
+                    comp.instance.pushFrame(payloadBuffer, targetModelId, isHeavy3DStream && telemetry3DCount === 1);
                 }
             });
         }
@@ -2463,10 +2468,10 @@ networkManager.onMessage(async (data) => {
                 const vpNodes = state?.nodes.filter(n => n.type === 'Telemetry3DViewport') || [];
                 layoutManager.components.forEach(comp => {
                     if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance) {
-                        comp.instance.setSTLGeometry?.(verts, modelId);
+                        comp.instance.setSTLGeometry?.(verts, modelId, filePath);
                     }
                     if (comp.type === 'TELEMETRY_3D' && comp.instance) {
-                        comp.instance.setSTLGeometry(verts, modelId);
+                        comp.instance.setSTLGeometry(verts, modelId, filePath);
                     }
                 });
                 
@@ -2475,7 +2480,7 @@ networkManager.onMessage(async (data) => {
                     layoutManager.components.forEach(comp => {
                         if (comp.type === 'NODE_GRAPH' && comp.instance) {
                             vpNodes.forEach(vpNode => {
-                                comp.instance.setSTLGeometry(vpNode.id, verts);
+                                comp.instance.setSTLGeometry(vpNode.id, verts, filePath);
                             });
                             comp.instance.render(state);
                         }
@@ -2484,7 +2489,7 @@ networkManager.onMessage(async (data) => {
                 
                 layoutManager.components.forEach(comp => {
                     if (comp.type === 'NODE_VIEWER' && comp.instance) {
-                        comp.instance.setSTLGeometry(verts, modelId);
+                        comp.instance.setSTLGeometry(verts, modelId, filePath);
                     }
                     if (comp.type === 'PROPERTY_GRID' && comp.instance) {
                         comp.instance.updateLiveStats?.();

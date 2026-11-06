@@ -431,6 +431,10 @@ struct alignas(32) MPMGridNode3D {
     float m_reacted{0.0f};      // Reacted JWL explosive mass (4B)
     float v_energetic{0.0f};    // Shape-weighted volume of energetic particles (sum N_i V_p) (4B)
     float v_reacted{0.0f};      // Shape-weighted volume of reacted products (sum N_i V_p lambda) (4B)
+    float temperature{293.0f};  // Mass-weighted nodal temperature (K) (4B)
+    float dT_cond{0.0f};        // Grid thermal conduction increment (K) (4B)
+    float t_star{0.0f};         // Mass-weighted homologous temperature T* in [0, 1] (4B)
+    float q_fric{0.0f};         // Contact frictional heating specific energy increment (J/kg) (4B)
 
     static constexpr float MIN_MASS = 1.0e-20f;
     float v(int i) const { return m > MIN_MASS ? p[i] / m : 0.0f; }
@@ -475,7 +479,7 @@ public:
     void addDetonator(const MPMDetonator3D& det) { m_detonators.push_back(det); }
     const std::vector<MPMDetonator3D>& getDetonators() const { return m_detonators; }
     std::vector<MPMDetonator3D>& getDetonators() { return m_detonators; }
-    bool interpolateGridVelocity(float x, float y, float z, float& vx, float& vy, float& vz) const;
+    bool interpolateGridVelocity(float x, float y, float z, float& vx, float& vy, float& vz, int target_object_id = -1) const;
     void updateDetonators(float dt);
     void fireDetonator(MPMDetonator3D& det);
 
@@ -590,7 +594,7 @@ public:
     // Getters & Telemetry
     std::vector<MPMParticle3D>& getParticles() { return m_particles; }
     const std::vector<MPMParticle3D>& getParticles() const { return m_particles; }
-    MPMVTKSnapshot3D extractVTKSnapshot(bool has_vel = true, bool has_stress = true, bool has_strain = true, bool has_damage = true, bool has_temp = true, bool has_pressure = true, bool has_material_id = true, bool has_object_id = true) const;
+    MPMVTKSnapshot3D extractVTKSnapshot(bool has_vel = true, bool has_stress = true, bool has_strain = true, bool has_damage = true, bool has_temp = true, bool has_pressure = true, bool has_material_id = true, bool has_object_id = true, bool has_particle_density = true) const;
 
     std::vector<MaterialTable3D>& getMaterialTables() { return m_material_tables; }
     const std::vector<MaterialTable3D>& getMaterialTables() const { return m_material_tables; }
@@ -686,6 +690,14 @@ public:
     void setObjectMaterialMapping(const std::vector<int>& obj_to_mat, int num_materials);
     int getNumMaterials() const { return m_num_materials; }
 
+    // Thermo-Mechanical Bonding, Frictional Heating & Thermal Conduction Toggles
+    void setImpactWelding(bool enable) { m_enable_impact_welding = enable; }
+    bool getEnableImpactWelding() const { return m_enable_impact_welding; }
+    void setFrictionalHeating(bool enable) { m_enable_frictional_heating = enable; }
+    bool getEnableFrictionalHeating() const { return m_enable_frictional_heating; }
+    void setThermalConduction(bool enable) { m_enable_thermal_conduction = enable; }
+    bool getEnableThermalConduction() const { return m_enable_thermal_conduction; }
+
     // Retained for backward API compatibility (Clean Single-Grid Continuum Contact)
     void setSdfBarrier([[maybe_unused]] bool enable = false,
                        [[maybe_unused]] float restitution = 0.10f,
@@ -714,6 +726,7 @@ public:
 
 private:
     void updateGridKinematics(float dt);
+    void applyGridThermalConduction(float dt);
     void gridToParticle(float dt);
     void updateStressState(float dt);
     void gridToParticleAndStress(float dt);
@@ -750,6 +763,9 @@ private:
     MPMTimeIntegrationScheme m_time_scheme{MPMTimeIntegrationScheme::Leapfrog};
     float m_flip_blend{0.95f};
     bool m_smooth_plastic_strain{true};
+    bool m_enable_impact_welding{false};
+    bool m_enable_frictional_heating{false};
+    bool m_enable_thermal_conduction{false};
     bool m_enable_dem_contact{false};
     float m_dem_friction{0.20f};
     float m_dem_restitution{0.0f};
@@ -772,6 +788,9 @@ private:
         float B_new[3][3]{{0,0,0},{0,0,0},{0,0,0}};
         float L_new[3][3]{{0,0,0},{0,0,0},{0,0,0}};
         float ep_smoothed{0.0f};
+        float q_fric{0.0f};
+        float t_interp{0.0f};
+        float dt_cond{0.0f};
     };
     MPMGatheredKinematics3D gatherParticleKinematics(const MPMParticle3D& p, float dt) const;
     MPMGatheredKinematics3D gatherParticleKinematicsBardenhagen(const MPMParticle3D& p, float dt) const;
@@ -794,7 +813,7 @@ private:
     void gridToParticleAndStressBardenhagen(float dt);
 
     std::vector<MaterialTable3D> m_material_tables;
-    std::vector<MPMGridNode3D> m_grid;
+    mutable std::vector<MPMGridNode3D> m_grid;
     std::vector<MPMParticle3D> m_particles;
     std::vector<float> m_f_ext_fsi;
     std::vector<MPMDetonator3D> m_detonators;

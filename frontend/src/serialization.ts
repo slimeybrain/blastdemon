@@ -1,5 +1,6 @@
 import { SimulationState, Node } from './types.js';
-import { resolveResourcePath, isSeabedMaterialNode } from './state-manager.js';
+import { resolveResourcePath, isSeabedMaterialNode, getLSDynaDeckMeta } from './state-manager.js';
+import { syncModelFEMSetup } from './fem-setup-types.js';
 
 export function isAirMaterialNode(node: any): boolean {
     if (!node || node.type !== 'Material') return false;
@@ -298,13 +299,36 @@ export function serializeMPMObjectsWithSleeve(
     const domainParticleDist = mpmDomain?.parameters?.particle_distribution;
     const domainBoundaryFill = mpmDomain?.parameters?.boundary_filling;
     flattenedParams['ppc'] = domainPpc;
+    flattenedParams['bardenhagen_grouping_policy'] = mpmDomain?.parameters?.bardenhagen_grouping_policy || 'Per-Object Independent';
 
     const mpmObjects: any[] = [];
-    const targetMpmNodes = mpmDomain ? (
-        state.connections.filter(c => c.toNode === mpmDomain.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in'))
+    let targetMpmNodes: (Node | undefined)[] = [];
+    if (mpmDomain) {
+        const directObjs = state.connections
+            .filter(c => c.toNode === mpmDomain.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in'))
             .map(c => state.nodes.find(n => n.id === c.fromNode))
-            .filter(n => n && n.type === 'MPMObject3D')
-    ) : mpmObjNodes;
+            .filter(n => n && n.type === 'MPMObject3D');
+        const domainCouplers = state.nodes.filter(n =>
+            n.type === 'MPMContactCoupler3D' && (
+                state.connections.some(c => c.fromNode === n.id && c.toNode === mpmDomain.id) ||
+                n.parameters?.target_domain === mpmDomain.id
+            )
+        );
+        const couplerIds = new Set(domainCouplers.map(c => c.id));
+        const couplerObjs = state.connections
+            .filter(c => couplerIds.has(c.toNode))
+            .map(c => state.nodes.find(n => n.id === c.fromNode))
+            .filter(n => n && n.type === 'MPMObject3D');
+        const seenIds = new Set<string>();
+        for (const o of [...directObjs, ...couplerObjs]) {
+            if (o && !seenIds.has(o.id)) {
+                seenIds.add(o.id);
+                targetMpmNodes.push(o);
+            }
+        }
+    } else {
+        targetMpmNodes = mpmObjNodes;
+    }
     const finalMpmNodes = (targetMpmNodes.length > 0 ? targetMpmNodes : mpmObjNodes);
 
     for (const objNode of finalMpmNodes) {
@@ -364,10 +388,43 @@ export function serializeMPMObjectsWithSleeve(
         } else if (!objParams['material_model']) {
             objParams['material_model'] = objNode.parameters?.['material_model'] || 'Hypoelastic';
         }
+        const domainTransferScheme = mpmDomain?.parameters?.transfer_scheme;
+        const objTransferScheme = objNode.parameters?.transfer_scheme;
+        const matTransferScheme = matNode?.parameters?.transfer_scheme;
+        if (objTransferScheme && objTransferScheme !== 'Default' && objTransferScheme !== 'BSpline') {
+            objParams['transfer_scheme'] = objTransferScheme;
+        } else if (domainTransferScheme && domainTransferScheme !== 'Default') {
+            objParams['transfer_scheme'] = domainTransferScheme;
+        } else if (matTransferScheme && matTransferScheme !== 'Default') {
+            objParams['transfer_scheme'] = matTransferScheme;
+        } else if (objTransferScheme) {
+            objParams['transfer_scheme'] = objTransferScheme;
+        }
+        if (!objParams['particle_distribution'] && domainParticleDist) {
+            objParams['particle_distribution'] = domainParticleDist;
+        }
+        if (!objParams['boundary_filling'] && domainBoundaryFill) {
+            objParams['boundary_filling'] = domainBoundaryFill;
+        }
         if (objParams['vel_x'] === undefined && objParams['initial_velocity_x'] !== undefined) objParams['vel_x'] = objParams['initial_velocity_x'];
         if (objParams['vel_y'] === undefined && objParams['initial_velocity_y'] !== undefined) objParams['vel_y'] = objParams['initial_velocity_y'];
         if (objParams['vel_z'] === undefined && objParams['initial_velocity_z'] !== undefined) objParams['vel_z'] = objParams['initial_velocity_z'];
         objParams['ppc'] = Math.max(1, Math.round(Number(objNode.parameters?.ppc ?? domainPpc)));
+
+        // Resolve effective velocity_group from connected MPMContactCoupler3D or node parameter
+        const couplerConn = state.connections.find(c => c.fromNode === objNode.id && state.nodes.some(n => n.id === c.toNode && n.type === 'MPMContactCoupler3D'));
+        const couplerNode = couplerConn ? state.nodes.find(n => n.id === couplerConn.toNode) : undefined;
+        if (couplerNode) {
+            const cMode = String(couplerNode.parameters?.coupler_mode || 'Bonded (Single-Velocity)');
+            if (cMode.includes('Independent')) {
+                objParams['velocity_group'] = 'Independent';
+            } else {
+                objParams['velocity_group'] = String(couplerNode.parameters?.coupler_group_tag || `Coupler_${couplerNode.id}`);
+            }
+        } else {
+            objParams['velocity_group'] = String(objNode.parameters?.velocity_group || 'Independent (Auto)');
+        }
+
         mpmObjects.push(objParams);
     }
 
@@ -954,7 +1011,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
         'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
         // FEM keys
-        'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy',
+        'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy', 'node_merge_tolerance',
         'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
         'rebarRadius', 'viewport_refresh_rate', 'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
         'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
@@ -1012,10 +1069,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
     ];
 
     const booleanKeys = [
-        'enabled', 'afterburn_enabled', 'smooth_plastic_strain', 'enable_sdf_barrier', 'enable_dem_contact', 'export_ascii', 'export_binary', 'export_hdf5',
+        'enabled', 'afterburn_enabled', 'smooth_plastic_strain', 'enable_sdf_barrier', 'enable_dem_contact',
+        'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction',
+        'export_ascii', 'export_binary', 'export_hdf5',
         'include_header', 'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy',
         'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_materials', 'qty_water', 'qty_soil',
-        'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id',
+        'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id', 'qty_mpm_particle_density',
         'qty_overpressure', 'qty_impulse',
         'export_slices', 'export_volumes', 'export_fem', 'export_mpm', 'export_pvd',
         'roi_enabled', 'is_ideal_gas', 'directional_crack_band', 'enable_heterogeneity',
@@ -2489,10 +2548,10 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     });
                 }
 
-                const setup = objNode.parameters?.['fem_setup'] || (femDomain ? femDomain.parameters?.['fem_setup'] : undefined);
+                const setup = objNode.parameters?.['fem_setup'] || (femDomain ? femDomain.parameters?.['fem_setup'] : undefined) || syncModelFEMSetup(state, getLSDynaDeckMeta);
                 if (setup) {
                     if (setup.parts && Array.isArray(setup.parts)) {
-                        const primaryPart = setup.parts.find((p: any) => p.node_id === objNode.id || p.id === objNode.id || p.name === objNode.parameters?.name) || setup.parts[0];
+                        const primaryPart = setup.parts.find((p: any) => p.canvas_node_id === objNode.id || p.node_id === objNode.id || p.id === objNode.id || p.name === objNode.parameters?.name) || setup.parts[0];
                         if (primaryPart) {
                             if (objNode.parameters?.['nx'] !== undefined) {
                                 objParams['nx'] = Number(objNode.parameters['nx']);
@@ -2568,9 +2627,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                             }
                         }
                         objParams['fem_parts'] = setup.parts.map((p: any) => {
-                            const isSelfPart = (setup.parts.length === 1 || p.node_id === objNode.id || p.id === objNode.id);
+                            const isSelfPart = (setup.parts.length === 1 || p.canvas_node_id === objNode.id || p.node_id === objNode.id || p.id === objNode.id);
                             let mappedMatId: number | undefined = undefined;
-                            if (typeof p.material_assignment === 'string') {
+                            const matDef = Array.isArray(setup.materials) ? setup.materials.find((m: any) => m.mat_id === p.material_id) : undefined;
+                            if (matDef?.canvas_node_id && matIdMap.has(matDef.canvas_node_id)) {
+                                mappedMatId = matIdMap.get(matDef.canvas_node_id);
+                            } else if (typeof p.material_assignment === 'string') {
                                 if (matIdMap.has(p.material_assignment)) {
                                     mappedMatId = matIdMap.get(p.material_assignment);
                                 } else if (p.material_assignment.startsWith('DECK_MAT_')) {
@@ -2578,10 +2640,22 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                                 }
                             } else if (typeof p.material_assignment === 'number') {
                                 mappedMatId = p.material_assignment;
+                            } else if (typeof p.material_id === 'number' && p.material_id >= 1) {
+                                mappedMatId = Math.max(0, p.material_id - 1);
                             }
+                            const secToTopo: Record<string, string> = {
+                                'SolidHex8': 'Hex8', 'SolidHex8_SRI': 'Hex8_SRI', 'SolidHex8_Full': 'Hex8_Full',
+                                'SolidTet4': 'Tet4', 'SolidTet4_ANP': 'Tet4_ANP', 'SolidWedge6': 'Wedge6',
+                                'Shell4': 'Shell4', 'Beam3D': 'Beam3D', 'Truss1D': 'Truss1D'
+                            };
                             return {
                                 part_id: Number(p.part_id),
+                                deck_part_id: p.deck_part_id !== undefined ? Number(p.deck_part_id) : Number(p.part_id),
+                                canvas_node_id: p.canvas_node_id || '',
                                 name: String(p.name || ''),
+                                section_type: String(p.section_type || 'SolidHex8'),
+                                thickness_or_area: Number(p.thickness_or_area ?? 0.01),
+                                hourglass_coeff: Number(p.hourglass_coeff ?? 0.03),
                                 suppressed: p.suppressed === true,
                                 visible: p.visible !== false,
                                 color: String(p.color || '#3b82f6'),
@@ -2591,7 +2665,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                                 failure_strain: p.erosion_override?.failure_strain !== undefined ? Number(p.erosion_override.failure_strain) : undefined,
                                 convert_to_mpm: p.erosion_override?.convert_to_mpm === true,
                                 shape_type: p.shape_type || objParams['shape_type'] || 'Box',
-                                element_topology: p.element_topology || objParams['element_topology'] || 'Hex8',
+                                element_topology: secToTopo[p.section_type] || p.element_topology || objParams['element_topology'] || 'Hex8',
                                 stl_file: p.stl_file || objParams['stl_file'] || '',
                                 origin_mode: p.origin_mode || objParams['origin_mode'] || 'Center',
                                 nx: Number((isSelfPart ? objParams['nx'] : p.nx) ?? objParams['nx'] ?? 10),
@@ -2619,8 +2693,19 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                             bc_type: String(bc.bc_type),
                             target_type: String(bc.target_type),
                             target_id: bc.target_id,
-                            dofs: Array.isArray(bc.dofs) ? bc.dofs : [true, true, true, true, true, true],
-                            velocity: Array.isArray(bc.velocity) ? bc.velocity.map(Number) : [0, 0, 0],
+                            dofs: Array.isArray(bc.dofs)
+                                ? bc.dofs.map(Boolean)
+                                : [
+                                    bc.dofs?.tx !== false,
+                                    bc.dofs?.ty !== false,
+                                    bc.dofs?.tz !== false,
+                                    bc.dofs?.rx === true,
+                                    bc.dofs?.ry === true,
+                                    bc.dofs?.rz === true
+                                  ],
+                            velocity: Array.isArray(bc.values)
+                                ? bc.values.map(Number)
+                                : (Array.isArray(bc.velocity) ? bc.velocity.map(Number) : [0, 0, 0]),
                             active: bc.active !== false
                         }));
                     }
@@ -2641,6 +2726,22 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             state.nodes.filter(n => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D').forEach(processObjNode);
             if (femObjects.length > 0) {
                 flattenedParams['fem_objects'] = femObjects;
+                if (femObjects[0]['fem_parts']) flattenedParams['fem_parts'] = femObjects[0]['fem_parts'];
+                if (femObjects[0]['fem_sets']) flattenedParams['fem_sets'] = femObjects[0]['fem_sets'];
+                if (femObjects[0]['boundary_conditions']) flattenedParams['boundary_conditions'] = femObjects[0]['boundary_conditions'];
+                if (femObjects[0]['fem_contacts']) flattenedParams['fem_contacts'] = femObjects[0]['fem_contacts'];
+                if (femObjects[0]['fem_materials']) flattenedParams['fem_materials'] = femObjects[0]['fem_materials'];
+            }
+            if (femDomain) {
+                if (femDomain.parameters?.['merge_coincident_nodes'] !== undefined) {
+                    flattenedParams['merge_coincident_nodes'] = Boolean(femDomain.parameters['merge_coincident_nodes']);
+                }
+                if (femDomain.parameters?.['node_merge_tolerance'] !== undefined) {
+                    flattenedParams['node_merge_tolerance'] = Number(femDomain.parameters['node_merge_tolerance']);
+                }
+                if (femDomain.parameters?.['embedded_rebar_coupling'] !== undefined) {
+                    flattenedParams['embedded_rebar_coupling'] = Boolean(femDomain.parameters['embedded_rebar_coupling']);
+                }
             }
 
             if (femDomain) {
@@ -3040,9 +3141,29 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             const domainBoundaryFill = mpmDomain.parameters?.boundary_filling;
             flattenedParams['ppc'] = domainPpc;
             flattenedParams['device'] = mpmDomain.parameters?.device || 'gpu';
+            flattenedParams['bardenhagen_grouping_policy'] = mpmDomain.parameters?.bardenhagen_grouping_policy || 'Per-Object Independent';
 
             const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in'));
-            let targetObjNodes = objConns.map(c => state.nodes.find(n => n.id === c.fromNode)).filter(n => n && n.type === 'MPMObject3D');
+            const directObjNodes = objConns.map(c => state.nodes.find(n => n.id === c.fromNode)).filter(n => n && n.type === 'MPMObject3D');
+            const domainCouplers = state.nodes.filter(n =>
+                n.type === 'MPMContactCoupler3D' && (
+                    state.connections.some(c => c.fromNode === n.id && c.toNode === mpmDomain.id) ||
+                    n.parameters?.target_domain === mpmDomain.id
+                )
+            );
+            const couplerIds = new Set(domainCouplers.map(c => c.id));
+            const couplerObjNodes = state.connections
+                .filter(c => couplerIds.has(c.toNode))
+                .map(c => state.nodes.find(n => n.id === c.fromNode))
+                .filter(n => n && n.type === 'MPMObject3D');
+            let targetObjNodes: (Node | undefined)[] = [];
+            const seenObjIds = new Set<string>();
+            for (const o of [...directObjNodes, ...couplerObjNodes]) {
+                if (o && !seenObjIds.has(o.id)) {
+                    seenObjIds.add(o.id);
+                    targetObjNodes.push(o);
+                }
+            }
             if (targetObjNodes.length === 0) {
                 targetObjNodes = state.nodes.filter(n => n.type === 'MPMObject3D');
             }
@@ -3189,7 +3310,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     'vel_x', 'vel_y', 'vel_z', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                     'initial_velocity_x', 'initial_velocity_y', 'initial_velocity_z',
                     'ppc', 'particle_distribution', 'boundary_filling', 'origin_mode',
-                    'voxelization_method', 'stl_file', 'stl_volume'
+                    'voxelization_method', 'stl_file', 'stl_volume', 'velocity_group'
                 ];
                 Object.entries(objNode.parameters).forEach(([k, v]) => {
                     if (nonConstitutiveKeys.includes(k) || !matNode) {
@@ -3236,6 +3357,25 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     objParams['product_model'] = objNode.parameters['product_model'];
                 }
 
+                const domainTransferScheme = mpmDomain?.parameters?.transfer_scheme;
+                const objTransferScheme = objNode.parameters?.transfer_scheme;
+                const matTransferScheme = matNode?.parameters?.transfer_scheme;
+                if (objTransferScheme && objTransferScheme !== 'Default' && objTransferScheme !== 'BSpline') {
+                    objParams['transfer_scheme'] = objTransferScheme;
+                } else if (domainTransferScheme && domainTransferScheme !== 'Default') {
+                    objParams['transfer_scheme'] = domainTransferScheme;
+                } else if (matTransferScheme && matTransferScheme !== 'Default') {
+                    objParams['transfer_scheme'] = matTransferScheme;
+                } else if (objTransferScheme) {
+                    objParams['transfer_scheme'] = objTransferScheme;
+                }
+                if (!objParams['particle_distribution'] && domainParticleDist) {
+                    objParams['particle_distribution'] = domainParticleDist;
+                }
+                if (!objParams['boundary_filling'] && domainBoundaryFill) {
+                    objParams['boundary_filling'] = domainBoundaryFill;
+                }
+
                 // Only overwrite shape_type/position if NOT already set by a connected STLGeometry node
                 if (objParams['shape_type'] === undefined) {
                     objParams['shape_type'] = objNode.parameters?.shape_type || objNode.parameters?.shape || 'Box';
@@ -3258,6 +3398,20 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 objParams['vel_y'] = Number(objNode.parameters?.vel_y ?? objNode.parameters?.initial_velocity_y ?? 0.0);
                 objParams['vel_z'] = Number(objNode.parameters?.vel_z ?? objNode.parameters?.initial_velocity_z ?? 0.0);
                 objParams['ppc'] = Math.max(1, Math.round(Number(objNode.parameters?.ppc ?? domainPpc)));
+
+                // Resolve effective velocity_group from connected MPMContactCoupler3D or node parameter
+                const couplerConn = state.connections.find(c => c.fromNode === objNode.id && state.nodes.some(n => n.id === c.toNode && n.type === 'MPMContactCoupler3D'));
+                const couplerNode = couplerConn ? state.nodes.find(n => n.id === couplerConn.toNode) : undefined;
+                if (couplerNode) {
+                    const cMode = String(couplerNode.parameters?.coupler_mode || 'Bonded (Single-Velocity)');
+                    if (cMode.includes('Independent')) {
+                        objParams['velocity_group'] = 'Independent';
+                    } else {
+                        objParams['velocity_group'] = String(couplerNode.parameters?.coupler_group_tag || `Coupler_${couplerNode.id}`);
+                    }
+                } else {
+                    objParams['velocity_group'] = String(objNode.parameters?.velocity_group || 'Independent (Auto)');
+                }
 
                 mpmObjects.push(objParams);
             }
@@ -3504,10 +3658,10 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     });
                 }
 
-                const setup = objNode.parameters?.['fem_setup'] || femDomain.parameters?.['fem_setup'];
+                const setup = objNode.parameters?.['fem_setup'] || femDomain.parameters?.['fem_setup'] || syncModelFEMSetup(state, getLSDynaDeckMeta);
                 if (setup) {
                     if (setup.parts && Array.isArray(setup.parts)) {
-                        const primaryPart = setup.parts.find((p: any) => p.node_id === objNode.id || p.id === objNode.id || p.name === objNode.parameters?.name) || setup.parts[0];
+                        const primaryPart = setup.parts.find((p: any) => p.canvas_node_id === objNode.id || p.node_id === objNode.id || p.id === objNode.id || p.name === objNode.parameters?.name) || setup.parts[0];
                         if (primaryPart) {
                             if (objNode.parameters?.['nx'] !== undefined) {
                                 objParams['nx'] = Number(objNode.parameters['nx']);
@@ -3583,9 +3737,12 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                             }
                         }
                         objParams['fem_parts'] = setup.parts.map((p: any) => {
-                            const isSelfPart = (setup.parts.length === 1 || p.node_id === objNode.id || p.id === objNode.id);
+                            const isSelfPart = (setup.parts.length === 1 || p.canvas_node_id === objNode.id || p.node_id === objNode.id || p.id === objNode.id);
                             let mappedMatId: number | undefined = undefined;
-                            if (typeof p.material_assignment === 'string') {
+                            const matDef = Array.isArray(setup.materials) ? setup.materials.find((m: any) => m.mat_id === p.material_id) : undefined;
+                            if (matDef?.canvas_node_id && matIdMap.has(matDef.canvas_node_id)) {
+                                mappedMatId = matIdMap.get(matDef.canvas_node_id);
+                            } else if (typeof p.material_assignment === 'string') {
                                 if (matIdMap.has(p.material_assignment)) {
                                     mappedMatId = matIdMap.get(p.material_assignment);
                                 } else if (p.material_assignment.startsWith('DECK_MAT_')) {
@@ -3593,10 +3750,22 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                                 }
                             } else if (typeof p.material_assignment === 'number') {
                                 mappedMatId = p.material_assignment;
+                            } else if (typeof p.material_id === 'number' && p.material_id >= 1) {
+                                mappedMatId = Math.max(0, p.material_id - 1);
                             }
+                            const secToTopo: Record<string, string> = {
+                                'SolidHex8': 'Hex8', 'SolidHex8_SRI': 'Hex8_SRI', 'SolidHex8_Full': 'Hex8_Full',
+                                'SolidTet4': 'Tet4', 'SolidTet4_ANP': 'Tet4_ANP', 'SolidWedge6': 'Wedge6',
+                                'Shell4': 'Shell4', 'Beam3D': 'Beam3D', 'Truss1D': 'Truss1D'
+                            };
                             return {
                                 part_id: Number(p.part_id),
+                                deck_part_id: p.deck_part_id !== undefined ? Number(p.deck_part_id) : Number(p.part_id),
+                                canvas_node_id: p.canvas_node_id || '',
                                 name: String(p.name || ''),
+                                section_type: String(p.section_type || 'SolidHex8'),
+                                thickness_or_area: Number(p.thickness_or_area ?? 0.01),
+                                hourglass_coeff: Number(p.hourglass_coeff ?? 0.03),
                                 suppressed: p.suppressed === true,
                                 visible: p.visible !== false,
                                 color: String(p.color || '#3b82f6'),
@@ -3606,7 +3775,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                                 failure_strain: p.erosion_override?.failure_strain !== undefined ? Number(p.erosion_override.failure_strain) : undefined,
                                 convert_to_mpm: p.erosion_override?.convert_to_mpm === true,
                                 shape_type: p.shape_type || objParams['shape_type'] || 'Box',
-                                element_topology: p.element_topology || objParams['element_topology'] || 'Hex8',
+                                element_topology: secToTopo[p.section_type] || p.element_topology || objParams['element_topology'] || 'Hex8',
                                 stl_file: p.stl_file || objParams['stl_file'] || '',
                                 origin_mode: p.origin_mode || objParams['origin_mode'] || 'Center',
                                 nx: Number((isSelfPart ? objParams['nx'] : p.nx) ?? objParams['nx'] ?? 10),
@@ -3634,8 +3803,19 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                             bc_type: String(bc.bc_type),
                             target_type: String(bc.target_type),
                             target_id: bc.target_id,
-                            dofs: Array.isArray(bc.dofs) ? bc.dofs : [true, true, true, true, true, true],
-                            velocity: Array.isArray(bc.velocity) ? bc.velocity.map(Number) : [0, 0, 0],
+                            dofs: Array.isArray(bc.dofs)
+                                ? bc.dofs.map(Boolean)
+                                : [
+                                    bc.dofs?.tx !== false,
+                                    bc.dofs?.ty !== false,
+                                    bc.dofs?.tz !== false,
+                                    bc.dofs?.rx === true,
+                                    bc.dofs?.ry === true,
+                                    bc.dofs?.rz === true
+                                  ],
+                            velocity: Array.isArray(bc.values)
+                                ? bc.values.map(Number)
+                                : (Array.isArray(bc.velocity) ? bc.velocity.map(Number) : [0, 0, 0]),
                             active: bc.active !== false
                         }));
                     }
@@ -3655,6 +3835,22 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
 
             state.nodes.filter(n => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D').forEach(processObjNode);
             flattenedParams['fem_objects'] = femObjects;
+            if (femObjects.length > 0) {
+                if (femObjects[0]['fem_parts']) flattenedParams['fem_parts'] = femObjects[0]['fem_parts'];
+                if (femObjects[0]['fem_sets']) flattenedParams['fem_sets'] = femObjects[0]['fem_sets'];
+                if (femObjects[0]['boundary_conditions']) flattenedParams['boundary_conditions'] = femObjects[0]['boundary_conditions'];
+                if (femObjects[0]['fem_contacts']) flattenedParams['fem_contacts'] = femObjects[0]['fem_contacts'];
+                if (femObjects[0]['fem_materials']) flattenedParams['fem_materials'] = femObjects[0]['fem_materials'];
+            }
+            if (femDomain.parameters?.['merge_coincident_nodes'] !== undefined) {
+                flattenedParams['merge_coincident_nodes'] = Boolean(femDomain.parameters['merge_coincident_nodes']);
+            }
+            if (femDomain.parameters?.['node_merge_tolerance'] !== undefined) {
+                flattenedParams['node_merge_tolerance'] = Number(femDomain.parameters['node_merge_tolerance']);
+            }
+            if (femDomain.parameters?.['embedded_rebar_coupling'] !== undefined) {
+                flattenedParams['embedded_rebar_coupling'] = Boolean(femDomain.parameters['embedded_rebar_coupling']);
+            }
 
             const detConns = state.connections.filter(c => c.toNode === femDomain.id && (c.toPort === 'detonator' || c.toPort === 'trigger'));
             const detonators: any[] = [];
