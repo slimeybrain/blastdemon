@@ -46,7 +46,10 @@ set(HDF5_USE_STATIC_LIBRARIES ON)
 find_package(HDF5 COMPONENTS C)
 
 # Daemon (Broker)
-add_executable(Broker backend/BlastDaemon/Broker.cpp)
+add_executable(Broker
+    backend/BlastDaemon/Broker.cpp
+    backend/BlastSolver/PrimitiveGeometryParser.cpp
+)
 target_include_directories(Broker PRIVATE
     backend/BlastSolver/include
 )
@@ -55,6 +58,7 @@ set_target_properties(Broker PROPERTIES CXX_STANDARD 17)
 
 # Core Solver Library — 1D, 2D, and 3D CPU + CUDA solver components compiled once
 add_library(BlastSolverCore STATIC
+    backend/BlastSolver/PrimitiveGeometryParser.cpp
     backend/BlastSolver/system_memory_guard.cpp
     backend/BlastSolver/cfd_solver.cpp
     backend/BlastSolver/cfd_solver_init.cpp
@@ -124,6 +128,21 @@ set_target_properties(BlastSolverCore PROPERTIES
 )
 target_compile_options(BlastSolverCore PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>
+)
+
+# Precompiled headers for near-instant CXX incremental build times
+target_precompile_headers(BlastSolverCore PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:<vector>>
+    $<$<COMPILE_LANGUAGE:CXX>:<string>>
+    $<$<COMPILE_LANGUAGE:CXX>:<memory>>
+    $<$<COMPILE_LANGUAGE:CXX>:<cmath>>
+    $<$<COMPILE_LANGUAGE:CXX>:<iostream>>
+    $<$<COMPILE_LANGUAGE:CXX>:<algorithm>>
+    $<$<COMPILE_LANGUAGE:CXX>:<thread>>
+    $<$<COMPILE_LANGUAGE:CXX>:<atomic>>
+    $<$<COMPILE_LANGUAGE:CXX>:<chrono>>
+    $<$<COMPILE_LANGUAGE:CXX>:<mutex>>
+    $<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/backend/BlastSolver/include/nlohmann/json.hpp>
 )
 
 # OpenMP linkage for BlastSolverCore

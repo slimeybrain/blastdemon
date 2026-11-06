@@ -2,11 +2,11 @@
 # Automatically harnesses ccache, parallel cores, and streamlined target scoping
 
 BUILD_DIR ?= build
-MAX_JOBS ?= 4
+MAX_JOBS ?= 8
 NPROC ?= $(shell nproc 2>/dev/null || echo 4)
 JOBS ?= $(shell echo $$(( $(NPROC) > $(MAX_JOBS) ? $(MAX_JOBS) : $(NPROC) )))
 
-.PHONY: all default clean frontend verify tests help
+.PHONY: all default clean frontend verify tests help Broker BlastSolver blastcli BlastStudio blast_verify cfd fem mpm verify-quick
 
 # Default target builds primary production deliverables in parallel
 default:
@@ -22,6 +22,9 @@ Broker BlastSolver blastcli BlastStudio blast_verify:
 
 # Living Verification Compendium execution
 verify: blast_verify
+	@./$(BUILD_DIR)/blast_verify
+
+verify-quick:
 	@./$(BUILD_DIR)/blast_verify
 
 # Standalone test targets (built on demand without polluting standard build times)

@@ -28,6 +28,7 @@
 
 using json = nlohmann::json;
 #include "PrimitiveGeometry.hpp"
+#include "PrimitiveGeometryParser.hpp"
 #include "ImmersedBoundary.hpp"
 #include <set>
 #include <unordered_map>
@@ -4216,7 +4217,7 @@ void init_3d_thread_func(nlohmann::json msg) {
         clear_vtu_mesh_cache(); // invalidate any stale cached geometry from a previous run
         if (msg.contains("primitives") && msg["primitives"].is_array() && !msg["primitives"].empty()) {
             global_raw_stl_triangles = generate_primitives_triangles(msg["primitives"]);
-            local_solver_3d->setGeometryPrimitives(msg["primitives"], geometry_hash, voxel_method, &sim3d_terminate, progress_callback);
+            local_solver_3d->setGeometryTriangles(global_raw_stl_triangles, geometry_hash, voxel_method, &sim3d_terminate, progress_callback);
         } else {
             if (!stl_file.empty()) {
                 try {

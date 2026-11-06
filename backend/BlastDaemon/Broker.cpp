@@ -14,6 +14,7 @@
 #include <filesystem>
 #include "ProcessManager.hpp"
 #include "PrimitiveGeometry.hpp"
+#include "PrimitiveGeometryParser.hpp"
 
 #ifdef _WIN32
     #include <winsock2.h>

@@ -290,9 +290,6 @@ public:
     virtual void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
                                       const std::atomic<bool>* terminate_flag = nullptr,
                                       std::function<void(double)> progress_callback = nullptr) = 0;
-    virtual void setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
-                                       const std::atomic<bool>* terminate_flag = nullptr,
-                                       std::function<void(double)> progress_callback = nullptr) = 0;
     virtual void uploadObstacleFaces(const std::vector<ObstacleFace>&) {}
     virtual void setSolidMask(const uint8_t*) {}
     virtual void setSolidVelocities(const double*) {}
@@ -398,9 +395,6 @@ public:
     void setGeometryTriangles(const std::vector<Triangle>&, const std::string&, const std::string&,
                               const std::atomic<bool>* = nullptr,
                               std::function<void(double)> = nullptr) override {}
-    void setGeometryPrimitives(const nlohmann::json&, const std::string&, const std::string&,
-                               const std::atomic<bool>* = nullptr,
-                               std::function<void(double)> = nullptr) override {}
     std::pair<double, double> getConservationTotals() const override { return {0.0, 0.0}; }
 };
 
@@ -442,9 +436,6 @@ public:
     void setGeometryTriangles(const std::vector<Triangle>& triangles, const std::string& geometry_hash, const std::string& voxelization_method,
                               const std::atomic<bool>* terminate_flag = nullptr,
                               std::function<void(double)> progress_callback = nullptr) override;
-    void setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
-                               const std::atomic<bool>* terminate_flag = nullptr,
-                               std::function<void(double)> progress_callback = nullptr) override;
     void uploadObstacleFaces(const std::vector<ObstacleFace>& faces) override;
     void setSolidMask(const uint8_t* mask) override;
     void setSolidVelocities(const double* v) override {

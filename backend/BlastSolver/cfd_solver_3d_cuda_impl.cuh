@@ -7903,34 +7903,6 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGeometryTriangles(const std:
 }
 
 template <typename RealType, bool IsMultiMaterial>
-void CFDSolver3DCuda<RealType, IsMultiMaterial>::setGeometryPrimitives(const nlohmann::json& primitives, const std::string& geometry_hash, const std::string& voxelization_method,
-                                                                      const std::atomic<bool>* terminate_flag,
-                                                                      std::function<void(double)> progress_callback) {
-    ensure_paged_in();
-
-    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
-    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
-    int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
-    int total_tiles = ntx * nty * ntz;
-
-    std::vector<GeometryTile3D> host_geom(total_tiles);
-    voxelize_primitives(
-        primitives,
-        geometry_hash,
-        voxelization_method,
-        host_geom,
-        nx, ny, nz,
-        cellSize,
-        xmin, ymin, zmin,
-        ntx, nty, ntz,
-        terminate_flag,
-        progress_callback
-    );
-
-    loadGeometryToGPU(host_geom, terminate_flag);
-}
-
-template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::loadGeometryToGPU(const std::vector<GeometryTile3D>& host_geom, const std::atomic<bool>* terminate_flag) {
     if (terminate_flag && terminate_flag->load()) return;
 
