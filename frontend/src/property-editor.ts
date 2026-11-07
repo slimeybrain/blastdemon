@@ -2613,6 +2613,7 @@ export class PropertyEditor {
             'enable_impact_welding': ['Disabled', 'Enabled'],
             'enable_frictional_heating': ['Disabled', 'Enabled'],
             'enable_thermal_conduction': ['Disabled', 'Enabled'],
+            'bardenhagen_initial_tie': ['Disabled', 'Enabled'],
             'enable_dem_contact': ['Disabled', 'Enabled'],
             'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
             'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
@@ -5614,7 +5615,7 @@ export class PropertyEditor {
             'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion',
             'enable_heterogeneity', 'enable_anisotropy', 'kc_auto_generate',
             'dimension', 'charge_shape', 'init_mode', 'velocity_scheme', 'trigger_type',
-            'contact_method', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode'
+            'contact_method', 'bardenhagen_initial_tie', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode'
         ];
         this.render(structuralKeys.includes(key));
     }

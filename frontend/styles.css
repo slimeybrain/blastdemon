@@ -3304,30 +3304,65 @@ canvas {
 }
 
 .pipeline-group {
-    margin-bottom: 2px;
+    margin: 0 4px 8px 4px;
+    background: #111317;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 5px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.pipeline-group:hover {
+    border-color: rgba(255, 255, 255, 0.13);
+}
+
+.pipeline-group.collapsed {
+    margin-bottom: 5px;
 }
 
 .pipeline-group-header {
+    position: sticky;
+    top: 0;
+    z-index: 5;
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 10px;
-    background: #18191d;
+    padding: 6px 8px;
+    background: #18191e;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--cat-color, #38bdf8) 14%, #18191e) 0%, #16181d 75%);
     cursor: pointer;
     font-weight: 600;
-    color: #cbd5e1;
-    border-left: 3px solid #38bdf8;
+    font-size: 11.5px;
+    color: #e2e8f0;
+    border-left: 3.5px solid var(--cat-color, #38bdf8);
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    user-select: none;
+    transition: background 0.15s ease, filter 0.15s ease;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.pipeline-group.collapsed .pipeline-group-header {
+    border-bottom-left-radius: 4px;
+    border-bottom-right-radius: 4px;
+    border-bottom: none;
+}
+
+.pipeline-group-header:hover {
+    background: #1e2027;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--cat-color, #38bdf8) 22%, #1e2027) 0%, #1a1c23 75%);
 }
 
 .pipeline-caret {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
-    height: 22px;
-    min-width: 22px;
-    min-height: 22px;
-    margin: -4px -2px -4px -4px;
+    width: 20px;
+    height: 20px;
+    min-width: 20px;
+    min-height: 20px;
+    margin: -3px 0 -3px -2px;
     padding: 0;
     font-size: 8px;
     line-height: 1;
@@ -3349,12 +3384,45 @@ canvas {
 }
 
 .pipeline-cat-icon {
+    font-size: 12px;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+    flex-shrink: 0;
+}
+
+.pipeline-cat-label {
     font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    color: #f1f5f9;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.pipeline-cat-count {
+    margin-left: auto;
+    margin-right: 2px;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.05);
+    background: color-mix(in srgb, var(--cat-color, #38bdf8) 18%, rgba(255, 255, 255, 0.04));
+    color: var(--cat-color, #94a3b8);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-color: color-mix(in srgb, var(--cat-color, #38bdf8) 35%, transparent);
+    letter-spacing: 0.2px;
+    line-height: 1.2;
+    flex-shrink: 0;
 }
 
 .pipeline-node-list {
     display: flex;
     flex-direction: column;
+    padding: 3px 0 5px 0;
+    background: rgba(13, 15, 20, 0.5);
+    border-bottom-left-radius: 4px;
+    border-bottom-right-radius: 4px;
 }
 
 .pipeline-node-item {
@@ -3924,25 +3992,30 @@ canvas {
 }
 
 .pipeline-cat-quick-add {
-    margin-left: auto;
+    margin-left: 2px;
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
     color: #94a3b8;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
     line-height: 1;
-    padding: 1px 6px;
+    padding: 1px 5px;
     border-radius: 3px;
     cursor: pointer;
     transition: all 0.15s ease;
-    opacity: 0.6;
+    opacity: 0.5;
+    flex-shrink: 0;
 }
 
-.pipeline-group-header:hover .pipeline-cat-quick-add,
+.pipeline-group-header:hover .pipeline-cat-quick-add {
+    opacity: 0.85;
+}
+
 .pipeline-cat-quick-add:hover {
-    opacity: 1;
-    color: #38bdf8;
-    background: rgba(56, 189, 248, 0.2);
+    opacity: 1 !important;
+    color: #fff !important;
+    background: var(--cat-color, #38bdf8) !important;
+    border-color: var(--cat-color, #38bdf8) !important;
 }
 
 /* Property Grid Slice Pills */

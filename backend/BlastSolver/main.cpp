@@ -5335,6 +5335,7 @@ static void populate_mpm_objects_from_json(const nlohmann::json& msg, bool use_g
         global_solver_mpm_3d_cuda->setImpactWelding(enable_impact_welding);
         global_solver_mpm_3d_cuda->setFrictionalHeating(enable_frictional_heating);
         global_solver_mpm_3d_cuda->setThermalConduction(enable_thermal_conduction);
+        global_solver_mpm_3d_cuda->setInitialContactTie(msg.value("bardenhagen_initial_tie", true));
         global_solver_mpm_3d_cuda->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
         global_solver_mpm_3d_cuda->uploadMaterialTableToDevice();
         global_solver_mpm_3d_cuda->syncToDevice();
@@ -5343,6 +5344,7 @@ static void populate_mpm_objects_from_json(const nlohmann::json& msg, bool use_g
         global_solver_mpm_3d->setImpactWelding(enable_impact_welding);
         global_solver_mpm_3d->setFrictionalHeating(enable_frictional_heating);
         global_solver_mpm_3d->setThermalConduction(enable_thermal_conduction);
+        global_solver_mpm_3d->setInitialContactTie(msg.value("bardenhagen_initial_tie", true));
         global_solver_mpm_3d->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
         global_solver_mpm_3d->particleToGrid();
     }
@@ -7085,9 +7087,11 @@ int main() {
 
                     if (global_solver_mpm_3d_cuda) {
                         global_solver_mpm_3d_cuda->setContactMethod(contact_method);
+                        global_solver_mpm_3d_cuda->setInitialContactTie(msg.value("bardenhagen_initial_tie", true));
                         global_solver_mpm_3d_cuda->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
                     } else {
                         global_solver_mpm_3d->setContactMethod(contact_method);
+                        global_solver_mpm_3d->setInitialContactTie(msg.value("bardenhagen_initial_tie", true));
                         global_solver_mpm_3d->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
                     }
 
@@ -8312,9 +8316,11 @@ int main() {
 
                     if (global_solver_mpm_3d_cuda) {
                         global_solver_mpm_3d_cuda->setContactMethod(contact_method);
+                        global_solver_mpm_3d_cuda->setInitialContactTie(msg.value("bardenhagen_initial_tie", true));
                         global_solver_mpm_3d_cuda->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
                     } else {
                         global_solver_mpm_3d->setContactMethod(contact_method);
+                        global_solver_mpm_3d->setInitialContactTie(msg.value("bardenhagen_initial_tie", true));
                         global_solver_mpm_3d->setObjectMaterialMapping(obj_to_mat, num_unique_materials);
                     }
                     if (is_stratified_fsi) {

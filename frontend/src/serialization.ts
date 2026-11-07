@@ -300,6 +300,7 @@ export function serializeMPMObjectsWithSleeve(
     const domainBoundaryFill = mpmDomain?.parameters?.boundary_filling;
     flattenedParams['ppc'] = domainPpc;
     flattenedParams['bardenhagen_grouping_policy'] = mpmDomain?.parameters?.bardenhagen_grouping_policy || 'Per-Object Independent';
+    flattenedParams['bardenhagen_initial_tie'] = mpmDomain?.parameters?.bardenhagen_initial_tie ?? true;
 
     const mpmObjects: any[] = [];
     let targetMpmNodes: (Node | undefined)[] = [];
@@ -1069,7 +1070,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
     ];
 
     const booleanKeys = [
-        'enabled', 'afterburn_enabled', 'smooth_plastic_strain', 'enable_sdf_barrier', 'enable_dem_contact',
+        'enabled', 'afterburn_enabled', 'smooth_plastic_strain', 'enable_sdf_barrier', 'enable_dem_contact', 'bardenhagen_initial_tie',
         'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction',
         'export_ascii', 'export_binary', 'export_hdf5',
         'include_header', 'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy',
@@ -3142,6 +3143,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             flattenedParams['ppc'] = domainPpc;
             flattenedParams['device'] = mpmDomain.parameters?.device || 'gpu';
             flattenedParams['bardenhagen_grouping_policy'] = mpmDomain.parameters?.bardenhagen_grouping_policy || 'Per-Object Independent';
+            flattenedParams['bardenhagen_initial_tie'] = mpmDomain.parameters?.bardenhagen_initial_tie ?? true;
 
             const objConns = state.connections.filter(c => c.toNode === mpmDomain.id && (c.toPort === 'objects' || c.toPort === 'mpm_objects' || c.toPort === 'in'));
             const directObjNodes = objConns.map(c => state.nodes.find(n => n.id === c.fromNode)).filter(n => n && n.type === 'MPMObject3D');

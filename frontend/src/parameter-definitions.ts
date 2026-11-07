@@ -1234,6 +1234,16 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         defaultVal: 'Per-Object Independent',
         solverScope: 'MPM'
     },
+    'bardenhagen_initial_tie': {
+        key: 'bardenhagen_initial_tie',
+        label: 'Initial-Contact Tie (Contact Initialisation)',
+        category: 'MPM Particle Mechanics',
+        shortDesc: 'Ties velocity fields of bodies that are touching and rigid-body co-moving at t = 0 so Bardenhagen contact does not act on their initial interface',
+        detailedDesc: 'At initialisation the solver searches for pairs of Bardenhagen velocity fields whose particles touch (centre distance below 1.25 x the mean particle spacing h = cbrt(V0)) and whose touching particle pairs are all rigid-body co-moving to round-off (v_a + B_a (x_b - x_a) = v_b, translation plus spin). Ties are closed transitively (Nose - Cap - Body form one cluster). At every grid node carrying tied fields the fields are merged into one contact body (member velocity = cluster momentum / cluster mass, exact momentum conservation) and Bardenhagen contact acts only between clusters. A tied pair is released when it separates along the interface normal n = unit(g_a - g_b) faster than 1e5 x FLT_EPS x max(|v_a|, |v_b|), so genuinely separating bodies (fragments, spall) detach. Rationale: conformal sub-cell interfaces (e.g. a 1.6 mm cap jacket on a 7-10 mm grid) have noisy mass-gradient normals; running contact there with spin produced spurious plastic strain. Side effect: sliding friction between initially touching co-moving bodies is lost while they remain pressed together (equivalent to an automatic bond). Bodies that approach each other are never tied. Disable to recover plain Bardenhagen contact at all interfaces.',
+        allowedValues: ['Disabled', 'Enabled'],
+        defaultVal: 'Enabled',
+        solverScope: 'MPM'
+    },
     'velocity_group': {
         key: 'velocity_group',
         label: 'Velocity Field / Bonded Group',
@@ -4961,7 +4971,7 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
     // Material parameters key-based mapping
     const mpmOnlyKeys = [
         'transfer_scheme', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-        'bardenhagen_grouping_policy', 'velocity_group', 'coupler_mode', 'coupler_group_tag'
+        'bardenhagen_grouping_policy', 'bardenhagen_initial_tie', 'velocity_group', 'coupler_mode', 'coupler_group_tag'
     ];
     if (mpmOnlyKeys.includes(key)) return 'MPM';
 
@@ -5477,7 +5487,7 @@ export function getParamKeysForNode(
     } else if (nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver') {
         keys = ['ambient_air_material', 'explosive_charge', 'connected_detonators', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
     } else if (nodeType === 'MPMDomain3D') {
-        keys = ['device', 'precision', 'transfer_scheme', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'contact_method', 'bardenhagen_grouping_policy', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale', 'cfl', 'endtime'];
+        keys = ['device', 'precision', 'transfer_scheme', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'contact_method', 'bardenhagen_grouping_policy', 'bardenhagen_initial_tie', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale', 'cfl', 'endtime'];
     } else if (nodeType === 'MPMDomain2D') {
         keys = ['precision', 'transfer_scheme', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'cfl', 'endtime'];
     } else if (nodeType === 'MPMObject2D') {
@@ -5871,7 +5881,7 @@ export function shouldSkipNodeParameter(
             const isDemPrimary = method.includes('DEM') || method.includes('Discrete Element');
             const hasDemToggle = Boolean(parameters['enable_dem_contact']);
 
-            if (!isBardenhagen && key === 'bardenhagen_grouping_policy') return true;
+            if (!isBardenhagen && (key === 'bardenhagen_grouping_policy' || key === 'bardenhagen_initial_tie')) return true;
 
             if (isBardenhagen) {
                 if (!hasDemToggle && ['dem_contact_mode', 'dem_velocity_threshold', 'dem_contact_scale'].includes(key)) return true;

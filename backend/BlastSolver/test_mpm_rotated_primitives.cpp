@@ -5,34 +5,7 @@
 #include "mpm_solver_3d.hpp"
 #include "PrimitiveGeometry.hpp"
 
-// Utility to inverse-rotate point via analytical inverse Euler angles
-static inline Point3D inv_rotate_point_euler(float u, float v, float w, float ax_deg, float ay_deg, float az_deg) {
-    constexpr float deg_to_rad = 3.14159265358979323846f / 180.0f;
-    float ax = ax_deg * deg_to_rad;
-    float ay = ay_deg * deg_to_rad;
-    float az = az_deg * deg_to_rad;
-
-    float cx = std::cos(ax), sx = std::sin(ax);
-    float cy = std::cos(ay), sy = std::sin(ay);
-    float cz = std::cos(az), sz = std::sin(az);
-
-    // Step 1: Inverse rotation around Z (-az)
-    float u1 = cz * u + sz * v;
-    float v1 = -sz * u + cz * v;
-    float w1 = w;
-
-    // Step 2: Inverse rotation around Y (-ay)
-    float u2 = cy * u1 - sy * w1;
-    float v2 = v1;
-    float w2 = sy * u1 + cy * w1;
-
-    // Step 3: Inverse rotation around X (-ax)
-    float u_rot = u2;
-    float v_rot = cx * v2 + sx * w2;
-    float w_rot = -sx * v2 + cx * w2;
-
-    return { u_rot, v_rot, w_rot };
-}
+// Uses inv_rotate_point_euler from PrimitiveGeometry.hpp
 
 int main() {
     std::cout << "========================================================\n";
@@ -45,7 +18,7 @@ int main() {
     {
         std::cout << "\n[Test 1] Box: 0 deg vs 90 deg Z-rotation...\n";
         Blast::MPMSolver3D solver_unrot;
-        solver_unrot.setDomainGeometry(0.01f, 0.01f, 0.01f, 0.0f, 0.0f, 0.0f);
+        solver_unrot.setDomainGeometry(0.01f, 0.01f, 0.01f, 0.0f, 0.0f, 0.0f, 100, 100, 100);
         // Size: 0.40m in X, 0.20m in Y, 0.10m in Z
         solver_unrot.addBoxObject(1, 0.5f, 0.5f, 0.5f, 0.4f, 0.2f, 0.1f,
                                  0, 0, 0, 0, 0, 0,
@@ -60,7 +33,7 @@ int main() {
         assert(n_particles > 0);
 
         Blast::MPMSolver3D solver_rot90z;
-        solver_rot90z.setDomainGeometry(0.01f, 0.01f, 0.01f, 0.0f, 0.0f, 0.0f);
+        solver_rot90z.setDomainGeometry(0.01f, 0.01f, 0.01f, 0.0f, 0.0f, 0.0f, 100, 100, 100);
         solver_rot90z.addBoxObject(1, 0.5f, 0.5f, 0.5f, 0.4f, 0.2f, 0.1f,
                                   0, 0, 0, 0, 0, 0,
                                   7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, 8,
@@ -113,7 +86,7 @@ int main() {
         float sx = 0.3f, sy = 0.2f, sz = 0.15f;
 
         Blast::MPMSolver3D solver;
-        solver.setDomainGeometry(0.01f, 0.01f, 0.01f, 0.0f, 0.0f, 0.0f);
+        solver.setDomainGeometry(0.01f, 0.01f, 0.01f, 0.0f, 0.0f, 0.0f, 100, 100, 100);
         solver.addBoxObject(1, pos_x, pos_y, pos_z, sx, sy, sz,
                             1.0f, -2.0f, 0.5f, 0.1f, 0.2f, 0.3f,
                             7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, 8,
@@ -170,7 +143,7 @@ int main() {
         float pos_x = 0.5f, pos_y = 0.5f, pos_z = 0.5f;
 
         Blast::MPMSolver3D solver_cyl;
-        solver_cyl.setDomainGeometry(0.01f, 0.01f, 0.01f, 0.0f, 0.0f, 0.0f);
+        solver_cyl.setDomainGeometry(0.01f, 0.01f, 0.01f, 0.0f, 0.0f, 0.0f, 100, 100, 100);
         solver_cyl.addCylinderObject(1, pos_x, pos_y, pos_z, radius, 0.0f, height,
                                     0, 0, 0, 0, 0, 0,
                                     7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, 8,
@@ -214,6 +187,69 @@ int main() {
         assert(span_y > 0.18f && span_y < 0.21f);
         assert(span_z > 0.18f && span_z < 0.21f);
         std::cout << "  -> PASSED: Cylinder successfully oriented along X axis under Euler rotation.\n";
+    }
+
+    // -------------------------------------------------------------
+    // Test 4: Oblique Rotated Box (30 deg) Partial Seeding & Plastic Strain Uniformity
+    // -------------------------------------------------------------
+    {
+        std::cout << "\n[Test 4] Oblique Rotated Box (30 deg): Partial Cut-Cell Mass & Plastic Strain Uniformity...\n";
+        Blast::MPMSolver3D solver;
+        solver.initializeGrid(24, 24, 24, 0.01f, 0.01f, 0.01f, 0.0f, 0.0f, 0.0f);
+        solver.setTransferScheme(Blast::MPMTransferScheme::BSpline);
+        solver.setVelocityScheme(Blast::MPMVelocityScheme::APIC);
+
+        const float sx = 0.08f, sy = 0.08f, sz = 0.06f;
+        const float rho0 = 7850.0f;
+        const float exact_mass = rho0 * sx * sy * sz;
+
+        solver.addBoxObject(1, 0.12f, 0.12f, 0.12f, sx, sy, sz,
+                            0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                            rho0, 200.0e9f, 0.3f, 250.0e6f, 500.0e6f, 0.2f, 0.0f, 8,
+                            Blast::MPMParticleDistribution::Cartesian,
+                            Blast::MPMBoundaryFilling::Partial,
+                            0.0f, 0.0f, 30.0f);
+
+        auto& particles = solver.getParticles();
+        assert(!particles.empty());
+
+        double total_mass = 0.0;
+        for (auto& p : particles) {
+            total_mass += p.m;
+            // Apply a spatially uniform axial compression velocity gradient dv_z/dz = -1500 s^-1
+            p.v[2] = -1500.0f * (p.x[2] - 0.12f);
+            p.B[2][2] = -1500.0f;
+        }
+        double mass_rel_err = std::abs(total_mass - exact_mass) / exact_mass;
+        std::cout << "  Oblique rotated box Partial mass error = " << mass_rel_err
+                  << " (" << particles.size() << " particles)\n";
+        assert(mass_rel_err < 0.01);
+
+        for (int step = 0; step < 8; ++step) {
+            solver.stepWithDt(2.0e-7f);
+        }
+
+        const auto& p_after = solver.getParticles();
+        double sum_ep = 0.0, sum_ep2 = 0.0;
+        int count_interior = 0;
+        for (const auto& p : p_after) {
+            Point3D loc = inv_rotate_point_euler(p.x[0] - 0.12f, p.x[1] - 0.12f, p.x[2] - 0.12f, 0.0f, 0.0f, 30.0f);
+            if (std::abs(loc.x) < 0.02f && std::abs(loc.y) < 0.02f && std::abs(loc.z) < 0.015f) {
+                sum_ep += p.ep_bar;
+                sum_ep2 += static_cast<double>(p.ep_bar) * p.ep_bar;
+                count_interior++;
+            }
+        }
+        assert(count_interior > 10);
+        double mean_ep = sum_ep / count_interior;
+        double var_ep = std::max(0.0, (sum_ep2 / count_interior) - mean_ep * mean_ep);
+        double cov_ep = (mean_ep > 1.0e-8) ? (std::sqrt(var_ep) / mean_ep) : 0.0;
+        std::cout << "  Rotated box core plastic strain: mean(ep_bar) = " << mean_ep
+                  << ", CoV = " << cov_ep << " (free of 1-3 cell Moire banding)\n";
+        assert(mean_ep > 1.0e-4);
+        assert(cov_ep < 0.05);
+        (void)mass_rel_err; (void)cov_ep;
+        std::cout << "  -> PASSED: Oblique rotated box maintains uniform plastic strain without Moire banding.\n";
     }
 
     std::cout << "\n========================================================\n";

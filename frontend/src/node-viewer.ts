@@ -3012,6 +3012,7 @@ export class NodeViewer {
             'velocity_scheme': ['APIC', 'PIC', 'FLIP'],
             'contact_method': ['Single-Velocity', 'Discrete Element (DEM)', 'Multi-Velocity (Bardenhagen)'],
             'bardenhagen_grouping_policy': ['Per-Object Independent', 'By Material Node'],
+            'bardenhagen_initial_tie': ['Disabled', 'Enabled'],
             'velocity_group': ['Independent (Auto)', 'Bonded Group A', 'Bonded Group B', 'Bonded Group C', 'Bonded Group D', 'Bonded Group E', 'Bonded Group F'],
             'coupler_mode': ['Bonded (Single-Velocity)', 'Independent (Bardenhagen)'],
             'coupler_group_tag': ['Bonded Group A', 'Bonded Group B', 'Bonded Group C', 'Bonded Group D', 'Bonded Group E', 'Bonded Group F'],

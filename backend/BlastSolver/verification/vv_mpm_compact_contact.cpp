@@ -339,6 +339,112 @@ BenchmarkResult run_layout_switch_check() {
     return res;
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// VV-L2-CMP-08 helpers: initial-contact tie (Bardenhagen contact initialisation).
+// Conformal spinning sleeve-on-core assembly: the sleeve inner surface coincides with the core outer
+// surface. Both bodies carry the identical rigid-body velocity field (translation + axial spin) and own
+// independent Bardenhagen velocity fields. Genuine production MPMSolver3DCUDA, real stepping loops.
+// ---------------------------------------------------------------------------------------------
+struct ShellRunMetrics {
+    int ties{0};
+    double max_ep_core{0.0}, max_ep_sleeve{0.0};
+    double max_vm_sleeve{0.0};
+    double band_vr_rel{0.0};     // max |<v_r>_sleeve - <v_r>_core| over the +/-5 cell radial band slices / v_tip
+    double mom_err{0.0};         // |P(t) - P(0)| / sum m|v0| (linear momentum drift)
+    size_t np_core{0}, np_sleeve{0};
+    int nx{0}, ny{0}, nz{0};
+    float dx{0.0f}, dt{0.0f};
+    int steps{0};
+    std::vector<double> t_us, ep_hist;
+};
+
+ShellRunMetrics run_conformal_shell(bool tie, float spin, int steps, float thickness, float dt, bool bonded = false) {
+    ShellRunMetrics out;
+    MPMSolver3DCUDA s;
+    const float dx = 0.002f;
+    const int nx = 40, ny = 40, nz = 60;
+    out.nx = nx; out.ny = ny; out.nz = nz; out.dx = dx; out.dt = dt; out.steps = steps;
+    s.initializeGrid(nx, ny, nz, dx, dx, dx, 0.0f, 0.0f, 0.0f);
+    s.setTransferScheme(MPMTransferScheme::Standard);
+    s.setVelocityScheme(MPMVelocityScheme::APIC);
+    s.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+    s.setInitialContactTie(tie);
+    s.setDemContact(false, 0.1f, 0.0f);
+    const float cx = 0.04f, cy = 0.04f, cz = 0.06f;
+    const float R_core = 0.014f;
+    const float vx0 = 100.0f;
+    s.addCylinderObject(1, cx, cy, cz, R_core, 0.0f, 0.080f, vx0, 0, 0, 0, 0, spin,
+                        7850.0f, 205.0e9f, 0.30f, 1.725e9f, 1.8e9f, 0.09f, 1.8e9f, 8,
+                        MPMParticleDistribution::Hexagonal, MPMBoundaryFilling::Partial);
+    s.addCylinderObject(2, cx, cy, cz, R_core + thickness, R_core, 0.050f, vx0, 0, 0, 0, 0, spin,
+                        7850.0f, 200.0e9f, 0.30f, 250.0e6f, 1.0e9f, 0.20f, 600.0e6f, 8,
+                        MPMParticleDistribution::Hexagonal, MPMBoundaryFilling::Partial);
+    s.setContactMethod(MPMContactMethod::MultiVelocityBardenhagen);
+    if (bonded) s.setObjectMaterialMapping({0, 0, 0}, 1); else s.setObjectMaterialMapping({0, 0, 1}, 2);
+    s.syncToDevice();
+    out.ties = s.getNumInitialContactTies();
+
+    auto measure = [&](double& ep_core, double& ep_sleeve, double& vm_sleeve, double& vr_rel, double& Pdev, double& Pref) {
+        s.syncParticlesToHost();
+        const auto& ps = s.getParticles();
+        ep_core = ep_sleeve = vm_sleeve = 0.0; Pdev = 0.0; Pref = 0.0;
+        double P[3] = {0, 0, 0}, M = 0.0;
+        // radial band slices (one per cell, +/-5 cells around R_core): mean radial velocity per body
+        const int nb = 11;
+        double vr_c[nb] = {0}, vr_s[nb] = {0}; int n_c[nb] = {0}, n_s[nb] = {0};
+        for (const auto& p : ps) {
+            const double sxx = p.sigma[0][0], syy = p.sigma[1][1], szz = p.sigma[2][2];
+            const double vm = std::sqrt(0.5 * ((sxx - syy) * (sxx - syy) + (syy - szz) * (syy - szz) + (szz - sxx) * (szz - sxx)) +
+                                        3.0 * (p.sigma[0][1] * p.sigma[0][1] + p.sigma[1][2] * p.sigma[1][2] + p.sigma[2][0] * p.sigma[2][0]));
+            if (p.object_id == 1) ep_core = std::max(ep_core, (double)p.ep_bar);
+            if (p.object_id == 2) { ep_sleeve = std::max(ep_sleeve, (double)p.ep_bar); vm_sleeve = std::max(vm_sleeve, vm); }
+            M += p.m;
+            for (int c = 0; c < 3; ++c) P[c] += p.m * p.v[c];
+            Pref += p.m * std::sqrt((double)p.v[0] * p.v[0] + (double)p.v[1] * p.v[1] + (double)p.v[2] * p.v[2]);
+            // radial velocity about the current axis through the body centre of the spin axis (cx + vx0 t is unknown ->
+            // use per-particle position relative to the core centroid computed below)
+        }
+        // centroid of core in x,y
+        double ccx = 0, ccy = 0; size_t nc = 0;
+        for (const auto& p : ps) if (p.object_id == 1) { ccx += p.x[0]; ccy += p.x[1]; nc++; }
+        ccx /= std::max<size_t>(nc, 1); ccy /= std::max<size_t>(nc, 1);
+        for (const auto& p : ps) {
+            const double rx = p.x[0] - ccx, ry = p.x[1] - ccy, r = std::sqrt(rx * rx + ry * ry);
+            if (r < 1.0e-9) continue;
+            const double vr = ((p.v[0] - vx0) * rx + p.v[1] * ry) / r;
+            const int bi = (int)std::floor((r - R_core) / dx + 5.5);
+            if (bi < 0 || bi >= nb) continue;
+            if (p.object_id == 1) { vr_c[bi] += vr; n_c[bi]++; }
+            else if (p.object_id == 2) { vr_s[bi] += vr; n_s[bi]++; }
+        }
+        // compare the two bodies' mean radial velocity in the two slices straddling the interface
+        vr_rel = 0.0;
+        const double vtip = std::fabs((double)spin) * R_core;
+        for (int bi = 4; bi <= 6; ++bi) {
+            if (n_c[bi] > 0 && n_s[bi] > 0)
+                vr_rel = std::max(vr_rel, std::fabs(vr_s[bi] / n_s[bi] - vr_c[bi] / n_c[bi]) / std::max(vtip, 1.0));
+        }
+        Pdev = std::sqrt((P[0] - M * vx0) * (P[0] - M * vx0) + P[1] * P[1] + P[2] * P[2]);
+    };
+    for (const auto& p : s.getParticles()) { if (p.object_id == 1) out.np_core++; else if (p.object_id == 2) out.np_sleeve++; }
+    double epc, eps_, vms, vr, Pd, Pr;
+    measure(epc, eps_, vms, vr, Pd, Pr);
+    for (int i = 1; i <= steps; ++i) {
+        s.stepWithDt(dt, true);
+        if (i % 25 == 0 || i == steps) {
+            measure(epc, eps_, vms, vr, Pd, Pr);
+            out.t_us.push_back(i * dt * 1.0e6);
+            out.ep_hist.push_back(std::max(epc, eps_));
+            out.max_ep_core = std::max(out.max_ep_core, epc);
+            out.max_ep_sleeve = std::max(out.max_ep_sleeve, eps_);
+            out.max_vm_sleeve = std::max(out.max_vm_sleeve, vms);
+            out.band_vr_rel = std::max(out.band_vr_rel, vr);
+            out.mom_err = std::max(out.mom_err, Pd / std::max(Pr, 1.0e-30));
+        }
+    }
+    return out;
+}
 } // namespace
 
 std::vector<BenchmarkResult> run_mpm_compact_contact_benchmarks() {
@@ -1250,6 +1356,214 @@ std::vector<BenchmarkResult> run_mpm_compact_contact_benchmarks() {
             det << "Discretisation: grid " << nx << " x " << ny << " x " << nz
                 << ", dx = dy = dz = " << dx << " m, Np = " << s_coupled.getParticleCount()
                 << " (Obj1=" << n1 << ", Obj2=" << n2 << ", Obj3=" << n3 << "), velocity fields M = 2, steps = " << steps << ".";
+            res.details = det.str();
+        } catch (const std::exception& e) {
+            res.passed = false;
+            res.summary = std::string("FAILED with exception: ") + e.what();
+        }
+        results.push_back(res);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // 08: Initial-contact tie (Bardenhagen contact initialisation) on a conformal spinning
+    //     sleeve-on-core assembly, with tie-release (separation) and closing-impact guards.
+    // ---------------------------------------------------------------------------------------
+    {
+        BenchmarkResult res;
+        res.id = "VV-L2-CMP-08";
+        res.title = "Bardenhagen initial-contact tie: conformal spinning sleeve-on-core (no spurious plasticity, exact release, closing impact untouched)";
+        res.level = 2;
+        res.tolerance_linf = 1.0e-6;      // max equivalent plastic strain of the tied, elastically loaded assembly
+        res.tolerance_l2 = 1.0e-2;        // interface radial-velocity mismatch |<vr>_sleeve - <vr>_core| / v_tip in the +/-1 cell band
+        res.tolerance_momentum = 1.0e-5;  // linear momentum drift
+        res.tolerance_energy = 2.0e-2;    // separation-rate error of released pair |dv_meas - dv_imposed| / dv_imposed
+        try {
+            const float spin = 3000.0f;
+            const float thickness = 0.0010f;   // 0.5 cell sleeve: sub-cell conformal jacket
+            const int steps = 400;
+            const float dt = 1.0e-7f;
+            ShellRunMetrics on = run_conformal_shell(true, spin, steps, thickness, dt);
+            ShellRunMetrics off = run_conformal_shell(false, spin, steps, thickness, dt);
+            ShellRunMetrics on0 = run_conformal_shell(false, spin, steps, thickness, dt, true);
+
+            // --- (b) release: touching co-moving boxes, then impose a separating velocity on body 2 ---
+            double sep_err = 1.0e9, sep_meas = 0.0;
+            int ties_box = 0;
+            {
+                MPMSolver3DCUDA s;
+                const float dxb = 0.002f;
+                s.initializeGrid(60, 20, 20, dxb, dxb, dxb, 0.0f, 0.0f, 0.0f);
+                s.setTransferScheme(MPMTransferScheme::Standard);
+                s.setVelocityScheme(MPMVelocityScheme::APIC);
+                s.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+                s.setInitialContactTie(true);
+                s.setDemContact(false, 0.1f, 0.0f);
+                s.addBoxObject(1, 0.040f, 0.020f, 0.020f, 0.040f, 0.020f, 0.020f, 20.0f, 0, 0, 0, 0, 0,
+                               7850.0f, 205.0e9f, 0.30f, 1.0e9f, 1.0e9f, 0.2f, 1.0e9f, 8,
+                               MPMParticleDistribution::Hexagonal, MPMBoundaryFilling::Partial);
+                s.addBoxObject(2, 0.080f, 0.020f, 0.020f, 0.040f, 0.020f, 0.020f, 20.0f, 0, 0, 0, 0, 0,
+                               7850.0f, 205.0e9f, 0.30f, 1.0e9f, 1.0e9f, 0.2f, 1.0e9f, 8,
+                               MPMParticleDistribution::Hexagonal, MPMBoundaryFilling::Partial);
+                s.setContactMethod(MPMContactMethod::MultiVelocityBardenhagen);
+                s.setObjectMaterialMapping({0, 0, 1}, 2);
+                s.syncToDevice();
+                ties_box = s.getNumInitialContactTies();
+                const float dtb = 1.0e-7f;
+                for (int i = 0; i < 50; ++i) s.stepWithDt(dtb, true);
+                const float dv_imposed = 5.0f;
+                s.syncParticlesToHost();
+                for (auto& p : s.getParticles()) if (p.object_id == 2) p.v[0] += dv_imposed;
+                s.syncToDevice();
+                auto com = [&](int obj) { double xs = 0.0; size_t n = 0; for (const auto& p : s.getParticles()) if (p.object_id == obj) { xs += p.x[0]; n++; } return xs / std::max<size_t>(n, 1); };
+                s.syncParticlesToHost();
+                const double gap0 = com(2) - com(1);
+                const int n_sep = 150;
+                for (int i = 0; i < n_sep; ++i) s.stepWithDt(dtb, true);
+                s.syncParticlesToHost();
+                const double gap1 = com(2) - com(1);
+                sep_meas = (gap1 - gap0) / (n_sep * dtb);
+                sep_err = std::fabs(sep_meas - dv_imposed) / dv_imposed;
+            }
+
+            // --- (c) closing impact: bodies approaching each other must never be tied, and results must equal tie-off ---
+            int ties_close = -1;
+            double close_diff = 1.0e9;
+            {
+                auto run_close = [&](bool tie, int& ties, double& vcm1) {
+                    MPMSolver3DCUDA s;
+                    const float dxb = 0.002f;
+                    s.initializeGrid(60, 20, 20, dxb, dxb, dxb, 0.0f, 0.0f, 0.0f);
+                    s.setTransferScheme(MPMTransferScheme::Standard);
+                    s.setVelocityScheme(MPMVelocityScheme::APIC);
+                    s.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+                    s.setInitialContactTie(tie);
+                    s.setDemContact(false, 0.1f, 0.0f);
+                    s.addBoxObject(1, 0.040f, 0.020f, 0.020f, 0.040f, 0.020f, 0.020f, 30.0f, 0, 0, 0, 0, 0,
+                                   7850.0f, 205.0e9f, 0.30f, 1.0e9f, 1.0e9f, 0.2f, 1.0e9f, 8,
+                                   MPMParticleDistribution::Hexagonal, MPMBoundaryFilling::Partial);
+                    s.addBoxObject(2, 0.080f, 0.020f, 0.020f, 0.040f, 0.020f, 0.020f, -30.0f, 0, 0, 0, 0, 0,
+                                   7850.0f, 205.0e9f, 0.30f, 1.0e9f, 1.0e9f, 0.2f, 1.0e9f, 8,
+                                   MPMParticleDistribution::Hexagonal, MPMBoundaryFilling::Partial);
+                    s.setContactMethod(MPMContactMethod::MultiVelocityBardenhagen);
+                    s.setObjectMaterialMapping({0, 0, 1}, 2);
+                    s.syncToDevice();
+                    ties = s.getNumInitialContactTies();
+                    for (int i = 0; i < 200; ++i) s.stepWithDt(1.0e-7f, true);
+                    s.syncParticlesToHost();
+                    double vs = 0.0; size_t n = 0;
+                    for (const auto& p : s.getParticles()) if (p.object_id == 1) { vs += p.v[0]; n++; }
+                    vcm1 = vs / std::max<size_t>(n, 1);
+                };
+                int t_on = 0, t_off = 0; double v_on = 0.0, v_off = 0.0;
+                run_close(true, t_on, v_on);
+                run_close(false, t_off, v_off);
+                ties_close = t_on;
+                close_diff = std::fabs(v_on - v_off) / 30.0;
+            }
+
+            // --- (d) scale-free Standard transfer free-surface wave ringing (macro dx=7mm and micro dx=7um, CPU + CUDA) ---
+            // Verifies that sub-cell offset free faces (y_frac ≈ 0.417, Sy(outer) ≈ 0.083) under elastic wave ringing
+            // do not suffer 1/Sy boundary acceleration or APIC velocity-gradient strain-rate amplification at any particle mass scale.
+            auto run_free_face_ringing = [&](auto& s_f, float scale, bool is_cuda, double& max_ep_face, double p_end_out[3], double& p_ref_out) {
+                const int nx_f = 16, ny_f = 16, nz_f = 12;
+                const float dxf = 0.007f * scale;
+                const float dt_f = 2.0e-7f * scale;
+                const int steps_f = 250;
+                // Sub-cell offset y center so y_min face particles sit at y_frac ≈ 0.083 inside cell j=2..3
+                const float cx_f = 8.0f * dxf;
+                const float cy_f = 8.0f * dxf + 0.166f * dxf;
+                const float cz_f = 6.0f * dxf;
+                const float sx_f = 6.0f * dxf;
+                const float sy_f = 8.0f * dxf;
+                const float sz_f = 4.0f * dxf;
+
+                s_f.initializeGrid(nx_f, ny_f, nz_f, dxf, dxf, dxf, 0.0f, 0.0f, 0.0f);
+                s_f.setTransferScheme(MPMTransferScheme::Standard);
+                s_f.setVelocityScheme(MPMVelocityScheme::APIC);
+                s_f.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+                s_f.setContactMethod(MPMContactMethod::MultiVelocityBardenhagen);
+                s_f.setInitialContactTie(true);
+                s_f.addBoxObject(1, cx_f, cy_f, cz_f, sx_f, sy_f, sz_f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                 7850.0f, 200.0e9f, 0.29f, 1000.0e6f, 500.0e6f, 0.30f, 2.5e9f, 8,
+                                 MPMParticleDistribution::Hexagonal, MPMBoundaryFilling::Partial);
+                // Impose a strong localized elastic compressive velocity pulse in the center of the plate
+                // to excite multi-dimensional elastic wave ringing across the sub-cell offset y-faces
+                for (auto& p : s_f.getParticles()) {
+                    float rx = (p.x[0] - cx_f) / (0.5f * sx_f);
+                    float ry = (p.x[1] - cy_f) / (0.5f * sy_f);
+                    if (std::fabs(rx) < 0.45f && std::fabs(ry) < 0.45f) {
+                        p.v[2] = 35.0f * std::cos(1.5707963f * rx) * std::cos(1.5707963f * ry);
+                    }
+                }
+                s_f.setObjectMaterialMapping({0, 0}, 1);
+                double m_tot = 0.0;
+                for (const auto& p : s_f.getParticles()) {
+                    m_tot += p.m;
+                }
+                p_ref_out = std::max(m_tot * 35.0, 1.0e-30);
+                if constexpr (std::is_same_v<std::decay_t<decltype(s_f)>, MPMSolver3DCUDA>) {
+                    (void)is_cuda;
+                    s_f.syncToDevice();
+                    for (int i = 0; i < steps_f; ++i) s_f.stepWithDt(dt_f, true);
+                    s_f.syncParticlesToHost();
+                } else {
+                    (void)is_cuda;
+                    for (int i = 0; i < steps_f; ++i) s_f.stepWithDt(dt_f, true);
+                }
+
+                max_ep_face = 0.0;
+                p_end_out[0] = p_end_out[1] = p_end_out[2] = 0.0;
+                for (const auto& p : s_f.getParticles()) {
+                    max_ep_face = std::max(max_ep_face, static_cast<double>(p.ep_bar));
+                    for (int c = 0; c < 3; ++c) p_end_out[c] += static_cast<double>(p.m) * p.v[c];
+                }
+            };
+            double ep_macro_gpu = 1.0, p_macro_gpu[3] = {0,0,0}, pref_macro = 1.0;
+            double ep_micro_gpu = 1.0, p_micro_gpu[3] = {0,0,0}, pref_micro = 1.0;
+            double ep_micro_cpu = 1.0, p_micro_cpu[3] = {0,0,0}, pref_micro_cpu = 1.0;
+            { MPMSolver3DCUDA s_macro_gpu; run_free_face_ringing(s_macro_gpu, 1.0f, true, ep_macro_gpu, p_macro_gpu, pref_macro); }
+            { MPMSolver3DCUDA s_micro_gpu; run_free_face_ringing(s_micro_gpu, 1.0e-3f, true, ep_micro_gpu, p_micro_gpu, pref_micro); }
+            { MPMSolver3D     s_micro_cpu; run_free_face_ringing(s_micro_cpu, 1.0e-3f, false, ep_micro_cpu, p_micro_cpu, pref_micro_cpu); }
+            const double max_ep_ringing = std::max({ep_macro_gpu, ep_micro_gpu, ep_micro_cpu});
+            const double cpu_gpu_micro_parity = std::sqrt(
+                (p_micro_gpu[0]-p_micro_cpu[0])*(p_micro_gpu[0]-p_micro_cpu[0]) +
+                (p_micro_gpu[1]-p_micro_cpu[1])*(p_micro_gpu[1]-p_micro_cpu[1]) +
+                (p_micro_gpu[2]-p_micro_cpu[2])*(p_micro_gpu[2]-p_micro_cpu[2])) / pref_micro;
+
+            res.error_linf = std::max({on.max_ep_core, on.max_ep_sleeve, max_ep_ringing});
+            res.error_l2 = on.band_vr_rel;
+            res.momentum_drift = std::max(std::fabs(on.mom_err - on0.mom_err), cpu_gpu_micro_parity);  // tie-ON vs single-field bonded reference + micro-scale CPU/GPU parity
+            res.energy_drift = sep_err;
+            res.passed = (on.ties == 1) && (ties_box == 1) && (ties_close == 0) &&
+                         (res.error_linf <= res.tolerance_linf) &&
+                         (res.error_l2 <= res.tolerance_l2) &&
+                         (res.momentum_drift <= res.tolerance_momentum) &&
+                         (sep_err <= res.tolerance_energy) &&
+                         (close_diff <= 1.0e-2);
+
+            std::string svg_file = "vv_mpm_cmp_08_initial_contact_tie.svg";
+            generate_svg_plot(svg_file,
+                              "VV-L2-CMP-08: max equivalent plastic strain, conformal spinning sleeve (tie OFF = reference, tie ON = result)",
+                              "Time (us)", "max eps_p (-)", on.t_us, off.ep_hist, on.ep_hist, 1.0, 5.0);
+            res.svg_path = svg_file;
+
+            std::ostringstream sum;
+            sum << "Conformal spinning sleeve (3000 rad/s, 100 m/s, 0.5-cell sleeve): ties detected ON/OFF = " << on.ties << "/" << off.ties
+                << "; max eps_p tie-ON = " << fmt(res.error_linf) << " (tie-OFF = " << fmt(std::max(off.max_ep_core, off.max_ep_sleeve)) << ")"
+                << "; interface radial-velocity mismatch ON = " << fmt(on.band_vr_rel) << " (OFF = " << fmt(off.band_vr_rel) << ")"
+                << "; momentum drift = " << fmt(res.momentum_drift) << " (bonded ep = " << fmt(std::max(on0.max_ep_core, on0.max_ep_sleeve)) << ")"
+                << "; release-box ties = " << ties_box << "; release: measured separation rate " << std::fixed << std::setprecision(3) << sep_meas << " m/s vs imposed 5 m/s (err " << fmt(sep_err) << ")"
+                << "; closing impact ties = " << ties_close << ", |dv_on - dv_off|/v = " << fmt(close_diff)
+                << "; scale-free Standard free-face ringing max_ep (macro GPU / micro GPU / micro CPU) = "
+                << fmt(ep_macro_gpu) << " / " << fmt(ep_micro_gpu) << " / " << fmt(ep_micro_cpu) << ".";
+            res.summary = sum.str();
+
+            std::ostringstream det;
+            det << "Discretisation: grid " << on.nx << " x " << on.ny << " x " << on.nz << ", dx = dy = dz = " << on.dx
+                << " m, core Np = " << on.np_core << ", sleeve Np = " << on.np_sleeve << ", steps = " << on.steps
+                << ", dt = " << fmt(on.dt) << " s, Standard transfer + APIC + Leapfrog, Bardenhagen mu = 0.1, e = 0. "
+                << "Release/closing sub-tests: 60 x 20 x 20 grid, dx = 2 mm, dt = 1e-7 s, 50 + 150 steps (release) and 200 steps (closing impact). "
+                << "Scale-free free-face ringing sub-test: 16 x 16 x 12 grid, dx = 7 mm (macro) and dx = 7 um (micro, m_p = 3.4e-13 kg), 250 steps, CPU & GPU.";
             res.details = det.str();
         } catch (const std::exception& e) {
             res.passed = false;

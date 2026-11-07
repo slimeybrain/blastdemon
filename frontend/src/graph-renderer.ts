@@ -5047,6 +5047,7 @@ export class GraphRenderer {
                 'enable_impact_welding': ['Disabled', 'Enabled'],
                 'enable_frictional_heating': ['Disabled', 'Enabled'],
                 'enable_thermal_conduction': ['Disabled', 'Enabled'],
+                'bardenhagen_initial_tie': ['Disabled', 'Enabled'],
                 'enable_dem_contact': ['Disabled', 'Enabled'],
                 'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
                 'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],

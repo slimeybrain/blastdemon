@@ -280,6 +280,37 @@ inline Point3D rotate_point_euler(float u, float v, float w, float ax_deg, float
     return { u_rot, v_rot, w_rot };
 }
 
+inline Point3D inv_rotate_point_euler(float u, float v, float w, float ax_deg, float ay_deg, float az_deg) {
+    if (ax_deg == 0.0f && ay_deg == 0.0f && az_deg == 0.0f) {
+        return { u, v, w };
+    }
+    constexpr float deg_to_rad = 3.14159265358979323846f / 180.0f;
+    float ax = ax_deg * deg_to_rad;
+    float ay = ay_deg * deg_to_rad;
+    float az = az_deg * deg_to_rad;
+
+    float cx = std::cos(ax), sx = std::sin(ax);
+    float cy = std::cos(ay), sy = std::sin(ay);
+    float cz = std::cos(az), sz = std::sin(az);
+
+    // Step 1: Inverse rotation around Z (-az)
+    float u1 = cz * u + sz * v;
+    float v1 = -sz * u + cz * v;
+    float w1 = w;
+
+    // Step 2: Inverse rotation around Y (-ay)
+    float u2 = cy * u1 - sy * w1;
+    float v2 = v1;
+    float w2 = sy * u1 + cy * w1;
+
+    // Step 3: Inverse rotation around X (-ax)
+    float u_rot = u2;
+    float v_rot = cx * v2 + sx * w2;
+    float w_rot = -sx * v2 + cx * w2;
+
+    return { u_rot, v_rot, w_rot };
+}
+
 inline std::vector<Triangle> transform_triangles(
     const std::vector<Triangle>& raw_triangles,
     float scale_x, float scale_y, float scale_z,

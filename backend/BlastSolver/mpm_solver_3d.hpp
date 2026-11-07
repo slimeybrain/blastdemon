@@ -435,6 +435,7 @@ struct alignas(32) MPMGridNode3D {
     float dT_cond{0.0f};        // Grid thermal conduction increment (K) (4B)
     float t_star{0.0f};         // Mass-weighted homologous temperature T* in [0, 1] (4B)
     float q_fric{0.0f};         // Contact frictional heating specific energy increment (J/kg) (4B)
+    float w_sum{0.0f};          // Dimensionless nodal shape-function support completeness sum_p N_I(x_p) (4B)
 
     static constexpr float MIN_MASS = 1.0e-20f;
     float v(int i) const { return m > MIN_MASS ? p[i] / m : 0.0f; }
@@ -688,6 +689,10 @@ public:
     void setContactMethod(MPMContactMethod method);
     MPMContactMethod getContactMethod() const { return m_contact_method; }
     void setObjectMaterialMapping(const std::vector<int>& obj_to_mat, int num_materials);
+    // Enable/disable automatic tying of initially touching, rigid-body co-moving velocity fields (default: on).
+    // Takes effect at the next setObjectMaterialMapping() call.
+    void setInitialContactTie(bool enable) { m_initial_contact_tie = enable; }
+    int getNumInitialContactTies() const { return m_num_tied_pairs; }
     int getNumMaterials() const { return m_num_materials; }
 
     // Thermo-Mechanical Bonding, Frictional Heating & Thermal Conduction Toggles
@@ -767,6 +772,9 @@ private:
     float m_flip_blend{0.95f};
     bool m_smooth_plastic_strain{true};
     bool m_enable_impact_welding{false};
+    bool m_initial_contact_tie{true};
+    int m_num_tied_pairs{0};
+    std::vector<unsigned int> m_tie_mask;   // per-field bit mask of tied fields (see initial_contact_tie.hpp)
     bool m_enable_frictional_heating{false};
     bool m_enable_thermal_conduction{false};
     bool m_enable_dem_contact{false};

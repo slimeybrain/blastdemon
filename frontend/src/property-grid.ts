@@ -4497,6 +4497,7 @@ export class PropertyGrid {
             'enable_impact_welding': ['Disabled', 'Enabled'],
             'enable_frictional_heating': ['Disabled', 'Enabled'],
             'enable_thermal_conduction': ['Disabled', 'Enabled'],
+            'bardenhagen_initial_tie': ['Disabled', 'Enabled'],
             'enable_dem_contact': ['Disabled', 'Enabled'],
             'dem_contact_mode': ['Gas-Solid Only', 'Ballistic Impacts & Gas', 'All Dynamic Contacts'],
             'boundary_condition': ['Free', 'Fixed Base', 'Fixed Entire'],
@@ -5651,7 +5652,7 @@ export class PropertyGrid {
             'enable_heterogeneity', 'enable_anisotropy',
             'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion',
             'kc_auto_generate', 'directional_crack_band', 'enable_directional_crack_band',
-            'contact_method', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode',
+            'contact_method', 'bardenhagen_initial_tie', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode',
             'export_fem', 'export_mpm', 'export_stl_faces', 'tessellate_stl_faces',
             'showFEMMesh', 'showMPMParticles', 'showRebar', 'showBeams', 'show_stl', 'show_gauges',
             'water_discretization_mode', 'seabed_mesh_type', 'roi_enabled', 'trigger_type'
@@ -6064,7 +6065,7 @@ export class PropertyGrid {
 
             const keys = ['device', 'precision', 'transfer_scheme', 'particle_distribution', 'boundary_filling', 'velocity_scheme', 'space_time_scheme', 'smooth_plastic_strain', 'contact_method'];
             if (isBardenhagen) {
-                keys.push('bardenhagen_grouping_policy');
+                keys.push('bardenhagen_grouping_policy', 'bardenhagen_initial_tie');
             }
             keys.push('enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction');
 
@@ -6085,7 +6086,7 @@ export class PropertyGrid {
 
             if (hasFLIP) keys.push('flip_blend');
             keys.push('ppc', 'cfl', 'endtime');
-            return keys.filter(k => k in node.parameters || k === 'bardenhagen_grouping_policy');
+            return keys.filter(k => k in node.parameters || k === 'bardenhagen_grouping_policy' || k === 'bardenhagen_initial_tie');
         }
 
         if (node.type === 'MPMObject2D') {
@@ -6552,7 +6553,7 @@ export class PropertyGrid {
             addGroup('mpm_numerics', 'Discretization & Particle Formulation', ['particle_distribution', 'boundary_filling', 'ppc', 'smooth_plastic_strain']);
             addGroup('mpm_time', 'Velocity Scheme & Time Stepping', ['velocity_scheme', 'flip_blend', 'space_time_scheme', 'cfl', 'endtime']);
             if (node.type === 'MPMDomain3D') {
-                addGroup('mpm_dem_contact', 'Multi-Body Contact, Impact Welding & Thermal Mechanics', ['contact_method', 'bardenhagen_grouping_policy', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale']);
+                addGroup('mpm_dem_contact', 'Multi-Body Contact, Impact Welding & Thermal Mechanics', ['contact_method', 'bardenhagen_grouping_policy', 'bardenhagen_initial_tie', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale']);
             }
             addGroup('mpm_hardware', 'Hardware & Precision', ['device', 'precision']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));

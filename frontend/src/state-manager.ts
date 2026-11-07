@@ -1746,6 +1746,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         smooth_plastic_strain: true,
         contact_method: 'Single-Velocity',
         bardenhagen_grouping_policy: 'Per-Object Independent',
+        bardenhagen_initial_tie: true,
         enable_impact_welding: false,
         enable_frictional_heating: false,
         enable_thermal_conduction: false,

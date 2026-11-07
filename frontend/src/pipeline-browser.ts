@@ -1572,8 +1572,13 @@ export class PipelineBrowser {
     private createCategoryGroup(cat: EntityCategory, nodes: Node[], model: Model): HTMLElement {
         const group = document.createElement('div');
         group.className = 'pipeline-group';
+        group.dataset.categoryId = cat.id;
+        group.style.setProperty('--cat-color', cat.color);
 
         const isCollapsed = this.collapsedCategories.has(cat.id);
+        if (isCollapsed) {
+            group.classList.add('collapsed');
+        }
 
         const header = document.createElement('div');
         header.className = 'pipeline-group-header';
@@ -1613,7 +1618,11 @@ export class PipelineBrowser {
 
         const catLabel = document.createElement('span');
         catLabel.className = 'pipeline-cat-label';
-        catLabel.textContent = `${cat.label} (${nodes.length})`;
+        catLabel.textContent = cat.label;
+
+        const catCount = document.createElement('span');
+        catCount.className = 'pipeline-cat-count';
+        catCount.textContent = `${nodes.length}`;
 
         const catQuickAdd = document.createElement('button');
         catQuickAdd.className = 'pipeline-cat-quick-add';
@@ -1627,6 +1636,7 @@ export class PipelineBrowser {
         header.appendChild(caret);
         header.appendChild(catIcon);
         header.appendChild(catLabel);
+        header.appendChild(catCount);
         header.appendChild(catQuickAdd);
         group.appendChild(header);
 
@@ -5748,12 +5758,14 @@ export class PipelineBrowser {
                 const fricHeat = Boolean(node.parameters?.enable_frictional_heating);
                 const cond = Boolean(node.parameters?.enable_thermal_conduction);
                 const groupingPolicy = String(node.parameters?.bardenhagen_grouping_policy || 'Per-Object Independent');
+                const initialTie = node.parameters?.bardenhagen_initial_tie !== false;
                 const contactChip = document.createElement('span');
                 contactChip.className = 'pipeline-conn-chip connected';
                 const flags: string[] = [];
                 if (weld) flags.push('Weld');
                 if (fricHeat) flags.push('FricHeat');
                 if (cond) flags.push('Cond');
+                if (isBard && initialTie) flags.push('Tie');
                 const flagSuffix = flags.length > 0 ? ` [${flags.join('+')}]` : '';
                 const cmShort = isBard ? 'Multi-Vel' : (isDem ? 'DEM' : 'Single-Vel');
                 contactChip.textContent = `🔥 ${cmShort}${flagSuffix}`;
@@ -5766,6 +5778,7 @@ export class PipelineBrowser {
                         { id: 'bardenhagen_weld_full', label: 'Multi-Velocity + Full Impact Welding', sublabel: 'Enables Impact Welding + Frictional Heating + Thermal Conduction' },
                         { id: 'policy_per_obj', label: `${groupingPolicy === 'Per-Object Independent' ? '✓ ' : ''}Grouping: Per-Object Independent`, sublabel: 'Each uncoupled MPMObject3D gets its own velocity field' },
                         { id: 'policy_by_mat', label: `${groupingPolicy === 'By Material Node' ? '✓ ' : ''}Grouping: By Material Node`, sublabel: 'Uncoupled parts sharing a Material node share a velocity field' },
+                        { id: 'toggle_initial_tie', label: `${initialTie ? '✓ ' : ''}Toggle Initial-Contact Tie`, sublabel: `Currently ${initialTie ? 'Enabled' : 'Disabled'} (tie touching co-moving bodies at t = 0; avoids spurious contact plasticity at conformal interfaces)` },
                         { id: 'add_coupler', label: '➕ Add Bardenhagen Contact Coupler', sublabel: 'Create an MPMContactCoupler3D node to bond selected parts' },
                         { id: 'toggle_weld', label: `${weld ? '✓ ' : ''}Toggle Impact Welding`, sublabel: `Currently ${weld ? 'Enabled' : 'Disabled'} (T* / plastic shear fusion + sintering)` },
                         { id: 'toggle_fric_heat', label: `${fricHeat ? '✓ ' : ''}Toggle Frictional Heating`, sublabel: `Currently ${fricHeat ? 'Enabled' : 'Disabled'} (contact ΔK -> thermal energy)` },
@@ -5801,6 +5814,8 @@ export class PipelineBrowser {
                                 nextParams.bardenhagen_grouping_policy = 'Per-Object Independent';
                             } else if (selectedId === 'policy_by_mat') {
                                 nextParams.bardenhagen_grouping_policy = 'By Material Node';
+                            } else if (selectedId === 'toggle_initial_tie') {
+                                nextParams.bardenhagen_initial_tie = !initialTie;
                             } else if (selectedId === 'toggle_weld') {
                                 nextParams.enable_impact_welding = !weld;
                             } else if (selectedId === 'toggle_fric_heat') {

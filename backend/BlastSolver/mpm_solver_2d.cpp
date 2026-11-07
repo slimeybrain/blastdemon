@@ -860,17 +860,33 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                     const auto& node = m_grid[node_idx];
 
                     if (node.m > 1.0e-14f) {
-                        v_pic_x += weight * node.v[0];
-                        v_pic_y += weight * node.v[1];
-                        delta_v_grid_x += weight * (node.v[0] - node.v_old[0]);
-                        delta_v_grid_y += weight * (node.v[1] - node.v_old[1]);
+                        float eff_vx = node.v[0];
+                        float eff_vy = node.v[1];
+                        float eff_dvx = node.v[0] - node.v_old[0];
+                        float eff_dvy = node.v[1] - node.v_old[1];
+
+                        if (is_standard) {
+                            float p_m_ref = std::max(p.m, 1.0e-12f);
+                            float reg_dv = std::min(1.0f, node.m / p_m_ref);
+                            float v_old_x = eff_vx - eff_dvx;
+                            float v_old_y = eff_vy - eff_dvy;
+                            eff_dvx *= reg_dv;
+                            eff_dvy *= reg_dv;
+                            eff_vx = v_old_x + eff_dvx;
+                            eff_vy = v_old_y + eff_dvy;
+                        }
+
+                        v_pic_x += weight * eff_vx;
+                        v_pic_y += weight * eff_vy;
+                        delta_v_grid_x += weight * eff_dvx;
+                        delta_v_grid_y += weight * eff_dvy;
                         weight_sum += weight;
 
                         float dist_x = node_x - p.x[0];
                         float dist_y = node_y - p.x[1];
 
-                        float diff_vx = node.v[0] - p.v[0];
-                        float diff_vy = node.v[1] - p.v[1];
+                        float diff_vx = eff_vx - p.v[0];
+                        float diff_vy = eff_vy - p.v[1];
 
                         float b_grad_x = is_standard ? dN_dx : (weight * dist_x * D_inv_x);
                         float b_grad_y = is_standard ? dN_dy : (weight * dist_y * D_inv_y);

@@ -77,6 +77,10 @@ public:
     void setContactMethod(MPMContactMethod method);
     MPMContactMethod getContactMethod() const { return m_contact_method; }
     void setObjectMaterialMapping(const std::vector<int>& obj_to_mat, int num_materials);
+    // Enable/disable automatic tying of initially touching, rigid-body co-moving velocity fields (default: on).
+    // Takes effect at the next setObjectMaterialMapping() call.
+    void setInitialContactTie(bool enable) { m_initial_contact_tie = enable; }
+    int getNumInitialContactTies() const { return m_num_tied_pairs; }
     int getNumMaterials() const { return m_num_materials; }
 
     // Compact multi-material (Bardenhagen) grid storage.
@@ -440,6 +444,12 @@ private:
     float* d_mat_grid_v{nullptr};
     float* d_mat_grid_dv{nullptr};
     int* d_mat_to_obj{nullptr};
+    // Initial-contact tie (Bardenhagen contact initialisation): per-field bit set of tied partner fields
+    unsigned int* d_tie_mask{nullptr};
+    std::vector<unsigned int> m_tie_mask_host;
+    int m_num_tied_pairs{0};
+    bool m_initial_contact_tie{true};
+    void computeInitialContactTies();
     void allocateMatGridBuffers(size_t num_nodes, int num_materials);
     void freeMatGridBuffers();
 
