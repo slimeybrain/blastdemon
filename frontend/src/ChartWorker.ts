@@ -25,6 +25,9 @@ let lastBuffer: ArrayBuffer | null = null;
 // X-axis configuration
 let xAxisMode = 'radius';
 let domainRadius = 1.0;
+let chargeRadius = 0.0;
+let detonatorR: number | null = null;
+let gauges: Array<{ id?: string; name?: string; r: number }> = [];
 
 // Zoom/Pan State
 let isZoomedOrPanned = false;
@@ -151,7 +154,7 @@ function drawCurve(
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
 
-    const dxPerIndex = xAxisMode === 'radius' ? (domainRadius / (numPoints - 1 || 1)) : 1;
+    const dxPerIndex = xAxisMode === 'radius' ? (domainRadius / (numPoints || 1)) : 1;
     const iMin = Math.max(0, Math.floor(activeMinX / dxPerIndex) - 1);
     const iMax = Math.min(numPoints - 1, Math.ceil(activeMaxX / dxPerIndex) + 1);
     const visiblePointsCount = iMax - iMin + 1;
@@ -161,7 +164,7 @@ function drawCurve(
         ctx.beginPath();
         let first = true;
         for (let i = Math.max(0, iMin); i <= iMax; i++) {
-            const xVal = i * dxPerIndex;
+            const xVal = xAxisMode === 'radius' ? (i + 0.5) * dxPerIndex : i;
             const yVal = data[i];
             if (!isFinite(yVal)) continue;
 
@@ -221,6 +224,91 @@ function drawCurve(
         }
         ctx.stroke();
     }
+    ctx.restore();
+}
+
+function draw1DSchematicAndOverlays(
+    drawWidth: number,
+    drawHeight: number,
+    currentPadding: number,
+    activeMinX: number,
+    activeMaxX: number,
+    hasLiveCurve: boolean
+): void {
+    if (!ctx || xAxisMode !== 'radius') return;
+    const activeRangeX = activeMaxX - activeMinX || 1;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(currentPadding, 0, drawWidth, drawHeight);
+    ctx.clip();
+
+    // Draw Charge Zone [0, chargeRadius]
+    if (chargeRadius > 0) {
+        const x0 = currentPadding + ((0 - activeMinX) / activeRangeX) * drawWidth;
+        const x1 = currentPadding + ((chargeRadius - activeMinX) / activeRangeX) * drawWidth;
+        const w = Math.max(2, x1 - x0);
+        ctx.fillStyle = hasLiveCurve ? 'rgba(244, 63, 94, 0.08)' : 'rgba(244, 63, 94, 0.22)';
+        ctx.fillRect(x0, 0, w, drawHeight);
+        ctx.strokeStyle = 'rgba(244, 63, 94, 0.65)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(x1, 0);
+        ctx.lineTo(x1, drawHeight);
+        ctx.stroke();
+
+        if (!hasLiveCurve) {
+            ctx.fillStyle = '#fda4af';
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Charge (R=${chargeRadius.toFixed(3)}m)`, Math.max(currentPadding + 6, x1 + 6), 22);
+        }
+    }
+
+    // Draw Detonator marker
+    if (detonatorR !== null && isFinite(detonatorR)) {
+        const detX = currentPadding + ((detonatorR - activeMinX) / activeRangeX) * drawWidth;
+        const detY = drawHeight - 14;
+        ctx.beginPath();
+        ctx.arc(detX, detY, 4, 0, 2 * Math.PI);
+        ctx.fillStyle = '#ff3b30';
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.2;
+        ctx.fill();
+        ctx.stroke();
+    }
+
+    // Draw Virtual Gauges vertical dashed lines & labels
+    if (gauges && gauges.length > 0) {
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = 'rgba(16, 185, 129, 0.65)';
+        ctx.lineWidth = 1;
+        ctx.font = '10px monospace';
+        ctx.fillStyle = '#6ee7b7';
+        ctx.textAlign = 'left';
+        for (let i = 0; i < gauges.length; ++i) {
+            const g = gauges[i];
+            const gr = Number(g.r ?? 0);
+            const gx = currentPadding + ((gr - activeMinX) / activeRangeX) * drawWidth;
+            if (gx < currentPadding || gx > currentPadding + drawWidth) continue;
+            ctx.beginPath();
+            ctx.moveTo(gx, 0);
+            ctx.lineTo(gx, drawHeight);
+            ctx.stroke();
+            const label = g.name || g.id || `G${i + 1}`;
+            ctx.fillText(`${label} (${gr.toFixed(2)}m)`, gx + 4, 38 + (i % 4) * 14);
+        }
+        ctx.restore();
+    }
+
+    if (!hasLiveCurve) {
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(`1D Spherical Domain Preview (R_max = ${domainRadius.toFixed(2)} m) — Ready`, currentPadding + 12, drawHeight / 2);
+    }
+
     ctx.restore();
 }
 
@@ -359,7 +447,7 @@ function render(): void {
                 const val = activeMinX + pct * activeRangeX;
                 let labelText = '';
                 if (xAxisMode === 'radius') {
-                    labelText = val.toFixed(2);
+                    labelText = val.toFixed(2) + ' m';
                 } else {
                     labelText = String(Math.round(val));
                 }
@@ -368,6 +456,8 @@ function render(): void {
         }
 
         const physDrawWidth = Math.round(drawWidth * dpr);
+        const hasLiveCurve = Boolean(rawData && rawData.length > 0);
+        draw1DSchematicAndOverlays(drawWidth, drawHeight, currentPadding, activeMinX, activeMaxX, hasLiveCurve);
 
         if (selectedChannel === 4 && lastBuffer) {
             const dataBurned = extractChannel(lastBuffer, 4);
@@ -407,6 +497,22 @@ self.onmessage = (event) => {
         lastBuffer = data;
         rawData = extractChannel(data, selectedChannel);
         updateAutoScale();
+        requestRender();
+        return;
+    }
+
+    if (data.type === 'clearData') {
+        lastBuffer = null;
+        rawData = null;
+        requestRender();
+        return;
+    }
+
+    if (data.type === 'resetView') {
+        isZoomedOrPanned = false;
+        if (lastBuffer) {
+            updateAutoScale();
+        }
         requestRender();
         return;
     }
@@ -508,6 +614,9 @@ self.onmessage = (event) => {
         if (typeof data.showAxes === 'boolean')  showAxes = data.showAxes;
         if (data.xAxisMode)                     xAxisMode = data.xAxisMode;
         if (typeof data.domainRadius === 'number') domainRadius = data.domainRadius;
+        if (typeof data.chargeRadius === 'number') chargeRadius = data.chargeRadius;
+        if (data.detonatorR !== undefined)      detonatorR = data.detonatorR;
+        if (Array.isArray(data.gauges))         gauges = data.gauges;
         range = displayMax - displayMin || 1;
 
         // Channel switch: re-slice the cached buffer immediately without a new frame

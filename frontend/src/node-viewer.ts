@@ -1372,7 +1372,7 @@ export class NodeViewer {
         if (node && (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D')) {
             if (this.gaugesCanvas) {
                 const gauges = node.parameters?.gauges || [];
-                const has2D = activeModel?.nodes.some(n => n.type === 'DomainMesh2D') || false;
+                const has2D = activeModel?.nodes.some(n => n.type === 'DomainMesh2D' || n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D') || false;
                 const history = data || this.stateManager.getTelemetry(nodeId);
                 this.drawGaugesChart(this.gaugesCanvas, history, gauges, this.gaugesChannel, has2D);
             }
@@ -1400,7 +1400,7 @@ export class NodeViewer {
         this.gaugesZoomedOrPanned = false;
 
         const activeModel = this.stateManager.getActiveModel();
-        const has2D = activeModel?.nodes.some(n => n.type === 'DomainMesh2D') || false;
+        const has2D = activeModel?.nodes.some(n => n.type === 'DomainMesh2D' || n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D') || false;
         const is3D = activeModel?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') || false;
 
         const ALL_CHANNELS = [
@@ -1840,7 +1840,9 @@ export class NodeViewer {
                 const nextIdx = gauges.length + 1;
                 const newGauge = is3D 
                     ? { id: `G${nextIdx}`, name: `G${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true, plot: true }
-                    : { id: `G${nextIdx}`, name: `G${nextIdx}`, r: 0.1, z: 0.0, active: true, plot: true };
+                    : has2D
+                        ? { id: `G${nextIdx}`, name: `G${nextIdx}`, r: 0.1, z: 0.0, active: true, plot: true }
+                        : { id: `G${nextIdx}`, name: `G${nextIdx}`, r: 0.1, active: true, plot: true };
                 const newGauges = [...gauges, newGauge];
                 this.stateManager.updateNodeParameters(node.id, { gauges: newGauges });
                 this.render();
@@ -2836,7 +2838,7 @@ export class NodeViewer {
             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride', 'tessellation_max_edge',
             'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
             // 2D CFD keys
-            'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
+            'nr', 'nz', 'min_r', 'min_z', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
             'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
@@ -3718,7 +3720,6 @@ export class NodeViewer {
             const sourceDim = is2Dto3D ? '2D' : '1D';
 
             const candidateModels = allModels.filter(m => {
-                if (owningModel && m.id === owningModel.id) return false;
                 return m.nodes.some(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
             });
 
@@ -3728,7 +3729,7 @@ export class NodeViewer {
             candidateModels.forEach(m => {
                 const opt = document.createElement('option');
                 opt.value = m.id;
-                opt.text = `[${sourceDim}] ${m.name || m.id}`;
+                opt.text = `[${sourceDim}] ${m.name || m.id}${owningModel && m.id === owningModel.id ? ' (Same Model)' : ''}`;
                 if (m.id === currentModelId) {
                     opt.selected = true;
                     foundModel = true;
@@ -3794,7 +3795,7 @@ export class NodeViewer {
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
             const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
             const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode';
-            const targetSolvers = candidateNodes.filter(n => is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D');
+            const targetSolvers = candidateNodes.filter(n => is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (n.type === 'CFDSolver2D' || n.type === 'FSICoupler2D' || n.type === 'MPMDomain2D'));
 
             let currentSolverId = node.parameters?.target_solver || '';
             if (!currentSolverId && state) {

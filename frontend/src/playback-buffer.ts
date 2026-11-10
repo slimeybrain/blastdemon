@@ -36,6 +36,7 @@ export class PlaybackRingBuffer {
     private listeners: ((frame: BufferedFrame, count: number) => void)[] = [];
     private lastRecordedTimestamp: number = 0;
     private lastRecordedFrame: BufferedFrame | null = null;
+    private latestFrameByModel: Map<string, BufferedFrame> = new Map();
 
     /**
      * @param maxFrames Maximum number of frames to store in the ring buffer (default: 1000)
@@ -56,7 +57,6 @@ export class PlaybackRingBuffer {
         meta: { step?: number; time?: number; modelId?: string; metrics?: any } = {}
     ): BufferedFrame {
         const now = performance.now();
-        const isStepZero = meta.step === 0;
         const timeSinceLast = now - this.lastRecordedTimestamp;
         const magic = rawBuffer.byteLength >= 4 ? new DataView(rawBuffer).getUint32(0, true) : 0;
         const isMPM = magic === 0x4d504d33; // 'MPM3'
@@ -169,6 +169,9 @@ export class PlaybackRingBuffer {
                     const dt = (meta.metrics.dt !== undefined && meta.metrics.dt > 0) ? meta.metrics.dt : this.lastRecordedFrame.metrics?.dt;
                     this.lastRecordedFrame.metrics = { ...this.lastRecordedFrame.metrics, ...meta.metrics, ...(dt !== undefined ? { dt } : {}) };
                 }
+                if (meta.modelId) {
+                    this.latestFrameByModel.set(meta.modelId, { ...this.lastRecordedFrame });
+                }
                 // Notify listeners of updated multi-modal frame contents
                 for (const cb of this.listeners) {
                     try {
@@ -199,6 +202,8 @@ export class PlaybackRingBuffer {
         const storedBuffer = isHistoryEnabled ? rawBuffer.slice(0) : rawBuffer;
         const byteSize = isHistoryEnabled ? storedBuffer.byteLength : 0;
 
+        const prevModelFrame = meta.modelId ? this.latestFrameByModel.get(meta.modelId) : (sameModel ? this.lastRecordedFrame : null);
+
         // Auto-extract step/time from binary header if not provided in meta
         let step = meta.step ?? 0;
         let time = meta.time ?? 0;
@@ -212,17 +217,17 @@ export class PlaybackRingBuffer {
         }
 
         // If step or time was unresolved or 0, preserve previous frame values for the same model if available
-        if (step === 0 && this.lastRecordedFrame && this.lastRecordedFrame.step > 0 && sameModel) {
-            step = this.lastRecordedFrame.step;
+        if (step === 0 && prevModelFrame && prevModelFrame.step > 0) {
+            step = prevModelFrame.step;
         }
-        if (time === 0 && this.lastRecordedFrame && this.lastRecordedFrame.time > 0 && sameModel) {
-            time = this.lastRecordedFrame.time;
+        if (time === 0 && prevModelFrame && prevModelFrame.time > 0) {
+            time = prevModelFrame.time;
         }
 
-        const metrics = { ...(this.lastRecordedFrame?.metrics || {}), ...(meta.metrics || {}) };
+        const metrics = { ...(prevModelFrame?.metrics || {}), ...(meta.metrics || {}) };
         if (metrics.dt === undefined || metrics.dt <= 0) {
-            const lastDt = this.lastRecordedFrame?.metrics?.dt;
-            if (typeof lastDt === 'number' && lastDt > 0 && sameModel) {
+            const lastDt = prevModelFrame?.metrics?.dt;
+            if (typeof lastDt === 'number' && lastDt > 0) {
                 metrics.dt = lastDt;
             }
         }
@@ -235,10 +240,10 @@ export class PlaybackRingBuffer {
             time,
             modelId: meta.modelId,
             buffer: storedBuffer,
-            sliceBuffer: isSlice ? storedBuffer : undefined,
-            mpmBuffer: isMPM ? storedBuffer : undefined,
-            phaseParticlesBuffer: isPhase ? storedBuffer : undefined,
-            femBuffer: isFEM ? storedBuffer : undefined,
+            sliceBuffer: isSlice ? storedBuffer : prevModelFrame?.sliceBuffer,
+            mpmBuffer: isMPM ? storedBuffer : prevModelFrame?.mpmBuffer,
+            phaseParticlesBuffer: isPhase ? storedBuffer : prevModelFrame?.phaseParticlesBuffer,
+            femBuffer: isFEM ? storedBuffer : prevModelFrame?.femBuffer,
             metrics,
             timestamp: now,
             byteSize
@@ -247,6 +252,9 @@ export class PlaybackRingBuffer {
         this.frames.push(frame);
         this.currentMemoryBytes += byteSize;
         this.lastRecordedFrame = frame;
+        if (meta.modelId) {
+            this.latestFrameByModel.set(meta.modelId, { ...frame });
+        }
 
         // Notify listeners of new frame arrival
         for (const cb of this.listeners) {
@@ -289,13 +297,6 @@ export class PlaybackRingBuffer {
                 const time = dataView.getFloat32(4, true);
                 const step = (this.lastRecordedFrame && this.lastRecordedFrame.step > 0) ? this.lastRecordedFrame.step : 0;
                 return { step, time: Number.isFinite(time) ? time : 0 };
-            } else {
-                // Fallback: heuristic header parsing
-                const step = dataView.getUint32(0, true);
-                const time = dataView.getFloat32(4, true);
-                if (Number.isFinite(time) && time >= 0 && time < 1e6 && step < 1e7) {
-                    return { step, time };
-                }
             }
         } catch {
             // Ignore parse failures
@@ -383,19 +384,25 @@ export class PlaybackRingBuffer {
      * Get the latest recorded frame for a specific model (or globally if modelId is unspecified).
      */
     public getLatestFrameForModel(modelId?: string | null): BufferedFrame | null {
-        if (this.frames.length === 0 || !modelId) return null;
+        if (!modelId) return this.getLatestFrame();
         for (let i = this.frames.length - 1; i >= 0; i--) {
             if (this.frames[i].modelId === modelId) {
                 return this.frames[i];
             }
         }
-        return null;
+        return this.latestFrameByModel.get(modelId) || null;
     }
 
     /**
      * Get the latest recorded FEM3 binary mesh buffer for a model (or across any model).
      */
     public getLatestFEMBuffer(modelId?: string | null): ArrayBuffer | null {
+        if (modelId) {
+            const latest = this.latestFrameByModel.get(modelId);
+            if (latest?.femBuffer && latest.femBuffer.byteLength >= 24) {
+                return latest.femBuffer;
+            }
+        }
         if (this.frames.length === 0) return null;
         for (let i = this.frames.length - 1; i >= 0; i--) {
             const f = this.frames[i];
@@ -447,7 +454,9 @@ export class PlaybackRingBuffer {
             this.currentMemoryBytes = 0;
             this.lastRecordedFrame = null;
             this.lastRecordedTimestamp = 0;
+            this.latestFrameByModel.clear();
         } else {
+            this.latestFrameByModel.delete(modelId);
             this.frames = this.frames.filter(f => f.modelId !== modelId);
             this.currentMemoryBytes = this.frames.reduce((sum, f) => sum + f.byteSize, 0);
             if (this.lastRecordedFrame && this.lastRecordedFrame.modelId === modelId) {

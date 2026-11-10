@@ -977,7 +977,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride', 'tessellation_max_edge',
         'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
         // 2D CFD keys
-        'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
+        'nr', 'nz', 'min_r', 'min_z', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
         'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
         'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
         'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
@@ -1693,6 +1693,19 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 });
             }
+            if (targetNode && targetNode.type === 'Obstacle') {
+                if (!flattenedParams['obstacles_2d']) flattenedParams['obstacles_2d'] = [];
+                const op = targetNode.parameters || {};
+                flattenedParams['obstacles_2d'].push({
+                    r1: Number(op.r1 ?? 0.2),
+                    r2: Number(op.r2 ?? 0.4),
+                    z1: Number(op.z1 ?? 0.2),
+                    z2: Number(op.z2 ?? 0.4),
+                    is_destructible: Boolean(op.is_destructible),
+                    yield_stress: Number(op.yield_stress ?? 250e6),
+                    rho: Number(op.rho ?? 7800.0)
+                });
+            }
         }
     }
 
@@ -1705,11 +1718,17 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         // gamma comes from MaterialAir's gamma parameter (default 1.4 if not set)
         if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
 
-        const mass = flattenedParams['charge_mass'] !== undefined ? flattenedParams['charge_mass'] : 0.0;
+        const mass = flattenedParams['charge_mass'] !== undefined ? Number(flattenedParams['charge_mass']) : 0.0;
         const rho = flattenedParams['rho'] || 1630.0;
         flattenedParams['charge_mass'] = mass;
         flattenedParams['rho'] = rho;
-        flattenedParams['explosive_radius'] = mass > 0 ? Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0) : 0.0;
+        if (mass > 0) {
+            flattenedParams['explosive_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0);
+        } else if (!flattenedParams['explosive_radius'] && flattenedParams['charge_radius']) {
+            flattenedParams['explosive_radius'] = Number(flattenedParams['charge_radius']);
+        } else if (!flattenedParams['explosive_radius']) {
+            flattenedParams['explosive_radius'] = 0.05;
+        }
 
         const p = flattenedParams['atm_pressure'] || 101325.0;
         const t = flattenedParams['atm_temperature'] || 288.0;
@@ -1792,17 +1811,23 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
 
         const cellSize = flattenedParams['cell_size'] || 0.005;
-        const maxR = flattenedParams['max_r'] || 1.0;
-        const maxZ = flattenedParams['max_z'] || 1.0;
+        const minR = Number(flattenedParams['min_r'] ?? 0.0);
+        const maxR = Number(flattenedParams['max_r'] ?? 1.0);
+        const minZ = Number(flattenedParams['min_z'] ?? 0.0);
+        const maxZ = Number(flattenedParams['max_z'] ?? 1.0);
+        const spanR = Math.max(cellSize, maxR - minR);
+        const spanZ = Math.max(cellSize, maxZ - minZ);
 
         if (flattenedParams['mesh_type'] === 'amr') {
-            flattenedParams['nr'] = Math.ceil((Math.round(maxR / cellSize) || 128) / 16) * 16;
-            flattenedParams['nz'] = Math.ceil((Math.round(maxZ / cellSize) || 128) / 16) * 16;
+            flattenedParams['nr'] = Math.ceil((Math.round(spanR / cellSize) || 128) / 16) * 16;
+            flattenedParams['nz'] = Math.ceil((Math.round(spanZ / cellSize) || 128) / 16) * 16;
         } else {
-            flattenedParams['nr'] = Math.round(maxR / cellSize);
-            flattenedParams['nz'] = Math.round(maxZ / cellSize);
+            flattenedParams['nr'] = Math.max(1, Math.round(spanR / cellSize));
+            flattenedParams['nz'] = Math.max(1, Math.round(spanZ / cellSize));
         }
+        flattenedParams['min_r'] = minR;
         flattenedParams['max_r'] = maxR;
+        flattenedParams['min_z'] = minZ;
         flattenedParams['max_z'] = maxZ;
     } else if (command === "INIT_FSI_2D" || command === "INIT_FSI") {
         // 1. Serialize 2D CFD Solver part
@@ -1866,11 +1891,59 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 }
             }
 
+            // Trace Detonator / Trigger for 2D FSI
+            const detConn2D = state.connections.find(c =>
+                (c.toNode === solverNode2D.id || c.fromNode === solverNode2D.id) &&
+                (c.toPort === 'detonator' || c.toPort === 'trigger' || c.fromPort === 'detonator' || c.fromPort === 'trigger')
+            );
+            let detNode2D = detConn2D ? state.nodes.find(n => (n.id === detConn2D.fromNode || n.id === detConn2D.toNode) && (n.type === 'DetonatorLocation' || n.type === 'TriggerLocation')) : null;
+            if (!detNode2D) {
+                detNode2D = state.nodes.find(n => n.type === 'DetonatorLocation' || n.type === 'TriggerLocation') || null;
+            }
+            if (detNode2D) {
+                Object.entries(detNode2D.parameters).forEach(([key, value]) => {
+                    flattenedParams[key] = numericKeys.includes(key) ? Number(value) : (booleanKeys.includes(key) ? Boolean(value) : value);
+                });
+                const tDelay = Number(detNode2D.parameters?.time_delay ?? detNode2D.parameters?.detonator_time ?? detNode2D.parameters?.start_time ?? 0.0);
+                flattenedParams['time_delay'] = tDelay;
+                flattenedParams['detonator_time'] = tDelay;
+                flattenedParams['start_time'] = tDelay;
+            }
+
+            // Trace Obstacles, Gauges, VTK on solverNode2D
+            const solver2DConns = state.connections.filter(c => c.fromNode === solverNode2D.id || c.toNode === solverNode2D.id);
+            for (const conn of solver2DConns) {
+                const otherId = conn.fromNode === solverNode2D.id ? conn.toNode : conn.fromNode;
+                const targetNode = state.nodes.find(n => n.id === otherId);
+                if (targetNode && targetNode.type === 'Obstacle') {
+                    if (!flattenedParams['obstacles_2d']) flattenedParams['obstacles_2d'] = [];
+                    const op = targetNode.parameters || {};
+                    flattenedParams['obstacles_2d'].push({
+                        r1: Number(op.r1 ?? 0.2),
+                        r2: Number(op.r2 ?? 0.4),
+                        z1: Number(op.z1 ?? 0.2),
+                        z2: Number(op.z2 ?? 0.4),
+                        is_destructible: Boolean(op.is_destructible),
+                        yield_stress: Number(op.yield_stress ?? 250e6),
+                        rho: Number(op.rho ?? 7800.0)
+                    });
+                }
+                if (targetNode && targetNode.type === 'VirtualGauges') {
+                    flattenedParams['gauges'] = targetNode.parameters?.gauges || [];
+                }
+            }
+
             const remapConn2D = state.connections.find(c => c.toNode === solverNode2D.id && c.toPort === 'remap');
             const remapNode2D = remapConn2D ? state.nodes.find(n => n.id === remapConn2D.fromNode) : state.nodes.find(n => n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode');
             if (remapNode2D) {
                 flattenedParams['init_mode'] = 'From1D';
                 inheritFrom1DUpstream(state, remapNode2D, modelId, flattenedParams, numericKeys, booleanKeys);
+            } else if (!flattenedParams['init_mode'] || flattenedParams['init_mode'] === 'From1D') {
+                if (flattenedParams['explosive_type'] === 'MaterialIdealGas') {
+                    flattenedParams['init_mode'] = 'Ideal Gas';
+                } else {
+                    flattenedParams['init_mode'] = 'JWL';
+                }
             }
         }
 
@@ -1955,16 +2028,60 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             });
         }
 
-        const cellSize = flattenedParams['cell_size'] || 0.005;
-        const maxR = flattenedParams['max_r'] || 1.0;
-        const maxZ = flattenedParams['max_z'] || 1.0;
-        flattenedParams['nr'] = Math.round(maxR / cellSize);
-        flattenedParams['nz'] = Math.round(maxZ / cellSize);
-        flattenedParams['max_r'] = maxR;
-        flattenedParams['max_z'] = maxZ;
+        // 4. Derive charge geometry & ambient state for 2D FSI
         if (!flattenedParams['gamma']) flattenedParams['gamma'] = 1.4;
         const p = flattenedParams['atm_pressure'] || 101325.0;
         const t = flattenedParams['atm_temperature'] || 288.0;
+        flattenedParams['ambient_rho'] = p / (287.058 * t);
+
+        const mass = flattenedParams['charge_mass'] !== undefined ? Number(flattenedParams['charge_mass']) : 0.0;
+        const rho = flattenedParams['rho'] || 1630.0;
+        if (mass > 0) {
+            if (flattenedParams['charge_shape'] === 'Cylinder') {
+                const ar = flattenedParams['charge_aspect_ratio'] || (flattenedParams['charge_height'] && flattenedParams['charge_radius'] ? flattenedParams['charge_height'] / (2.0 * flattenedParams['charge_radius']) : 1.0);
+                if (!flattenedParams['charge_radius'] || flattenedParams['charge_radius'] === 0.0) {
+                    flattenedParams['charge_radius'] = Math.cbrt(mass / (2.0 * Math.PI * rho * ar));
+                }
+                flattenedParams['charge_height'] = 2.0 * flattenedParams['charge_radius'] * ar;
+                flattenedParams['charge_aspect_ratio'] = ar;
+            } else {
+                flattenedParams['charge_radius'] = Math.pow((3.0 * mass) / (4.0 * Math.PI * rho), 1.0/3.0);
+            }
+        } else if (!flattenedParams['charge_radius']) {
+            flattenedParams['charge_radius'] = Number(flattenedParams['explosive_radius'] ?? 0.05);
+        }
+
+        const cellSize = flattenedParams['cell_size'] || 0.005;
+        const minR = Number(flattenedParams['min_r'] ?? 0.0);
+        const maxR = Number(flattenedParams['max_r'] ?? 1.0);
+        const minZ = Number(flattenedParams['min_z'] ?? 0.0);
+        const maxZ = Number(flattenedParams['max_z'] ?? 1.0);
+        const spanR = Math.max(cellSize, maxR - minR);
+        const spanZ = Math.max(cellSize, maxZ - minZ);
+        if (flattenedParams['mesh_type'] === 'amr') {
+            flattenedParams['nr'] = Math.ceil((Math.round(spanR / cellSize) || 128) / 16) * 16;
+            flattenedParams['nz'] = Math.ceil((Math.round(spanZ / cellSize) || 128) / 16) * 16;
+        } else {
+            flattenedParams['nr'] = Math.max(1, Math.round(spanR / cellSize));
+            flattenedParams['nz'] = Math.max(1, Math.round(spanZ / cellSize));
+        }
+        flattenedParams['min_r'] = minR;
+        flattenedParams['max_r'] = maxR;
+        flattenedParams['min_z'] = minZ;
+        flattenedParams['max_z'] = maxZ;
+
+        // 5. Re-apply CFDSolver2D solver config keys for strict precedence (Directive 11 & 12)
+        if (solverNode2D) {
+            if (solverNode2D.parameters.device !== undefined) flattenedParams['device'] = solverNode2D.parameters.device;
+            if (solverNode2D.parameters.precision !== undefined) flattenedParams['precision'] = solverNode2D.parameters.precision;
+            if (solverNode2D.parameters.space_time_scheme !== undefined) flattenedParams['space_time_scheme'] = solverNode2D.parameters.space_time_scheme;
+            if (couplerNode?.parameters?.cfl === undefined && solverNode2D.parameters.cfl !== undefined) {
+                flattenedParams['cfl'] = Number(solverNode2D.parameters.cfl);
+            }
+            if (couplerNode?.parameters?.endtime === undefined && solverNode2D.parameters.endtime !== undefined) {
+                flattenedParams['endtime'] = Number(solverNode2D.parameters.endtime);
+            }
+        }
     } else if (command === "INIT_FSI_3D") {
         const couplerNode = state.nodes.find(n => n.type === 'FSICoupler3D');
         // 1. Serialize 3D CFD Solver part
@@ -2964,13 +3081,27 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                 Object.entries(meshNode.parameters).forEach(([key, value]) => {
                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 });
-                const cellSize = Number(meshNode.parameters?.cell_size ?? 0.005);
+                const cellSize = Math.max(1e-6, Number(meshNode.parameters?.cell_size ?? 0.005));
+                const minR = Number(meshNode.parameters?.min_r ?? 0.0);
                 const maxR = Number(meshNode.parameters?.max_r ?? 1.0);
+                const minZ = Number(meshNode.parameters?.min_z ?? 0.0);
                 const maxZ = Number(meshNode.parameters?.max_z ?? 1.0);
-                flattenedParams['nr'] = Math.round(maxR / cellSize);
-                flattenedParams['nz'] = Math.round(maxZ / cellSize);
+                const spanR = Math.max(cellSize, maxR - minR);
+                const spanZ = Math.max(cellSize, maxZ - minZ);
+                const nr = Math.max(1, Math.round(spanR / cellSize));
+                const nz = Math.max(1, Math.round(spanZ / cellSize));
+                flattenedParams['nr'] = nr;
+                flattenedParams['nz'] = nz;
+                flattenedParams['nx'] = nr;
+                flattenedParams['ny'] = nz;
+                flattenedParams['min_r'] = minR;
                 flattenedParams['max_r'] = maxR;
+                flattenedParams['min_z'] = minZ;
                 flattenedParams['max_z'] = maxZ;
+                flattenedParams['max_x'] = spanR;
+                flattenedParams['max_y'] = spanZ;
+                flattenedParams['domain_x'] = spanR;
+                flattenedParams['domain_y'] = spanZ;
             }
 
             const domainPpc = Number(mpmDomain.parameters?.ppc ?? 4);

@@ -1390,13 +1390,24 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     },
     'DomainMesh2D': {
         cell_size: 0.005,
+        min_r: 0.0,
         max_r: 1.0,
+        min_z: 0.0,
         max_z: 1.0,
         bc_r_min: 'Reflecting',
         bc_r_max: 'Terminate',
         bc_z_min: 'Reflecting',
         bc_z_max: 'Terminate',
         coordinate_system: 'Axisymmetric'
+    },
+    'Obstacle': {
+        r1: 0.2,
+        r2: 0.4,
+        z1: 0.2,
+        z2: 0.4,
+        is_destructible: false,
+        yield_stress: 10000000.0,
+        rho: 2500.0
     },
     'DetonatorLocation': {
         detonator_r: 0.0,
@@ -1457,20 +1468,26 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'Remap1DTo3DNode': {
         source_model_id: '',
         target_solver: '',
+        center_x: 0.5,
+        center_y: 0.5,
+        center_z: 0.5,
         explosive_x: 0.5,
         explosive_y: 0.5,
         explosive_z: 0.5,
-        remap_radius: 0.0,
+        remap_radius: 0.2,
         trigger_type: 'end',
         trigger_val: 0.0
     },
     'Remap2DTo3DNode': {
         source_model_id: '',
         target_solver: '',
+        center_x: 0.5,
+        center_y: 0.5,
+        z_offset: 0.0,
         explosive_x: 0.5,
         explosive_y: 0.5,
         explosive_z: 0.5,
-        remap_radius: 0.0,
+        remap_radius: 0.2,
         trigger_type: 'end',
         trigger_val: 0.0
     },
@@ -1491,7 +1508,9 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         mesh_type: 'regular',
         amr_max_levels: 3,
         amr_threshold: 0.05,
-        amr_coarsen_ratio: 0.2
+        amr_coarsen_ratio: 0.2,
+        device: 'cpu',
+        precision: 'single'
     },
     'TelemetryContour': {
         telemetry_channel: 0,
@@ -2193,7 +2212,7 @@ export class StateManager {
             }
         }
 
-        // 2. MPM 2D: Background grid (DomainMesh2D) is strictly mandatory
+        // 2. MPM 2D: Background grid (DomainMesh2D) and at least one MPMObject2D are mandatory
         const mpmDomain2D = model.nodes.find(n => n.type === 'MPMDomain2D');
         if (mpmDomain2D) {
             const hasMeshConn = (model.connections || []).some(c =>
@@ -2216,6 +2235,17 @@ export class StateManager {
                     complete: false,
                     missingGrid: true,
                     reason: "Connected background grid is not a valid DomainMesh2D node."
+                };
+            }
+            const hasObjConn = (model.connections || []).some(c =>
+                (c.toNode === mpmDomain2D.id && (c.toPort === 'objects' || c.toPort === 'in')) ||
+                (c.fromNode === mpmDomain2D.id && c.fromPort === 'objects')
+            );
+            if (!hasObjConn) {
+                return {
+                    complete: false,
+                    missingGrid: false,
+                    reason: "No MPM Object 2D connected to MPM Domain 2D. Please add and wire at least one MPMObject2D node."
                 };
             }
         }
@@ -2248,6 +2278,30 @@ export class StateManager {
                     complete: false,
                     missingGrid: true,
                     reason: "No background grid connected. A DomainMesh2D node must be defined and connected to CFD Solver 2D."
+                };
+            }
+        }
+
+        // 4b. CFD Solver 1D: DomainMesh (direct or via ThePainter) is mandatory
+        const cfdSolver1D = model.nodes.find(n => n.type === 'CFDSolver');
+        if (cfdSolver1D) {
+            const conns = model.connections || [];
+            const painterConn = conns.find(c => c.toNode === cfdSolver1D.id && c.toPort === 'in');
+            const painterNode = painterConn ? model.nodes.find(n => n.id === painterConn.fromNode && n.type === 'ThePainter') : null;
+            const hasDirectMesh = conns.some(c =>
+                ((c.toNode === cfdSolver1D.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+                 (c.fromNode === cfdSolver1D.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))) &&
+                model.nodes.some(n => (n.id === c.fromNode || n.id === c.toNode) && n.type === 'DomainMesh')
+            );
+            const hasPainterMesh = painterNode ? conns.some(c =>
+                c.toNode === painterNode.id && (c.toPort === 'mesh' || c.toPort === 'grid') &&
+                model.nodes.some(n => n.id === c.fromNode && n.type === 'DomainMesh')
+            ) : false;
+            if (!hasDirectMesh && !hasPainterMesh) {
+                return {
+                    complete: false,
+                    missingGrid: true,
+                    reason: "No background grid connected. A 1D DomainMesh node must be defined and connected to CFD Solver (1D)."
                 };
             }
         }
@@ -4540,7 +4594,7 @@ export class StateManager {
                     this.telemetryStore.set("latest-fem-mesh", data);
                 }
             }
-            const visualNodes = nodes.filter(n => n.type === 'Telemetry3DViewport' || n.type === 'TelemetryContour');
+            const visualNodes = nodes.filter(n => n.type === 'Telemetry3DViewport' || n.type === 'TelemetryContour' || n.type === 'TelemetryGraph');
             visualNodes.forEach(vNode => {
                 if (vNode.id === nodeId || updatedNodeIds.has(vNode.id)) return;
                 this.telemetryStore.set(vNode.id, data);
@@ -5652,6 +5706,20 @@ export class StateManager {
                         changed = true;
                     }
                 }
+            } else if (geom.type === 'Obstacle') {
+                const cfdSolver2D = model.nodes.find(s => s.type === 'CFDSolver2D');
+                if (cfdSolver2D) {
+                    const isConnected = model.connections.some(c => c.fromNode === geom.id && c.toNode === cfdSolver2D.id && (c.toPort === 'obstacle' || c.toPort === 'in'));
+                    if (!isConnected) {
+                        model.connections.push({
+                            fromNode: geom.id,
+                            fromPort: 'obstacle',
+                            toNode: cfdSolver2D.id,
+                            toPort: 'obstacle'
+                        });
+                        changed = true;
+                    }
+                }
             }
         }
 
@@ -5925,9 +5993,6 @@ export class StateManager {
                     delete node.parameters.trigger_radius;
                     delete node.parameters.trigger_time;
                 }
-            }
-            if (node.type === 'Obstacle') {
-                node.type = 'Obstacle3D';
             }
             node.inputs = this.getDefaultInputs(node.type);
             node.outputs = this.getDefaultOutputs(node.type);
@@ -6259,6 +6324,7 @@ export class StateManager {
                 { id: 'charge', label: 'Charge' },
                 { id: 'explosive', label: 'Charge (Legacy)' },
                 { id: 'detonator', label: 'Detonator' },
+                { id: 'obstacle', label: 'Obstacle' },
                 { id: 'hardware', label: 'Hardware' },
                 { id: 'remap', label: 'Remap' }
             ];
@@ -6349,8 +6415,8 @@ export class StateManager {
             case 'MarineHarbourDomain': return [{ id: 'telemetry', label: 'Telemetry' }, { id: 'undex_out', label: 'UNDEX State' }];
             case 'STLGeometry':
             case 'PrimitiveGeometry3D':
-            case 'Obstacle3D':
-            case 'Obstacle': return [{ id: 'stl', label: 'Obstacle Mesh' }];
+            case 'Obstacle3D': return [{ id: 'stl', label: 'Obstacle Mesh' }];
+            case 'Obstacle': return [{ id: 'obstacle', label: 'Obstacle Spec' }];
             default: return [];
         }
     }

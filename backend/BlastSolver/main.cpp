@@ -1782,6 +1782,7 @@ void worker_thread_func() {
     bool reached_end = (final_end_time > 0.0 && global_t >= final_end_time - 1e-12);
     bool term = !reached_end && global_solver->is_terminated();
     emit_telemetry(*global_solver, global_t, term, global_step_1d.load());
+    flush_async_telemetry();
     
     // Emit final 100% progress packet to transition frontend state to paused/complete
     nlohmann::json progress_msg;
@@ -2137,6 +2138,7 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             emit_kernel_log("REMAP", "1D->3D remap applied successfully.", start_time, "3d");
             emit_telemetry_3d(global_t3d, false);
         } else if (solver_2d) {
+            double start_time = msg.value("time", msg.value("sim_time", 0.0));
             solver_2d->setGamma(gamma);
             solver_2d->setIdealGas(is_ideal_gas);
             solver_2d->setMaterialParameters(matSet);
@@ -2144,13 +2146,14 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
                 solver_2d->setChargeRadius(msg.value("charge_radius", 0.05));
             }
             solver_2d->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
-            solver_2d->setTime(0.0);
-            global_t2d = 0.0;
+            solver_2d->setTime(start_time);
+            global_t2d = start_time;
             global_wallclock_2d = 0.0;
             solver2d_initialized = true;
-            emit_kernel_log("REMAP", "1D->2D remap applied successfully.", 0.0, "2d");
+            emit_kernel_log("REMAP", "1D->2D remap applied successfully.", start_time, "2d");
             emit_telemetry_2d(global_t2d, false);
         } else if (solver_2d_cuda) {
+            double start_time = msg.value("time", msg.value("sim_time", 0.0));
             solver_2d_cuda->setGamma(gamma);
             solver_2d_cuda->setIdealGas(is_ideal_gas);
             solver_2d_cuda->setMaterialParameters(matSet);
@@ -2158,11 +2161,11 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
                 solver_2d_cuda->setChargeRadius(msg.value("charge_radius", 0.05));
             }
             solver_2d_cuda->setInitialConditionFrom1D(explosive_z, remap_radius, r_1d, states_1d, ambient_rho, ambient_p, explosive_r);
-            solver_2d_cuda->setTime(0.0);
-            global_t2d = 0.0;
+            solver_2d_cuda->setTime(start_time);
+            global_t2d = start_time;
             global_wallclock_2d = 0.0;
             solver2d_initialized = true;
-            emit_kernel_log("REMAP", "1D->2D remap applied successfully.", 0.0, "2d");
+            emit_kernel_log("REMAP", "1D->2D remap applied successfully.", start_time, "2d");
             emit_telemetry_2d(global_t2d, false);
         }
     } else if (type == "2D") {
@@ -2802,6 +2805,7 @@ void worker_3d_thread_func() {
     bool reached_end = (final_end_time > 0.0 && global_t3d >= final_end_time - 1e-12);
     bool term_3d = !reached_end && global_solver_3d->is_terminated();
     emit_telemetry_3d(global_t3d, term_3d, global_step_3d.load());
+    flush_async_telemetry();
 
     nlohmann::json progress_msg;
     progress_msg["type"] = "progress";
@@ -3025,6 +3029,7 @@ void worker_2d_thread_func() {
         else if (global_solver_2d) term_2d = global_solver_2d->checkTerminationCondition();
     }
     emit_telemetry_2d(global_t2d, term_2d, global_step_2d.load());
+    flush_async_telemetry();
     
     // Emit final 100% progress packet to transition frontend state to paused/complete/terminated
     nlohmann::json progress_msg;
@@ -3204,6 +3209,7 @@ void worker_mpm_2d_thread_func() {
     bool reached_end = (final_end_time > 0.0 && final_sim_time >= final_end_time - 1e-12);
     bool term_mpm_2d = !reached_end && global_solver_mpm_2d && global_solver_mpm_2d->is_terminated();
     emit_telemetry_mpm_2d(final_sim_time, term_mpm_2d, final_step);
+    flush_async_telemetry();
 
     nlohmann::json progress_msg;
     progress_msg["type"] = "progress";
@@ -3509,6 +3515,7 @@ void worker_mpm_3d_thread_func() {
         global_last_io_ms = interval_io_ms / steps_in_interval;
     }
     emit_telemetry_mpm_3d(final_sim_time, term_mpm_3d, final_step);
+    flush_async_telemetry();
 
     nlohmann::json progress_msg;
     progress_msg["type"] = "progress";
@@ -3879,6 +3886,7 @@ void worker_fem_3d_thread_func() {
             global_last_io_ms = interval_io_ms / steps_in_interval;
         }
         emit_telemetry_fem_3d(final_sim_time, false, final_step);
+        flush_async_telemetry();
 
 
         if (reached_end) {
@@ -3926,6 +3934,48 @@ std::atomic<bool> global_exec_until_end_fsi_3d{false};
 std::atomic<int> global_target_steps_fsi_3d{0};
 std::atomic<float> global_cfl_fsi_3d{0.6f};
 std::atomic<double> global_endtime_fsi_3d{1.0};
+
+static std::vector<uint8_t> global_static_obstacle_mask_2d;
+
+void apply_obstacles_2d(const nlohmann::json& msg, int nr, int nz, double max_r, double max_z) {
+    global_static_obstacle_mask_2d.assign(nr * nz, 0);
+    if (!msg.contains("obstacles_2d") || !msg["obstacles_2d"].is_array() || msg["obstacles_2d"].empty()) {
+        return;
+    }
+    double dr = (nr > 0) ? (max_r / nr) : 1.0;
+    double dz = (nz > 0) ? (max_z / nz) : 1.0;
+    int solid_cells = 0;
+    for (const auto& obs : msg["obstacles_2d"]) {
+        double r0 = get_json_double(obs, "r_min", 0.0);
+        double r1 = get_json_double(obs, "r_max", 0.0);
+        double z0 = get_json_double(obs, "z_min", 0.0);
+        double z1 = get_json_double(obs, "z_max", 0.0);
+        if (r1 < r0) std::swap(r0, r1);
+        if (z1 < z0) std::swap(z0, z1);
+        for (int i = 0; i < nr; ++i) {
+            double rc = (i + 0.5) * dr;
+            if (rc < r0 || rc > r1) continue;
+            for (int j = 0; j < nz; ++j) {
+                double zc = (j + 0.5) * dz;
+                if (zc >= z0 && zc <= z1) {
+                    global_static_obstacle_mask_2d[i * nz + j] = 1;
+                    solid_cells++;
+                }
+            }
+        }
+    }
+    if (solid_cells > 0) {
+        std::vector<double> zero_vel(2 * nr * nz, 0.0);
+        if (global_solver_2d_cuda) {
+            global_solver_2d_cuda->setSolidMask(global_static_obstacle_mask_2d.data());
+            global_solver_2d_cuda->setSolidVelocities(zero_vel.data());
+        }
+        if (global_solver_2d) {
+            global_solver_2d->setSolidMask(global_static_obstacle_mask_2d.data());
+            global_solver_2d->setSolidVelocities(zero_vel.data());
+        }
+    }
+}
 
 void worker_fsi_2d_thread_func() {
     try {
@@ -4002,10 +4052,15 @@ void worker_fsi_2d_thread_func() {
 
                     for (int i = 0; i < nr; ++i) {
                         for (int j = 0; j < nz; ++j) {
+                            int cfd_idx = i * nz + j;
+                            if (cfd_idx < static_cast<int>(global_static_obstacle_mask_2d.size()) && global_static_obstacle_mask_2d[cfd_idx]) {
+                                solid_mask[cfd_idx] = 1;
+                                solid_vel[2 * cfd_idx + 0] = 0.0;
+                                solid_vel[2 * cfd_idx + 1] = 0.0;
+                            }
                             if (i < mpm_nx && j < mpm_ny) {
                                 int mpm_idx = i * mpm_ny + j;
                                 const auto& m_node = mpm_grid[mpm_idx];
-                                int cfd_idx = i * nz + j;
 
                                 // Hysteresis threshold: turn solid at mass > 1.0e-8, stay solid until mass < 2.0e-9
                                 bool was_solid = (prev_solid_mask[cfd_idx] != 0);
@@ -4145,8 +4200,8 @@ void worker_fsi_2d_thread_func() {
                 interval_steps = 0;
 
                 auto comms_start = std::chrono::steady_clock::now();
-                if (global_solver_mpm_2d) emit_telemetry_mpm_2d(sim_time, false, global_step_fsi_2d.load());
                 if (has_solver_2d()) emit_telemetry_2d(global_t2d, false, global_step_fsi_2d.load());
+                else if (global_solver_mpm_2d) emit_telemetry_mpm_2d(sim_time, false, global_step_fsi_2d.load());
                 auto comms_end = std::chrono::steady_clock::now();
                 double comms_ms = std::chrono::duration<double, std::milli>(comms_end - comms_start).count();
                 global_last_comms_ms = comms_ms;
@@ -4196,8 +4251,9 @@ void worker_fsi_2d_thread_func() {
     bool term_fsi_2d = !reached_end && ((global_solver_mpm_2d && global_solver_mpm_2d->is_terminated()) ||
                                         (global_solver_2d_cuda && global_solver_2d_cuda->checkTerminationCondition()) ||
                                         (global_solver_2d && global_solver_2d->checkTerminationCondition()));
-    if (global_solver_mpm_2d) emit_telemetry_mpm_2d(final_sim_time, term_fsi_2d, global_step_fsi_2d.load());
     if (has_solver_2d()) emit_telemetry_2d(global_t2d, term_fsi_2d, global_step_fsi_2d.load());
+    else if (global_solver_mpm_2d) emit_telemetry_mpm_2d(final_sim_time, term_fsi_2d, global_step_fsi_2d.load());
+    flush_async_telemetry();
     write_gauge_files();
     if (term_fsi_2d) {
         emit_kernel_log("SYSTEM", "2D FSI simulation terminated at Terminate boundary.", final_sim_time, "2d", global_step_fsi_2d.load());
@@ -4770,6 +4826,7 @@ void worker_fsi_3d_thread_func() {
     } else if ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) || (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty())) {
         emit_telemetry_mpm_3d(global_t3d, term_fsi_3d, global_step_fsi_3d.load());
     }
+    flush_async_telemetry();
     write_gauge_files();
 
     if (term_fsi_3d) {
@@ -5051,6 +5108,7 @@ void worker_fem_fsi_3d_thread_func() {
             emit_telemetry_mpm_3d(global_t3d, term_fem_fsi_3d, final_step);
         }
         emit_telemetry_fem_3d(final_sim_time, term_fem_fsi_3d, final_step);
+        flush_async_telemetry();
         write_gauge_files();
 
         if (term_fem_fsi_3d) {
@@ -5877,7 +5935,8 @@ int main() {
                                         }
                                     } else if (port == "remap") {
                                         for (const auto& n : msg["nodes"]) {
-                                            if (n.value("id", "") == from && n.value("type", "") == "RemapNode") {
+                                            std::string ntype = n.value("type", "");
+                                            if (n.value("id", "") == from && (ntype == "RemapNode" || ntype == "Remap1DTo2DNode")) {
                                                 has_remap = true;
                                                 remap_id = from;
                                             }
@@ -5892,10 +5951,16 @@ int main() {
 
                             if (init_mode_2d == "From1D") {
                                 if (!has_remap) {
-                                    missing_elements_2d.push_back("RemapNode connected to CFD Solver 2D");
+                                    missing_elements_2d.push_back("Remap1DTo2DNode connected to CFD Solver 2D");
                                 } else {
-                                    // Check if RemapNode has connection from CFDSolver (1D)
+                                    // Check if RemapNode has connection from CFDSolver (1D) or a cross-model source_model_id
                                     bool remap_has_1d_solver = false;
+                                    for (const auto& n : msg["nodes"]) {
+                                        if (n.value("id", "") == remap_id && n.contains("parameters") && n["parameters"].is_object()) {
+                                            std::string src_mid = n["parameters"].value("source_model_id", "");
+                                            if (!src_mid.empty()) remap_has_1d_solver = true;
+                                        }
+                                    }
                                     for (const auto& conn : msg["connections"]) {
                                         if (conn.value("toNode", "") == remap_id && conn.value("toPort", "") == "in") {
                                             std::string from = conn.value("fromNode", "");
@@ -5907,7 +5972,7 @@ int main() {
                                         }
                                     }
                                     if (!remap_has_1d_solver) {
-                                        missing_elements_2d.push_back("CFDSolver (1D) connected to RemapNode");
+                                        missing_elements_2d.push_back("CFDSolver (1D) or source_model_id configured on Remap1DTo2DNode");
                                     }
                                 }
                             } else {
@@ -5993,6 +6058,7 @@ int main() {
 
                     global_t2d = 0.0;
                     global_dt_2d = 0.0;
+                    global_solver_mpm_2d.reset();
 
                     std::string mesh_type = msg.value("mesh_type", "regular");
                     global_is_amr_2d = (mesh_type == "amr");
@@ -6037,25 +6103,34 @@ int main() {
                             static_cast<CFDSolver2DCuda::BCType>(z_max_bc)
                         );
                         global_solver_2d_cuda->setMaterialParameters(matSet);
+                        global_solver_2d_cuda->setCoordinateSystemCartesian(coord_sys == "Cartesian");
 
                         std::string init_mode = msg.value("init_mode", "Ideal Gas");
-                        if (init_mode == "Ideal Gas" || msg.value("explosive_type", "") == "MaterialIdealGas") {
+                        if (init_mode == "From1D") {
+                            std::lock_guard<std::mutex> rlock(g_pending_remap_mutex);
+                            if (g_pending_remap.has_pending && g_pending_remap.type == "1D") {
+                                apply_remap_payload(g_pending_remap.msg, "1D", nullptr, nullptr, global_solver_2d_cuda.get());
+                                g_pending_remap.has_pending = false;
+                            }
+                        } else if (init_mode == "Ideal Gas" || msg.value("explosive_type", "") == "MaterialIdealGas") {
                             double det_energy = msg.value("detonation_energy", 4520000.0);
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.225648589);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
+                            double explosive_r = msg.value("charge_r", msg.value("explosive_r", 0.0));
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
-                            double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", 0.0));
+                            double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
                             double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
                             double detonator_delay = get_json_double(msg, "time_delay", get_json_double(msg, "start_time", get_json_double(msg, "detonator_time", 0.0)));
                             global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z, detonator_delay);
-                            global_solver_2d_cuda->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
+                            global_solver_2d_cuda->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p, explosive_r);
                         } else if (init_mode == "Multi-Material JWL" || init_mode == "JWL") {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.225648589);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
+                            double explosive_r = msg.value("charge_r", msg.value("explosive_r", 0.0));
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
@@ -6067,17 +6142,17 @@ int main() {
                                     double ar = msg.value("charge_aspect_ratio", 1.0);
                                     if (ar > 0.0) charge_height = 2.0 * charge_radius * ar;
                                 }
-                                double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", 0.0));
+                                double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
                                 double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z + charge_height / 2.0));
                                 double detonator_delay = get_json_double(msg, "time_delay", get_json_double(msg, "start_time", get_json_double(msg, "detonator_time", 0.0)));
                                 global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z, detonator_delay);
-                                global_solver_2d_cuda->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p);
+                                global_solver_2d_cuda->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p, explosive_r);
                             } else {
-                                double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", 0.0));
+                                double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
                                 double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
                                 double detonator_delay = get_json_double(msg, "time_delay", get_json_double(msg, "start_time", get_json_double(msg, "detonator_time", 0.0)));
                                 global_solver_2d_cuda->setDetonatorLocation(detonator_r, detonator_z, detonator_delay);
-                                global_solver_2d_cuda->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p);
+                                global_solver_2d_cuda->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p, explosive_r);
                             }
                         }
                     } else {
@@ -6107,19 +6182,26 @@ int main() {
                         global_solver_2d->setCoordinateSystemCartesian(coord_sys == "Cartesian");
  
                         std::string init_mode = msg.value("init_mode", "Ideal Gas");
-                        if (init_mode == "Ideal Gas" || msg.value("explosive_type", "") == "MaterialIdealGas") {
+                        if (init_mode == "From1D") {
+                            std::lock_guard<std::mutex> rlock(g_pending_remap_mutex);
+                            if (g_pending_remap.has_pending && g_pending_remap.type == "1D") {
+                                apply_remap_payload(g_pending_remap.msg, "1D", nullptr, global_solver_2d.get(), nullptr);
+                                g_pending_remap.has_pending = false;
+                            }
+                        } else if (init_mode == "Ideal Gas" || msg.value("explosive_type", "") == "MaterialIdealGas") {
                             double det_energy = msg.value("detonation_energy", 4520000.0);
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.225648589);
                             double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
+                            double explosive_r = msg.value("charge_r", msg.value("explosive_r", 0.0));
                             double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.0));
                             double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
                             
-                            double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", 0.0));
+                            double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
                             double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
                             double detonator_delay = get_json_double(msg, "time_delay", get_json_double(msg, "start_time", get_json_double(msg, "detonator_time", 0.0)));
                             global_solver_2d->setDetonatorLocation(detonator_r, detonator_z, detonator_delay);
-                            global_solver_2d->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p);
+                            global_solver_2d->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p, explosive_r);
                         } else if (init_mode == "Multi-Material JWL" || init_mode == "JWL") {
                             double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
                             double ambient_rho = msg.value("ambient_rho", 1.225648589);
@@ -6151,6 +6233,7 @@ int main() {
                         }
                     }
                     
+                    apply_obstacles_2d(msg, nr, nz, max_r, max_z);
                     solver2d_initialized = true;
                     init_gauges(msg);
                     record_gauges_2d(global_t2d);
@@ -7298,6 +7381,8 @@ int main() {
                     global_solver_2d->setMaterialParameters(matSet);
                     global_solver_2d->setCoordinateSystemCartesian(coord_sys == "Cartesian");
 
+                    global_t2d = 0.0;
+                    global_dt_2d = 0.0;
                     double explosive_r = msg.value("charge_r", msg.value("explosive_r", 0.0));
                     double explosive_z = msg.value("charge_z", msg.value("explosive_z", 0.1));
                     double high_rho = msg.value("high_rho", msg.value("rho", 1630.0));
@@ -7305,11 +7390,43 @@ int main() {
                     double ambient_p = msg.value("atm_pressure", msg.value("ambient_p", 101325.0));
                     double explosive_radius = msg.value("charge_radius", msg.value("explosive_radius", 0.1));
 
-                    double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
-                    double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
-                    double detonator_delay = get_json_double(msg, "time_delay", get_json_double(msg, "start_time", get_json_double(msg, "detonator_time", 0.0)));
-                    global_solver_2d->setDetonatorLocation(detonator_r, detonator_z, detonator_delay);
-                    global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p, explosive_r);
+                    std::string init_mode_fsi = msg.value("init_mode", "Multi-Material JWL");
+                    if (init_mode_fsi == "From1D") {
+                        std::lock_guard<std::mutex> rlock(g_pending_remap_mutex);
+                        if (g_pending_remap.has_pending && g_pending_remap.type == "1D") {
+                            apply_remap_payload(g_pending_remap.msg, "1D", nullptr, global_solver_2d.get(), nullptr);
+                            g_pending_remap.has_pending = false;
+                        }
+                    } else if (init_mode_fsi == "Ideal Gas" || msg.value("explosive_type", "") == "MaterialIdealGas") {
+                        double det_energy = msg.value("detonation_energy", 4520000.0);
+                        double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
+                        double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
+                        double detonator_delay = get_json_double(msg, "time_delay", get_json_double(msg, "start_time", get_json_double(msg, "detonator_time", 0.0)));
+                        global_solver_2d->setDetonatorLocation(detonator_r, detonator_z, detonator_delay);
+                        global_solver_2d->setInitialConditionIdealGas(explosive_z, explosive_radius, high_rho, det_energy, ambient_rho, ambient_p, explosive_r);
+                    } else {
+                        std::string charge_shape = msg.value("charge_shape", "Sphere");
+                        if (charge_shape == "Cylinder" || charge_shape == "cylinder") {
+                            double charge_radius = msg.value("charge_radius", 0.1);
+                            double charge_height = msg.value("charge_height", 0.2);
+                            if (msg.contains("charge_aspect_ratio") && !msg.contains("charge_height")) {
+                                double ar = msg.value("charge_aspect_ratio", 1.0);
+                                if (ar > 0.0) charge_height = 2.0 * charge_radius * ar;
+                            }
+                            double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
+                            double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z + charge_height / 2.0));
+                            double detonator_delay = get_json_double(msg, "time_delay", get_json_double(msg, "start_time", get_json_double(msg, "detonator_time", 0.0)));
+                            global_solver_2d->setDetonatorLocation(detonator_r, detonator_z, detonator_delay);
+                            global_solver_2d->setInitialConditionTNTCylinder(explosive_z, charge_radius, charge_height, high_rho, ambient_rho, ambient_p, explosive_r);
+                        } else {
+                            double detonator_r = get_json_double(msg, "trigger_r", get_json_double(msg, "detonator_r", explosive_r));
+                            double detonator_z = get_json_double(msg, "trigger_z", get_json_double(msg, "detonator_z", explosive_z));
+                            double detonator_delay = get_json_double(msg, "time_delay", get_json_double(msg, "start_time", get_json_double(msg, "detonator_time", 0.0)));
+                            global_solver_2d->setDetonatorLocation(detonator_r, detonator_z, detonator_delay);
+                            global_solver_2d->setInitialConditionTNT(explosive_z, explosive_radius, high_rho, ambient_rho, ambient_p, explosive_r);
+                        }
+                    }
+                    apply_obstacles_2d(msg, nr, nz, max_r, max_z);
                     solver2d_initialized = true;
 
                     global_solver_mpm_2d = std::make_unique<Blast::MPMSolver2D>();
@@ -7637,9 +7754,9 @@ int main() {
 
                         global_solver_mpm_2d->particleToGrid();
                         init_gauges(msg);
-                        emit_kernel_log("SYSTEM", "2D Coupled FSI Solver (CFD + MPM) Initialized", 0.0, "2d");
-                        emit_telemetry_2d(0.0, false);
-                        emit_telemetry_mpm_2d(0.0, false);
+                        record_gauges_2d(global_t2d);
+                        emit_kernel_log("SYSTEM", "2D Coupled FSI Solver (CFD + MPM) Initialized", global_t2d, "2d");
+                        emit_telemetry_2d(global_t2d, false);
                     } catch (const std::exception& e) {
                         std::cerr << "[ERROR] Exception in INIT_FSI_2D: " << e.what() << std::endl;
                         emit_kernel_log("ERROR", std::string("FSI 2D initialization failed: ") + e.what(), 0.0, "2d");

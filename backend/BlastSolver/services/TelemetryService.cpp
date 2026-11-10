@@ -579,7 +579,9 @@ inline void populate_timing_payload(TelemetryPayload* payload, double ram_mb, do
 struct AsyncTelemetry {
     std::mutex mutex;
     std::condition_variable cv;
+    std::condition_variable flush_cv;
     std::queue<std::unique_ptr<TelemetryPayload>> queue;
+    bool in_flight = false;
     bool exit_flag = false;
 
     void push(std::unique_ptr<TelemetryPayload> payload) {
@@ -606,15 +608,19 @@ void async_telemetry_thread_func() {
                 return !global_async_telemetry.queue.empty() || global_async_telemetry.exit_flag;
             });
             if (global_async_telemetry.exit_flag && global_async_telemetry.queue.empty()) {
+                global_async_telemetry.in_flight = false;
+                global_async_telemetry.flush_cv.notify_all();
                 break;
             }
             payload = std::move(global_async_telemetry.queue.front());
             global_async_telemetry.queue.pop();
+            global_async_telemetry.in_flight = (payload != nullptr);
         }
 
         if (!payload) continue;
 
-        std::lock_guard<std::mutex> lock(cout_mutex);
+        {
+            std::lock_guard<std::mutex> lock(cout_mutex);
 
         nlohmann::json envelope;
         if (!global_model_id.empty()) {
@@ -694,13 +700,21 @@ void async_telemetry_thread_func() {
             const uint32_t n_channels_u = 7;
             size_t header_bytes  = sizeof(uint32_t) * 3;
             size_t payload_bytes = payload->grid_data.size() * sizeof(float);
-            size_t total_bytes   = header_bytes + payload_bytes;
+            bool has_mpm_2d_particles = !payload->mpm_particles.empty();
+            uint32_t n_particles_u = has_mpm_2d_particles ? static_cast<uint32_t>(payload->mpm_particles.size() / 2) : 0;
+            size_t particle_hdr_bytes = has_mpm_2d_particles ? sizeof(uint32_t) : 0;
+            size_t particle_payload_bytes = has_mpm_2d_particles ? (payload->mpm_particles.size() * sizeof(float)) : 0;
+            size_t total_bytes   = header_bytes + payload_bytes + particle_hdr_bytes + particle_payload_bytes;
 
             std::cout << "BIN_FRAME_2D " << total_bytes << "\n";
             std::cout.write(reinterpret_cast<const char*>(&out_nr_u),     sizeof(uint32_t));
             std::cout.write(reinterpret_cast<const char*>(&out_nz_u),     sizeof(uint32_t));
             std::cout.write(reinterpret_cast<const char*>(&n_channels_u), sizeof(uint32_t));
             std::cout.write(reinterpret_cast<const char*>(payload->grid_data.data()), payload_bytes);
+            if (has_mpm_2d_particles) {
+                std::cout.write(reinterpret_cast<const char*>(&n_particles_u), sizeof(uint32_t));
+                std::cout.write(reinterpret_cast<const char*>(payload->mpm_particles.data()), particle_payload_bytes);
+            }
             std::cout.flush();
 
         } else if (payload->type == TelemetryPayload::TYPE_2D_AMR) {
@@ -941,6 +955,12 @@ void async_telemetry_thread_func() {
                 std::cout.flush();
             }
         }
+        }
+        {
+            std::lock_guard<std::mutex> lock(global_async_telemetry.mutex);
+            global_async_telemetry.in_flight = false;
+            global_async_telemetry.flush_cv.notify_all();
+        }
     }
 }
 
@@ -1013,6 +1033,17 @@ void emit_telemetry_2d(double elapsed, bool is_terminated, int step) {
     payload->wallclock = global_wallclock_2d.load();
     payload->grid_data = std::move(downsampled);
     payload->is_ideal_gas = global_solver_2d_cuda ? global_solver_2d_cuda->isIdealGas() : (global_solver_2d ? global_solver_2d->isIdealGas() : false);
+
+    if (global_solver_mpm_2d) {
+        const auto& particles = global_solver_mpm_2d->getParticles();
+        if (!particles.empty()) {
+            payload->mpm_particles.resize(particles.size() * 2);
+            for (size_t k = 0; k < particles.size(); ++k) {
+                payload->mpm_particles[k * 2 + 0] = particles[k].x[0];
+                payload->mpm_particles[k * 2 + 1] = particles[k].x[1];
+            }
+        }
+    }
 
     {
         double ram_mb = 0.0, vram_mb = 0.0;
@@ -2153,10 +2184,18 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
     global_async_telemetry.push(std::move(payload));
 }
 
+void flush_async_telemetry() {
+    std::unique_lock<std::mutex> lock(global_async_telemetry.mutex);
+    global_async_telemetry.flush_cv.wait(lock, []() {
+        return (global_async_telemetry.queue.empty() && !global_async_telemetry.in_flight) || global_async_telemetry.exit_flag;
+    });
+}
+
 void stop_async_telemetry() {
     {
         std::lock_guard<std::mutex> lock(global_async_telemetry.mutex);
         global_async_telemetry.exit_flag = true;
     }
     global_async_telemetry.cv.notify_all();
+    global_async_telemetry.flush_cv.notify_all();
 }

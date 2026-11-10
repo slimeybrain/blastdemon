@@ -2102,9 +2102,36 @@ export class TransportController {
         gTop.appendChild(toggleAllG);
         body1.appendChild(gTop);
 
+        const targetModel = this.stateManager.getActiveModel();
+        const is1DModel = Boolean(targetModel && (targetModel.nodes.some((n: any) => n.type === 'CFDSolver' || n.type === 'DomainMesh') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || n.type === 'DomainMesh2D' || n.type === 'MPMDomain2D' || n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D')));
+        const is2DModel = Boolean(targetModel && !is1DModel && (targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || n.type === 'DomainMesh2D' || n.type === 'MPMDomain2D') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D')));
+
         const gTable = document.createElement('table');
         gTable.className = 'slices-matrix-table';
-        gTable.innerHTML = `
+        gTable.innerHTML = is1DModel ? `
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Probe ID</th>
+                    <th>R (m)</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+            </tbody>
+        ` : is2DModel ? `
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Probe ID</th>
+                    <th>R / X (m)</th>
+                    <th>Z / Y (m)</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+            </tbody>
+        ` : `
             <thead>
                 <tr>
                     <th>#</th>
@@ -2120,22 +2147,37 @@ export class TransportController {
         `;
         const gBody = gTable.querySelector('tbody')!;
 
-        const targetModel = this.stateManager.getActiveModel();
         const gaugeNode = targetModel?.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge');
-        const gauges: any[] = gaugeNode?.parameters?.gauges || [
-            { id: 'P1', x: 0.0, y: 0.0, z: 0.0 }
-        ];
+        const domainNode = targetModel?.nodes.find((n: any) => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain');
+        const gauges: any[] = gaugeNode?.parameters?.gauges || domainNode?.parameters?.gauges || [];
 
         gauges.forEach((g: any, gIdx: number) => {
             const gTr = document.createElement('tr');
-            gTr.innerHTML = `
-                <td>#${gIdx + 1}</td>
-                <td><strong>${g.id || 'P' + (gIdx + 1)}</strong></td>
-                <td>${Number(g.x ?? 0).toFixed(3)}</td>
-                <td>${Number(g.y ?? 0).toFixed(3)}</td>
-                <td>${Number(g.z ?? 0).toFixed(3)}</td>
-                <td><button class="table-icon-btn danger">✖</button></td>
-            `;
+            if (is1DModel) {
+                gTr.innerHTML = `
+                    <td>#${gIdx + 1}</td>
+                    <td><strong>${g.id || 'G' + (gIdx + 1)}</strong></td>
+                    <td>${Number(g.r ?? g.x ?? 0).toFixed(3)}</td>
+                    <td><button class="table-icon-btn danger">✖</button></td>
+                `;
+            } else if (is2DModel) {
+                gTr.innerHTML = `
+                    <td>#${gIdx + 1}</td>
+                    <td><strong>${g.id || 'G' + (gIdx + 1)}</strong></td>
+                    <td>${Number(g.r ?? g.x ?? 0).toFixed(3)}</td>
+                    <td>${Number(g.z ?? g.y ?? 0).toFixed(3)}</td>
+                    <td><button class="table-icon-btn danger">✖</button></td>
+                `;
+            } else {
+                gTr.innerHTML = `
+                    <td>#${gIdx + 1}</td>
+                    <td><strong>${g.id || 'P' + (gIdx + 1)}</strong></td>
+                    <td>${Number(g.x ?? 0).toFixed(3)}</td>
+                    <td>${Number(g.y ?? 0).toFixed(3)}</td>
+                    <td>${Number(g.z ?? 0).toFixed(3)}</td>
+                    <td><button class="table-icon-btn danger">✖</button></td>
+                `;
+            }
             gTr.querySelector('.danger')?.addEventListener('click', () => {
                 this.removeGaugeProbe(gIdx);
             });
@@ -4689,27 +4731,75 @@ export class TransportController {
     }
 
     private addGaugeProbe(): void {
-        const targetModel = this.stateManager.getActiveModel();
-        const gaugeNode = targetModel?.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge');
-        if (gaugeNode) {
-            const list = gaugeNode.parameters?.gauges || [];
-            const newId = `P${list.length + 1}`;
-            const updated = [...list, { id: newId, x: 0.0, y: 0.0, z: 0.0 }];
+        let targetModel = this.stateManager.getActiveModel();
+        if (!targetModel) return;
+        const is1DModel = Boolean(targetModel.nodes.some((n: any) => n.type === 'CFDSolver' || n.type === 'DomainMesh') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || n.type === 'DomainMesh2D' || n.type === 'MPMDomain2D' || n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D'));
+        const is2DModel = Boolean(!is1DModel && targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || n.type === 'DomainMesh2D' || n.type === 'MPMDomain2D') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D'));
+
+        let gaugeNode = targetModel.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge');
+        const domainNode = targetModel.nodes.find((n: any) => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain');
+        if (!gaugeNode) {
+            const state = this.stateManager.getCurrentState();
+            const newNodeId = this.stateManager.generateUniqueNodeId('VirtualGauges');
+            const newNode: any = {
+                id: newNodeId,
+                type: 'VirtualGauges',
+                x: 400,
+                y: 300,
+                displayMode: 'expanded',
+                inputs: this.stateManager.getDefaultInputs('VirtualGauges'),
+                outputs: this.stateManager.getDefaultOutputs('VirtualGauges'),
+                parameters: { ...this.stateManager.getDefaultParameters('VirtualGauges'), gauges: [] }
+            };
+            targetModel.nodes.push(newNode);
+            if (state) {
+                state.nodes.push(newNode);
+                const solverNode = targetModel.nodes.find((n: any) => ['CFDSolver3D', 'MarineHarbourDomain', 'CFDSolver2D', 'CFDSolver', 'MPMDomain3D', 'MPMDomain2D', 'FEMDomain3D'].includes(n.type));
+                if (solverNode) {
+                    const conn = { fromNode: solverNode.id, fromPort: 'telemetry', toNode: newNodeId, toPort: 'in' };
+                    targetModel.connections.push(conn);
+                    state.connections.push(conn);
+                }
+                this.stateManager.pushState(state);
+            }
+            targetModel = this.stateManager.getActiveModel();
+            gaugeNode = targetModel?.nodes.find((n: any) => n.id === newNodeId);
+        }
+        if (gaugeNode && targetModel) {
+            const list = gaugeNode.parameters?.gauges || domainNode?.parameters?.gauges || [];
+            const newId = is1DModel || is2DModel ? `G${list.length + 1}` : `P${list.length + 1}`;
+            const newEntry = is1DModel
+                ? { id: newId, r: Number((0.25 * (list.length + 1)).toFixed(3)) }
+                : is2DModel
+                ? { id: newId, r: Number((0.25 * (list.length + 1)).toFixed(3)), z: Number((0.25 * (list.length + 1)).toFixed(3)) }
+                : { id: newId, x: 0.0, y: 0.0, z: 0.0 };
+            const updated = [...list, newEntry];
             this.stateManager.updateNodeParametersInPlace(gaugeNode.id, { gauges: updated });
+            if (domainNode && domainNode.id !== gaugeNode.id) {
+                this.stateManager.updateNodeParametersInPlace(domainNode.id, { gauges: updated });
+            }
+            this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
             this.renderActiveTabContent();
         }
     }
 
     private removeGaugeProbe(idx: number): void {
         const targetModel = this.stateManager.getActiveModel();
-        const gaugeNode = targetModel?.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge');
-        if (gaugeNode) {
-            const list = [...(gaugeNode.parameters?.gauges || [])];
-            if (idx >= 0 && idx < list.length) {
-                list.splice(idx, 1);
+        if (!targetModel) return;
+        const gaugeNode = targetModel.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge');
+        const domainNode = targetModel.nodes.find((n: any) => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain');
+        const baseList = gaugeNode?.parameters?.gauges || domainNode?.parameters?.gauges || [];
+        if (idx >= 0 && idx < baseList.length) {
+            const list = [...baseList];
+            list.splice(idx, 1);
+            if (gaugeNode) {
                 this.stateManager.updateNodeParametersInPlace(gaugeNode.id, { gauges: list });
-                this.renderActiveTabContent();
             }
+            if (domainNode && domainNode.id !== gaugeNode?.id) {
+                this.stateManager.updateNodeParametersInPlace(domainNode.id, { gauges: list });
+            }
+            this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
+            this.renderActiveTabContent();
         }
     }
 

@@ -2415,7 +2415,7 @@ export class PropertyEditor {
             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride', 'tessellation_max_edge',
             'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
             // 2D CFD keys
-            'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
+            'nr', 'nz', 'min_r', 'min_z', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
             'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',

@@ -20,6 +20,9 @@ let selectedColormap = 'rainbow';
 let isAxisymmetric = true;
 let chargeInfo: any = null;
 let detonatorInfo: any = null;
+let obstacles: Array<{ r_min: number; r_max: number; z_min: number; z_max: number; name?: string }> = [];
+let mpmObjects: Array<{ shape_type?: string; pos_x: number; pos_y: number; size_x?: number; size_y?: number; radius?: number; name?: string }> = [];
+let gauges: Array<{ id?: string; name?: string; r: number; z: number }> = [];
 let showGridlines = false;
 let interpolate = true;
 let max_r = 1.0;
@@ -715,6 +718,37 @@ function render(): void {
                 context.moveTo(cx_far, dy); context.lineTo(cx_far, dy + dh);
             }
             context.stroke();
+
+            // Highlight 16x16 AMR leaf tile boundaries so refinement levels are clearly visible
+            context.beginPath();
+            context.strokeStyle = 'rgba(56, 189, 248, 0.55)';
+            context.lineWidth = 1.1 / zoom;
+            for (const tile of amrTiles) {
+                const factor = 1.0 / (1 << tile.level);
+                const level0TilesR = Math.max(1, Math.ceil((baseNr || 128) / 16));
+                const dr_base = (max_r || 1.0) / (level0TilesR * 16);
+                const level0TilesZ = Math.max(1, Math.round((max_z || 1.0) / (dr_base * 16)));
+                const tileWidth = (max_r / level0TilesR) * factor;
+                const tileHeight = (max_z / level0TilesZ) * factor;
+                const rMin = tile.r_idx * tileWidth;
+                const zMin = tile.z_idx * tileHeight;
+                const cyTop = dy + dh - ((zMin + tileHeight) / max_z) * dh;
+                const cyBot = dy + dh - (zMin / max_z) * dh;
+                const th = cyBot - cyTop;
+
+                if (isAxisymmetric) {
+                    const cxR = dx + dw / 2 + (rMin / max_r) * (dw / 2);
+                    const tw = (tileWidth / max_r) * (dw / 2);
+                    context.rect(cxR, cyTop, tw, th);
+                    const cxL = dx + dw / 2 - ((rMin + tileWidth) / max_r) * (dw / 2);
+                    context.rect(cxL, cyTop, tw, th);
+                } else {
+                    const cx = dx + (rMin / max_r) * dw;
+                    const tw = (tileWidth / max_r) * dw;
+                    context.rect(cx, cyTop, tw, th);
+                }
+            }
+            context.stroke();
             context.restore();
         } else if (nr > 0 && nz > 0) {
             const cellWidthOnScreen = (isAxisymmetric ? (dw / 2) : dw) / nr * zoom;
@@ -753,6 +787,78 @@ function render(): void {
                 context.restore();
             }
         }
+    }
+
+    // Render 2D Rigid Obstacles
+    if (obstacles && obstacles.length > 0) {
+        context.save();
+        const drawObs = (obs: { r_min: number; r_max: number; z_min: number; z_max: number }, flipX: boolean) => {
+            const r0 = Math.min(obs.r_min, obs.r_max);
+            const r1 = Math.max(obs.r_min, obs.r_max);
+            const z0 = Math.min(obs.z_min, obs.z_max);
+            const z1 = Math.max(obs.z_min, obs.z_max);
+            let x0: number, x1: number;
+            if (isAxisymmetric) {
+                const sign = flipX ? -1 : 1;
+                x0 = dx + dw / 2 + sign * (r0 / max_r) * (dw / 2);
+                x1 = dx + dw / 2 + sign * (r1 / max_r) * (dw / 2);
+            } else {
+                x0 = dx + (r0 / max_r) * dw;
+                x1 = dx + (r1 / max_r) * dw;
+            }
+            const y0 = dy + dh - (z1 / max_z) * dh;
+            const y1 = dy + dh - (z0 / max_z) * dh;
+            const rx = Math.min(x0, x1);
+            const ry = Math.min(y0, y1);
+            const rw = Math.abs(x1 - x0);
+            const rh = Math.abs(y1 - y0);
+
+            context.fillStyle = 'rgba(30, 41, 59, 0.82)';
+            context.strokeStyle = '#94a3b8';
+            context.lineWidth = 1.5 / zoom;
+            context.beginPath();
+            context.rect(rx, ry, rw, rh);
+            context.fill();
+            context.stroke();
+        };
+        for (const obs of obstacles) {
+            drawObs(obs, false);
+            if (isAxisymmetric) drawObs(obs, true);
+        }
+        context.restore();
+    }
+
+    // Render pre-run 2D MPM Object outlines if no live MPM particle cloud is present yet
+    if ((!currentParticles || currentParticles.length === 0) && mpmObjects && mpmObjects.length > 0) {
+        context.save();
+        context.fillStyle = 'rgba(0, 240, 255, 0.18)';
+        context.strokeStyle = '#00f0ff';
+        context.lineWidth = 1.5 / zoom;
+        const drawMpmObj = (obj: { shape_type?: string; pos_x: number; pos_y: number; size_x?: number; size_y?: number; radius?: number }, flipX: boolean) => {
+            const cx = isAxisymmetric
+                ? (dx + dw / 2 + (flipX ? -1 : 1) * (obj.pos_x / max_r) * (dw / 2))
+                : (dx + (obj.pos_x / max_r) * dw);
+            const cy = dy + dh - (obj.pos_y / max_z) * dh;
+            context.beginPath();
+            if (obj.shape_type === 'Circle') {
+                const rad = obj.radius ?? 0.1;
+                const rPx = isAxisymmetric ? (rad / max_r) * (dw / 2) : (rad / max_r) * dw;
+                context.arc(cx, cy, Math.abs(rPx), 0, 2 * Math.PI);
+            } else {
+                const sx = obj.size_x ?? 0.2;
+                const sy = obj.size_y ?? 0.2;
+                const wPx = isAxisymmetric ? (sx / max_r) * (dw / 2) : (sx / max_r) * dw;
+                const hPx = (sy / max_z) * dh;
+                context.rect(cx - wPx / 2, cy - hPx / 2, wPx, hPx);
+            }
+            context.fill();
+            context.stroke();
+        };
+        for (const obj of mpmObjects) {
+            drawMpmObj(obj, false);
+            if (isAxisymmetric) drawMpmObj(obj, true);
+        }
+        context.restore();
     }
 
     // Render overlays (charge shape and detonator location)
@@ -883,6 +989,39 @@ function render(): void {
         context.restore();
     }
 
+    // Draw 2D Virtual Gauge Markers
+    if (gauges && gauges.length > 0) {
+        context.save();
+        context.font = `${Math.max(8, Math.round(10 / zoom))}px monospace`;
+        for (let idx = 0; idx < gauges.length; ++idx) {
+            const g = gauges[idx];
+            const gr = Number(g.r ?? 0);
+            const gz = Number(g.z ?? 0);
+            const gx = isAxisymmetric
+                ? (dx + dw / 2 + (gr / max_r) * (dw / 2))
+                : (dx + (gr / max_r) * dw);
+            const gy = dy + dh - (gz / max_z) * dh;
+            const rMarker = 4 / zoom;
+
+            context.beginPath();
+            context.moveTo(gx, gy - rMarker);
+            context.lineTo(gx + rMarker, gy);
+            context.lineTo(gx, gy + rMarker);
+            context.lineTo(gx - rMarker, gy);
+            context.closePath();
+            context.fillStyle = '#10b981';
+            context.strokeStyle = '#ffffff';
+            context.lineWidth = 1.2 / zoom;
+            context.fill();
+            context.stroke();
+
+            const label = g.name || g.id || `G${idx + 1}`;
+            context.fillStyle = '#a7f3d0';
+            context.fillText(label, gx + 6 / zoom, gy + 3 / zoom);
+        }
+        context.restore();
+    }
+
     context.restore(); // Restore transformed context
 
     // Draw grid info overlay (glassmorphism/ HUD styling)
@@ -897,7 +1036,7 @@ function render(): void {
         }
         context.fillText(`Range: [${displayMin.toExponential(2)}, ${displayMax.toExponential(2)}]`, 15, 35);
     } else {
-        context.fillText('Waiting for telemetry...', 15, 20);
+        context.fillText(`2D Domain Preview (${max_r.toFixed(2)}m × ${max_z.toFixed(2)}m) — Ready`, 15, 20);
     }
     context.restore();
 }
@@ -920,10 +1059,12 @@ self.onmessage = (event) => {
             }
         }
 
+        lastCfdBuffer = data;
         if (isMpm) {
             lastMpmBuffer = data;
         } else {
-            lastCfdBuffer = data;
+            lastMpmBuffer = null;
+            currentParticles = null;
         }
 
         // Robustness: throttle & catch-up logic
@@ -956,6 +1097,15 @@ self.onmessage = (event) => {
                 }
             }
         }
+        return;
+    }
+
+    if (data.type === 'clearData') {
+        lastBuffer = null;
+        lastCfdBuffer = null;
+        lastMpmBuffer = null;
+        currentParticles = null;
+        requestRender();
         return;
     }
 
@@ -1006,6 +1156,9 @@ self.onmessage = (event) => {
         if (typeof data.isAxisymmetric === 'boolean') isAxisymmetric = data.isAxisymmetric;
         if (data.chargeInfo !== undefined) chargeInfo = data.chargeInfo;
         if (data.detonatorInfo !== undefined) detonatorInfo = data.detonatorInfo;
+        if (Array.isArray(data.obstacles)) obstacles = data.obstacles;
+        if (Array.isArray(data.mpmObjects)) mpmObjects = data.mpmObjects;
+        if (Array.isArray(data.gauges)) gauges = data.gauges;
         if (typeof data.showGridlines === 'boolean') showGridlines = data.showGridlines;
         if (typeof data.interpolate === 'boolean') interpolate = data.interpolate;
         if (!autoScale) {

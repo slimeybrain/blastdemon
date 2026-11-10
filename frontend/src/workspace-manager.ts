@@ -26,6 +26,9 @@ interface ViewportPane {
     typeSelect: HTMLSelectElement;
     modelSelect?: HTMLSelectElement;
     viewSelect?: HTMLSelectElement;
+    inlineControlsHost?: HTMLElement;
+    hudElement?: HTMLElement | null;
+    workerConfigOverrides?: Record<string, any>;
     modelId: string | null;
     viewId?: string | null;
     viewType: ViewportViewType;
@@ -52,6 +55,8 @@ export class WorkspaceManager {
     private focusedPaneId: string | null = null;
     private titleElement: HTMLElement | null = null;
     private stateListener: () => void;
+    private inPlaceListener: (nodeId: string, params: Record<string, any>) => void;
+    private statusListener: (modelId: string, status: any) => void;
 
     /** True while the constructor's buildStage() is running. Prevents saveStageOptions
      *  from calling updatePanelOptions synchronously during initialisation, which would
@@ -106,7 +111,27 @@ export class WorkspaceManager {
         this.container.appendChild(this.rootElement);
 
         this.stateListener = () => this.syncVirtualViewports();
+        this.inPlaceListener = (_nodeId: string, _params: Record<string, any>) => {
+            this.panes.forEach(pane => {
+                if (pane.viewType === '2D_CONTOUR' || pane.viewType === '1D_CHART') {
+                    this.syncPaneWorkerConfig(pane);
+                }
+            });
+        };
+        this.statusListener = (modelId?: string, status?: string) => {
+            if (!modelId) return;
+            this.panes.forEach(pane => {
+                if (pane.modelId === modelId && (pane.viewType === '2D_CONTOUR' || pane.viewType === '1D_CHART')) {
+                    if (status === 'UNINITIALIZED' && !this.hasModelBinaryTelemetry(modelId)) {
+                        pane.worker?.postMessage({ type: 'clearData' });
+                    }
+                    this.syncPaneWorkerConfig(pane);
+                }
+            });
+        };
         this.stateManager.onStateChange(this.stateListener);
+        this.stateManager.onInPlaceParameterChange(this.inPlaceListener);
+        this.stateManager.onModelStatusChange(this.statusListener);
 
         this.windowResizeListener = () => this.triggerResize();
         window.addEventListener('resize', this.windowResizeListener);
@@ -199,10 +224,14 @@ export class WorkspaceManager {
     private detectSmartViewType(model: Model | null | undefined): ViewportViewType {
         if (!model || !model.nodes) return '3D_VIEWPORT';
         const types = model.nodes.map(n => n.type);
-        if (types.some(t => ['CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D', 'FSICoupler3D', 'FEMFSICoupler3D', 'Telemetry3DViewport', 'STLGeometry', 'DomainMesh3D'].includes(t))) {
+        if (types.some(t => ['CFDSolver3D', 'MarineHarbourDomain', 'MPMDomain3D', 'FEMDomain3D', 'FSICoupler3D', 'FEMFSICoupler3D', 'Telemetry3DViewport', 'STLGeometry', 'DomainMesh3D'].includes(t))) {
             return '3D_VIEWPORT';
         }
-        if (types.some(t => ['CFDSolver2D', 'MPMDomain2D', 'FSICoupler2D', 'ThePainter', 'TelemetryContour', 'DomainMesh2D'].includes(t))) {
+        if (types.some(t => ['CFDSolver2D', 'MPMDomain2D', 'MPMObject2D', 'FSICoupler2D', 'ThePainter', 'TelemetryContour', 'DomainMesh2D', 'Obstacle', 'Charge2D', 'Remap1DTo2DNode'].includes(t))) {
+            return '2D_CONTOUR';
+        }
+        const dmNode = model.nodes.find(n => n.type === 'DomainMesh');
+        if (dmNode?.parameters?.dimension === '2D') {
             return '2D_CONTOUR';
         }
         if (types.some(t => ['CFDSolver', 'Charge1D', 'VirtualGauges', 'TelemetryGraph', 'DomainMesh'].includes(t))) {
@@ -254,6 +283,12 @@ export class WorkspaceManager {
                 } else if (typeof pane.instance.setLayerVisibility === 'function') {
                     pane.instance.setLayerVisibility('grid', this.showStudioGrid);
                 }
+            } else if (pane.viewType === '2D_CONTOUR' && pane.worker) {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), showGridlines: this.showStudioGrid };
+                pane.worker.postMessage({ type: 'setConfig', showGridlines: this.showStudioGrid });
+            } else if (pane.viewType === '1D_CHART' && pane.worker) {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), showGrid: this.showStudioGrid };
+                pane.worker.postMessage({ type: 'setConfig', showGrid: this.showStudioGrid });
             }
         });
         this.saveStageOptions();
@@ -486,6 +521,14 @@ export class WorkspaceManager {
         viewSelect.style.display = initialViewType === '3D_VIEWPORT' ? 'inline-block' : 'none';
         headerControlsLeft.appendChild(viewSelect);
 
+        const inlineControlsHost = document.createElement('div');
+        inlineControlsHost.className = 'stage-pane-inline-controls';
+        inlineControlsHost.style.display = 'flex';
+        inlineControlsHost.style.alignItems = 'center';
+        inlineControlsHost.style.gap = '4px';
+        inlineControlsHost.style.flexWrap = 'wrap';
+        headerControlsLeft.appendChild(inlineControlsHost);
+
         const maxBtn = document.createElement('button');
         maxBtn.className = 'stage-pane-tool-btn';
         maxBtn.textContent = '⛶';
@@ -509,6 +552,8 @@ export class WorkspaceManager {
             typeSelect,
             modelSelect,
             viewSelect,
+            inlineControlsHost,
+            hudElement: null,
             modelId: initialModelId,
             viewId: initialViewId || null,
             viewType: initialViewType,
@@ -516,7 +561,8 @@ export class WorkspaceManager {
             worker: null,
             resizeObserver: null,
             cleanupListeners: null,
-            isMaximized: false
+            isMaximized: false,
+            workerConfigOverrides: {}
         };
 
         modelSelect.addEventListener('change', () => {
@@ -638,7 +684,370 @@ export class WorkspaceManager {
             pane.instance.destroy?.();
             pane.instance = null;
         }
+        pane.hudElement = null;
+        if (pane.inlineControlsHost) {
+            pane.inlineControlsHost.innerHTML = '';
+        }
         pane.content.innerHTML = '';
+    }
+
+    private hasModelBinaryTelemetry(modelId: string): boolean {
+        const latestFrame = this.playbackBuffer.getLatestFrameForModel(modelId);
+        if (latestFrame && latestFrame.buffer && latestFrame.buffer.byteLength > 0) {
+            return true;
+        }
+        const allModels = this.stateManager.getWorkspaceModels();
+        const model = allModels.find(m => m.id === modelId);
+        if (!model) return false;
+        const solverNode = model.nodes.find(n =>
+            n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D' || n.type === 'CFDSolver' ||
+            n.type === 'TelemetryContour' || n.type === 'TelemetryGraph'
+        );
+        if (solverNode) {
+            const cached = this.stateManager.getTelemetry(solverNode.id);
+            if (cached instanceof ArrayBuffer && cached.byteLength > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private getCachedModelBinaryTelemetry(model: Model | null): ArrayBuffer | null {
+        if (!model) return null;
+        const latestFrame = this.playbackBuffer.getLatestFrameForModel(model.id);
+        if (latestFrame && latestFrame.buffer && latestFrame.buffer.byteLength > 0) {
+            return latestFrame.buffer;
+        }
+        for (const n of model.nodes) {
+            if (n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D' || n.type === 'CFDSolver' || n.type === 'TelemetryContour' || n.type === 'TelemetryGraph') {
+                const cached = this.stateManager.getTelemetry(n.id);
+                if (cached instanceof ArrayBuffer && cached.byteLength > 0) {
+                    return cached;
+                }
+            }
+        }
+        return null;
+    }
+
+    private buildContourConfig(model: Model | null, overrides: Record<string, any> = {}): Record<string, any> {
+        const solverNode = model?.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D');
+        const meshNode = model?.nodes.find(n => n.type === 'DomainMesh2D' || n.type === 'MPMDomain2D' || n.type === 'DomainMesh');
+        const contourNode = model?.nodes.find(n => n.type === 'TelemetryContour');
+        const chargeNode = model?.nodes.find(n => n.type === 'Charge2D' || n.type === 'Charge1D');
+        const detNode = model?.nodes.find(n => n.type === 'DetonatorLocation' || n.type === 'TriggerLocation');
+        const gaugesNode = model?.nodes.find(n => n.type === 'VirtualGauges');
+
+        const max_r = Number(meshNode?.parameters?.max_r ?? meshNode?.parameters?.domain_radius ?? meshNode?.parameters?.domain_width ?? 1.0) || 1.0;
+        const max_z = Number(meshNode?.parameters?.max_z ?? meshNode?.parameters?.domain_height ?? max_r) || max_r;
+        const cellSize = Number(meshNode?.parameters?.cell_size) || 0.05;
+        const calculatedNr = Math.max(8, Math.round(max_r / cellSize) || 128);
+        const calculatedNz = Math.max(8, Math.round(max_z / cellSize) || 128);
+        const meshType = String(solverNode?.parameters?.mesh_type || 'regular');
+        const baseNr = (meshType === 'amr') ? Math.ceil(calculatedNr / 16) * 16 : calculatedNr;
+        const baseNz = (meshType === 'amr') ? Math.ceil(calculatedNz / 16) * 16 : calculatedNz;
+
+        const chargeMass = Number(chargeNode?.parameters?.charge_mass ?? 0);
+        const chargeShape = String(chargeNode?.parameters?.shape ?? 'Sphere');
+        let chargeRadius = Number(chargeNode?.parameters?.explosive_r ?? chargeNode?.parameters?.explosive_radius ?? 0);
+        if (chargeMass > 0 && chargeRadius <= 0) {
+            const rho0 = 1630.0;
+            const vol = chargeMass / rho0;
+            chargeRadius = Math.pow((3.0 * vol) / (4.0 * Math.PI), 1.0 / 3.0);
+        }
+        const chargeHeight = Number(chargeNode?.parameters?.charge_height ?? (chargeRadius * 2.0));
+        const chargeZOffset = Number(chargeNode?.parameters?.z_offset ?? chargeNode?.parameters?.center_z ?? (max_z * 0.5));
+        const detonatorR = Number(detNode?.parameters?.detonator_r ?? detNode?.parameters?.r ?? 0.0);
+        const detonatorZ = Number(detNode?.parameters?.detonator_z ?? detNode?.parameters?.z ?? chargeZOffset);
+
+        const obstacles = (model?.nodes || [])
+            .filter(n => n.type === 'Obstacle')
+            .map(n => ({
+                min_r: Number(n.parameters?.min_r ?? 0),
+                max_r: Number(n.parameters?.max_r ?? 0),
+                min_z: Number(n.parameters?.min_z ?? 0),
+                max_z: Number(n.parameters?.max_z ?? 0),
+                label: String(n.parameters?.name || n.id)
+            }))
+            .filter(o => o.max_r > o.min_r && o.max_z > o.min_z);
+
+        const mpmObjects = (model?.nodes || [])
+            .filter(n => n.type === 'MPMObject2D')
+            .map(n => ({
+                shape: String(n.parameters?.shape ?? 'Box'),
+                min_x: Number(n.parameters?.min_x ?? 0),
+                max_x: Number(n.parameters?.max_x ?? 0),
+                min_y: Number(n.parameters?.min_y ?? 0),
+                max_y: Number(n.parameters?.max_y ?? 0),
+                center_x: Number(n.parameters?.center_x ?? 0),
+                center_y: Number(n.parameters?.center_y ?? 0),
+                radius: Number(n.parameters?.radius ?? 0),
+                label: String(n.parameters?.name || n.id)
+            }));
+
+        const rawGauges = Array.isArray(gaugesNode?.parameters?.gauges)
+            ? gaugesNode!.parameters.gauges
+            : (Array.isArray(meshNode?.parameters?.gauges) ? meshNode!.parameters.gauges : []);
+        const gauges = rawGauges.map((g: any, idx: number) => ({
+            id: String(g.id || `G${idx + 1}`),
+            r: Number(g.r ?? g.x ?? 0),
+            z: Number(g.z ?? g.y ?? 0)
+        }));
+
+        const defaultChannel = (model && model.nodes.some(n => n.type === 'MPMDomain2D') && !model.nodes.some(n => n.type === 'CFDSolver2D')) ? 7 : 0;
+
+        return {
+            type: 'setConfig',
+            channel: Number(overrides.channel ?? contourNode?.parameters?.channel ?? defaultChannel),
+            stride: Number(overrides.stride ?? contourNode?.parameters?.stride ?? 1),
+            refreshRate: Number(overrides.refreshRate ?? contourNode?.parameters?.refresh_rate ?? 0.0),
+            logScale: Boolean(overrides.logScale ?? contourNode?.parameters?.log_scale ?? false),
+            autoScale: overrides.autoScale !== undefined ? Boolean(overrides.autoScale) : (contourNode?.parameters?.auto_scale !== false),
+            minVal: Number(overrides.minVal ?? contourNode?.parameters?.min_val ?? 0),
+            maxVal: Number(overrides.maxVal ?? contourNode?.parameters?.max_val ?? 1000000),
+            colormap: String(overrides.colormap ?? contourNode?.parameters?.colormap ?? 'turbo'),
+            showColorbar: overrides.showColorbar !== undefined ? Boolean(overrides.showColorbar) : (contourNode?.parameters?.show_colorbar !== false),
+            showGridlines: overrides.showGridlines !== undefined ? Boolean(overrides.showGridlines) : Boolean(contourNode?.parameters?.show_gridlines ?? this.showStudioGrid),
+            interpolate: overrides.interpolate !== undefined ? Boolean(overrides.interpolate) : Boolean(contourNode?.parameters?.interpolate ?? false),
+            isAxisymmetric: meshNode?.parameters?.coordinate_system !== 'Cartesian' && meshNode?.type !== 'MPMDomain2D',
+            max_r,
+            max_z,
+            meshType,
+            amrMaxLevels: Math.max(1, Number(solverNode?.parameters?.amr_max_levels ?? 3)),
+            baseNr,
+            baseNz,
+            chargeShape,
+            chargeRadius,
+            chargeHeight,
+            chargeZOffset,
+            detonatorR,
+            detonatorZ,
+            obstacles,
+            mpmObjects,
+            gauges
+        };
+    }
+
+    private buildChartConfig(model: Model | null, overrides: Record<string, any> = {}): Record<string, any> {
+        const graphNode = model?.nodes.find(n => n.type === 'TelemetryGraph');
+        const meshNode = model?.nodes.find(n => n.type === 'DomainMesh');
+        const chargeNode = model?.nodes.find(n => n.type === 'Charge1D');
+        const detNode = model?.nodes.find(n => n.type === 'DetonatorLocation');
+        const gaugesNode = model?.nodes.find(n => n.type === 'VirtualGauges');
+
+        const domainRadius = Number(meshNode?.parameters?.domain_radius ?? 1.0) || 1.0;
+        const chargeMass = Number(chargeNode?.parameters?.charge_mass ?? 0);
+        let chargeRadius = Number(chargeNode?.parameters?.explosive_radius ?? chargeNode?.parameters?.explosive_r ?? 0);
+        if (chargeMass > 0 && chargeRadius <= 0) {
+            const rho0 = 1630.0;
+            const vol = chargeMass / rho0;
+            chargeRadius = Math.pow((3.0 * vol) / (4.0 * Math.PI), 1.0 / 3.0);
+        }
+        const detonatorR = Number(detNode?.parameters?.detonator_r ?? detNode?.parameters?.r ?? 0);
+
+        const rawGauges = Array.isArray(gaugesNode?.parameters?.gauges)
+            ? gaugesNode!.parameters.gauges
+            : (Array.isArray(meshNode?.parameters?.gauges) ? meshNode!.parameters.gauges : []);
+        const gauges = rawGauges.map((g: any, idx: number) => ({
+            id: String(g.id || `G${idx + 1}`),
+            r: Number(g.r ?? g.x ?? 0)
+        }));
+
+        return {
+            type: 'setConfig',
+            channel: Number(overrides.channel ?? graphNode?.parameters?.channel ?? 0),
+            color: String(overrides.color ?? graphNode?.parameters?.color ?? '#38bdf8'),
+            autoScaleY: overrides.autoScaleY !== undefined ? Boolean(overrides.autoScaleY) : (graphNode?.parameters?.auto_scale_y !== false),
+            min: Number(overrides.min ?? graphNode?.parameters?.min_y ?? 0),
+            max: Number(overrides.max ?? graphNode?.parameters?.max_y ?? 1000000),
+            showGrid: overrides.showGrid !== undefined ? Boolean(overrides.showGrid) : (graphNode?.parameters?.show_grid !== false),
+            showAxes: true,
+            xAxisMode: 'radius',
+            domainRadius,
+            chargeRadius,
+            detonatorR,
+            gauges
+        };
+    }
+
+    private syncPaneWorkerConfig(pane: ViewportPane): void {
+        if (!pane.worker) return;
+        const allModels = this.stateManager.getWorkspaceModels();
+        const activeWs = this.stateManager.getActiveWorkspace();
+        const targetModelId = pane.modelId || activeWs?.activeModelId || allModels[0]?.id || null;
+        const model = allModels.find(m => m.id === targetModelId) || null;
+
+        if (pane.viewType === '2D_CONTOUR') {
+            const cfg = this.buildContourConfig(model, pane.workerConfigOverrides || {});
+            pane.worker.postMessage(cfg);
+            const channelNames = ['Pressure (Pa)', 'Density (kg/m³)', 'Radial Vel u_r (m/s)', 'Axial Vel u_z (m/s)', 'Internal Energy (J/kg)', 'Phase α₁', 'Phase α₂', 'MPM von Mises (Pa)', 'MPM Plastic Strain'];
+            if (pane.hudElement) {
+                pane.hudElement.textContent = `2D Contour • ${channelNames[cfg.channel] || 'Pressure'} • ${String(cfg.colormap).toUpperCase()}${cfg.meshType === 'amr' ? ' • AMR' : ''}`;
+            }
+        } else if (pane.viewType === '1D_CHART') {
+            const cfg = this.buildChartConfig(model, pane.workerConfigOverrides || {});
+            pane.worker.postMessage(cfg);
+            const channelNames = ['Pressure (Pa)', 'Density (kg/m³)', 'Velocity u_r (m/s)', 'Internal Energy (J/kg)', 'Phase α₁'];
+            if (pane.hudElement) {
+                pane.hudElement.textContent = `1D Radial Profile • ${channelNames[cfg.channel] || 'Pressure'} • R_max=${cfg.domainRadius}m`;
+            }
+        }
+    }
+
+    private populateInlinePaneControls(pane: ViewportPane, model: Model | null): void {
+        if (!pane.inlineControlsHost) return;
+        pane.inlineControlsHost.innerHTML = '';
+
+        const makeSelect = (options: { value: string; label: string }[], currentVal: string, title: string, onChange: (val: string) => void) => {
+            const sel = document.createElement('select');
+            sel.className = 'stage-pane-type-select';
+            sel.title = title;
+            sel.style.background = '#141822';
+            sel.style.color = '#e2e8f0';
+            sel.style.border = '1px solid rgba(255, 255, 255, 0.14)';
+            sel.style.borderRadius = '4px';
+            sel.style.padding = '2px 5px';
+            sel.style.fontSize = '10px';
+            sel.style.cursor = 'pointer';
+            options.forEach(o => {
+                const opt = document.createElement('option');
+                opt.value = o.value;
+                opt.textContent = o.label;
+                if (o.value === currentVal) opt.selected = true;
+                sel.appendChild(opt);
+            });
+            sel.addEventListener('change', () => onChange(sel.value));
+            return sel;
+        };
+
+        const makeToggleBtn = (label: string, title: string, active: boolean, onClick: (next: boolean) => void) => {
+            let state = active;
+            const btn = document.createElement('button');
+            btn.className = 'stage-pane-tool-btn';
+            btn.textContent = label;
+            btn.title = title;
+            btn.style.fontSize = '10px';
+            btn.style.padding = '2px 6px';
+            const applyStyle = () => {
+                btn.style.background = state ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.04)';
+                btn.style.color = state ? '#38bdf8' : '#94a3b8';
+                btn.style.borderColor = state ? 'rgba(56, 189, 248, 0.45)' : 'rgba(255, 255, 255, 0.1)';
+            };
+            applyStyle();
+            btn.addEventListener('click', () => {
+                state = !state;
+                applyStyle();
+                onClick(state);
+            });
+            return btn;
+        };
+
+        if (pane.viewType === '2D_CONTOUR') {
+            const cfg = this.buildContourConfig(model, pane.workerConfigOverrides || {});
+            const channelSel = makeSelect([
+                { value: '0', label: '🌡️ Pressure' },
+                { value: '1', label: '🧱 Density' },
+                { value: '2', label: '💨 Vel u_r / |u|' },
+                { value: '3', label: '⬆️ Vel u_z' },
+                { value: '4', label: '⚡ Int. Energy' },
+                { value: '5', label: '🧪 Phase α₁' },
+                { value: '6', label: '💧 Phase α₂' },
+                { value: '7', label: '🔩 MPM von Mises' },
+                { value: '8', label: '🔧 MPM Plastic ε_p' }
+            ], String(cfg.channel), 'Select 2D Contour Field', (val) => {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), channel: Number(val) };
+                this.syncPaneWorkerConfig(pane);
+            });
+
+            const cmapSel = makeSelect([
+                { value: 'turbo', label: '🎨 Turbo' },
+                { value: 'viridis', label: '🎨 Viridis' },
+                { value: 'inferno', label: '🎨 Inferno' },
+                { value: 'plasma', label: '🎨 Plasma' },
+                { value: 'magma', label: '🎨 Magma' },
+                { value: 'coolwarm', label: '🎨 CoolWarm' },
+                { value: 'rainbow', label: '🎨 Rainbow' },
+                { value: 'jet', label: '🎨 Jet' },
+                { value: 'grayscale', label: '🎨 Grayscale' }
+            ], String(cfg.colormap), 'Select Colormap', (val) => {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), colormap: val };
+                this.syncPaneWorkerConfig(pane);
+            });
+
+            const autoBtn = makeToggleBtn('Auto', 'Toggle Auto-Scale Color Range', Boolean(cfg.autoScale), (next) => {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), autoScale: next };
+                this.syncPaneWorkerConfig(pane);
+            });
+
+            const logBtn = makeToggleBtn('Log', 'Toggle Logarithmic Scale', Boolean(cfg.logScale), (next) => {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), logScale: next };
+                this.syncPaneWorkerConfig(pane);
+            });
+
+            const gridBtn = makeToggleBtn('Grid', 'Toggle 2D Mesh / AMR Tile Gridlines', Boolean(cfg.showGridlines), (next) => {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), showGridlines: next };
+                this.syncPaneWorkerConfig(pane);
+            });
+
+            const interpBtn = makeToggleBtn('Smooth', 'Toggle Bilinear Interpolation', Boolean(cfg.interpolate), (next) => {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), interpolate: next };
+                this.syncPaneWorkerConfig(pane);
+            });
+
+            const resetBtn = document.createElement('button');
+            resetBtn.className = 'stage-pane-tool-btn';
+            resetBtn.textContent = '⟲';
+            resetBtn.title = 'Reset 2D Pan & Zoom';
+            resetBtn.style.fontSize = '11px';
+            resetBtn.style.padding = '2px 6px';
+            resetBtn.addEventListener('click', () => {
+                pane.worker?.postMessage({ type: 'resetView' });
+            });
+
+            pane.inlineControlsHost.appendChild(channelSel);
+            pane.inlineControlsHost.appendChild(cmapSel);
+            pane.inlineControlsHost.appendChild(autoBtn);
+            pane.inlineControlsHost.appendChild(logBtn);
+            pane.inlineControlsHost.appendChild(gridBtn);
+            pane.inlineControlsHost.appendChild(interpBtn);
+            pane.inlineControlsHost.appendChild(resetBtn);
+        } else if (pane.viewType === '1D_CHART') {
+            const cfg = this.buildChartConfig(model, pane.workerConfigOverrides || {});
+            const channelSel = makeSelect([
+                { value: '0', label: '📈 Pressure (Pa)' },
+                { value: '1', label: '🧱 Density (kg/m³)' },
+                { value: '2', label: '💨 Velocity u_r (m/s)' },
+                { value: '3', label: '⚡ Int. Energy (J/kg)' },
+                { value: '4', label: '🧪 Phase α₁' }
+            ], String(cfg.channel), 'Select 1D Radial Profile Channel', (val) => {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), channel: Number(val) };
+                this.syncPaneWorkerConfig(pane);
+            });
+
+            const autoBtn = makeToggleBtn('Auto Y', 'Toggle Auto-Scale Y Axis', Boolean(cfg.autoScaleY), (next) => {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), autoScaleY: next };
+                this.syncPaneWorkerConfig(pane);
+            });
+
+            const gridBtn = makeToggleBtn('Grid', 'Toggle Chart Gridlines', Boolean(cfg.showGrid), (next) => {
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), showGrid: next };
+                this.syncPaneWorkerConfig(pane);
+            });
+
+            const resetBtn = document.createElement('button');
+            resetBtn.className = 'stage-pane-tool-btn';
+            resetBtn.textContent = '⟲';
+            resetBtn.title = 'Reset 1D Chart Zoom';
+            resetBtn.style.fontSize = '11px';
+            resetBtn.style.padding = '2px 6px';
+            resetBtn.addEventListener('click', () => {
+                pane.worker?.postMessage({ type: 'resetView' });
+            });
+
+            pane.inlineControlsHost.appendChild(channelSel);
+            pane.inlineControlsHost.appendChild(autoBtn);
+            pane.inlineControlsHost.appendChild(gridBtn);
+            pane.inlineControlsHost.appendChild(resetBtn);
+        }
     }
 
     private mountViewInstance(pane: ViewportPane): void {
@@ -724,18 +1133,8 @@ export class WorkspaceManager {
             pane.instance = new ResourceManager(pane.content, this.stateManager, `stage-pane-${pane.index}`);
         } else if (pane.viewType === '2D_CONTOUR') {
             this.mountContourView(pane, targetModel);
-            const latestFrame = this.playbackBuffer.getLatestFrameForModel(modelId);
-            if (latestFrame && pane.worker) {
-                const copy = latestFrame.buffer.slice(0);
-                pane.worker.postMessage(copy, [copy]);
-            }
         } else if (pane.viewType === '1D_CHART') {
             this.mountChartView(pane, targetModel);
-            const latestFrame = this.playbackBuffer.getLatestFrameForModel(modelId);
-            if (latestFrame && pane.worker) {
-                const copy = latestFrame.buffer.slice(0);
-                pane.worker.postMessage(copy, [copy]);
-            }
         }
         this.updatePaneModelSelector(pane);
     }
@@ -770,6 +1169,7 @@ export class WorkspaceManager {
         hud.style.pointerEvents = 'none';
         hud.textContent = '2D Contour Slice View';
         host.appendChild(hud);
+        pane.hudElement = hud;
 
         pane.content.appendChild(host);
 
@@ -790,37 +1190,8 @@ export class WorkspaceManager {
             height: initialH
         }, [offscreen] as any);
 
-        // Configure 2D worker from model nodes
-        const solverNode = model?.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D');
-        const meshNode = model?.nodes.find(n => n.type === 'DomainMesh2D' || n.type === 'DomainMesh');
-        const contourNode = model?.nodes.find(n => n.type === 'TelemetryContour');
-
-        const max_r = Number(meshNode?.parameters?.domain_radius ?? 1.0);
-        const max_z = Number(meshNode?.parameters?.domain_height ?? max_r);
-        const currentChannel = Number(contourNode?.parameters?.channel ?? 0);
-        const colormap = String(contourNode?.parameters?.colormap ?? 'rainbow');
-
-        const cellSize = Number(meshNode?.parameters?.cell_size) || 0.05;
-        const calculatedNr = Math.round(max_r / cellSize) || 128;
-        const calculatedNz = Math.round(max_z / cellSize) || 128;
-        const baseNr = (solverNode?.parameters?.mesh_type === 'amr') ? Math.ceil(calculatedNr / 16) * 16 : calculatedNr;
-        const baseNz = (solverNode?.parameters?.mesh_type === 'amr') ? Math.ceil(calculatedNz / 16) * 16 : calculatedNz;
-
-        worker.postMessage({
-            type: 'setConfig',
-            channel: currentChannel,
-            stride: 1,
-            refreshRate: 0.0,
-            logScale: false,
-            colormap: colormap,
-            isAxisymmetric: meshNode?.parameters?.coordinate_system !== 'Cartesian',
-            max_r,
-            max_z,
-            meshType: solverNode?.parameters?.mesh_type || 'regular',
-            amrMaxLevels: Math.max(1, Number(solverNode?.parameters?.amr_max_levels ?? 3)),
-            baseNr,
-            baseNz
-        });
+        this.populateInlinePaneControls(pane, model);
+        this.syncPaneWorkerConfig(pane);
 
         // Resize Observer
         pane.resizeObserver = new ResizeObserver(entries => {
@@ -887,13 +1258,11 @@ export class WorkspaceManager {
             host.removeEventListener('dblclick', onDblClick);
         };
 
-        // Send cached telemetry if available
-        if (solverNode) {
-            const cached = this.stateManager.getTelemetry(solverNode.id);
-            if (cached instanceof ArrayBuffer) {
-                const copy = cached.slice(0);
-                worker.postMessage(copy, [copy]);
-            }
+        // Send cached telemetry if available (single dispatch)
+        const cached = this.getCachedModelBinaryTelemetry(model);
+        if (cached) {
+            const copy = cached.slice(0);
+            worker.postMessage(copy, [copy]);
         }
     }
 
@@ -924,8 +1293,9 @@ export class WorkspaceManager {
         hud.style.fontSize = '9px';
         hud.style.color = '#38bdf8';
         hud.style.pointerEvents = 'none';
-        hud.textContent = '1D Time History Gauge View';
+        hud.textContent = '1D Radial Profile View';
         host.appendChild(hud);
+        pane.hudElement = hud;
 
         pane.content.appendChild(host);
 
@@ -946,21 +1316,8 @@ export class WorkspaceManager {
             height: initialH
         }, [offscreen] as any);
 
-        const solverNode = model?.nodes.find(n => n.type === 'CFDSolver');
-        const graphNode = model?.nodes.find(n => n.type === 'TelemetryGraph');
-        const meshNode = model?.nodes.find(n => n.type === 'DomainMesh');
-
-        worker.postMessage({
-            type: 'setConfig',
-            channel: Number(graphNode?.parameters?.channel ?? 0),
-            color: graphNode?.parameters?.color ?? '#38bdf8',
-            min: Number(graphNode?.parameters?.min_y ?? 0),
-            max: Number(graphNode?.parameters?.max_y ?? 1000000),
-            showGrid: graphNode?.parameters?.show_grid !== false,
-            showAxes: true,
-            xAxisMode: 'radius',
-            domainRadius: Number(meshNode?.parameters?.domain_radius ?? 1.0)
-        });
+        this.populateInlinePaneControls(pane, model);
+        this.syncPaneWorkerConfig(pane);
 
         pane.resizeObserver = new ResizeObserver(entries => {
             for (const entry of entries) {
@@ -1025,12 +1382,10 @@ export class WorkspaceManager {
             host.removeEventListener('dblclick', onDblClick);
         };
 
-        if (solverNode) {
-            const cached = this.stateManager.getTelemetry(solverNode.id);
-            if (cached instanceof ArrayBuffer) {
-                const copy = cached.slice(0);
-                worker.postMessage(copy, [copy]);
-            }
+        const cached = this.getCachedModelBinaryTelemetry(model);
+        if (cached) {
+            const copy = cached.slice(0);
+            worker.postMessage(copy, [copy]);
         }
     }
 
@@ -1155,6 +1510,8 @@ export class WorkspaceManager {
         targets.forEach(pane => {
             if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                 pane.instance.snapCameraPreset?.(preset);
+            } else if ((pane.viewType === '2D_CONTOUR' || pane.viewType === '1D_CHART') && pane.worker && preset === 'reset') {
+                pane.worker.postMessage({ type: 'resetView' });
             }
         });
     }
@@ -1167,7 +1524,13 @@ export class WorkspaceManager {
             if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                 pane.instance.setColormap?.(colormap, min, max);
             } else if (pane.viewType === '2D_CONTOUR' && pane.worker) {
-                pane.worker.postMessage({ type: 'setConfig', colormap });
+                pane.workerConfigOverrides = {
+                    ...(pane.workerConfigOverrides || {}),
+                    colormap,
+                    ...(min !== undefined ? { minVal: min } : {}),
+                    ...(max !== undefined ? { maxVal: max } : {})
+                };
+                this.syncPaneWorkerConfig(pane);
             }
         });
     }
@@ -1222,10 +1585,31 @@ export class WorkspaceManager {
                     'uz': 3,
                     'energy': 4,
                     'alpha1': 5,
-                    'alpha2': 6
+                    'species1': 5,
+                    'alpha2': 6,
+                    'species2': 6,
+                    'vonmises': 7,
+                    'von_mises': 7,
+                    'plasticstrain': 8,
+                    'plastic_strain': 8,
+                    'damage': 8
                 };
                 const ch = channelMap[quantity.toLowerCase()] ?? 0;
-                pane.worker.postMessage({ type: 'setConfig', channel: ch });
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), channel: ch };
+                this.syncPaneWorkerConfig(pane);
+            } else if (pane.viewType === '1D_CHART' && pane.worker) {
+                const channelMap1D: Record<string, number> = {
+                    'pressure': 0,
+                    'density': 1,
+                    'velocity': 2,
+                    'ur': 2,
+                    'energy': 3,
+                    'alpha1': 4,
+                    'species1': 4
+                };
+                const ch = channelMap1D[quantity.toLowerCase()] ?? 0;
+                pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), channel: ch };
+                this.syncPaneWorkerConfig(pane);
             }
         });
     }
@@ -1237,6 +1621,16 @@ export class WorkspaceManager {
         this.panes.forEach(pane => {
             if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                 pane.instance.setLayerVisibility?.(layer, active);
+            } else if (pane.viewType === '2D_CONTOUR' && pane.worker) {
+                if (layer === 'grid' || layer === 'slices') {
+                    pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), showGridlines: active };
+                    this.syncPaneWorkerConfig(pane);
+                }
+            } else if (pane.viewType === '1D_CHART' && pane.worker) {
+                if (layer === 'grid') {
+                    pane.workerConfigOverrides = { ...(pane.workerConfigOverrides || {}), showGrid: active };
+                    this.syncPaneWorkerConfig(pane);
+                }
             }
         });
     }
@@ -1255,12 +1649,31 @@ export class WorkspaceManager {
     }
 
     /**
-     * Set shading config on all active 3D viewports.
+     * Set shading config on all active viewports (3D, 2D Contour, and 1D Chart).
      */
     public setShadingConfig(config: any): void {
         this.panes.forEach(pane => {
             if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                 pane.instance.setShadingConfig?.(config);
+            } else if (pane.viewType === '2D_CONTOUR' && pane.worker && config) {
+                const overrides: Record<string, any> = { ...(pane.workerConfigOverrides || {}) };
+                if (config.autoScale !== undefined) overrides.autoScale = Boolean(config.autoScale);
+                if (config.minVal !== undefined) overrides.minVal = Number(config.minVal);
+                if (config.maxVal !== undefined) overrides.maxVal = Number(config.maxVal);
+                if (config.logScale !== undefined) overrides.logScale = Boolean(config.logScale);
+                if (config.showColorbar !== undefined) overrides.showColorbar = Boolean(config.showColorbar);
+                if (config.showMeshLines !== undefined) overrides.showGridlines = Boolean(config.showMeshLines);
+                if (config.interpolate !== undefined) overrides.interpolate = Boolean(config.interpolate);
+                pane.workerConfigOverrides = overrides;
+                this.syncPaneWorkerConfig(pane);
+            } else if (pane.viewType === '1D_CHART' && pane.worker && config) {
+                const overrides: Record<string, any> = { ...(pane.workerConfigOverrides || {}) };
+                if (config.autoScale !== undefined) overrides.autoScaleY = Boolean(config.autoScale);
+                if (config.minVal !== undefined) overrides.min = Number(config.minVal);
+                if (config.maxVal !== undefined) overrides.max = Number(config.maxVal);
+                if (config.showMeshLines !== undefined) overrides.showGrid = Boolean(config.showMeshLines);
+                pane.workerConfigOverrides = overrides;
+                this.syncPaneWorkerConfig(pane);
             }
         });
     }
@@ -1323,13 +1736,19 @@ export class WorkspaceManager {
     }
 
     /**
-     * Reset simulation runtime data on all active 3D viewports.
+     * Reset simulation runtime data on all active viewports (3D, 2D Contour, and 1D Chart).
      */
     public resetSimulationData(modelId?: string): void {
+        if (modelId) {
+            this.playbackBuffer.clear(modelId);
+        }
         this.panes.forEach(pane => {
             if (modelId && pane.modelId && modelId !== pane.modelId) return;
             if (pane.viewType === '3D_VIEWPORT' && pane.instance) {
                 pane.instance.resetSimulationData?.(modelId);
+            } else if ((pane.viewType === '2D_CONTOUR' || pane.viewType === '1D_CHART') && pane.worker) {
+                pane.worker.postMessage({ type: 'clearData' });
+                this.syncPaneWorkerConfig(pane);
             }
         });
     }
@@ -1364,6 +1783,7 @@ export class WorkspaceManager {
         this.updateStageTitle();
 
         this.panes.forEach(pane => {
+            const paneModel = allModels.find(m => m.id === (pane.modelId || activeModelId)) || model;
             if (this.activePreset === '1x1' || !pane.modelId || !allModels.some(m => m.id === pane.modelId)) {
                 if (pane.modelId !== activeModelId) {
                     pane.modelId = activeModelId;
@@ -1375,8 +1795,17 @@ export class WorkspaceManager {
                     }
                     this.mountViewInstance(pane);
                     this.saveStageOptions();
+                } else if (this.activePreset === '1x1' && paneModel) {
+                    const smartType = this.detectSmartViewType(paneModel);
+                    if (pane.viewType !== smartType && pane.viewType !== 'RESOURCE_MONITOR') {
+                        pane.viewType = smartType;
+                        pane.typeSelect.value = smartType;
+                        this.mountViewInstance(pane);
+                        this.saveStageOptions();
+                    }
                 }
             }
+            this.syncPaneWorkerConfig(pane);
             this.updatePaneModelSelector(pane);
             this.updatePaneViewSelector(pane);
         });
@@ -1412,6 +1841,8 @@ export class WorkspaceManager {
             this.windowResizeListener = null;
         }
         this.stateManager.offStateChange(this.stateListener);
+        this.stateManager.offInPlaceParameterChange(this.inPlaceListener);
+        this.stateManager.offModelStatusChange(this.statusListener);
         this.panes.forEach(p => this.destroyPaneInstance(p));
         this.panes = [];
         this.stlGeometries.clear();

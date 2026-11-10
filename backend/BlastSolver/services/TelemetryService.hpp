@@ -17,4 +17,5 @@ void emit_telemetry_fem_3d(double elapsed = 0.0, bool is_terminated = false, int
 
 // Async Telemetry Thread Lifecycle
 void async_telemetry_thread_func();
+void flush_async_telemetry();
 void stop_async_telemetry();

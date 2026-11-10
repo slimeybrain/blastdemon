@@ -1458,18 +1458,20 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 addMessage(node.id, 'error', "Remap 2D->3D node has no upstream source specified. Select a Source Model in the Inspector or wire an upstream 2D CFD Solver.");
             }
 
-            // Cross-validation with 2D mesh dimensions
-            const remapConn = state.connections.find(c => c.fromNode === node.id && c.fromPort === 'remap');
+            // Cross-validation with 2D / 3D mesh dimensions
+            const remapConn = state.connections.find(c => c.fromNode === node.id && (c.fromPort === 'remap' || c.fromPort === 'remap_out'));
             if (remapConn) {
                 const connectedSolver = state.nodes.find(n => n.id === remapConn.toNode);
-                if (connectedSolver && connectedSolver.type === 'CFDSolver2D') {
-                    const meshConn2D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
-                    if (meshConn2D) {
-                        const meshNode = state.nodes.find(n => n.id === meshConn2D.fromNode);
-                        if (meshNode && meshNode.type === 'DomainMesh2D') {
-                            const max_r = Number(meshNode.parameters?.max_r ?? 1.0);
-                            if (remap_radius > max_r) {
-                                addMessage(node.id, 'warning', `Remap radius (${remap_radius}) exceeds mesh max R (${max_r}).`);
+                if (connectedSolver && (connectedSolver.type === 'CFDSolver3D' || connectedSolver.type === 'MarineHarbourDomain')) {
+                    const meshConn3D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
+                    if (meshConn3D) {
+                        const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
+                        if (meshNode && meshNode.type === 'DomainMesh3D') {
+                            const spanX = Math.abs(Number(meshNode.parameters?.xmax ?? 1.0) - Number(meshNode.parameters?.xmin ?? 0.0));
+                            const spanY = Math.abs(Number(meshNode.parameters?.ymax ?? 1.0) - Number(meshNode.parameters?.ymin ?? 0.0));
+                            const maxHalfSpan = 0.5 * Math.max(spanX, spanY);
+                            if (remap_radius > maxHalfSpan * Math.SQRT2) {
+                                addMessage(node.id, 'warning', `Remap radius (${remap_radius}) exceeds 3D domain horizontal span (${maxHalfSpan.toFixed(3)} m).`);
                             }
                         }
                     }
