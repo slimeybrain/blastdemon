@@ -11,6 +11,7 @@ struct VTKOutputConfig {
     bool export_volumes = false;
     bool export_fem = true;
     bool export_mpm = true;
+    bool export_mpm_density_grid = false;
     bool export_obstacles = true;
     bool export_stl_faces = true;
     std::string stl_outside_domain = "nan";

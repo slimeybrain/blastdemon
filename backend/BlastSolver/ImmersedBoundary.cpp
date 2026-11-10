@@ -73,10 +73,43 @@ static std::vector<Triangle> read_ascii_stl(std::ifstream& file) {
     return triangles;
 }
 
+#include <filesystem>
+#include "services/SolverState.hpp"
+
 std::vector<Triangle> read_stl(const std::string& filepath) {
-    std::ifstream file(filepath, std::ios::binary);
+    std::string effective_path = filepath;
+    std::error_code ec;
+    std::filesystem::path p(effective_path);
+
+    if (!std::filesystem::exists(p, ec)) {
+        std::string clean = effective_path;
+        if (clean.rfind("./", 0) == 0) {
+            clean = clean.substr(2);
+        }
+        std::filesystem::path clean_p(clean);
+
+        if (!global_model_filename.empty()) {
+            std::filesystem::path model_dir = std::filesystem::path(global_model_filename).parent_path();
+            if (std::filesystem::exists(model_dir / clean_p, ec)) {
+                effective_path = (model_dir / clean_p).string();
+            } else if (std::filesystem::exists(model_dir / p, ec)) {
+                effective_path = (model_dir / p).string();
+            }
+        }
+
+        if (!std::filesystem::exists(effective_path, ec)) {
+            std::filesystem::path proj_dir("/home/chris/antigrav/blastdemon");
+            if (std::filesystem::exists(proj_dir / clean_p, ec)) {
+                effective_path = (proj_dir / clean_p).string();
+            } else if (std::filesystem::exists(proj_dir / p, ec)) {
+                effective_path = (proj_dir / p).string();
+            }
+        }
+    }
+
+    std::ifstream file(effective_path, std::ios::binary);
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to open STL file: " + filepath);
+        throw std::runtime_error("Failed to open STL file: " + filepath + " (resolved to: " + effective_path + ")");
     }
 
     file.seekg(0, std::ios::end);

@@ -165,6 +165,25 @@ void export_vtu_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapsho
 
 void export_vtp_mpm_3d_snapshot(const std::string& filename, const MPMVTKSnapshot3D& snap, const std::string& format = "Binary");
 
+struct MPMDensityGridSnapshot3D {
+    int nx = 0, ny = 0, nz = 0;
+    double dx = 0.0, dy = 0.0, dz = 0.0;
+    double xmin = 0.0, ymin = 0.0, zmin = 0.0;
+    int stride = 1;
+    bool roi_enabled = false;
+    double roi_xmin = 0.0, roi_xmax = 1.0;
+    double roi_ymin = 0.0, roi_ymax = 1.0;
+    double roi_zmin = 0.0, roi_zmax = 1.0;
+    int i_start = 0, i_end = 0, j_start = 0, j_end = 0, k_start = 0, k_end = 0;
+    int nx_sub = 0, ny_sub = 0, nz_sub = 0;
+    int compression_level = 6;
+    std::string float_precision = "12-bit Mantissa (~4 sig. digits)";
+    std::vector<float> particle_count; // Cell count of particles
+    std::vector<float> mass_density;   // Cell mass density (kg/m^3)
+};
+
+void export_vts_mpm_density_grid_snapshot(const std::string& filename, const MPMDensityGridSnapshot3D& snap, const std::string& format = "Binary");
+
 void export_vtu_phase_particles_3d_snapshot(const std::string& filename, const Blast::PhaseTrackingVTKSnapshot3D& snap, const std::string& format = "Binary");
 
 void export_vtu_mpm_3d(const std::string& filename, const std::vector<Blast::MPMParticle3D>& particles, const std::string& format = "Binary",

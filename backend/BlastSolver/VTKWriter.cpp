@@ -854,6 +854,168 @@ void export_vts_cfd_3d_snapshot(const std::string& filename, const CFDVolumeSnap
     out.close();
 }
 
+void export_vts_mpm_density_grid_snapshot(const std::string& filename, const MPMDensityGridSnapshot3D& snap, const std::string& format) {
+    std::ofstream out(filename);
+    if (!out) return;
+
+    int nx = snap.nx;
+    int ny = snap.ny;
+    int nz = snap.nz;
+    double dx = snap.dx;
+    double dy = snap.dy;
+    double dz = snap.dz;
+    double xmin = snap.xmin;
+    double ymin = snap.ymin;
+    double zmin = snap.zmin;
+    int stride = std::max(1, snap.stride);
+
+    int i_start = 0, i_end = nx;
+    int j_start = 0, j_end = ny;
+    int k_start = 0, k_end = nz;
+
+    if (snap.roi_enabled) {
+        i_start = snap.i_start;
+        i_end   = snap.i_end;
+        j_start = snap.j_start;
+        j_end   = snap.j_end;
+        k_start = snap.k_start;
+        k_end   = snap.k_end;
+    }
+
+    int nx_sub = (snap.nx_sub > 0) ? snap.nx_sub : ((i_end - i_start + stride - 1) / stride);
+    int ny_sub = (snap.ny_sub > 0) ? snap.ny_sub : ((j_end - j_start + stride - 1) / stride);
+    int nz_sub = (snap.nz_sub > 0) ? snap.nz_sub : ((k_end - k_start + stride - 1) / stride);
+
+    if (nx_sub <= 0 || ny_sub <= 0 || nz_sub <= 0) return;
+
+    int num_points = (nx_sub + 1) * (ny_sub + 1) * (nz_sub + 1);
+    int num_cells = nx_sub * ny_sub * nz_sub;
+
+    std::vector<float> points;
+    points.reserve(num_points * 3);
+    for (int k = 0; k <= nz_sub; ++k) {
+        float z = static_cast<float>(zmin + (k_start + k * stride) * dz);
+        for (int j = 0; j <= ny_sub; ++j) {
+            float y = static_cast<float>(ymin + (j_start + j * stride) * dy);
+            for (int i = 0; i <= nx_sub; ++i) {
+                float x = static_cast<float>(xmin + (i_start + i * stride) * dx);
+                points.push_back(x);
+                points.push_back(y);
+                points.push_back(z);
+            }
+        }
+    }
+
+    // Interpolate cell values to points for immediate ParaView Contour/Isosurface extraction
+    std::vector<float> pt_particle_density;
+    std::vector<float> pt_mass_density;
+    if (!snap.particle_count.empty() && snap.particle_count.size() == static_cast<size_t>(num_cells)) {
+        pt_particle_density.assign(num_points, 0.0f);
+        if (!snap.mass_density.empty() && snap.mass_density.size() == static_cast<size_t>(num_cells)) {
+            pt_mass_density.assign(num_points, 0.0f);
+        }
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int k = 0; k <= nz_sub; ++k) {
+            for (int j = 0; j <= ny_sub; ++j) {
+                for (int i = 0; i <= nx_sub; ++i) {
+                    int p_idx = i + j * (nx_sub + 1) + k * (nx_sub + 1) * (ny_sub + 1);
+                    float sum_cnt = 0.0f;
+                    float sum_rho = 0.0f;
+                    int n_adj = 0;
+                    for (int dk = -1; dk <= 0; ++dk) {
+                        int ck = k + dk;
+                        if (ck < 0 || ck >= nz_sub) continue;
+                        for (int dj = -1; dj <= 0; ++dj) {
+                            int cj = j + dj;
+                            if (cj < 0 || cj >= ny_sub) continue;
+                            for (int di = -1; di <= 0; ++di) {
+                                int ci = i + di;
+                                if (ci < 0 || ci >= nx_sub) continue;
+                                size_t c_idx = (static_cast<size_t>(ci) * ny_sub + cj) * nz_sub + ck;
+                                sum_cnt += snap.particle_count[c_idx];
+                                if (!pt_mass_density.empty()) {
+                                    sum_rho += snap.mass_density[c_idx];
+                                }
+                                ++n_adj;
+                            }
+                        }
+                    }
+                    if (n_adj > 0) {
+                        pt_particle_density[p_idx] = sum_cnt / static_cast<float>(n_adj);
+                        if (!pt_mass_density.empty()) {
+                            pt_mass_density[p_idx] = sum_rho / static_cast<float>(n_adj);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    out << "<?xml version=\"1.0\"?>\n";
+    if (format == "ASCII") {
+        out << "<VTKFile type=\"StructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n";
+    } else {
+        out << "<VTKFile type=\"StructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\" header_type=\"UInt32\" compressor=\"vtkZLibDataCompressor\">\n";
+    }
+
+    out << "  <StructuredGrid WholeExtent=\"0 " << nx_sub << " 0 " << ny_sub << " 0 " << nz_sub << "\">\n";
+    out << "    <Piece Extent=\"0 " << nx_sub << " 0 " << ny_sub << " 0 " << nz_sub << "\">\n";
+
+    // 1. Point Coordinates
+    out << "      <Points>\n";
+    if (format == "ASCII") {
+        out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"ascii\">\n          ";
+        for (float v : points) out << v << " ";
+        out << "\n        </DataArray>\n";
+    } else {
+        out << "        <DataArray type=\"Float32\" Name=\"Points\" NumberOfComponents=\"3\" format=\"binary\">\n          "
+            << binary_encode(points) << "\n        </DataArray>\n";
+    }
+    out << "      </Points>\n";
+
+    int points_bits = 23, field_bits = 23;
+    parse_mpm_mantissa_bits(snap.float_precision, points_bits, field_bits);
+
+    auto writeArray = [&](const std::string& name, const std::vector<float>& data) {
+        if (data.empty()) return;
+        if (format == "ASCII") {
+            out << "        <DataArray type=\"Float32\" Name=\"" << name << "\" format=\"ascii\">\n          ";
+            for (float v : data) out << v << " ";
+            out << "\n        </DataArray>\n";
+        } else {
+            if (field_bits < 23) {
+                std::vector<float> groomed(data.size());
+                #pragma omp parallel for schedule(static)
+                for (size_t idx = 0; idx < data.size(); ++idx) {
+                    groomed[idx] = bit_groom_float32(data[idx], field_bits);
+                }
+                out << "        <DataArray type=\"Float32\" Name=\"" << name << "\" format=\"binary\">\n          "
+                    << binary_encode(groomed) << "\n        </DataArray>\n";
+            } else {
+                out << "        <DataArray type=\"Float32\" Name=\"" << name << "\" format=\"binary\">\n          "
+                    << binary_encode(data) << "\n        </DataArray>\n";
+            }
+        }
+    };
+
+    // 2. PointData (Enables 1-click Isosurface / Contour in ParaView)
+    out << "      <PointData Scalars=\"Particle_Density\">\n";
+    if (!pt_particle_density.empty()) writeArray("Particle_Density", pt_particle_density);
+    if (!pt_mass_density.empty()) writeArray("Mass_Density", pt_mass_density);
+    out << "      </PointData>\n";
+
+    // 3. CellData (Cell-discrete counts and densities)
+    out << "      <CellData Scalars=\"Particle_Count\">\n";
+    if (!snap.particle_count.empty()) writeArray("Particle_Count", snap.particle_count);
+    if (!snap.mass_density.empty()) writeArray("Cell_Mass_Density", snap.mass_density);
+    out << "      </CellData>\n";
+
+    out << "    </Piece>\n";
+    out << "  </StructuredGrid>\n";
+    out << "</VTKFile>\n";
+    out.close();
+}
+
 void export_vtu_volume_3d(const std::string& filename, const CFDSolver3D& solver, const std::string& format,
                           bool has_p, bool has_rho, bool has_vel, bool has_E,
                           bool has_reacted, bool has_unreacted, bool has_air,

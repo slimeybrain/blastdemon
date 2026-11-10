@@ -1054,7 +1054,7 @@ void FEMSolver3D<T>::igniteDetonator(T det_x, T det_y, T det_z, T det_r, int tar
             }
         } else if (active_burn == ReactionKinetics::CRESTEntropy) {
             if (time_delay <= m_sim_time && dist <= eff_rad) {
-                elem.s_shock = static_cast<T>(2.0f * std::max(mat.crest_s_threshold, 100.0f));
+                elem.s_shock = static_cast<T>((mat.crest_awe_c0 > 0.0f) ? std::max(0.02f, 2.0f * mat.crest_awe_c13) : 2.0f * std::max(mat.crest_s_threshold, 100.0f));
                 elem.lambda = static_cast<T>(1.0f);
                 elem.e_int = q_det;
                 elem.v_min = static_cast<T>((mat.davis_vc > 0.1f) ? mat.davis_vc : 0.70f);
@@ -3180,13 +3180,37 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                                   (mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth && mat.burn_model != ReactionKinetics::CRESTEntropy);
             bool use_davis_solid = (mat.solid_model == SolidReactantEOS::DavisSolid) ||
                                    (mat.material_model == MPMMaterialModel::CRESTReactiveBurn);
-            bool use_davis_prod = (mat.product_model == DetonationProductEOS::DavisProduct) ||
-                                  (mat.material_model == MPMMaterialModel::CRESTReactiveBurn);
+            const bool awe = is_crest_kinetics && mat.crest_awe_c0 > 0.0f;
+            bool use_davis_prod = !awe && ((mat.product_model == DetonationProductEOS::DavisProduct) ||
+                                  (mat.material_model == MPMMaterialModel::CRESTReactiveBurn));
+            CrestDavis::CRESTSolidParams awe_q{};
+            float awe_vtmd = 1.0f;
+            if (awe) {
+                const float rho0s = (mat.davis_rho0 > 0.0f) ? mat.davis_rho0 : mat.density;
+                awe_q = {mat.density, rho0s, mat.crest_awe_K0s, mat.detonation_energy,
+                         mat.crest_awe_A1, mat.crest_awe_A2, mat.crest_awe_A3,
+                         mat.crest_awe_B1, mat.crest_awe_B2, mat.crest_awe_B3,
+                         mat.crest_awe_fc, mat.crest_awe_delta,
+                         mat.crest_awe_Gamma1, mat.crest_awe_Gamma2, mat.crest_awe_gamma00, mat.crest_awe_m};
+                awe_vtmd = rho0s / mat.density;
+            }
 
             float p_curr_comp = static_cast<float>(-(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f) + q_visc);
             if (p_curr_comp < 0.0f) p_curr_comp = 0.0f;
 
-            if (is_crest_kinetics) {
+            if (awe) {
+                elem.v_min = std::min(elem.v_min, static_cast<T>(v_rel_f));
+                elem.s_shock = std::max(elem.s_shock, static_cast<T>(CrestDavis::computeCRESTShockEntropy(static_cast<double>(elem.v_min), awe_q)));
+                float e_th_trial = std::max(0.0f, static_cast<float>(elem.e_int) - lam_curr * mat.detonation_energy);
+                float p_react_trial = static_cast<float>(CrestDavis::computeCRESTSolidPressure(v_rel_f, e_th_trial, awe_q));
+                float p_mech_trial = p_react_trial + static_cast<float>(q_visc);
+                float p_eff_comp = (lam_curr <= 1.0e-5f) ? std::max(p_curr_comp, p_mech_trial) : p_mech_trial;
+                if (p_eff_comp > 1.0e6f)
+                    elem.s_shock = std::max(elem.s_shock, static_cast<T>(CrestDavis::computeCRESTShockEntropyFromPressure(p_eff_comp, awe_q)));
+                lam_new = static_cast<float>(CrestDavis::advanceAWECRESTProgress(static_cast<double>(dt), static_cast<double>(elem.s_shock), lam_curr,
+                    mat.crest_awe_c0, mat.crest_awe_c1, mat.crest_awe_c2, mat.crest_awe_c3, mat.crest_awe_c6,
+                    mat.crest_awe_c8, mat.crest_awe_c9, mat.crest_awe_c10, mat.crest_awe_c11, mat.crest_awe_c12, mat.crest_awe_c13));
+            } else if (is_crest_kinetics) {
                 elem.v_min = std::min(elem.v_min, static_cast<T>(v_rel_f));
                 float s_calc = CrestDavis::computeDavisShockEntropy(
                     static_cast<float>(elem.v_min), mat.davis_c0, mat.davis_s1, mat.davis_gamma0,
@@ -3238,11 +3262,15 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             float e_prod = e_th + q_heat;
 
             float p_ambient = 101325.0f;
-            float p_solid = use_davis_solid
+            float p_solid = awe
+                ? (p_ambient + static_cast<float>(CrestDavis::computeCRESTSolidPressure(v_rel_f, std::max(0.0f, e_th), awe_q)))
+                : use_davis_solid
                 ? (p_ambient + CrestDavis::computeDavisReactantPressure(v_rel_f, e_th, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0))
                 : (p_ambient + JWL::computeSolidReactantPressure(v_rel_f, e_th, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density));
 
-            float p_prod = use_davis_prod
+            float p_prod = awe
+                ? JWL::computeJWLProductPressure(v_rel_f * awe_vtmd, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, static_cast<float>(awe_q.rho0s))
+                : use_davis_prod
                 ? CrestDavis::computeDavisProductPressure(v_rel_f, e_prod, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0)
                 : JWL::computeJWLProductPressure(v_rel_f, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.density);
 

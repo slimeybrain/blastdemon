@@ -11,44 +11,10 @@ import { HostFileBrowserModal, FileFilterPreset } from './host-file-browser.js';
 import { GaugeManagerModal } from './gauge-manager-modal.js';
 import { FEMSetupModal } from './fem-setup-modal.js';
 import { syncModelFEMSetup, FEMSetupConfig, FEMSectionType } from './fem-setup-types.js';
-import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, getConstitutiveModels, getPresetsForConstitutiveModel, getCategorizedPresetsForModel, getDefaultPresetForModel } from './mpm-presets.js';
+import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, getExplosiveCompositionTable, getConstitutiveModels, getPresetsForConstitutiveModel, getCategorizedPresetsForModel, getDefaultPresetForModel } from './mpm-presets.js';
 import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover, showNodeDetailsModal, getSolverBadgeHTML, getSolverScope, shouldSkipNodeParameter, PARAMETER_DEFINITIONS, resolveModelContext } from './parameter-definitions.js';
 
-export const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
-    'Aluminized ANFO': { rho: 1050, detonation_energy: 4100000, det_vel: 4900, jwl_A: 76.5e9, jwl_B: 1.85e9, jwl_R1: 4.15, jwl_R2: 1.15, jwl_omega: 0.30 },
-    'Ammonal': { rho: 1600, detonation_energy: 4400000, det_vel: 5400, jwl_A: 125.0e9, jwl_B: 2.5e9, jwl_R1: 4.0, jwl_R2: 1.0, jwl_omega: 0.25 },
-    'ANFO': { rho: 930, detonation_energy: 3700000, det_vel: 4700, jwl_A: 49.46e9, jwl_B: 1.891e9, jwl_R1: 4.10, jwl_R2: 1.15, jwl_omega: 0.33 },
-    'Baratol': { rho: 2550, detonation_energy: 2800000, det_vel: 4900, jwl_A: 289.4e9, jwl_B: 5.14e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.25 },
-    'C-4': { rho: 1601, detonation_energy: 5600000, det_vel: 8040, jwl_A: 593.7e9, jwl_B: 12.87e9, jwl_R1: 4.5, jwl_R2: 1.2, jwl_omega: 0.38 },
-    'Composition A-3': { rho: 1650, detonation_energy: 5000000, det_vel: 8100, jwl_A: 601.5e9, jwl_B: 12.0e9, jwl_R1: 4.5, jwl_R2: 1.2, jwl_omega: 0.35 },
-    'Composition B': { rho: 1717, detonation_energy: 5170000, det_vel: 7980, jwl_A: 524.2e9, jwl_B: 7.67e9, jwl_R1: 4.2, jwl_R2: 1.1, jwl_omega: 0.34 },
-    'Composition C-3': { rho: 1600, detonation_energy: 5300000, det_vel: 8000, jwl_A: 580.0e9, jwl_B: 11.5e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.35 },
-    'Cyclotol': { rho: 1750, detonation_energy: 5200000, det_vel: 8250, jwl_A: 582.0e9, jwl_B: 10.5e9, jwl_R1: 4.3, jwl_R2: 1.1, jwl_omega: 0.32 },
-    'Heavy ANFO': { rho: 1250, detonation_energy: 3500000, det_vel: 5000, jwl_A: 198.0e9, jwl_B: 1.45e9, jwl_R1: 4.30, jwl_R2: 1.00, jwl_omega: 0.20 },
-    'HMX': { rho: 1890, detonation_energy: 5620000, det_vel: 9110, jwl_A: 778.3e9, jwl_B: 7.071e9, jwl_R1: 4.2, jwl_R2: 1.0, jwl_omega: 0.30 },
-    'LX-04': { rho: 1860, detonation_energy: 5300000, det_vel: 8400, jwl_A: 742.0e9, jwl_B: 11.2e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.30 },
-    'LX-07': { rho: 1865, detonation_energy: 5400000, det_vel: 8600, jwl_A: 755.0e9, jwl_B: 10.8e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.30 },
-    'LX-10': { rho: 1860, detonation_energy: 5500000, det_vel: 8820, jwl_A: 760.0e9, jwl_B: 10.5e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.30 },
-    'LX-14': { rho: 1830, detonation_energy: 5400000, det_vel: 8800, jwl_A: 750.0e9, jwl_B: 11.0e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.30 },
-    'LX-17': { rho: 1900, detonation_energy: 4300000, det_vel: 7600, jwl_A: 550.0e9, jwl_B: 8.0e9, jwl_R1: 4.5, jwl_R2: 1.5, jwl_omega: 0.25 },
-    'Mining Emulsion': { rho: 1150, detonation_energy: 3200000, det_vel: 4500, jwl_A: 130.0e9, jwl_B: 1.8e9, jwl_R1: 4.20, jwl_R2: 1.05, jwl_omega: 0.22 },
-    'Nitromethane': { rho: 1128, detonation_energy: 4480000, det_vel: 6280, jwl_A: 209.2e9, jwl_B: 5.689e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30 },
-    'Octol': { rho: 1810, detonation_energy: 5500000, det_vel: 8480, jwl_A: 680.0e9, jwl_B: 9.5e9, jwl_R1: 4.3, jwl_R2: 1.1, jwl_omega: 0.32 },
-    'PBX 9404': { rho: 1840, detonation_energy: 5700000, det_vel: 8800, jwl_A: 780.0e9, jwl_B: 12.0e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.30 },
-    'PBX 9501': { rho: 1830, detonation_energy: 5600000, det_vel: 8800, jwl_A: 760.0e9, jwl_B: 11.5e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.30 },
-    'PBX 9502': { rho: 1895, detonation_energy: 4400000, det_vel: 7670, jwl_A: 560.0e9, jwl_B: 8.5e9, jwl_R1: 4.5, jwl_R2: 1.5, jwl_omega: 0.25 },
-    'PE-10': { rho: 1550, detonation_energy: 4800000, det_vel: 7500, jwl_A: 480.0e9, jwl_B: 8.0e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.30 },
-    'PE-12': { rho: 1580, detonation_energy: 4900000, det_vel: 7600, jwl_A: 500.0e9, jwl_B: 8.5e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.30 },
-    'PE-4': { rho: 1590, detonation_energy: 5200000, det_vel: 7800, jwl_A: 550.0e9, jwl_B: 10.0e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.32 },
-    'PE-8': { rho: 1570, detonation_energy: 5000000, det_vel: 7700, jwl_A: 520.0e9, jwl_B: 9.0e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.31 },
-    'Pentolite': { rho: 1700, detonation_energy: 5110000, det_vel: 7530, jwl_A: 541.0e9, jwl_B: 9.38e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.28 },
-    'PETN': { rho: 1770, detonation_energy: 5800000, det_vel: 8300, jwl_A: 613.4e9, jwl_B: 15.07e9, jwl_R1: 4.4, jwl_R2: 1.2, jwl_omega: 0.28 },
-    'RDX': { rho: 1806, detonation_energy: 5300000, det_vel: 8750, jwl_A: 524.2e9, jwl_B: 7.678e9, jwl_R1: 4.2, jwl_R2: 1.1, jwl_omega: 0.34 },
-    'TATB': { rho: 1800, detonation_energy: 4400000, det_vel: 7660, jwl_A: 554.6e9, jwl_B: 7.91e9, jwl_R1: 4.5, jwl_R2: 1.6, jwl_omega: 0.25 },
-    'Tetryl': { rho: 1730, detonation_energy: 4230000, det_vel: 7570, jwl_A: 510.9e9, jwl_B: 8.44e9, jwl_R1: 4.5, jwl_R2: 1.4, jwl_omega: 0.25 },
-    'TNT': { rho: 1630, detonation_energy: 4290000, det_vel: 6930, jwl_A: 373.77e9, jwl_B: 3.747e9, jwl_R1: 4.15, jwl_R2: 0.90, jwl_omega: 0.35 },
-    'Water Gel': { rho: 1200, detonation_energy: 3400000, det_vel: 4800, jwl_A: 154.0e9, jwl_B: 2.15e9, jwl_R1: 4.30, jwl_R2: 1.10, jwl_omega: 0.25 }
-};
+export const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = getExplosiveCompositionTable();
 
 const NUMERIC_KEYS = new Set([
     'domain_radius', 'cell_size', 'atm_pressure', 'atm_temperature', 'initial_temperature',
@@ -100,7 +66,7 @@ const NUMERIC_KEYS = new Set([
     'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
     'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
     'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13',
     'initiation_radius', 'booster_overpressure',
     'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'volume_stride', 'slice_stride', 'compression_level',
     'nonlocal_radius', 'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
@@ -4457,7 +4423,7 @@ export class PropertyGrid {
             'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
             'contact_search_method': ['Hierarchical Octave Hash Grid', 'Linear BVH (Morton Code)'],
             'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
-            'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Nitromethane', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
+            'composition': [...Object.keys(EXPLOSIVE_PRESETS).sort(), 'Custom'],
             'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3', '5'],
@@ -5434,7 +5400,7 @@ export class PropertyGrid {
             } else if (value === 'Lee-Tarver Ignition & Growth') {
                 updates['material_model'] = 'Lee-Tarver Ignition & Growth';
                 updates['material_type'] = 'JWL Charge';
-                const defPreset = 'LX-17 (TATB/Kel-F 92.5/7.5) - Lee-Tarver I&G';
+                const defPreset = 'Custom';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
                 if (presetData) Object.assign(updates, presetData);
@@ -5444,7 +5410,7 @@ export class PropertyGrid {
             } else if (value === 'CREST Reactive Burn') {
                 updates['material_model'] = 'CREST Reactive Burn';
                 delete updates['material_type'];
-                const defPreset = 'PBX 9502 (TATB/Kel-F 95/5) - CREST Davis';
+                const defPreset = 'Custom';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
                 if (presetData) Object.assign(updates, presetData);
@@ -5550,6 +5516,30 @@ export class PropertyGrid {
                     if (node.parameters['crest_m2'] === undefined) updates['crest_m2'] = 1.5;
                     if (node.parameters['crest_s0'] === undefined) updates['crest_s0'] = 100.0;
                     if (node.parameters['crest_s_threshold'] === undefined) updates['crest_s_threshold'] = 45.0;
+                    if (node.parameters['crest_awe_K0s'] === undefined) updates['crest_awe_K0s'] = 14.24525e9;
+                    if (node.parameters['crest_awe_A1'] === undefined) updates['crest_awe_A1'] = 2.417494;
+                    if (node.parameters['crest_awe_A2'] === undefined) updates['crest_awe_A2'] = 2.208027;
+                    if (node.parameters['crest_awe_A3'] === undefined) updates['crest_awe_A3'] = 0.0;
+                    if (node.parameters['crest_awe_B1'] === undefined) updates['crest_awe_B1'] = 0.0;
+                    if (node.parameters['crest_awe_B2'] === undefined) updates['crest_awe_B2'] = 0.0;
+                    if (node.parameters['crest_awe_B3'] === undefined) updates['crest_awe_B3'] = 0.0;
+                    if (node.parameters['crest_awe_fc'] === undefined) updates['crest_awe_fc'] = 0.0;
+                    if (node.parameters['crest_awe_delta'] === undefined) updates['crest_awe_delta'] = 0.0;
+                    if (node.parameters['crest_awe_Gamma1'] === undefined) updates['crest_awe_Gamma1'] = 32.33557;
+                    if (node.parameters['crest_awe_Gamma2'] === undefined) updates['crest_awe_Gamma2'] = 3.596933;
+                    if (node.parameters['crest_awe_gamma00'] === undefined) updates['crest_awe_gamma00'] = 0.4;
+                    if (node.parameters['crest_awe_m'] === undefined) updates['crest_awe_m'] = 2.0;
+                    if (node.parameters['crest_awe_c0'] === undefined) updates['crest_awe_c0'] = 0.0;
+                    if (node.parameters['crest_awe_c1'] === undefined) updates['crest_awe_c1'] = 2.0;
+                    if (node.parameters['crest_awe_c2'] === undefined) updates['crest_awe_c2'] = 2.2e8;
+                    if (node.parameters['crest_awe_c3'] === undefined) updates['crest_awe_c3'] = 2.5;
+                    if (node.parameters['crest_awe_c6'] === undefined) updates['crest_awe_c6'] = 0.0;
+                    if (node.parameters['crest_awe_c8'] === undefined) updates['crest_awe_c8'] = 1.6e-4;
+                    if (node.parameters['crest_awe_c9'] === undefined) updates['crest_awe_c9'] = 1.0;
+                    if (node.parameters['crest_awe_c10'] === undefined) updates['crest_awe_c10'] = 4.0e5;
+                    if (node.parameters['crest_awe_c11'] === undefined) updates['crest_awe_c11'] = 1.8;
+                    if (node.parameters['crest_awe_c12'] === undefined) updates['crest_awe_c12'] = 0.0;
+                    if (node.parameters['crest_awe_c13'] === undefined) updates['crest_awe_c13'] = 0.0;
                 }
             } else if (key === 'product_model') {
                 if (value === 'Davis Detonation Product') {
@@ -5653,7 +5643,7 @@ export class PropertyGrid {
             'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion',
             'kc_auto_generate', 'directional_crack_band', 'enable_directional_crack_band',
             'contact_method', 'bardenhagen_initial_tie', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode',
-            'export_fem', 'export_mpm', 'export_stl_faces', 'tessellate_stl_faces',
+            'export_fem', 'export_mpm', 'export_mpm_density_grid', 'export_stl_faces', 'tessellate_stl_faces',
             'showFEMMesh', 'showMPMParticles', 'showRebar', 'showBeams', 'show_stl', 'show_gauges',
             'water_discretization_mode', 'seabed_mesh_type', 'roi_enabled', 'trigger_type'
         ];
@@ -5897,7 +5887,7 @@ export class PropertyGrid {
                 if (burnModel.includes('Lee-Tarver')) {
                     keys.push('det_vel', 'detonation_energy', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min');
                 } else if (burnModel.includes('CREST')) {
-                    keys.push('crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold');
+                    keys.push('crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13');
                 } else {
                     keys.push('det_vel', 'detonation_energy', 'burn_zone_cells', 'tau_burn_min');
                 }
@@ -6238,7 +6228,9 @@ export class PropertyGrid {
                 keys.push('volume_stride', 'slice_stride', 'roi_enabled', 'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax');
             }
             if (hasFem) keys.push('export_fem');
-            if (hasMpm) keys.push('export_mpm');
+            if (hasMpm) {
+                keys.push('export_mpm', 'export_mpm_density_grid');
+            }
 
             keys.push(
                 'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_overpressure', 'qty_impulse',
@@ -6433,7 +6425,7 @@ export class PropertyGrid {
                 addGroup('mat_burn', `Pillar 2: Reaction Kinetics [${burnShort}]`, [
                     'det_vel', 'detonation_energy', 'burn_zone_cells', 'tau_burn_min',
                     'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min',
-                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'
+                    'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13'
                 ]);
 
                 addGroup('mat_prod', `Pillar 3: Detonation Products EOS [${prodShort}]`, [
@@ -6708,7 +6700,7 @@ export class PropertyGrid {
 
         if (node.type === 'VTKOutput') {
             addGroup('vtk_format', 'Output Triggers & Formats', ['trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'compression_level', 'float_precision', 'mpm_topology', 'custom_filename', 'vtk_dir', 'export_pvd']);
-            addGroup('vtk_domains', 'Physics Domains & Strides', ['export_cfd_2d', 'export_slices', 'export_volumes', 'export_obstacles', 'export_stl_faces', 'stl_outside_domain', 'tessellate_stl_faces', 'tessellation_max_edge', 'export_fem', 'export_mpm', 'volume_stride', 'slice_stride', 'roi_enabled', 'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'downsample_stride', 'fields']);
+            addGroup('vtk_domains', 'Physics Domains & Strides', ['export_cfd_2d', 'export_slices', 'export_volumes', 'export_obstacles', 'export_stl_faces', 'stl_outside_domain', 'tessellate_stl_faces', 'tessellation_max_edge', 'export_fem', 'export_mpm', 'export_mpm_density_grid', 'volume_stride', 'slice_stride', 'roi_enabled', 'roi_xmin', 'roi_xmax', 'roi_ymin', 'roi_ymax', 'roi_zmin', 'roi_zmax', 'downsample_stride', 'fields']);
             addGroup('vtk_cfd_qty', 'CFD Eulerian Fluid Fields', ['qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_overpressure', 'qty_impulse', 'qty_temperature', 'qty_afterburn_rate', 'qty_fuel_density']);
             addGroup('vtk_fem_qty', 'Solid FEM Structural Fields', ['qty_fem_stress', 'qty_fem_strain', 'qty_fem_pressure', 'qty_fem_temp', 'qty_fem_damage', 'qty_fem_vel', 'qty_fem_disp']);
             addGroup('vtk_mpm_qty', 'Solid MPM Particle Fields', ['qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id', 'qty_mpm_particle_density', 'qty_mpm_temp', 'qty_mpm_vel']);

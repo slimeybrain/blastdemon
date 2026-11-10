@@ -52,6 +52,11 @@ export interface MPMMaterialParams {
     hill_M?: number;
     hill_N?: number;
     hill_sigma_y0?: number;
+    // Drucker-Prager / Mohr-Coulomb Geomaterial Strength
+    friction_angle?: number;
+    cohesion?: number;
+    dilation_angle?: number;
+    tensile_cutoff?: number;
     // Tait Water & Shock Fluid EOS
     tait_gamma?: number;
     tait_B?: number;
@@ -136,6 +141,31 @@ export interface MPMMaterialParams {
     crest_m2?: number;
     crest_s0?: number;
     crest_s_threshold?: number;
+    // AWE CREST (Handley 2006 / Cartwright 2016); crest_awe_c0 > 0 activates the finite-strain model
+    crest_awe_K0s?: number;
+    crest_awe_A1?: number;
+    crest_awe_A2?: number;
+    crest_awe_A3?: number;
+    crest_awe_B1?: number;
+    crest_awe_B2?: number;
+    crest_awe_B3?: number;
+    crest_awe_fc?: number;
+    crest_awe_delta?: number;
+    crest_awe_Gamma1?: number;
+    crest_awe_Gamma2?: number;
+    crest_awe_gamma00?: number;
+    crest_awe_m?: number;
+    crest_awe_c0?: number;
+    crest_awe_c1?: number;
+    crest_awe_c2?: number;
+    crest_awe_c3?: number;
+    crest_awe_c6?: number;
+    crest_awe_c8?: number;
+    crest_awe_c9?: number;
+    crest_awe_c10?: number;
+    crest_awe_c11?: number;
+    crest_awe_c12?: number;
+    crest_awe_c13?: number;
     // Ideal Gas CFD
     atm_pressure?: number;
     atm_temperature?: number;
@@ -277,6 +307,42 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         section: 'plasticity',
         solverScope: 'MPM+FEM',
         tooltip: 'Linear plastic tangent slope H (Pa) for work hardening (Stress = Yield_Stress + H * ep).'
+    },
+    'friction_angle': {
+        key: 'friction_angle',
+        label: 'Internal Friction Angle (φ)',
+        shortDesc: 'Drucker-Prager / Mohr-Coulomb friction',
+        unit: 'deg',
+        section: 'plasticity',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Angle of internal friction φ (deg) setting pressure-dependent shear capacity: q_yield = c_dp + M_dp * p. Zero gives a pressure-independent (undrained / von Mises) yield.'
+    },
+    'cohesion': {
+        key: 'cohesion',
+        label: 'Cohesion (c)',
+        shortDesc: 'Shear strength at zero confinement',
+        unit: 'Pa',
+        section: 'plasticity',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Cohesion c (Pa): shear strength at zero normal stress. For rocks and concretes c = UCS * (1 - sin φ) / (2 cos φ); for undrained clays c = Cu.'
+    },
+    'dilation_angle': {
+        key: 'dilation_angle',
+        label: 'Dilatancy Angle (ψ)',
+        shortDesc: 'Plastic volumetric expansion rate',
+        unit: 'deg',
+        section: 'plasticity',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Dilatancy angle ψ (deg) governing plastic volume expansion during shear; ψ < φ gives non-associated flow (dense sand, rock, concrete).'
+    },
+    'tensile_cutoff': {
+        key: 'tensile_cutoff',
+        label: 'Tensile Cutoff',
+        shortDesc: 'Hydrostatic tension limit',
+        unit: 'Pa',
+        section: 'plasticity',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Maximum sustainable hydrostatic tension (Pa) before the Drucker-Prager cone is truncated.'
     },
     'failure_strain': {
         key: 'failure_strain',
@@ -1044,6 +1110,222 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         section: 'crest_kinetics',
         solverScope: 'MPM+FV',
         tooltip: 'Minimum shock entropy threshold below which no ignition or reaction progress occurs.'
+    },
+    'crest_awe_K0s': {
+        key: 'crest_awe_K0s',
+        label: 'AWE CREST K₀s: Solid Bulk Modulus',
+        shortDesc: 'Reactant bulk modulus at TMD',
+        unit: 'Pa',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: "Zero-pressure bulk modulus of the solid reactant in the AWE finite-strain principal isentrope: pi(f) = 3·K0s·f·(2f+1)^(5/2)·(F + f·F'/2), with f = ½((ρs/ρ0s)^(2/3) − 1) and F = exp(gA+gB+gC). Source: Handley (2006) Table 2; Cartwright (2016) Table 3.1."
+    },
+    'crest_awe_A1': {
+        key: 'crest_awe_A1',
+        label: 'AWE CREST A₁: Isentrope Coefficient 1',
+        shortDesc: 'Low-strain polynomial coefficient',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Linear coefficient of gA(f) = A1·f + A2·f² + A3·f³ in the exponent of the isentrope correction F(f). Fitted to Hugoniot/isentrope data.'
+    },
+    'crest_awe_A2': {
+        key: 'crest_awe_A2',
+        label: 'AWE CREST A₂: Isentrope Coefficient 2',
+        shortDesc: 'Quadratic polynomial coefficient',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Quadratic coefficient of gA(f); controls stiffening of the unreacted isentrope with compression.'
+    },
+    'crest_awe_A3': {
+        key: 'crest_awe_A3',
+        label: 'AWE CREST A₃: Isentrope Coefficient 3',
+        shortDesc: 'Cubic polynomial coefficient',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Cubic coefficient of gA(f). Zero for both published sets (EDC37, PBX 9502).'
+    },
+    'crest_awe_B1': {
+        key: 'crest_awe_B1',
+        label: 'AWE CREST B₁: High-Strain Coefficient 1',
+        shortDesc: 'High-strain branch linear term',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Linear coefficient of the arctan-smoothed high-strain polynomial B1·(f−fc) + B2·(f−fc)² + B3·(f−fc)³ applied above branch strain fc. Zero disables the branch (EDC37).'
+    },
+    'crest_awe_B2': {
+        key: 'crest_awe_B2',
+        label: 'AWE CREST B₂: High-Strain Coefficient 2',
+        shortDesc: 'High-strain branch quadratic term',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Quadratic coefficient of the high-strain polynomial added to the isentrope exponent above fc.'
+    },
+    'crest_awe_B3': {
+        key: 'crest_awe_B3',
+        label: 'AWE CREST B₃: High-Strain Coefficient 3',
+        shortDesc: 'High-strain branch cubic term',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Cubic coefficient of the high-strain polynomial. Zero for both published sets.'
+    },
+    'crest_awe_fc': {
+        key: 'crest_awe_fc',
+        label: 'AWE CREST fc: Branch Strain',
+        shortDesc: 'Strain where high-strain branch switches on',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Finite strain f at which the high-strain polynomial branch is centred; used with δ in the smooth switch 0.5·(1 − (2/π)·atan((f−fc)/δ)).'
+    },
+    'crest_awe_delta': {
+        key: 'crest_awe_delta',
+        label: 'AWE CREST δ: Branch Smoothing Width',
+        shortDesc: 'Arctan switch width',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Smoothing width of the branch switch. Must be > 0 for the B-polynomial to be active; zero disables the branch.'
+    },
+    'crest_awe_Gamma1': {
+        key: 'crest_awe_Gamma1',
+        label: 'AWE CREST Γ₁: Grüneisen Amplitude',
+        shortDesc: 'Strain-dependent Grüneisen coefficient',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Γ(x) = γ00 + Γ1·x^m·exp(−Γ2·x), x = ρ0s/ρs. Sets the thermal-pressure response of the solid reactant.'
+    },
+    'crest_awe_Gamma2': {
+        key: 'crest_awe_Gamma2',
+        label: 'AWE CREST Γ₂: Grüneisen Decay',
+        shortDesc: 'Grüneisen exponential decay rate',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Exponential decay rate in Γ(x); also enters τ = exp(−∫Γ/x dx), the integrating factor that defines shock entropy Zs.'
+    },
+    'crest_awe_gamma00': {
+        key: 'crest_awe_gamma00',
+        label: 'AWE CREST γ00: Grüneisen Floor',
+        shortDesc: 'High-compression Grüneisen limit',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Asymptotic Grüneisen parameter at strong compression (published value 0.4).'
+    },
+    'crest_awe_m': {
+        key: 'crest_awe_m',
+        label: 'AWE CREST m: Grüneisen Exponent',
+        shortDesc: 'Power on x in Γ(x)',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Exponent m in Γ(x) = γ00 + Γ1·x^m·exp(−Γ2·x). Published value 2.'
+    },
+    'crest_awe_c0': {
+        key: 'crest_awe_c0',
+        label: 'AWE CREST c0: Fast Rate Coefficient',
+        shortDesc: 'Fast-channel rate prefactor; > 0 activates AWE CREST',
+        unit: 'μs⁻²·(Mbar·cm³/g)^−c1',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Fast rate b1 = min(4000, c0·Zs^c1) in μs⁻². A value > 0 switches the solver from the legacy CREST model to the AWE finite-strain CREST model; 0 keeps the legacy model. Source: Handley (2006) Table 2; Cartwright (2016) Table 3.1.'
+    },
+    'crest_awe_c1': {
+        key: 'crest_awe_c1',
+        label: 'AWE CREST c1: Fast Rate Exponent',
+        shortDesc: 'Shock-entropy exponent of fast rate',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Exponent on Zs in b1 = c0·Zs^c1.'
+    },
+    'crest_awe_c2': {
+        key: 'crest_awe_c2',
+        label: 'AWE CREST c2: Slow Rate Coefficient',
+        shortDesc: 'Slow-channel rate prefactor',
+        unit: 'μs⁻²·(Mbar·cm³/g)^−c3',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Slow rate b2 = min(4000, c2·Zs^c3) in μs⁻².'
+    },
+    'crest_awe_c3': {
+        key: 'crest_awe_c3',
+        label: 'AWE CREST c3: Slow Rate Exponent',
+        shortDesc: 'Shock-entropy exponent of slow rate',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Exponent on Zs in b2 = c2·Zs^c3.'
+    },
+    'crest_awe_c6': {
+        key: 'crest_awe_c6',
+        label: 'AWE CREST c6: Fast Weight Coefficient',
+        shortDesc: 'Fast-channel burn weight prefactor',
+        unit: 'μs⁻¹·(Mbar·cm³/g)^−c12',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Fast weight M1 = c6·Zs^c12/√b1. Zero disables the fast channel (EDC37).'
+    },
+    'crest_awe_c8': {
+        key: 'crest_awe_c8',
+        label: 'AWE CREST c8: Slow Low-Zs Coefficient',
+        shortDesc: 'Low-entropy slow weight term',
+        unit: 'μs⁻¹·(Mbar·cm³/g)^c9',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Contributes c8·Zs^(−c9) to the slow-channel numerator in M2 = min(10, (c8·Zs^−c9 + c10·(Zs−c13)^c11)/√b2).'
+    },
+    'crest_awe_c9': {
+        key: 'crest_awe_c9',
+        label: 'AWE CREST c9: Slow Low-Zs Exponent',
+        shortDesc: 'Exponent of the low-entropy term',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Exponent in the c8 term.'
+    },
+    'crest_awe_c10': {
+        key: 'crest_awe_c10',
+        label: 'AWE CREST c10: Slow High-Zs Coefficient',
+        shortDesc: 'High-entropy slow weight term',
+        unit: 'μs⁻¹·(Mbar·cm³/g)^−c11',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Coefficient of c10·(Zs − c13)^c11 in the slow-channel numerator, active for Zs > c13.'
+    },
+    'crest_awe_c11': {
+        key: 'crest_awe_c11',
+        label: 'AWE CREST c11: Slow High-Zs Exponent',
+        shortDesc: 'Exponent of the high-entropy term',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Exponent in the c10 term.'
+    },
+    'crest_awe_c12': {
+        key: 'crest_awe_c12',
+        label: 'AWE CREST c12: Fast Weight Exponent',
+        shortDesc: 'Shock-entropy exponent of fast weight',
+        unit: 'dim',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Exponent on Zs in M1 = c6·Zs^c12/√b1.'
+    },
+    'crest_awe_c13': {
+        key: 'crest_awe_c13',
+        label: 'AWE CREST c13: Entropy Threshold',
+        shortDesc: 'Shock entropy below which the c10 term is off',
+        unit: 'Mbar·cm³/g',
+        section: 'crest_kinetics',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Threshold shock entropy for the high-entropy slow channel; also seeds detonator-initiated Zs (2·c13, minimum 0.02).'
     },
     // Ideal Gas CFD
     'atm_pressure': {
@@ -1827,6 +2109,7 @@ export const MPM_MATERIAL_CATEGORIES: MPMCategoryGroup[] = [
         category: 'JWL Detonation Gas Presets (Eulerian CFD)',
         presets: [
             'TNT (Trinitrotoluene)',
+            'Ammonium Picrate (Explosive D)',
             'C-4 (Composition 4)',
             'Composition B (Comp B)',
             'PETN (Pentaerythritol Tetranitrate)',
@@ -1839,17 +2122,16 @@ export const MPM_MATERIAL_CATEGORIES: MPMCategoryGroup[] = [
             'LX-10',
             'LX-14',
             'LX-17',
-            'ANFO (Ammonium Nitrate / Fuel Oil)',
-            'Aluminized ANFO',
-            'Heavy ANFO',
-            'Ammonal',
-            'Tritonal (80% TNT / 20% Al)',
             'Pentolite 50/50',
-            'Semtex 1A',
             'Tetryl',
-            'Mining Emulsion',
             'Nitromethane',
-            'Water Gel'
+        ]
+    },
+    {
+        category: 'CREST Reactive Burn Presets',
+        presets: [
+            'EDC37 (CREST Reactive Burn)',
+            'PBX 9502 (CREST Reactive Burn)',
         ]
     },
     {
@@ -1868,17 +2150,6 @@ export const MPM_MATERIAL_CATEGORIES: MPMCategoryGroup[] = [
             'LX-10 (HMX/Viton 95/5) - JWL Programmed Burn',
             'LX-14 (HMX/Estane 95.5/4.5) - JWL Programmed Burn',
             'LX-17 (TATB/Kel-F 92.5/7.5) - JWL Programmed Burn',
-            'ANFO (Ammonium Nitrate/Fuel Oil) - JWL Programmed Burn',
-            'Tritonal (TNT/Al 80/20) - JWL Programmed Burn'
-        ]
-    },
-    {
-        category: 'Lee-Tarver Ignition & Growth Presets',
-        presets: [
-            'LX-17 (TATB/Kel-F 92.5/7.5) - Lee-Tarver I&G',
-            'PBX 9404 (HMX/NC 94/3) - Lee-Tarver I&G',
-            'PBX 9502 (TATB/Kel-F 95/5) - Lee-Tarver I&G',
-            'Composition B (RDX/TNT 60/40) - Lee-Tarver I&G'
         ]
     },
     {
@@ -1917,6 +2188,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 250.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1793.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 250.0e6,
         category: 'Structural & Military Steels', reference: 'ASTM A36 Standard / LLNL Explosives Handbook'
     },
     'Steel S275': {
@@ -1924,6 +2197,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 275.0e6, jc_B: 450.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 275.0e6,
         category: 'Structural & Military Steels', reference: 'BS EN 10025-2 Standard Structural Steel'
     },
     'Steel S355': {
@@ -1931,6 +2206,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 355.0e6, jc_B: 480.0e6, jc_n: 0.27, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 355.0e6,
         category: 'Structural & Military Steels', reference: 'EN 10025-2 European Standard Structural Steel'
     },
     'Steel S460': {
@@ -1938,6 +2215,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 460.0e6, jc_B: 520.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 460.0e6,
         category: 'Structural & Military Steels', reference: 'EN 10025-3 High Yield Structural Steel'
     },
     'Steel 1006': {
@@ -1945,6 +2224,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 350.0e6, jc_B: 275.0e6, jc_n: 0.36, jc_C: 0.022, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1811.0, T_room: 293.0, Cp: 452.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 350.0e6,
         category: 'Structural & Military Steels', reference: 'Bane & Johnson, J. Appl. Mech. (1985)'
     },
     'Steel 1020': {
@@ -1952,6 +2233,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 330.0e6, jc_B: 410.0e6, jc_n: 0.32, jc_C: 0.019, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1790.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 330.0e6,
         category: 'Structural & Military Steels', reference: 'ASM Metals Handbook Vol. 1'
     },
     'AISI 4150 Steel': {
@@ -1962,6 +2245,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'ASTM E8 / Tensile & Split-Hopkinson Pressure Bar (SHPB) Dynamic Calibration',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 850.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-S-11595 / ASTM A29 Cr-Mo Ordnance Steel / ARL-TR-4340'
     },
     'AISI 4150': {
@@ -1972,6 +2257,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'ASTM E8 / Tensile & Split-Hopkinson Pressure Bar (SHPB) Dynamic Calibration',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 850.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-S-11595 / ASTM A29 Cr-Mo Ordnance Steel / ARL-TR-4340'
     },
     'AISI 4340 Steel': {
@@ -1982,6 +2269,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'Split-Hopkinson Pressure Bar (SHPB), Taylor Anvil & Torsion Hopkinson Tests',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 792.0e6,
         category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics / MIL-HDBK-5J'
     },
     'AISI 4340': {
@@ -1992,6 +2281,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'Split-Hopkinson Pressure Bar (SHPB), Taylor Anvil & Torsion Hopkinson Tests',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 792.0e6,
         category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics / MIL-HDBK-5J'
     },
     'Steel 4340': {
@@ -2002,6 +2293,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'Split-Hopkinson Pressure Bar (SHPB), Taylor Anvil & Torsion Hopkinson Tests',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 792.0e6,
         category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics / MIL-HDBK-5J'
     },
     'AISI 4340 (Penetrator Nose / 55-58 HRC)': {
@@ -2012,6 +2305,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'ASTM E8 / High-Hardness Armor Penetrator Nose Specification (55-58 HRC)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 1725.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-A-12560 / Børvik et al. / Projectile Nose Zone (55-58 HRC)'
     },
     'AISI 4340 (Shell Base / 32-36 HRC)': {
@@ -2022,6 +2317,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'ASTM E8 / Shell Core & Base High-Toughness Heat Treatment (32-36 HRC)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 900.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-HDBK-5J / Tempered Martensite High-Ductility Core & Base (32-36 HRC)'
     },
     'AISI 4340 (Annealed)': {
@@ -2032,6 +2329,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'ASTM E8 / Spheroidize Annealed Tensile Test (815°C Furnace Cool)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 470.0e6,
         category: 'Structural & Military Steels', reference: 'ASTM A29 / ASM Handbook Vol. 1 / Annealed (95 HRB / 217 HB)'
     },
     'AISI 4340 (Normalized)': {
@@ -2042,6 +2341,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'ASTM E8 / Air Cool Normalized from 870°C',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 860.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-HDBK-5J / Normalized Condition (38 HRC / 355 HB)'
     },
     'AISI 4340 (Q&T 315°C / 48 HRC)': {
@@ -2052,6 +2353,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'ASTM E8 / High-Strength Aircraft & Ordnance Temper (Oil Quenched & Tempered 315°C)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 1520.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-S-5000 / MIL-HDBK-5J / 48 HRC High Strength'
     },
     'AISI 4340 (Q&T 425°C / 42 HRC)': {
@@ -2062,6 +2365,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'ASTM E8 / Intermediate Hardness Temper (Oil Quenched & Tempered 425°C)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 1320.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-HDBK-5J / 42 HRC Medium-High Strength'
     },
     'AISI 4340 (Q&T 540°C / 36 HRC)': {
@@ -2072,6 +2377,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'ASTM E8 / Toughness Optimized Temper (Oil Quenched & Tempered 540°C)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 1100.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-HDBK-5J / 36 HRC Fatigue & Shock Resistant'
     },
     'AISI 4340 (Q&T 650°C / 27 HRC)': {
@@ -2082,6 +2389,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'ASTM E8 / High-Ductility Maximum Energy Absorption Temper (650°C)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 790.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-HDBK-5J / 27 HRC High Ductility'
     },
     'Krupp E22 Steel': {
@@ -2092,6 +2401,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'hybrid',
         test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 820.0e6,
         category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
     },
     'Krupp E22 Formula': {
@@ -2102,6 +2413,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'hybrid',
         test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 820.0e6,
         category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
     },
     'Krupp E22': {
@@ -2112,6 +2425,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'hybrid',
         test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 820.0e6,
         category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
     },
     'E22 Steel': {
@@ -2122,6 +2437,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'hybrid',
         test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 820.0e6,
         category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
     },
     'E22': {
@@ -2132,6 +2449,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'hybrid',
         test_method: 'Wartime Firing Trials, Charpy V-Notch Impact & Brinell Hardness Mapping (265-309 HB)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 820.0e6,
         category: 'Structural & Military Steels', reference: 'Krupp E22 Specification / BIOS Final Report No. 1343 / German RHA (60-80mm)'
     },
     'US Class 4 RHA (WWII AXS-488)': {
@@ -2142,6 +2461,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 700.0e6,
         category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
     },
     'US RHA (WWII AXS-488)': {
@@ -2152,6 +2473,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 700.0e6,
         category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
     },
     'US Class 4 RHA (WWII)': {
@@ -2162,6 +2485,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 700.0e6,
         category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
     },
     'US WWII RHA': {
@@ -2172,6 +2497,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 700.0e6,
         category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
     },
     'AXS-488 Steel': {
@@ -2182,6 +2509,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 700.0e6,
         category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
     },
     'AXS-488': {
@@ -2192,6 +2521,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 700.0e6,
         category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
     },
     'US Class 4 RHA': {
@@ -2202,6 +2533,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         provenance: 'experimental',
         test_method: 'Watertown Arsenal Laboratory WAL 710/542 / AXS-488 Ballistic Firing & Charpy Impact Calibration (220-265 HB / 240 HB Nominal)',
         solid_model: 'Mie-Grüneisen Shock Reactant',
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 700.0e6,
         category: 'Structural & Military Steels', reference: 'US Army Ordnance AXS-488 / Watertown Arsenal WAL-710 / US WWII RHA (240 HB)'
     },
     'Q1N (HY-80 Naval Steel)': {
@@ -2209,6 +2542,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 550.0e6, jc_B: 600.0e6, jc_n: 0.30, jc_C: 0.015, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 550.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-S-16216 Naval Submarine Armor Steel'
     },
     'HY-100 Steel': {
@@ -2216,6 +2551,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 690.0e6, jc_B: 650.0e6, jc_n: 0.28, jc_C: 0.015, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 690.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-S-16216 Submarine Pressure Hull Armor'
     },
     'RHA (Rolled Homogeneous Armor)': {
@@ -2223,6 +2560,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 950.0e6, jc_B: 720.0e6, jc_n: 0.25, jc_C: 0.012, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 10.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 950.0e6,
         category: 'Structural & Military Steels', reference: 'MIL-A-12560 Armor Plate Benchmark'
     },
     'Armox 500T': {
@@ -2230,6 +2569,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 1250.0e6, jc_B: 840.0e6, jc_n: 0.26, jc_C: 0.005, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 1250.0e6,
         category: 'Structural & Military Steels', reference: 'Borvik et al., Int. J. Impact Eng. (2009)'
     },
     'Armox 600T': {
@@ -2237,6 +2578,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 1650.0e6, jc_B: 950.0e6, jc_n: 0.20, jc_C: 0.005, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 8.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 1650.0e6,
         category: 'Structural & Military Steels', reference: 'SSAB Armox Ultra-High Hardness Armor'
     },
     'Weldox 700E': {
@@ -2244,6 +2587,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 700.0e6, jc_B: 560.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 700.0e6,
         category: 'Structural & Military Steels', reference: 'Borvik et al., Eur. J. Mech. A (2001)'
     },
     'Weldox 900E': {
@@ -2251,6 +2596,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 900.0e6, jc_B: 620.0e6, jc_n: 0.24, jc_C: 0.012, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 900.0e6,
         category: 'Structural & Military Steels', reference: 'Dey et al., Int. J. Solids Struct. (2004)'
     },
     'Stainless Steel 304': {
@@ -2258,6 +2605,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 310.0e6, jc_B: 1000.0e6, jc_n: 0.65, jc_C: 0.070, jc_m: 1.00, jc_d1: 0.10, jc_d2: 2.00, jc_d3: -1.50, jc_d4: 0.005, jc_d5: 1.00,
         weibull_modulus: 11.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1673.0, T_room: 293.0, Cp: 500.0, mg_gamma0: 1.93, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 310.0e6,
         category: 'Structural & Military Steels', reference: 'Lee et al., J. Mater. Process. Technol. (2002)'
     },
     'Stainless Steel 316L': {
@@ -2265,6 +2614,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 290.0e6, jc_B: 940.0e6, jc_n: 0.61, jc_C: 0.065, jc_m: 1.00, jc_d1: 0.10, jc_d2: 2.00, jc_d3: -1.50, jc_d4: 0.005, jc_d5: 1.00,
         weibull_modulus: 11.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1650.0, T_room: 293.0, Cp: 500.0, mg_gamma0: 1.93, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 290.0e6,
         category: 'Structural & Military Steels', reference: 'Follansbee & Kocks, Acta Metall. (1988)'
     },
     'Tool Steel D2': {
@@ -2272,6 +2623,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 1600.0e6, jc_B: 900.0e6, jc_n: 0.20, jc_C: 0.010, jc_m: 1.00, jc_d1: 0.02, jc_d2: 1.50, jc_d3: -1.00, jc_d4: 0.001, jc_d5: 0.50,
         weibull_modulus: 7.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1690.0, T_room: 293.0, Cp: 460.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
+        // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
+        hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 1600.0e6,
         category: 'Structural & Military Steels', reference: 'ASM Specialty Handbook: Tool Materials'
     },
     'Aluminum 6061-T6': {
@@ -2382,6 +2735,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         kc_auto_generate: true, kc_a0: 6.67e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 5.33e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
         cscm_alpha: 7.0e6, cscm_theta: 0.38, cscm_lambda: 5.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 60.0e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 20.0e6, jc_B: 150.0e6, jc_n: 0.40, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.00, mg_c0: 3000.0, mg_s: 1.20,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
+        friction_angle: 35.0, cohesion: 5.21e6, dilation_angle: 15.0, tensile_cutoff: 2.2e6, provenance: 'hybrid',
+        // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
+        cdp_f_t0: 2.2e6, cdp_f_c0: 20.0e6, cdp_g_f: 75.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Eurocode 2 EN 1992-1-1 / Riedel-Hiermaier-Thoma (RHT) Model'
     },
     'Standard Structural Concrete C30/37 (30 MPa)': {
@@ -2391,6 +2748,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         kc_auto_generate: true, kc_a0: 10.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 8.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
         cscm_alpha: 10.5e6, cscm_theta: 0.40, cscm_lambda: 7.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 85.0e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 30.0e6, jc_B: 180.0e6, jc_n: 0.40, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.00, mg_c0: 3100.0, mg_s: 1.25,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
+        friction_angle: 35.0, cohesion: 7.81e6, dilation_angle: 15.0, tensile_cutoff: 2.9e6, provenance: 'hybrid',
+        // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
+        cdp_f_t0: 2.9e6, cdp_f_c0: 30.0e6, cdp_g_f: 90.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Eurocode 2 C30/37 Standard / RHT Benchmark'
     },
     'High-Strength Concrete C50/60 (50 MPa)': {
@@ -2400,6 +2761,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         kc_auto_generate: true, kc_a0: 16.67e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 13.33e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
         cscm_alpha: 17.5e6, cscm_theta: 0.42, cscm_lambda: 12.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 140.0e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 50.0e6, jc_B: 220.0e6, jc_n: 0.38, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.00, mg_c0: 3300.0, mg_s: 1.30,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
+        friction_angle: 35.0, cohesion: 1.30e7, dilation_angle: 15.0, tensile_cutoff: 4.1e6, provenance: 'hybrid',
+        // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
+        cdp_f_t0: 4.1e6, cdp_f_c0: 50.0e6, cdp_g_f: 120.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Riedel et al., Int. J. Impact Eng. (1999)'
     },
     'Ultra-High Performance Concrete C100/115 (100 MPa)': {
@@ -2409,6 +2774,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         kc_auto_generate: true, kc_a0: 33.33e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 26.67e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
         cscm_alpha: 35.0e6, cscm_theta: 0.45, cscm_lambda: 24.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 280.0e6, cscm_W: 0.04, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 100.0e6, jc_B: 300.0e6, jc_n: 0.35, jc_C: 0.006, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.10, mg_c0: 3600.0, mg_s: 1.35,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
+        friction_angle: 35.0, cohesion: 2.60e7, dilation_angle: 15.0, tensile_cutoff: 7.0e6, provenance: 'hybrid',
+        // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
+        cdp_f_t0: 7.0e6, cdp_f_c0: 100.0e6, cdp_g_f: 180.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Forquin et al., Int. J. Impact Eng. (2010)'
     },
     'UHPC / Ductal (150 MPa)': {
@@ -2418,6 +2787,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         kc_auto_generate: true, kc_a0: 50.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 40.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
         cscm_alpha: 52.5e6, cscm_theta: 0.48, cscm_lambda: 36.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 420.0e6, cscm_W: 0.03, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 150.0e6, jc_B: 400.0e6, jc_n: 0.30, jc_C: 0.007, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.15, mg_c0: 3800.0, mg_s: 1.38,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
+        friction_angle: 35.0, cohesion: 3.90e7, dilation_angle: 15.0, tensile_cutoff: 12.0e6, provenance: 'hybrid',
+        // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
+        cdp_f_t0: 12.0e6, cdp_f_c0: 150.0e6, cdp_g_f: 300.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Lafarge Holcim Ductal Technical Manual'
     },
     'Fiber-Reinforced Concrete (FRC 60 MPa)': {
@@ -2427,6 +2800,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         kc_auto_generate: true, kc_a0: 20.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 16.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.40, kc_omega: 0.50,
         cscm_alpha: 21.0e6, cscm_theta: 0.43, cscm_lambda: 14.5e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 170.0e6, cscm_W: 0.05, cscm_D1: 2.0e-9, cscm_D2: 1.0,
         jc_A: 60.0e6, jc_B: 280.0e6, jc_n: 0.35, jc_C: 0.006, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 920.0, mg_gamma0: 1.05, mg_c0: 3400.0, mg_s: 1.32,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
+        friction_angle: 35.0, cohesion: 1.56e7, dilation_angle: 15.0, tensile_cutoff: 8.5e6, provenance: 'hybrid',
+        // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
+        cdp_f_t0: 8.5e6, cdp_f_c0: 60.0e6, cdp_g_f: 500.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Nold, ACI Materials Journal (2012)'
     },
     'Clay Brick Masonry': {
@@ -2436,6 +2813,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         kc_auto_generate: true, kc_a0: 4.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 3.2e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.80, kc_omega: 0.50,
         cscm_alpha: 4.2e6, cscm_theta: 0.35, cscm_lambda: 3.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 35.0e6, cscm_W: 0.06, cscm_D1: 3.0e-9, cscm_D2: 1.0,
         jc_A: 12.0e6, jc_B: 50.0e6, jc_n: 0.45, jc_C: 0.003, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 840.0, mg_gamma0: 0.85, mg_c0: 2200.0, mg_s: 1.15,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
+        friction_angle: 30.0, cohesion: 3.46e6, dilation_angle: 10.0, tensile_cutoff: 1.2e6, provenance: 'hybrid',
+        // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
+        cdp_f_t0: 1.2e6, cdp_f_c0: 12.0e6, cdp_g_f: 40.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Lourenco, PhD Thesis TU Delft'
     },
     'Aerated Autoclaved Concrete (AAC)': {
@@ -2445,6 +2826,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         kc_auto_generate: true, kc_a0: 1.33e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 1.07e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 2.00, kc_omega: 0.50,
         cscm_alpha: 1.4e6, cscm_theta: 0.30, cscm_lambda: 1.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 12.0e6, cscm_W: 0.08, cscm_D1: 4.0e-9, cscm_D2: 1.0,
         jc_A: 4.0e6, jc_B: 15.0e6, jc_n: 0.50, jc_C: 0.002, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.50, mg_c0: 1200.0, mg_s: 1.10,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
+        friction_angle: 30.0, cohesion: 1.15e6, dilation_angle: 10.0, tensile_cutoff: 0.5e6, provenance: 'hybrid',
+        // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
+        cdp_f_t0: 0.5e6, cdp_f_c0: 4.0e6, cdp_g_f: 15.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Autoclaved Aerated Concrete Handbook'
     },
 
@@ -2454,61 +2839,85 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Soft Marine Clay (Cu = 25 kPa)': {
         density: 1600.0, youngs_modulus: 15.0e6, poissons_ratio: 0.45, yield_stress: 0.025e6, hardening_modulus: 0.1e6, failure_strain: 0.20, tensile_failure_stress: 0.005e6,
         jc_A: 0.025e6, jc_B: 0.10e6, jc_n: 0.50, jc_C: 0.050, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 1200.0, mg_gamma0: 0.50, mg_c0: 1500.0, mg_s: 1.40,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (undrained: phi_u = 0, c = Cu)
+        friction_angle: 0.0, cohesion: 2.50e4, dilation_angle: 0.0, tensile_cutoff: 0.005e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Wood, Soil Behaviour & Critical State Mechanics'
     },
     'Stiff Silty Clay (Cu = 100 kPa)': {
         density: 1850.0, youngs_modulus: 50.0e6, poissons_ratio: 0.40, yield_stress: 0.10e6, hardening_modulus: 0.5e6, failure_strain: 0.15, tensile_failure_stress: 0.02e6,
         jc_A: 0.10e6, jc_B: 0.30e6, jc_n: 0.45, jc_C: 0.030, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 1100.0, mg_gamma0: 0.65, mg_c0: 1600.0, mg_s: 1.45,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (undrained: phi_u = 0, c = Cu)
+        friction_angle: 0.0, cohesion: 1.00e5, dilation_angle: 0.0, tensile_cutoff: 0.02e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Terzaghi & Peck Soil Mechanics'
     },
     'Saturated Mud / Slurry (Geotechnical Soil)': {
         density: 1500.0, youngs_modulus: 2.5e6, poissons_ratio: 0.48, yield_stress: 0.010e6, hardening_modulus: 0.05e6, failure_strain: 0.80, tensile_failure_stress: 0.001e6,
         jc_A: 0.010e6, jc_B: 0.05e6, jc_n: 0.50, jc_C: 0.080, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 2400.0, mg_gamma0: 0.35, mg_c0: 1520.0, mg_s: 1.60,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (undrained slurry: phi_u = 0, c = yield_stress)
+        friction_angle: 0.0, cohesion: 1.00e4, dilation_angle: 0.0, tensile_cutoff: 0.001e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Mitchell & Soga, Fundamentals of Soil Behavior'
     },
     'Loose Dry Sand (Dr = 30%)': {
         density: 1550.0, youngs_modulus: 30.0e6, poissons_ratio: 0.30, yield_stress: 0.05e6, hardening_modulus: 0.2e6, failure_strain: 0.15, tensile_failure_stress: 0.001e6,
         jc_A: 0.05e6, jc_B: 0.20e6, jc_n: 0.50, jc_C: 0.010, jc_m: 1.00, T_melt: 1700.0, T_room: 293.0, Cp: 800.0, mg_gamma0: 0.45, mg_c0: 1450.0, mg_s: 1.35,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (cohesionless; 1 kPa apparent cohesion for numerical regularization)
+        friction_angle: 30.0, cohesion: 1.00e3, dilation_angle: 0.0, tensile_cutoff: 0.001e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Lade & Duncan Granular Soil Benchmark'
     },
     'Dense Compacted Sand (Dr = 85%)': {
         density: 1800.0, youngs_modulus: 100.0e6, poissons_ratio: 0.30, yield_stress: 0.25e6, hardening_modulus: 1.0e6, failure_strain: 0.10, tensile_failure_stress: 0.005e6,
         jc_A: 0.25e6, jc_B: 0.80e6, jc_n: 0.40, jc_C: 0.015, jc_m: 1.00, T_melt: 1700.0, T_room: 293.0, Cp: 800.0, mg_gamma0: 0.60, mg_c0: 1650.0, mg_s: 1.40,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (cohesionless; 2 kPa apparent cohesion; psi ~ phi - 30)
+        friction_angle: 41.0, cohesion: 2.00e3, dilation_angle: 10.0, tensile_cutoff: 0.005e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Lade & Nelson Granular Media Model'
     },
     'Compacted Gravel Subgrade': {
         density: 2100.0, youngs_modulus: 200.0e6, poissons_ratio: 0.28, yield_stress: 0.50e6, hardening_modulus: 2.0e6, failure_strain: 0.08, tensile_failure_stress: 0.01e6,
         jc_A: 0.50e6, jc_B: 1.50e6, jc_n: 0.35, jc_C: 0.015, jc_m: 1.00, T_melt: 1700.0, T_room: 293.0, Cp: 850.0, mg_gamma0: 0.75, mg_c0: 1850.0, mg_s: 1.42,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (cohesionless; 3 kPa apparent cohesion)
+        friction_angle: 40.0, cohesion: 3.00e3, dilation_angle: 8.0, tensile_cutoff: 0.01e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'AASHTO Pavement Design Subgrade Manual'
     },
     'Westerly Granite': {
         density: 2640.0, youngs_modulus: 60.0e9, poissons_ratio: 0.25, yield_stress: 200.0e6, hardening_modulus: 5.0e9, failure_strain: 0.015, tensile_failure_stress: 15.0e6,
         jc_A: 200.0e6, jc_B: 800.0e6, jc_n: 0.30, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 790.0, mg_gamma0: 1.50, mg_c0: 3950.0, mg_s: 1.40,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (intact rock; c from UCS = yield_stress)
+        friction_angle: 50.0, cohesion: 3.64e7, dilation_angle: 10.0, tensile_cutoff: 15.0e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Marsh, LASL Shock Hugoniot Data (1980)'
     },
     'Basalt (Hard Igneous Rock)': {
         density: 2900.0, youngs_modulus: 75.0e9, poissons_ratio: 0.24, yield_stress: 250.0e6, hardening_modulus: 6.0e9, failure_strain: 0.012, tensile_failure_stress: 18.0e6,
         jc_A: 250.0e6, jc_B: 900.0e6, jc_n: 0.28, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 840.0, mg_gamma0: 1.45, mg_c0: 4800.0, mg_s: 1.35,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (intact rock; c from UCS = yield_stress)
+        friction_angle: 50.0, cohesion: 4.55e7, dilation_angle: 10.0, tensile_cutoff: 18.0e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Jaeger, Cook, & Zimmerman, Fundamentals of Rock Mechanics (2007)'
     },
     'Berea Sandstone': {
         density: 2150.0, youngs_modulus: 18.0e9, poissons_ratio: 0.20, yield_stress: 50.0e6, hardening_modulus: 1.5e9, failure_strain: 0.020, tensile_failure_stress: 4.0e6,
         jc_A: 50.0e6, jc_B: 250.0e6, jc_n: 0.35, jc_C: 0.005, jc_m: 1.00, T_melt: 1600.0, T_room: 293.0, Cp: 850.0, mg_gamma0: 1.10, mg_c0: 2800.0, mg_s: 1.30,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (intact rock; c from UCS = yield_stress)
+        friction_angle: 32.0, cohesion: 1.39e7, dilation_angle: 8.0, tensile_cutoff: 4.0e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Zhang et al., Int. J. Rock Mech. Min. Sci. (2000)'
     },
     'Limestone (Solnhofen)': {
         density: 2600.0, youngs_modulus: 50.0e9, poissons_ratio: 0.28, yield_stress: 120.0e6, hardening_modulus: 3.5e9, failure_strain: 0.015, tensile_failure_stress: 8.0e6,
         jc_A: 120.0e6, jc_B: 500.0e6, jc_n: 0.32, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 820.0, mg_gamma0: 1.40, mg_c0: 3700.0, mg_s: 1.38,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (intact rock; c from UCS = yield_stress)
+        friction_angle: 35.0, cohesion: 3.12e7, dilation_angle: 8.0, tensile_cutoff: 8.0e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Ahrens & Gregson, J. Geophys. Res. (1964)'
     },
     'Shale (Sedimentary Rock)': {
         density: 2400.0, youngs_modulus: 25.0e9, poissons_ratio: 0.22, yield_stress: 80.0e6, hardening_modulus: 2.0e9, failure_strain: 0.018, tensile_failure_stress: 6.0e6,
         jc_A: 80.0e6, jc_B: 350.0e6, jc_n: 0.32, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 1.20, mg_c0: 3200.0, mg_s: 1.35,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (intact rock; c from UCS = yield_stress)
+        friction_angle: 25.0, cohesion: 2.55e7, dilation_angle: 5.0, tensile_cutoff: 6.0e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Horsrud, J. Pet. Sci. Eng. (2001) Mechanical properties of shale'
     },
     'Ice / Permafrost (-5°C)': {
         density: 917.0, youngs_modulus: 9.0e9, poissons_ratio: 0.33, yield_stress: 5.0e6, hardening_modulus: 100.0e6, failure_strain: 0.050, tensile_failure_stress: 1.5e6,
         jc_A: 5.0e6, jc_B: 20.0e6, jc_n: 0.50, jc_C: 0.020, jc_m: 1.00, T_melt: 273.15, T_room: 268.15, Cp: 2050.0, mg_gamma0: 1.00, mg_c0: 2950.0, mg_s: 1.30,
+        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (c from UCS = yield_stress)
+        friction_angle: 15.0, cohesion: 1.92e6, dilation_angle: 0.0, tensile_cutoff: 1.5e6, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Schulson, JOM (1999) Physics of Ice'
     },
 
@@ -2817,67 +3226,14 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'Linear Elastic Presets', reference: 'Pilkington Technical Glass Data'
     },
 
-    // ---------------------------------------------------------
-    // 10. CREST Reactive Burn Presets (Davis Reactant + Product EOS)
-    // ---------------------------------------------------------
-    'PBX 9502 (TATB/Kel-F 95/5) - CREST Davis': {
-        density: 1895.0, youngs_modulus: 10.0e9, poissons_ratio: 0.35, yield_stress: 50.0e6, hardening_modulus: 100.0e6, failure_strain: 0.10, tensile_failure_stress: 60.0e6,
-        jc_A: 50.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 623.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.65, mg_c0: 2050.0, mg_s: 2.12,
-        davis_c0: 2050.0, davis_s1: 2.12, davis_gamma0: 0.65, davis_cv: 1000.0, davis_t0: 293.0, davis_rho0: 1895.0,
-        davis_a: 2.85, davis_b: 1.10, davis_k: 1.35, davis_vc: 0.65, davis_pc: 12.5e9, davis_q_det: 3.90e6,
-        crest_b1: 1.2e7, crest_c1: 0.67, crest_m1: 2.5, crest_b2: 3.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.5, crest_s0: 15.0, crest_s_threshold: 2.0,
-        provenance: 'experimental', test_method: 'Gas-gun plate impact & embedded electromagnetic particle velocity gauges',
-        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Shock Entropy Kinetics', product_model: 'Davis Detonation Product',
-        category: 'CREST Reactive Burn Presets', reference: 'Handley, C. A. (2007) CREST reactive burn model for PBX 9502; Davis (1998)'
-    },
-    'EDC37 (HMX/NC/K10 91/1/8) - CREST Davis': {
-        density: 1841.0, youngs_modulus: 8.5e9, poissons_ratio: 0.36, yield_stress: 40.0e6, hardening_modulus: 80.0e6, failure_strain: 0.12, tensile_failure_stress: 50.0e6,
-        jc_A: 40.0e6, jc_B: 80.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1100.0, mg_gamma0: 0.70, mg_c0: 2750.0, mg_s: 1.85,
-        davis_c0: 2750.0, davis_s1: 1.85, davis_gamma0: 0.70, davis_cv: 1100.0, davis_t0: 293.0, davis_rho0: 1841.0,
-        davis_a: 3.10, davis_b: 1.25, davis_k: 1.30, davis_vc: 0.60, davis_pc: 14.2e9, davis_q_det: 5.20e6,
-        crest_b1: 2.5e7, crest_c1: 0.67, crest_m1: 2.0, crest_b2: 6.8e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.2, crest_s0: 14.0, crest_s_threshold: 1.5,
-        provenance: 'experimental', test_method: 'Gas-gun plate impact & embedded electromagnetic particle velocity gauges',
-        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Shock Entropy Kinetics', product_model: 'Davis Detonation Product',
-        category: 'CREST Reactive Burn Presets', reference: 'Whitworth, N. J. (2008) CREST modeling of EDC37 shock initiation'
-    },
-    'PBX 9501 (HMX/Estane 95/5) - CREST Davis': {
-        density: 1830.0, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 45.0e6, hardening_modulus: 90.0e6, failure_strain: 0.10, tensile_failure_stress: 55.0e6,
-        jc_A: 45.0e6, jc_B: 90.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1080.0, mg_gamma0: 0.68, mg_c0: 2600.0, mg_s: 1.90,
-        davis_c0: 2600.0, davis_s1: 1.90, davis_gamma0: 0.68, davis_cv: 1080.0, davis_t0: 293.0, davis_rho0: 1830.0,
-        davis_a: 3.00, davis_b: 1.20, davis_k: 1.32, davis_vc: 0.62, davis_pc: 13.8e9, davis_q_det: 5.00e6,
-        crest_b1: 2.0e7, crest_c1: 0.67, crest_m1: 2.2, crest_b2: 5.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.3, crest_s0: 14.0, crest_s_threshold: 2.0,
-        provenance: 'experimental', test_method: 'Gas-gun plate impact & embedded electromagnetic particle velocity gauges',
-        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Shock Entropy Kinetics', product_model: 'Davis Detonation Product',
-        category: 'CREST Reactive Burn Presets', reference: 'Gibbs & Popolato (1980) LASL Explosive Property Data / Davis EOS'
-    },
-    'Composition B (RDX/TNT 60/40) - CREST Davis': {
-        density: 1717.0, youngs_modulus: 7.2e9, poissons_ratio: 0.34, yield_stress: 35.0e6, hardening_modulus: 70.0e6, failure_strain: 0.15, tensile_failure_stress: 40.0e6,
-        jc_A: 35.0e6, jc_B: 70.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 0.72, mg_c0: 2450.0, mg_s: 1.95,
-        davis_c0: 2450.0, davis_s1: 1.95, davis_gamma0: 0.72, davis_cv: 1050.0, davis_t0: 293.0, davis_rho0: 1717.0,
-        davis_a: 2.70, davis_b: 1.15, davis_k: 1.36, davis_vc: 0.66, davis_pc: 11.8e9, davis_q_det: 4.60e6,
-        crest_b1: 1.8e7, crest_c1: 0.67, crest_m1: 2.3, crest_b2: 4.5e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.4, crest_s0: 15.0, crest_s_threshold: 1.5,
-        provenance: 'experimental', test_method: 'Gas-gun plate impact & embedded electromagnetic particle velocity gauges',
-        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Shock Entropy Kinetics', product_model: 'Davis Detonation Product',
-        category: 'CREST Reactive Burn Presets', reference: 'Urtiew et al. (1998) Shock initiation of Comp B / Davis EOS parameters'
-    },
-    'LX-17 (TATB/Kel-F 92.5/7.5) - CREST Davis': {
-        density: 1905.0, youngs_modulus: 10.5e9, poissons_ratio: 0.35, yield_stress: 52.0e6, hardening_modulus: 105.0e6, failure_strain: 0.10, tensile_failure_stress: 62.0e6,
-        jc_A: 52.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 623.0, T_room: 293.0, Cp: 990.0, mg_gamma0: 0.64, mg_c0: 2020.0, mg_s: 2.15,
-        davis_c0: 2020.0, davis_s1: 2.15, davis_gamma0: 0.64, davis_cv: 990.0, davis_t0: 293.0, davis_rho0: 1905.0,
-        davis_a: 2.80, davis_b: 1.08, davis_k: 1.35, davis_vc: 0.65, davis_pc: 12.2e9, davis_q_det: 3.80e6,
-        crest_b1: 1.1e7, crest_c1: 0.67, crest_m1: 2.5, crest_b2: 3.2e6, crest_c2: 0.50, crest_c3: 0.67, crest_m2: 1.5, crest_s0: 15.0, crest_s_threshold: 3.0,
-        provenance: 'experimental', test_method: 'Gas-gun plate impact & embedded electromagnetic particle velocity gauges',
-        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Shock Entropy Kinetics', product_model: 'Davis Detonation Product',
-        category: 'CREST Reactive Burn Presets', reference: 'LLNL Explosives Handbook / CREST Parameters for Insensitive HE'
-    },
 
     // ---------------------------------------------------------
     // 11. JWL Programmed Burn Presets (Mie-Grüneisen Solid + JWL Products)
     // ---------------------------------------------------------
     'C-4 (Composition C-4) - JWL Programmed Burn': {
-        density: 1600.0, youngs_modulus: 1.5e9, poissons_ratio: 0.38, yield_stress: 2.0e6, hardening_modulus: 20.0e6, failure_strain: 0.15, tensile_failure_stress: 0.8e6,
+        density: 1601.0, youngs_modulus: 1.5e9, poissons_ratio: 0.38, yield_stress: 2.0e6, hardening_modulus: 20.0e6, failure_strain: 0.15, tensile_failure_stress: 0.8e6,
         jc_A: 2.0e6, jc_B: 10.0e6, jc_n: 0.40, jc_C: 0.02, jc_m: 1.0, T_melt: 477.0, T_room: 293.0, Cp: 1200.0, mg_gamma0: 1.10, mg_c0: 2400.0, mg_s: 1.58,
-        det_vel: 8190.0, detonation_energy: 5.62e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        det_vel: 8193.0, detonation_energy: 5.621e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
         jwl_A: 609.77e9, jwl_B: 12.95e9, jwl_R1: 4.50, jwl_R2: 1.40, jwl_omega: 0.25,
         afterburn_enabled: true, afterburn_energy: 8.58e6, afterburn_fuel_fraction: 0.28, afterburn_stoich_ratio: 2.50, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.2e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997 / Dobratz (1985)',
@@ -2888,8 +3244,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'TNT (Trinitrotoluene) - JWL Programmed Burn': {
         density: 1630.0, youngs_modulus: 6.0e9, poissons_ratio: 0.35, yield_stress: 20.0e6, hardening_modulus: 120.0e6, failure_strain: 0.07, tensile_failure_stress: 5.0e6,
         jc_A: 20.0e6, jc_B: 60.0e6, jc_n: 0.38, jc_C: 0.01, jc_m: 1.0, T_melt: 354.0, T_room: 293.0, Cp: 1260.0, mg_gamma0: 0.92, mg_c0: 2470.0, mg_s: 1.59,
-        det_vel: 6930.0, detonation_energy: 4.29e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 373.77e9, jwl_B: 3.747e9, jwl_R1: 4.15, jwl_R2: 0.90, jwl_omega: 0.35,
+        det_vel: 6930.0, detonation_energy: 4.294e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 371.2e9, jwl_B: 3.231e9, jwl_R1: 4.15, jwl_R2: 0.95, jwl_omega: 0.30,
         afterburn_enabled: true, afterburn_energy: 1.071e7, afterburn_fuel_fraction: 0.35, afterburn_stoich_ratio: 2.67, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997 / Dobratz (1985)',
         test_method: 'Cylinder Expansion Test (1-inch & 2-inch) + Plate Impact Hugoniot',
@@ -2899,8 +3255,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Composition B (Comp B) - JWL Programmed Burn': {
         density: 1717.0, youngs_modulus: 7.2e9, poissons_ratio: 0.34, yield_stress: 35.0e6, hardening_modulus: 70.0e6, failure_strain: 0.15, tensile_failure_stress: 40.0e6,
         jc_A: 35.0e6, jc_B: 70.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 354.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 0.72, mg_c0: 2450.0, mg_s: 1.95,
-        det_vel: 7980.0, detonation_energy: 5.19e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 524.23e9, jwl_B: 7.678e9, jwl_R1: 4.20, jwl_R2: 1.10, jwl_omega: 0.34,
+        det_vel: 7980.0, detonation_energy: 4.95e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 524.2e9, jwl_B: 7.678e9, jwl_R1: 4.20, jwl_R2: 1.10, jwl_omega: 0.34,
         afterburn_enabled: true, afterburn_energy: 8.31e6, afterburn_fuel_fraction: 0.26, afterburn_stoich_ratio: 2.40, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997 / Dobratz (1985)',
         test_method: 'Cylinder Expansion Test (1-inch & 2-inch) + Plate Impact Hugoniot',
@@ -2910,8 +3266,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'PETN (Pentaerythritol Tetranitrate) - JWL Programmed Burn': {
         density: 1770.0, youngs_modulus: 14.0e9, poissons_ratio: 0.29, yield_stress: 40.0e6, hardening_modulus: 250.0e6, failure_strain: 0.03, tensile_failure_stress: 10.0e6,
         jc_A: 40.0e6, jc_B: 125.0e6, jc_n: 0.32, jc_C: 0.01, jc_m: 1.0, T_melt: 414.0, T_room: 293.0, Cp: 1090.0, mg_gamma0: 1.08, mg_c0: 2810.0, mg_s: 1.66,
-        det_vel: 8300.0, detonation_energy: 5.80e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 625.3e9, jwl_B: 23.29e9, jwl_R1: 5.25, jwl_R2: 1.60, jwl_omega: 0.28,
+        det_vel: 8300.0, detonation_energy: 5.706e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 617e9, jwl_B: 16.926e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.25,
         afterburn_enabled: true, afterburn_energy: 2.00e6, afterburn_fuel_fraction: 0.08, afterburn_stoich_ratio: 1.50, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
         test_method: 'Cylinder Expansion Test (1-inch) + Laser Velocimetry',
@@ -2919,10 +3275,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'JWL Programmed Burn Presets'
     },
     'HMX (Octogen) - JWL Programmed Burn': {
-        density: 1890.0, youngs_modulus: 18.0e9, poissons_ratio: 0.28, yield_stress: 55.0e6, hardening_modulus: 350.0e6, failure_strain: 0.02, tensile_failure_stress: 14.0e6,
+        density: 1891.0, youngs_modulus: 18.0e9, poissons_ratio: 0.28, yield_stress: 55.0e6, hardening_modulus: 350.0e6, failure_strain: 0.02, tensile_failure_stress: 14.0e6,
         jc_A: 55.0e6, jc_B: 160.0e6, jc_n: 0.28, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 1.15, mg_c0: 2900.0, mg_s: 1.70,
-        det_vel: 9110.0, detonation_energy: 6.78e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 778.3e9, jwl_B: 7.07e9, jwl_R1: 4.20, jwl_R2: 1.00, jwl_omega: 0.30,
+        det_vel: 9110.0, detonation_energy: 5.553e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 778.3e9, jwl_B: 7.071e9, jwl_R1: 4.20, jwl_R2: 1.00, jwl_omega: 0.30,
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
         test_method: 'Cylinder Expansion Test + Gas Gun Shock Hugoniot',
@@ -2930,20 +3286,21 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'JWL Programmed Burn Presets'
     },
     'RDX (Hexogen) - JWL Programmed Burn': {
+        // HYBRID FIT (not a published set): LLNL Explosives Handbook UCRL-52997 has no pure-RDX JWL. A,B were solved so the CJ state matches handbook D(1.80 g/cc) = 8775 m/s (interpolated from D = 8.70 at 1.77 and 8.80 at 1.81 km/s) and Pcj = 35.0 GPa (handbook measured 33.8 GPa at 1.767 g/cc, scaled by rho*D^2). E0 = 10.1 GPa comes from cylinder-energy similarity to PETN/Cyclotol (RDX Ecyl 1.60 MJ/kg). R1,R2,omega are the mean of the neighbouring handbook sets (PETN, HMX, C-4, Cyclotol). The cylinder test does not pin B/R2/omega: alternative fits fall within about 5% in released energy.
         density: 1800.0, youngs_modulus: 15.0e9, poissons_ratio: 0.29, yield_stress: 42.0e6, hardening_modulus: 270.0e6, failure_strain: 0.03, tensile_failure_stress: 10.5e6,
         jc_A: 42.0e6, jc_B: 130.0e6, jc_n: 0.31, jc_C: 0.01, jc_m: 1.0, T_melt: 477.0, T_room: 293.0, Cp: 1070.0, mg_gamma0: 1.10, mg_c0: 2840.0, mg_s: 1.67,
-        det_vel: 8750.0, detonation_energy: 5.90e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 648.0e9, jwl_B: 9.38e9, jwl_R1: 4.50, jwl_R2: 1.40, jwl_omega: 0.33,
+        det_vel: 8775.0, detonation_energy: 5.611e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 799.9e9, jwl_B: 7.59e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
         afterburn_enabled: true, afterburn_energy: 5.60e6, afterburn_fuel_fraction: 0.18, afterburn_stoich_ratio: 2.10, afterburn_ignition_temp: 850.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
-        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
-        test_method: 'Cylinder Expansion Test + Plate Impact',
+        provenance: 'hybrid', reference: 'Fitted to LLNL Explosives Handbook UCRL-52997 RDX D, Pcj and cylinder-energy data (see comment)',
+        test_method: 'CJ-constrained JWL fit to handbook D, Pcj and Ecyl',
         solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Programmed Wavefront Burn', product_model: 'JWL Product Gas',
         category: 'JWL Programmed Burn Presets'
     },
     'PBX 9404 (HMX/NC 94/3) - JWL Programmed Burn': {
         density: 1840.0, youngs_modulus: 9.5e9, poissons_ratio: 0.34, yield_stress: 45.0e6, hardening_modulus: 150.0e6, failure_strain: 0.05, tensile_failure_stress: 12.0e6,
         jc_A: 45.0e6, jc_B: 120.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1100.0, mg_gamma0: 0.88, mg_c0: 2430.0, mg_s: 1.88,
-        det_vel: 8800.0, detonation_energy: 5.95e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        det_vel: 8800.0, detonation_energy: 5.543e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
         jwl_A: 852.4e9, jwl_B: 18.02e9, jwl_R1: 4.60, jwl_R2: 1.30, jwl_omega: 0.38,
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         provenance: 'experimental', reference: 'Lee & Tarver (1980) / LLNL Explosives Handbook',
@@ -2952,10 +3309,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'JWL Programmed Burn Presets'
     },
     'PBX 9501 (HMX/Estane 95/5) - JWL Programmed Burn': {
-        density: 1830.0, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 45.0e6, hardening_modulus: 90.0e6, failure_strain: 0.10, tensile_failure_stress: 55.0e6,
+        density: 1840.0, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 45.0e6, hardening_modulus: 90.0e6, failure_strain: 0.10, tensile_failure_stress: 55.0e6,
         jc_A: 45.0e6, jc_B: 90.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1080.0, mg_gamma0: 0.68, mg_c0: 2600.0, mg_s: 1.90,
-        det_vel: 8800.0, detonation_energy: 5.90e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 856.0e9, jwl_B: 18.3e9, jwl_R1: 4.60, jwl_R2: 1.30, jwl_omega: 0.38,
+        det_vel: 8800.0, detonation_energy: 5.543e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 852.4e9, jwl_B: 18.02e9, jwl_R1: 4.55, jwl_R2: 1.30, jwl_omega: 0.38,
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         provenance: 'experimental', reference: 'Gibbs & Popolato (1980) LASL Explosive Property Data',
         test_method: 'Cylinder Expansion Test (1-inch & 2-inch) + Gas Gun',
@@ -2965,19 +3322,46 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'PBX 9502 (TATB/Kel-F 95/5) - JWL Programmed Burn': {
         density: 1895.0, youngs_modulus: 10.0e9, poissons_ratio: 0.35, yield_stress: 50.0e6, hardening_modulus: 100.0e6, failure_strain: 0.10, tensile_failure_stress: 60.0e6,
         jc_A: 50.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 623.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.65, mg_c0: 2050.0, mg_s: 2.12,
-        det_vel: 7670.0, detonation_energy: 4.30e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 556.0e9, jwl_B: 8.44e9, jwl_R1: 4.39, jwl_R2: 1.10, jwl_omega: 0.35,
+        det_vel: 7710.0, detonation_energy: 3.731e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        // LLNL Explosives Handbook (UCRL-52997) Table 8-7, PBX-9502, rho0 1.895, CJ P = 30.2 GPa, JWL E0 = 7.07 GPa (= detonation_energy * rho)
+        jwl_A: 460.3e9, jwl_B: 9.114e9, jwl_R1: 4.00, jwl_R2: 1.70, jwl_omega: 0.48,
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         provenance: 'experimental', reference: 'Bahl et al. (1998) / LLNL Explosives Handbook',
         test_method: 'Cylinder Expansion Test + Embedded Gauges',
         solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Programmed Wavefront Burn', product_model: 'JWL Product Gas',
         category: 'JWL Programmed Burn Presets'
     },
+    'EDC37 (CREST Reactive Burn)': {
+        density: 1844.5, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 45.0e6, hardening_modulus: 90.0e6, failure_strain: 0.10, tensile_failure_stress: 55.0e6,
+        jc_A: 45.0e6, jc_B: 90.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1080.0, mg_gamma0: 0.68, mg_c0: 2600.0, mg_s: 1.90,
+        det_vel: 8769.3, detonation_energy: 7.19557e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 664.2021e9, jwl_B: 22.82927e9, jwl_R1: 4.25, jwl_R2: 1.825, jwl_omega: 0.25,
+        davis_rho0: 1844.5, davis_cv: 917.0, davis_t0: 293.0, davis_q_det: 7.19557e6,
+        crest_awe_K0s: 14.24525e9, crest_awe_A1: 2.417494, crest_awe_A2: 2.208027, crest_awe_A3: 0.0, crest_awe_B1: 0.0, crest_awe_B2: 0.0, crest_awe_B3: 0.0, crest_awe_fc: 0.0, crest_awe_delta: 0.0, crest_awe_Gamma1: 32.33557, crest_awe_Gamma2: 3.596933, crest_awe_gamma00: 0.4, crest_awe_m: 2.0, crest_awe_c0: 2.0e8, crest_awe_c1: 2.0, crest_awe_c2: 2.2e8, crest_awe_c3: 2.5, crest_awe_c6: 0.0, crest_awe_c8: 1.6e-4, crest_awe_c9: 1.0, crest_awe_c10: 4.0e5, crest_awe_c11: 1.8, crest_awe_c12: 0.0, crest_awe_c13: 0.0,
+        afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
+        provenance: 'experimental', reference: 'EDC37 (91% HMX / 9% binder): Handley, 13th Int. Detonation Symp. (2006) Table 2; Cartwright, PhD Thesis, Univ. of Leeds (2016) Table 3.1. Shear/strength values are generic HMX-PBX values, not part of the CREST calibration.',
+        test_method: 'AWE CREST calibration vs. embedded-gauge / run-to-detonation data (Handley 2006; Cartwright 2016)',
+        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Entropy', product_model: 'JWL Product Gas',
+        category: 'CREST Reactive Burn Presets'
+    },
+    'PBX 9502 (CREST Reactive Burn)': {
+        density: 1890.0, youngs_modulus: 10.0e9, poissons_ratio: 0.35, yield_stress: 50.0e6, hardening_modulus: 100.0e6, failure_strain: 0.10, tensile_failure_stress: 60.0e6,
+        jc_A: 45.0e6, jc_B: 90.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.65, mg_c0: 2050.0, mg_s: 2.12,
+        det_vel: 7597.4, detonation_energy: 3.73e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 460.3e9, jwl_B: 9.544e9, jwl_R1: 3.903, jwl_R2: 1.659, jwl_omega: 0.48,
+        davis_rho0: 1942.0, davis_cv: 1000.0, davis_t0: 293.0, davis_q_det: 3.73e6,
+        crest_awe_K0s: 9.0314021e9, crest_awe_A1: 0.246257, crest_awe_A2: 11.44221, crest_awe_A3: 0.0, crest_awe_B1: 16.8477, crest_awe_B2: 6.534913, crest_awe_B3: 0.0, crest_awe_fc: 0.05, crest_awe_delta: 0.021322, crest_awe_Gamma1: 126.4052, crest_awe_Gamma2: 6.554447, crest_awe_gamma00: 0.4, crest_awe_m: 2.0, crest_awe_c0: 2.0e7, crest_awe_c1: 2.5, crest_awe_c2: 8.0e6, crest_awe_c3: 2.5, crest_awe_c6: 1.8e12, crest_awe_c8: 0.0, crest_awe_c9: 1.0, crest_awe_c10: 3.0e13, crest_awe_c11: 1.25, crest_awe_c12: 5.0, crest_awe_c13: 0.0012,
+        afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
+        provenance: 'experimental', reference: 'PBX 9502 (95% TATB / 5% Kel-F): Cartwright, PhD Thesis, Univ. of Leeds (2016) Table 3.1. Shear/strength values are generic TATB-PBX values, not part of the CREST calibration.',
+        test_method: 'AWE CREST calibration vs. embedded-gauge / run-to-detonation data (Handley 2006; Cartwright 2016)',
+        solid_model: 'Davis Solid Reactant', burn_model: 'CREST Entropy', product_model: 'JWL Product Gas',
+        category: 'CREST Reactive Burn Presets'
+    },
     'LX-04 (HMX/Viton 85/15) - JWL Programmed Burn': {
-        density: 1860.0, youngs_modulus: 8.5e9, poissons_ratio: 0.36, yield_stress: 38.0e6, hardening_modulus: 95.0e6, failure_strain: 0.08, tensile_failure_stress: 10.0e6,
+        density: 1865.0, youngs_modulus: 8.5e9, poissons_ratio: 0.36, yield_stress: 38.0e6, hardening_modulus: 95.0e6, failure_strain: 0.08, tensile_failure_stress: 10.0e6,
         jc_A: 38.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1120.0, mg_gamma0: 0.85, mg_c0: 2450.0, mg_s: 1.85,
-        det_vel: 8460.0, detonation_energy: 5.25e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 720.0e9, jwl_B: 15.0e9, jwl_R1: 4.50, jwl_R2: 1.25, jwl_omega: 0.35,
+        det_vel: 8470.0, detonation_energy: 5.094e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 836.4e9, jwl_B: 12.98e9, jwl_R1: 4.62, jwl_R2: 1.25, jwl_omega: 0.42,
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
         test_method: 'Cylinder Expansion Test (1-inch)',
@@ -2987,8 +3371,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'LX-10 (HMX/Viton 95/5) - JWL Programmed Burn': {
         density: 1865.0, youngs_modulus: 9.2e9, poissons_ratio: 0.35, yield_stress: 42.0e6, hardening_modulus: 110.0e6, failure_strain: 0.07, tensile_failure_stress: 11.0e6,
         jc_A: 42.0e6, jc_B: 110.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1090.0, mg_gamma0: 0.90, mg_c0: 2500.0, mg_s: 1.82,
-        det_vel: 8820.0, detonation_energy: 6.05e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 831.2e9, jwl_B: 15.53e9, jwl_R1: 4.55, jwl_R2: 1.30, jwl_omega: 0.38,
+        det_vel: 8820.0, detonation_energy: 5.576e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: 880.7e9, jwl_B: 18.36e9, jwl_R1: 4.62, jwl_R2: 1.32, jwl_omega: 0.38,
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
         test_method: 'Cylinder Expansion Test (1-inch & 2-inch)',
@@ -2998,7 +3382,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'LX-14 (HMX/Estane 95.5/4.5) - JWL Programmed Burn': {
         density: 1835.0, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 44.0e6, hardening_modulus: 95.0e6, failure_strain: 0.09, tensile_failure_stress: 12.0e6,
         jc_A: 44.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1080.0, mg_gamma0: 0.88, mg_c0: 2550.0, mg_s: 1.86,
-        det_vel: 8830.0, detonation_energy: 5.95e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        det_vel: 8800.0, detonation_energy: 5.559e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
         jwl_A: 826.1e9, jwl_B: 17.24e9, jwl_R1: 4.55, jwl_R2: 1.32, jwl_omega: 0.38,
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
@@ -3007,86 +3391,18 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'JWL Programmed Burn Presets'
     },
     'LX-17 (TATB/Kel-F 92.5/7.5) - JWL Programmed Burn': {
-        density: 1905.0, youngs_modulus: 10.5e9, poissons_ratio: 0.35, yield_stress: 52.0e6, hardening_modulus: 105.0e6, failure_strain: 0.10, tensile_failure_stress: 62.0e6,
+        density: 1900.0, youngs_modulus: 10.5e9, poissons_ratio: 0.35, yield_stress: 52.0e6, hardening_modulus: 105.0e6, failure_strain: 0.10, tensile_failure_stress: 62.0e6,
         jc_A: 52.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 623.0, T_room: 293.0, Cp: 990.0, mg_gamma0: 0.64, mg_c0: 2020.0, mg_s: 2.15,
-        det_vel: 7630.0, detonation_energy: 4.25e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 593.5e9, jwl_B: 15.2e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.38,
+        det_vel: 7600.0, detonation_energy: 3.632e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        // LLNL Explosives Handbook (UCRL-52997) Table 8-7, LX-17-0, rho0 1.900, CJ P = 30.0 GPa, JWL E0 = 6.9 GPa (= detonation_energy * rho)
+        jwl_A: 446e9, jwl_B: 1.339e9, jwl_R1: 3.85, jwl_R2: 1.03, jwl_omega: 0.46,
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         provenance: 'experimental', reference: 'Tarver & Chidester (2005) / LLNL Explosives Handbook',
         test_method: 'Cylinder Expansion Test (1-inch & 2-inch) + Fabry-Perot',
         solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Programmed Wavefront Burn', product_model: 'JWL Product Gas',
         category: 'JWL Programmed Burn Presets'
     },
-    'ANFO (Ammonium Nitrate/Fuel Oil) - JWL Programmed Burn': {
-        density: 850.0, youngs_modulus: 1.0e9, poissons_ratio: 0.38, yield_stress: 1.0e6, hardening_modulus: 5.0e6, failure_strain: 0.20, tensile_failure_stress: 0.3e6,
-        jc_A: 1.0e6, jc_B: 5.0e6, jc_n: 0.40, jc_C: 0.01, jc_m: 1.0, T_melt: 442.0, T_room: 293.0, Cp: 1400.0, mg_gamma0: 0.50, mg_c0: 1500.0, mg_s: 1.40,
-        det_vel: 4560.0, detonation_energy: 2.45e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 49.46e9, jwl_B: 1.891e9, jwl_R1: 3.90, jwl_R2: 1.10, jwl_omega: 0.33,
-        afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_oxygen_balanced',
-        provenance: 'experimental', reference: 'LLNL Explosives Handbook UCRL-52997',
-        test_method: 'Large Diameter Cylinder Expansion (4-inch)',
-        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Programmed Wavefront Burn', product_model: 'JWL Product Gas',
-        category: 'JWL Programmed Burn Presets'
-    },
-    'Tritonal (TNT/Al 80/20) - JWL Programmed Burn': {
-        density: 1780.0, youngs_modulus: 8.0e9, poissons_ratio: 0.33, yield_stress: 25.0e6, hardening_modulus: 140.0e6, failure_strain: 0.06, tensile_failure_stress: 6.0e6,
-        jc_A: 25.0e6, jc_B: 80.0e6, jc_n: 0.35, jc_C: 0.01, jc_m: 1.0, T_melt: 354.0, T_room: 293.0, Cp: 1180.0, mg_gamma0: 1.10, mg_c0: 2600.0, mg_s: 1.62,
-        det_vel: 6700.0, detonation_energy: 5.20e6, burn_zone_cells: 4, tau_burn_min: 1.0e-7,
-        jwl_A: 420.0e9, jwl_B: 4.50e9, jwl_R1: 4.20, jwl_R2: 0.95, jwl_omega: 0.32,
-        afterburn_enabled: true, afterburn_energy: 1.80e7, afterburn_fuel_fraction: 0.45, afterburn_stoich_ratio: 2.80, afterburn_ignition_temp: 900.0, afterburn_tau_chem: 2.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
-        provenance: 'experimental', reference: 'Dobratz (1985) / LLNL Explosives Handbook',
-        test_method: 'Cylinder Expansion Test + Blast Characterization',
-        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Programmed Wavefront Burn', product_model: 'JWL Product Gas',
-        category: 'JWL Programmed Burn Presets'
-    },
 
-    // ---------------------------------------------------------
-    // 12. Lee-Tarver Ignition & Growth Presets (3-Term Reaction Kinetics)
-    // ---------------------------------------------------------
-    'LX-17 (TATB/Kel-F 92.5/7.5) - Lee-Tarver I&G': {
-        density: 1905.0, youngs_modulus: 10.5e9, poissons_ratio: 0.35, yield_stress: 52.0e6, hardening_modulus: 105.0e6, failure_strain: 0.10, tensile_failure_stress: 62.0e6,
-        jc_A: 52.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 623.0, T_room: 293.0, Cp: 990.0, mg_gamma0: 0.64, mg_c0: 2020.0, mg_s: 2.15,
-        det_vel: 7630.0, detonation_energy: 4.25e6,
-        jwl_A: 593.5e9, jwl_B: 15.2e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.38,
-        lt_I: 4.0e6, lt_a: 0.24, lt_b: 0.667, lt_x: 7.0, lt_G1: 2.5e-3, lt_c: 0.667, lt_d: 0.333, lt_y: 2.0, lt_G2: 0.05, lt_e: 0.667, lt_g: 0.333, lt_z: 3.0, lt_F_ig_max: 0.02, lt_F_G1_max: 0.30, lt_F_G2_min: 0.30,
-        provenance: 'experimental', reference: 'Tarver & Chidester (2005) LX-17 Ignition and Growth Calibrations',
-        test_method: 'Manganin Pressure Gauges & Fabry-Perot Laser Velocimetry (LLNL)',
-        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Lee-Tarver 3-Stage ODE', product_model: 'JWL Product Gas',
-        category: 'Lee-Tarver Ignition & Growth Presets'
-    },
-    'PBX 9404 (HMX/NC 94/3) - Lee-Tarver I&G': {
-        density: 1840.0, youngs_modulus: 9.5e9, poissons_ratio: 0.34, yield_stress: 45.0e6, hardening_modulus: 150.0e6, failure_strain: 0.05, tensile_failure_stress: 12.0e6,
-        jc_A: 45.0e6, jc_B: 120.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 550.0, T_room: 293.0, Cp: 1100.0, mg_gamma0: 0.88, mg_c0: 2430.0, mg_s: 1.88,
-        det_vel: 8800.0, detonation_energy: 5.95e6,
-        jwl_A: 852.4e9, jwl_B: 18.02e9, jwl_R1: 4.60, jwl_R2: 1.30, jwl_omega: 0.38,
-        lt_I: 4.4e7, lt_a: 0.04, lt_b: 0.667, lt_x: 4.0, lt_G1: 0.85, lt_c: 0.667, lt_d: 0.29, lt_y: 1.0, lt_G2: 0.0, lt_e: 0.0, lt_g: 0.0, lt_z: 0.0, lt_F_ig_max: 0.03, lt_F_G1_max: 1.0, lt_F_G2_min: 0.0,
-        provenance: 'experimental', reference: 'Lee & Tarver (1980) Phenomenological Model of Shock Initiation',
-        test_method: 'Wedge Tests & Manganin Foil Gauges',
-        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Lee-Tarver 3-Stage ODE', product_model: 'JWL Product Gas',
-        category: 'Lee-Tarver Ignition & Growth Presets'
-    },
-    'PBX 9502 (TATB/Kel-F 95/5) - Lee-Tarver I&G': {
-        density: 1895.0, youngs_modulus: 10.0e9, poissons_ratio: 0.35, yield_stress: 50.0e6, hardening_modulus: 100.0e6, failure_strain: 0.10, tensile_failure_stress: 60.0e6,
-        jc_A: 50.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 623.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.65, mg_c0: 2050.0, mg_s: 2.12,
-        det_vel: 7670.0, detonation_energy: 4.30e6,
-        jwl_A: 556.0e9, jwl_B: 8.44e9, jwl_R1: 4.39, jwl_R2: 1.10, jwl_omega: 0.35,
-        lt_I: 4.0e6, lt_a: 0.22, lt_b: 0.667, lt_x: 7.0, lt_G1: 2.3e-3, lt_c: 0.667, lt_d: 0.333, lt_y: 2.0, lt_G2: 0.045, lt_e: 0.667, lt_g: 0.333, lt_z: 3.0, lt_F_ig_max: 0.02, lt_F_G1_max: 0.30, lt_F_G2_min: 0.30,
-        provenance: 'experimental', reference: 'Bahl et al. (1998) PBX 9502 Shock Initiation',
-        test_method: 'Symmetric Gas-Gun Impact & Fabry-Perot Velocimetry',
-        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Lee-Tarver 3-Stage ODE', product_model: 'JWL Product Gas',
-        category: 'Lee-Tarver Ignition & Growth Presets'
-    },
-    'Composition B (RDX/TNT 60/40) - Lee-Tarver I&G': {
-        density: 1717.0, youngs_modulus: 7.2e9, poissons_ratio: 0.34, yield_stress: 35.0e6, hardening_modulus: 70.0e6, failure_strain: 0.15, tensile_failure_stress: 40.0e6,
-        jc_A: 35.0e6, jc_B: 70.0e6, jc_n: 0.30, jc_C: 0.01, jc_m: 1.0, T_melt: 354.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 0.72, mg_c0: 2450.0, mg_s: 1.95,
-        det_vel: 7980.0, detonation_energy: 5.19e6,
-        jwl_A: 524.2e9, jwl_B: 7.678e9, jwl_R1: 4.20, jwl_R2: 1.10, jwl_omega: 0.34,
-        lt_I: 4.0e7, lt_a: 0.08, lt_b: 0.667, lt_x: 4.0, lt_G1: 0.45, lt_c: 0.667, lt_d: 0.29, lt_y: 1.2, lt_G2: 0.0, lt_e: 0.0, lt_g: 0.0, lt_z: 0.0, lt_F_ig_max: 0.03, lt_F_G1_max: 1.0, lt_F_G2_min: 0.0,
-        provenance: 'experimental', reference: 'Urtiew et al. (1998) Shock Initiation of Composition B',
-        test_method: 'Manganin In-Situ Stress Gauges',
-        solid_model: 'Mie-Grüneisen Shock Reactant', burn_model: 'Lee-Tarver 3-Stage ODE', product_model: 'JWL Product Gas',
-        category: 'Lee-Tarver Ignition & Growth Presets'
-    },
 
     // ---------------------------------------------------------
     // 11. Concrete Damage Models (RHT, K&C, CSCM)
@@ -3362,17 +3678,28 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'TNT (Trinitrotoluene)': {
         density: 1630.0, youngs_modulus: 6.0e9, poissons_ratio: 0.35, yield_stress: 20.0e6, hardening_modulus: 120.0e6, failure_strain: 0.07, tensile_failure_stress: 5.0e6,
         jc_A: 20.0e6, jc_B: 60.0e6, jc_n: 0.38, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1260.0, mg_gamma0: 0.92, mg_c0: 2470.0, mg_s: 1.59,
-        composition: 'TNT', rho: 1630.0, detonation_energy: 4.29e6, det_vel: 6930.0, jwl_A: 373.77e9, jwl_B: 3.747e9, jwl_R1: 4.15, jwl_R2: 0.90, jwl_omega: 0.35,
-        ideal_gamma: 1.40, ideal_rho_0: 1630.0, ideal_e_0: 4.29e6,
+        composition: 'TNT', rho: 1630.0, detonation_energy: 4.294e6, det_vel: 6930.0, jwl_A: 371.2e9, jwl_B: 3.231e9, jwl_R1: 4.15, jwl_R2: 0.95, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1630.0, ideal_e_0: 4.294e6,
         // Real Empirical Afterburn Calorimetry (Cooper 1996, LLNL UCRL-52997, Kuhl et al. 2010; OB = -74%)
         afterburn_enabled: true, afterburn_energy: 1.071e7, afterburn_fuel_fraction: 0.35, afterburn_stoich_ratio: 2.67, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         category: 'JWL Detonation Gas Presets', reference: 'Dobratz, B. M. LLNL Explosives Handbook UCRL-52997'
     },
+    'Ammonium Picrate (Explosive D)': {
+        density: 1420.0, youngs_modulus: 6.0e9, poissons_ratio: 0.35, yield_stress: 20.0e6, hardening_modulus: 100.0e6, failure_strain: 0.07, tensile_failure_stress: 5.0e6,
+        jc_A: 20.0e6, jc_B: 60.0e6, jc_n: 0.38, jc_C: 0.010, jc_m: 1.00, T_melt: 540.0, T_room: 293.0, Cp: 1200.0, mg_gamma0: 0.92, mg_c0: 2400.0, mg_s: 1.59,
+        // LLNL Explosives Handbook (UCRL-52997) Table 8-7, 'Explosive D', rho0 1.42, CJ P = 16.0 GPa, JWL E0 = 5.4 GPa (= detonation_energy * rho).
+        // The handbook marks this fit as having no cylinder-test data, i.e. an estimate. It is valid at 1.42 g/cc only.
+        composition: 'Ammonium Picrate', rho: 1420.0, detonation_energy: 3.803e6, det_vel: 6500.0, jwl_A: 300.7e9, jwl_B: 3.94e9, jwl_R1: 4.30, jwl_R2: 1.20, jwl_omega: 0.35,
+        ideal_gamma: 1.40, ideal_rho_0: 1420.0, ideal_e_0: 3.803e6,
+        afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
+        provenance: 'hybrid',
+        category: 'JWL Detonation Gas Presets', reference: 'Dobratz, B. M. LLNL Explosives Handbook UCRL-52997, Table 8-7 (Explosive D, 1.42 g/cc, estimated fit)'
+    },
     'C-4 (Composition 4)': {
         density: 1601.0, youngs_modulus: 5.5e9, poissons_ratio: 0.36, yield_stress: 15.0e6, hardening_modulus: 80.0e6, failure_strain: 0.10, tensile_failure_stress: 4.0e6,
         jc_A: 15.0e6, jc_B: 50.0e6, jc_n: 0.35, jc_C: 0.010, jc_m: 1.00, T_melt: 450.0, T_room: 293.0, Cp: 1300.0, mg_gamma0: 0.90, mg_c0: 2500.0, mg_s: 1.60,
-        composition: 'C-4', rho: 1601.0, detonation_energy: 5.60e6, det_vel: 8193.0, jwl_A: 596.22e9, jwl_B: 13.75e9, jwl_R1: 4.50, jwl_R2: 1.50, jwl_omega: 0.32,
-        ideal_gamma: 1.40, ideal_rho_0: 1601.0, ideal_e_0: 5.60e6,
+        composition: 'C-4', rho: 1601.0, detonation_energy: 5.621e6, det_vel: 8193.0, jwl_A: 609.77e9, jwl_B: 12.95e9, jwl_R1: 4.50, jwl_R2: 1.40, jwl_omega: 0.25,
+        ideal_gamma: 1.40, ideal_rho_0: 1601.0, ideal_e_0: 5.621e6,
         // Real Empirical Afterburn Data (9% polyisobutylene binder aerobic combustion, LLNL UCRL-52997, Ornellas 1982)
         afterburn_enabled: true, afterburn_energy: 8.58e6, afterburn_fuel_fraction: 0.28, afterburn_stoich_ratio: 2.50, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.2e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         category: 'JWL Detonation Gas Presets', reference: 'Lee et al., JWL Equation of State Parameters for High Explosives'
@@ -3380,8 +3707,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Composition B (Comp B)': {
         density: 1717.0, youngs_modulus: 7.2e9, poissons_ratio: 0.34, yield_stress: 35.0e6, hardening_modulus: 70.0e6, failure_strain: 0.15, tensile_failure_stress: 40.0e6,
         jc_A: 35.0e6, jc_B: 70.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 0.72, mg_c0: 2450.0, mg_s: 1.95,
-        composition: 'Comp B', rho: 1717.0, detonation_energy: 5.19e6, det_vel: 7980.0, jwl_A: 524.23e9, jwl_B: 7.678e9, jwl_R1: 4.20, jwl_R2: 1.10, jwl_omega: 0.34,
-        ideal_gamma: 1.40, ideal_rho_0: 1717.0, ideal_e_0: 5.19e6,
+        composition: 'Comp B', rho: 1717.0, detonation_energy: 4.95e6, det_vel: 7980.0, jwl_A: 524.2e9, jwl_B: 7.678e9, jwl_R1: 4.20, jwl_R2: 1.10, jwl_omega: 0.34,
+        ideal_gamma: 1.40, ideal_rho_0: 1717.0, ideal_e_0: 4.95e6,
         // Real Empirical Afterburn Data (60% RDX / 40% TNT calorimetry, Ornellas 1982, Dobratz 1985)
         afterburn_enabled: true, afterburn_energy: 8.31e6, afterburn_fuel_fraction: 0.26, afterburn_stoich_ratio: 2.40, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
@@ -3389,35 +3716,36 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'PETN (Pentaerythritol Tetranitrate)': {
         density: 1770.0, youngs_modulus: 13.5e9, poissons_ratio: 0.30, yield_stress: 38.0e6, hardening_modulus: 240.0e6, failure_strain: 0.04, tensile_failure_stress: 9.0e6,
         jc_A: 38.0e6, jc_B: 110.0e6, jc_n: 0.32, jc_C: 0.010, jc_m: 1.00, T_melt: 414.0, T_room: 293.0, Cp: 1120.0, mg_gamma0: 1.05, mg_c0: 2800.0, mg_s: 1.65,
-        composition: 'PETN', rho: 1770.0, detonation_energy: 6.00e6, det_vel: 8300.0, jwl_A: 625.3e9, jwl_B: 23.29e9, jwl_R1: 5.25, jwl_R2: 1.60, jwl_omega: 0.28,
-        ideal_gamma: 1.40, ideal_rho_0: 1770.0, ideal_e_0: 6.00e6,
+        composition: 'PETN', rho: 1770.0, detonation_energy: 5.706e6, det_vel: 8300.0, jwl_A: 617e9, jwl_B: 16.926e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.25,
+        ideal_gamma: 1.40, ideal_rho_0: 1770.0, ideal_e_0: 5.706e6,
         // Real Empirical Afterburn Data (Nearly oxygen balanced OB = -10.1%, minor heat release, Dobratz 1985)
         afterburn_enabled: true, afterburn_energy: 2.00e6, afterburn_fuel_fraction: 0.08, afterburn_stoich_ratio: 1.50, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
     },
     'HMX (Octogen / EDC37)': {
-        density: 1890.0, youngs_modulus: 18.0e9, poissons_ratio: 0.28, yield_stress: 55.0e6, hardening_modulus: 380.0e6, failure_strain: 0.03, tensile_failure_stress: 14.0e6,
+        density: 1891.0, youngs_modulus: 18.0e9, poissons_ratio: 0.28, yield_stress: 55.0e6, hardening_modulus: 380.0e6, failure_strain: 0.03, tensile_failure_stress: 14.0e6,
         jc_A: 55.0e6, jc_B: 160.0e6, jc_n: 0.28, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1020.0, mg_gamma0: 1.15, mg_c0: 3000.0, mg_s: 1.70,
-        composition: 'HMX', rho: 1890.0, detonation_energy: 6.20e6, det_vel: 9110.0, jwl_A: 778.3e9, jwl_B: 7.071e9, jwl_R1: 4.20, jwl_R2: 1.00, jwl_omega: 0.30,
-        ideal_gamma: 1.40, ideal_rho_0: 1890.0, ideal_e_0: 6.20e6,
+        composition: 'HMX', rho: 1891.0, detonation_energy: 5.553e6, det_vel: 9110.0, jwl_A: 778.3e9, jwl_B: 7.071e9, jwl_R1: 4.20, jwl_R2: 1.00, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1891.0, ideal_e_0: 5.553e6,
         // NO AFTERBURN DATA AVAILABLE: Afterburn explicitly disabled (zero afterburn)
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'LASL Explosive Property Data'
     },
     'RDX (Hexogen / Cyclonite)': {
+        // HYBRID FIT (not a published set): LLNL Explosives Handbook UCRL-52997 has no pure-RDX JWL. A,B were solved so the CJ state matches handbook D(1.80 g/cc) = 8775 m/s (interpolated from D = 8.70 at 1.77 and 8.80 at 1.81 km/s) and Pcj = 35.0 GPa (handbook measured 33.8 GPa at 1.767 g/cc, scaled by rho*D^2). E0 = 10.1 GPa comes from cylinder-energy similarity to PETN/Cyclotol (RDX Ecyl 1.60 MJ/kg). R1,R2,omega are the mean of the neighbouring handbook sets (PETN, HMX, C-4, Cyclotol). The cylinder test does not pin B/R2/omega: alternative fits fall within about 5% in released energy.
         density: 1800.0, youngs_modulus: 15.0e9, poissons_ratio: 0.29, yield_stress: 42.0e6, hardening_modulus: 270.0e6, failure_strain: 0.03, tensile_failure_stress: 10.5e6,
         jc_A: 42.0e6, jc_B: 130.0e6, jc_n: 0.31, jc_C: 0.010, jc_m: 1.00, T_melt: 477.0, T_room: 293.0, Cp: 1070.0, mg_gamma0: 1.10, mg_c0: 2840.0, mg_s: 1.67,
-        composition: 'RDX', rho: 1800.0, detonation_energy: 5.80e6, det_vel: 8750.0, jwl_A: 611.3e9, jwl_B: 10.65e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.32,
-        ideal_gamma: 1.40, ideal_rho_0: 1800.0, ideal_e_0: 5.80e6,
+        composition: 'RDX', rho: 1800.0, detonation_energy: 5.611e6, det_vel: 8775.0, jwl_A: 799.9e9, jwl_B: 7.59e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1800.0, ideal_e_0: 5.611e6,
         // Real Empirical Afterburn Data (OB = -21.6%, LLNL UCRL-52997, Ornellas 1982)
         afterburn_enabled: true, afterburn_energy: 5.60e6, afterburn_fuel_fraction: 0.18, afterburn_stoich_ratio: 2.10, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
-        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
+        category: 'JWL Detonation Gas Presets', provenance: 'hybrid', reference: 'Fitted to LLNL Explosives Handbook UCRL-52997 RDX D, Pcj and cylinder-energy data (see comment)'
     },
     'PBX 9501': {
-        density: 1830.0, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 45.0e6, hardening_modulus: 90.0e6, failure_strain: 0.10, tensile_failure_stress: 55.0e6,
+        density: 1840.0, youngs_modulus: 9.0e9, poissons_ratio: 0.35, yield_stress: 45.0e6, hardening_modulus: 90.0e6, failure_strain: 0.10, tensile_failure_stress: 55.0e6,
         jc_A: 45.0e6, jc_B: 90.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1080.0, mg_gamma0: 0.68, mg_c0: 2600.0, mg_s: 1.90,
-        composition: 'PBX 9501', rho: 1830.0, detonation_energy: 5.50e6, det_vel: 8800.0, jwl_A: 852.4e9, jwl_B: 18.02e9, jwl_R1: 4.55, jwl_R2: 1.30, jwl_omega: 0.38,
-        ideal_gamma: 1.40, ideal_rho_0: 1830.0, ideal_e_0: 5.50e6,
+        composition: 'PBX 9501', rho: 1840.0, detonation_energy: 5.543e6, det_vel: 8800.0, jwl_A: 852.4e9, jwl_B: 18.02e9, jwl_R1: 4.55, jwl_R2: 1.30, jwl_omega: 0.38,
+        ideal_gamma: 1.40, ideal_rho_0: 1840.0, ideal_e_0: 5.543e6,
         // NO AFTERBURN DATA AVAILABLE: Afterburn explicitly disabled (zero afterburn)
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'LASL Explosive Property Data'
@@ -3425,143 +3753,83 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'PBX 9502': {
         density: 1895.0, youngs_modulus: 10.0e9, poissons_ratio: 0.35, yield_stress: 50.0e6, hardening_modulus: 100.0e6, failure_strain: 0.10, tensile_failure_stress: 60.0e6,
         jc_A: 50.0e6, jc_B: 100.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 623.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.65, mg_c0: 2050.0, mg_s: 2.12,
-        composition: 'PBX 9502', rho: 1895.0, detonation_energy: 4.20e6, det_vel: 7720.0, jwl_A: 559.0e9, jwl_B: 8.44e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
-        ideal_gamma: 1.40, ideal_rho_0: 1895.0, ideal_e_0: 4.20e6,
+        // LLNL Explosives Handbook (UCRL-52997) Table 8-7, PBX-9502, rho0 1.895, CJ P = 30.2 GPa, JWL E0 = 7.07 GPa (= detonation_energy * rho)
+        composition: 'PBX 9502', rho: 1895.0, detonation_energy: 3.731e6, det_vel: 7710.0, jwl_A: 460.3e9, jwl_B: 9.114e9, jwl_R1: 4.00, jwl_R2: 1.70, jwl_omega: 0.48,
+        ideal_gamma: 1.40, ideal_rho_0: 1895.0, ideal_e_0: 3.731e6,
         // NO AFTERBURN DATA AVAILABLE: Afterburn explicitly disabled (zero afterburn)
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
     },
     'LX-04': {
-        density: 1860.0, youngs_modulus: 8.5e9, poissons_ratio: 0.35, yield_stress: 40.0e6, hardening_modulus: 85.0e6, failure_strain: 0.10, tensile_failure_stress: 48.0e6,
+        density: 1865.0, youngs_modulus: 8.5e9, poissons_ratio: 0.35, yield_stress: 40.0e6, hardening_modulus: 85.0e6, failure_strain: 0.10, tensile_failure_stress: 48.0e6,
         jc_A: 40.0e6, jc_B: 85.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1060.0, mg_gamma0: 0.70, mg_c0: 2580.0, mg_s: 1.88,
-        composition: 'LX-04', rho: 1860.0, detonation_energy: 5.30e6, det_vel: 8400.0, jwl_A: 742.0e9, jwl_B: 11.20e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
-        ideal_gamma: 1.40, ideal_rho_0: 1860.0, ideal_e_0: 5.30e6,
+        composition: 'LX-04', rho: 1865.0, detonation_energy: 5.094e6, det_vel: 8470.0, jwl_A: 836.4e9, jwl_B: 12.98e9, jwl_R1: 4.62, jwl_R2: 1.25, jwl_omega: 0.42,
+        ideal_gamma: 1.40, ideal_rho_0: 1865.0, ideal_e_0: 5.094e6,
         // NO AFTERBURN DATA AVAILABLE: Afterburn explicitly disabled (zero afterburn)
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook'
     },
     'LX-07': {
-        density: 1860.0, youngs_modulus: 8.6e9, poissons_ratio: 0.35, yield_stress: 42.0e6, hardening_modulus: 86.0e6, failure_strain: 0.10, tensile_failure_stress: 50.0e6,
+        density: 1865.0, youngs_modulus: 8.6e9, poissons_ratio: 0.35, yield_stress: 42.0e6, hardening_modulus: 86.0e6, failure_strain: 0.10, tensile_failure_stress: 50.0e6,
         jc_A: 42.0e6, jc_B: 86.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1060.0, mg_gamma0: 0.70, mg_c0: 2600.0, mg_s: 1.88,
-        composition: 'LX-07', rho: 1860.0, detonation_energy: 5.50e6, det_vel: 8600.0, jwl_A: 785.0e9, jwl_B: 12.50e9, jwl_R1: 4.45, jwl_R2: 1.15, jwl_omega: 0.32,
-        ideal_gamma: 1.40, ideal_rho_0: 1860.0, ideal_e_0: 5.50e6,
+        composition: 'LX-07', rho: 1865.0, detonation_energy: 5.362e6, det_vel: 8640.0, jwl_A: 871e9, jwl_B: 13.9e9, jwl_R1: 4.60, jwl_R2: 1.15, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1865.0, ideal_e_0: 5.362e6,
         // NO AFTERBURN DATA AVAILABLE: Afterburn explicitly disabled (zero afterburn)
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook'
     },
     'LX-10': {
-        density: 1860.0, youngs_modulus: 8.8e9, poissons_ratio: 0.35, yield_stress: 43.0e6, hardening_modulus: 88.0e6, failure_strain: 0.10, tensile_failure_stress: 51.0e6,
+        density: 1865.0, youngs_modulus: 8.8e9, poissons_ratio: 0.35, yield_stress: 43.0e6, hardening_modulus: 88.0e6, failure_strain: 0.10, tensile_failure_stress: 51.0e6,
         jc_A: 43.0e6, jc_B: 88.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1060.0, mg_gamma0: 0.70, mg_c0: 2610.0, mg_s: 1.88,
-        composition: 'LX-10', rho: 1860.0, detonation_energy: 5.80e6, det_vel: 8820.0, jwl_A: 830.0e9, jwl_B: 15.00e9, jwl_R1: 4.50, jwl_R2: 1.10, jwl_omega: 0.38,
-        ideal_gamma: 1.40, ideal_rho_0: 1860.0, ideal_e_0: 5.80e6,
+        composition: 'LX-10', rho: 1865.0, detonation_energy: 5.576e6, det_vel: 8820.0, jwl_A: 880.7e9, jwl_B: 18.36e9, jwl_R1: 4.62, jwl_R2: 1.32, jwl_omega: 0.38,
+        ideal_gamma: 1.40, ideal_rho_0: 1865.0, ideal_e_0: 5.576e6,
         // NO AFTERBURN DATA AVAILABLE: Afterburn explicitly disabled (zero afterburn)
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook'
     },
     'LX-14': {
-        density: 1830.0, youngs_modulus: 8.8e9, poissons_ratio: 0.35, yield_stress: 44.0e6, hardening_modulus: 88.0e6, failure_strain: 0.10, tensile_failure_stress: 52.0e6,
+        density: 1835.0, youngs_modulus: 8.8e9, poissons_ratio: 0.35, yield_stress: 44.0e6, hardening_modulus: 88.0e6, failure_strain: 0.10, tensile_failure_stress: 52.0e6,
         jc_A: 44.0e6, jc_B: 88.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1060.0, mg_gamma0: 0.70, mg_c0: 2620.0, mg_s: 1.88,
-        composition: 'LX-14', rho: 1830.0, detonation_energy: 5.95e6, det_vel: 8830.0, jwl_A: 826.1e9, jwl_B: 17.24e9, jwl_R1: 4.55, jwl_R2: 1.32, jwl_omega: 0.38,
-        ideal_gamma: 1.40, ideal_rho_0: 1830.0, ideal_e_0: 5.95e6,
+        composition: 'LX-14', rho: 1835.0, detonation_energy: 5.559e6, det_vel: 8800.0, jwl_A: 826.1e9, jwl_B: 17.24e9, jwl_R1: 4.55, jwl_R2: 1.32, jwl_omega: 0.38,
+        ideal_gamma: 1.40, ideal_rho_0: 1835.0, ideal_e_0: 5.559e6,
         // NO AFTERBURN DATA AVAILABLE: Afterburn explicitly disabled (zero afterburn)
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook'
     },
     'LX-17': {
-        density: 1905.0, youngs_modulus: 10.5e9, poissons_ratio: 0.35, yield_stress: 52.0e6, hardening_modulus: 105.0e6, failure_strain: 0.10, tensile_failure_stress: 62.0e6,
+        density: 1900.0, youngs_modulus: 10.5e9, poissons_ratio: 0.35, yield_stress: 52.0e6, hardening_modulus: 105.0e6, failure_strain: 0.10, tensile_failure_stress: 62.0e6,
         jc_A: 52.0e6, jc_B: 105.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 623.0, T_room: 293.0, Cp: 990.0, mg_gamma0: 0.64, mg_c0: 2020.0, mg_s: 2.15,
-        composition: 'LX-17', rho: 1905.0, detonation_energy: 4.10e6, det_vel: 7630.0, jwl_A: 535.0e9, jwl_B: 8.00e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
-        ideal_gamma: 1.40, ideal_rho_0: 1905.0, ideal_e_0: 4.10e6,
+        // LLNL Explosives Handbook (UCRL-52997) Table 8-7, LX-17-0, rho0 1.900, CJ P = 30.0 GPa, JWL E0 = 6.9 GPa (= detonation_energy * rho)
+        composition: 'LX-17', rho: 1900.0, detonation_energy: 3.632e6, det_vel: 7600.0, jwl_A: 446e9, jwl_B: 1.339e9, jwl_R1: 3.85, jwl_R2: 1.03, jwl_omega: 0.46,
+        ideal_gamma: 1.40, ideal_rho_0: 1900.0, ideal_e_0: 3.632e6,
         // NO AFTERBURN DATA AVAILABLE: Afterburn explicitly disabled (zero afterburn)
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook'
     },
-    'ANFO (Ammonium Nitrate / Fuel Oil)': {
-        density: 880.0, youngs_modulus: 1.5e9, poissons_ratio: 0.40, yield_stress: 2.0e6, hardening_modulus: 10.0e6, failure_strain: 0.25, tensile_failure_stress: 0.5e6,
-        jc_A: 2.0e6, jc_B: 8.0e6, jc_n: 0.45, jc_C: 0.020, jc_m: 1.00, T_melt: 442.0, T_room: 293.0, Cp: 1600.0, mg_gamma0: 0.50, mg_c0: 1500.0, mg_s: 1.40,
-        composition: 'ANFO', rho: 880.0, detonation_energy: 3.70e6, det_vel: 4560.0, jwl_A: 49.46e9, jwl_B: 1.891e9, jwl_R1: 3.90, jwl_R2: 1.10, jwl_omega: 0.33,
-        ideal_gamma: 1.40, ideal_rho_0: 880.0, ideal_e_0: 3.70e6,
-        // Stoichiometric Oxygen-Balanced (OB ~ 0%): Secondary afterburn negligible (explicitly zeroed)
-        afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_oxygen_balanced',
-        category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
-    },
-    'Aluminized ANFO': {
-        density: 1050.0, youngs_modulus: 2.0e9, poissons_ratio: 0.38, yield_stress: 3.0e6, hardening_modulus: 15.0e6, failure_strain: 0.20, tensile_failure_stress: 1.0e6,
-        jc_A: 3.0e6, jc_B: 10.0e6, jc_n: 0.40, jc_C: 0.020, jc_m: 1.00, T_melt: 442.0, T_room: 293.0, Cp: 1550.0, mg_gamma0: 0.55, mg_c0: 1650.0, mg_s: 1.45,
-        composition: 'Aluminized ANFO', rho: 1050.0, detonation_energy: 4.10e6, det_vel: 4900.0, jwl_A: 76.5e9, jwl_B: 1.85e9, jwl_R1: 4.15, jwl_R2: 1.15, jwl_omega: 0.30,
-        ideal_gamma: 1.40, ideal_rho_0: 1050.0, ideal_e_0: 4.10e6,
-        // Real Empirical Afterburn Data (Aluminum secondary oxidation in air, Cook 1958)
-        afterburn_enabled: true, afterburn_energy: 1.20e7, afterburn_fuel_fraction: 0.30, afterburn_stoich_ratio: 2.20, afterburn_ignition_temp: 950.0, afterburn_tau_chem: 2.5e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
-        category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
-    },
-    'Heavy ANFO': {
-        density: 1250.0, youngs_modulus: 2.5e9, poissons_ratio: 0.38, yield_stress: 4.0e6, hardening_modulus: 20.0e6, failure_strain: 0.18, tensile_failure_stress: 1.5e6,
-        jc_A: 4.0e6, jc_B: 12.0e6, jc_n: 0.40, jc_C: 0.020, jc_m: 1.00, T_melt: 442.0, T_room: 293.0, Cp: 1500.0, mg_gamma0: 0.52, mg_c0: 1700.0, mg_s: 1.45,
-        composition: 'Heavy ANFO', rho: 1250.0, detonation_energy: 3.50e6, det_vel: 5000.0, jwl_A: 198.0e9, jwl_B: 1.45e9, jwl_R1: 4.30, jwl_R2: 1.00, jwl_omega: 0.20,
-        ideal_gamma: 1.40, ideal_rho_0: 1250.0, ideal_e_0: 3.50e6,
-        // Stoichiometric Oxygen-Balanced (OB ~ 0%): Secondary afterburn negligible (explicitly zeroed)
-        afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_oxygen_balanced',
-        category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
-    },
-    'Ammonal': {
-        density: 1600.0, youngs_modulus: 4.0e9, poissons_ratio: 0.36, yield_stress: 10.0e6, hardening_modulus: 40.0e6, failure_strain: 0.15, tensile_failure_stress: 3.0e6,
-        jc_A: 10.0e6, jc_B: 30.0e6, jc_n: 0.35, jc_C: 0.015, jc_m: 1.00, T_melt: 442.0, T_room: 293.0, Cp: 1400.0, mg_gamma0: 0.60, mg_c0: 2000.0, mg_s: 1.50,
-        composition: 'Ammonal', rho: 1600.0, detonation_energy: 4.40e6, det_vel: 5400.0, jwl_A: 125.0e9, jwl_B: 2.50e9, jwl_R1: 4.00, jwl_R2: 1.00, jwl_omega: 0.25,
-        ideal_gamma: 1.40, ideal_rho_0: 1600.0, ideal_e_0: 4.40e6,
-        // Real Empirical Afterburn Data (20% Al powder aerobic fireball combustion, Neuwald et al. 2003)
-        afterburn_enabled: true, afterburn_energy: 1.50e7, afterburn_fuel_fraction: 0.38, afterburn_stoich_ratio: 2.60, afterburn_ignition_temp: 920.0, afterburn_tau_chem: 2.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
-        category: 'JWL Detonation Gas Presets', reference: 'Demolition Range Reference'
-    },
-    'Tritonal (80% TNT / 20% Al)': {
-        density: 1720.0, youngs_modulus: 8.0e9, poissons_ratio: 0.33, yield_stress: 25.0e6, hardening_modulus: 150.0e6, failure_strain: 0.08, tensile_failure_stress: 6.0e6,
-        jc_A: 25.0e6, jc_B: 80.0e6, jc_n: 0.35, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1180.0, mg_gamma0: 0.95, mg_c0: 2550.0, mg_s: 1.62,
-        composition: 'Tritonal', rho: 1720.0, detonation_energy: 5.40e6, det_vel: 6700.0, jwl_A: 400.0e9, jwl_B: 4.50e9, jwl_R1: 4.10, jwl_R2: 0.95, jwl_omega: 0.32,
-        ideal_gamma: 1.40, ideal_rho_0: 1720.0, ideal_e_0: 5.40e6,
-        // Real Empirical Afterburn Data (Aluminum secondary aerobic combustion, AFATL, Neuwald et al. 2003)
-        afterburn_enabled: true, afterburn_energy: 1.80e7, afterburn_fuel_fraction: 0.45, afterburn_stoich_ratio: 2.80, afterburn_ignition_temp: 900.0, afterburn_tau_chem: 2.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
-        category: 'JWL Detonation Gas Presets', reference: 'Air Force Armament Laboratory Tritonal Data'
-    },
     'Pentolite 50/50': {
-        density: 1650.0, youngs_modulus: 9.0e9, poissons_ratio: 0.32, yield_stress: 28.0e6, hardening_modulus: 160.0e6, failure_strain: 0.06, tensile_failure_stress: 7.0e6,
+        density: 1700.0, youngs_modulus: 9.0e9, poissons_ratio: 0.32, yield_stress: 28.0e6, hardening_modulus: 160.0e6, failure_strain: 0.06, tensile_failure_stress: 7.0e6,
         jc_A: 28.0e6, jc_B: 85.0e6, jc_n: 0.33, jc_C: 0.010, jc_m: 1.00, T_melt: 373.0, T_room: 293.0, Cp: 1200.0, mg_gamma0: 0.98, mg_c0: 2600.0, mg_s: 1.60,
-        composition: 'Pentolite 50/50', rho: 1650.0, detonation_energy: 5.10e6, det_vel: 7470.0, jwl_A: 540.0e9, jwl_B: 9.20e9, jwl_R1: 4.50, jwl_R2: 1.40, jwl_omega: 0.35,
-        ideal_gamma: 1.40, ideal_rho_0: 1650.0, ideal_e_0: 5.10e6,
+        composition: 'Pentolite 50/50', rho: 1700.0, detonation_energy: 4.765e6, det_vel: 7530.0, jwl_A: 540.94e9, jwl_B: 9.3726e9, jwl_R1: 4.50, jwl_R2: 1.10, jwl_omega: 0.35,
+        ideal_gamma: 1.40, ideal_rho_0: 1700.0, ideal_e_0: 4.765e6,
         // Real Empirical Afterburn Data (50% PETN / 50% TNT, LASL Data, Ornellas 1982)
         afterburn_enabled: true, afterburn_energy: 6.35e6, afterburn_fuel_fraction: 0.22, afterburn_stoich_ratio: 2.08, afterburn_ignition_temp: 810.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         category: 'JWL Detonation Gas Presets', reference: 'LASL Explosive Property Data'
     },
-    'Semtex 1A': {
-        density: 1540.0, youngs_modulus: 4.5e9, poissons_ratio: 0.38, yield_stress: 12.0e6, hardening_modulus: 60.0e6, failure_strain: 0.12, tensile_failure_stress: 3.5e6,
-        jc_A: 12.0e6, jc_B: 40.0e6, jc_n: 0.36, jc_C: 0.015, jc_m: 1.00, T_melt: 414.0, T_room: 293.0, Cp: 1350.0, mg_gamma0: 0.88, mg_c0: 2380.0, mg_s: 1.64,
-        composition: 'Semtex 1A', rho: 1540.0, detonation_energy: 5.40e6, det_vel: 7900.0, jwl_A: 510.0e9, jwl_B: 11.50e9, jwl_R1: 4.40, jwl_R2: 1.30, jwl_omega: 0.32,
-        ideal_gamma: 1.40, ideal_rho_0: 1540.0, ideal_e_0: 5.40e6,
-        // Real Empirical Afterburn Data (76% PETN, 4.6% RDX, plasticizer, Explosia a.s.)
-        afterburn_enabled: true, afterburn_energy: 3.20e6, afterburn_fuel_fraction: 0.12, afterburn_stoich_ratio: 1.65, afterburn_ignition_temp: 810.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
-        category: 'JWL Detonation Gas Presets', reference: 'Explosia a.s. Technical Data'
-    },
     'Tetryl': {
         density: 1730.0, youngs_modulus: 11.0e9, poissons_ratio: 0.31, yield_stress: 32.0e6, hardening_modulus: 180.0e6, failure_strain: 0.05, tensile_failure_stress: 8.0e6,
         jc_A: 32.0e6, jc_B: 95.0e6, jc_n: 0.32, jc_C: 0.010, jc_m: 1.00, T_melt: 402.0, T_room: 293.0, Cp: 1150.0, mg_gamma0: 0.95, mg_c0: 2700.0, mg_s: 1.65,
-        composition: 'Tetryl', rho: 1730.0, detonation_energy: 4.23e6, det_vel: 7570.0, jwl_A: 510.9e9, jwl_B: 8.44e9, jwl_R1: 4.50, jwl_R2: 1.40, jwl_omega: 0.25,
-        ideal_gamma: 1.40, ideal_rho_0: 1730.0, ideal_e_0: 4.23e6,
+        // LLNL Explosives Handbook (UCRL-52997) Table 8-7, Tetryl, rho0 1.73, CJ P = 28.5 GPa, JWL E0 = 8.2 GPa (= detonation_energy * rho)
+        composition: 'Tetryl', rho: 1730.0, detonation_energy: 4.74e6, det_vel: 7910.0, jwl_A: 586.8e9, jwl_B: 10.671e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.18,
+        ideal_gamma: 1.40, ideal_rho_0: 1730.0, ideal_e_0: 4.74e6,
         // Real Empirical Afterburn Data (Oxygen-deficient aromatic explosive OB = -47.4%, Dobratz 1985)
         afterburn_enabled: true, afterburn_energy: 7.80e6, afterburn_fuel_fraction: 0.25, afterburn_stoich_ratio: 2.30, afterburn_ignition_temp: 830.0, afterburn_tau_chem: 1.1e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
     },
-    'Mining Emulsion': {
-        density: 1150.0, youngs_modulus: 2.2e9, poissons_ratio: 0.38, yield_stress: 3.5e6, hardening_modulus: 18.0e6, failure_strain: 0.20, tensile_failure_stress: 1.2e6,
-        jc_A: 3.5e6, jc_B: 11.0e6, jc_n: 0.40, jc_C: 0.020, jc_m: 1.00, T_melt: 360.0, T_room: 293.0, Cp: 1550.0, mg_gamma0: 0.54, mg_c0: 1600.0, mg_s: 1.45,
-        composition: 'Mining Emulsion', rho: 1150.0, detonation_energy: 3.20e6, det_vel: 5300.0, jwl_A: 215.0e9, jwl_B: 1.76e9, jwl_R1: 4.45, jwl_R2: 1.05, jwl_omega: 0.15,
-        ideal_gamma: 1.40, ideal_rho_0: 1150.0, ideal_e_0: 3.20e6,
-        // Stoichiometric Oxygen-Balanced aqueous emulsion: Secondary afterburn negligible (explicitly zeroed)
-        afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_oxygen_balanced',
-        category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
-    },
     'Nitromethane': {
         density: 1128.0, youngs_modulus: 2.0e9, poissons_ratio: 0.45, yield_stress: 1.0e6, hardening_modulus: 5.0e6, failure_strain: 0.50, tensile_failure_stress: 0.5e6,
         jc_A: 1.0e6, jc_B: 5.0e6, jc_n: 0.10, jc_C: 0.010, jc_m: 1.00, T_melt: 244.0, T_room: 293.0, Cp: 1730.0, mg_gamma0: 0.90, mg_c0: 1650.0, mg_s: 1.63,
-        composition: 'Nitromethane', rho: 1128.0, detonation_energy: 4.48e6, det_vel: 6280.0, jwl_A: 209.2e9, jwl_B: 5.689e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
-        ideal_gamma: 1.40, ideal_rho_0: 1128.0, ideal_e_0: 4.48e6,
+        composition: 'Nitromethane', rho: 1128.0, detonation_energy: 4.521e6, det_vel: 6280.0, jwl_A: 209.2e9, jwl_B: 5.689e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1128.0, ideal_e_0: 4.521e6,
         // NO AFTERBURN DATA AVAILABLE: Afterburn explicitly disabled (zero afterburn)
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'Lee et al., JWL Equation of State Parameters for High Explosives / LLNL'
@@ -3569,129 +3837,107 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Nitromethane (Liquid HE)': {
         density: 1128.0, youngs_modulus: 2.0e9, poissons_ratio: 0.45, yield_stress: 1.0e6, hardening_modulus: 5.0e6, failure_strain: 0.50, tensile_failure_stress: 0.5e6,
         jc_A: 1.0e6, jc_B: 5.0e6, jc_n: 0.10, jc_C: 0.010, jc_m: 1.00, T_melt: 244.0, T_room: 293.0, Cp: 1730.0, mg_gamma0: 0.90, mg_c0: 1650.0, mg_s: 1.63,
-        composition: 'Nitromethane', rho: 1128.0, detonation_energy: 4.48e6, det_vel: 6280.0, jwl_A: 209.2e9, jwl_B: 5.689e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
-        ideal_gamma: 1.40, ideal_rho_0: 1128.0, ideal_e_0: 4.48e6,
+        composition: 'Nitromethane', rho: 1128.0, detonation_energy: 4.521e6, det_vel: 6280.0, jwl_A: 209.2e9, jwl_B: 5.689e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1128.0, ideal_e_0: 4.521e6,
         // NO AFTERBURN DATA AVAILABLE: Afterburn explicitly disabled (zero afterburn)
         afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'Lee et al., JWL Equation of State Parameters for High Explosives / LLNL'
-    },
-    'Water Gel': {
-        density: 1200.0, youngs_modulus: 2.4e9, poissons_ratio: 0.38, yield_stress: 3.8e6, hardening_modulus: 19.0e6, failure_strain: 0.19, tensile_failure_stress: 1.4e6,
-        jc_A: 3.8e6, jc_B: 11.5e6, jc_n: 0.40, jc_C: 0.020, jc_m: 1.00, T_melt: 360.0, T_room: 293.0, Cp: 1580.0, mg_gamma0: 0.53, mg_c0: 1650.0, mg_s: 1.45,
-        composition: 'Water Gel', rho: 1200.0, detonation_energy: 3.40e6, det_vel: 4800.0, jwl_A: 154.0e9, jwl_B: 2.15e9, jwl_R1: 4.30, jwl_R2: 1.10, jwl_omega: 0.25,
-        ideal_gamma: 1.40, ideal_rho_0: 1200.0, ideal_e_0: 3.40e6,
-        // Stoichiometric aqueous gel: Secondary afterburn negligible (explicitly zeroed)
-        afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_oxygen_balanced',
-        category: 'JWL Detonation Gas Presets', reference: 'Commercial Mining Explosives Data'
     },
     // Ideal Gas Blast Equivalents
     'TNT (Ideal Gas Equivalent)': {
         density: 1630.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
         jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'TNT', rho: 1630.0, ideal_gamma: 1.40, ideal_rho_0: 1630.0, ideal_e_0: 4.29e6, category: 'Ideal Gas Blast Presets', reference: 'Standard TNT Equivalence'
+        composition: 'TNT', rho: 1630.0, ideal_gamma: 1.40, ideal_rho_0: 1630.0, ideal_e_0: 4.294e6, category: 'Ideal Gas Blast Presets', reference: 'Standard TNT Equivalence'
     },
     'C-4 (Ideal Gas Equivalent)': {
         density: 1601.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
         jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'C-4', rho: 1601.0, ideal_gamma: 1.40, ideal_rho_0: 1601.0, ideal_e_0: 5.60e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
+        composition: 'C-4', rho: 1601.0, ideal_gamma: 1.40, ideal_rho_0: 1601.0, ideal_e_0: 5.621e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
     },
     'Composition B (Ideal Gas Equivalent)': {
         density: 1717.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
         jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'Composition B', rho: 1717.0, ideal_gamma: 1.40, ideal_rho_0: 1717.0, ideal_e_0: 5.19e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
+        composition: 'Composition B', rho: 1717.0, ideal_gamma: 1.40, ideal_rho_0: 1717.0, ideal_e_0: 4.95e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
     },
     'PETN (Ideal Gas Equivalent)': {
         density: 1770.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
         jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'PETN', rho: 1770.0, ideal_gamma: 1.40, ideal_rho_0: 1770.0, ideal_e_0: 5.80e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
+        composition: 'PETN', rho: 1770.0, ideal_gamma: 1.40, ideal_rho_0: 1770.0, ideal_e_0: 5.706e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
     },
     'HMX (Ideal Gas Equivalent)': {
         density: 1891.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
         jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'HMX', rho: 1891.0, ideal_gamma: 1.40, ideal_rho_0: 1891.0, ideal_e_0: 5.53e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
+        composition: 'HMX', rho: 1891.0, ideal_gamma: 1.40, ideal_rho_0: 1891.0, ideal_e_0: 5.553e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
     },
     'RDX (Ideal Gas Equivalent)': {
         density: 1800.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
         jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'RDX', rho: 1800.0, ideal_gamma: 1.40, ideal_rho_0: 1800.0, ideal_e_0: 5.36e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
+        composition: 'RDX', rho: 1800.0, ideal_gamma: 1.40, ideal_rho_0: 1800.0, ideal_e_0: 5.611e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
     },
     'PBX 9501 (Ideal Gas Equivalent)': {
-        density: 1838.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
+        density: 1840.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
         jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'PBX 9501', rho: 1838.0, ideal_gamma: 1.40, ideal_rho_0: 1838.0, ideal_e_0: 5.07e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
+        composition: 'PBX 9501', rho: 1840.0, ideal_gamma: 1.40, ideal_rho_0: 1840.0, ideal_e_0: 5.543e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
     },
     'PBX 9502 (Ideal Gas Equivalent)': {
         density: 1895.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
         jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'PBX 9502', rho: 1895.0, ideal_gamma: 1.40, ideal_rho_0: 1895.0, ideal_e_0: 4.10e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
-    },
-    'ANFO (Ideal Gas Equivalent)': {
-        density: 930.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
-        jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'ANFO', rho: 930.0, ideal_gamma: 1.40, ideal_rho_0: 930.0, ideal_e_0: 3.70e6, category: 'Ideal Gas Blast Presets', reference: 'Mining Explosives Data'
-    },
-    'Aluminized ANFO (Ideal Gas Equivalent)': {
-        density: 1050.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
-        jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'Aluminized ANFO', rho: 1050.0, ideal_gamma: 1.40, ideal_rho_0: 1050.0, ideal_e_0: 4.10e6, category: 'Ideal Gas Blast Presets', reference: 'Commercial ANFO Data'
-    },
-    'Ammonal (Ideal Gas Equivalent)': {
-        density: 1600.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
-        jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'Ammonal', rho: 1600.0, ideal_gamma: 1.40, ideal_rho_0: 1600.0, ideal_e_0: 4.40e6, category: 'Ideal Gas Blast Presets', reference: 'Military Explosives Compendium'
+        composition: 'PBX 9502', rho: 1895.0, ideal_gamma: 1.40, ideal_rho_0: 1895.0, ideal_e_0: 3.731e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
     },
     'Nitromethane (Ideal Gas Equivalent)': {
         density: 1128.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
         jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'Nitromethane', rho: 1128.0, ideal_gamma: 1.40, ideal_rho_0: 1128.0, ideal_e_0: 4.48e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
-    },
-    'Tritonal (Ideal Gas Equivalent)': {
-        density: 1730.0, youngs_modulus: 1.0e9, poissons_ratio: 0.35, yield_stress: 1.0e6, hardening_modulus: 0.0, failure_strain: 1.0, tensile_failure_stress: 1.0e6,
-        jc_A: 1.0e6, jc_B: 0.0, jc_n: 0.0, jc_C: 0.0, jc_m: 1.0, T_melt: 1000.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 1.40, mg_c0: 340.0, mg_s: 0.0,
-        composition: 'Tritonal', rho: 1730.0, ideal_gamma: 1.40, ideal_rho_0: 1730.0, ideal_e_0: 4.70e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
+        composition: 'Nitromethane', rho: 1128.0, ideal_gamma: 1.40, ideal_rho_0: 1128.0, ideal_e_0: 4.521e6, category: 'Ideal Gas Blast Presets', reference: 'LLNL High-Explosives Data'
     },
     // Composition short-name aliases for robust lookups across legacy/solver keys
     'TNT': {
         density: 1630.0, youngs_modulus: 6.0e9, poissons_ratio: 0.35, yield_stress: 20.0e6, hardening_modulus: 120.0e6, failure_strain: 0.07, tensile_failure_stress: 5.0e6,
         jc_A: 20.0e6, jc_B: 60.0e6, jc_n: 0.38, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1260.0, mg_gamma0: 0.92, mg_c0: 2470.0, mg_s: 1.59,
-        composition: 'TNT', rho: 1630.0, detonation_energy: 4.29e6, det_vel: 6930.0, jwl_A: 373.77e9, jwl_B: 3.747e9, jwl_R1: 4.15, jwl_R2: 0.90, jwl_omega: 0.35,
-        ideal_gamma: 1.40, ideal_rho_0: 1630.0, ideal_e_0: 4.29e6,
+        composition: 'TNT', rho: 1630.0, detonation_energy: 4.294e6, det_vel: 6930.0, jwl_A: 371.2e9, jwl_B: 3.231e9, jwl_R1: 4.15, jwl_R2: 0.95, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1630.0, ideal_e_0: 4.294e6,
+        afterburn_enabled: true, afterburn_energy: 1.071e7, afterburn_fuel_fraction: 0.35, afterburn_stoich_ratio: 2.67, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         category: 'JWL Detonation Gas Presets', reference: 'Dobratz, B. M. LLNL Explosives Handbook UCRL-52997'
     },
     'C-4': {
         density: 1601.0, youngs_modulus: 5.5e9, poissons_ratio: 0.36, yield_stress: 15.0e6, hardening_modulus: 80.0e6, failure_strain: 0.10, tensile_failure_stress: 4.0e6,
         jc_A: 15.0e6, jc_B: 50.0e6, jc_n: 0.35, jc_C: 0.010, jc_m: 1.00, T_melt: 450.0, T_room: 293.0, Cp: 1300.0, mg_gamma0: 0.90, mg_c0: 2500.0, mg_s: 1.60,
-        composition: 'C-4', rho: 1601.0, detonation_energy: 5.60e6, det_vel: 8193.0, jwl_A: 596.22e9, jwl_B: 13.75e9, jwl_R1: 4.50, jwl_R2: 1.50, jwl_omega: 0.32,
-        ideal_gamma: 1.40, ideal_rho_0: 1601.0, ideal_e_0: 5.60e6,
+        composition: 'C-4', rho: 1601.0, detonation_energy: 5.621e6, det_vel: 8193.0, jwl_A: 609.77e9, jwl_B: 12.95e9, jwl_R1: 4.50, jwl_R2: 1.40, jwl_omega: 0.25,
+        ideal_gamma: 1.40, ideal_rho_0: 1601.0, ideal_e_0: 5.621e6,
+        afterburn_enabled: true, afterburn_energy: 8.58e6, afterburn_fuel_fraction: 0.28, afterburn_stoich_ratio: 2.50, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.2e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         category: 'JWL Detonation Gas Presets', reference: 'Lee et al., JWL Equation of State Parameters for High Explosives'
     },
     'Composition B': {
         density: 1717.0, youngs_modulus: 7.2e9, poissons_ratio: 0.34, yield_stress: 35.0e6, hardening_modulus: 70.0e6, failure_strain: 0.15, tensile_failure_stress: 40.0e6,
         jc_A: 35.0e6, jc_B: 70.0e6, jc_n: 0.30, jc_C: 0.010, jc_m: 1.00, T_melt: 354.0, T_room: 293.0, Cp: 1050.0, mg_gamma0: 0.72, mg_c0: 2450.0, mg_s: 1.95,
-        composition: 'Comp B', rho: 1717.0, detonation_energy: 5.19e6, det_vel: 7980.0, jwl_A: 524.23e9, jwl_B: 7.678e9, jwl_R1: 4.20, jwl_R2: 1.10, jwl_omega: 0.34,
-        ideal_gamma: 1.40, ideal_rho_0: 1717.0, ideal_e_0: 5.19e6,
+        composition: 'Comp B', rho: 1717.0, detonation_energy: 4.95e6, det_vel: 7980.0, jwl_A: 524.2e9, jwl_B: 7.678e9, jwl_R1: 4.20, jwl_R2: 1.10, jwl_omega: 0.34,
+        ideal_gamma: 1.40, ideal_rho_0: 1717.0, ideal_e_0: 4.95e6,
+        afterburn_enabled: true, afterburn_energy: 8.31e6, afterburn_fuel_fraction: 0.26, afterburn_stoich_ratio: 2.40, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
     },
     'PETN': {
         density: 1770.0, youngs_modulus: 13.5e9, poissons_ratio: 0.30, yield_stress: 38.0e6, hardening_modulus: 240.0e6, failure_strain: 0.04, tensile_failure_stress: 9.0e6,
         jc_A: 38.0e6, jc_B: 110.0e6, jc_n: 0.32, jc_C: 0.010, jc_m: 1.00, T_melt: 414.0, T_room: 293.0, Cp: 1120.0, mg_gamma0: 1.05, mg_c0: 2800.0, mg_s: 1.65,
-        composition: 'PETN', rho: 1770.0, detonation_energy: 6.00e6, det_vel: 8300.0, jwl_A: 625.3e9, jwl_B: 23.29e9, jwl_R1: 5.25, jwl_R2: 1.60, jwl_omega: 0.28,
-        ideal_gamma: 1.40, ideal_rho_0: 1770.0, ideal_e_0: 6.00e6,
+        composition: 'PETN', rho: 1770.0, detonation_energy: 5.706e6, det_vel: 8300.0, jwl_A: 617e9, jwl_B: 16.926e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.25,
+        ideal_gamma: 1.40, ideal_rho_0: 1770.0, ideal_e_0: 5.706e6,
+        afterburn_enabled: true, afterburn_energy: 2.00e6, afterburn_fuel_fraction: 0.08, afterburn_stoich_ratio: 1.50, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
         category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
     },
     'HMX': {
-        density: 1890.0, youngs_modulus: 18.0e9, poissons_ratio: 0.28, yield_stress: 55.0e6, hardening_modulus: 380.0e6, failure_strain: 0.03, tensile_failure_stress: 14.0e6,
+        density: 1891.0, youngs_modulus: 18.0e9, poissons_ratio: 0.28, yield_stress: 55.0e6, hardening_modulus: 380.0e6, failure_strain: 0.03, tensile_failure_stress: 14.0e6,
         jc_A: 55.0e6, jc_B: 160.0e6, jc_n: 0.28, jc_C: 0.010, jc_m: 1.00, T_melt: 550.0, T_room: 293.0, Cp: 1020.0, mg_gamma0: 1.15, mg_c0: 3000.0, mg_s: 1.70,
-        composition: 'HMX', rho: 1890.0, detonation_energy: 6.20e6, det_vel: 9110.0, jwl_A: 778.3e9, jwl_B: 7.071e9, jwl_R1: 4.20, jwl_R2: 1.00, jwl_omega: 0.30,
-        ideal_gamma: 1.40, ideal_rho_0: 1890.0, ideal_e_0: 6.20e6,
+        composition: 'HMX', rho: 1891.0, detonation_energy: 5.553e6, det_vel: 9110.0, jwl_A: 778.3e9, jwl_B: 7.071e9, jwl_R1: 4.20, jwl_R2: 1.00, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1891.0, ideal_e_0: 5.553e6,
+        afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0, afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
         category: 'JWL Detonation Gas Presets', reference: 'LASL Explosive Property Data'
     },
     'RDX': {
+        // HYBRID FIT (not a published set): LLNL Explosives Handbook UCRL-52997 has no pure-RDX JWL. A,B were solved so the CJ state matches handbook D(1.80 g/cc) = 8775 m/s (interpolated from D = 8.70 at 1.77 and 8.80 at 1.81 km/s) and Pcj = 35.0 GPa (handbook measured 33.8 GPa at 1.767 g/cc, scaled by rho*D^2). E0 = 10.1 GPa comes from cylinder-energy similarity to PETN/Cyclotol (RDX Ecyl 1.60 MJ/kg). R1,R2,omega are the mean of the neighbouring handbook sets (PETN, HMX, C-4, Cyclotol). The cylinder test does not pin B/R2/omega: alternative fits fall within about 5% in released energy.
         density: 1800.0, youngs_modulus: 15.0e9, poissons_ratio: 0.29, yield_stress: 42.0e6, hardening_modulus: 270.0e6, failure_strain: 0.03, tensile_failure_stress: 10.5e6,
         jc_A: 42.0e6, jc_B: 130.0e6, jc_n: 0.31, jc_C: 0.010, jc_m: 1.00, T_melt: 477.0, T_room: 293.0, Cp: 1070.0, mg_gamma0: 1.10, mg_c0: 2840.0, mg_s: 1.67,
-        composition: 'RDX', rho: 1800.0, detonation_energy: 5.80e6, det_vel: 8750.0, jwl_A: 611.3e9, jwl_B: 10.65e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.32,
-        ideal_gamma: 1.40, ideal_rho_0: 1800.0, ideal_e_0: 5.80e6,
-        category: 'JWL Detonation Gas Presets', reference: 'LLNL Explosives Handbook UCRL-52997'
+        composition: 'RDX', rho: 1800.0, detonation_energy: 5.611e6, det_vel: 8775.0, jwl_A: 799.9e9, jwl_B: 7.59e9, jwl_R1: 4.40, jwl_R2: 1.20, jwl_omega: 0.30,
+        ideal_gamma: 1.40, ideal_rho_0: 1800.0, ideal_e_0: 5.611e6,
+        afterburn_enabled: true, afterburn_energy: 5.60e6, afterburn_fuel_fraction: 0.18, afterburn_stoich_ratio: 2.10, afterburn_ignition_temp: 600.0, afterburn_tau_chem: 1.0e-5, afterburn_c_mix: 50.0, afterburn_provenance: 'real_calibrated',
+        category: 'JWL Detonation Gas Presets', provenance: 'hybrid', reference: 'Fitted to LLNL Explosives Handbook UCRL-52997 RDX D, Pcj and cylinder-energy data (see comment)'
     },
     // --- Hyperelastic Elastomers & Rubbers ---
     'Silicone Rubber (Yeoh)': {
@@ -3903,21 +4149,16 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
             return getSolidPresets();
 
         case 'CREST Reactive Burn':
-            return [
-                'PBX 9502 (TATB/Kel-F 95/5) - CREST Davis',
-                'EDC37 (HMX/NC/K10 91/1/8) - CREST Davis',
-                'PBX 9501 (HMX/Estane 95/5) - CREST Davis',
-                'Composition B (RDX/TNT 60/40) - CREST Davis',
-                'LX-17 (TATB/Kel-F 92.5/7.5) - CREST Davis'
-            ].concat(
-                MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Energetic Solids & Unreacted Explosives')?.presets || []
-            ).concat(['Custom']);
+            // Only published AWE CREST calibrations (Handley 2006; Cartwright 2016) are shipped.
+            return (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'CREST Reactive Burn Presets')?.presets || []).concat(['Custom']);
 
         case 'JWL Programmed Burn':
             return (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'JWL Programmed Burn Presets')?.presets || []).concat(['Custom']);
 
         case 'Lee-Tarver Ignition & Growth':
-            return (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Lee-Tarver Ignition & Growth Presets')?.presets || []).concat(['Custom']);
+            // No verified Lee-Tarver calibration is shipped. The previous 4 presets could not be traced to a source
+            // table (and the backend rate-unit convention is unresolved), so they were removed. Use 'Custom'.
+            return ['Custom'];
 
         case 'RHT Concrete':
             return [
@@ -3973,11 +4214,7 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
                 'RDX (Ideal Gas Equivalent)',
                 'PBX 9501 (Ideal Gas Equivalent)',
                 'PBX 9502 (Ideal Gas Equivalent)',
-                'ANFO (Ideal Gas Equivalent)',
-                'Aluminized ANFO (Ideal Gas Equivalent)',
-                'Ammonal (Ideal Gas Equivalent)',
                 'Nitromethane (Ideal Gas Equivalent)',
-                'Tritonal (Ideal Gas Equivalent)',
                 'Custom'
             ];
 
@@ -4001,33 +4238,16 @@ export function getCategorizedPresetsForModel(modelName: string): CategorizedPre
 
     // Special top-level groups for dedicated models if applicable
     if (modelName === 'CREST Reactive Burn') {
-        const crestDavisPresets = [
-            'PBX 9502 (TATB/Kel-F 95/5) - CREST Davis',
-            'EDC37 (HMX/NC/K10 91/1/8) - CREST Davis',
-            'PBX 9501 (HMX/Estane 95/5) - CREST Davis',
-            'Composition B (RDX/TNT 60/40) - CREST Davis',
-            'LX-17 (TATB/Kel-F 92.5/7.5) - CREST Davis'
-        ].filter(p => validPresets.has(p));
-        if (crestDavisPresets.length > 0) {
-            result.push({
-                category: 'CREST Reactive Burn Calibrations',
-                presets: crestDavisPresets
-            });
-        }
+        const crestPresets = (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'CREST Reactive Burn Presets')?.presets || []).filter(p => validPresets.has(p));
+        if (crestPresets.length > 0) result.push({ category: 'AWE CREST Calibrations (published)', presets: crestPresets });
+    } else if (modelName === 'Lee-Tarver Ignition & Growth') {
+        // Intentionally no calibration groups: no verified preset exists for this model.
     } else if (modelName === 'JWL Programmed Burn') {
         const jwlPresets = (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'JWL Programmed Burn Presets')?.presets || []).filter(p => validPresets.has(p));
         if (jwlPresets.length > 0) {
             result.push({
                 category: 'JWL Programmed Burn Calibrations',
                 presets: jwlPresets
-            });
-        }
-    } else if (modelName === 'Lee-Tarver Ignition & Growth') {
-        const ltPresets = (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Lee-Tarver Ignition & Growth Presets')?.presets || []).filter(p => validPresets.has(p));
-        if (ltPresets.length > 0) {
-            result.push({
-                category: 'Lee-Tarver Ignition & Growth Calibrations',
-                presets: ltPresets
             });
         }
     } else if (modelName === 'RHT Concrete') {
@@ -4083,11 +4303,7 @@ export function getCategorizedPresetsForModel(modelName: string): CategorizedPre
             'RDX (Ideal Gas Equivalent)',
             'PBX 9501 (Ideal Gas Equivalent)',
             'PBX 9502 (Ideal Gas Equivalent)',
-            'ANFO (Ideal Gas Equivalent)',
-            'Aluminized ANFO (Ideal Gas Equivalent)',
-            'Ammonal (Ideal Gas Equivalent)',
             'Nitromethane (Ideal Gas Equivalent)',
-            'Tritonal (Ideal Gas Equivalent)'
         ].filter(p => validPresets.has(p));
         if (igPresets.length > 0) {
             result.push({
@@ -4160,9 +4376,9 @@ export function getDefaultPresetForModel(modelName: string): string {
     if (modelName === 'Concrete Damage Plasticity (CDP)') return 'Structural Concrete C30 (CDP)';
     if (modelName === 'Hill48 Orthotropic') return 'Rolled Armor Steel (Hill48)';
     if (modelName === 'Tait Water') return 'Liquid Water (Isentropic Modified Tait)';
-    if (modelName === 'CREST Reactive Burn') return 'PBX 9502 (TATB/Kel-F 95/5) - CREST Davis';
+    if (modelName === 'CREST Reactive Burn') return 'EDC37 (CREST Reactive Burn)';
     if (modelName === 'JWL Programmed Burn') return 'C-4 (Composition C-4) - JWL Programmed Burn';
-    if (modelName === 'Lee-Tarver Ignition & Growth') return 'LX-17 (TATB/Kel-F 92.5/7.5) - Lee-Tarver I&G';
+    if (modelName === 'Lee-Tarver Ignition & Growth') return 'Custom';
     if (modelName === 'RHT Concrete') return 'Normal-Strength Concrete C35/45 (RHT Default)';
     if (modelName === 'Karagozian & Case (K&C)') return 'Normal-Strength Concrete C35/45 (K&C Auto MAT_072R3)';
     if (modelName === 'CSCM Concrete') return 'Normal-Strength Concrete C35/45 (CSCM MAT_159 Standard)';
@@ -4174,3 +4390,28 @@ export function getDefaultPresetForModel(modelName: string): string {
     return list.length > 0 ? list[0] : 'Custom';
 }
 
+
+
+/**
+ * Single source of truth for the 'composition' dropdown of JWL Detonation Gas charges.
+ * Derived from the verified 'JWL Detonation Gas Presets' records above so the Material-node
+ * composition selector can never drift from the preset registry (it previously held four
+ * hand-copied tables with different, unsourced values).
+ */
+export function getExplosiveCompositionTable(): Record<string, Record<string, number>> {
+    const table: Record<string, Record<string, number>> = {};
+    for (const p of Object.values(MPM_MATERIAL_PRESETS)) {
+        if (p.category !== 'JWL Detonation Gas Presets' || !p.composition) continue;
+        table[p.composition] = {
+            rho: p.rho ?? p.density ?? 0,
+            detonation_energy: p.detonation_energy ?? 0,
+            det_vel: p.det_vel ?? 0,
+            jwl_A: p.jwl_A ?? 0,
+            jwl_B: p.jwl_B ?? 0,
+            jwl_R1: p.jwl_R1 ?? 0,
+            jwl_R2: p.jwl_R2 ?? 0,
+            jwl_omega: p.jwl_omega ?? 0
+        };
+    }
+    return table;
+}

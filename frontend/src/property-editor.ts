@@ -1,4 +1,4 @@
-import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, resolveFEMCounts, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, getMaterialDisplayHTML, syncMPMMaterialParameters, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, isExplosiveMaterialNode, isWaterMaterialNode, isSeabedMaterialNode, isSolidMaterialNode } from './state-manager.js';
+import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, resolveFEMCounts, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, getMaterialDisplayHTML, syncMPMMaterialParameters, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, isExplosiveMaterialNode, isWaterMaterialNode, isSeabedMaterialNode, isSolidMaterialNode, resolveResourcePath } from './state-manager.js';
 import { isAirMaterialNode } from './serialization.js';
 import { getMemoryDisplayHTML } from './memory-validator.js';
 import { Node, SimulationState } from './types.js';
@@ -984,7 +984,9 @@ export class PropertyEditor {
                                 if (net && net.isConnected()) {
                                     const activeWs = this.stateManager.getActiveWorkspace();
                                     const modelId = activeWs?.activeModelId || 'default';
-                                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: path, modelId });
+                                    const activeModel = this.stateManager.getAllModels().find(m => m.id === modelId) || this.stateManager.getActiveModel();
+                                    const resolvedPath = resolveResourcePath(path, activeModel?.filename);
+                                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: resolvedPath, modelId });
                                 }
                             }
                         }
@@ -1367,7 +1369,9 @@ export class PropertyEditor {
                                 if (net && net.isConnected()) {
                                     const activeWs = this.stateManager.getActiveWorkspace();
                                     const modelId = activeWs?.activeModelId || 'default';
-                                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: path, modelId });
+                                    const activeModel = this.stateManager.getAllModels().find(m => m.id === modelId) || this.stateManager.getActiveModel();
+                                    const resolvedPath = resolveResourcePath(path, activeModel?.filename);
+                                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: resolvedPath, modelId });
                                 }
                             }
                         }
@@ -1601,6 +1605,7 @@ export class PropertyEditor {
                 solidToggles.style.gap = '8px';
                 solidToggles.appendChild(createCheckboxField('export_fem', node.parameters['export_fem'] !== false, 'Export FEM Mesh'));
                 solidToggles.appendChild(createCheckboxField('export_mpm', node.parameters['export_mpm'] !== false, 'Export MPM Particles'));
+                solidToggles.appendChild(createCheckboxField('export_mpm_density_grid', node.parameters['export_mpm_density_grid'] === true, 'Export MPM Density Grid (.vts)'));
                 solidToggles.appendChild(createCheckboxField('export_obstacles', node.parameters['export_obstacles'] !== false, 'Export Voxel Boundary Shell'));
                 solidToggles.appendChild(createCheckboxField('export_stl_faces', node.parameters['export_stl_faces'] !== false, 'Export CAD STL Faces'));
                 solidToggles.appendChild(createCheckboxField('tessellate_stl_faces', node.parameters['tessellate_stl_faces'] === true, 'Tessellate Large Faces to CFD Grid'));
@@ -2464,7 +2469,7 @@ export class PropertyEditor {
             // Davis & CREST Reactive Burn
             'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
             'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-            'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+            'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13',
             'initiation_radius', 'booster_overpressure',
             // JWL Programmed Burn & Lee-Tarver Ignition & Growth
             'burn_zone_cells', 'tau_burn_min',
@@ -2574,7 +2579,7 @@ export class PropertyEditor {
             'mesh_source': ['Box Generator', 'Cylinder Generator', 'Plate Generator', 'STL File', 'LS-DYNA Keyword File'],
             'element_topology': ['Hex8', 'Tet4_ANP'],
             'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
-            'composition': ['Aluminized ANFO', 'Ammonal', 'ANFO', 'Baratol', 'C-4', 'Composition A-3', 'Composition B', 'Composition C-3', 'Cyclotol', 'Heavy ANFO', 'HMX', 'LX-04', 'LX-07', 'LX-10', 'LX-14', 'LX-17', 'Mining Emulsion', 'Nitromethane', 'Octol', 'PBX 9404', 'PBX 9501', 'PBX 9502', 'PE-10', 'PE-12', 'PE-4', 'PE-8', 'Pentolite', 'PETN', 'RDX', 'TATB', 'Tetryl', 'TNT', 'Water Gel', 'Custom'],
+            'composition': [...Object.keys(EXPLOSIVE_PRESETS).sort(), 'Custom'],
             'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3', '5'],
@@ -4624,338 +4629,6 @@ export class PropertyEditor {
         }
 
         if (node.type === 'Material' && key === 'composition') {
-            const EXPLOSIVE_PRESETS: Record<string, Record<string, number>> = {
-                'Aluminized ANFO': {
-                    rho: 1050,
-                    detonation_energy: 4100000,
-                    det_vel: 4900,
-                    jwl_A: 76.5e9,
-                    jwl_B: 1.85e9,
-                    jwl_R1: 4.15,
-                    jwl_R2: 1.15,
-                    jwl_omega: 0.30
-                },
-                'Ammonal': {
-                    rho: 1600,
-                    detonation_energy: 4400000,
-                    det_vel: 5400,
-                    jwl_A: 125.0e9,
-                    jwl_B: 2.5e9,
-                    jwl_R1: 4.0,
-                    jwl_R2: 1.0,
-                    jwl_omega: 0.25
-                },
-                'ANFO': {
-                    rho: 930,
-                    detonation_energy: 3700000,
-                    det_vel: 4700,
-                    jwl_A: 49.46e9,
-                    jwl_B: 1.891e9,
-                    jwl_R1: 4.10,
-                    jwl_R2: 1.15,
-                    jwl_omega: 0.33
-                },
-                'Baratol': {
-                    rho: 2550,
-                    detonation_energy: 2800000,
-                    det_vel: 4900,
-                    jwl_A: 289.4e9,
-                    jwl_B: 5.14e9,
-                    jwl_R1: 4.4,
-                    jwl_R2: 1.2,
-                    jwl_omega: 0.25
-                },
-                'C-4': {
-                    rho: 1601,
-                    detonation_energy: 5600000,
-                    det_vel: 8040,
-                    jwl_A: 593.7e9,
-                    jwl_B: 12.87e9,
-                    jwl_R1: 4.5,
-                    jwl_R2: 1.2,
-                    jwl_omega: 0.38
-                },
-                'Composition A-3': {
-                    rho: 1650,
-                    detonation_energy: 5000000,
-                    det_vel: 8100,
-                    jwl_A: 601.5e9,
-                    jwl_B: 12.0e9,
-                    jwl_R1: 4.5,
-                    jwl_R2: 1.2,
-                    jwl_omega: 0.35
-                },
-                'Composition B': {
-                    rho: 1717,
-                    detonation_energy: 5170000,
-                    det_vel: 7980,
-                    jwl_A: 524.2e9,
-                    jwl_B: 7.67e9,
-                    jwl_R1: 4.2,
-                    jwl_R2: 1.1,
-                    jwl_omega: 0.34
-                },
-                'Composition C-3': {
-                    rho: 1600,
-                    detonation_energy: 5300000,
-                    det_vel: 8000,
-                    jwl_A: 580.0e9,
-                    jwl_B: 11.5e9,
-                    jwl_R1: 4.4,
-                    jwl_R2: 1.2,
-                    jwl_omega: 0.35
-                },
-                'Cyclotol': {
-                    rho: 1750,
-                    detonation_energy: 5200000,
-                    det_vel: 8250,
-                    jwl_A: 582.0e9,
-                    jwl_B: 10.5e9,
-                    jwl_R1: 4.3,
-                    jwl_R2: 1.1,
-                    jwl_omega: 0.32
-                },
-                'Heavy ANFO': {
-                    rho: 1250,
-                    detonation_energy: 3500000,
-                    det_vel: 5000,
-                    jwl_A: 198.0e9,
-                    jwl_B: 1.45e9,
-                    jwl_R1: 4.30,
-                    jwl_R2: 1.00,
-                    jwl_omega: 0.20
-                },
-                'HMX': {
-                    rho: 1890,
-                    detonation_energy: 5620000,
-                    det_vel: 9110,
-                    jwl_A: 778.3e9,
-                    jwl_B: 7.071e9,
-                    jwl_R1: 4.2,
-                    jwl_R2: 1.0,
-                    jwl_omega: 0.30
-                },
-                'LX-04': {
-                    rho: 1860,
-                    detonation_energy: 5300000,
-                    det_vel: 8400,
-                    jwl_A: 742.0e9,
-                    jwl_B: 11.2e9,
-                    jwl_R1: 4.4,
-                    jwl_R2: 1.2,
-                    jwl_omega: 0.30
-                },
-                'LX-07': {
-                    rho: 1860,
-                    detonation_energy: 5500000,
-                    det_vel: 8600,
-                    jwl_A: 785.0e9,
-                    jwl_B: 12.5e9,
-                    jwl_R1: 4.45,
-                    jwl_R2: 1.15,
-                    jwl_omega: 0.32
-                },
-                'LX-10': {
-                    rho: 1860,
-                    detonation_energy: 5800000,
-                    det_vel: 8820,
-                    jwl_A: 830.0e9,
-                    jwl_B: 15.0e9,
-                    jwl_R1: 4.5,
-                    jwl_R2: 1.1,
-                    jwl_omega: 0.38
-                },
-                'LX-14': {
-                    rho: 1835,
-                    detonation_energy: 6000000,
-                    det_vel: 8800,
-                    jwl_A: 825.8e9,
-                    jwl_B: 17.24e9,
-                    jwl_R1: 4.4,
-                    jwl_R2: 0.9,
-                    jwl_omega: 0.38
-                },
-                'LX-17': {
-                    rho: 1900,
-                    detonation_energy: 4500000,
-                    det_vel: 7600,
-                    jwl_A: 640.0e9,
-                    jwl_B: 14.0e9,
-                    jwl_R1: 4.2,
-                    jwl_R2: 1.1,
-                    jwl_omega: 0.30
-                },
-                'Mining Emulsion': {
-                    rho: 1150,
-                    detonation_energy: 3200000,
-                    det_vel: 5300,
-                    jwl_A: 215.0e9,
-                    jwl_B: 1.76e9,
-                    jwl_R1: 4.45,
-                    jwl_R2: 1.05,
-                    jwl_omega: 0.15
-                },
-                'Nitromethane': {
-                    rho: 1128,
-                    detonation_energy: 4480000,
-                    det_vel: 6280,
-                    jwl_A: 209.2e9,
-                    jwl_B: 5.689e9,
-                    jwl_R1: 4.40,
-                    jwl_R2: 1.20,
-                    jwl_omega: 0.30
-                },
-                'Octol': {
-                    rho: 1810,
-                    detonation_energy: 5400000,
-                    det_vel: 8380,
-                    jwl_A: 718.5e9,
-                    jwl_B: 13.9e9,
-                    jwl_R1: 4.35,
-                    jwl_R2: 1.05,
-                    jwl_omega: 0.32
-                },
-                'PBX 9404': {
-                    rho: 1840,
-                    detonation_energy: 6020000,
-                    det_vel: 8800,
-                    jwl_A: 852.4e9,
-                    jwl_B: 18.02e9,
-                    jwl_R1: 4.55,
-                    jwl_R2: 1.10,
-                    jwl_omega: 0.38
-                },
-                'PBX 9501': {
-                    rho: 1830,
-                    detonation_energy: 5880000,
-                    det_vel: 8800,
-                    jwl_A: 854.5e9,
-                    jwl_B: 20.49e9,
-                    jwl_R1: 4.60,
-                    jwl_R2: 1.35,
-                    jwl_omega: 0.38
-                },
-                'PBX 9502': {
-                    rho: 1895,
-                    detonation_energy: 4100000,
-                    det_vel: 7700,
-                    jwl_A: 548.8e9,
-                    jwl_B: 7.67e9,
-                    jwl_R1: 4.4,
-                    jwl_R2: 1.2,
-                    jwl_omega: 0.30
-                },
-                'PE-10': {
-                    rho: 1550,
-                    detonation_energy: 5200000,
-                    det_vel: 7800,
-                    jwl_A: 590.0e9,
-                    jwl_B: 12.0e9,
-                    jwl_R1: 4.5,
-                    jwl_R2: 1.4,
-                    jwl_omega: 0.25
-                },
-                'PE-12': {
-                    rho: 1520,
-                    detonation_energy: 5000000,
-                    det_vel: 7700,
-                    jwl_A: 570.0e9,
-                    jwl_B: 11.5e9,
-                    jwl_R1: 4.5,
-                    jwl_R2: 1.4,
-                    jwl_omega: 0.25
-                },
-                'PE-4': {
-                    rho: 1590,
-                    detonation_energy: 5621000,
-                    det_vel: 8100,
-                    jwl_A: 609.8e9,
-                    jwl_B: 12.95e9,
-                    jwl_R1: 4.5,
-                    jwl_R2: 1.4,
-                    jwl_omega: 0.25
-                },
-                'PE-8': {
-                    rho: 1570,
-                    detonation_energy: 5400000,
-                    det_vel: 8000,
-                    jwl_A: 600.0e9,
-                    jwl_B: 12.5e9,
-                    jwl_R1: 4.5,
-                    jwl_R2: 1.4,
-                    jwl_omega: 0.25
-                },
-                'Pentolite': {
-                    rho: 1660,
-                    detonation_energy: 5000000,
-                    det_vel: 7470,
-                    jwl_A: 492.2e9,
-                    jwl_B: 9.38e9,
-                    jwl_R1: 4.3,
-                    jwl_R2: 1.1,
-                    jwl_omega: 0.31
-                },
-                'PETN': {
-                    rho: 1770,
-                    detonation_energy: 5800000,
-                    det_vel: 8300,
-                    jwl_A: 613.4e9,
-                    jwl_B: 15.07e9,
-                    jwl_R1: 4.4,
-                    jwl_R2: 1.2,
-                    jwl_omega: 0.28
-                },
-                'RDX': {
-                    rho: 1806,
-                    detonation_energy: 5300000,
-                    det_vel: 8750,
-                    jwl_A: 524.2e9,
-                    jwl_B: 7.678e9,
-                    jwl_R1: 4.2,
-                    jwl_R2: 1.1,
-                    jwl_omega: 0.34
-                },
-                'TATB': {
-                    rho: 1800,
-                    detonation_energy: 4400000,
-                    det_vel: 7660,
-                    jwl_A: 554.6e9,
-                    jwl_B: 7.91e9,
-                    jwl_R1: 4.5,
-                    jwl_R2: 1.6,
-                    jwl_omega: 0.25
-                },
-                'Tetryl': {
-                    rho: 1730,
-                    detonation_energy: 4230000,
-                    det_vel: 7570,
-                    jwl_A: 510.9e9,
-                    jwl_B: 8.44e9,
-                    jwl_R1: 4.5,
-                    jwl_R2: 1.4,
-                    jwl_omega: 0.25
-                },
-                'TNT': {
-                    rho: 1630,
-                    detonation_energy: 4290000,
-                    det_vel: 6930,
-                    jwl_A: 373.77e9,
-                    jwl_B: 3.747e9,
-                    jwl_R1: 4.15,
-                    jwl_R2: 0.90,
-                    jwl_omega: 0.35
-                },
-                'Water Gel': {
-                    rho: 1200,
-                    detonation_energy: 3400000,
-                    det_vel: 4800,
-                    jwl_A: 154.0e9,
-                    jwl_B: 2.15e9,
-                    jwl_R1: 4.30,
-                    jwl_R2: 1.10,
-                    jwl_omega: 0.25
-                }
-            };
             const preset = EXPLOSIVE_PRESETS[value];
             if (preset) {
                 const matType = node.parameters['material_type'] || 'JWL Charge';
@@ -4970,7 +4643,13 @@ export class PropertyEditor {
         } else if (node.type === 'Material' && key === 'preset') {
             const presetData = MPM_MATERIAL_PRESETS[value];
             if (presetData) {
+                const currentTs = node.parameters['transfer_scheme'];
                 Object.assign(updates, presetData);
+                if (currentTs !== undefined) {
+                    updates['transfer_scheme'] = currentTs;
+                } else {
+                    updates['transfer_scheme'] = 'Default';
+                }
                 if (presetData.category === 'Ideal Gas Presets') {
                     updates['material_type'] = 'Air';
                     updates['material_model'] = 'Ideal Gas';
@@ -5216,6 +4895,30 @@ export class PropertyEditor {
                     if (node.parameters['crest_m2'] === undefined) updates['crest_m2'] = 1.5;
                     if (node.parameters['crest_s0'] === undefined) updates['crest_s0'] = 100.0;
                     if (node.parameters['crest_s_threshold'] === undefined) updates['crest_s_threshold'] = 45.0;
+                    if (node.parameters['crest_awe_K0s'] === undefined) updates['crest_awe_K0s'] = 14.24525e9;
+                    if (node.parameters['crest_awe_A1'] === undefined) updates['crest_awe_A1'] = 2.417494;
+                    if (node.parameters['crest_awe_A2'] === undefined) updates['crest_awe_A2'] = 2.208027;
+                    if (node.parameters['crest_awe_A3'] === undefined) updates['crest_awe_A3'] = 0.0;
+                    if (node.parameters['crest_awe_B1'] === undefined) updates['crest_awe_B1'] = 0.0;
+                    if (node.parameters['crest_awe_B2'] === undefined) updates['crest_awe_B2'] = 0.0;
+                    if (node.parameters['crest_awe_B3'] === undefined) updates['crest_awe_B3'] = 0.0;
+                    if (node.parameters['crest_awe_fc'] === undefined) updates['crest_awe_fc'] = 0.0;
+                    if (node.parameters['crest_awe_delta'] === undefined) updates['crest_awe_delta'] = 0.0;
+                    if (node.parameters['crest_awe_Gamma1'] === undefined) updates['crest_awe_Gamma1'] = 32.33557;
+                    if (node.parameters['crest_awe_Gamma2'] === undefined) updates['crest_awe_Gamma2'] = 3.596933;
+                    if (node.parameters['crest_awe_gamma00'] === undefined) updates['crest_awe_gamma00'] = 0.4;
+                    if (node.parameters['crest_awe_m'] === undefined) updates['crest_awe_m'] = 2.0;
+                    if (node.parameters['crest_awe_c0'] === undefined) updates['crest_awe_c0'] = 0.0;
+                    if (node.parameters['crest_awe_c1'] === undefined) updates['crest_awe_c1'] = 2.0;
+                    if (node.parameters['crest_awe_c2'] === undefined) updates['crest_awe_c2'] = 2.2e8;
+                    if (node.parameters['crest_awe_c3'] === undefined) updates['crest_awe_c3'] = 2.5;
+                    if (node.parameters['crest_awe_c6'] === undefined) updates['crest_awe_c6'] = 0.0;
+                    if (node.parameters['crest_awe_c8'] === undefined) updates['crest_awe_c8'] = 1.6e-4;
+                    if (node.parameters['crest_awe_c9'] === undefined) updates['crest_awe_c9'] = 1.0;
+                    if (node.parameters['crest_awe_c10'] === undefined) updates['crest_awe_c10'] = 4.0e5;
+                    if (node.parameters['crest_awe_c11'] === undefined) updates['crest_awe_c11'] = 1.8;
+                    if (node.parameters['crest_awe_c12'] === undefined) updates['crest_awe_c12'] = 0.0;
+                    if (node.parameters['crest_awe_c13'] === undefined) updates['crest_awe_c13'] = 0.0;
                 }
             } else if (key === 'product_model') {
                 if (value === 'Davis Detonation Product') {

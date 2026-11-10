@@ -6,7 +6,7 @@
 
 | Total Benchmarks | Verified & Passed | Pending Integration | Failed | Active Pass Rate |
 | :--- | :---: | :---: | :---: | :---: |
-| **54** | **32** | **22** | **0** | **100.0%** |
+| **55** | **33** | **22** | **0** | **100.0%** |
 
 ### Master Benchmark Matrix
 
@@ -23,6 +23,7 @@
 | **VV-L1-09** | Level 1 | MPM Johnson-Cook + Mie-Grüneisen Material Point: Hugoniot, Uncoupled Flow, Confined Fracture Locus & Fractured Residual Strength | `e_L2 = 8.73e-08` | `e_L2 <= 1.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L1-10** | Level 1 | 3D Tet4-ANP Hydrostatic/JWL Isentrope, Option C Cohesive Node-Splitting & Three-Pillar Energetics | `e_L2 = 1.56e-03` | `e_L2 <= 5.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L1-11** | Level 1 | Constitutive Viscoplasticity, Dynamic Hardening & Ballistic Energy: US Class 4 RHA (WWII AXS-488) vs. German sRHA (Krupp E22) | `e_L2 = 1.44e-16` | `e_L2 <= 2.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
+| **VV-L1-12** | Level 1 | AWE CREST Reactive Burn: Shock Entropy at von Neumann Spike & lambda_max(Zs) (EDC37, PBX 9502) | `e_L2 = 4.83e-03` | `e_L2 <= 5.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L2-01** | Level 2 | Morley's 30-deg Skew Rhombic Thin Shell Bending Benchmark | `STATUS: PENDING INTEGRATION` | `Full Multi-Scale Integration` | <span style="color:#d29922;font-weight:bold;">PENDING</span> |
 | **VV-L2-02** | Level 2 | Scordelis-Lo Cylindrical Barrel Vault Shell Benchmark | `STATUS: PENDING INTEGRATION` | `Full Multi-Scale Integration` | <span style="color:#d29922;font-weight:bold;">PENDING</span> |
 | **VV-L2-03** | Level 2 | Pinched Hemispherical Shell with 18-deg Hole (MacNeal-Harder Benchmark) | `STATUS: PENDING INTEGRATION` | `Full Multi-Scale Integration` | <span style="color:#d29922;font-weight:bold;">PENDING</span> |
@@ -39,14 +40,14 @@
 | **VV-L2-14** | Level 2 | Secondary Aerobic Afterburn Energy & Pressure Wavefront Augmentation | `e_L2 = 9.22e-05` | `e_L2 <= 1.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L2-15** | Level 2 | All-Around Transmitting & Characteristic Riemann Absorbing Boundary Benchmark | `e_L2 = 6.11e-05` | `e_L2 <= 2.50e-02` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L2-CMP-00** | Level 2 | Compact Bardenhagen storage: zonal fallback and layout switching | `e_Linf = 0.00e+00` | `e_Linf <= 1.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
-| **VV-L2-CMP-01** | Level 2 | Compact Bardenhagen storage parity: head-on impact (B-spline, Leapfrog, M = 2) | `e_L2 = 3.56e-07` | `e_L2 <= 1.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
-| **VV-L2-CMP-02** | Level 2 | Compact Bardenhagen storage parity: oblique frictional 3-body contact (cubic B-spline, RK2, M = 3) | `e_L2 = 1.32e-06` | `e_L2 <= 1.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
-| **VV-L2-CMP-03** | Level 2 | Compact Bardenhagen storage parity: radial MLS, 3 objects -> 2 materials, slot regrowth | `e_L2 = 2.73e-07` | `e_L2 <= 1.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
-| **VV-L2-CMP-04** | Level 2 | Millimeter-scale high-spin (2000 rad/s) 3D MPM angular/linear momentum & Cayley stress conservation | `e_L2 = 2.74e-06` | `e_L2 <= 1.00e-04` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
+| **VV-L2-CMP-01** | Level 2 | Compact Bardenhagen storage parity: head-on impact (B-spline, Leapfrog, M = 2) | `e_L2 = 3.72e-07` | `e_L2 <= 1.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
+| **VV-L2-CMP-02** | Level 2 | Compact Bardenhagen storage parity: oblique frictional 3-body contact (cubic B-spline, RK2, M = 3) | `e_L2 = 1.31e-06` | `e_L2 <= 1.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
+| **VV-L2-CMP-03** | Level 2 | Compact Bardenhagen storage parity: radial MLS, 3 objects -> 2 materials, slot regrowth | `e_L2 = 3.10e-07` | `e_L2 <= 1.00e-03` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
+| **VV-L2-CMP-04** | Level 2 | Millimeter-scale high-spin (2000 rad/s) 3D MPM angular/linear momentum & Cayley stress conservation | `e_L2 = 2.88e-06` | `e_L2 <= 1.00e-04` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L2-CMP-05** | Level 2 | 3D MPM Multi-Velocity Impact Welding, Frictional Heating & Thermal Conduction | `e_L2 = 1.35e-01` | `e_L2 <= 2.00e-01` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L2-CMP-06** | Level 2 | Inclined Target Plate (rot_y = 10 deg) Pre-Strained Fragment Skimming & Hexagonal Box Flatness | `e_L2 = 2.93e-08` | `e_L2 <= 1.00e-04` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
-| **VV-L2-CMP-07** | Level 2 | Hybrid Bardenhagen Coupler: Bonded Single-Velocity Pair Impacting Independent 3rd Body | `e_L2 = 1.87e-06` | `e_L2 <= 1.00e-04` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
-| **VV-L2-CMP-08** | Level 2 | Bardenhagen initial-contact tie: conformal spinning sleeve-on-core (no spurious plasticity, exact release, closing impact untouched) | `e_L2 = 4.03e-04` | `e_L2 <= 1.00e-02` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
+| **VV-L2-CMP-07** | Level 2 | Hybrid Bardenhagen Coupler: Bonded Single-Velocity Pair Impacting Independent 3rd Body | `e_L2 = 1.81e-06` | `e_L2 <= 1.00e-04` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
+| **VV-L2-CMP-08** | Level 2 | Bardenhagen initial-contact tie: conformal spinning sleeve-on-core (no spurious plasticity, exact release, closing impact untouched) | `e_L2 = 4.07e-04` | `e_L2 <= 1.00e-02` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
 | **VV-L3-01** | Level 3 | Progressive Accordion Buckling (Thin-Walled Box S-Rail Axial Crush) | `STATUS: PENDING INTEGRATION` | `Full Multi-Scale Integration` | <span style="color:#d29922;font-weight:bold;">PENDING</span> |
 | **VV-L3-02** | Level 3 | Top-Hat Rail Spotwelded Crash Box Progressive Failure | `STATUS: PENDING INTEGRATION` | `Full Multi-Scale Integration` | <span style="color:#d29922;font-weight:bold;">PENDING</span> |
 | **VV-L3-03** | Level 3 | Taylor Anvil Impact Validation (Wilkins-Guinan OFHC Copper Benchmark) | `e_L2 = 4.69e-03` | `e_L2 <= 6.00e-02` | <span style="color:#2ea043;font-weight:bold;">PASS</span> |
@@ -198,7 +199,7 @@ Evaluates modified Tait EOS (Cole 1948), caloric Grüneisen energy coupling, Hug
 
 #### Governing Formulation & Technical Details
 
-Discretization: single material point (Np = 1, V0 = (2.5 mm)^3), dt = 1.0e-8 s, production MPMSolver3D::updateParticleStress. (A) Hydrostatic compression to J = 0.80 in 400 steps: intact MG pressure vs closed-form Hugoniot, e_L2 = 8.72629e-08, e_Linf = 2.09156e-07. (B) Compression to J = 0.92 then simple shear to gamma = 1.0 in 4000 steps (eps_dot = 5.8e4 1/s) with Weibull flaw factor w = 1.4: von Mises stress vs uncoupled JC flow stress e_L2 = 8.08438e-08; final eps_p = 0.565571, p = 15.8649 GPa, damage D = 0.0104074 (independent JC locus integral 0.0104074; legacy x4-capped locus would give D = 1.03574). (C) Isochoric pure shear (sigma* = 0): fracture at eps_p = 0.264491 vs reference 0.264476 (rel. err 5.6761e-05 <= 1%). (D) Fractured particle, compression to J = 0.90 with shear: q vs min(0.6 p, A) e_L2 = 6.71846e-08, e_Linf = 1.95585e-07; dilated fractured particle residual stress = 0 Pa.
+Discretization: single material point (Np = 1, V0 = (2.5 mm)^3), dt = 1.0e-8 s, production MPMSolver3D::updateParticleStress. (A) Hydrostatic compression to J = 0.80 in 400 steps: intact MG pressure vs closed-form Hugoniot, e_L2 = 8.72629e-08, e_Linf = 2.09156e-07. (B) Compression to J = 0.92 then simple shear to gamma = 1.0 in 4000 steps (eps_dot = 5.8e4 1/s) with Weibull flaw factor w = 1.4: von Mises stress vs uncoupled JC flow stress e_L2 = 8.08438e-08; final eps_p = 0.565571, p = 15.8649 GPa, damage D = 0.0104074 (independent JC locus integral 0.0104074; legacy x4-capped locus would give D = 1.03574). (C) Isochoric pure shear (sigma* = 0): fracture at eps_p = 0.264491 vs reference 0.264476 (rel. err 5.6761e-05 <= 1%). (D) Fractured particle, compression to J = 0.90 with shear: q vs min(0.6 p, A) e_L2 = 7.03144e-08, e_Linf = 1.95585e-07; dilated fractured particle residual stress = 0 Pa.
 
 #### Numerical vs. Exact Verification Plot
 
@@ -213,7 +214,7 @@ Discretization: single material point (Np = 1, V0 = (2.5 mm)^3), dt = 1.0e-8 s, 
 
 #### Governing Formulation & Technical Details
 
-Discretization: (A) 2x2x2 Freudenthal/Kuhn Tet4-ANP block (40 tetrahedra, dx = 50 mm, dt = 1.0e-6 s, 200 steps); (B) Hollow Tet4-ANP cylinder casing (nr=4, nz=3, dt = 1.0e-6 s, 15 steps); (C) Watertight STL cube voxelized into 384 Tet4-ANP elements with CREST reactive burn. Results: (A) Tet4-ANP 2-pass Average Nodal Pressure JWL expansion e_L2 = 0.00155645, e_Linf = 0.000980044; (B) Option C Cohesive Facet Node-Splitting grew active nodes from 320 to 4608 upon fracture with relative mass conservation error 5.22422e-14 and relative momentum conservation error 5.12023e-15 (zero background grid); (C) STL tetrahedralizer generated 384 Tet4-ANP elements and CREST shock compression reached lambda = 0.521543.
+Discretization: (A) 2x2x2 Freudenthal/Kuhn Tet4-ANP block (40 tetrahedra, dx = 50 mm, dt = 1.0e-6 s, 200 steps); (B) Hollow Tet4-ANP cylinder casing (nr=4, nz=3, dt = 1.0e-6 s, 15 steps); (C) Watertight STL cube voxelized into 384 Tet4-ANP elements with CREST reactive burn. Results: (A) Tet4-ANP 2-pass Average Nodal Pressure JWL expansion e_L2 = 0.00155645, e_Linf = 0.000980044; (B) Option C Cohesive Facet Node-Splitting grew active nodes from 320 to 4608 upon fracture with relative mass conservation error 5.22422e-14 and relative momentum conservation error 1.35701e-15 (zero background grid); (C) STL tetrahedralizer generated 384 Tet4-ANP elements and CREST shock compression reached lambda = 0.521543.
 
 #### Numerical vs. Exact Verification Plot
 
@@ -233,6 +234,21 @@ Discretization: single material-point constitutive integration across 50 plastic
 #### Numerical vs. Exact Verification Plot
 
 ![Constitutive Viscoplasticity, Dynamic Hardening & Ballistic Energy: US Class 4 RHA (WWII AXS-488) vs. German sRHA (Krupp E22)](vv_l1_11_us_rha_axs488_vs_krupp_e22.svg)
+
+---
+
+### VV-L1-12: AWE CREST Reactive Burn: Shock Entropy at von Neumann Spike & lambda_max(Zs) (EDC37, PBX 9502)
+
+- **Status:** **PASSED**
+- **Summary:** AWE CREST finite-strain Hugoniot entropy and two-stage rate integrator verified against published EDC37/PBX 9502 data (constitutive level).
+
+#### Governing Formulation & Technical Details
+
+Discretization: single material-point integration of the production CrestDavis::advanceAWECRESTProgress (dt = 1.0e-8 s, 4000 steps, Zs held at the Table 5.5 values; no spatial grid) and the production finite-strain Hugoniot (bisection, 40 iterations). Results: Zs at spike EDC37 = 0.0165306 (published 0.01653-0.01677), PBX 9502 = 0.0134125 (published 0.0133-0.0134); EDC37 lambda_max e_L2 = 0.00225275, e_Linf = 0.00358241. CJ velocity from the JWL products Hugoniot: EDC37 = 8811.66 m/s (published 8769.3), PBX 9502 = 7608.73 m/s (published 7597.4). STATUS: coupled 1D/3D solver run-to-detonation PENDING INTEGRATION; this test verifies the constitutive EOS, CJ state and rate integrator only.
+
+#### Numerical vs. Exact Verification Plot
+
+![AWE CREST Reactive Burn: Shock Entropy at von Neumann Spike & lambda_max(Zs) (EDC37, PBX 9502)](vv_l1_12_awe_crest_lambda_max.svg)
 
 ---
 
@@ -481,11 +497,11 @@ Grid 40 x 20 x 20, dx = 0.01 m, Np = 1024, M = 2. Expected bytes: dense 1280000,
 ### VV-L2-CMP-01: Compact Bardenhagen storage parity: head-on impact (B-spline, Leapfrog, M = 2)
 
 - **Status:** **PASSED**
-- **Summary:** Dense vs compact Bardenhagen storage: 1-step e_Linf(v) = 2.861e-07 (noise floor 2.861e-07), end e_L2(v) = 3.561e-07 (noise floor 3.290e-07), e_P = 4.533e-08, e_KE = 1.534e-07, band max |dvx|/v_ref = 1.505e-07. Material storage 2560000 B dense vs 209920 B compact (8.2%).
+- **Summary:** Dense vs compact Bardenhagen storage: 1-step e_Linf(v) = 2.861e-07 (noise floor 2.861e-07), end e_L2(v) = 3.722e-07 (noise floor 3.751e-07), e_P = 6.908e-08, e_KE = 1.374e-07, band max |dvx|/v_ref = 2.544e-07. Material storage 2560000 B dense vs 209920 B compact (8.2%).
 
 #### Governing Formulation & Technical Details
 
-Discretisation: grid 80 x 20 x 20 (32000 nodes), dx = dy = dz = 0.01 m, Np = 1024, materials M = 2, steps = 150, dt_first = 1.374e-05 s, dt_last = 1.388e-05 s, t_end = 2.074e-03 s, CFL = 0.3, transfer scheme = 2, time scheme = 0, friction = 0, restitution = 0.8. Compact slots: peak used = 72, final capacity = 1024 (initial 1024, no regrowth), peak bytes = 209920. Positions: 1-step max |dx| = 0.000e+00 cells, end max |dx| = 8.941e-06 cells (noise floor 5.960e-06). Noise floor (dense vs dense rerun): e_P = 2.008e-08, e_KE = 6.779e-08. Checks: memory_ok = yes, slot path exercised = yes, band particle counts identical = yes. Tolerances: 1-step e_Linf <= 1.0e-04, end e_L2 <= 1.0e-03, e_P <= 1.0e-04, e_KE <= 1.0e-03, band |dvx|/v_ref <= 1.0e-03. Interface band (cell, x [m], N_dense, N_compact, vx_dense, vx_compact, |dvx|/v_ref): [35, 0.3550, 128, 128, -5.08514, -5.08514, 1.12e-08] [36, 0.3650, 128, 128, -6.41443, -6.41443, 1.37e-07] [37, 0.3750, 128, 128, -7.56736, -7.56737, 1.10e-07] [38, 0.3850, 128, 128, -8.54900, -8.54900, 1.31e-07] [39, 0.3950, 0, 0, 0.00000, 0.00000, 0.00e+00] [40, 0.4050, 0, 0, 0.00000, 0.00000, 0.00e+00] [41, 0.4150, 128, 128, 8.54900, 8.54900, 1.03e-07] [42, 0.4250, 128, 128, 7.56736, 7.56736, 5.96e-09] [43, 0.4350, 128, 128, 6.41443, 6.41443, 1.06e-07] [44, 0.4450, 128, 128, 5.08513, 5.08514, 1.51e-07] [45, 0.4550, 0, 0, 0.00000, 0.00000, 0.00e+00] 
+Discretisation: grid 80 x 20 x 20 (32000 nodes), dx = dy = dz = 0.01 m, Np = 1024, materials M = 2, steps = 150, dt_first = 1.374e-05 s, dt_last = 1.388e-05 s, t_end = 2.074e-03 s, CFL = 0.3, transfer scheme = 2, time scheme = 0, friction = 0, restitution = 0.8. Compact slots: peak used = 72, final capacity = 1024 (initial 1024, no regrowth), peak bytes = 209920. Positions: 1-step max |dx| = 0.000e+00 cells, end max |dx| = 5.960e-06 cells (noise floor 5.960e-06). Noise floor (dense vs dense rerun): e_P = 1.336e-07, e_KE = 1.957e-07. Checks: memory_ok = yes, slot path exercised = yes, band particle counts identical = yes. Tolerances: 1-step e_Linf <= 1.0e-04, end e_L2 <= 1.0e-03, e_P <= 1.0e-04, e_KE <= 1.0e-03, band |dvx|/v_ref <= 1.0e-03. Interface band (cell, x [m], N_dense, N_compact, vx_dense, vx_compact, |dvx|/v_ref): [35, 0.3550, 128, 128, -5.08514, -5.08514, 2.54e-07] [36, 0.3650, 128, 128, -6.41443, -6.41443, 1.13e-07] [37, 0.3750, 128, 128, -7.56737, -7.56736, 7.79e-08] [38, 0.3850, 128, 128, -8.54900, -8.54900, 1.80e-07] [39, 0.3950, 0, 0, 0.00000, 0.00000, 0.00e+00] [40, 0.4050, 0, 0, 0.00000, 0.00000, 0.00e+00] [41, 0.4150, 128, 128, 8.54900, 8.54899, 1.39e-07] [42, 0.4250, 128, 128, 7.56736, 7.56736, 6.00e-08] [43, 0.4350, 128, 128, 6.41443, 6.41443, 4.10e-09] [44, 0.4450, 128, 128, 5.08514, 5.08513, 7.56e-08] [45, 0.4550, 0, 0, 0.00000, 0.00000, 0.00e+00] 
 
 #### Numerical vs. Exact Verification Plot
 
@@ -496,11 +512,11 @@ Discretisation: grid 80 x 20 x 20 (32000 nodes), dx = dy = dz = 0.01 m, Np = 102
 ### VV-L2-CMP-02: Compact Bardenhagen storage parity: oblique frictional 3-body contact (cubic B-spline, RK2, M = 3)
 
 - **Status:** **PASSED**
-- **Summary:** Dense vs compact Bardenhagen storage: 1-step e_Linf(v) = 3.518e-07 (noise floor 3.518e-07), end e_L2(v) = 1.325e-06 (noise floor 2.803e-07), e_P = 8.985e-07, e_KE = 2.173e-07, band max |dvx|/v_ref = 7.167e-08. Material storage 2880000 B dense vs 218880 B compact (7.6%).
+- **Summary:** Dense vs compact Bardenhagen storage: 1-step e_Linf(v) = 3.518e-07 (noise floor 4.690e-07), end e_L2(v) = 1.314e-06 (noise floor 6.190e-07), e_P = 8.181e-07, e_KE = 8.843e-08, band max |dvx|/v_ref = 6.846e-08. Material storage 2880000 B dense vs 218880 B compact (7.6%).
 
 #### Governing Formulation & Technical Details
 
-Discretisation: grid 40 x 20 x 30 (24000 nodes), dx = dy = dz = 0.01 m, Np = 19456, materials M = 3, steps = 120, dt_first = 1.423e-05 s, dt_last = 1.456e-05 s, t_end = 1.740e-03 s, CFL = 0.3, transfer scheme = 4, time scheme = 3, friction = 0.3, restitution = 0. Compact slots: peak used = 408, final capacity = 1024 (initial 1024, no regrowth), peak bytes = 218880. Positions: 1-step max |dx| = 0.000e+00 cells, end max |dx| = 2.980e-06 cells (noise floor 2.980e-06). Noise floor (dense vs dense rerun): e_P = 6.360e-08, e_KE = 1.350e-07. Checks: memory_ok = yes, slot path exercised = yes, band particle counts identical = yes. Tolerances: 1-step e_Linf <= 1.0e-04, end e_L2 <= 1.0e-03, e_P <= 1.0e-04, e_KE <= 1.0e-03, band |dvx|/v_ref <= 1.0e-03. Interface band (cell, x [m], N_dense, N_compact, vx_dense, vx_compact, |dvx|/v_ref): [12, 0.1250, 512, 512, -0.05123, -0.05123, 2.07e-08] [13, 0.1350, 640, 640, -0.42956, -0.42956, 6.97e-08] [14, 0.1450, 640, 640, -0.43256, -0.43256, 7.15e-08] [15, 0.1550, 640, 640, -0.42789, -0.42789, 7.17e-08] [16, 0.1650, 640, 640, -0.43807, -0.43807, 6.74e-08] [17, 0.1750, 512, 512, -0.00092, -0.00092, 6.18e-09] [18, 0.1850, 640, 640, 0.43620, 0.43620, 5.28e-08] [19, 0.1950, 640, 640, 0.42492, 0.42492, 4.59e-08] [20, 0.2050, 640, 640, 0.42769, 0.42769, 4.34e-08] [21, 0.2150, 640, 640, 0.42197, 0.42197, 2.99e-08] [22, 0.2250, 512, 512, 0.03738, 0.03738, 3.06e-08] 
+Discretisation: grid 40 x 20 x 30 (24000 nodes), dx = dy = dz = 0.01 m, Np = 19456, materials M = 3, steps = 120, dt_first = 1.423e-05 s, dt_last = 1.456e-05 s, t_end = 1.740e-03 s, CFL = 0.3, transfer scheme = 4, time scheme = 3, friction = 0.3, restitution = 0. Compact slots: peak used = 408, final capacity = 1024 (initial 1024, no regrowth), peak bytes = 218880. Positions: 1-step max |dx| = 0.000e+00 cells, end max |dx| = 2.980e-06 cells (noise floor 2.980e-06). Noise floor (dense vs dense rerun): e_P = 3.412e-07, e_KE = 8.191e-07. Checks: memory_ok = yes, slot path exercised = yes, band particle counts identical = yes. Tolerances: 1-step e_Linf <= 1.0e-04, end e_L2 <= 1.0e-03, e_P <= 1.0e-04, e_KE <= 1.0e-03, band |dvx|/v_ref <= 1.0e-03. Interface band (cell, x [m], N_dense, N_compact, vx_dense, vx_compact, |dvx|/v_ref): [12, 0.1250, 512, 512, -0.05123, -0.05123, 1.90e-08] [13, 0.1350, 640, 640, -0.42956, -0.42956, 4.76e-08] [14, 0.1450, 640, 640, -0.43256, -0.43256, 5.35e-08] [15, 0.1550, 640, 640, -0.42789, -0.42789, 6.58e-08] [16, 0.1650, 640, 640, -0.43807, -0.43807, 6.85e-08] [17, 0.1750, 512, 512, -0.00092, -0.00092, 8.85e-10] [18, 0.1850, 640, 640, 0.43620, 0.43620, 6.71e-08] [19, 0.1950, 640, 640, 0.42492, 0.42492, 5.40e-08] [20, 0.2050, 640, 640, 0.42769, 0.42769, 5.04e-08] [21, 0.2150, 640, 640, 0.42197, 0.42197, 4.63e-08] [22, 0.2250, 512, 512, 0.03738, 0.03738, 3.02e-08] 
 
 #### Numerical vs. Exact Verification Plot
 
@@ -511,11 +527,11 @@ Discretisation: grid 40 x 20 x 30 (24000 nodes), dx = dy = dz = 0.01 m, Np = 194
 ### VV-L2-CMP-03: Compact Bardenhagen storage parity: radial MLS, 3 objects -> 2 materials, slot regrowth
 
 - **Status:** **PASSED**
-- **Summary:** Dense vs compact Bardenhagen storage: 1-step e_Linf(v) = 1.788e-07 (noise floor 1.800e-07), end e_L2(v) = 2.731e-07 (noise floor 2.708e-07), e_P = 7.500e-08, e_KE = 9.769e-08, band max |dvx|/v_ref = 1.192e-07. Material storage 2560000 B dense vs 148160 B compact (5.8%).
+- **Summary:** Dense vs compact Bardenhagen storage: 1-step e_Linf(v) = 2.384e-07 (noise floor 1.974e-07), end e_L2(v) = 3.100e-07 (noise floor 3.505e-07), e_P = 1.043e-07, e_KE = 3.180e-07, band max |dvx|/v_ref = 3.129e-07. Material storage 2560000 B dense vs 148160 B compact (5.8%).
 
 #### Governing Formulation & Technical Details
 
-Discretisation: grid 80 x 20 x 20 (32000 nodes), dx = dy = dz = 0.01 m, Np = 1536, materials M = 2, steps = 100, dt_first = 1.397e-05 s, dt_last = 1.369e-05 s, t_end = 1.383e-03 s, CFL = 0.3, transfer scheme = 3, time scheme = 0, friction = 0, restitution = 0.5. Compact slots: peak used = 192, final capacity = 252 (initial 16, regrown), peak bytes = 148160. Positions: 1-step max |dx| = 0.000e+00 cells, end max |dx| = 5.960e-06 cells (noise floor 5.960e-06). Noise floor (dense vs dense rerun): e_P = 6.449e-08, e_KE = 7.446e-08. Checks: memory_ok = yes, slot path exercised = yes, band particle counts identical = yes. Tolerances: 1-step e_Linf <= 1.0e-04, end e_L2 <= 1.0e-03, e_P <= 1.0e-04, e_KE <= 1.0e-03, band |dvx|/v_ref <= 1.0e-03. Interface band (cell, x [m], N_dense, N_compact, vx_dense, vx_compact, |dvx|/v_ref): [35, 0.3550, 64, 64, -2.91588, -2.91588, 4.10e-08] [36, 0.3650, 128, 128, -0.85447, -0.85447, 4.10e-08] [37, 0.3750, 128, 128, 1.86919, 1.86919, 5.87e-08] [38, 0.3850, 128, 128, 4.08815, 4.08815, 9.69e-08] [39, 0.3950, 128, 128, 5.26521, 5.26521, 5.40e-08] [40, 0.4050, 128, 128, 7.73465, 7.73465, 5.92e-08] [41, 0.4150, 128, 128, 9.89738, 9.89738, 4.25e-08] [42, 0.4250, 128, 128, 9.51433, 9.51433, 3.73e-09] [43, 0.4350, 128, 128, 9.44183, 9.44183, 8.72e-08] [44, 0.4450, 64, 64, 9.60398, 9.60399, 1.19e-07] [45, 0.4550, 0, 0, 0.00000, 0.00000, 0.00e+00] 
+Discretisation: grid 80 x 20 x 20 (32000 nodes), dx = dy = dz = 0.01 m, Np = 1536, materials M = 2, steps = 100, dt_first = 1.397e-05 s, dt_last = 1.369e-05 s, t_end = 1.383e-03 s, CFL = 0.3, transfer scheme = 3, time scheme = 0, friction = 0, restitution = 0.5. Compact slots: peak used = 192, final capacity = 252 (initial 16, regrown), peak bytes = 148160. Positions: 1-step max |dx| = 0.000e+00 cells, end max |dx| = 5.960e-06 cells (noise floor 5.960e-06). Noise floor (dense vs dense rerun): e_P = 1.171e-07, e_KE = 4.040e-07. Checks: memory_ok = yes, slot path exercised = yes, band particle counts identical = yes. Tolerances: 1-step e_Linf <= 1.0e-04, end e_L2 <= 1.0e-03, e_P <= 1.0e-04, e_KE <= 1.0e-03, band |dvx|/v_ref <= 1.0e-03. Interface band (cell, x [m], N_dense, N_compact, vx_dense, vx_compact, |dvx|/v_ref): [35, 0.3550, 64, 64, -2.91588, -2.91588, 7.71e-08] [36, 0.3650, 128, 128, -0.85447, -0.85447, 4.45e-09] [37, 0.3750, 128, 128, 1.86919, 1.86919, 1.01e-08] [38, 0.3850, 128, 128, 4.08815, 4.08815, 1.06e-08] [39, 0.3950, 128, 128, 5.26521, 5.26521, 5.33e-08] [40, 0.4050, 128, 128, 7.73465, 7.73465, 1.16e-07] [41, 0.4150, 128, 128, 9.89738, 9.89738, 1.18e-07] [42, 0.4250, 128, 128, 9.51433, 9.51433, 1.81e-07] [43, 0.4350, 128, 128, 9.44183, 9.44183, 2.73e-07] [44, 0.4450, 64, 64, 9.60398, 9.60399, 3.13e-07] [45, 0.4550, 0, 0, 0.00000, 0.00000, 0.00e+00] 
 
 #### Numerical vs. Exact Verification Plot
 
@@ -526,11 +542,11 @@ Discretisation: grid 80 x 20 x 20 (32000 nodes), dx = dy = dz = 0.01 m, Np = 153
 ### VV-L2-CMP-04: Millimeter-scale high-spin (2000 rad/s) 3D MPM angular/linear momentum & Cayley stress conservation
 
 - **Status:** **PASSED**
-- **Summary:** High-spin (wx = 2000 rad/s, wz = 250 rad/s, dx = 2 mm) 3D MPM conservation: Cayley stress invariant error = 1.427e-05, angular momentum vector error |L(t)-L(0)|/|L(0)| = 2.743e-06, linear momentum drift = 2.023e-06, spin-up / transverse excess = 0.000e+00, intact fractured particles = 0.
+- **Summary:** High-spin (wx = 2000 rad/s, wz = 250 rad/s, dx = 2 mm) 3D MPM conservation: Cayley stress invariant error = 1.427e-05, angular momentum vector error |L(t)-L(0)|/|L(0)| = 2.879e-06, linear momentum drift = 1.888e-06, spin-up / transverse excess = 0.000e+00, intact fractured particles = 0.
 
 #### Governing Formulation & Technical Details
 
-Discretisation: grid 32 x 32 x 32, dx = dy = dz = 0.002 m, Np = 5056, steps = 200, dt = 1.000e-07 s. Intact w(0) = (2000, 6.42545e-11, 250) rad/s -> w(t) = (2001.05, -0.000130319, 249.899) rad/s. Partially-damaged remnant |w(0)| = 920.203 rad/s -> |w(t)| = 919.591 rad/s.
+Discretisation: grid 32 x 32 x 32, dx = dy = dz = 0.002 m, Np = 5056, steps = 200, dt = 1.000e-07 s. Intact w(0) = (2000, 6.42545e-11, 250) rad/s -> w(t) = (2001.05, -0.00016704, 249.899) rad/s. Partially-damaged remnant |w(0)| = 920.203 rad/s -> |w(t)| = 919.591 rad/s.
 
 #### Numerical vs. Exact Verification Plot
 
@@ -541,7 +557,7 @@ Discretisation: grid 32 x 32 x 32, dx = dy = dz = 0.002 m, Np = 5056, steps = 20
 ### VV-L2-CMP-05: 3D MPM Multi-Velocity Impact Welding, Frictional Heating & Thermal Conduction
 
 - **Status:** **PASSED**
-- **Summary:** Oblique Cu-Steel impact welding (v0 = (380, 140) m/s): welded |dv_12| = 5.838e+01 m/s vs unwelded |dv_12| = 1.162e+02 m/s, E_th(weld) = 2.969e+03 J vs E_th(unwelded) = 2.868e+03 J, sinter-healed particles = 150, momentum drift = 8.336e-07.
+- **Summary:** Oblique Cu-Steel impact welding (v0 = (380, 140) m/s): welded |dv_12| = 5.838e+01 m/s vs unwelded |dv_12| = 1.162e+02 m/s, E_th(weld) = 2.969e+03 J vs E_th(unwelded) = 2.868e+03 J, sinter-healed particles = 150, momentum drift = 6.467e-07.
 
 #### Governing Formulation & Technical Details
 
@@ -556,7 +572,7 @@ Discretisation: grid 24 x 20 x 20, dx = dy = dz = 0.0025 m, Np = 968, steps = 80
 ### VV-L2-CMP-06: Inclined Target Plate (rot_y = 10 deg) Pre-Strained Fragment Skimming & Hexagonal Box Flatness
 
 - **Status:** **PASSED**
-- **Summary:** Inclined target plate (rot_y = 10 deg) under 320 m/s pre-strained fragment skimming: max(ep_bar) = 0.000e+00, L2(ep_bar) = 0.000e+00, Hexagonal+Partial mass error = 2.928e-08, face flatness error = 0.000e+00 m, momentum drift = 9.509e-07.
+- **Summary:** Inclined target plate (rot_y = 10 deg) under 320 m/s pre-strained fragment skimming: max(ep_bar) = 0.000e+00, L2(ep_bar) = 0.000e+00, Hexagonal+Partial mass error = 2.928e-08, face flatness error = 0.000e+00 m, momentum drift = 9.019e-07.
 
 #### Governing Formulation & Technical Details
 
@@ -571,7 +587,7 @@ Discretisation: grid 24 x 10 x 28, dx = dy = dz = 0.01 m, Np = 1984 (target = 15
 ### VV-L2-CMP-07: Hybrid Bardenhagen Coupler: Bonded Single-Velocity Pair Impacting Independent 3rd Body
 
 - **Status:** **PASSED**
-- **Summary:** 3-body hybrid contact (Objects 1+2 bonded on Field 0, Object 3 independent on Field 1) vs monolithic reference: profile e_L2(vx) = 1.871e-06, e_Linf(vx) = 2.027e-06, bonded COM offset drift = 1.460e-04 m, rebound vx_12 = -6.90 m/s, vx_3 = +6.90 m/s.
+- **Summary:** 3-body hybrid contact (Objects 1+2 bonded on Field 0, Object 3 independent on Field 1) vs monolithic reference: profile e_L2(vx) = 1.806e-06, e_Linf(vx) = 1.848e-06, bonded COM offset drift = 1.460e-04 m, rebound vx_12 = -6.90 m/s, vx_3 = +6.90 m/s.
 
 #### Governing Formulation & Technical Details
 
@@ -586,7 +602,7 @@ Discretisation: grid 80 x 20 x 20, dx = dy = dz = 0.01 m, Np = 1024 (Obj1=256, O
 ### VV-L2-CMP-08: Bardenhagen initial-contact tie: conformal spinning sleeve-on-core (no spurious plasticity, exact release, closing impact untouched)
 
 - **Status:** **PASSED**
-- **Summary:** Conformal spinning sleeve (3000 rad/s, 100 m/s, 0.5-cell sleeve): ties detected ON/OFF = 1/0; max eps_p tie-ON = 0.000e+00 (tie-OFF = 2.690e-03); interface radial-velocity mismatch ON = 4.035e-04 (OFF = 1.103e-02); momentum drift = 3.778e-06 (bonded ep = 0.000e+00); release-box ties = 1; release: measured separation rate 5.027 m/s vs imposed 5 m/s (err 5.456e-03); closing impact ties = 0, |dv_on - dv_off|/v = 2.144e-06; scale-free Standard free-face ringing max_ep (macro GPU / micro GPU / micro CPU) = 0.000e+00 / 0.000e+00 / 0.000e+00.
+- **Summary:** Conformal spinning sleeve (3000 rad/s, 100 m/s, 0.5-cell sleeve): ties detected ON/OFF = 1/0; max eps_p tie-ON = 0.000e+00 (tie-OFF = 7.247e-03); interface radial-velocity mismatch ON = 4.069e-04 (OFF = 1.107e-02); momentum drift = 2.265e-06 (bonded ep = 0.000e+00); release-box ties = 1; release: measured separation rate 5.027 m/s vs imposed 5 m/s (err 5.456e-03); closing impact ties = 0, |dv_on - dv_off|/v = 1.033e-07; scale-free Standard free-face ringing max_ep (macro GPU / micro GPU / micro CPU) = 0.000e+00 / 0.000e+00 / 0.000e+00.
 
 #### Governing Formulation & Technical Details
 

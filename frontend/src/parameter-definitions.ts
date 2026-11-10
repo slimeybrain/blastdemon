@@ -2274,6 +2274,198 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Critical shock entropy threshold for ignition onset',
         detailedDesc: 'Specific shock entropy threshold s_th [J/(kg·K)] below which hot-spot ignition rate is strictly zero, preventing premature deflagration from acoustic waves.'
     },
+    'crest_awe_K0s': {
+        key: 'crest_awe_K0s',
+        label: 'AWE CREST K₀s: Solid Bulk Modulus',
+        unit: 'Pa',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Reactant bulk modulus at TMD',
+        detailedDesc: "Zero-pressure bulk modulus of the solid reactant in the AWE finite-strain principal isentrope: pi(f) = 3·K0s·f·(2f+1)^(5/2)·(F + f·F'/2), with f = ½((ρs/ρ0s)^(2/3) − 1) and F = exp(gA+gB+gC). Source: Handley (2006) Table 2; Cartwright (2016) Table 3.1."
+    },
+    'crest_awe_A1': {
+        key: 'crest_awe_A1',
+        label: 'AWE CREST A₁: Isentrope Coefficient 1',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Low-strain polynomial coefficient',
+        detailedDesc: 'Linear coefficient of gA(f) = A1·f + A2·f² + A3·f³ in the exponent of the isentrope correction F(f). Fitted to Hugoniot/isentrope data.'
+    },
+    'crest_awe_A2': {
+        key: 'crest_awe_A2',
+        label: 'AWE CREST A₂: Isentrope Coefficient 2',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Quadratic polynomial coefficient',
+        detailedDesc: 'Quadratic coefficient of gA(f); controls stiffening of the unreacted isentrope with compression.'
+    },
+    'crest_awe_A3': {
+        key: 'crest_awe_A3',
+        label: 'AWE CREST A₃: Isentrope Coefficient 3',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Cubic polynomial coefficient',
+        detailedDesc: 'Cubic coefficient of gA(f). Zero for both published sets (EDC37, PBX 9502).'
+    },
+    'crest_awe_B1': {
+        key: 'crest_awe_B1',
+        label: 'AWE CREST B₁: High-Strain Coefficient 1',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'High-strain branch linear term',
+        detailedDesc: 'Linear coefficient of the arctan-smoothed high-strain polynomial B1·(f−fc) + B2·(f−fc)² + B3·(f−fc)³ applied above branch strain fc. Zero disables the branch (EDC37).'
+    },
+    'crest_awe_B2': {
+        key: 'crest_awe_B2',
+        label: 'AWE CREST B₂: High-Strain Coefficient 2',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'High-strain branch quadratic term',
+        detailedDesc: 'Quadratic coefficient of the high-strain polynomial added to the isentrope exponent above fc.'
+    },
+    'crest_awe_B3': {
+        key: 'crest_awe_B3',
+        label: 'AWE CREST B₃: High-Strain Coefficient 3',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'High-strain branch cubic term',
+        detailedDesc: 'Cubic coefficient of the high-strain polynomial. Zero for both published sets.'
+    },
+    'crest_awe_fc': {
+        key: 'crest_awe_fc',
+        label: 'AWE CREST fc: Branch Strain',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Strain where high-strain branch switches on',
+        detailedDesc: 'Finite strain f at which the high-strain polynomial branch is centred; used with δ in the smooth switch 0.5·(1 − (2/π)·atan((f−fc)/δ)).'
+    },
+    'crest_awe_delta': {
+        key: 'crest_awe_delta',
+        label: 'AWE CREST δ: Branch Smoothing Width',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Arctan switch width',
+        detailedDesc: 'Smoothing width of the branch switch. Must be > 0 for the B-polynomial to be active; zero disables the branch.'
+    },
+    'crest_awe_Gamma1': {
+        key: 'crest_awe_Gamma1',
+        label: 'AWE CREST Γ₁: Grüneisen Amplitude',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Strain-dependent Grüneisen coefficient',
+        detailedDesc: 'Γ(x) = γ00 + Γ1·x^m·exp(−Γ2·x), x = ρ0s/ρs. Sets the thermal-pressure response of the solid reactant.'
+    },
+    'crest_awe_Gamma2': {
+        key: 'crest_awe_Gamma2',
+        label: 'AWE CREST Γ₂: Grüneisen Decay',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Grüneisen exponential decay rate',
+        detailedDesc: 'Exponential decay rate in Γ(x); also enters τ = exp(−∫Γ/x dx), the integrating factor that defines shock entropy Zs.'
+    },
+    'crest_awe_gamma00': {
+        key: 'crest_awe_gamma00',
+        label: 'AWE CREST γ00: Grüneisen Floor',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'High-compression Grüneisen limit',
+        detailedDesc: 'Asymptotic Grüneisen parameter at strong compression (published value 0.4).'
+    },
+    'crest_awe_m': {
+        key: 'crest_awe_m',
+        label: 'AWE CREST m: Grüneisen Exponent',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Power on x in Γ(x)',
+        detailedDesc: 'Exponent m in Γ(x) = γ00 + Γ1·x^m·exp(−Γ2·x). Published value 2.'
+    },
+    'crest_awe_c0': {
+        key: 'crest_awe_c0',
+        label: 'AWE CREST c0: Fast Rate Coefficient',
+        unit: 'μs⁻²·(Mbar·cm³/g)^−c1',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Fast-channel rate prefactor; > 0 activates AWE CREST',
+        detailedDesc: 'Fast rate b1 = min(4000, c0·Zs^c1) in μs⁻². A value > 0 switches the solver from the legacy CREST model to the AWE finite-strain CREST model; 0 keeps the legacy model. Source: Handley (2006) Table 2; Cartwright (2016) Table 3.1.'
+    },
+    'crest_awe_c1': {
+        key: 'crest_awe_c1',
+        label: 'AWE CREST c1: Fast Rate Exponent',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Shock-entropy exponent of fast rate',
+        detailedDesc: 'Exponent on Zs in b1 = c0·Zs^c1.'
+    },
+    'crest_awe_c2': {
+        key: 'crest_awe_c2',
+        label: 'AWE CREST c2: Slow Rate Coefficient',
+        unit: 'μs⁻²·(Mbar·cm³/g)^−c3',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Slow-channel rate prefactor',
+        detailedDesc: 'Slow rate b2 = min(4000, c2·Zs^c3) in μs⁻².'
+    },
+    'crest_awe_c3': {
+        key: 'crest_awe_c3',
+        label: 'AWE CREST c3: Slow Rate Exponent',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Shock-entropy exponent of slow rate',
+        detailedDesc: 'Exponent on Zs in b2 = c2·Zs^c3.'
+    },
+    'crest_awe_c6': {
+        key: 'crest_awe_c6',
+        label: 'AWE CREST c6: Fast Weight Coefficient',
+        unit: 'μs⁻¹·(Mbar·cm³/g)^−c12',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Fast-channel burn weight prefactor',
+        detailedDesc: 'Fast weight M1 = c6·Zs^c12/√b1. Zero disables the fast channel (EDC37).'
+    },
+    'crest_awe_c8': {
+        key: 'crest_awe_c8',
+        label: 'AWE CREST c8: Slow Low-Zs Coefficient',
+        unit: 'μs⁻¹·(Mbar·cm³/g)^c9',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Low-entropy slow weight term',
+        detailedDesc: 'Contributes c8·Zs^(−c9) to the slow-channel numerator in M2 = min(10, (c8·Zs^−c9 + c10·(Zs−c13)^c11)/√b2).'
+    },
+    'crest_awe_c9': {
+        key: 'crest_awe_c9',
+        label: 'AWE CREST c9: Slow Low-Zs Exponent',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Exponent of the low-entropy term',
+        detailedDesc: 'Exponent in the c8 term.'
+    },
+    'crest_awe_c10': {
+        key: 'crest_awe_c10',
+        label: 'AWE CREST c10: Slow High-Zs Coefficient',
+        unit: 'μs⁻¹·(Mbar·cm³/g)^−c11',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'High-entropy slow weight term',
+        detailedDesc: 'Coefficient of c10·(Zs − c13)^c11 in the slow-channel numerator, active for Zs > c13.'
+    },
+    'crest_awe_c11': {
+        key: 'crest_awe_c11',
+        label: 'AWE CREST c11: Slow High-Zs Exponent',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Exponent of the high-entropy term',
+        detailedDesc: 'Exponent in the c10 term.'
+    },
+    'crest_awe_c12': {
+        key: 'crest_awe_c12',
+        label: 'AWE CREST c12: Fast Weight Exponent',
+        unit: 'dim',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Shock-entropy exponent of fast weight',
+        detailedDesc: 'Exponent on Zs in M1 = c6·Zs^c12/√b1.'
+    },
+    'crest_awe_c13': {
+        key: 'crest_awe_c13',
+        label: 'AWE CREST c13: Entropy Threshold',
+        unit: 'Mbar·cm³/g',
+        category: 'CREST Reactive Burn Kinetics',
+        shortDesc: 'Shock entropy below which the c10 term is off',
+        detailedDesc: 'Threshold shock entropy for the high-entropy slow channel; also seeds detonator-initiated Zs (2·c13, minimum 0.02).'
+    },
     'initiation_radius': {
         key: 'initiation_radius',
         label: 'Detonator Hot-Spot Booster Radius',
@@ -3102,6 +3294,13 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'VTK Output',
         shortDesc: 'Save Lagrangian MPM points to VTK',
         detailedDesc: 'Exports discrete material point positions, velocities, stress tensors, and temperatures.'
+    },
+    'export_mpm_density_grid': {
+        key: 'export_mpm_density_grid',
+        label: 'Export MPM Density Grid (.vts)',
+        category: 'VTK Output',
+        shortDesc: 'Export background grid cell particle count and mass density',
+        detailedDesc: 'Exports an XML StructuredGrid (.vts) of the background Cartesian grid containing cell-wise particle density (number of particles in each background cell) and continuum mass density (kg/m^3) for seamless isosurface generation, volume rendering, and threshold filtering in ParaView.'
     },
     'export_pvd': {
         key: 'export_pvd',
@@ -4998,7 +5197,7 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
         'solid_model', 'burn_model', 'product_model',
         'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
         'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-        'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+        'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13',
         'burn_zone_cells', 'tau_burn_min',
         'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_G2', 'lt_e', 'lt_g', 'lt_z',
         'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min'
@@ -5333,7 +5532,7 @@ export function getParamKeysForNode(
             if (burnModel.includes('Lee-Tarver')) {
                 keys.push('det_vel', 'detonation_energy', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min');
             } else if (burnModel.includes('CREST')) {
-                keys.push('crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold');
+                keys.push('crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13');
             } else {
                 keys.push('det_vel', 'detonation_energy', 'burn_zone_cells', 'tau_burn_min');
             }
@@ -5539,7 +5738,7 @@ export function getParamKeysForNode(
     } else if (nodeType === 'VTKOutput') {
         keys = [
             'trigger_type', 'step_interval', 'time_interval', 'vtk_format', 'compression_level', 'float_precision', 'mpm_topology', 'custom_filename', 'vtk_dir',
-            'export_cfd_2d', 'export_slices', 'export_volumes', 'export_obstacles', 'export_stl_faces', 'stl_outside_domain', 'tessellate_stl_faces', 'tessellation_max_edge', 'export_fem', 'export_mpm', 'export_pvd',
+            'export_cfd_2d', 'export_slices', 'export_volumes', 'export_obstacles', 'export_stl_faces', 'stl_outside_domain', 'tessellate_stl_faces', 'tessellation_max_edge', 'export_fem', 'export_mpm', 'export_mpm_density_grid', 'export_pvd',
             'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_materials', 'qty_water', 'qty_soil', 'qty_overpressure', 'qty_impulse',
             'qty_fem_stress', 'qty_fem_strain', 'qty_fem_pressure', 'qty_fem_temp', 'qty_fem_damage', 'qty_fem_vel', 'qty_fem_disp',
             'qty_mpm_stress', 'qty_mpm_strain', 'qty_mpm_damage', 'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id', 'qty_mpm_particle_density', 'qty_mpm_temp', 'qty_mpm_vel',
@@ -5828,7 +6027,7 @@ export function shouldSkipNodeParameter(
             if (['mg_c0', 'mg_s', 'mg_gamma0'].includes(key) && solidModel.includes('Davis')) return true;
 
             if (['lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min'].includes(key) && !burnModel.includes('Lee-Tarver')) return true;
-            if (['crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'].includes(key) && !burnModel.includes('CREST')) return true;
+            if (['crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13'].includes(key) && !burnModel.includes('CREST')) return true;
             if (['burn_zone_cells', 'tau_burn_min'].includes(key) && (burnModel.includes('Lee-Tarver') || burnModel.includes('CREST'))) return true;
 
             if (['davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det'].includes(key) && !prodModel.includes('Davis')) return true;
@@ -5847,7 +6046,7 @@ export function shouldSkipNodeParameter(
         } else {
             // Non-energetic models do not expose pillar selector dropdowns or reaction kinetics
             if (['solid_model', 'burn_model', 'product_model'].includes(key)) return true;
-            if (['burn_zone_cells', 'tau_burn_min', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min', 'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold'].includes(key)) return true;
+            if (['burn_zone_cells', 'tau_burn_min', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min', 'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13'].includes(key)) return true;
             if (['davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0', 'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det'].includes(key)) return true;
         }
 
@@ -5943,7 +6142,7 @@ export function shouldSkipNodeParameter(
 
         // Model-level physics dependencies (Directive: don't display params that are not relevant to the current setup)
         if (!ctx.hasFEM && (key === 'export_fem' || key.startsWith('qty_fem_'))) return true;
-        if (!ctx.hasMPM && (key === 'export_mpm' || key === 'mpm_topology' || key.startsWith('qty_mpm_'))) return true;
+        if (!ctx.hasMPM && (key === 'export_mpm' || key === 'export_mpm_density_grid' || key === 'mpm_topology' || key.startsWith('qty_mpm_'))) return true;
         if (!ctx.hasCFD && (
             key === 'export_cfd_2d' || key === 'export_slices' || key === 'export_volumes' ||
             ['qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_materials', 'qty_water', 'qty_soil', 'qty_overpressure', 'qty_impulse'].includes(key)
@@ -5963,7 +6162,7 @@ export function shouldSkipNodeParameter(
 
         // Spatial dimension dependencies
         if (!ctx.is3D && (
-            key === 'export_slices' || key === 'export_volumes' || key === 'export_obstacles' || key === 'export_stl_faces' || key === 'stl_outside_domain' || key === 'tessellate_stl_faces' || key === 'tessellation_max_edge' || key === 'export_fem' || key === 'export_mpm' ||
+            key === 'export_slices' || key === 'export_volumes' || key === 'export_obstacles' || key === 'export_stl_faces' || key === 'stl_outside_domain' || key === 'tessellate_stl_faces' || key === 'tessellation_max_edge' || key === 'export_fem' || key === 'export_mpm' || key === 'export_mpm_density_grid' ||
             key.startsWith('qty_fem_') || key.startsWith('qty_mpm_') ||
             key.startsWith('roi_') || key === 'volume_stride' || key === 'slice_stride'
         )) return true;

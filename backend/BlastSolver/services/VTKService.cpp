@@ -86,6 +86,7 @@ void parse_vtk_config(const nlohmann::json& msg) {
                     global_vtk_config.export_volumes = get_json_bool(params, "export_volumes", false);
                     global_vtk_config.export_fem = get_json_bool(params, "export_fem", true);
                     global_vtk_config.export_mpm = get_json_bool(params, "export_mpm", true);
+                    global_vtk_config.export_mpm_density_grid = get_json_bool(params, "export_mpm_density_grid", false);
                     global_vtk_config.export_obstacles = get_json_bool(params, "export_obstacles", true);
                     global_vtk_config.export_stl_faces = get_json_bool(params, "export_stl_faces", true);
                     if (params.contains("stl_outside_domain") && params["stl_outside_domain"].is_string()) {
@@ -160,6 +161,7 @@ void parse_vtk_config(const nlohmann::json& msg) {
         if (params.contains("export_volumes")) global_vtk_config.export_volumes = params.value("export_volumes", global_vtk_config.export_volumes);
         if (params.contains("export_fem")) global_vtk_config.export_fem = params.value("export_fem", global_vtk_config.export_fem);
         if (params.contains("export_mpm")) global_vtk_config.export_mpm = params.value("export_mpm", global_vtk_config.export_mpm);
+        if (params.contains("export_mpm_density_grid")) global_vtk_config.export_mpm_density_grid = params.value("export_mpm_density_grid", global_vtk_config.export_mpm_density_grid);
         if (params.contains("export_obstacles")) global_vtk_config.export_obstacles = params.value("export_obstacles", global_vtk_config.export_obstacles);
         if (params.contains("export_stl_faces")) global_vtk_config.export_stl_faces = params.value("export_stl_faces", global_vtk_config.export_stl_faces);
         if (params.contains("stl_outside_domain")) global_vtk_config.stl_outside_domain = params.value("stl_outside_domain", global_vtk_config.stl_outside_domain);
@@ -197,6 +199,7 @@ void parse_vtk_config(const nlohmann::json& msg) {
     if (msg.contains("export_volumes")) global_vtk_config.export_volumes = get_json_bool(msg, "export_volumes", global_vtk_config.export_volumes);
     if (msg.contains("export_fem")) global_vtk_config.export_fem = get_json_bool(msg, "export_fem", global_vtk_config.export_fem);
     if (msg.contains("export_mpm")) global_vtk_config.export_mpm = get_json_bool(msg, "export_mpm", global_vtk_config.export_mpm);
+    if (msg.contains("export_mpm_density_grid")) global_vtk_config.export_mpm_density_grid = get_json_bool(msg, "export_mpm_density_grid", global_vtk_config.export_mpm_density_grid);
     if (msg.contains("export_obstacles")) global_vtk_config.export_obstacles = get_json_bool(msg, "export_obstacles", global_vtk_config.export_obstacles);
     if (msg.contains("export_stl_faces")) global_vtk_config.export_stl_faces = get_json_bool(msg, "export_stl_faces", global_vtk_config.export_stl_faces);
     if (msg.contains("stl_outside_domain") && msg["stl_outside_domain"].is_string()) global_vtk_config.stl_outside_domain = msg["stl_outside_domain"].get<std::string>();
@@ -742,6 +745,91 @@ void write_vtk_outputs(int step, double time) {
                 global_vtk_config.qty_mpm_particle_density
             ));
         }
+    }
+
+    // 3A. MPM 3D Background Grid Density (.vts StructuredGrid)
+    if (global_vtk_config.export_mpm_density_grid && (global_solver_mpm_3d_cuda || global_solver_mpm_3d)) {
+        MPMDensityGridSnapshot3D snap;
+        if (global_solver_mpm_3d_cuda) {
+            snap.nx = global_solver_mpm_3d_cuda->getNx();
+            snap.ny = global_solver_mpm_3d_cuda->getNy();
+            snap.nz = global_solver_mpm_3d_cuda->getNz();
+            snap.dx = global_solver_mpm_3d_cuda->getDx();
+            snap.dy = global_solver_mpm_3d_cuda->getDy();
+            snap.dz = global_solver_mpm_3d_cuda->getDz();
+            snap.xmin = global_solver_mpm_3d_cuda->getXMin();
+            snap.ymin = global_solver_mpm_3d_cuda->getYMin();
+            snap.zmin = global_solver_mpm_3d_cuda->getZMin();
+        } else {
+            snap.nx = global_solver_mpm_3d->getNx();
+            snap.ny = global_solver_mpm_3d->getNy();
+            snap.nz = global_solver_mpm_3d->getNz();
+            snap.dx = global_solver_mpm_3d->getDx();
+            snap.dy = global_solver_mpm_3d->getDy();
+            snap.dz = global_solver_mpm_3d->getDz();
+            snap.xmin = global_solver_mpm_3d->getXMin();
+            snap.ymin = global_solver_mpm_3d->getYMin();
+            snap.zmin = global_solver_mpm_3d->getZMin();
+        }
+
+        snap.stride = std::max(1, global_vtk_config.volume_stride);
+        snap.roi_enabled = global_vtk_config.roi_enabled;
+        snap.roi_xmin = global_vtk_config.roi_xmin; snap.roi_xmax = global_vtk_config.roi_xmax;
+        snap.roi_ymin = global_vtk_config.roi_ymin; snap.roi_ymax = global_vtk_config.roi_ymax;
+        snap.roi_zmin = global_vtk_config.roi_zmin; snap.roi_zmax = global_vtk_config.roi_zmax;
+        snap.compression_level = global_vtk_config.compression_level;
+        snap.float_precision = global_vtk_config.float_precision;
+
+        if (snap.roi_enabled && snap.dx > 0.0 && snap.dy > 0.0 && snap.dz > 0.0) {
+            snap.i_start = std::clamp(static_cast<int>(std::floor((snap.roi_xmin - snap.xmin) / snap.dx)), 0, snap.nx - 1);
+            snap.i_end   = std::clamp(static_cast<int>(std::ceil((snap.roi_xmax - snap.xmin) / snap.dx)), snap.i_start + 1, snap.nx);
+            snap.j_start = std::clamp(static_cast<int>(std::floor((snap.roi_ymin - snap.ymin) / snap.dy)), 0, snap.ny - 1);
+            snap.j_end   = std::clamp(static_cast<int>(std::ceil((snap.roi_ymax - snap.ymin) / snap.dy)), snap.j_start + 1, snap.ny);
+            snap.k_start = std::clamp(static_cast<int>(std::floor((snap.roi_zmin - snap.zmin) / snap.dz)), 0, snap.nz - 1);
+            snap.k_end   = std::clamp(static_cast<int>(std::ceil((snap.roi_zmax - snap.zmin) / snap.dz)), snap.k_start + 1, snap.nz);
+
+            snap.nx_sub = (snap.i_end - snap.i_start + snap.stride - 1) / snap.stride;
+            snap.ny_sub = (snap.j_end - snap.j_start + snap.stride - 1) / snap.stride;
+            snap.nz_sub = (snap.k_end - snap.k_start + snap.stride - 1) / snap.stride;
+        } else {
+            snap.i_start = 0; snap.i_end = snap.nx;
+            snap.j_start = 0; snap.j_end = snap.ny;
+            snap.k_start = 0; snap.k_end = snap.nz;
+            snap.nx_sub = (snap.nx + snap.stride - 1) / snap.stride;
+            snap.ny_sub = (snap.ny + snap.stride - 1) / snap.stride;
+            snap.nz_sub = (snap.nz + snap.stride - 1) / snap.stride;
+        }
+
+        if (global_solver_mpm_3d_cuda) {
+            global_solver_mpm_3d_cuda->extractDensityGridToHost(
+                snap.particle_count, snap.mass_density,
+                snap.i_start, snap.i_end,
+                snap.j_start, snap.j_end,
+                snap.k_start, snap.k_end,
+                snap.stride
+            );
+        } else if (global_solver_mpm_3d) {
+            global_solver_mpm_3d->extractDensityGrid(
+                snap.particle_count, snap.mass_density,
+                snap.i_start, snap.i_end,
+                snap.j_start, snap.j_end,
+                snap.k_start, snap.k_end,
+                snap.stride
+            );
+        }
+
+        std::string rel_filename = global_vtk_config.custom_filename + "_mpm_density_" + tag + ".vts";
+        std::string filename = out_dir + "/" + rel_filename;
+        std::string pvd_filename = out_dir + "/" + global_vtk_config.custom_filename + "_mpm_density.pvd";
+        bool export_pvd = global_vtk_config.export_pvd;
+        std::string format = (global_vtk_config.vtk_format == "ASCII") ? "ASCII" : "Binary";
+
+        Blast::AsyncVTKWriter::getInstance().enqueue([filename, snap = std::move(snap), format, export_pvd, pvd_filename, time, rel_filename]() {
+            export_vts_mpm_density_grid_snapshot(filename, snap, format);
+            if (export_pvd) {
+                append_pvd_timestep(pvd_filename, time, rel_filename);
+            }
+        });
     }
 
     // 3B. Phase Tracking Particles (LPTP)

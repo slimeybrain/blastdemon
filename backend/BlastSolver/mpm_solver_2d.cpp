@@ -1275,8 +1275,32 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             float lam_curr = p.lambda;
             float lam_new = lam_curr;
 
+            const bool awe = (p.burn_model == ReactionKinetics::CRESTEntropy) && p.crest_awe_c0 > 0.0f;
+            CrestDavis::CRESTSolidParams awe_q{};
+            float awe_vtmd = 1.0f;
+            if (awe) {
+                const float rho0s = (p.davis_rho0 > 0.0f) ? p.davis_rho0 : p.density;
+                awe_q = {p.density, rho0s, p.crest_awe_K0s, p.detonation_energy,
+                         p.crest_awe_A1, p.crest_awe_A2, p.crest_awe_A3,
+                         p.crest_awe_B1, p.crest_awe_B2, p.crest_awe_B3,
+                         p.crest_awe_fc, p.crest_awe_delta,
+                         p.crest_awe_Gamma1, p.crest_awe_Gamma2, p.crest_awe_gamma00, p.crest_awe_m};
+                awe_vtmd = rho0s / p.density;
+            }
             // Pillar 2: Reaction Kinetics Rate Law
-            if (p.burn_model == ReactionKinetics::CRESTEntropy) {
+            if (awe) {
+                p.v_min = std::min(p.v_min, v_rel);
+                p.s_shock = std::max(p.s_shock, static_cast<float>(CrestDavis::computeCRESTShockEntropy(p.v_min, awe_q)));
+                float e_th_trial = std::max(0.0f, p.e_int - lam_curr * p.detonation_energy);
+                float p_curr_comp = -0.5f * (p.sigma[0][0] + p.sigma[1][1]);
+                float p_react_trial = static_cast<float>(CrestDavis::computeCRESTSolidPressure(v_rel, e_th_trial, awe_q));
+                float p_eff_comp = (lam_curr <= 1.0e-5f) ? std::max(p_curr_comp, p_react_trial) : p_react_trial;
+                if (p_eff_comp > 1.0e6f)
+                    p.s_shock = std::max(p.s_shock, static_cast<float>(CrestDavis::computeCRESTShockEntropyFromPressure(p_eff_comp, awe_q)));
+                lam_new = static_cast<float>(CrestDavis::advanceAWECRESTProgress(dt, p.s_shock, p.lambda,
+                    p.crest_awe_c0, p.crest_awe_c1, p.crest_awe_c2, p.crest_awe_c3, p.crest_awe_c6,
+                    p.crest_awe_c8, p.crest_awe_c9, p.crest_awe_c10, p.crest_awe_c11, p.crest_awe_c12, p.crest_awe_c13));
+            } else if (p.burn_model == ReactionKinetics::CRESTEntropy) {
                 p.v_min = std::min(p.v_min, v_rel);
                 float s_calc = CrestDavis::computeDavisShockEntropy(p.v_min, p.davis_c0, p.davis_s1, p.davis_gamma0, p.davis_cv, p.davis_t0, p.davis_rho0);
                 p.s_shock = std::max(p.s_shock, s_calc);
@@ -1315,13 +1339,15 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             p.lambda = lam_new;
             float d_lam = std::max(0.0f, lam_new - lam_curr);
 
-            float q_heat = (p.product_model == DetonationProductEOS::DavisProduct) ? p.davis_q_det : p.detonation_energy;
+            float q_heat = (!awe && p.product_model == DetonationProductEOS::DavisProduct) ? p.davis_q_det : p.detonation_energy;
             float e_th = p.e_int - lam_curr * q_heat;
             float e_prod = e_th + q_heat;
 
             // Pillar 1: Solid Reactant EOS
             float p_solid = 0.0f;
-            if (p.solid_model == SolidReactantEOS::DavisSolid) {
+            if (awe) {
+                p_solid = static_cast<float>(CrestDavis::computeCRESTSolidPressure(v_rel, std::max(0.0f, e_th), awe_q));
+            } else if (p.solid_model == SolidReactantEOS::DavisSolid) {
                 p_solid = CrestDavis::computeDavisReactantPressure(v_rel, e_th, p.davis_c0, p.davis_s1, p.davis_gamma0, p.davis_cv, p.davis_t0, p.davis_rho0);
             } else {
                 p_solid = JWL::computeSolidReactantPressure(v_rel, e_th, p.mg_c0, p.mg_s, p.mg_gamma0, p.density);
@@ -1329,7 +1355,9 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
 
             // Pillar 3: Detonation Products EOS
             float p_prod = 0.0f;
-            if (p.product_model == DetonationProductEOS::DavisProduct) {
+            if (awe) {
+                p_prod = JWL::computeJWLProductPressure(v_rel * awe_vtmd, e_prod, p.jwl_A, p.jwl_B, p.jwl_R1, p.jwl_R2, p.jwl_omega, static_cast<float>(awe_q.rho0s));
+            } else if (p.product_model == DetonationProductEOS::DavisProduct) {
                 p_prod = CrestDavis::computeDavisProductPressure(v_rel, e_prod, p.davis_a, p.davis_b, p.davis_k, p.davis_vc, p.davis_pc, p.davis_q_det, p.davis_rho0);
             } else {
                 p_prod = JWL::computeJWLProductPressure(v_rel, e_prod, p.jwl_A, p.jwl_B, p.jwl_R1, p.jwl_R2, p.jwl_omega, p.density);

@@ -389,17 +389,17 @@ export function serializeMPMObjectsWithSleeve(
         } else if (!objParams['material_model']) {
             objParams['material_model'] = objNode.parameters?.['material_model'] || 'Hypoelastic';
         }
-        const domainTransferScheme = mpmDomain?.parameters?.transfer_scheme;
+        const domainTransferScheme = mpmDomain?.parameters?.transfer_scheme || 'BSpline';
         const objTransferScheme = objNode.parameters?.transfer_scheme;
         const matTransferScheme = matNode?.parameters?.transfer_scheme;
-        if (objTransferScheme && objTransferScheme !== 'Default' && objTransferScheme !== 'BSpline') {
+        if (objTransferScheme && objTransferScheme !== 'Default') {
             objParams['transfer_scheme'] = objTransferScheme;
-        } else if (domainTransferScheme && domainTransferScheme !== 'Default') {
-            objParams['transfer_scheme'] = domainTransferScheme;
         } else if (matTransferScheme && matTransferScheme !== 'Default') {
             objParams['transfer_scheme'] = matTransferScheme;
-        } else if (objTransferScheme) {
-            objParams['transfer_scheme'] = objTransferScheme;
+        } else if (domainTransferScheme && domainTransferScheme !== 'Default') {
+            objParams['transfer_scheme'] = domainTransferScheme;
+        } else {
+            objParams['transfer_scheme'] = 'BSpline';
         }
         if (!objParams['particle_distribution'] && domainParticleDist) {
             objParams['particle_distribution'] = domainParticleDist;
@@ -1031,7 +1031,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         // Davis & CREST Reactive Burn
         'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
         'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-        'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+        'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13',
         'initiation_radius', 'booster_overpressure',
         // JWL Programmed Burn & Lee-Tarver Ignition & Growth
         'burn_zone_cells', 'tau_burn_min',
@@ -1077,7 +1077,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_materials', 'qty_water', 'qty_soil',
         'qty_mpm_pressure', 'qty_mpm_material_id', 'qty_mpm_object_id', 'qty_mpm_particle_density',
         'qty_overpressure', 'qty_impulse',
-        'export_slices', 'export_volumes', 'export_fem', 'export_mpm', 'export_pvd',
+        'export_slices', 'export_volumes', 'export_fem', 'export_mpm', 'export_mpm_density_grid', 'export_pvd',
         'roi_enabled', 'is_ideal_gas', 'directional_crack_band', 'enable_heterogeneity',
         'enable_anisotropy', 'enable_strain_erosion', 'enable_stress_erosion',
         'enable_timestep_erosion', 'kc_auto_generate', 'enable_cohesive_splitting',
@@ -3359,17 +3359,17 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
                     objParams['product_model'] = objNode.parameters['product_model'];
                 }
 
-                const domainTransferScheme = mpmDomain?.parameters?.transfer_scheme;
+                const domainTransferScheme = mpmDomain?.parameters?.transfer_scheme || 'BSpline';
                 const objTransferScheme = objNode.parameters?.transfer_scheme;
                 const matTransferScheme = matNode?.parameters?.transfer_scheme;
-                if (objTransferScheme && objTransferScheme !== 'Default' && objTransferScheme !== 'BSpline') {
+                if (objTransferScheme && objTransferScheme !== 'Default') {
                     objParams['transfer_scheme'] = objTransferScheme;
-                } else if (domainTransferScheme && domainTransferScheme !== 'Default') {
-                    objParams['transfer_scheme'] = domainTransferScheme;
                 } else if (matTransferScheme && matTransferScheme !== 'Default') {
                     objParams['transfer_scheme'] = matTransferScheme;
-                } else if (objTransferScheme) {
-                    objParams['transfer_scheme'] = objTransferScheme;
+                } else if (domainTransferScheme && domainTransferScheme !== 'Default') {
+                    objParams['transfer_scheme'] = domainTransferScheme;
+                } else {
+                    objParams['transfer_scheme'] = 'BSpline';
                 }
                 if (!objParams['particle_distribution'] && domainParticleDist) {
                     objParams['particle_distribution'] = domainParticleDist;

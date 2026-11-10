@@ -5,7 +5,7 @@
 #include <algorithm>
 
 #ifdef __CUDACC__
-#define HD_CREST_FUNC __host__ __device__
+#define HD_CREST_FUNC inline __host__ __device__
 #else
 #define HD_CREST_FUNC inline
 #endif
@@ -261,6 +261,139 @@ HD_CREST_FUNC T advanceCRESTProgress(
     if (lam < static_cast<T>(0.0)) lam = static_cast<T>(0.0);
     if (lam > static_cast<T>(1.0)) lam = static_cast<T>(1.0);
     return lam;
+}
+
+// ============================================================================
+// AWE CREST (Handley 2006 Table 2; Cartwright 2016 Ch.3, Table 3.1)
+// Finite-strain solid isentrope. SI in/out; Zs returned in Mbar*cm^3/g.
+// ============================================================================
+struct CRESTSolidParams {
+    double rho0, rho0s, K0s, Ed;
+    double A1, A2, A3, B1, B2, B3, fc, delta;
+    double Gamma1, Gamma2, gamma00, m;
+};
+
+struct CRESTIsentrope { double pi, ei_rel, Gamma, tau; };
+
+HD_CREST_FUNC CRESTIsentrope evalCRESTSolidIsentrope(double rho_s, const CRESTSolidParams& q) {
+    const double PI = 3.14159265358979323846;
+    CRESTIsentrope o;
+    double x = 1.0;
+    o.pi = 0.0; o.ei_rel = 0.0;
+    if (rho_s > q.rho0s) {
+        const double f = 0.5 * (std::pow(rho_s / q.rho0s, 2.0 / 3.0) - 1.0);
+        double gA = q.A1 * f + q.A2 * f * f + q.A3 * f * f * f;
+        double dgA = q.A1 + 2.0 * q.A2 * f + 3.0 * q.A3 * f * f;
+        double gB = 0.0, dgB = 0.0, gC = 0.0;
+        const double d = q.delta;
+        if (d > 0.0 && (q.B1 != 0.0 || q.B2 != 0.0 || q.B3 != 0.0)) {
+            const double df = f - q.fc, fc = q.fc;
+            const double at = std::atan(df / d), atm = std::atan(-fc / d);
+            const double poly = q.B1 * df + q.B2 * df * df + q.B3 * df * df * df;
+            const double dpoly = q.B1 + 2.0 * q.B2 * df + 3.0 * q.B3 * df * df;
+            const double br = 0.5 * (1.0 - (2.0 / PI) * at);
+            const double dbr = -(1.0 / PI) * (d / (d * d + df * df));
+            gA += poly * br; dgA += dpoly * br + poly * dbr;
+            const double k = q.B1 - d * d * q.B3;
+            gB = (d / (2 * PI)) * k * std::log(d * d + df * df) - (q.B2 * d * d / PI) * at
+                 + (d / (2 * PI)) * df * (2 * q.B2 + q.B3 * df);
+            dgB = (d / (2 * PI)) * k * (2 * df / (d * d + df * df))
+                  - (q.B2 * d * d / PI) * (d / (d * d + df * df))
+                  + (d / (2 * PI)) * (2 * q.B2 + 2 * q.B3 * df);
+            gC = (q.B1 * fc - q.B2 * fc * fc + q.B3 * fc * fc * fc) * 0.5 * (1.0 - (2.0 / PI) * atm)
+                 - (d / (2 * PI)) * k * std::log(d * d + fc * fc) + (q.B2 * d * d / PI) * atm
+                 + (d / (2 * PI)) * fc * (2 * q.B2 - q.B3 * fc);
+        }
+        const double F = std::exp(gA + gB + gC), dF = F * (dgA + dgB);
+        o.pi = 3.0 * q.K0s * f * std::pow(2.0 * f + 1.0, 2.5) * (F + 0.5 * f * dF);
+        o.ei_rel = 4.5 * (q.K0s / q.rho0s) * f * f * F;
+        x = q.rho0s / rho_s;
+    }
+    o.Gamma = q.gamma00 + q.Gamma1 * std::pow(x, q.m) * std::exp(-q.Gamma2 * x);
+    const double G2 = q.Gamma2;
+    const double ig = q.gamma00 * std::log(x) + q.Gamma1 *
+        ((-std::exp(-G2 * x) * (G2 * x + 1.0) / (G2 * G2)) - (-std::exp(-G2) * (G2 + 1.0) / (G2 * G2)));
+    o.tau = std::exp(-ig);
+    return o;
+}
+
+// Solid pressure (Pa) at relative volume v_rel=rho0/rho_s and thermal-offset energy e_th (J/kg, above Ed).
+HD_CREST_FUNC double computeCRESTSolidPressure(double v_rel, double e_th, const CRESTSolidParams& q) {
+    const double rho_s = q.rho0 / v_rel;
+    const CRESTIsentrope s = evalCRESTSolidIsentrope(rho_s, q);
+    return std::max(0.0, s.pi + rho_s * s.Gamma * (e_th - s.ei_rel));
+}
+
+HD_CREST_FUNC double crestZsFromRho(double rho_s, const CRESTSolidParams& q, double* pH_out) {
+    const CRESTIsentrope s = evalCRESTSolidIsentrope(rho_s, q);
+    const double dv = 1.0 / q.rho0 - 1.0 / rho_s;
+    const double den = 1.0 - 0.5 * rho_s * s.Gamma * dv;
+    double pH = (den > 1e-9) ? (s.pi - rho_s * s.Gamma * s.ei_rel) / den : 0.0;
+    if (pH < 0.0) pH = 0.0;
+    if (pH_out) *pH_out = pH;
+    const double eH = 0.5 * pH * dv;
+    return std::max(0.0, (eH - s.ei_rel) / (s.tau * 1.0e8));
+}
+
+// Zs (Mbar*cm^3/g) from minimum relative volume reached.
+HD_CREST_FUNC double computeCRESTShockEntropy(double v_min, const CRESTSolidParams& q) {
+    if (v_min >= 1.0) return 0.0;
+    return crestZsFromRho(q.rho0 / v_min, q, nullptr);
+}
+
+// Zs (Mbar*cm^3/g) from compressive shock pressure (Pa) via Hugoniot bisection.
+HD_CREST_FUNC double computeCRESTShockEntropyFromPressure(double p_shock, const CRESTSolidParams& q) {
+    if (p_shock <= 0.0) return 0.0;
+    double lo = std::min(q.rho0, q.rho0s), hi = 3.0 * q.rho0s;
+    for (int i = 0; i < 40; ++i) {
+        const double mid = 0.5 * (lo + hi);
+        double pH; crestZsFromRho(mid, q, &pH);
+        if (pH < p_shock) lo = mid; else hi = mid;
+    }
+    return crestZsFromRho(0.5 * (lo + hi), q, nullptr);
+}
+
+// Exact manifold step for (lambda1, lambda2, lambda). Zs in Mbar*cm^3/g, dt in seconds.
+HD_CREST_FUNC double advanceAWECRESTProgress(double dt, double Zs, double lam,
+    double c0, double c1, double c2, double c3, double c6, double c8, double c9,
+    double c10, double c11, double c12, double c13) {
+    if (Zs <= 0.0) return lam;
+    const double b1 = std::min(4000.0, c0 * std::pow(Zs, c1));
+    const double b2 = std::min(4000.0, c2 * std::pow(Zs, c3));
+    if (b1 <= 0.0) return lam;
+    const double M1 = (c6 > 0.0) ? c6 * std::pow(Zs, c12) / std::sqrt(b1) : 0.0;
+    const double t8 = (c8 > 0.0) ? c8 * std::pow(Zs, -c9) : 0.0;
+    const double t10 = (c10 > 0.0 && Zs > c13) ? c10 * std::pow(Zs - c13, c11) : 0.0;
+    const double M2 = (b2 > 0.0) ? std::min(10.0, (t8 + t10) / std::sqrt(b2)) : 0.0;
+    const double lam_max = 1.0 - std::exp(-(M1 + M2));
+    if (lam >= lam_max - 1e-7) return lam;
+    const double r = b2 / b1;
+    auto Phi = [&](double u, double* dPhi) {
+        const double eu = std::exp(-u);
+        const double g = std::exp(-r * (u - 1.0 + eu));
+        if (dPhi) *dPhi = M1 * eu + M2 * g * r * (1.0 - eu);
+        return M1 * (1.0 - eu) + M2 * (1.0 - g);
+    };
+    double u = 0.0;
+    if (lam > 1e-12) {
+        const double target = -std::log(1.0 - lam);
+        double lo = 0.0, hi = 1.0;
+        while (Phi(hi, nullptr) < target && hi < 1e6) hi *= 2.0;
+        u = 0.5 * (lo + hi);
+        for (int i = 0; i < 12; ++i) {
+            double d; const double f = Phi(u, &d) - target;
+            if (f > 0) hi = u; else lo = u;
+            double un = (d > 1e-300) ? u - f / d : 0.5 * (lo + hi);
+            if (un <= lo || un >= hi) un = 0.5 * (lo + hi);
+            u = un;
+        }
+    }
+    const double dt_us = dt * 1.0e6;
+    const double sq = std::sqrt(u) + std::sqrt(0.5 * b1) * dt_us;
+    const double un = sq * sq;
+    const double l1 = 1.0 - std::exp(-un);
+    const double l2 = 1.0 - std::exp(-r * (un - l1));
+    return std::max(lam, 1.0 - std::exp(-(M1 * l1 + M2 * l2)));
 }
 
 } // namespace CrestDavis

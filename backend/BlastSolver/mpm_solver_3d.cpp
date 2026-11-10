@@ -4081,10 +4081,36 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
 
             bool use_davis_solid = (mat.solid_model == SolidReactantEOS::DavisSolid) ||
                                    (mat.material_model == MPMMaterialModel::CRESTReactiveBurn);
-            bool use_davis_prod = (mat.product_model == DetonationProductEOS::DavisProduct) ||
-                                  (mat.material_model == MPMMaterialModel::CRESTReactiveBurn);
+            // AWE CREST (finite-strain solid EOS + JWL products + 2-stage rate) when crest_awe_c0 > 0
+            const bool awe = is_crest_kinetics && mat.crest_awe_c0 > 0.0f;
+            bool use_davis_prod = !awe && ((mat.product_model == DetonationProductEOS::DavisProduct) ||
+                                  (mat.material_model == MPMMaterialModel::CRESTReactiveBurn));
+            CrestDavis::CRESTSolidParams awe_q{};
+            float awe_vtmd = 1.0f;
+            if (awe) {
+                const float rho0s = (mat.davis_rho0 > 0.0f) ? mat.davis_rho0 : mat.density;
+                awe_q = {mat.density, rho0s, mat.crest_awe_K0s, mat.detonation_energy,
+                         mat.crest_awe_A1, mat.crest_awe_A2, mat.crest_awe_A3,
+                         mat.crest_awe_B1, mat.crest_awe_B2, mat.crest_awe_B3,
+                         mat.crest_awe_fc, mat.crest_awe_delta,
+                         mat.crest_awe_Gamma1, mat.crest_awe_Gamma2, mat.crest_awe_gamma00, mat.crest_awe_m};
+                awe_vtmd = rho0s / mat.density;
+            }
 
-            if (is_crest_kinetics) {
+            if (awe) {
+                p.v_min = std::min(p.v_min, v_rel);
+                float s_calc = static_cast<float>(CrestDavis::computeCRESTShockEntropy(p.v_min, awe_q));
+                p.s_shock = std::max(p.s_shock, s_calc);
+                float e_th_trial = std::max(0.0f, p.e_int - lam_curr * mat.detonation_energy);
+                float p_curr_comp = -(p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
+                float p_react_trial = static_cast<float>(CrestDavis::computeCRESTSolidPressure(v_rel, e_th_trial, awe_q));
+                float p_eff_comp = (lam_curr <= 1.0e-5f) ? std::max(p_curr_comp, p_react_trial) : p_react_trial;
+                if (p_eff_comp > 1.0e6f)
+                    p.s_shock = std::max(p.s_shock, static_cast<float>(CrestDavis::computeCRESTShockEntropyFromPressure(p_eff_comp, awe_q)));
+                lam_new = static_cast<float>(CrestDavis::advanceAWECRESTProgress(dt, p.s_shock, p.lambda,
+                    mat.crest_awe_c0, mat.crest_awe_c1, mat.crest_awe_c2, mat.crest_awe_c3, mat.crest_awe_c6,
+                    mat.crest_awe_c8, mat.crest_awe_c9, mat.crest_awe_c10, mat.crest_awe_c11, mat.crest_awe_c12, mat.crest_awe_c13));
+            } else if (is_crest_kinetics) {
                 p.v_min = std::min(p.v_min, v_rel);
                 float s_calc = CrestDavis::computeDavisShockEntropy(p.v_min, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0);
                 p.s_shock = std::max(p.s_shock, s_calc);
@@ -4128,12 +4154,16 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             float e_prod = e_th + q_heat;
 
             // Pillar 1: Solid Reactant EOS
-            float p_solid = use_davis_solid
+            float p_solid = awe
+                ? static_cast<float>(CrestDavis::computeCRESTSolidPressure(v_rel, std::max(0.0f, e_th), awe_q))
+                : use_davis_solid
                 ? CrestDavis::computeDavisReactantPressure(v_rel, e_th, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0)
                 : JWL::computeSolidReactantPressure(v_rel, e_th, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density);
 
             // Pillar 3: Detonation Products EOS
-            float p_prod = use_davis_prod
+            float p_prod = awe
+                ? JWL::computeJWLProductPressure(v_rel * awe_vtmd, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, static_cast<float>(awe_q.rho0s))
+                : use_davis_prod
                 ? CrestDavis::computeDavisProductPressure(v_rel, e_prod, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0)
                 : JWL::computeJWLProductPressure(v_rel, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.density);
 
@@ -5352,6 +5382,62 @@ MPMVTKSnapshot3D MPMSolver3D::extractVTKSnapshot(bool has_vel, bool has_stress, 
     return snap;
 }
 
+void MPMSolver3D::extractDensityGrid(std::vector<float>& out_counts, std::vector<float>& out_density,
+                                     int i_start, int i_end,
+                                     int j_start, int j_end,
+                                     int k_start, int k_end,
+                                     int stride) const {
+    if (m_nx <= 0 || m_ny <= 0 || m_nz <= 0 || m_dx <= 0.0f || m_dy <= 0.0f || m_dz <= 0.0f) return;
+
+    int is = (i_end > i_start) ? i_start : 0;
+    int ie = (i_end > i_start) ? i_end : m_nx;
+    int js = (j_end > j_start) ? j_start : 0;
+    int je = (j_end > j_start) ? j_end : m_ny;
+    int ks = (k_end > k_start) ? k_start : 0;
+    int ke = (k_end > k_start) ? k_end : m_nz;
+
+    int s = std::max(1, stride);
+    int nx_sub = (ie - is + s - 1) / s;
+    int ny_sub = (je - js + s - 1) / s;
+    int nz_sub = (ke - ks + s - 1) / s;
+
+    size_t num_cells_sub = static_cast<size_t>(nx_sub) * ny_sub * nz_sub;
+    if (num_cells_sub == 0) return;
+
+    out_counts.assign(num_cells_sub, 0.0f);
+    out_density.assign(num_cells_sub, 0.0f);
+
+    const float inv_dx = 1.0f / m_dx;
+    const float inv_dy = 1.0f / m_dy;
+    const float inv_dz = 1.0f / m_dz;
+    const double cell_volume = static_cast<double>(m_dx) * m_dy * m_dz * s * s * s;
+    const float inv_cell_vol = (cell_volume > 1.0e-30) ? static_cast<float>(1.0 / cell_volume) : 0.0f;
+
+    // Fast particle binning
+    for (const auto& p : m_particles) {
+        int cx = static_cast<int>(std::floor((p.x[0] - m_xmin) * inv_dx));
+        int cy = static_cast<int>(std::floor((p.x[1] - m_ymin) * inv_dy));
+        int cz = static_cast<int>(std::floor((p.x[2] - m_zmin) * inv_dz));
+
+        if (cx < is || cx >= ie || cy < js || cy >= je || cz < ks || cz >= ke) continue;
+
+        int sx = (cx - is) / s;
+        int sy = (cy - js) / s;
+        int sz = (cz - ks) / s;
+        if (sx < 0 || sx >= nx_sub || sy < 0 || sy >= ny_sub || sz < 0 || sz >= nz_sub) continue;
+
+        size_t c_idx = (static_cast<size_t>(sx) * ny_sub + sy) * nz_sub + sz;
+        out_counts[c_idx] += 1.0f;
+        out_density[c_idx] += static_cast<float>(p.m);
+    }
+
+    // Convert accumulated cell mass to physical density (kg/m^3)
+    #pragma omp parallel for schedule(static)
+    for (size_t c = 0; c < num_cells_sub; ++c) {
+        out_density[c] *= inv_cell_vol;
+    }
+}
+
 void MPMSolver3D::applyStratifiedInitialCondition(const Blast::Stratified3DParams& strat) {
     if (strat.gravity_z != 0.0) {
         setGravity(0.0f, 0.0f, static_cast<float>(strat.gravity_z));
@@ -5753,7 +5839,7 @@ void MPMSolver3D::fireDetonator(MPMDetonator3D& det) {
         } else if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn) {
             float trigger_radius = std::max(det_r, 2.5f * m_dx);
             if (dist <= trigger_radius) {
-                p.s_shock = 1.5f * mat.crest_s_threshold;
+                p.s_shock = (mat.crest_awe_c0 > 0.0f) ? std::max(0.02f, 2.0f * mat.crest_awe_c13) : 1.5f * mat.crest_s_threshold;
                 p.lambda = 1.0f;
                 p.e_int = std::max(mat.davis_q_det, mat.detonation_energy);
                 p.v_min = (mat.davis_vc > 0.1f) ? mat.davis_vc : 0.70f;

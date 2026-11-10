@@ -213,9 +213,15 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
     if (updatedKey === 'material_model' || updatedKey === 'preset' || (updatedKey === undefined && presetName !== 'Custom')) {
         if (presetName !== 'Custom' && MPM_MATERIAL_PRESETS[presetName]) {
             const presetData = MPM_MATERIAL_PRESETS[presetName];
+            const existingTs = parameters['transfer_scheme'];
             for (const [k, v] of Object.entries(presetData)) {
                 if (k !== 'reference' && k !== 'category') {
-                    parameters[k] = v;
+                    if (k === 'transfer_scheme') {
+                        // Presets default to 'Default' (inherit from solver) unless explicitly set to a custom scheme by user
+                        parameters[k] = existingTs !== undefined ? existingTs : (v || 'Default');
+                    } else {
+                        parameters[k] = v;
+                    }
                 }
             }
             parameters['provenance'] = presetData.provenance || 'experimental';
@@ -231,6 +237,9 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
             'soil_friction_angle', 'soil_cohesion', 'k0_earth_pressure',
+            'friction_angle', 'cohesion', 'dilation_angle', 'tensile_cutoff',
+            'cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch',
+            'hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0',
             'failure_strain', 'tensile_failure_stress',
             'enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress',
             'enable_timestep_erosion', 'timestep_erosion_factor',
@@ -243,7 +252,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
             'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
             'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
-            'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold',
+            'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13',
             'det_vel', 'detonation_energy', 'burn_zone_cells', 'tau_burn_min',
             'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
             'afterburn_enabled', 'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
@@ -329,6 +338,30 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             if (parameters['crest_m2'] === undefined) parameters['crest_m2'] = 1.5;
             if (parameters['crest_s0'] === undefined) parameters['crest_s0'] = 100.0;
             if (parameters['crest_s_threshold'] === undefined) parameters['crest_s_threshold'] = 45.0;
+            if (parameters['crest_awe_K0s'] === undefined) parameters['crest_awe_K0s'] = 14.24525e9;
+            if (parameters['crest_awe_A1'] === undefined) parameters['crest_awe_A1'] = 2.417494;
+            if (parameters['crest_awe_A2'] === undefined) parameters['crest_awe_A2'] = 2.208027;
+            if (parameters['crest_awe_A3'] === undefined) parameters['crest_awe_A3'] = 0.0;
+            if (parameters['crest_awe_B1'] === undefined) parameters['crest_awe_B1'] = 0.0;
+            if (parameters['crest_awe_B2'] === undefined) parameters['crest_awe_B2'] = 0.0;
+            if (parameters['crest_awe_B3'] === undefined) parameters['crest_awe_B3'] = 0.0;
+            if (parameters['crest_awe_fc'] === undefined) parameters['crest_awe_fc'] = 0.0;
+            if (parameters['crest_awe_delta'] === undefined) parameters['crest_awe_delta'] = 0.0;
+            if (parameters['crest_awe_Gamma1'] === undefined) parameters['crest_awe_Gamma1'] = 32.33557;
+            if (parameters['crest_awe_Gamma2'] === undefined) parameters['crest_awe_Gamma2'] = 3.596933;
+            if (parameters['crest_awe_gamma00'] === undefined) parameters['crest_awe_gamma00'] = 0.4;
+            if (parameters['crest_awe_m'] === undefined) parameters['crest_awe_m'] = 2.0;
+            if (parameters['crest_awe_c0'] === undefined) parameters['crest_awe_c0'] = 0.0;
+            if (parameters['crest_awe_c1'] === undefined) parameters['crest_awe_c1'] = 2.0;
+            if (parameters['crest_awe_c2'] === undefined) parameters['crest_awe_c2'] = 2.2e8;
+            if (parameters['crest_awe_c3'] === undefined) parameters['crest_awe_c3'] = 2.5;
+            if (parameters['crest_awe_c6'] === undefined) parameters['crest_awe_c6'] = 0.0;
+            if (parameters['crest_awe_c8'] === undefined) parameters['crest_awe_c8'] = 1.6e-4;
+            if (parameters['crest_awe_c9'] === undefined) parameters['crest_awe_c9'] = 1.0;
+            if (parameters['crest_awe_c10'] === undefined) parameters['crest_awe_c10'] = 4.0e5;
+            if (parameters['crest_awe_c11'] === undefined) parameters['crest_awe_c11'] = 1.8;
+            if (parameters['crest_awe_c12'] === undefined) parameters['crest_awe_c12'] = 0.0;
+            if (parameters['crest_awe_c13'] === undefined) parameters['crest_awe_c13'] = 0.0;
         } else {
             if (parameters['det_vel'] === undefined) parameters['det_vel'] = 6930.0;
             if (parameters['detonation_energy'] === undefined) parameters['detonation_energy'] = 4.29e6;
@@ -377,7 +410,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         }
     }
 
-    if (parameters['transfer_scheme'] === undefined) parameters['transfer_scheme'] = 'BSpline';
+    if (parameters['transfer_scheme'] === undefined) parameters['transfer_scheme'] = (node.type === 'Material') ? 'Default' : 'BSpline';
     if (parameters['enable_heterogeneity'] === undefined) parameters['enable_heterogeneity'] = false;
     if (parameters['weibull_modulus'] === undefined) parameters['weibull_modulus'] = 0.0;
     if (parameters['weibull_scale'] === undefined) parameters['weibull_scale'] = 1.0;
@@ -946,9 +979,14 @@ export function resolveResourcePath(rawPath: string, modelFilename?: string | nu
 
     const cleanRel = trimmed.startsWith('./') ? trimmed.substring(2) : trimmed;
 
-    if (modelFilename && typeof modelFilename === 'string' && modelFilename.includes('/')) {
-        const lastSlash = modelFilename.lastIndexOf('/');
-        const dir = lastSlash !== -1 ? modelFilename.substring(0, lastSlash) : '.';
+    let effectiveModelFilename = modelFilename;
+    if (!effectiveModelFilename && activeStateManagerInstance) {
+        effectiveModelFilename = activeStateManagerInstance.getActiveModel()?.filename || null;
+    }
+
+    if (effectiveModelFilename && typeof effectiveModelFilename === 'string' && effectiveModelFilename.includes('/')) {
+        const lastSlash = effectiveModelFilename.lastIndexOf('/');
+        const dir = lastSlash !== -1 ? effectiveModelFilename.substring(0, lastSlash) : '.';
         return `${dir}/${cleanRel}`;
     }
 
@@ -1084,7 +1122,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'Material': {
         material_model: 'Hypoelastic',
         preset: 'Structural Steel (A36)',
-        transfer_scheme: 'BSpline',
+        transfer_scheme: 'Default',
         solid_model: 'Mie-Grüneisen Shock Reactant',
         burn_model: 'Programmed Wavefront Burn',
         product_model: 'JWL Product Gas',
@@ -1147,6 +1185,30 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         crest_m2: 1.5,
         crest_s0: 15.0,
         crest_s_threshold: 2.0,
+        crest_awe_K0s: 14.24525e9,
+        crest_awe_A1: 2.417494,
+        crest_awe_A2: 2.208027,
+        crest_awe_A3: 0.0,
+        crest_awe_B1: 0.0,
+        crest_awe_B2: 0.0,
+        crest_awe_B3: 0.0,
+        crest_awe_fc: 0.0,
+        crest_awe_delta: 0.0,
+        crest_awe_Gamma1: 32.33557,
+        crest_awe_Gamma2: 3.596933,
+        crest_awe_gamma00: 0.4,
+        crest_awe_m: 2.0,
+        crest_awe_c0: 0.0,
+        crest_awe_c1: 2.0,
+        crest_awe_c2: 2.2e8,
+        crest_awe_c3: 2.5,
+        crest_awe_c6: 0.0,
+        crest_awe_c8: 1.6e-4,
+        crest_awe_c9: 1.0,
+        crest_awe_c10: 4.0e5,
+        crest_awe_c11: 1.8,
+        crest_awe_c12: 0.0,
+        crest_awe_c13: 0.0,
         // Concrete Base
         fc: 35.0e6,
         ft: 3.2e6,
@@ -1456,6 +1518,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         tessellation_max_edge: 0.0,
         export_fem: true,
         export_mpm: true,
+        export_mpm_density_grid: false,
         export_pvd: true,
         custom_filename: 'vtk_output',
         step_interval: 10,
@@ -1962,6 +2025,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     }
 };
 
+let activeStateManagerInstance: StateManager | null = null;
+
 export class StateManager {
     private appState: AppState;
     private history: AppState[] = [];
@@ -2051,6 +2116,7 @@ export class StateManager {
         };
 
         this.healModelGraph(defaultModel);
+        activeStateManagerInstance = this;
         this.pushAppState(this.appState, false);
     }
 
@@ -5962,9 +6028,6 @@ export class StateManager {
                 if (!isAirMaterialNode(node)) {
                     delete node.parameters['ambient_air_target'];
                 }
-                if (node.parameters['transfer_scheme'] === 'Default') {
-                    node.parameters['transfer_scheme'] = 'BSpline';
-                }
             }
             if (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') {
                 delete node.parameters['time_step'];
@@ -7316,11 +7379,60 @@ export function registerSTLVertices(filePath: string, vertices: Float32Array): S
     };
 
     stlGeometryCache.set(filePath, meta);
+    
+    // Also cache under normalized variants (basename and ./basename) so relative/local queries resolve seamlessly
+    const lastSlash = filePath.lastIndexOf('/');
+    const baseName = lastSlash !== -1 ? filePath.substring(lastSlash + 1) : (filePath.startsWith('./') ? filePath.substring(2) : filePath);
+    if (baseName && baseName !== filePath) {
+        stlGeometryCache.set(baseName, meta);
+        stlGeometryCache.set(`./${baseName}`, meta);
+    }
     return meta;
 }
 
-export function getSTLGeometryMeta(filePath: string): STLGeometryMeta | undefined {
-    return stlGeometryCache.get(filePath);
+export function getSTLGeometryMeta(filePath: string, modelFilename?: string | null): STLGeometryMeta | undefined {
+    if (!filePath) return undefined;
+    const direct = stlGeometryCache.get(filePath);
+    if (direct) return direct;
+
+    const trimmed = filePath.trim();
+    const cleanRel = trimmed.startsWith('./') ? trimmed.substring(2) : trimmed;
+    const relDot = `./${cleanRel}`;
+
+    const cand1 = stlGeometryCache.get(cleanRel);
+    if (cand1) return cand1;
+
+    const cand2 = stlGeometryCache.get(relDot);
+    if (cand2) return cand2;
+
+    // Try resolving against modelFilename or active model
+    let resolvedFilename = modelFilename;
+    if (!resolvedFilename && activeStateManagerInstance) {
+        resolvedFilename = activeStateManagerInstance.getActiveModel()?.filename;
+    }
+    if (resolvedFilename) {
+        const fullResolved = resolveResourcePath(filePath, resolvedFilename);
+        const candResolved = stlGeometryCache.get(fullResolved);
+        if (candResolved) return candResolved;
+    }
+
+    // Try finding by basename in cache keys
+    const lastSlash = cleanRel.lastIndexOf('/');
+    const baseName = lastSlash !== -1 ? cleanRel.substring(lastSlash + 1) : cleanRel;
+    if (baseName) {
+        const candBase = stlGeometryCache.get(baseName);
+        if (candBase) return candBase;
+        const candBaseDot = stlGeometryCache.get(`./${baseName}`);
+        if (candBaseDot) return candBaseDot;
+
+        for (const [key, value] of stlGeometryCache.entries()) {
+            if (key.endsWith('/' + baseName) || key === baseName || key === './' + baseName) {
+                return value;
+            }
+        }
+    }
+
+    return undefined;
 }
 
 export function getMPMObjectVolume(node: Node, state?: SimulationState): { volume: number, isStlEstimated: boolean } {
@@ -8117,6 +8229,7 @@ export function resolveTelemetryCounts(node: Node, _state?: SimulationState) {
             if (node.parameters['export_stl_faces'] !== false) domains.push(node.parameters['tessellate_stl_faces'] !== false ? 'STL (Tessellated)' : 'STL Faces');
             if (node.parameters['export_fem'] !== false && (!_state || _state.nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D'))) domains.push('FEM Elements');
             if (node.parameters['export_mpm'] !== false && (!_state || _state.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D'))) domains.push('MPM Particles');
+            if (node.parameters['export_mpm_density_grid'] === true && (!_state || _state.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D'))) domains.push('MPM Density Grid (.vts)');
         }
         return { exportDomains: domains };
     } else if (node.type === 'Telemetry3DViewport') {

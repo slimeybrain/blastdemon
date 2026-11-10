@@ -568,9 +568,24 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             std::error_code ec;
             std::filesystem::path stl_p(filePath);
             if (!std::filesystem::exists(stl_p, ec)) {
-                std::filesystem::path alt_p = std::filesystem::path("/home/chris/antigrav/blastdemon") / stl_p;
-                if (std::filesystem::exists(alt_p, ec)) {
-                    filePath = alt_p.string();
+                std::string clean = filePath;
+                if (clean.rfind("./", 0) == 0) clean = clean.substr(2);
+                std::filesystem::path clean_p(clean);
+
+                std::string modelDir = payload.value("modelDir", "");
+                if (modelDir.empty() && payload.contains("modelFilename")) {
+                    std::string mfn = payload.value("modelFilename", "");
+                    if (!mfn.empty()) {
+                        modelDir = std::filesystem::path(mfn).parent_path().string();
+                    }
+                }
+
+                if (!modelDir.empty() && std::filesystem::exists(std::filesystem::path(modelDir) / clean_p, ec)) {
+                    filePath = (std::filesystem::path(modelDir) / clean_p).string();
+                } else if (std::filesystem::exists(std::filesystem::path("/home/chris/antigrav/blastdemon") / clean_p, ec)) {
+                    filePath = (std::filesystem::path("/home/chris/antigrav/blastdemon") / clean_p).string();
+                } else if (std::filesystem::exists(std::filesystem::path("/home/chris/antigrav/blastdemon") / stl_p, ec)) {
+                    filePath = (std::filesystem::path("/home/chris/antigrav/blastdemon") / stl_p).string();
                 }
             }
 

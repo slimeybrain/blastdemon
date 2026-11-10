@@ -225,6 +225,16 @@ struct MPMParticle2D {
     float crest_m2{1.5f};                // Growth entropy power exponent
     float crest_s0{100.0f};              // Reference entropy scale (J/(kg K))
     float crest_s_threshold{45.0f};      // Shock entropy ignition threshold (J/(kg K))
+    // --- AWE CREST (Handley 2006 / Cartwright 2016); active when crest_awe_c0 > 0 ---
+    float crest_awe_K0s{14.24525e9f};    // Solid bulk modulus (Pa)
+    float crest_awe_A1{2.417494f}, crest_awe_A2{2.208027f}, crest_awe_A3{0.0f};
+    float crest_awe_B1{0.0f}, crest_awe_B2{0.0f}, crest_awe_B3{0.0f};
+    float crest_awe_fc{0.0f}, crest_awe_delta{0.0f};
+    float crest_awe_Gamma1{32.33557f}, crest_awe_Gamma2{3.596933f};
+    float crest_awe_gamma00{0.4f}, crest_awe_m{2.0f};
+    float crest_awe_c0{0.0f}, crest_awe_c1{2.0f}, crest_awe_c2{2.2e8f}, crest_awe_c3{2.5f};
+    float crest_awe_c6{0.0f}, crest_awe_c8{1.6e-4f}, crest_awe_c9{1.0f};
+    float crest_awe_c10{4.0e5f}, crest_awe_c11{1.8f}, crest_awe_c12{0.0f}, crest_awe_c13{0.0f};
 
     // JWL Product Gas EOS & Programmed Burn Parameters
     float jwl_A{373.77e9f};              // High pressure coefficient A (Pa)

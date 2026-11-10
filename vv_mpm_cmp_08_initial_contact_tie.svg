@@ -15,17 +15,17 @@
   <rect width="800" height="450" fill="#0d1117" rx="8"/>
   <text x="400" y="30" text-anchor="middle" class="title">VV-L2-CMP-08: max equivalent plastic strain, conformal spinning sleeve (tie OFF = reference, tie ON = result)</text>
   <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
-  <text x="67" y="394" text-anchor="end" class="tick">-0.000269</text>
+  <text x="67" y="394" text-anchor="end" class="tick">-0.000725</text>
   <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
-  <text x="67" y="326" text-anchor="end" class="tick">0.000377</text>
+  <text x="67" y="326" text-anchor="end" class="tick">0.00101</text>
   <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
-  <text x="67" y="258" text-anchor="end" class="tick">0.00102</text>
+  <text x="67" y="258" text-anchor="end" class="tick">0.00275</text>
   <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
-  <text x="67" y="190" text-anchor="end" class="tick">0.00167</text>
+  <text x="67" y="190" text-anchor="end" class="tick">0.00449</text>
   <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
-  <text x="67" y="122" text-anchor="end" class="tick">0.00231</text>
+  <text x="67" y="122" text-anchor="end" class="tick">0.00623</text>
   <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
-  <text x="67" y="54" text-anchor="end" class="tick">0.00296</text>
+  <text x="67" y="54" text-anchor="end" class="tick">0.00797</text>
   <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
   <text x="75" y="408" text-anchor="middle" class="tick">2.5</text>
   <line x1="213" y1="50" x2="213" y2="390" class="grid"/>

@@ -1375,6 +1375,109 @@ std::vector<BenchmarkResult> run_level_1_benchmarks() {
         results.push_back(res);
     }
 
+    // =========================================================================
+    // VV-L1-12: AWE CREST (finite-strain solid EOS + 2-stage reaction rate)
+    //           vs. published EDC37 / PBX 9502 data (Cartwright 2016; Handley 2006)
+    // =========================================================================
+    {
+        BenchmarkResult res;
+        res.id = "VV-L1-12";
+        res.title = "AWE CREST Reactive Burn: Shock Entropy at von Neumann Spike & lambda_max(Zs) (EDC37, PBX 9502)";
+        res.level = 1;
+        res.tolerance_l2 = 5.0e-3;
+        res.tolerance_linf = 2.0e-2;
+
+        using namespace Blast::CrestDavis;
+        // Parameters: Handley (2006) Table 2 / Cartwright (2016) Table 3.1 (SI)
+        CRESTSolidParams edc{1844.5, 1844.5, 14.24525e9, 7.19557e6,
+                             2.417494, 2.208027, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                             32.33557, 3.596933, 0.4, 2.0};
+        CRESTSolidParams pbx{1890.0, 1942.0, 9.0314021e9, 3.73e6,
+                             0.246257, 11.44221, 0.0, 16.8477, 6.534913, 0.0, 0.05, 0.021322,
+                             126.4052, 6.554447, 0.4, 2.0};
+
+        // (A) Zs at the published von Neumann spike pressures (Cartwright Figs 5.6, 5.10)
+        const double Zs_edc = computeCRESTShockEntropyFromPressure(5.23e10, edc);
+        const double Zs_pbx = computeCRESTShockEntropyFromPressure(3.60e10, pbx);
+        const double Zs_edc_pub_lo = 0.01653, Zs_edc_pub_hi = 0.01677; // published range
+        const double Zs_pbx_pub_lo = 0.0133, Zs_pbx_pub_hi = 0.0134; // published range (Cartwright Fig 5.10)
+        const double eA_edc = (Zs_edc >= Zs_edc_pub_lo && Zs_edc <= Zs_edc_pub_hi) ? 0.0
+            : std::min(std::abs(Zs_edc - Zs_edc_pub_lo), std::abs(Zs_edc - Zs_edc_pub_hi)) / Zs_edc_pub_hi;
+        const double eA_pbx = (Zs_pbx >= Zs_pbx_pub_lo && Zs_pbx <= Zs_pbx_pub_hi) ? 0.0
+            : std::min(std::abs(Zs_pbx - Zs_pbx_pub_lo), std::abs(Zs_pbx - Zs_pbx_pub_hi)) / Zs_pbx_pub_hi;
+
+        // (B) lambda_max(Zs) for EDC37 by genuine time integration (dt = 1e-8 s, 4000 steps = 40 us)
+        // vs Cartwright (2016) Table 5.5
+        const double Zs_tab[3]  = {0.0085, 0.0124, 0.0133};
+        const double lam_pub[3] = {0.856, 0.910, 0.928};
+        std::vector<double> x_vec, y_exact, y_num;
+        double sum_sq = 0.0, sum_ref = 0.0, eB_inf = 0.0;
+        for (int k = 0; k < 3; ++k) {
+            double lam = 0.0;
+            for (int n = 0; n < 4000; ++n)
+                lam = advanceAWECRESTProgress(1.0e-8, Zs_tab[k], lam, 2.0e8, 2.0, 2.2e8, 2.5, 0.0, 1.6e-4, 1.0, 4.0e5, 1.8, 0.0, 0.0);
+            const double e = lam - lam_pub[k];
+            sum_sq += e * e; sum_ref += lam_pub[k] * lam_pub[k];
+            eB_inf = std::max(eB_inf, std::abs(e) / lam_pub[k]);
+            x_vec.push_back(Zs_tab[k]); y_exact.push_back(lam_pub[k]); y_num.push_back(lam);
+        }
+        const double eB_l2 = std::sqrt(sum_sq / sum_ref);
+
+        // (C) CJ detonation velocity from the production JWL products EOS (Rayleigh-line minimum on the
+        // energy-release Hugoniot) vs Cartwright (2016) Table 5.4 ZND velocities. EOS-level check, no spatial grid.
+        auto cj_velocity = [](const CRESTSolidParams& q, float A, float B, float R1, float R2, float om, double Q) {
+            const double v0 = 1.0 / q.rho0;
+            double Dmin = 1.0e30;
+            for (int i = 1; i < 4000; ++i) {
+                const double v = v0 * (0.30 + 0.69 * i / 4000.0);
+                const double vr = v * q.rho0s;                          // relative to TMD
+                const float pz = JWL::computeJWLProductPressure(static_cast<float>(vr), 0.0f, A, B, R1, R2, om, static_cast<float>(q.rho0s));
+                const double dpde = static_cast<double>(om) * q.rho0s / vr;   // exact dp/de of the JWL form (p linear in e)
+                // p = pz + dpde*(Q + 0.5*p*(v0-v))  ->  solve for p
+                const double den = 1.0 - 0.5 * dpde * (v0 - v);
+                if (den <= 1e-9) continue;
+                const double pH = (pz + dpde * Q) / den;
+                if (pH <= 0.0) continue;
+                const double D2 = v0 * v0 * pH / (v0 - v);
+                Dmin = std::min(Dmin, D2);
+            }
+            return std::sqrt(Dmin);
+        };
+        const double D_edc = cj_velocity(edc, 664.2021e9f, 22.82927e9f, 4.25f, 1.825f, 0.25f, 7.19557e6);
+        const double D_pbx = cj_velocity(pbx, 460.3e9f, 9.544e9f, 3.903f, 1.659f, 0.48f, 3.73e6);
+        const double eC_edc = std::abs(D_edc - 8769.3) / 8769.3;
+        const double eC_pbx = std::abs(D_pbx - 7597.4) / 7597.4;
+        const double eC = std::max(eC_edc, eC_pbx);
+
+        res.error_l2 = std::max({eB_l2, eA_edc, eA_pbx, eC});
+        res.error_linf = std::max({eB_inf, eA_edc, eA_pbx, eC});
+        res.passed = (res.error_l2 <= res.tolerance_l2) && (res.error_linf <= res.tolerance_linf);
+
+        std::cout << std::defaultfloat << std::setprecision(6);
+        std::cout << "[METRICS VV-L1-12] Zs(EDC37@52.3GPa)=" << Zs_edc << " Zs(PBX9502@36GPa)=" << Zs_pbx
+                  << " eA_edc=" << eA_edc << " eA_pbx=" << eA_pbx
+                  << " | D_CJ(EDC37)=" << D_edc << " D_CJ(PBX9502)=" << D_pbx << " eC=" << eC
+                  << " | lambda_max e_L2=" << eB_l2 << " e_inf=" << eB_inf
+                  << (res.passed ? " PASS" : " FAIL") << std::endl;
+
+        std::string svg_file = "vv_l1_12_awe_crest_lambda_max.svg";
+        generate_svg_plot(svg_file,
+            "VV-L1-12: AWE CREST EDC37 lambda_max vs Shock Entropy Zs (Cartwright 2016 Table 5.5)",
+            "Zs (Mbar cm^3/g)", "lambda_max (-)", x_vec, y_exact, y_num, 1.0, 5.0);
+        res.svg_path = svg_file;
+
+        std::ostringstream oss;
+        oss << "Discretization: single material-point integration of the production CrestDavis::advanceAWECRESTProgress "
+            << "(dt = 1.0e-8 s, 4000 steps, Zs held at the Table 5.5 values; no spatial grid) and the production finite-strain "
+            << "Hugoniot (bisection, 40 iterations). Results: Zs at spike EDC37 = " << Zs_edc << " (published 0.01653-0.01677), "
+            << "PBX 9502 = " << Zs_pbx << " (published 0.0133-0.0134); EDC37 lambda_max e_L2 = " << eB_l2 << ", e_Linf = " << eB_inf << ". "
+            << "CJ velocity from the JWL products Hugoniot: EDC37 = " << D_edc << " m/s (published 8769.3), PBX 9502 = " << D_pbx << " m/s (published 7597.4). "
+            << "STATUS: coupled 1D/3D solver run-to-detonation PENDING INTEGRATION; this test verifies the constitutive EOS, CJ state and rate integrator only.";
+        res.details = oss.str();
+        res.summary = "AWE CREST finite-strain Hugoniot entropy and two-stage rate integrator verified against published EDC37/PBX 9502 data (constitutive level).";
+        results.push_back(res);
+    }
+
     return results;
 }
 

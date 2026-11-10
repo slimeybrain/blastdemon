@@ -380,6 +380,30 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.crest_m2 = static_cast<float>(get_json_double(obj, "crest_m2", 1.5));
     mat.crest_s0 = static_cast<float>(get_json_double(obj, "crest_s0", 100.0));
     mat.crest_s_threshold = static_cast<float>(get_json_double(obj, "crest_s_threshold", 45.0));
+    mat.crest_awe_K0s = static_cast<float>(get_json_double(obj, "crest_awe_K0s", 14245250000.0));
+    mat.crest_awe_A1 = static_cast<float>(get_json_double(obj, "crest_awe_A1", 2.417494));
+    mat.crest_awe_A2 = static_cast<float>(get_json_double(obj, "crest_awe_A2", 2.208027));
+    mat.crest_awe_A3 = static_cast<float>(get_json_double(obj, "crest_awe_A3", 0.0));
+    mat.crest_awe_B1 = static_cast<float>(get_json_double(obj, "crest_awe_B1", 0.0));
+    mat.crest_awe_B2 = static_cast<float>(get_json_double(obj, "crest_awe_B2", 0.0));
+    mat.crest_awe_B3 = static_cast<float>(get_json_double(obj, "crest_awe_B3", 0.0));
+    mat.crest_awe_fc = static_cast<float>(get_json_double(obj, "crest_awe_fc", 0.0));
+    mat.crest_awe_delta = static_cast<float>(get_json_double(obj, "crest_awe_delta", 0.0));
+    mat.crest_awe_Gamma1 = static_cast<float>(get_json_double(obj, "crest_awe_Gamma1", 32.33557));
+    mat.crest_awe_Gamma2 = static_cast<float>(get_json_double(obj, "crest_awe_Gamma2", 3.596933));
+    mat.crest_awe_gamma00 = static_cast<float>(get_json_double(obj, "crest_awe_gamma00", 0.4));
+    mat.crest_awe_m = static_cast<float>(get_json_double(obj, "crest_awe_m", 2.0));
+    mat.crest_awe_c0 = static_cast<float>(get_json_double(obj, "crest_awe_c0", 0.0));
+    mat.crest_awe_c1 = static_cast<float>(get_json_double(obj, "crest_awe_c1", 2.0));
+    mat.crest_awe_c2 = static_cast<float>(get_json_double(obj, "crest_awe_c2", 220000000.0));
+    mat.crest_awe_c3 = static_cast<float>(get_json_double(obj, "crest_awe_c3", 2.5));
+    mat.crest_awe_c6 = static_cast<float>(get_json_double(obj, "crest_awe_c6", 0.0));
+    mat.crest_awe_c8 = static_cast<float>(get_json_double(obj, "crest_awe_c8", 0.00016));
+    mat.crest_awe_c9 = static_cast<float>(get_json_double(obj, "crest_awe_c9", 1.0));
+    mat.crest_awe_c10 = static_cast<float>(get_json_double(obj, "crest_awe_c10", 400000.0));
+    mat.crest_awe_c11 = static_cast<float>(get_json_double(obj, "crest_awe_c11", 1.8));
+    mat.crest_awe_c12 = static_cast<float>(get_json_double(obj, "crest_awe_c12", 0.0));
+    mat.crest_awe_c13 = static_cast<float>(get_json_double(obj, "crest_awe_c13", 0.0));
 
     // JWL Product Gas EOS & Programmed Burn Parameters
     mat.jwl_A = static_cast<float>(get_json_double(obj, "jwl_A", 373.77e9));
@@ -405,9 +429,9 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.lt_e = static_cast<float>(get_json_double(obj, "lt_e", 0.333));
     mat.lt_g = static_cast<float>(get_json_double(obj, "lt_g", 0.667));
     mat.lt_z = static_cast<float>(get_json_double(obj, "lt_z", 3.0));
-    mat.lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", 0.02));
-    mat.lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", 0.50));
-    mat.lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", 0.50));
+    mat.lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", get_json_double(obj, "lt_F_ig_max", 0.02)));
+    mat.lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", get_json_double(obj, "lt_F_G1_max", 0.50)));
+    mat.lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", get_json_double(obj, "lt_F_G2_min", 0.50)));
 
     // Concrete Base
     mat.fc = static_cast<float>(get_json_double(obj, "fc", 35.0e6));
@@ -5508,6 +5532,9 @@ int main() {
                 if (msg.contains("modelId")) {
                     global_model_id = msg.value("modelId", "");
                 }
+                if (msg.contains("model_filename") && !msg["model_filename"].is_null()) {
+                    global_model_filename = msg.value("model_filename", "");
+                }
 
                 if (command.rfind("INIT", 0) == 0) {
                     reset_timing_metrics();
@@ -6318,9 +6345,9 @@ int main() {
                             float lt_e = static_cast<float>(get_json_double(obj, "lt_e", 0.333));
                             float lt_g = static_cast<float>(get_json_double(obj, "lt_g", 0.667));
                             float lt_z = static_cast<float>(get_json_double(obj, "lt_z", 3.0));
-                            float lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", 0.02));
-                            float lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", 0.50));
-                            float lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", 0.50));
+                            float lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", get_json_double(obj, "lt_F_ig_max", 0.02)));
+                            float lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", get_json_double(obj, "lt_F_G1_max", 0.50)));
+                            float lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", get_json_double(obj, "lt_F_G2_min", 0.50)));
 
                             float davis_c0 = static_cast<float>(get_json_double(obj, "davis_c0", 2050.0));
                             float davis_s1 = static_cast<float>(get_json_double(obj, "davis_s1", 2.12));
@@ -6345,6 +6372,30 @@ int main() {
                             float crest_m2 = static_cast<float>(get_json_double(obj, "crest_m2", 1.5));
                             float crest_s0 = static_cast<float>(get_json_double(obj, "crest_s0", 100.0));
                             float crest_s_threshold = static_cast<float>(get_json_double(obj, "crest_s_threshold", 45.0));
+                            float crest_awe_K0s = static_cast<float>(get_json_double(obj, "crest_awe_K0s", 14245250000.0));
+                            float crest_awe_A1 = static_cast<float>(get_json_double(obj, "crest_awe_A1", 2.417494));
+                            float crest_awe_A2 = static_cast<float>(get_json_double(obj, "crest_awe_A2", 2.208027));
+                            float crest_awe_A3 = static_cast<float>(get_json_double(obj, "crest_awe_A3", 0.0));
+                            float crest_awe_B1 = static_cast<float>(get_json_double(obj, "crest_awe_B1", 0.0));
+                            float crest_awe_B2 = static_cast<float>(get_json_double(obj, "crest_awe_B2", 0.0));
+                            float crest_awe_B3 = static_cast<float>(get_json_double(obj, "crest_awe_B3", 0.0));
+                            float crest_awe_fc = static_cast<float>(get_json_double(obj, "crest_awe_fc", 0.0));
+                            float crest_awe_delta = static_cast<float>(get_json_double(obj, "crest_awe_delta", 0.0));
+                            float crest_awe_Gamma1 = static_cast<float>(get_json_double(obj, "crest_awe_Gamma1", 32.33557));
+                            float crest_awe_Gamma2 = static_cast<float>(get_json_double(obj, "crest_awe_Gamma2", 3.596933));
+                            float crest_awe_gamma00 = static_cast<float>(get_json_double(obj, "crest_awe_gamma00", 0.4));
+                            float crest_awe_m = static_cast<float>(get_json_double(obj, "crest_awe_m", 2.0));
+                            float crest_awe_c0 = static_cast<float>(get_json_double(obj, "crest_awe_c0", 0.0));
+                            float crest_awe_c1 = static_cast<float>(get_json_double(obj, "crest_awe_c1", 2.0));
+                            float crest_awe_c2 = static_cast<float>(get_json_double(obj, "crest_awe_c2", 220000000.0));
+                            float crest_awe_c3 = static_cast<float>(get_json_double(obj, "crest_awe_c3", 2.5));
+                            float crest_awe_c6 = static_cast<float>(get_json_double(obj, "crest_awe_c6", 0.0));
+                            float crest_awe_c8 = static_cast<float>(get_json_double(obj, "crest_awe_c8", 0.00016));
+                            float crest_awe_c9 = static_cast<float>(get_json_double(obj, "crest_awe_c9", 1.0));
+                            float crest_awe_c10 = static_cast<float>(get_json_double(obj, "crest_awe_c10", 400000.0));
+                            float crest_awe_c11 = static_cast<float>(get_json_double(obj, "crest_awe_c11", 1.8));
+                            float crest_awe_c12 = static_cast<float>(get_json_double(obj, "crest_awe_c12", 0.0));
+                            float crest_awe_c13 = static_cast<float>(get_json_double(obj, "crest_awe_c13", 0.0));
 
                             bool enable_het = get_json_bool(obj, "enable_heterogeneity", false);
                             float weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", 0.0));
@@ -6428,6 +6479,30 @@ int main() {
                                     p.crest_m2 = crest_m2;
                                     p.crest_s0 = crest_s0;
                                     p.crest_s_threshold = crest_s_threshold;
+                                    p.crest_awe_K0s = crest_awe_K0s;
+                                    p.crest_awe_A1 = crest_awe_A1;
+                                    p.crest_awe_A2 = crest_awe_A2;
+                                    p.crest_awe_A3 = crest_awe_A3;
+                                    p.crest_awe_B1 = crest_awe_B1;
+                                    p.crest_awe_B2 = crest_awe_B2;
+                                    p.crest_awe_B3 = crest_awe_B3;
+                                    p.crest_awe_fc = crest_awe_fc;
+                                    p.crest_awe_delta = crest_awe_delta;
+                                    p.crest_awe_Gamma1 = crest_awe_Gamma1;
+                                    p.crest_awe_Gamma2 = crest_awe_Gamma2;
+                                    p.crest_awe_gamma00 = crest_awe_gamma00;
+                                    p.crest_awe_m = crest_awe_m;
+                                    p.crest_awe_c0 = crest_awe_c0;
+                                    p.crest_awe_c1 = crest_awe_c1;
+                                    p.crest_awe_c2 = crest_awe_c2;
+                                    p.crest_awe_c3 = crest_awe_c3;
+                                    p.crest_awe_c6 = crest_awe_c6;
+                                    p.crest_awe_c8 = crest_awe_c8;
+                                    p.crest_awe_c9 = crest_awe_c9;
+                                    p.crest_awe_c10 = crest_awe_c10;
+                                    p.crest_awe_c11 = crest_awe_c11;
+                                    p.crest_awe_c12 = crest_awe_c12;
+                                    p.crest_awe_c13 = crest_awe_c13;
                                     p.temperature = T_room;
                                     p.e_int = 0.0f;
                                     p.enable_heterogeneity = enable_het;
@@ -6994,7 +7069,7 @@ int main() {
                                         }
                                         if (in_trigger_core) {
                                             ignited_count++;
-                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold;
+                                            p.s_shock = (parsed_mat.crest_awe_c0 > 0.0f) ? std::max(0.02f, 2.0f * parsed_mat.crest_awe_c13) : 1.5f * parsed_mat.crest_s_threshold;
                                             p.lambda = 1.0f;
                                             p.e_int = std::max(parsed_mat.davis_q_det, static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6)));
                                             p.v_min = (parsed_mat.davis_vc > 0.1f) ? parsed_mat.davis_vc : 0.70f;
@@ -7365,9 +7440,9 @@ int main() {
                             float lt_e = static_cast<float>(get_json_double(obj, "lt_e", 0.333));
                             float lt_g = static_cast<float>(get_json_double(obj, "lt_g", 0.667));
                             float lt_z = static_cast<float>(get_json_double(obj, "lt_z", 3.0));
-                            float lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", 0.02));
-                            float lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", 0.50));
-                            float lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", 0.50));
+                            float lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", get_json_double(obj, "lt_F_ig_max", 0.02)));
+                            float lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", get_json_double(obj, "lt_F_G1_max", 0.50)));
+                            float lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", get_json_double(obj, "lt_F_G2_min", 0.50)));
 
                             float davis_c0 = static_cast<float>(get_json_double(obj, "davis_c0", 2050.0));
                             float davis_s1 = static_cast<float>(get_json_double(obj, "davis_s1", 2.12));
@@ -7392,6 +7467,30 @@ int main() {
                             float crest_m2 = static_cast<float>(get_json_double(obj, "crest_m2", 1.5));
                             float crest_s0 = static_cast<float>(get_json_double(obj, "crest_s0", 100.0));
                             float crest_s_threshold = static_cast<float>(get_json_double(obj, "crest_s_threshold", 45.0));
+                            float crest_awe_K0s = static_cast<float>(get_json_double(obj, "crest_awe_K0s", 14245250000.0));
+                            float crest_awe_A1 = static_cast<float>(get_json_double(obj, "crest_awe_A1", 2.417494));
+                            float crest_awe_A2 = static_cast<float>(get_json_double(obj, "crest_awe_A2", 2.208027));
+                            float crest_awe_A3 = static_cast<float>(get_json_double(obj, "crest_awe_A3", 0.0));
+                            float crest_awe_B1 = static_cast<float>(get_json_double(obj, "crest_awe_B1", 0.0));
+                            float crest_awe_B2 = static_cast<float>(get_json_double(obj, "crest_awe_B2", 0.0));
+                            float crest_awe_B3 = static_cast<float>(get_json_double(obj, "crest_awe_B3", 0.0));
+                            float crest_awe_fc = static_cast<float>(get_json_double(obj, "crest_awe_fc", 0.0));
+                            float crest_awe_delta = static_cast<float>(get_json_double(obj, "crest_awe_delta", 0.0));
+                            float crest_awe_Gamma1 = static_cast<float>(get_json_double(obj, "crest_awe_Gamma1", 32.33557));
+                            float crest_awe_Gamma2 = static_cast<float>(get_json_double(obj, "crest_awe_Gamma2", 3.596933));
+                            float crest_awe_gamma00 = static_cast<float>(get_json_double(obj, "crest_awe_gamma00", 0.4));
+                            float crest_awe_m = static_cast<float>(get_json_double(obj, "crest_awe_m", 2.0));
+                            float crest_awe_c0 = static_cast<float>(get_json_double(obj, "crest_awe_c0", 0.0));
+                            float crest_awe_c1 = static_cast<float>(get_json_double(obj, "crest_awe_c1", 2.0));
+                            float crest_awe_c2 = static_cast<float>(get_json_double(obj, "crest_awe_c2", 220000000.0));
+                            float crest_awe_c3 = static_cast<float>(get_json_double(obj, "crest_awe_c3", 2.5));
+                            float crest_awe_c6 = static_cast<float>(get_json_double(obj, "crest_awe_c6", 0.0));
+                            float crest_awe_c8 = static_cast<float>(get_json_double(obj, "crest_awe_c8", 0.00016));
+                            float crest_awe_c9 = static_cast<float>(get_json_double(obj, "crest_awe_c9", 1.0));
+                            float crest_awe_c10 = static_cast<float>(get_json_double(obj, "crest_awe_c10", 400000.0));
+                            float crest_awe_c11 = static_cast<float>(get_json_double(obj, "crest_awe_c11", 1.8));
+                            float crest_awe_c12 = static_cast<float>(get_json_double(obj, "crest_awe_c12", 0.0));
+                            float crest_awe_c13 = static_cast<float>(get_json_double(obj, "crest_awe_c13", 0.0));
 
                             bool enable_het = get_json_bool(obj, "enable_heterogeneity", false);
                             float weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", 0.0));
@@ -7475,6 +7574,30 @@ int main() {
                                     p.crest_m2 = crest_m2;
                                     p.crest_s0 = crest_s0;
                                     p.crest_s_threshold = crest_s_threshold;
+                                    p.crest_awe_K0s = crest_awe_K0s;
+                                    p.crest_awe_A1 = crest_awe_A1;
+                                    p.crest_awe_A2 = crest_awe_A2;
+                                    p.crest_awe_A3 = crest_awe_A3;
+                                    p.crest_awe_B1 = crest_awe_B1;
+                                    p.crest_awe_B2 = crest_awe_B2;
+                                    p.crest_awe_B3 = crest_awe_B3;
+                                    p.crest_awe_fc = crest_awe_fc;
+                                    p.crest_awe_delta = crest_awe_delta;
+                                    p.crest_awe_Gamma1 = crest_awe_Gamma1;
+                                    p.crest_awe_Gamma2 = crest_awe_Gamma2;
+                                    p.crest_awe_gamma00 = crest_awe_gamma00;
+                                    p.crest_awe_m = crest_awe_m;
+                                    p.crest_awe_c0 = crest_awe_c0;
+                                    p.crest_awe_c1 = crest_awe_c1;
+                                    p.crest_awe_c2 = crest_awe_c2;
+                                    p.crest_awe_c3 = crest_awe_c3;
+                                    p.crest_awe_c6 = crest_awe_c6;
+                                    p.crest_awe_c8 = crest_awe_c8;
+                                    p.crest_awe_c9 = crest_awe_c9;
+                                    p.crest_awe_c10 = crest_awe_c10;
+                                    p.crest_awe_c11 = crest_awe_c11;
+                                    p.crest_awe_c12 = crest_awe_c12;
+                                    p.crest_awe_c13 = crest_awe_c13;
                                     p.temperature = T_room;
                                     p.e_int = 0.0f;
 
@@ -8217,7 +8340,7 @@ int main() {
                                         }
                                         if (in_trigger_core) {
                                             ignited_count++;
-                                            p.s_shock = 1.5f * parsed_mat.crest_s_threshold;
+                                            p.s_shock = (parsed_mat.crest_awe_c0 > 0.0f) ? std::max(0.02f, 2.0f * parsed_mat.crest_awe_c13) : 1.5f * parsed_mat.crest_s_threshold;
                                             p.lambda = 1.0f;
                                             p.e_int = std::max(parsed_mat.davis_q_det, static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6)));
                                             p.v_min = (parsed_mat.davis_vc > 0.1f) ? parsed_mat.davis_vc : 0.70f;

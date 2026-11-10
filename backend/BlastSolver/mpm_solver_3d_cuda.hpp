@@ -319,6 +319,12 @@ public:
     MaterialTable3D* getDeviceMaterialTables() { return d_material_tables; }
     // Extract 2D slice directly on GPU to host vector (eliminates 512 MB PCIe downloads)
     void extractSliceToHost(std::vector<float>& out_slice, const std::string& axis, float offset, const std::string& req_qty = "plastic_strain");
+    // Extract background grid cell particle density and mass density for VTK StructuredGrid (.vts)
+    void extractDensityGridToHost(std::vector<float>& out_counts, std::vector<float>& out_density,
+                                  int i_start = 0, int i_end = 0,
+                                  int j_start = 0, int j_end = 0,
+                                  int k_start = 0, int k_end = 0,
+                                  int stride = 1);
 
     size_t getParticleCount() const { return m_num_active_particles > 0 ? m_num_active_particles : m_host_particles.size(); }
     size_t getActiveParticleCount() const { return m_num_active_particles; }
