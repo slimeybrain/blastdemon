@@ -10,14 +10,20 @@ extern void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<Mu
     CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap);
 extern void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
     CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z = 0.0);
+extern void remap_3d_to_3d(const CFDBulkSnapshot3D& src, CFDSolver3D& solver_3d,
+    double x_expl, double y_expl, double z_expl, double R_remap,
+    double src_x_expl, double src_y_expl, double src_z_expl);
 #include <device_launch_parameters.h>
 #include <string>
 #include <stdexcept>
+#include "services/ErrorDiagnostics.hpp"
 
 #define CHECK_CUDA(call) { \
     cudaError_t err = call; \
     if (err != cudaSuccess) { \
+        std::string phase = BlastDiagnostics::get_kernel_phase(); \
         std::string err_msg = std::string("CUDA Error: ") + cudaGetErrorString(err) + " at " + __FILE__ + ":" + std::to_string(__LINE__); \
+        if (!phase.empty()) err_msg += " [phase: " + phase + "]"; \
         std::cerr << err_msg << std::endl; \
         throw std::runtime_error(err_msg); \
     } \
@@ -464,6 +470,7 @@ static __device__ inline bool is_solid_cell_gpu(const GeometryTile3D* geom, int 
     int ty = clamped_j >> 3;
     int tz = clamped_k >> 3;
     int t_idx = tx + ty * d_ntx + tz * d_ntx * d_nty;
+    if (t_idx < 0 || t_idx >= d_ntx * d_nty * d_ntz) return false;
     int lx = clamped_i & 7;
     int ly = clamped_j & 7;
     int lz = clamped_k & 7;
@@ -883,6 +890,7 @@ static __device__ inline bool get_solid_normal_gpu(const GeometryTile3D* geom, i
     int ty = cj >> 3;
     int tz = ck >> 3;
     int t_idx = tx + ty * d_ntx + tz * d_ntx * d_nty;
+    if (t_idx < 0 || t_idx >= d_ntx * d_nty * d_ntz) return false;
     int lx = ci & 7;
     int ly = cj & 7;
     int lz = ck & 7;
@@ -5412,7 +5420,7 @@ __global__ void __launch_bounds__(512) predict_states_gpu_kernel_3d(
     const GeometryTile3D* __restrict__ geom,
     RealType dt,
     RealType gamma_r,
-    int temporalOrder
+    int scheme_id
 ) {
     int t_idx = active_tile_indices[blockIdx.x];
     int tx = t_idx % d_ntx;
@@ -5455,7 +5463,7 @@ __global__ void __launch_bounds__(512) predict_states_gpu_kernel_3d(
     GPUCellStateT<RealType, IsMultiMaterial> d_x, d_y, d_z;
     RealType invDx = (RealType)1.0 / (RealType)d_cellSize;
 
-    if (temporalOrder == 4) {
+    if (scheme_id == 0) { // MUSCL-Hancock
         GPUCellStateT<RealType, IsMultiMaterial> sL_x, sR_x;
         reconstruct_gpu<RealType, IsMultiMaterial, SpatialOrder>(states, geom, gx, gy, gz, 0, sL_x, sR_x, gx, gy, gz, is_near_boundary);
         GPUCellStateT<RealType, IsMultiMaterial> sL_xP1, sR_xP1;
@@ -5958,7 +5966,26 @@ __global__ void kernel_fsi_apply_penalty_gpu(
     int nx, int ny, int nz,
     int ntx, int nty,
     float dx, float dy, float dz,
-    float gamma
+    float gamma,
+    Blast::MPMGridView3D gv = {}
+);
+
+template <typename RealType, bool IsMultiMaterial>
+__global__ void kernel_fsi_apply_penalty_active_gpu(
+    PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
+    ConservativeTile3D<RealType, IsMultiMaterial>* d_U,
+    const Blast::MPMGridNode3D* d_grid,
+    const int* d_active_nodes,
+    int num_active_nodes,
+    int nx_cfd, int ny_cfd, int nz_cfd,
+    int ntx, int nty,
+    float dx_cfd, float dy_cfd, float dz_cfd,
+    float xmin_cfd, float ymin_cfd, float zmin_cfd,
+    int nx_mpm, int ny_mpm, int nz_mpm,
+    float dx_mpm, float dy_mpm, float dz_mpm,
+    float xmin_mpm, float ymin_mpm, float zmin_mpm,
+    float gamma,
+    Blast::MPMGridView3D gv = {}
 );
 
 template <typename RealType, bool IsMultiMaterial>
@@ -6057,18 +6084,19 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
         }
     };
 
-    // MUSCL-Hancock (4), ADER-2 (5), ADER-3 (6) on GPU
+    // MUSCL-Hancock (0), ADER-2 (1), ADER-3 (2) on GPU
     int total_tiles = ntx * nty * ntz;
     if (!d_states_pred) {
         CHECK_CUDA(cudaMalloc(&d_states_pred, total_tiles * sizeof(PrimitivePredictorTile3D<RealType, IsMultiMaterial>)));
         CHECK_CUDA(cudaMemset(d_states_pred, 0, total_tiles * sizeof(PrimitivePredictorTile3D<RealType, IsMultiMaterial>)));
     }
-    if (temporalOrder == 6 && !d_dW_dt) {
+    bool is_ader3 = (spaceTimeScheme == SpaceTimeScheme3D::ADER_3);
+    if (is_ader3 && !d_dW_dt) {
         CHECK_CUDA(cudaMalloc(&d_dW_dt, total_tiles * sizeof(PrimitivePredictorTile3D<RealType, IsMultiMaterial>)));
         CHECK_CUDA(cudaMemset(d_dW_dt, 0, total_tiles * sizeof(PrimitivePredictorTile3D<RealType, IsMultiMaterial>)));
     }
     auto states_pred_ptr = (PrimitivePredictorTile3D<RealType, IsMultiMaterial>*)d_states_pred;
-    auto dW_dt_ptr = (temporalOrder == 6) ? (PrimitivePredictorTile3D<RealType, IsMultiMaterial>*)d_dW_dt : nullptr;
+    auto dW_dt_ptr = is_ader3 ? (PrimitivePredictorTile3D<RealType, IsMultiMaterial>*)d_dW_dt : nullptr;
 
     copy_active_primitive_tiles_kernel_3d<RealType, IsMultiMaterial><<<n_active, 512>>>(
         states_pred_ptr, (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (const int*)d_active_tile_indices
@@ -6076,8 +6104,11 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
     CHECK_CUDA(cudaGetLastError());
     
     RealType gamma_r = (RealType)gamma;
+    int scheme_id = static_cast<int>(spaceTimeScheme);
 
         // Launch pass 1 prediction kernel
+        BlastDiagnostics::set_last_dt(dt);
+        BlastDiagnostics::set_kernel_phase("predict_states_gpu_kernel_3d");
         if (spatialOrder == 3) {
             predict_states_gpu_kernel_3d<RealType, IsMultiMaterial, 3><<<n_active, threads>>>(
                 (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
@@ -6088,7 +6119,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
                 (const GeometryTile3D*)d_geom,
                 dt_r,
                 gamma_r,
-                temporalOrder
+                scheme_id
             );
         } else if (spatialOrder == 2) {
             predict_states_gpu_kernel_3d<RealType, IsMultiMaterial, 2><<<n_active, threads>>>(
@@ -6100,7 +6131,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
                 (const GeometryTile3D*)d_geom,
                 dt_r,
                 gamma_r,
-                temporalOrder
+                scheme_id
             );
         } else {
             predict_states_gpu_kernel_3d<RealType, IsMultiMaterial, 1><<<n_active, threads>>>(
@@ -6112,12 +6143,14 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
                 (const GeometryTile3D*)d_geom,
                 dt_r,
                 gamma_r,
-                temporalOrder
+                scheme_id
             );
         }
+        CHECK_CUDA(cudaGetLastError());
 
-        if (temporalOrder == 6) {
+        if (is_ader3) {
             // ADER-3 Second Pass: compute integrated states
+            BlastDiagnostics::set_kernel_phase("predict_states_ader3_gpu_kernel_3d");
             predict_states_ader3_gpu_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>(
                 (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, // orig W^n
                 states_pred_ptr, // mid W^{n+1/2}
@@ -6129,21 +6162,27 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
                 dt_r,
                 gamma_r
             );
+            CHECK_CUDA(cudaGetLastError());
         }
 
         // Perform flux update using predicted states directly without pointer swap
+        BlastDiagnostics::set_kernel_phase("compute_flux_fused_3d");
         launch_fused_kernel_with_states(states_pred_ptr, d_U, 0, nullptr, false, (RealType)0.0);
+        CHECK_CUDA(cudaGetLastError());
 
         if constexpr (IsMultiMaterial) {
+            BlastDiagnostics::set_kernel_phase("applyProgrammedBurn_kernel_3d");
             applyProgrammedBurn_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>(
                 (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
                 (const int*)d_active_tile_indices,
                 (RealType)currentTime,
                 dt_r
             );
+            CHECK_CUDA(cudaGetLastError());
         }
 
         // Update primitive variables and peaks
+        BlastDiagnostics::set_kernel_phase("update_primitive_kernel_3d");
         update_primitive_kernel_3d<RealType, IsMultiMaterial><<<n_active, threads>>>(
             (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
             (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
@@ -6152,20 +6191,51 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::step(double dt) {
             dt_r,
             (const SolidVelocityTile3D*)d_solid_vel_fsi
         );
-
-    if (this->d_fsi_mpm_grid) {
-        dim3 penalty_threads(8, 8, 4);
-        dim3 penalty_grid((nx + 7) / 8, (ny + 7) / 8, (nz + 3) / 4);
-        kernel_fsi_apply_penalty_gpu<RealType, IsMultiMaterial><<<penalty_grid, penalty_threads>>>(
-            (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
-            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
-            (const Blast::MPMGridNode3D*)this->d_fsi_mpm_grid,
-            nx, ny, nz, ntx, nty,
-            (float)cellSize, (float)cellSize, (float)cellSize,
-            (float)gamma
-        );
         CHECK_CUDA(cudaGetLastError());
-        CHECK_CUDA(cudaDeviceSynchronize());
+
+    if (this->m_fsi_mpm_solver) {
+        auto* mpm_s = static_cast<Blast::MPMSolver3DCUDA*>(this->m_fsi_mpm_solver);
+        this->d_fsi_mpm_grid = mpm_s->getDeviceGrid();
+    }
+    if (this->d_fsi_mpm_grid) {
+        auto* mpm_s = static_cast<Blast::MPMSolver3DCUDA*>(this->m_fsi_mpm_solver);
+        Blast::MPMGridView3D fsi_gv = mpm_s ? mpm_s->getDeviceGridView() : Blast::MPMGridView3D{};
+        if (mpm_s && mpm_s->getNumActiveNodes() > 0 && mpm_s->getDeviceActiveNodes()) {
+            int num_act = mpm_s->getNumActiveNodes();
+            int threads_act = 256;
+            int blocks_act = (num_act + threads_act - 1) / threads_act;
+            kernel_fsi_apply_penalty_active_gpu<RealType, IsMultiMaterial><<<blocks_act, threads_act>>>(
+                (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+                (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+                (const Blast::MPMGridNode3D*)this->d_fsi_mpm_grid,
+                mpm_s->getDeviceActiveNodes(),
+                num_act,
+                nx, ny, nz, ntx, nty,
+                (float)cellSize, (float)cellSize, (float)cellSize,
+                (float)xmin, (float)ymin, (float)zmin,
+                mpm_s->getNx(), mpm_s->getNy(), mpm_s->getNz(),
+                mpm_s->getDx(), mpm_s->getDy(), mpm_s->getDz(),
+                mpm_s->getXMin(), mpm_s->getYMin(), mpm_s->getZMin(),
+                (float)gamma,
+                fsi_gv
+            );
+            CHECK_CUDA(cudaGetLastError());
+            CHECK_CUDA(cudaDeviceSynchronize());
+        } else if (!mpm_s || (mpm_s->getNx() == nx && mpm_s->getNy() == ny && mpm_s->getNz() == nz)) {
+            dim3 penalty_threads(8, 8, 4);
+            dim3 penalty_grid((nx + 7) / 8, (ny + 7) / 8, (nz + 3) / 4);
+            kernel_fsi_apply_penalty_gpu<RealType, IsMultiMaterial><<<penalty_grid, penalty_threads>>>(
+                (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+                (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+                (const Blast::MPMGridNode3D*)this->d_fsi_mpm_grid,
+                nx, ny, nz, ntx, nty,
+                (float)cellSize, (float)cellSize, (float)cellSize,
+                (float)gamma,
+                fsi_gv
+            );
+            CHECK_CUDA(cudaGetLastError());
+            CHECK_CUDA(cudaDeviceSynchronize());
+        }
     }
 
 
@@ -7244,6 +7314,132 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz
     }
 }
 
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DCuda<RealType, IsMultiMaterial>::initializeFrom3D(const CFDBulkSnapshot3D& src, double x_expl, double y_expl, double z_expl, double R_remap, double src_x_expl, double src_y_expl, double src_z_expl) {
+    ensure_paged_in();
+    currentTime = 0.0;
+    if (src.p.empty() || src.rho.empty()) return;
+    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int ntz = (this->nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int total_tiles = ntx * nty * ntz;
+
+    double amb_rho = (this->ambient_rho > 0.0) ? this->ambient_rho : 1.225;
+    double amb_p = (this->ambient_p > 0.0) ? this->ambient_p : 101325.0;
+    ambient_rho = amb_rho;
+    ambient_p = amb_p;
+
+    bind_constants();
+
+    if (!d_states || !d_U || !d_active_tiles) {
+        CHECK_CUDA(cudaMalloc(&d_states, total_tiles * sizeof(PrimitiveTile3D<RealType, IsMultiMaterial>)));
+        CHECK_CUDA(cudaMalloc(&d_U, total_tiles * sizeof(ConservativeTile3D<RealType, IsMultiMaterial>)));
+        CHECK_CUDA(cudaMalloc(&d_active_tiles, total_tiles * sizeof(uint8_t)));
+        CHECK_CUDA(cudaMalloc(&d_tile_active_temp, total_tiles * sizeof(uint8_t)));
+        CHECK_CUDA(cudaMalloc(&d_active_tile_indices, total_tiles * sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_active_count, sizeof(int)));
+        CHECK_CUDA(cudaMalloc(&d_max_s_buf, total_tiles * sizeof(RealType)));
+        CHECK_CUDA(cudaMalloc(&d_tile_mass, total_tiles * sizeof(double)));
+        CHECK_CUDA(cudaMalloc(&d_tile_energy, total_tiles * sizeof(double)));
+    }
+    if (!d_geom) {
+        CHECK_CUDA(cudaMalloc(&d_geom, total_tiles * sizeof(GeometryTile3D)));
+        CHECK_CUDA(cudaMemset(d_geom, 0, total_tiles * sizeof(GeometryTile3D)));
+    }
+    if (!d_tile_is_near_boundary) {
+        CHECK_CUDA(cudaMalloc(&d_tile_is_near_boundary, total_tiles * sizeof(uint8_t)));
+        CHECK_CUDA(cudaMemset(d_tile_is_near_boundary, 0, total_tiles * sizeof(uint8_t)));
+    }
+
+    initialize_ambient_kernel<RealType, IsMultiMaterial><<<total_tiles, 512>>>(
+        (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+        (RealType)amb_rho, (RealType)amb_p, (RealType)gamma, total_tiles
+    );
+    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaMemset(d_active_tiles, 0, total_tiles * sizeof(uint8_t)));
+
+    std::vector<PrimitiveTile3D<RealType, IsMultiMaterial>*> h_tiles(total_tiles, nullptr);
+    for (int t = 0; t < total_tiles; ++t) {
+        auto* tile = new PrimitiveTile3D<RealType, IsMultiMaterial>();
+        for (int c = 0; c < TILE_CELLS_3D; ++c) {
+            tile->rho[c] = (RealType)amb_rho;
+            tile->ux[c] = 0.0; tile->uy[c] = 0.0; tile->uz[c] = 0.0;
+            tile->p[c] = (RealType)amb_p;
+            if constexpr (IsMultiMaterial) {
+                tile->alpha1[c] = 0.0; tile->alpha2[c] = 0.0;
+                tile->arho1[c] = 0.0; tile->arho2[c] = 0.0;
+            }
+            tile->floor_status[c] = 0;
+            tile->peak_overpressure[c] = 0.0; tile->running_impulse[c] = 0.0; tile->peak_impulse[c] = 0.0;
+        }
+        h_tiles[t] = tile;
+    }
+    temp_h_tiles_ptr = &h_tiles;
+
+    remap_3d_to_3d(src, *this, x_expl, y_expl, z_expl, R_remap, src_x_expl, src_y_expl, src_z_expl);
+
+    commitStates();
+
+    for (auto* ptr : h_tiles) {
+        delete ptr;
+    }
+    temp_h_tiles_ptr = nullptr;
+
+    dim3 c_threads_unc(8, 8, 8);
+    update_conservative_from_primitive_kernel_3d<RealType, IsMultiMaterial><<<total_tiles, c_threads_unc>>>(
+        (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+        (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+        total_tiles, (RealType)gamma, currentMaterials.products, currentMaterials.unreacted
+    );
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    updateActiveRegions();
+
+    if (R_remap > 0.0) {
+        std::vector<uint8_t> h_active_tiles(total_tiles, 0);
+        CHECK_CUDA(cudaMemcpy(h_active_tiles.data(), d_active_tiles, total_tiles * sizeof(uint8_t), cudaMemcpyDeviceToHost));
+        for (int t = 0; t < total_tiles; ++t) {
+            int tx = t % ntx;
+            int ty = (t / ntx) % nty;
+            int tz = t / (ntx * nty);
+            double t_min_x = xmin + tx * TILE_SIZE_3D * cellSize;
+            double t_max_x = t_min_x + TILE_SIZE_3D * cellSize;
+            double t_min_y = ymin + ty * TILE_SIZE_3D * cellSize;
+            double t_max_y = t_min_y + TILE_SIZE_3D * cellSize;
+            double t_min_z = zmin + tz * TILE_SIZE_3D * cellSize;
+            double t_max_z = t_min_z + TILE_SIZE_3D * cellSize;
+
+            double cl_x = std::clamp(x_expl, t_min_x, t_max_x);
+            double cl_y = std::clamp(y_expl, t_min_y, t_max_y);
+            double cl_z = std::clamp(z_expl, t_min_z, t_max_z);
+            double min_dist = std::sqrt((x_expl - cl_x)*(x_expl - cl_x) + (y_expl - cl_y)*(y_expl - cl_y) + (z_expl - cl_z)*(z_expl - cl_z));
+            double max_dist = std::sqrt(
+                std::max((x_expl - t_min_x)*(x_expl - t_min_x), (x_expl - t_max_x)*(x_expl - t_max_x)) +
+                std::max((y_expl - t_min_y)*(y_expl - t_min_y), (y_expl - t_max_y)*(y_expl - t_max_y)) +
+                std::max((z_expl - t_min_z)*(z_expl - t_min_z), (z_expl - t_max_z)*(z_expl - t_max_z))
+            );
+
+            if (min_dist <= R_remap + 2.0 * cellSize || (min_dist <= R_remap && max_dist >= R_remap - 2.0 * cellSize)) {
+                h_active_tiles[t] = 1;
+            }
+        }
+        CHECK_CUDA(cudaMemcpy(d_active_tiles, h_active_tiles.data(), total_tiles * sizeof(uint8_t), cudaMemcpyHostToDevice));
+        rebuildActiveIndex();
+
+        dim3 r_threads(TILE_SIZE_3D, TILE_SIZE_3D, TILE_SIZE_3D);
+        reset_inactive_tiles_kernel<RealType, IsMultiMaterial><<<total_tiles, r_threads>>>(
+            (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+            (const uint8_t*)d_active_tiles,
+            (RealType)ambient_rho, (RealType)ambient_p, (RealType)gamma,
+            total_tiles,
+            currentMaterials.products, currentMaterials.unreacted
+        );
+        CHECK_CUDA(cudaDeviceSynchronize());
+        last_cached_tile_idx = -1;
+    }
+}
+
 
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) {
@@ -7403,7 +7599,16 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::setSpatialOrder(int order) {
 
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::setTemporalOrder(int order) { 
-    temporalOrder = order; 
+    if (order == 5) {
+        spaceTimeScheme = SpaceTimeScheme3D::ADER_2;
+        temporalOrder = 2;
+    } else if (order == 6) {
+        spaceTimeScheme = SpaceTimeScheme3D::ADER_3;
+        temporalOrder = 3;
+    } else {
+        spaceTimeScheme = SpaceTimeScheme3D::MUSCL_HANCOCK;
+        temporalOrder = (order == 1) ? 1 : 2;
+    }
     constants_dirty = true;
 }
 
@@ -8469,35 +8674,41 @@ static __device__ inline float get_fsi_pressure_at(
     return static_cast<float>(d_states[t_idx].p[c_idx]);
 }
 
-static __device__ inline float get_mpm_total_mass_at(const Blast::MPMGridNode3D* grid, int x, int y, int z, int nx, int ny, int nz) {
-    if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return 0.0f;
-    int mpm_idx = (x * ny + y) * nz + z;
-    return grid[mpm_idx].m;
+static __device__ inline long long resolve_fsi_mpm_slot(int x, int y, int z, int nx, int ny, int nz, const Blast::MPMGridView3D& gv) {
+    if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return -1;
+    if (gv.nx > 0) return gv.slotIndex(x, y, z);
+    return static_cast<long long>((static_cast<size_t>(x) * ny + y) * nz + z);
 }
 
-static __device__ inline float get_mpm_solid_mass_at(const Blast::MPMGridNode3D* grid, int x, int y, int z, int nx, int ny, int nz) {
-    if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) return 0.0f;
-    int mpm_idx = (x * ny + y) * nz + z;
-    return grid[mpm_idx].m_solid;
+static __device__ inline float get_mpm_total_mass_at(const Blast::MPMGridNode3D* grid, int x, int y, int z, int nx, int ny, int nz, const Blast::MPMGridView3D& gv = {}) {
+    const long long slot = resolve_fsi_mpm_slot(x, y, z, nx, ny, nz, gv);
+    return (slot >= 0) ? grid[slot].m : 0.0f;
 }
 
-static __device__ inline float get_mpm_mass_at(const Blast::MPMGridNode3D* grid, int x, int y, int z, int nx, int ny, int nz) {
-    return get_mpm_solid_mass_at(grid, x, y, z, nx, ny, nz);
+static __device__ inline float get_mpm_solid_mass_at(const Blast::MPMGridNode3D* grid, int x, int y, int z, int nx, int ny, int nz, const Blast::MPMGridView3D& gv = {}) {
+    const long long slot = resolve_fsi_mpm_slot(x, y, z, nx, ny, nz, gv);
+    return (slot >= 0) ? grid[slot].m_solid : 0.0f;
 }
 
-static __device__ inline bool is_fsi_fluid_cell(const Blast::MPMGridNode3D* d_grid, int gx, int gy, int gz, int nx, int ny, int nz) {
+static __device__ inline float get_mpm_mass_at(const Blast::MPMGridNode3D* grid, int x, int y, int z, int nx, int ny, int nz, const Blast::MPMGridView3D& gv = {}) {
+    return get_mpm_solid_mass_at(grid, x, y, z, nx, ny, nz, gv);
+}
+
+static __device__ inline bool is_fsi_fluid_cell(const Blast::MPMGridNode3D* d_grid, int gx, int gy, int gz, int nx, int ny, int nz, const Blast::MPMGridView3D& gv = {}) {
     if (gx < 0 || gx >= nx || gy < 0 || gy >= ny || gz < 0 || gz >= nz) return false;
-    int idx = (gx * ny + gy) * nz + gz;
-    return d_grid[idx].m_solid <= 1.0e-8f;
+    const long long slot = resolve_fsi_mpm_slot(gx, gy, gz, nx, ny, nz, gv);
+    return (slot < 0) ? true : (d_grid[slot].m_solid <= 1.0e-8f);
 }
 
-static __global__ void kernel_zero_fsi_grid_ext_forces(Blast::MPMGridNode3D* d_grid, const int* d_active_nodes, int num_active) {
+static __global__ void kernel_zero_fsi_grid_ext_forces(Blast::MPMGridNode3D* d_grid, const int* d_active_nodes, int num_active, Blast::MPMGridView3D gv = {}) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_active) return;
     int idx = d_active_nodes[tid];
-    d_grid[idx].f_ext[0] = 0.0f;
-    d_grid[idx].f_ext[1] = 0.0f;
-    d_grid[idx].f_ext[2] = 0.0f;
+    const long long slot = (gv.nx > 0) ? gv.slotIndexFromLogical(idx) : static_cast<long long>(idx);
+    if (slot < 0) return;
+    d_grid[slot].f_ext[0] = 0.0f;
+    d_grid[slot].f_ext[1] = 0.0f;
+    d_grid[slot].f_ext[2] = 0.0f;
 }
 
 static __global__ void kernel_zero_all_fsi_grid_ext_forces(Blast::MPMGridNode3D* d_grid, int num_nodes) {
@@ -8516,7 +8727,8 @@ static __global__ void kernel_fsi_couple_gpu(
     SolidVelocityTile3D* d_solid_vel,
     int nx, int ny, int nz,
     int ntx, int nty,
-    float dx, float dy, float dz
+    float dx, float dy, float dz,
+    Blast::MPMGridView3D gv = {}
 ) {
     int gx = blockIdx.x * blockDim.x + threadIdx.x;
     int gy = blockIdx.y * blockDim.y + threadIdx.y;
@@ -8524,23 +8736,24 @@ static __global__ void kernel_fsi_couple_gpu(
 
     if (gx >= nx || gy >= ny || gz >= nz) return;
 
-    int mpm_idx = (gx * ny + gy) * nz + gz;
-    float mass = d_grid[mpm_idx].m;
+    const long long mpm_slot = resolve_fsi_mpm_slot(gx, gy, gz, nx, ny, nz, gv);
+    if (mpm_slot < 0) return;
+    float mass = d_grid[mpm_slot].m;
     if (mass <= 1.0e-8f) {
-        d_grid[mpm_idx].f_ext[0] = 0.0f;
-        d_grid[mpm_idx].f_ext[1] = 0.0f;
-        d_grid[mpm_idx].f_ext[2] = 0.0f;
+        d_grid[mpm_slot].f_ext[0] = 0.0f;
+        d_grid[mpm_slot].f_ext[1] = 0.0f;
+        d_grid[mpm_slot].f_ext[2] = 0.0f;
         return;
     }
-    float solid_mass = d_grid[mpm_idx].m_solid;
+    float solid_mass = d_grid[mpm_slot].m_solid;
     bool is_solid = (solid_mass > 1.0e-8f);
 
     int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
     int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
 
-    float vx = d_grid[mpm_idx].p[0] / mass;
-    float vy = d_grid[mpm_idx].p[1] / mass;
-    float vz = d_grid[mpm_idx].p[2] / mass;
+    float vx = d_grid[mpm_slot].p[0] / mass;
+    float vy = d_grid[mpm_slot].p[1] / mass;
+    float vz = d_grid[mpm_slot].p[2] / mass;
 
     float z_node = static_cast<float>(d_zmin) + (static_cast<float>(gz) + 0.5f) * dz;
     bool is_structural_solid = is_solid && (!d_stratParams.enabled || z_node >= static_cast<float>(d_stratParams.seabed_surface_z));
@@ -8563,12 +8776,12 @@ static __global__ void kernel_fsi_couple_gpu(
         d_solid_vel[t_idx].vz[c_idx] = vz;
     }
 
-    float ms_L = get_mpm_mass_at(d_grid, gx - 1, gy, gz, nx, ny, nz);
-    float ms_R = get_mpm_mass_at(d_grid, gx + 1, gy, gz, nx, ny, nz);
-    float ms_B = get_mpm_mass_at(d_grid, gx, gy - 1, gz, nx, ny, nz);
-    float ms_T = get_mpm_mass_at(d_grid, gx, gy + 1, gz, nx, ny, nz);
-    float ms_D = get_mpm_mass_at(d_grid, gx, gy, gz - 1, nx, ny, nz);
-    float ms_U = get_mpm_mass_at(d_grid, gx, gy, gz + 1, nx, ny, nz);
+    float ms_L = get_mpm_mass_at(d_grid, gx - 1, gy, gz, nx, ny, nz, gv);
+    float ms_R = get_mpm_mass_at(d_grid, gx + 1, gy, gz, nx, ny, nz, gv);
+    float ms_B = get_mpm_mass_at(d_grid, gx, gy - 1, gz, nx, ny, nz, gv);
+    float ms_T = get_mpm_mass_at(d_grid, gx, gy + 1, gz, nx, ny, nz, gv);
+    float ms_D = get_mpm_mass_at(d_grid, gx, gy, gz - 1, nx, ny, nz, gv);
+    float ms_U = get_mpm_mass_at(d_grid, gx, gy, gz + 1, nx, ny, nz, gv);
 
     float grad_x = ms_R - ms_L;
     float grad_y = ms_T - ms_B;
@@ -8608,32 +8821,32 @@ static __global__ void kernel_fsi_couple_gpu(
     float p_D = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz - 1, nx, ny, nz, ntx, nty);
     float p_U = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz + 1, nx, ny, nz, ntx, nty);
 
-    float m_L = get_mpm_total_mass_at(d_grid, gx - 1, gy, gz, nx, ny, nz);
-    float m_R = get_mpm_total_mass_at(d_grid, gx + 1, gy, gz, nx, ny, nz);
-    float m_B = get_mpm_total_mass_at(d_grid, gx, gy - 1, gz, nx, ny, nz);
-    float m_T = get_mpm_total_mass_at(d_grid, gx, gy + 1, gz, nx, ny, nz);
-    float m_D = get_mpm_total_mass_at(d_grid, gx, gy, gz - 1, nx, ny, nz);
-    float m_U = get_mpm_total_mass_at(d_grid, gx, gy, gz + 1, nx, ny, nz);
+    float m_L = get_mpm_total_mass_at(d_grid, gx - 1, gy, gz, nx, ny, nz, gv);
+    float m_R = get_mpm_total_mass_at(d_grid, gx + 1, gy, gz, nx, ny, nz, gv);
+    float m_B = get_mpm_total_mass_at(d_grid, gx, gy - 1, gz, nx, ny, nz, gv);
+    float m_T = get_mpm_total_mass_at(d_grid, gx, gy + 1, gz, nx, ny, nz, gv);
+    float m_D = get_mpm_total_mass_at(d_grid, gx, gy, gz - 1, nx, ny, nz, gv);
+    float m_U = get_mpm_total_mass_at(d_grid, gx, gy, gz + 1, nx, ny, nz, gv);
 
     if (is_structural_solid && n_solid_neighbors >= 4) {
-        if (gx > 0 && is_fsi_fluid_cell(d_grid, gx - 1, gy, gz, nx, ny, nz)) {
+        if (gx > 0 && is_fsi_fluid_cell(d_grid, gx - 1, gy, gz, nx, ny, nz, gv)) {
             f_x += p_L;
         }
-        if (is_fsi_fluid_cell(d_grid, gx + 1, gy, gz, nx, ny, nz)) {
+        if (is_fsi_fluid_cell(d_grid, gx + 1, gy, gz, nx, ny, nz, gv)) {
             f_x -= p_R;
         }
 
-        if (gy > 0 && is_fsi_fluid_cell(d_grid, gx, gy - 1, gz, nx, ny, nz)) {
+        if (gy > 0 && is_fsi_fluid_cell(d_grid, gx, gy - 1, gz, nx, ny, nz, gv)) {
             f_y += p_B;
         }
-        if (is_fsi_fluid_cell(d_grid, gx, gy + 1, gz, nx, ny, nz)) {
+        if (is_fsi_fluid_cell(d_grid, gx, gy + 1, gz, nx, ny, nz, gv)) {
             f_y -= p_T;
         }
 
-        if (is_fsi_fluid_cell(d_grid, gx, gy, gz - 1, nx, ny, nz)) {
+        if (is_fsi_fluid_cell(d_grid, gx, gy, gz - 1, nx, ny, nz, gv)) {
             f_z += p_D;
         }
-        if (is_fsi_fluid_cell(d_grid, gx, gy, gz + 1, nx, ny, nz)) {
+        if (is_fsi_fluid_cell(d_grid, gx, gy, gz + 1, nx, ny, nz, gv)) {
             f_z -= p_U;
         }
         if (gx <= 0) f_x = 0.0f;
@@ -8757,32 +8970,28 @@ static __global__ void kernel_fsi_couple_gpu(
     }
 
     if (!is_structural_solid || n_fluid_neighbors >= 2) {
-        if (fabsf(F_x) > 1.0e-12f) atomicAdd(&d_grid[mpm_idx].f_ext[0], F_x);
-        if (fabsf(F_y) > 1.0e-12f) atomicAdd(&d_grid[mpm_idx].f_ext[1], F_y);
-        if (fabsf(F_z) > 1.0e-12f) atomicAdd(&d_grid[mpm_idx].f_ext[2], F_z);
+        if (fabsf(F_x) > 1.0e-12f) atomicAdd(&d_grid[mpm_slot].f_ext[0], F_x);
+        if (fabsf(F_y) > 1.0e-12f) atomicAdd(&d_grid[mpm_slot].f_ext[1], F_y);
+        if (fabsf(F_z) > 1.0e-12f) atomicAdd(&d_grid[mpm_slot].f_ext[2], F_z);
     } else {
         // Continuous structural solid: mass-weighted distribution across local solid column stencil
         if (fabsf(F_z) > 1.0e-12f) {
             float mass_z_stencil = 0.0f;
             for (int dk = -2; dk <= 2; ++dk) {
                 int k_c = gz + dk;
-                if (k_c >= 0 && k_c < nz) {
-                    int k_idx = (gx * ny + gy) * nz + k_c;
-                    if (d_grid[k_idx].m > 1.0e-8f) mass_z_stencil += d_grid[k_idx].m;
-                }
+                const long long k_slot = resolve_fsi_mpm_slot(gx, gy, k_c, nx, ny, nz, gv);
+                if (k_slot >= 0 && d_grid[k_slot].m > 1.0e-8f) mass_z_stencil += d_grid[k_slot].m;
             }
             if (mass_z_stencil > 1.0e-12f) {
                 for (int dk = -2; dk <= 2; ++dk) {
                     int k_c = gz + dk;
-                    if (k_c >= 0 && k_c < nz) {
-                        int k_idx = (gx * ny + gy) * nz + k_c;
-                        if (d_grid[k_idx].m > 1.0e-8f) {
-                            atomicAdd(&d_grid[k_idx].f_ext[2], F_z * (d_grid[k_idx].m / mass_z_stencil));
-                        }
+                    const long long k_slot = resolve_fsi_mpm_slot(gx, gy, k_c, nx, ny, nz, gv);
+                    if (k_slot >= 0 && d_grid[k_slot].m > 1.0e-8f) {
+                        atomicAdd(&d_grid[k_slot].f_ext[2], F_z * (d_grid[k_slot].m / mass_z_stencil));
                     }
                 }
             } else {
-                atomicAdd(&d_grid[mpm_idx].f_ext[2], F_z);
+                atomicAdd(&d_grid[mpm_slot].f_ext[2], F_z);
             }
         }
 
@@ -8790,23 +8999,19 @@ static __global__ void kernel_fsi_couple_gpu(
             float mass_x_stencil = 0.0f;
             for (int di = -2; di <= 2; ++di) {
                 int i_c = gx + di;
-                if (i_c >= 0 && i_c < nx) {
-                    int i_idx = (i_c * ny + gy) * nz + gz;
-                    if (d_grid[i_idx].m > 1.0e-8f) mass_x_stencil += d_grid[i_idx].m;
-                }
+                const long long i_slot = resolve_fsi_mpm_slot(i_c, gy, gz, nx, ny, nz, gv);
+                if (i_slot >= 0 && d_grid[i_slot].m > 1.0e-8f) mass_x_stencil += d_grid[i_slot].m;
             }
             if (mass_x_stencil > 1.0e-12f) {
                 for (int di = -2; di <= 2; ++di) {
                     int i_c = gx + di;
-                    if (i_c >= 0 && i_c < nx) {
-                        int i_idx = (i_c * ny + gy) * nz + gz;
-                        if (d_grid[i_idx].m > 1.0e-8f) {
-                            atomicAdd(&d_grid[i_idx].f_ext[0], F_x * (d_grid[i_idx].m / mass_x_stencil));
-                        }
+                    const long long i_slot = resolve_fsi_mpm_slot(i_c, gy, gz, nx, ny, nz, gv);
+                    if (i_slot >= 0 && d_grid[i_slot].m > 1.0e-8f) {
+                        atomicAdd(&d_grid[i_slot].f_ext[0], F_x * (d_grid[i_slot].m / mass_x_stencil));
                     }
                 }
             } else {
-                atomicAdd(&d_grid[mpm_idx].f_ext[0], F_x);
+                atomicAdd(&d_grid[mpm_slot].f_ext[0], F_x);
             }
         }
 
@@ -8814,23 +9019,19 @@ static __global__ void kernel_fsi_couple_gpu(
             float mass_y_stencil = 0.0f;
             for (int dj = -2; dj <= 2; ++dj) {
                 int j_c = gy + dj;
-                if (j_c >= 0 && j_c < ny) {
-                    int j_idx = (gx * ny + j_c) * nz + gz;
-                    if (d_grid[j_idx].m > 1.0e-8f) mass_y_stencil += d_grid[j_idx].m;
-                }
+                const long long j_slot = resolve_fsi_mpm_slot(gx, j_c, gz, nx, ny, nz, gv);
+                if (j_slot >= 0 && d_grid[j_slot].m > 1.0e-8f) mass_y_stencil += d_grid[j_slot].m;
             }
             if (mass_y_stencil > 1.0e-12f) {
                 for (int dj = -2; dj <= 2; ++dj) {
                     int j_c = gy + dj;
-                    if (j_c >= 0 && j_c < ny) {
-                        int j_idx = (gx * ny + j_c) * nz + gz;
-                        if (d_grid[j_idx].m > 1.0e-8f) {
-                            atomicAdd(&d_grid[j_idx].f_ext[1], F_y * (d_grid[j_idx].m / mass_y_stencil));
-                        }
+                    const long long j_slot = resolve_fsi_mpm_slot(gx, j_c, gz, nx, ny, nz, gv);
+                    if (j_slot >= 0 && d_grid[j_slot].m > 1.0e-8f) {
+                        atomicAdd(&d_grid[j_slot].f_ext[1], F_y * (d_grid[j_slot].m / mass_y_stencil));
                     }
                 }
             } else {
-                atomicAdd(&d_grid[mpm_idx].f_ext[1], F_y);
+                atomicAdd(&d_grid[mpm_slot].f_ext[1], F_y);
             }
         }
     }
@@ -8850,20 +9051,24 @@ static __global__ void kernel_fsi_couple_active_gpu(
     float xmin_cfd, float ymin_cfd, float zmin_cfd,
     int nx_mpm, int ny_mpm, int nz_mpm,
     float dx_mpm, float dy_mpm, float dz_mpm,
-    float xmin_mpm, float ymin_mpm, float zmin_mpm
+    float xmin_mpm, float ymin_mpm, float zmin_mpm,
+    Blast::MPMGridView3D gv = {}
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_active_nodes) return;
 
     int mpm_idx = d_active_nodes[tid];
-    float mass = d_grid[mpm_idx].m;
+    const long long mpm_slot = (gv.nx > 0) ? gv.slotIndexFromLogical(mpm_idx) : static_cast<long long>(mpm_idx);
+    if (mpm_slot < 0) return;
+
+    float mass = d_grid[mpm_slot].m;
     if (mass <= 1.0e-8f) {
-        d_grid[mpm_idx].f_ext[0] = 0.0f;
-        d_grid[mpm_idx].f_ext[1] = 0.0f;
-        d_grid[mpm_idx].f_ext[2] = 0.0f;
+        d_grid[mpm_slot].f_ext[0] = 0.0f;
+        d_grid[mpm_slot].f_ext[1] = 0.0f;
+        d_grid[mpm_slot].f_ext[2] = 0.0f;
         return;
     }
-    float solid_mass = d_grid[mpm_idx].m_solid;
+    float solid_mass = d_grid[mpm_slot].m_solid;
     bool is_solid = (solid_mass > 1.0e-8f);
 
     int k_mpm = mpm_idx % nz_mpm;
@@ -8883,9 +9088,9 @@ static __global__ void kernel_fsi_couple_active_gpu(
     int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
     int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
 
-    float vx = d_grid[mpm_idx].p[0] / mass;
-    float vy = d_grid[mpm_idx].p[1] / mass;
-    float vz = d_grid[mpm_idx].p[2] / mass;
+    float vx = d_grid[mpm_slot].p[0] / mass;
+    float vy = d_grid[mpm_slot].p[1] / mass;
+    float vz = d_grid[mpm_slot].p[2] / mass;
     bool is_structural_solid = is_solid && (!d_stratParams.enabled || z_node >= static_cast<float>(d_stratParams.seabed_surface_z));
 
     if (d_zonalParams.enabled) {
@@ -8904,19 +9109,19 @@ static __global__ void kernel_fsi_couple_active_gpu(
         d_solid_vel[t_idx].vz[c_idx] = vz;
     }
 
-    float m_L = get_mpm_total_mass_at(d_grid, i_mpm - 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-    float m_R = get_mpm_total_mass_at(d_grid, i_mpm + 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-    float m_B = get_mpm_total_mass_at(d_grid, i_mpm, j_mpm - 1, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-    float m_T = get_mpm_total_mass_at(d_grid, i_mpm, j_mpm + 1, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-    float m_D = get_mpm_total_mass_at(d_grid, i_mpm, j_mpm, k_mpm - 1, nx_mpm, ny_mpm, nz_mpm);
-    float m_U = get_mpm_total_mass_at(d_grid, i_mpm, j_mpm, k_mpm + 1, nx_mpm, ny_mpm, nz_mpm);
+    float m_L = get_mpm_total_mass_at(d_grid, i_mpm - 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+    float m_R = get_mpm_total_mass_at(d_grid, i_mpm + 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+    float m_B = get_mpm_total_mass_at(d_grid, i_mpm, j_mpm - 1, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+    float m_T = get_mpm_total_mass_at(d_grid, i_mpm, j_mpm + 1, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+    float m_D = get_mpm_total_mass_at(d_grid, i_mpm, j_mpm, k_mpm - 1, nx_mpm, ny_mpm, nz_mpm, gv);
+    float m_U = get_mpm_total_mass_at(d_grid, i_mpm, j_mpm, k_mpm + 1, nx_mpm, ny_mpm, nz_mpm, gv);
 
-    float ms_L = get_mpm_solid_mass_at(d_grid, i_mpm - 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-    float ms_R = get_mpm_solid_mass_at(d_grid, i_mpm + 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-    float ms_B = get_mpm_solid_mass_at(d_grid, i_mpm, j_mpm - 1, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-    float ms_T = get_mpm_solid_mass_at(d_grid, i_mpm, j_mpm + 1, k_mpm, nx_mpm, ny_mpm, nz_mpm);
-    float ms_D = get_mpm_solid_mass_at(d_grid, i_mpm, j_mpm, k_mpm - 1, nx_mpm, ny_mpm, nz_mpm);
-    float ms_U = get_mpm_solid_mass_at(d_grid, i_mpm, j_mpm, k_mpm + 1, nx_mpm, ny_mpm, nz_mpm);
+    float ms_L = get_mpm_solid_mass_at(d_grid, i_mpm - 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+    float ms_R = get_mpm_solid_mass_at(d_grid, i_mpm + 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+    float ms_B = get_mpm_solid_mass_at(d_grid, i_mpm, j_mpm - 1, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+    float ms_T = get_mpm_solid_mass_at(d_grid, i_mpm, j_mpm + 1, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+    float ms_D = get_mpm_solid_mass_at(d_grid, i_mpm, j_mpm, k_mpm - 1, nx_mpm, ny_mpm, nz_mpm, gv);
+    float ms_U = get_mpm_solid_mass_at(d_grid, i_mpm, j_mpm, k_mpm + 1, nx_mpm, ny_mpm, nz_mpm, gv);
 
     float grad_x = ms_R - ms_L;
     float grad_y = ms_T - ms_B;
@@ -8955,24 +9160,24 @@ static __global__ void kernel_fsi_couple_active_gpu(
     float p_U = get_fsi_pressure_at<RealType, IsMultiMaterial>(d_states, gx, gy, gz + 1, nx_cfd, ny_cfd, nz_cfd, ntx, nty);
 
     if (is_structural_solid && n_solid_neighbors >= 4) {
-        if (i_mpm > 0 && gx > 0 && is_fsi_fluid_cell(d_grid, i_mpm - 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm)) {
+        if (i_mpm > 0 && gx > 0 && is_fsi_fluid_cell(d_grid, i_mpm - 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv)) {
             f_x += p_L;
         }
-        if (is_fsi_fluid_cell(d_grid, i_mpm + 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm)) {
+        if (is_fsi_fluid_cell(d_grid, i_mpm + 1, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv)) {
             f_x -= p_R;
         }
 
-        if (j_mpm > 0 && gy > 0 && is_fsi_fluid_cell(d_grid, i_mpm, j_mpm - 1, k_mpm, nx_mpm, ny_mpm, nz_mpm)) {
+        if (j_mpm > 0 && gy > 0 && is_fsi_fluid_cell(d_grid, i_mpm, j_mpm - 1, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv)) {
             f_y += p_B;
         }
-        if (is_fsi_fluid_cell(d_grid, i_mpm, j_mpm + 1, k_mpm, nx_mpm, ny_mpm, nz_mpm)) {
+        if (is_fsi_fluid_cell(d_grid, i_mpm, j_mpm + 1, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv)) {
             f_y -= p_T;
         }
 
-        if (is_fsi_fluid_cell(d_grid, i_mpm, j_mpm, k_mpm - 1, nx_mpm, ny_mpm, nz_mpm)) {
+        if (is_fsi_fluid_cell(d_grid, i_mpm, j_mpm, k_mpm - 1, nx_mpm, ny_mpm, nz_mpm, gv)) {
             f_z += p_D;
         }
-        if (is_fsi_fluid_cell(d_grid, i_mpm, j_mpm, k_mpm + 1, nx_mpm, ny_mpm, nz_mpm)) {
+        if (is_fsi_fluid_cell(d_grid, i_mpm, j_mpm, k_mpm + 1, nx_mpm, ny_mpm, nz_mpm, gv)) {
             f_z -= p_U;
         }
         if (i_mpm <= 0 || gx <= 0) f_x = 0.0f;
@@ -9094,31 +9299,27 @@ static __global__ void kernel_fsi_couple_active_gpu(
 
     // Direct force application for fluid particles and exposed debris fragments; mass-weighted stencil for continuous solids
     if (!is_structural_solid || n_fluid_neighbors >= 2) {
-        if (fabsf(F_x) > 1.0e-12f) atomicAdd(&d_grid[mpm_idx].f_ext[0], F_x);
-        if (fabsf(F_y) > 1.0e-12f) atomicAdd(&d_grid[mpm_idx].f_ext[1], F_y);
-        if (fabsf(F_z) > 1.0e-12f) atomicAdd(&d_grid[mpm_idx].f_ext[2], F_z);
+        if (fabsf(F_x) > 1.0e-12f) atomicAdd(&d_grid[mpm_slot].f_ext[0], F_x);
+        if (fabsf(F_y) > 1.0e-12f) atomicAdd(&d_grid[mpm_slot].f_ext[1], F_y);
+        if (fabsf(F_z) > 1.0e-12f) atomicAdd(&d_grid[mpm_slot].f_ext[2], F_z);
     } else {
         if (fabsf(F_z) > 1.0e-12f) {
             float mass_z_stencil = 0.0f;
             for (int dk = -2; dk <= 2; ++dk) {
                 int k_c = k_mpm + dk;
-                if (k_c >= 0 && k_c < nz_mpm) {
-                    int k_idx = (i_mpm * ny_mpm + j_mpm) * nz_mpm + k_c;
-                    if (d_grid[k_idx].m > 1.0e-8f) mass_z_stencil += d_grid[k_idx].m;
-                }
+                const long long k_slot = resolve_fsi_mpm_slot(i_mpm, j_mpm, k_c, nx_mpm, ny_mpm, nz_mpm, gv);
+                if (k_slot >= 0 && d_grid[k_slot].m > 1.0e-8f) mass_z_stencil += d_grid[k_slot].m;
             }
             if (mass_z_stencil > 1.0e-12f) {
                 for (int dk = -2; dk <= 2; ++dk) {
                     int k_c = k_mpm + dk;
-                    if (k_c >= 0 && k_c < nz_mpm) {
-                        int k_idx = (i_mpm * ny_mpm + j_mpm) * nz_mpm + k_c;
-                        if (d_grid[k_idx].m > 1.0e-8f) {
-                            atomicAdd(&d_grid[k_idx].f_ext[2], F_z * (d_grid[k_idx].m / mass_z_stencil));
-                        }
+                    const long long k_slot = resolve_fsi_mpm_slot(i_mpm, j_mpm, k_c, nx_mpm, ny_mpm, nz_mpm, gv);
+                    if (k_slot >= 0 && d_grid[k_slot].m > 1.0e-8f) {
+                        atomicAdd(&d_grid[k_slot].f_ext[2], F_z * (d_grid[k_slot].m / mass_z_stencil));
                     }
                 }
             } else {
-                atomicAdd(&d_grid[mpm_idx].f_ext[2], F_z);
+                atomicAdd(&d_grid[mpm_slot].f_ext[2], F_z);
             }
         }
 
@@ -9126,23 +9327,19 @@ static __global__ void kernel_fsi_couple_active_gpu(
             float mass_x_stencil = 0.0f;
             for (int di = -2; di <= 2; ++di) {
                 int i_c = i_mpm + di;
-                if (i_c >= 0 && i_c < nx_mpm) {
-                    int i_idx = (i_c * ny_mpm + j_mpm) * nz_mpm + k_mpm;
-                    if (d_grid[i_idx].m > 1.0e-8f) mass_x_stencil += d_grid[i_idx].m;
-                }
+                const long long i_slot = resolve_fsi_mpm_slot(i_c, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+                if (i_slot >= 0 && d_grid[i_slot].m > 1.0e-8f) mass_x_stencil += d_grid[i_slot].m;
             }
             if (mass_x_stencil > 1.0e-12f) {
                 for (int di = -2; di <= 2; ++di) {
                     int i_c = i_mpm + di;
-                    if (i_c >= 0 && i_c < nx_mpm) {
-                        int i_idx = (i_c * ny_mpm + j_mpm) * nz_mpm + k_mpm;
-                        if (d_grid[i_idx].m > 1.0e-8f) {
-                            atomicAdd(&d_grid[i_idx].f_ext[0], F_x * (d_grid[i_idx].m / mass_x_stencil));
-                        }
+                    const long long i_slot = resolve_fsi_mpm_slot(i_c, j_mpm, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+                    if (i_slot >= 0 && d_grid[i_slot].m > 1.0e-8f) {
+                        atomicAdd(&d_grid[i_slot].f_ext[0], F_x * (d_grid[i_slot].m / mass_x_stencil));
                     }
                 }
             } else {
-                atomicAdd(&d_grid[mpm_idx].f_ext[0], F_x);
+                atomicAdd(&d_grid[mpm_slot].f_ext[0], F_x);
             }
         }
 
@@ -9150,23 +9347,19 @@ static __global__ void kernel_fsi_couple_active_gpu(
             float mass_y_stencil = 0.0f;
             for (int dj = -2; dj <= 2; ++dj) {
                 int j_c = j_mpm + dj;
-                if (j_c >= 0 && j_c < ny_mpm) {
-                    int j_idx = (i_mpm * ny_mpm + j_c) * nz_mpm + k_mpm;
-                    if (d_grid[j_idx].m > 1.0e-8f) mass_y_stencil += d_grid[j_idx].m;
-                }
+                const long long j_slot = resolve_fsi_mpm_slot(i_mpm, j_c, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+                if (j_slot >= 0 && d_grid[j_slot].m > 1.0e-8f) mass_y_stencil += d_grid[j_slot].m;
             }
             if (mass_y_stencil > 1.0e-12f) {
                 for (int dj = -2; dj <= 2; ++dj) {
                     int j_c = j_mpm + dj;
-                    if (j_c >= 0 && j_c < ny_mpm) {
-                        int j_idx = (i_mpm * ny_mpm + j_c) * nz_mpm + k_mpm;
-                        if (d_grid[j_idx].m > 1.0e-8f) {
-                            atomicAdd(&d_grid[j_idx].f_ext[1], F_y * (d_grid[j_idx].m / mass_y_stencil));
-                        }
+                    const long long j_slot = resolve_fsi_mpm_slot(i_mpm, j_c, k_mpm, nx_mpm, ny_mpm, nz_mpm, gv);
+                    if (j_slot >= 0 && d_grid[j_slot].m > 1.0e-8f) {
+                        atomicAdd(&d_grid[j_slot].f_ext[1], F_y * (d_grid[j_slot].m / mass_y_stencil));
                     }
                 }
             } else {
-                atomicAdd(&d_grid[mpm_idx].f_ext[1], F_y);
+                atomicAdd(&d_grid[mpm_slot].f_ext[1], F_y);
             }
         }
     }
@@ -9178,7 +9371,8 @@ __device__ inline RealType get_fsi_neighbor_fluid_pressure(
     const Blast::MPMGridNode3D* d_grid,
     int gx, int gy, int gz,
     int nx, int ny, int nz,
-    int ntx, int nty
+    int ntx, int nty,
+    const Blast::MPMGridView3D& gv = {}
 ) {
     int t_idx_self = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
     int c_idx_self = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
@@ -9195,8 +9389,8 @@ __device__ inline RealType get_fsi_neighbor_fluid_pressure(
         int ny_i = gy + dys[i];
         int nz_i = gz + dzs[i];
         if (nx_i >= 0 && nx_i < nx && ny_i >= 0 && ny_i < ny && nz_i >= 0 && nz_i < nz) {
-            int mpm_idx = (nx_i * ny + ny_i) * nz + nz_i;
-            if (d_grid[mpm_idx].m_solid <= 1.0e-8f) {
+            const long long n_slot = resolve_fsi_mpm_slot(nx_i, ny_i, nz_i, nx, ny, nz, gv);
+            if (n_slot < 0 || d_grid[n_slot].m_solid <= 1.0e-8f) {
                 int t_idx = (nx_i >> 3) + (ny_i >> 3) * ntx + (nz_i >> 3) * ntx * nty;
                 int c_idx = (nx_i & 7) + (ny_i & 7) * 8 + (nz_i & 7) * 64;
                 sum_p += d_states[t_idx].p[c_idx];
@@ -9218,7 +9412,8 @@ __global__ void kernel_fsi_apply_penalty_gpu(
     int nx, int ny, int nz,
     int ntx, int nty,
     float dx, float dy, float dz,
-    float gamma
+    float gamma,
+    Blast::MPMGridView3D gv
 ) {
     int gx = blockIdx.x * blockDim.x + threadIdx.x;
     int gy = blockIdx.y * blockDim.y + threadIdx.y;
@@ -9226,8 +9421,9 @@ __global__ void kernel_fsi_apply_penalty_gpu(
 
     if (gx >= nx || gy >= ny || gz >= nz) return;
 
-    int mpm_idx = (gx * ny + gy) * nz + gz;
-    float solid_mass = d_grid[mpm_idx].m_solid;
+    const long long mpm_slot = resolve_fsi_mpm_slot(gx, gy, gz, nx, ny, nz, gv);
+    if (mpm_slot < 0) return;
+    float solid_mass = d_grid[mpm_slot].m_solid;
 
     if (solid_mass <= 1.0e-8f) return;
     float z_cell = static_cast<float>(d_zmin) + (static_cast<float>(gz) + 0.5f) * dz;
@@ -9246,11 +9442,11 @@ __global__ void kernel_fsi_apply_penalty_gpu(
             return; // Zonal sleeve region evolves under MPM; do not apply rigid solid penalty
         }
     }
-    float mass = d_grid[mpm_idx].m;
+    float mass = d_grid[mpm_slot].m;
 
-    float vx = d_grid[mpm_idx].p[0] / mass;
-    float vy = d_grid[mpm_idx].p[1] / mass;
-    float vz = d_grid[mpm_idx].p[2] / mass;
+    float vx = d_grid[mpm_slot].p[0] / mass;
+    float vy = d_grid[mpm_slot].p[1] / mass;
+    float vz = d_grid[mpm_slot].p[2] / mass;
 
     int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
     int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
@@ -9260,7 +9456,7 @@ __global__ void kernel_fsi_apply_penalty_gpu(
     RealType new_uz = (RealType)vz;
 
     // Mirror fluid pressure from neighboring fluid cells to prevent unphysical pressure suppression
-    RealType mirrored_p = get_fsi_neighbor_fluid_pressure<RealType, IsMultiMaterial>(d_states, d_grid, gx, gy, gz, nx, ny, nz, ntx, nty);
+    RealType mirrored_p = get_fsi_neighbor_fluid_pressure<RealType, IsMultiMaterial>(d_states, d_grid, gx, gy, gz, nx, ny, nz, ntx, nty, gv);
 
     // Update Primitive tile velocity and mirrored pressure
     d_states[t_idx].ux[c_idx] = new_ux;
@@ -9306,32 +9502,51 @@ __global__ void kernel_fsi_apply_penalty_active_gpu(
     const Blast::MPMGridNode3D* d_grid,
     const int* d_active_nodes,
     int num_active_nodes,
-    int nx, int ny, int nz,
+    int nx_cfd, int ny_cfd, int nz_cfd,
     int ntx, int nty,
-    float dx, float dy, float dz,
-    float gamma
+    float dx_cfd, float dy_cfd, float dz_cfd,
+    float xmin_cfd, float ymin_cfd, float zmin_cfd,
+    int nx_mpm, int ny_mpm, int nz_mpm,
+    float dx_mpm, float dy_mpm, float dz_mpm,
+    float xmin_mpm, float ymin_mpm, float zmin_mpm,
+    float gamma,
+    Blast::MPMGridView3D gv
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_active_nodes) return;
 
     int mpm_idx = d_active_nodes[tid];
-    float solid_mass = d_grid[mpm_idx].m_solid;
-    float mass = d_grid[mpm_idx].m;
+    const long long mpm_slot = (gv.nx > 0) ? gv.slotIndexFromLogical(mpm_idx) : static_cast<long long>(mpm_idx);
+    if (mpm_slot < 0) return;
+
+    float solid_mass = d_grid[mpm_slot].m_solid;
+    float mass = d_grid[mpm_slot].m;
 
     bool is_solid = (solid_mass > 1.0e-8f);
-    if (!is_solid) return;
-    int gx = mpm_idx / (ny * nz);
-    int gy = (mpm_idx / nz) % ny;
-    int gz = mpm_idx % nz;
+    if (!is_solid || mass <= 1.0e-8f) return;
 
-    float z_cell = static_cast<float>(d_zmin) + (static_cast<float>(gz) + 0.5f) * dz;
-    if (d_stratParams.enabled && z_cell < static_cast<float>(d_stratParams.seabed_surface_z) + 2.0f * dz) {
+    int k_mpm = mpm_idx % nz_mpm;
+    int j_mpm = (mpm_idx / nz_mpm) % ny_mpm;
+    int i_mpm = mpm_idx / (ny_mpm * nz_mpm);
+
+    float x_node = xmin_mpm + (static_cast<float>(i_mpm) + 0.5f) * dx_mpm;
+    float y_node = ymin_mpm + (static_cast<float>(j_mpm) + 0.5f) * dy_mpm;
+    float z_node = zmin_mpm + (static_cast<float>(k_mpm) + 0.5f) * dz_mpm;
+
+    int gx = static_cast<int>(floorf((x_node - xmin_cfd) / dx_cfd));
+    int gy = static_cast<int>(floorf((y_node - ymin_cfd) / dy_cfd));
+    int gz = static_cast<int>(floorf((z_node - zmin_cfd) / dz_cfd));
+
+    if (gx < 0 || gx >= nx_cfd || gy < 0 || gy >= ny_cfd || gz < 0 || gz >= nz_cfd) return;
+
+    float z_cell = zmin_cfd + (static_cast<float>(gz) + 0.5f) * dz_cfd;
+    if (d_stratParams.enabled && z_cell < static_cast<float>(d_stratParams.seabed_surface_z) + 2.0f * dz_cfd) {
         return; // Do not apply rigid solid penalty velocity clamping to seabed geotechnical foundation or mudline halo
     }
 
     if (d_zonalParams.enabled) {
-        float x_cell = static_cast<float>(d_xmin) + (static_cast<float>(gx) + 0.5f) * dx;
-        float y_cell = static_cast<float>(d_ymin) + (static_cast<float>(gy) + 0.5f) * dy;
+        float x_cell = xmin_cfd + (static_cast<float>(gx) + 0.5f) * dx_cfd;
+        float y_cell = ymin_cfd + (static_cast<float>(gy) + 0.5f) * dy_cfd;
         float dx_rel = x_cell - static_cast<float>(d_zonalParams.center_x);
         float dy_rel = y_cell - static_cast<float>(d_zonalParams.center_y);
         float dz_rel = z_cell - static_cast<float>(d_zonalParams.center_z);
@@ -9341,9 +9556,9 @@ __global__ void kernel_fsi_apply_penalty_active_gpu(
         }
     }
 
-    float vx = d_grid[mpm_idx].p[0] / mass;
-    float vy = d_grid[mpm_idx].p[1] / mass;
-    float vz = d_grid[mpm_idx].p[2] / mass;
+    float vx = d_grid[mpm_slot].p[0] / mass;
+    float vy = d_grid[mpm_slot].p[1] / mass;
+    float vz = d_grid[mpm_slot].p[2] / mass;
 
     int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
     int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
@@ -9352,8 +9567,8 @@ __global__ void kernel_fsi_apply_penalty_active_gpu(
     RealType new_uy = (RealType)vy;
     RealType new_uz = (RealType)vz;
 
-    RealType p_target = is_solid 
-        ? get_fsi_neighbor_fluid_pressure<RealType, IsMultiMaterial>(d_states, d_grid, gx, gy, gz, nx, ny, nz, ntx, nty)
+    RealType p_target = (is_solid && nx_cfd == nx_mpm && ny_cfd == ny_mpm && nz_cfd == nz_mpm)
+        ? get_fsi_neighbor_fluid_pressure<RealType, IsMultiMaterial>(d_states, d_grid, gx, gy, gz, nx_cfd, ny_cfd, nz_cfd, ntx, nty, gv)
         : d_states[t_idx].p[c_idx];
 
     d_states[t_idx].ux[c_idx] = new_ux;
@@ -9405,7 +9620,8 @@ static __global__ void kernel_zonal_fill_ghost_pressure_gpu(
     const Blast::MPMGridNode3D* d_grid,
     float* ghost_p,
     int nx, int ny, int nz, int ntx, int nty,
-    float dx, float xmin, float ymin, float zmin)
+    float dx, float xmin, float ymin, float zmin,
+    Blast::MPMGridView3D gv = {})
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int num = nx * ny * nz;
@@ -9436,7 +9652,10 @@ static __global__ void kernel_zonal_fill_ghost_pressure_gpu(
     bool near_top = (z_c >= czmax - dx);
     if (!near_radial && !near_top) return;
 
-    if (d_grid && d_grid[idx].m_solid > 1.0e-8f) return;
+    if (d_grid) {
+        const long long slot = resolve_fsi_mpm_slot(gx, gy, gz, nx, ny, nz, gv);
+        if (slot >= 0 && d_grid[slot].m_solid > 1.0e-8f) return;
+    }
 
     int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
     int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
@@ -9460,7 +9679,8 @@ static __global__ void kernel_zonal_handoff_active_gpu(
     int ntx, int nty,
     float dx, float dy, float dz,
     float xmin, float ymin, float zmin,
-    float gamma
+    float gamma,
+    Blast::MPMGridView3D gv = {}
 ) {
     if (!d_zonalParams.enabled) return;
 
@@ -9468,10 +9688,13 @@ static __global__ void kernel_zonal_handoff_active_gpu(
     if (tid >= num_active_nodes) return;
 
     int mpm_idx = d_active_nodes[tid];
-    float solid_mass = d_grid[mpm_idx].m_solid;
+    const long long mpm_slot = (gv.nx > 0) ? gv.slotIndexFromLogical(mpm_idx) : static_cast<long long>(mpm_idx);
+    if (mpm_slot < 0) return;
+
+    float solid_mass = d_grid[mpm_slot].m_solid;
     if (solid_mass > 1.0e-8f) return; // Structural solids handled by solid penalty kernel
 
-    float mass = d_grid[mpm_idx].m;
+    float mass = d_grid[mpm_slot].m;
     float cell_vol = dx * dy * dz;
     if (mass < 1.0e-5f * cell_vol) return;
 
@@ -9520,22 +9743,22 @@ static __global__ void kernel_zonal_handoff_active_gpu(
     if (r >= R_outer) return;
 
     // Skip solid nodes (structures / boundaries / soil); energetic + fluid nodes are handed off
-    if (d_grid[mpm_idx].m_solid > 1.0e-8f) return;
+    if (d_grid[mpm_slot].m_solid > 1.0e-8f) return;
 
-    float ux_mpm = d_grid[mpm_idx].p[0] / mass;
-    float uy_mpm = d_grid[mpm_idx].p[1] / mass;
-    float uz_mpm = d_grid[mpm_idx].p[2] / mass;
+    float ux_mpm = d_grid[mpm_slot].p[0] / mass;
+    float uy_mpm = d_grid[mpm_slot].p[1] / mass;
+    float uz_mpm = d_grid[mpm_slot].p[2] / mass;
 
     // Mass-weighted continuum pressure transferred from MPM particles during P2G
     // (P2G only at this point in the step: not yet normalised by the grid update)
-    float p_mpm = d_grid[mpm_idx].pressure / mass;
+    float p_mpm = d_grid[mpm_slot].pressure / mass;
     // Realizability floor only: pressure cannot fall below the cavitation limit (Directive 19)
     if (p_mpm < static_cast<float>(d_taitParams.p_cav)) {
         p_mpm = static_cast<float>(d_taitParams.p_cav);
     }
 
-    float energetic_mass = d_grid[mpm_idx].m_energetic;
-    float reacted_mass   = fminf(energetic_mass, d_grid[mpm_idx].m_reacted);
+    float energetic_mass = d_grid[mpm_slot].m_energetic;
+    float reacted_mass   = fminf(energetic_mass, d_grid[mpm_slot].m_reacted);
 
     // Thermodynamically consistent multi-material state of the MPM node.
     // Every phase k carries a conserved partial density  arho_k = m_k / V_tot  and a volume fraction
@@ -9554,11 +9777,11 @@ static __global__ void kernel_zonal_handoff_active_gpu(
         static_cast<float>(d_taitParams.rho0),
         static_cast<float>(d_taitParams.p0)
     );
-    if (energetic_mass > 1.0e-8f * mass && d_grid[mpm_idx].v_energetic > 1.0e-20f) {
+    if (energetic_mass > 1.0e-8f * mass && d_grid[mpm_slot].v_energetic > 1.0e-20f) {
         const float m_g = reacted_mass;
         const float m_s = energetic_mass - reacted_mass;
-        const float v_g = fminf(d_grid[mpm_idx].v_energetic, d_grid[mpm_idx].v_reacted);
-        const float v_s = fmaxf(0.0f, d_grid[mpm_idx].v_energetic - v_g);
+        const float v_g = fminf(d_grid[mpm_slot].v_energetic, d_grid[mpm_slot].v_reacted);
+        const float v_s = fmaxf(0.0f, d_grid[mpm_slot].v_energetic - v_g);
         const float v_w = (m_w > 0.0f) ? m_w / fmaxf(rho_w_mpm, 1.0f) : 0.0f;
         const float v_tot = fmaxf(v_g + v_s + v_w, 1.0e-20f);
         rho_mpm = fmaxf(mass / v_tot, 1.0e-3f);
@@ -9911,6 +10134,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
     Blast::MPMSolver3DCUDA* mpm_solver = static_cast<Blast::MPMSolver3DCUDA*>(mpm_solver_void);
     Blast::MPMGridNode3D* d_grid = mpm_solver->getDeviceGrid();
     if (!d_grid) return;
+    Blast::MPMGridView3D gv = mpm_solver->getDeviceGridView();
     int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
@@ -9923,8 +10147,9 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
     dim3 block(8, 8, 4);
     dim3 grid((nx + 7) / 8, (ny + 7) / 8, (nz + 3) / 4);
 
-    // Save MPM grid pointer for CFD penalty step
+    // Save MPM grid pointer and solver pointer for CFD penalty step
     this->d_fsi_mpm_grid = d_grid;
+    this->m_fsi_mpm_solver = mpm_solver_void;
 
     // Allocate geometry buffers and tile proximity flags if needed (first FSI call)
     if (!d_geom) {
@@ -9958,7 +10183,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
         int threads_active = 256;
         int blocks_active = (num_active_nodes + threads_active - 1) / threads_active;
 
-        kernel_zero_fsi_grid_ext_forces<<<blocks_active, threads_active>>>(d_grid, d_active_nodes, num_active_nodes);
+        kernel_zero_fsi_grid_ext_forces<<<blocks_active, threads_active>>>(d_grid, d_active_nodes, num_active_nodes, gv);
         CHECK_CUDA(cudaGetLastError());
 
         kernel_fsi_couple_active_gpu<RealType, IsMultiMaterial><<<blocks_active, threads_active>>>(
@@ -9974,7 +10199,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
             (float)xmin, (float)ymin, (float)zmin,
             mpm_solver->getNx(), mpm_solver->getNy(), mpm_solver->getNz(),
             mpm_solver->getDx(), mpm_solver->getDy(), mpm_solver->getDz(),
-            mpm_solver->getXMin(), mpm_solver->getYMin(), mpm_solver->getZMin()
+            mpm_solver->getXMin(), mpm_solver->getYMin(), mpm_solver->getZMin(),
+            gv
         );
         CHECK_CUDA(cudaGetLastError());
 
@@ -10003,16 +10229,23 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
             num_active_nodes,
             nx, ny, nz,
             ntx, nty,
-            (float)mpm_dx, (float)mpm_dy, (float)mpm_dz,
-            (float)gamma
+            (float)cellSize, (float)cellSize, (float)cellSize,
+            (float)xmin, (float)ymin, (float)zmin,
+            mpm_solver->getNx(), mpm_solver->getNy(), mpm_solver->getNz(),
+            mpm_solver->getDx(), mpm_solver->getDy(), mpm_solver->getDz(),
+            mpm_solver->getXMin(), mpm_solver->getYMin(), mpm_solver->getZMin(),
+            (float)gamma,
+            gv
         );
         CHECK_CUDA(cudaGetLastError());
-    } else {
-        int total_nodes = nx * ny * nz;
-        int threads_all = 256;
-        int blocks_all = (total_nodes + threads_all - 1) / threads_all;
-        kernel_zero_all_fsi_grid_ext_forces<<<blocks_all, threads_all>>>(d_grid, total_nodes);
-        CHECK_CUDA(cudaGetLastError());
+    } else if (mpm_solver->getNx() == nx && mpm_solver->getNy() == ny && mpm_solver->getNz() == nz) {
+        int total_nodes = mpm_solver ? static_cast<int>(mpm_solver->getAllocatedGridNodeCapacity()) : (nx * ny * nz);
+        if (total_nodes > 0) {
+            int threads_all = 256;
+            int blocks_all = (total_nodes + threads_all - 1) / threads_all;
+            kernel_zero_all_fsi_grid_ext_forces<<<blocks_all, threads_all>>>(d_grid, total_nodes);
+            CHECK_CUDA(cudaGetLastError());
+        }
 
         kernel_fsi_couple_gpu<RealType, IsMultiMaterial><<<grid, block>>>(
             (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
@@ -10021,7 +10254,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
             (SolidVelocityTile3D*)d_solid_vel_fsi,
             nx, ny, nz,
             ntx, nty,
-            mpm_dx, mpm_dy, mpm_dz
+            mpm_dx, mpm_dy, mpm_dz,
+            gv
         );
         CHECK_CUDA(cudaGetLastError());
 
@@ -10049,7 +10283,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
             nx, ny, nz,
             ntx, nty,
             (float)mpm_dx, (float)mpm_dy, (float)mpm_dz,
-            (float)gamma
+            (float)gamma,
+            gv
         );
     }
     // Inject two-way zonal handoff fluxes from MPM sleeve into Eulerian CFD cells
@@ -10062,6 +10297,191 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithMPMGPU(void* mpm_s
 }
 
 template <typename RealType, bool IsMultiMaterial>
+static __global__ void kernel_erode_mpm_particles_to_cfd_gpu(
+    ConservativeTile3D<RealType, IsMultiMaterial>* d_U,
+    uint8_t* d_active_tiles,
+    Blast::MPMParticle3DSoA soa,
+    int num_particles,
+    const Blast::MaterialTable3D* d_mat_tables,
+    int nx_cfd, int ny_cfd, int nz_cfd,
+    int ntx, int nty,
+    float dx_cfd, float dy_cfd, float dz_cfd,
+    float xmin_cfd, float ymin_cfd, float zmin_cfd,
+    int* d_boundary_flags,
+    int* d_eroded_count
+) {
+    int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p_idx >= num_particles) return;
+    if ((soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
+
+    int obj_id = soa.object_id[p_idx];
+    const Blast::MaterialTable3D& mat = d_mat_tables[obj_id];
+    if (!mat.enable_density_erosion || !mat.erode_to_fv_grid) return;
+
+    const bool is_fluid = (mat.material_model == Blast::MPMMaterialModel::TaitWater);
+    const bool is_energetic = (mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn) ||
+                              (mat.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn) ||
+                              (mat.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth);
+    if (!is_fluid && !is_energetic) return;
+
+    const float m_p = soa.m[p_idx];
+    const float V_p = fmaxf(soa.V[p_idx], 1.0e-30f);
+    const float V0_p = fmaxf(soa.V0[p_idx], 1.0e-30f);
+    const float rho_p = m_p / V_p;
+    const float rho0 = (is_fluid && mat.tait_rho0 > 0.0f) ? mat.tait_rho0 : mat.density;
+    const float rho_thresh = fmaxf(mat.erosion_min_density, mat.erosion_min_density_ratio * rho0);
+    const float lam_p = soa.lambda ? soa.lambda[p_idx] : 0.0f;
+    const bool burn_ready = !is_energetic || (lam_p >= 0.5f || V_p > 1.05f * V0_p);
+
+    if (rho_thresh <= 0.0f || !burn_ready || rho_p >= rho_thresh) return;
+
+    const float px = soa.x[0][p_idx];
+    const float py = soa.x[1][p_idx];
+    const float pz = soa.x[2][p_idx];
+
+    const int gx = static_cast<int>(floorf((px - xmin_cfd) / dx_cfd));
+    const int gy = static_cast<int>(floorf((py - ymin_cfd) / dy_cfd));
+    const int gz = static_cast<int>(floorf((pz - zmin_cfd) / dz_cfd));
+
+    if (gx >= 0 && gx < nx_cfd && gy >= 0 && gy < ny_cfd && gz >= 0 && gz < nz_cfd && d_U) {
+        const int t_idx = (gx >> 3) + (gy >> 3) * ntx + (gz >> 3) * ntx * nty;
+        const int c_idx = (gx & 7) + (gy & 7) * 8 + (gz & 7) * 64;
+        const float V_cell = fmaxf(dx_cfd * dy_cfd * dz_cfd, 1.0e-30f);
+        const float drho = m_p / V_cell;
+        const float vx = soa.v[0][p_idx];
+        const float vy = soa.v[1][p_idx];
+        const float vz = soa.v[2][p_idx];
+        const float ke_spec = 0.5f * (vx * vx + vy * vy + vz * vz);
+        const float e_int_p = soa.e_int ? fmaxf(0.0f, soa.e_int[p_idx]) : 0.0f;
+        const float dE = drho * (e_int_p + ke_spec);
+
+        atomicAdd(&d_U[t_idx].rho[c_idx], static_cast<RealType>(drho));
+        atomicAdd(&d_U[t_idx].rhoux[c_idx], static_cast<RealType>(drho * vx));
+        atomicAdd(&d_U[t_idx].rhouy[c_idx], static_cast<RealType>(drho * vy));
+        atomicAdd(&d_U[t_idx].rhouz[c_idx], static_cast<RealType>(drho * vz));
+        atomicAdd(&d_U[t_idx].E[c_idx], static_cast<RealType>(dE));
+
+        if constexpr (IsMultiMaterial) {
+            if (is_energetic) {
+                const float dalpha1 = fminf(1.0f, V_p / V_cell);
+                atomicAdd(&d_U[t_idx].arho1[c_idx], static_cast<RealType>(drho));
+                atomicAdd(&d_U[t_idx].alpha1[c_idx], static_cast<RealType>(dalpha1));
+            }
+        }
+
+        if (d_active_tiles) {
+            d_active_tiles[t_idx] = 2; // Mark tile eroded/active
+        }
+    }
+
+    if (soa.state) soa.state[p_idx] = 2;
+    soa.m[p_idx] = 0.0f;
+    soa.v[0][p_idx] = 0.0f;
+    soa.v[1][p_idx] = 0.0f;
+    soa.v[2][p_idx] = 0.0f;
+    if (soa.B[0][0]) {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                soa.B[r][c][p_idx] = 0.0f;
+            }
+        }
+    }
+    if (soa.sigma_voigt[0]) {
+        for (int k = 0; k < 6; ++k) soa.sigma_voigt[k][p_idx] = 0.0f;
+    } else if (soa.sigma[0][0]) {
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                soa.sigma[r][c][p_idx] = 0.0f;
+    }
+    if (d_boundary_flags) {
+        d_boundary_flags[1] = 1;
+    }
+    if (d_eroded_count) {
+        atomicAdd(d_eroded_count, 1);
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+static __global__ void __launch_bounds__(512) kernel_sync_eroded_cfd_tiles_gpu(
+    PrimitiveTile3D<RealType, IsMultiMaterial>* d_states,
+    ConservativeTile3D<RealType, IsMultiMaterial>* d_U,
+    uint8_t* d_active_tiles,
+    const GeometryTile3D* d_geom,
+    const SolidVelocityTile3D* d_solid_vel
+) {
+    int t_idx = blockIdx.x;
+    if (!d_active_tiles || d_active_tiles[t_idx] != 2) return;
+
+    int lx = threadIdx.x;
+    int ly = threadIdx.y;
+    int lz = threadIdx.z;
+    int c_idx = lx + ly * TILE_SIZE_3D + lz * TILE_SIZE_3D * TILE_SIZE_3D;
+
+    convert_conservative_to_primitive_gpu<RealType, IsMultiMaterial, PrimitiveTile3D<RealType, IsMultiMaterial>>(
+        d_U, d_states, d_geom, t_idx, c_idx, (RealType)0.0, d_solid_vel
+    );
+    __syncthreads();
+    if (c_idx == 0) {
+        d_active_tiles[t_idx] = 1;
+    }
+}
+
+template <typename RealType, bool IsMultiMaterial>
+int CFDSolver3DCuda<RealType, IsMultiMaterial>::erodeMPMParticlesToCFDGPU(void* mpm_solver_void) {
+    ensure_paged_in();
+    bind_constants();
+    if (!mpm_solver_void) return 0;
+    Blast::MPMSolver3DCUDA* mpm_solver = static_cast<Blast::MPMSolver3DCUDA*>(mpm_solver_void);
+    size_t num_particles = mpm_solver->getParticleCount();
+    if (num_particles == 0) return 0;
+
+    int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int ntz = (nz + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
+    int total_tiles = ntx * nty * ntz;
+
+    CHECK_CUDA(cudaMemsetAsync(d_active_count, 0, sizeof(int)));
+
+    int threads = 256;
+    int blocks = (static_cast<int>(num_particles) + threads - 1) / threads;
+
+    kernel_erode_mpm_particles_to_cfd_gpu<RealType, IsMultiMaterial><<<blocks, threads>>>(
+        (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+        (uint8_t*)d_active_tiles,
+        mpm_solver->getDeviceParticlesSoA(),
+        static_cast<int>(num_particles),
+        mpm_solver->getDeviceMaterialTables(),
+        nx, ny, nz,
+        ntx, nty,
+        static_cast<float>(cellSize), static_cast<float>(cellSize), static_cast<float>(cellSize),
+        static_cast<float>(xmin), static_cast<float>(ymin), static_cast<float>(zmin),
+        mpm_solver->getDeviceBoundaryFlags(),
+        (int*)d_active_count
+    );
+    CHECK_CUDA(cudaGetLastError());
+
+    int h_eroded_count = 0;
+    CHECK_CUDA(cudaMemcpy(&h_eroded_count, d_active_count, sizeof(int), cudaMemcpyDeviceToHost));
+
+    if (h_eroded_count > 0) {
+        dim3 tile_threads(TILE_SIZE_3D, TILE_SIZE_3D, TILE_SIZE_3D);
+        kernel_sync_eroded_cfd_tiles_gpu<RealType, IsMultiMaterial><<<total_tiles, tile_threads>>>(
+            (PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states,
+            (ConservativeTile3D<RealType, IsMultiMaterial>*)d_U,
+            (uint8_t*)d_active_tiles,
+            (const GeometryTile3D*)d_geom,
+            (const SolidVelocityTile3D*)d_solid_vel_fsi
+        );
+        CHECK_CUDA(cudaGetLastError());
+        updateActiveRegions();
+        mpm_solver->compactTerminatedParticlesDevice();
+        last_cached_tile_idx = -1;
+    }
+
+    return h_eroded_count;
+}
+
+template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleZonalHandoffWithMPMGPU(void* mpm_solver_void) {
     ensure_paged_in();
     if (!mpm_solver_void || !m_zonal_handoff_params.enabled) return;
@@ -10070,6 +10490,7 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleZonalHandoffWithMPMGPU(vo
     int* d_active_nodes = mpm_solver->getDeviceActiveNodes();
     int num_active_nodes = mpm_solver->getNumActiveNodes();
     if (!d_grid || !d_active_nodes || num_active_nodes <= 0) return;
+    Blast::MPMGridView3D gv = mpm_solver->getDeviceGridView();
 
     int ntx = (nx + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
     int nty = (ny + TILE_SIZE_3D - 1) / TILE_SIZE_3D;
@@ -10084,7 +10505,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleZonalHandoffWithMPMGPU(vo
         kernel_zonal_fill_ghost_pressure_gpu<RealType, IsMultiMaterial><<<blocks_g, threads_g>>>(
             (const PrimitiveTile3D<RealType, IsMultiMaterial>*)d_states, d_grid, d_ghost_p,
             nx, ny, nz, ntx, nty,
-            static_cast<float>(cellSize), static_cast<float>(xmin), static_cast<float>(ymin), static_cast<float>(zmin));
+            static_cast<float>(cellSize), static_cast<float>(xmin), static_cast<float>(ymin), static_cast<float>(zmin),
+            gv);
         CHECK_CUDA(cudaGetLastError());
         mpm_solver->applyZonalGhostPressureTraction();
     } else {
@@ -10105,7 +10527,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleZonalHandoffWithMPMGPU(vo
         ntx, nty,
         static_cast<float>(cellSize), static_cast<float>(cellSize), static_cast<float>(cellSize),
         static_cast<float>(xmin), static_cast<float>(ymin), static_cast<float>(zmin),
-        static_cast<float>(gamma)
+        static_cast<float>(gamma),
+        gv
     );
     CHECK_CUDA(cudaGetLastError());
 }
@@ -10355,11 +10778,12 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
         Blast::MPMGridNode3D* d_grid = mpm_cuda->getDeviceGrid();
         int* d_active_nodes = mpm_cuda->getDeviceActiveNodes();
         int num_active_nodes = mpm_cuda->getNumActiveNodes();
+        Blast::MPMGridView3D gv_debris = mpm_cuda->getDeviceGridView();
         if (d_grid && num_active_nodes > 0 && d_active_nodes) {
             int threads_active = 256;
             int blocks_active = (num_active_nodes + threads_active - 1) / threads_active;
 
-            kernel_zero_fsi_grid_ext_forces<<<blocks_active, threads_active>>>(d_grid, d_active_nodes, num_active_nodes);
+            kernel_zero_fsi_grid_ext_forces<<<blocks_active, threads_active>>>(d_grid, d_active_nodes, num_active_nodes, gv_debris);
             CHECK_CUDA(cudaGetLastError());
 
             kernel_fsi_couple_active_gpu<RealType, IsMultiMaterial><<<blocks_active, threads_active>>>(
@@ -10375,7 +10799,8 @@ void CFDSolver3DCuda<RealType, IsMultiMaterial>::coupleFSIWithFEMGPU(void* fem_s
                 (float)xmin, (float)ymin, (float)zmin,
                 mpm_cuda->getNx(), mpm_cuda->getNy(), mpm_cuda->getNz(),
                 mpm_cuda->getDx(), mpm_cuda->getDy(), mpm_cuda->getDz(),
-                mpm_cuda->getXMin(), mpm_cuda->getYMin(), mpm_cuda->getZMin()
+                mpm_cuda->getXMin(), mpm_cuda->getYMin(), mpm_cuda->getZMin(),
+                gv_debris
             );
             CHECK_CUDA(cudaGetLastError());
             mpm_cuda->storeFSIForces();

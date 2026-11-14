@@ -1,5 +1,5 @@
-import { Node, SimulationState } from './types.js';
-import { calculateCFDMemory, resolveFEMCounts } from './state-manager.js';
+import { Node, SimulationState, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
+import { calculateCFDMemory, resolveFEMCounts, getMPMObjectVolume } from './state-manager.js';
 
 export interface MemoryEstimateResult {
     ramBytes: number;
@@ -51,7 +51,7 @@ export function estimateNodeMemory(node: Node, state?: SimulationState): MemoryE
             vramBytes = cfdMem.totalBytes;
             ramBytes = cfdMem.totalBytes * 0.2; // host staging buffer
         }
-    } else if (type === 'DomainMesh3D' || type === 'DomainMesh2D' || type === 'DomainMesh') {
+    } else if (isDomainMesh3DNode(type) || isDomainMesh2DNode(type) || type === 'DomainMesh') {
         const hasCfdSolver = state ? state.nodes.some(n => ['CFDSolver3D', 'CFDSolver2D', 'CFDSolver', 'FSICoupler3D', 'FEMFSICoupler3D', 'FSICoupler2D'].includes(n.type)) : true;
         if (hasCfdSolver) {
             const cfdMem = calculateCFDMemory(node, state);
@@ -68,17 +68,25 @@ export function estimateNodeMemory(node: Node, state?: SimulationState): MemoryE
             vramBytes = 0;
         }
     } else if (type === 'MPMDomain3D') {
-        const cellSize = Number(params.cell_size) || 0.01;
-        const xmin = Number(params.xmin) || 0;
-        const xmax = Number(params.xmax) || (xmin + 1.0);
-        const ymin = Number(params.ymin) || 0;
-        const ymax = Number(params.ymax) || (ymin + 1.0);
-        const zmin = Number(params.zmin) || 0;
-        const zmax = Number(params.zmax) || (zmin + 1.0);
+        const meshNode = state ? (
+            state.nodes.find(n => isDomainMesh3DNode(n.type) && state.connections.some(c =>
+                (c.fromNode === n.id && c.toNode === node.id) || (c.toNode === n.id && c.fromNode === node.id)
+            )) || state.nodes.find(n => isDomainMesh3DNode(n.type))
+        ) : undefined;
+        const mp = meshNode?.parameters || params;
+        const isSparse = meshNode?.type === 'SparseDomainMesh3D' || Boolean(params.mpm_sparse_grid) || Boolean(params.sparse_grid);
 
-        const nx = Math.max(1, Math.round((xmax - xmin) / cellSize));
-        const ny = Math.max(1, Math.round((ymax - ymin) / cellSize));
-        const nz = Math.max(1, Math.round((zmax - zmin) / cellSize));
+        const cellSize = Number(mp.cell_size ?? params.cell_size) || 0.01;
+        const xmin = Number(mp.xmin ?? params.xmin) || 0;
+        const xmax = Number(mp.xmax ?? params.xmax) || (xmin + 1.0);
+        const ymin = Number(mp.ymin ?? params.ymin) || 0;
+        const ymax = Number(mp.ymax ?? params.ymax) || (ymin + 1.0);
+        const zmin = Number(mp.zmin ?? params.zmin) || 0;
+        const zmax = Number(mp.zmax ?? params.zmax) || (zmin + 1.0);
+
+        const nx = Math.max(1, Math.round((xmax - xmin) / cellSize)) + 1;
+        const ny = Math.max(1, Math.round((ymax - ymin) / cellSize)) + 1;
+        const nz = Math.max(1, Math.round((zmax - zmin) / cellSize)) + 1;
         const gridNodes = nx * ny * nz;
 
         const ppc = Number(params.ppc) || 8;
@@ -93,25 +101,8 @@ export function estimateNodeMemory(node: Node, state?: SimulationState): MemoryE
                     const op = obj.parameters || {};
                     const objPpc = Math.max(1, Math.round(Number(op.ppc ?? ppc)));
                     const pVol = cellVol / objPpc;
-                    const shape = String(op.shape_type || 'Box');
-                    let objVol = 0;
-                    if (shape === 'Sphere') {
-                        const r = Number(op.radius) || 0.1;
-                        objVol = (4.0 / 3.0) * Math.PI * r * r * r;
-                    } else if (shape === 'Cylinder') {
-                        const r = Number(op.radius) || 0.1;
-                        const ir = Number(op.inner_radius) || 0;
-                        const h = Number(op.height) || 0.2;
-                        objVol = Math.PI * (r * r - ir * ir) * h;
-                    } else if (shape === 'STL') {
-                        objVol = domainVol * 0.12;
-                    } else {
-                        const sx = Number(op.size_x) || 0.2;
-                        const sy = Number(op.size_y) || 0.2;
-                        const sz = Number(op.size_z) || 0.2;
-                        objVol = sx * sy * sz;
-                    }
-                    objVol = Math.min(objVol, domainVol * 0.4);
+                    const { volume: rawVol } = getMPMObjectVolume(obj, state);
+                    const objVol = Math.min(rawVol, domainVol * 0.4);
                     totalEst += Math.max(10, Math.ceil(objVol / pVol));
                 }
                 estParticles = Math.max(1000, totalEst);
@@ -121,13 +112,76 @@ export function estimateNodeMemory(node: Node, state?: SimulationState): MemoryE
             estParticles = Math.min(gridNodes * Math.min(ppc, 4), 20000000);
         }
 
+        let allocatedGridNodes = gridNodes;
+        let tileDirBytes = 0;
+        if (isSparse) {
+            const ntx = Math.ceil(nx / 8);
+            const nty = Math.ceil(ny / 8);
+            const ntz = Math.ceil(nz / 8);
+            const totalTiles = Math.max(1, ntx * nty * ntz);
+            tileDirBytes = totalTiles * 4;
+            const minTiles = Math.ceil((estParticles / (512 * Math.max(1, ppc))) * 4.0) + 64;
+            const activeTiles = Math.min(totalTiles, Math.max(64, minTiles));
+            allocatedGridNodes = activeTiles * 512;
+        }
+
         if (isCuda) {
-            vramBytes = (gridNodes * 104) + (estParticles * 160) + (64 * 1024 * 1024);
-            ramBytes = (estParticles * 256) + (64 * 1024 * 1024);
+            vramBytes = tileDirBytes + (allocatedGridNodes * 104) + (estParticles * 160) + (64 * 1024 * 1024);
+            ramBytes = tileDirBytes + (estParticles * 256) + (64 * 1024 * 1024);
         } else {
-            ramBytes = (gridNodes * 128) + (estParticles * 256 * 2);
+            ramBytes = tileDirBytes + (allocatedGridNodes * 128) + (estParticles * 256 * 2);
             vramBytes = 0;
         }
+    } else if (type === 'MPMDomain2D') {
+        const meshNode = state ? (
+            state.nodes.find(n => isDomainMesh2DNode(n.type) && state.connections.some(c =>
+                (c.fromNode === n.id && c.toNode === node.id) || (c.toNode === n.id && c.fromNode === node.id)
+            )) || state.nodes.find(n => isDomainMesh2DNode(n.type))
+        ) : undefined;
+        const mp = meshNode?.parameters || params;
+        const isSparse = meshNode?.type === 'SparseDomainMesh2D' || Boolean(params.mpm_sparse_grid) || Boolean(params.sparse_grid);
+        const cellSize = Number(mp.cell_size ?? params.cell_size) || 0.005;
+        const maxR = Number(mp.max_r ?? params.max_r) || 1.0;
+        const maxZ = Number(mp.max_z ?? params.max_z) || 1.0;
+        const nr = Math.max(1, Math.round(maxR / cellSize)) + 1;
+        const nz = Math.max(1, Math.round(maxZ / cellSize)) + 1;
+        const gridNodes = nr * nz;
+        const ppc = Number(params.ppc) || 4;
+        let estParticles = 0;
+        if (state) {
+            const mpmObjects2D = state.nodes.filter(n => n.type === 'MPMObject2D');
+            if (mpmObjects2D.length > 0) {
+                const cellArea = cellSize * cellSize;
+                const domainArea = Math.max(0.0001, maxR * maxZ);
+                let totalEst = 0;
+                for (const obj of mpmObjects2D) {
+                    const op = obj.parameters || {};
+                    const objPpc = Math.max(1, Math.round(Number(op.ppc ?? ppc)));
+                    const pArea = cellArea / objPpc;
+                    const { volume: rawArea } = getMPMObjectVolume(obj, state);
+                    const objArea = Math.min(rawArea, domainArea * 0.4);
+                    totalEst += Math.max(10, Math.ceil(objArea / pArea));
+                }
+                estParticles = Math.max(100, totalEst);
+            }
+        }
+        if (estParticles === 0) {
+            estParticles = Math.min(gridNodes * ppc, 2000000);
+        }
+
+        let allocatedGridNodes = gridNodes;
+        let tileDirBytes = 0;
+        if (isSparse) {
+            const ntx = Math.ceil(nr / 8);
+            const nty = Math.ceil(nz / 8);
+            const totalTiles = Math.max(1, ntx * nty);
+            tileDirBytes = totalTiles * 4;
+            const minTiles = Math.ceil((estParticles / (64 * Math.max(1, ppc))) * 4.0) + 32;
+            const activeTiles = Math.min(totalTiles, Math.max(32, minTiles));
+            allocatedGridNodes = activeTiles * 64;
+        }
+        ramBytes = tileDirBytes + (allocatedGridNodes * 96) + (estParticles * 192);
+        vramBytes = 0;
     } else if (type === 'FEMDomain3D') {
         const counts = resolveFEMCounts(node, state);
         const numElements = counts.totalElements || counts.numElements;

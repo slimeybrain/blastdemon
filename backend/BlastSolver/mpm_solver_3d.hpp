@@ -6,6 +6,7 @@
 #include "constitutive_crest_davis.hpp"
 #include "constitutive_jwl.hpp"
 #include "constitutive_lee_tarver.hpp"
+#include "constitutive_mixture.hpp"
 #include "VTKWriter.hpp"
 #include "cfd_eos_water.hpp"
 #include <vector>
@@ -165,22 +166,34 @@ struct MaterialTable3D {
     float cell_dx{0.0f};                 // Background grid cell size dx for smeared burn zone
     float tau_burn_min{1.0e-7f};         // Minimum burn duration limiter (s)
 
-    // Lee-Tarver Ignition & Growth Parameters
-    float lt_I{4.0e6f};                  // Ignition rate coefficient (1/s)
-    float lt_a{0.24f};                   // Ignition compression threshold
+    // Lee-Tarver Ignition & Growth Parameters  (STRICT SI; default = LLNL PBX 9501, UCRL-JC-141967 Table 1,
+    // converted with Blast::LeeTarver::fromLLNL_*; I[1/s], G1[1/(s Pa^y)], G2[1/(s Pa^z)])
+    float lt_I{1.4e17f};                 // Ignition rate coefficient I (1/s)
+    float lt_a{0.0f};                    // Ignition compression threshold a
     float lt_b{0.667f};                  // Ignition depletion exponent
-    float lt_x{7.0f};                    // Ignition compression exponent
-    float lt_G1{130.0e-6f};              // Growth rate coefficient (1/(s Pa^y))
+    float lt_x{20.0f};                   // Ignition compression exponent
+    float lt_G1{1.3e-14f};               // Growth rate coefficient G1 (1/(s Pa^y))
     float lt_c{0.667f};                  // Growth depletion exponent
-    float lt_d{0.333f};                  // Growth reaction progress exponent
+    float lt_d{0.277f};                  // Growth reaction progress exponent
     float lt_y{2.0f};                    // Growth pressure exponent
-    float lt_G2{400.0e-6f};              // Completion rate coefficient (1/(s Pa^z))
+    float lt_G2{4.0e-14f};               // Completion rate coefficient G2 (1/(s Pa^z))
     float lt_e{0.333f};                  // Completion depletion exponent
-    float lt_g{0.667f};                  // Completion reaction progress exponent
-    float lt_z{3.0f};                    // Completion pressure exponent
-    float lt_ig_max{0.02f};              // Maximum ignition fraction
-    float lt_growth_max{0.50f};          // Maximum growth fraction
-    float lt_comp_min{0.50f};            // Minimum completion threshold
+    float lt_g{1.0f};                    // Completion reaction progress exponent
+    float lt_z{2.0f};                    // Completion pressure exponent
+    float lt_ig_max{0.3f};               // Maximum ignition fraction F_ig_max
+    float lt_growth_max{0.50f};          // Maximum growth fraction F_G1_max
+    float lt_comp_min{0.50f};            // Minimum completion threshold F_G2_min
+
+    // Unreacted-explosive JWL EOS (SolidReactantEOS::JWLReactant), strict SI.
+    // p = A e^(-R1 V) + B e^(-R2 V) + omega Cv T / V ;  default = LLNL PBX 9501 unreacted JWL at T0 = 298 K
+    float jwlr_A{7.32e14f};              // A (Pa)
+    float jwlr_B{-5.2654e9f};            // B (Pa), calibrated so p(V=1, T0) = 0
+    float jwlr_R1{14.1f};                // R1
+    float jwlr_R2{1.41f};                // R2
+    float jwlr_omega{0.8867f};           // Gruneisen omega
+    float jwlr_Cv{2.7806e6f};            // Cv (Pa/K, per initial volume)
+    float jwlr_T0{298.0f};               // Reference temperature (K)
+    int   mixture_rule{1};               // 0 = linear blend, 1 = pressure equilibrium (volume additive)
 
     // Artificial Bulk Viscosity & Timestep Erosion Parameters
     float bulk_viscosity_b1{0.06f};       // Linear artificial bulk viscosity coefficient
@@ -193,6 +206,10 @@ struct MaterialTable3D {
     bool enable_stress_erosion{false};
     float erosion_stress{600.0e6f};       // Tensile hydrostatic stress threshold (Pa)
     bool enable_timestep_erosion{false};
+    bool enable_density_erosion{false};   // Enable low-density particle erosion (e.g. expanded gas / cavitating fluid)
+    float erosion_min_density{0.0f};      // Minimum physical density threshold rho_min (kg/m^3)
+    float erosion_min_density_ratio{0.0f};// Minimum relative density ratio rho / rho0 in [0, 1]
+    bool erode_to_fv_grid{true};          // When coupled to an FV grid, conservatively inject eroded fluid/gas into FV cells
 
     // Directional Crack Band & Non-Local Damage Regularization
     bool directional_crack_band{true};   // Bažant crack band angle normalization against mesh bias
@@ -265,7 +282,7 @@ struct MaterialTable3D {
             if (product_model == DetonationProductEOS::JWLProductGas) product_model = DetonationProductEOS::DavisProduct;
         } else if (material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
             if (burn_model == ReactionKinetics::ProgrammedBurn) burn_model = ReactionKinetics::LeeTarverODE;
-            if (solid_model == SolidReactantEOS::DavisSolid) solid_model = SolidReactantEOS::MieGruneisen;
+            if (solid_model == SolidReactantEOS::DavisSolid) solid_model = SolidReactantEOS::JWLReactant;
             if (product_model == DetonationProductEOS::DavisProduct) product_model = DetonationProductEOS::JWLProductGas;
         } else if (material_model == MPMMaterialModel::JWLProgrammedBurn) {
             if (solid_model == SolidReactantEOS::DavisSolid) solid_model = SolidReactantEOS::MieGruneisen;
@@ -479,6 +496,54 @@ struct MPMDetonator3D {
     int target_object_id{-1};
 };
 
+// Zero-overhead 3D Grid Accessor Abstraction supporting both Dense Flat and 8x8x8 Block-Sparse Tile Pools.
+// In Dense mode (tile_table == nullptr), slotIndex(i, j, k) compiles to (i * ny + j) * nz + k.
+// In Sparse mode (tile_table != nullptr), slotIndex(i, j, k) resolves 8x8x8 tile slot in O(1) via bit-shifts.
+struct MPMGridView3D {
+    int nx{0};
+    int ny{0};
+    int nz{0};
+    int ntx{0};
+    int nty{0};
+    int ntz{0};
+    const int* tile_table{nullptr};
+
+    static constexpr int TILE_SHIFT = 3; // 2^3 = 8
+    static constexpr int TILE_DIM   = 8; // 8x8x8 = 512 nodes per tile
+    static constexpr int TILE_MASK  = 7;
+    static constexpr int TILE_NODES = 512;
+
+    HD_MPM_FUNC inline bool isValidCoords(int i, int j, int k) const {
+        return i >= 0 && i < nx && j >= 0 && j < ny && k >= 0 && k < nz;
+    }
+
+    HD_MPM_FUNC inline long long slotIndex(int i, int j, int k) const {
+        if (!isValidCoords(i, j, k)) return -1;
+        if (tile_table == nullptr) {
+            return (static_cast<long long>(i) * ny + j) * nz + k;
+        }
+        const int tx = i >> TILE_SHIFT;
+        const int ty = j >> TILE_SHIFT;
+        const int tz = k >> TILE_SHIFT;
+        const int t_slot = tile_table[(tx * nty + ty) * ntz + tz];
+        if (t_slot < 0) return -1;
+        const int lx = i & TILE_MASK;
+        const int ly = j & TILE_MASK;
+        const int lz = k & TILE_MASK;
+        return (static_cast<long long>(t_slot) << 9) | (lx << 6) | (ly << 3) | lz;
+    }
+
+    HD_MPM_FUNC inline long long slotIndexFromLogical(size_t logical_idx) const {
+        if (tile_table == nullptr) return static_cast<long long>(logical_idx);
+        if (ny <= 0 || nz <= 0) return -1;
+        const int k = static_cast<int>(logical_idx % static_cast<size_t>(nz));
+        const size_t ij = logical_idx / static_cast<size_t>(nz);
+        const int j = static_cast<int>(ij % static_cast<size_t>(ny));
+        const int i = static_cast<int>(ij / static_cast<size_t>(ny));
+        return slotIndex(i, j, k);
+    }
+};
+
 class MPMSolver3D {
 public:
     MPMSolver3D();
@@ -497,6 +562,18 @@ public:
     // Initialization & Grid Setup
     void initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f);
     void setDomainGeometry(float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f, int nx = 32, int ny = 32, int nz = 32);
+    void setSparseGridMode(bool enable);
+    bool isSparseGridMode() const { return m_sparse_grid_mode; }
+    MPMGridView3D getGridView() const {
+        return MPMGridView3D{m_nx, m_ny, m_nz, m_ntx, m_nty, m_ntz,
+                             (m_sparse_grid_mode && !m_tile_table.empty()) ? m_tile_table.data() : nullptr};
+    }
+    MPMGridView3D getHostGridView() const { return getGridView(); }
+    size_t getNumActiveTiles() const { return m_active_tiles.size(); }
+    size_t getTileCapacity() const { return m_tile_capacity; }
+    size_t getTotalLogicalTiles() const { return static_cast<size_t>(m_ntx) * m_nty * m_ntz; }
+    int getSparseActiveTileCount() const { return static_cast<int>(getNumActiveTiles()); }
+    int getSparseMaxActiveTiles() const { return static_cast<int>(getTileCapacity()); }
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
     void setTimeScheme(MPMTimeIntegrationScheme scheme) { m_time_scheme = scheme; }
@@ -647,8 +724,10 @@ public:
     double getSimTime() const { return m_sim_time; }
     int getStepCount() const { return m_step_count; }
 
-    void setGridNodeVelocity(size_t node_idx, float vx, float vy, float vz) {
-        if (node_idx >= m_grid.size()) return;
+    void setGridNodeVelocity(size_t logical_node_idx, float vx, float vy, float vz) {
+        const long long slot = getGridView().slotIndexFromLogical(logical_node_idx);
+        if (slot < 0 || static_cast<size_t>(slot) >= m_grid.size()) return;
+        const size_t node_idx = static_cast<size_t>(slot);
         if (m_grid[node_idx].m <= MPMGridNode3D::MIN_MASS) {
             m_grid[node_idx].m = 0.001f;
         }
@@ -662,7 +741,7 @@ public:
         m_grid[node_idx].f_ext[1] = 0.0f;
         m_grid[node_idx].f_ext[2] = 0.0f;
         for (int m = 0; m < m_num_materials; ++m) {
-            if (m < static_cast<int>(m_mat_fields.size())) {
+            if (m < static_cast<int>(m_mat_fields.size()) && node_idx < m_mat_fields[m].m.size()) {
                 if (m_mat_fields[m].m[node_idx] <= MPMGridNode3D::MIN_MASS) {
                     m_mat_fields[m].m[node_idx] = m_grid[node_idx].m;
                 }
@@ -737,6 +816,9 @@ public:
     void initMaterialHeterogeneity(int obj_id);
     void seedMottGradyFragments(int obj_id);
 
+    void setDeferFVErosionToCoupler(bool defer) { m_defer_fv_erosion_to_coupler = defer; }
+    bool getDeferFVErosionToCoupler() const { return m_defer_fv_erosion_to_coupler; }
+
     // Single material-point constitutive driver (V&V unit level): advances ONE particle through the
     // genuine production stress update with a prescribed velocity gradient L over dt. Used by
     // blast_verify to exercise the exact constitutive code path without grid transfer noise.
@@ -753,6 +835,7 @@ private:
     template <bool FUSE_STRESS>
     void gridToParticleInternal(float dt);
     void updateParticleStress(MPMParticle3D& p, float dt, const float L[3][3], const MaterialTable3D& mat, float ep_smoothed = 0.0f);
+    void syncMaterialFieldAllocation(size_t num_nodes);
 
     // Shape Function Evaluators (1D & 3D)
     float evalLinear_S(float x_p, float x_i, float h) const;
@@ -772,6 +855,14 @@ private:
     int m_nx{32};
     int m_ny{32};
     int m_nz{32};
+    int m_ntx{4};
+    int m_nty{4};
+    int m_ntz{4};
+    bool m_sparse_grid_mode{false};
+    bool m_defer_fv_erosion_to_coupler{false};
+    mutable size_t m_tile_capacity{0};
+    mutable std::vector<int> m_tile_table;
+    mutable std::vector<int> m_active_tiles;
     float m_dx{0.01f};
     float m_dy{0.01f};
     float m_dz{0.01f};

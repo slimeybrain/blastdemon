@@ -1,16 +1,26 @@
-import { STAGE_THEMES, type Node, type Model, type PanelType, type StageThemeId } from './types.js';
+import { STAGE_THEMES, type Node, type Model, type PanelType, type StageThemeId, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { StateManager, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, resolveResourcePath, getSliceAxisLabel, getLSDynaDeckMeta } from './state-manager.js';
+import {
+    COLORMAP_OPTIONS,
+    CONTOUR_BAND_PRESETS,
+    type QuantityContourStyle,
+    normalizeColormapId,
+    getColormapLabel,
+    getQuantityStyle,
+    buildAllQuantityStylesMap,
+    applyQuantityStyleUpdate,
+    buildColormapCSSGradient
+} from './contour-style.js';
 
 function getFocusedQuantityAndRange(vpNode: any): { quantity: string, min: number, max: number } {
-    const slices = vpNode.parameters.slices || [];
-    const focusedIdx = vpNode.parameters.focusedSliceIndex ?? 0;
+    const params = vpNode?.parameters || {};
+    const slices = params.slices || [];
+    const focusedIdx = params.focusedSliceIndex ?? 0;
     const slice = slices[focusedIdx] || slices[0] || { quantities: ['pressure'] };
     const rawQty = slice.quantities?.[0] || 'pressure';
     const qty = canonicalizeQuantity(rawQty);
-
-    const ranges = vpNode.parameters.quantity_ranges || {};
-    const range = ranges[qty] || ranges[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
-    return { quantity: qty, min: range[0], max: range[1] };
+    const style = getQuantityStyle(params, qty);
+    return { quantity: qty, min: style.minVal, max: style.maxVal };
 }
 
 import type { DiscoveredFEMPart } from './viewport/ViewportTypes.js';
@@ -207,6 +217,7 @@ export class Telemetry3DViewport {
                 if (p.femMaxVal !== undefined) workerData.femMaxVal = Number(p.femMaxVal);
                 if (p.femContourLevels !== undefined) workerData.femContourLevels = Number(p.femContourLevels);
                 if (p.femSmoothContours !== undefined) workerData.femSmoothContours = Boolean(p.femSmoothContours);
+                if (p.femInterpolate !== undefined) workerData.femInterpolate = Boolean(p.femInterpolate);
 
                 if (p.showBeams !== undefined) workerData.showBeams = p.showBeams;
                 if (p.beamSolid !== undefined) workerData.beamSolid = p.beamSolid;
@@ -244,10 +255,13 @@ export class Telemetry3DViewport {
                 if (p.stlShowResults !== undefined) workerData.stlShowResults = p.stlShowResults;
                 if (p.stl_quantity !== undefined) workerData.stlQuantity = p.stl_quantity;
                 if (p.stlQuantity !== undefined) workerData.stlQuantity = p.stlQuantity;
+                if (p.stl_sampling_mode !== undefined) workerData.stlSamplingMode = p.stl_sampling_mode;
                 if (p.stl_auto_scale !== undefined) workerData.stlAutoScale = p.stl_auto_scale;
                 if (p.stl_log_scale !== undefined) workerData.stlLogScale = p.stl_log_scale;
                 if (p.stl_min_val !== undefined) workerData.stlMinVal = Number(p.stl_min_val);
                 if (p.stl_max_val !== undefined) workerData.stlMaxVal = Number(p.stl_max_val);
+                if (p.stl_contour_levels !== undefined) workerData.stlContourLevels = Number(p.stl_contour_levels);
+                if (p.stl_smooth_contours !== undefined) workerData.stlSmoothContours = Boolean(p.stl_smooth_contours);
 
                 if (p.show_obstacles !== undefined) workerData.showObstacles = p.show_obstacles;
                 if (p.showObstacles !== undefined) workerData.showObstacles = p.showObstacles;
@@ -262,8 +276,11 @@ export class Telemetry3DViewport {
                 if (p.obstacles_quantity !== undefined) workerData.obstaclesQuantity = p.obstacles_quantity;
                 if (p.obstacles_auto_scale !== undefined) workerData.obstaclesAutoScale = p.obstacles_auto_scale;
                 if (p.obstacles_log_scale !== undefined) workerData.obstaclesLogScale = p.obstacles_log_scale;
+                if (p.obstacles_interpolate !== undefined) workerData.obstaclesInterpolate = Boolean(p.obstacles_interpolate);
                 if (p.obstacles_min_val !== undefined) workerData.obstaclesMinVal = Number(p.obstacles_min_val);
                 if (p.obstacles_max_val !== undefined) workerData.obstaclesMaxVal = Number(p.obstacles_max_val);
+                if (p.obstacles_contour_levels !== undefined) workerData.obstaclesContourLevels = Number(p.obstacles_contour_levels);
+                if (p.obstacles_smooth_contours !== undefined) workerData.obstaclesSmoothContours = Boolean(p.obstacles_smooth_contours);
 
                 if (p.show_charge !== undefined) workerData.showCharge = p.show_charge;
                 if (p.showCharge !== undefined) workerData.showCharge = p.showCharge;
@@ -346,6 +363,7 @@ export class Telemetry3DViewport {
                 if (p.quantity_auto_scales !== undefined || p.quantityAutoScales !== undefined) workerData.quantityAutoScales = p.quantity_auto_scales ?? p.quantityAutoScales;
                 if (p.quantity_log_scales !== undefined || p.quantityLogScales !== undefined) workerData.quantityLogScales = p.quantity_log_scales ?? p.quantityLogScales;
                 if (p.quantity_colormaps !== undefined || p.quantityColormaps !== undefined) workerData.quantityColormaps = p.quantity_colormaps ?? p.quantityColormaps;
+                workerData.quantityStyles = buildAllQuantityStylesMap(vpNode?.parameters || p);
                 }
 
                 // Check for charge or MPM geometry updates
@@ -369,6 +387,15 @@ export class Telemetry3DViewport {
                         if (targetModel?.nodes.some((n: any) => n.type === 'MarineHarbourDomain')) {
                             workerData.mpmObjects = this.getDiscoveredMPMObjects(targetModel);
                         }
+                    } else if (['Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(changedNode.type)) {
+                        const dm = targetModel?.nodes.find((n: any) => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh');
+                        const xm0 = Number(dm?.parameters?.xmin ?? dm?.parameters?.x_min ?? 0.0);
+                        const xm1 = Number(dm?.parameters?.xmax ?? dm?.parameters?.x_max ?? 1.0);
+                        const ym0 = Number(dm?.parameters?.ymin ?? dm?.parameters?.y_min ?? 0.0);
+                        const ym1 = Number(dm?.parameters?.ymax ?? dm?.parameters?.y_max ?? 1.0);
+                        const zm0 = Number(dm?.parameters?.zmin ?? dm?.parameters?.z_min ?? 0.0);
+                        const zm1 = Number(dm?.parameters?.zmax ?? dm?.parameters?.z_max ?? 1.0);
+                        workerData.charge = this.resolveRemap3DChargeParams(targetModel, xm0, xm1, ym0, ym1, zm0, zm1);
                     } else if (['MPMObject3D', 'MPMObject2D', 'MPMDomain3D', 'MPMDomain2D', 'MarineHarbourDomain'].includes(changedNode.type)) {
                         workerData.mpmObjects = this.getDiscoveredMPMObjects(targetModel);
                         const geomNode = (changedNode.parameters?.stl_file || changedNode.parameters?.file_path) ? changedNode : this.getGeometryNode(changedNode.id);
@@ -521,7 +548,7 @@ export class Telemetry3DViewport {
                         workerData.gauges = this.getVirtualGauges();
                     } else if (['Obstacle3D', 'ImmersedObstacle', 'Obstacle', 'ObstacleDomain3D', 'CSGObstacle3D', 'ObstacleBox3D', 'ObstacleCylinder3D', 'ObstacleSphere3D'].includes(changedNode.type)) {
                         workerData.showObstacles = (changedNode.parameters.visible !== false && !changedNode.parameters.hidden);
-                    } else if (['DomainMesh3D', 'DomainMesh', 'DomainMesh2D'].includes(changedNode.type)) {
+                    } else if (isDomainMesh3DNode(changedNode.type) || changedNode.type === 'DomainMesh' || isDomainMesh2DNode(changedNode.type)) {
                         if (p.visible !== undefined || p.hidden !== undefined) {
                             const isVis = changedNode.parameters.visible !== false && !changedNode.parameters.hidden;
                             workerData.showGrid = isVis;
@@ -735,33 +762,20 @@ export class Telemetry3DViewport {
             } else if (type === 'rangeUpdated') {
                 const vpNode = this.getViewportNode();
                 if (vpNode) {
-                    const { index, min, max } = e.data;
-                    if (index !== undefined) {
-                        const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
-                        if (slices[index]) {
-                            const updates = {
-                                auto_scale: false,
-                                min_val: min,
-                                max_val: max
-                            };
-                            slices[index] = {
-                                ...slices[index],
-                                ...updates
-                            };
-                            this.propagateSliceQuantitySettings(slices, index, updates);
-                            this.updateSlices(slices);
-                        }
-                    } else {
-                        const { quantity: focusedQty } = getFocusedQuantityAndRange(vpNode);
-                        const ranges = { ...(vpNode.parameters.quantity_ranges || {}) };
-                        ranges[focusedQty] = [min, max];
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, {
-                            auto_scale: false,
-                            quantity_ranges: ranges,
-                            min_val: min,
-                            max_val: max
-                        });
+                    const { index, min, max, quantity } = e.data;
+                    let targetQty = quantity;
+                    if (!targetQty && index !== undefined) {
+                        const slices = vpNode.parameters.slices || [];
+                        targetQty = slices[index]?.quantities?.[0];
                     }
+                    if (!targetQty) {
+                        targetQty = getFocusedQuantityAndRange(vpNode).quantity;
+                    }
+                    this.updateQuantityContourStyle(targetQty, {
+                        autoScale: false,
+                        minVal: min,
+                        maxVal: max
+                    });
                 }
             } else if (type === 'quantityRangesUpdated') {
                 this.latestQuantityRanges = e.data.ranges || {};
@@ -817,7 +831,7 @@ export class Telemetry3DViewport {
             const targetModel = this.getTargetModel();
             const node = targetModel?.nodes?.find((n: any) => n.id === nodeId);
             if (node) {
-                if (node.type === 'Telemetry3DViewport' || node.type === 'DomainMesh3D' || node.type === 'DomainMesh' || node.type === 'CFDSolver3D' || node.type === 'CFDSolver' || node.type === 'CFDSolver2D') {
+                if (node.type === 'Telemetry3DViewport' || isDomainMesh3DNode(node.type) || node.type === 'DomainMesh' || node.type === 'CFDSolver3D' || node.type === 'CFDSolver' || node.type === 'CFDSolver2D') {
                     const sliceIdx = this.stateManager.getSelectedSliceIndex();
                     if (sliceIdx !== null && sliceIdx !== undefined) {
                         const slices = this.getSlices();
@@ -1348,10 +1362,10 @@ export class Telemetry3DViewport {
                         this.stateManager.setSelectedSliceIndex(null);
                         if (objectType === 'VirtualGauges3D') {
                             matchedNode = targetModel.nodes.find((n: any) => n.id === objectId) ||
-                                          targetModel.nodes.find((n: any) => n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge') || null;
+                                          targetModel.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge') || null;
                         } else if (objectType === 'Charge3D') {
                             matchedNode = targetModel.nodes.find((n: any) => n.id === objectId) ||
-                                          targetModel.nodes.find((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'ExplosiveMaterial') || null;
+                                          targetModel.nodes.find((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'ExplosiveMaterial' || n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode' || n.type === 'Remap3DTo3DNode') || null;
                         } else if (objectType === 'DetonatorLocation3D' || objectType === 'TriggerLocation3D' || objectType === 'TriggerLocation') {
                             matchedNode = targetModel.nodes.find((n: any) => n.id === objectId) ||
                                           targetModel.nodes.find((n: any) => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || null;
@@ -1388,8 +1402,8 @@ export class Telemetry3DViewport {
                                           targetModel.nodes.find((n: any) => n.type === 'STLGeometry') ||
                                           targetModel.nodes.find((n: any) => n.type === 'CFDSolver3D') ||
                                           this.getViewportNode() || null;
-                        } else if (objectType === 'DomainMesh3D') {
-                            matchedNode = targetModel.nodes.find((n: any) => n.type === 'DomainMesh3D' || n.type === 'Mesh3D' || n.type === 'CFDSolver3D') || null;
+                        } else if (isDomainMesh3DNode(objectType)) {
+                            matchedNode = targetModel.nodes.find((n: any) => isDomainMesh3DNode(n.type) || n.type === 'Mesh3D' || n.type === 'CFDSolver3D') || null;
                         }
                     }
                 }
@@ -1484,8 +1498,8 @@ export class Telemetry3DViewport {
             let matchedNode: any = null;
             if (targetModel && targetModel.nodes) {
                 if (objectType === 'Slice') matchedNode = this.getSlicesCarrierNode() || this.getViewportNode();
-                else if (objectType === 'VirtualGauges3D') matchedNode = targetModel.nodes.find((n: any) => n.type === 'VirtualGauges3D') || null;
-                else if (objectType === 'Charge3D') matchedNode = targetModel.nodes.find((n: any) => n.type === 'Charge3D') || null;
+                else if (objectType === 'VirtualGauges3D') matchedNode = targetModel.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D') || null;
+                else if (objectType === 'Charge3D') matchedNode = targetModel.nodes.find((n: any) => n.type === 'Charge3D' || n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode' || n.type === 'Remap3DTo3DNode') || null;
                 else if (objectType === 'DetonatorLocation3D' || objectType === 'TriggerLocation3D' || objectType === 'TriggerLocation') matchedNode = targetModel.nodes.find((n: any) => n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation' || n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation') || null;
                 else if (objectType === 'FEMObject3D') {
                     const femObjNodes = targetModel.nodes.filter((n: any) => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D');
@@ -1509,7 +1523,7 @@ export class Telemetry3DViewport {
                                   targetModel.nodes.find((n: any) => n.type === 'CFDSolver3D') ||
                                   this.getViewportNode() || null;
                 }
-                else if (objectType === 'DomainMesh3D') matchedNode = targetModel.nodes.find((n: any) => n.type === 'DomainMesh3D') || null;
+                else if (isDomainMesh3DNode(objectType)) matchedNode = targetModel.nodes.find((n: any) => isDomainMesh3DNode(n.type)) || null;
             }
 
             // Action 1: Inspect Properties
@@ -1952,14 +1966,13 @@ export class Telemetry3DViewport {
         thead.innerHTML = `
             <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.15); color: #00adff; font-weight: bold; font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.5px;">
                 <th style="padding: 4px 2px; text-align: center; width: 20px;" title="Visibility">👁</th>
-                <th style="padding: 4px 4px; text-align: left; width: 70px;">LAYER</th>
+                <th style="padding: 4px 4px; text-align: left; width: 82px;">LAYER</th>
                 <th style="padding: 4px 2px; text-align: center; width: 32px;" title="Solids / Volume Surface">SOL</th>
                 <th style="padding: 4px 2px; text-align: center; width: 38px;" title="Lines, Mesh Gridlines & Cell Edges">LINES</th>
-                <th style="padding: 4px 2px; text-align: center; width: 32px;" title="Results / Contour Display">RES</th>
-                <th style="padding: 4px 4px; text-align: left; width: 70px;">QTY</th>
-                <th style="padding: 4px 4px; text-align: left; width: 70px;">COLOR</th>
-                <th style="padding: 4px 2px; text-align: center; width: 44px;">SCL</th>
-                <th style="padding: 4px 4px; text-align: center; width: 45px;">OPACITY</th>
+                <th style="padding: 4px 2px; text-align: center; width: 34px;" title="Results / Surface Lighting / Size">RES</th>
+                <th style="padding: 4px 4px; text-align: left; width: 92px;" title="Displayed Physical Quantity">QTY</th>
+                <th style="padding: 4px 2px; text-align: center; width: 28px;" title="Show / Hide Quantity Colour Bar">BAR</th>
+                <th style="padding: 4px 4px; text-align: center; width: 48px;">OPACITY</th>
                 <th style="padding: 4px 2px; text-align: center; width: 18px;">🗑</th>
             </tr>
         `;
@@ -2128,15 +2141,7 @@ export class Telemetry3DViewport {
     }
 
     private showColormapPopover(targetEl: HTMLElement, currentCmap: string, onSelect: (cmap: string) => void) {
-        const colormaps = [
-            { id: 'rainbow', name: 'Rainbow', grad: 'linear-gradient(to right, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000)' },
-            { id: 'plasma', name: 'Plasma', grad: 'linear-gradient(to right, #0d0887, #6a00a8, #b12a90, #e16462, #fca636, #f0f921)' },
-            { id: 'viridis', name: 'Viridis', grad: 'linear-gradient(to right, #440154, #3b528b, #21908d, #5dc963, #fde725)' },
-            { id: 'coolwarm', name: 'CoolWarm', grad: 'linear-gradient(to right, #3b4cc0, #88b0f3, #ddd, #f49a7b, #b40426)' },
-            { id: 'cividis', name: 'Cividis', grad: 'linear-gradient(to right, #002051, #395276, #678685, #9eb980, #fdea45)' },
-            { id: 'grayscale', name: 'Gray', grad: 'linear-gradient(to right, #000000, #ffffff)' },
-            { id: 'materials', name: 'Materials / Phase', grad: 'linear-gradient(to right, #38bdf8 0% 16.67%, #0284c7 16.67% 33.33%, #d97706 33.33% 50%, #f97316 50% 66.67%, #ef4444 66.67% 83.33%, #a855f7 83.33% 100%)' }
-        ];
+        const normCurrent = normalizeColormapId(currentCmap);
 
         this.showPopover(targetEl, (popover) => {
             const title = document.createElement('div');
@@ -2148,7 +2153,7 @@ export class Telemetry3DViewport {
             title.style.textTransform = 'uppercase';
             popover.appendChild(title);
 
-            colormaps.forEach(c => {
+            COLORMAP_OPTIONS.forEach(c => {
                 const item = document.createElement('div');
                 item.style.display = 'flex';
                 item.style.alignItems = 'center';
@@ -2157,23 +2162,23 @@ export class Telemetry3DViewport {
                 item.style.padding = '3px 6px';
                 item.style.borderRadius = '3px';
                 item.style.cursor = 'pointer';
-                item.style.background = c.id === currentCmap ? '#007acc' : 'transparent';
-                item.style.color = c.id === currentCmap ? '#fff' : '#ccc';
+                item.style.background = c.id === normCurrent ? '#007acc' : 'transparent';
+                item.style.color = c.id === normCurrent ? '#fff' : '#ccc';
 
                 const nameSpan = document.createElement('span');
-                nameSpan.textContent = c.name;
+                nameSpan.textContent = c.label;
                 item.appendChild(nameSpan);
 
                 const swatch = document.createElement('div');
-                swatch.style.width = '35px';
+                swatch.style.width = '40px';
                 swatch.style.height = '10px';
                 swatch.style.borderRadius = '2px';
-                swatch.style.background = c.grad;
+                swatch.style.background = buildColormapCSSGradient(c.id, 'to right', 0, true);
                 swatch.style.border = '1px solid rgba(255,255,255,0.3)';
                 item.appendChild(swatch);
 
-                item.onmouseenter = () => { if (c.id !== currentCmap) item.style.background = 'rgba(255,255,255,0.1)'; };
-                item.onmouseleave = () => { if (c.id !== currentCmap) item.style.background = 'transparent'; };
+                item.onmouseenter = () => { if (c.id !== normCurrent) item.style.background = 'rgba(255,255,255,0.1)'; };
+                item.onmouseleave = () => { if (c.id !== normCurrent) item.style.background = 'transparent'; };
                 item.onclick = (e) => {
                     e.stopPropagation();
                     onSelect(c.id);
@@ -3275,322 +3280,117 @@ export class Telemetry3DViewport {
         });
     }
 
-    public setQuantityColormap(qty: string, cmap: string) {
+    public getQuantityContourStyle(qty: string): QuantityContourStyle {
+        const vpNode = this.getViewportNode();
+        return getQuantityStyle(vpNode?.parameters || {}, qty);
+    }
+
+    public updateQuantityContourStyle(qty: string, patch: Partial<QuantityContourStyle>): void {
         const vpNode = this.getViewportNode();
         if (!vpNode) return;
-        const cQty = canonicalizeQuantity(qty);
-        const qCmaps = vpNode.parameters.quantity_colormaps ? { ...vpNode.parameters.quantity_colormaps } : {};
-        qCmaps[cQty] = cmap;
-        qCmaps[qty] = cmap;
-        if (cQty === 'velocity') qCmaps['speed'] = cmap;
-        if (cQty === 'peak_overpressure') qCmaps['overpressure'] = cmap;
-        if (cQty === 'peak_impulse') qCmaps['impulse'] = cmap;
-        if (cQty === 'plastic_strain') qCmaps['plasticStrain'] = cmap;
-        if (cQty === 'vonMises') qCmaps['von_mises'] = cmap;
+        const { style, paramUpdates } = applyQuantityStyleUpdate(vpNode.parameters, qty, patch);
+        const mergedParams = { ...vpNode.parameters, ...paramUpdates };
 
-        const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
-        slices.forEach(s => {
-            if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === cQty) {
-                s.colormap = cmap;
-            }
-        });
-
-        const updates: any = { quantity_colormaps: qCmaps, slices };
-        if (canonicalizeQuantity(vpNode.parameters.stl_quantity || 'pressure') === cQty) {
-            updates.stl_colormap = cmap;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.obstacles_quantity || 'pressure') === cQty) {
-            updates.obstacles_colormap = cmap;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.mpmParticleQuantity || 'vonMises') === cQty) {
-            updates.mpmParticleColormap = cmap;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.femQuantity || 'vonMises') === cQty) {
-            updates.femColormap = cmap;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.beamQuantity || 'plasticStrain') === cQty) {
-            updates.beamColormap = cmap;
+        if (!style.autoScale) {
+            if (!this.latestQuantityRanges) this.latestQuantityRanges = {};
+            this.latestQuantityRanges[style.quantity] = [style.minVal, style.maxVal];
+            this.latestQuantityRanges[qty] = [style.minVal, style.maxVal];
+            if (style.quantity === 'velocity') this.latestQuantityRanges['speed'] = [style.minVal, style.maxVal];
         }
 
-        this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
-        const stlNode = this.getGeometryNode();
-        if (stlNode && stlNode.type === 'STLGeometry') {
-            this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_colormap: cmap, colormap: cmap });
-        }
+        this.stateManager.updateNodeParametersInPlace(vpNode.id, paramUpdates);
         this.needsSlicesRebuild = true;
         this.worker.postMessage({
             type: 'setConfig',
             data: {
-                quantityColormaps: qCmaps,
-                slices,
-                stlColormap: updates.stl_colormap,
-                obstaclesColormap: updates.obstacles_colormap,
-                mpmParticleColormap: updates.mpmParticleColormap,
-                femColormap: updates.femColormap,
-                beamColormap: updates.beamColormap
+                quantityStyles: buildAllQuantityStylesMap(mergedParams),
+                quantityRanges: paramUpdates.quantity_ranges,
+                quantityAutoScales: paramUpdates.quantity_auto_scales,
+                quantityLogScales: paramUpdates.quantity_log_scales,
+                quantityColormaps: paramUpdates.quantity_colormaps,
+                slices: paramUpdates.slices,
+                stlColormap: paramUpdates.stl_colormap,
+                stlMinVal: paramUpdates.stl_min_val,
+                stlMaxVal: paramUpdates.stl_max_val,
+                stlAutoScale: paramUpdates.stl_auto_scale,
+                stlLogScale: paramUpdates.stl_log_scale,
+                stlSamplingMode: paramUpdates.stl_sampling_mode,
+                stlContourLevels: paramUpdates.stl_contour_levels,
+                stlSmoothContours: paramUpdates.stl_smooth_contours,
+                obstaclesColormap: paramUpdates.obstacles_colormap,
+                obstaclesMinVal: paramUpdates.obstacles_min_val,
+                obstaclesMaxVal: paramUpdates.obstacles_max_val,
+                obstaclesAutoScale: paramUpdates.obstacles_auto_scale,
+                obstaclesLogScale: paramUpdates.obstacles_log_scale,
+                obstaclesInterpolate: paramUpdates.obstacles_interpolate,
+                obstaclesContourLevels: paramUpdates.obstacles_contour_levels,
+                obstaclesSmoothContours: paramUpdates.obstacles_smooth_contours,
+                mpmParticleColormap: paramUpdates.mpmParticleColormap,
+                mpmParticleMinVal: paramUpdates.mpmParticleMinVal,
+                mpmParticleMaxVal: paramUpdates.mpmParticleMaxVal,
+                mpmParticleAutoScale: paramUpdates.mpmParticleAutoScale,
+                mpmParticleLogScale: paramUpdates.mpmParticleLogScale,
+                mpmContourLevels: paramUpdates.mpmContourLevels,
+                mpmSmoothContours: paramUpdates.mpmSmoothContours,
+                femColormap: paramUpdates.femColormap,
+                femMinVal: paramUpdates.femMinVal,
+                femMaxVal: paramUpdates.femMaxVal,
+                femAutoScale: paramUpdates.femAutoScale,
+                femLogScale: paramUpdates.femLogScale,
+                femInterpolate: paramUpdates.femInterpolate,
+                femContourLevels: paramUpdates.femContourLevels,
+                femSmoothContours: paramUpdates.femSmoothContours,
+                beamColormap: paramUpdates.beamColormap,
+                beamMinVal: paramUpdates.beamMinVal,
+                beamMaxVal: paramUpdates.beamMaxVal,
+                beamAutoScale: paramUpdates.beamAutoScale,
+                beamLogScale: paramUpdates.beamLogScale,
+                beamContourLevels: paramUpdates.beamContourLevels,
+                beamSmoothContours: paramUpdates.beamSmoothContours
             }
         });
         this.syncControls(false);
+        this.requestColorbarUpdate();
+        const tc = (window as any).transportController;
+        if (tc) {
+            tc.syncStateFromViewport?.();
+            tc.requestTabRender?.();
+        }
+    }
+
+    public setQuantityColormap(qty: string, cmap: string) {
+        this.updateQuantityContourStyle(qty, { colormap: normalizeColormapId(cmap) });
     }
 
     public setQuantityLogScale(qty: string, logV: boolean) {
-        const vpNode = this.getViewportNode();
-        if (!vpNode) return;
-        const cQty = canonicalizeQuantity(qty);
-        const qLogScales = vpNode.parameters.quantity_log_scales ? { ...vpNode.parameters.quantity_log_scales } : {};
-        qLogScales[cQty] = logV;
-        qLogScales[qty] = logV;
-        if (cQty === 'velocity') qLogScales['speed'] = logV;
-        if (cQty === 'peak_overpressure') qLogScales['overpressure'] = logV;
-        if (cQty === 'peak_impulse') qLogScales['impulse'] = logV;
-        if (cQty === 'plastic_strain') qLogScales['plasticStrain'] = logV;
-        if (cQty === 'vonMises') qLogScales['von_mises'] = logV;
-
-        const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
-        slices.forEach(s => {
-            if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === cQty) {
-                s.log_scale = logV;
-            }
-        });
-
-        const updates: any = { quantity_log_scales: qLogScales, slices };
-        if (canonicalizeQuantity(vpNode.parameters.stl_quantity || 'pressure') === cQty) {
-            updates.stl_log_scale = logV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.obstacles_quantity || 'pressure') === cQty) {
-            updates.obstacles_log_scale = logV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.mpmParticleQuantity || 'vonMises') === cQty) {
-            updates.mpmParticleLogScale = logV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.femQuantity || 'vonMises') === cQty) {
-            updates.femLogScale = logV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.beamQuantity || 'plasticStrain') === cQty) {
-            updates.beamLogScale = logV;
-        }
-
-        this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
-        const stlNode = this.getGeometryNode();
-        if (stlNode && stlNode.type === 'STLGeometry') {
-            this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_log_scale: logV });
-        }
-        this.needsSlicesRebuild = true;
-        this.worker.postMessage({
-            type: 'setConfig',
-            data: {
-                quantityLogScales: qLogScales,
-                slices,
-                stlLogScale: updates.stl_log_scale,
-                obstaclesLogScale: updates.obstacles_log_scale,
-                mpmParticleLogScale: updates.mpmParticleLogScale,
-                femLogScale: updates.femLogScale,
-                beamLogScale: updates.beamLogScale
-            }
-        });
-        this.syncControls(false);
+        this.updateQuantityContourStyle(qty, { logScale: logV });
     }
 
     public setQuantityAutoScale(qty: string, autoV: boolean) {
-        const vpNode = this.getViewportNode();
-        if (!vpNode) return;
-        const cQty = canonicalizeQuantity(qty);
-        const qAutoScales = vpNode.parameters.quantity_auto_scales ? { ...vpNode.parameters.quantity_auto_scales } : {};
-        qAutoScales[cQty] = autoV;
-        qAutoScales[qty] = autoV;
-        if (cQty === 'velocity') qAutoScales['speed'] = autoV;
-        if (cQty === 'peak_overpressure') qAutoScales['overpressure'] = autoV;
-        if (cQty === 'peak_impulse') qAutoScales['impulse'] = autoV;
-        if (cQty === 'plastic_strain') qAutoScales['plasticStrain'] = autoV;
-        if (cQty === 'vonMises') qAutoScales['von_mises'] = autoV;
-
-        const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
-        slices.forEach(s => {
-            if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === cQty) {
-                s.auto_scale = autoV;
-            }
-        });
-
-        const updates: any = { quantity_auto_scales: qAutoScales, slices };
-        if (canonicalizeQuantity(vpNode.parameters.stl_quantity || 'pressure') === cQty) {
-            updates.stl_auto_scale = autoV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.obstacles_quantity || 'pressure') === cQty) {
-            updates.obstacles_auto_scale = autoV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.mpmParticleQuantity || 'vonMises') === cQty) {
-            updates.mpmParticleAutoScale = autoV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.femQuantity || 'vonMises') === cQty) {
-            updates.femAutoScale = autoV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.beamQuantity || 'plasticStrain') === cQty) {
-            updates.beamAutoScale = autoV;
-        }
-
-        this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
-        const stlNode = this.getGeometryNode();
-        if (stlNode && stlNode.type === 'STLGeometry') {
-            this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_auto_scale: autoV });
-        }
-        this.needsSlicesRebuild = true;
-        this.worker.postMessage({
-            type: 'setConfig',
-            data: {
-                quantityAutoScales: qAutoScales,
-                slices,
-                stlAutoScale: updates.stl_auto_scale,
-                obstaclesAutoScale: updates.obstacles_auto_scale,
-                mpmParticleAutoScale: updates.mpmParticleAutoScale,
-                femAutoScale: updates.femAutoScale,
-                beamAutoScale: updates.beamAutoScale
-            }
-        });
-        this.syncControls(false);
+        this.updateQuantityContourStyle(qty, { autoScale: autoV });
     }
 
     public setQuantityRange(qty: string, minV: number, maxV: number, autoV: boolean = false, logV?: boolean, interpV?: boolean) {
-        const vpNode = this.getViewportNode();
-        if (!vpNode) return;
-        const cQty = canonicalizeQuantity(qty);
-
-        const qRanges = vpNode.parameters.quantity_ranges ? { ...vpNode.parameters.quantity_ranges } : {};
-        qRanges[cQty] = [minV, maxV];
-        qRanges[qty] = [minV, maxV];
-        if (cQty === 'velocity') qRanges['speed'] = [minV, maxV];
-        if (cQty === 'peak_overpressure') qRanges['overpressure'] = [minV, maxV];
-        if (cQty === 'peak_impulse') qRanges['impulse'] = [minV, maxV];
-        if (cQty === 'plastic_strain') qRanges['plasticStrain'] = [minV, maxV];
-        if (cQty === 'vonMises') qRanges['von_mises'] = [minV, maxV];
-
-        const qAutoScales = vpNode.parameters.quantity_auto_scales ? { ...vpNode.parameters.quantity_auto_scales } : {};
-        qAutoScales[cQty] = autoV;
-        qAutoScales[qty] = autoV;
-        if (cQty === 'velocity') qAutoScales['speed'] = autoV;
-        if (cQty === 'peak_overpressure') qAutoScales['overpressure'] = autoV;
-        if (cQty === 'peak_impulse') qAutoScales['impulse'] = autoV;
-        if (cQty === 'plastic_strain') qAutoScales['plasticStrain'] = autoV;
-        if (cQty === 'vonMises') qAutoScales['von_mises'] = autoV;
-
-        const qLogScales = vpNode.parameters.quantity_log_scales ? { ...vpNode.parameters.quantity_log_scales } : {};
-        if (logV !== undefined) {
-            qLogScales[cQty] = logV;
-            qLogScales[qty] = logV;
-            if (cQty === 'velocity') qLogScales['speed'] = logV;
-            if (cQty === 'peak_overpressure') qLogScales['overpressure'] = logV;
-            if (cQty === 'peak_impulse') qLogScales['impulse'] = logV;
-            if (cQty === 'plastic_strain') qLogScales['plasticStrain'] = logV;
-            if (cQty === 'vonMises') qLogScales['von_mises'] = logV;
-        }
-
-        const slices = vpNode.parameters.slices ? [...vpNode.parameters.slices] : [];
-        slices.forEach(s => {
-            if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === cQty) {
-                s.min_val = minV;
-                s.max_val = maxV;
-                s.auto_scale = autoV;
-                if (logV !== undefined) {
-                    s.log_scale = logV;
-                }
-                if (interpV !== undefined) {
-                    s.interpolate = interpV;
-                }
-            }
-        });
-
-        const updates: any = { 
-            quantity_ranges: qRanges, 
-            quantity_auto_scales: qAutoScales, 
-            slices,
-            min_val: minV,
-            max_val: maxV,
-            auto_scale: autoV,
+        const patch: Partial<QuantityContourStyle> = {
+            minVal: minV,
+            maxVal: maxV,
             autoScale: autoV
         };
-        if (logV !== undefined) {
-            updates.quantity_log_scales = qLogScales;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.stl_quantity || 'pressure') === cQty) {
-            updates.stl_min_val = minV;
-            updates.stl_max_val = maxV;
-            updates.stl_auto_scale = autoV;
-            if (logV !== undefined) updates.stl_log_scale = logV;
-            if (interpV !== undefined) updates.stl_sampling_mode = interpV ? 'linear' : 'nearest';
-        }
-        if (canonicalizeQuantity(vpNode.parameters.obstacles_quantity || 'pressure') === cQty) {
-            updates.obstacles_min_val = minV;
-            updates.obstacles_max_val = maxV;
-            updates.obstacles_auto_scale = autoV;
-            if (logV !== undefined) updates.obstacles_log_scale = logV;
-            if (interpV !== undefined) updates.obstacles_interpolate = interpV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.mpmParticleQuantity || 'vonMises') === cQty) {
-            updates.mpmParticleMinVal = minV;
-            updates.mpmParticleMaxVal = maxV;
-            updates.mpmParticleAutoScale = autoV;
-            if (logV !== undefined) updates.mpmParticleLogScale = logV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.femQuantity || 'vonMises') === cQty) {
-            updates.femMinVal = minV;
-            updates.femMaxVal = maxV;
-            updates.femAutoScale = autoV;
-            if (logV !== undefined) updates.femLogScale = logV;
-        }
-        if (canonicalizeQuantity(vpNode.parameters.beamQuantity || 'plasticStrain') === cQty) {
-            updates.beamMinVal = minV;
-            updates.beamMaxVal = maxV;
-            updates.beamAutoScale = autoV;
-            if (logV !== undefined) updates.beamLogScale = logV;
-        }
-        if (!this.latestQuantityRanges) this.latestQuantityRanges = {};
-        this.latestQuantityRanges[cQty] = [minV, maxV];
-        this.latestQuantityRanges[qty] = [minV, maxV];
-        if (cQty === 'velocity') this.latestQuantityRanges['speed'] = [minV, maxV];
+        if (logV !== undefined) patch.logScale = logV;
+        if (interpV !== undefined) patch.interpolate = interpV;
+        this.updateQuantityContourStyle(qty, patch);
+    }
 
-        this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
-        const stlNode = this.getGeometryNode();
-        if (stlNode && stlNode.type === 'STLGeometry') {
-            this.stateManager.updateNodeParametersInPlace(stlNode.id, {
-                stl_min_val: minV,
-                stl_max_val: maxV,
-                stl_auto_scale: autoV,
-                ...(logV !== undefined ? { stl_log_scale: logV } : {})
-            });
-        }
-        this.needsSlicesRebuild = true;
-        this.worker.postMessage({
-            type: 'setConfig',
-            data: {
-                minVal: minV,
-                maxVal: maxV,
-                autoScale: autoV,
-                quantityRanges: qRanges,
-                quantityAutoScales: qAutoScales,
-                quantityLogScales: qLogScales,
-                slices,
-                stlMinVal: updates.stl_min_val,
-                stlMaxVal: updates.stl_max_val,
-                stlAutoScale: updates.stl_auto_scale,
-                stlLogScale: updates.stl_log_scale,
-                obstaclesMinVal: updates.obstacles_min_val,
-                obstaclesMaxVal: updates.obstacles_max_val,
-                obstaclesAutoScale: updates.obstacles_auto_scale,
-                obstaclesLogScale: updates.obstacles_log_scale,
-                mpmParticleMinVal: updates.mpmParticleMinVal,
-                mpmParticleMaxVal: updates.mpmParticleMaxVal,
-                mpmParticleAutoScale: updates.mpmParticleAutoScale,
-                mpmParticleLogScale: updates.mpmParticleLogScale,
-                femMinVal: updates.femMinVal,
-                femMaxVal: updates.femMaxVal,
-                femAutoScale: updates.femAutoScale,
-                femLogScale: updates.femLogScale,
-                beamMinVal: updates.beamMinVal,
-                beamMaxVal: updates.beamMaxVal,
-                beamAutoScale: updates.beamAutoScale,
-                beamLogScale: updates.beamLogScale
-            }
-        });
-        this.syncControls(false);
+    public setQuantityContourLevels(qty: string, contourLevels: number, smoothContours: boolean) {
+        this.updateQuantityContourStyle(qty, { contourLevels, smoothContours });
+    }
+
+    public setQuantityInterpolate(qty: string, interpolate: boolean) {
+        this.updateQuantityContourStyle(qty, { interpolate });
+    }
+
+    public setQuantityShowColorbar(qty: string, show: boolean) {
+        this.updateQuantityContourStyle(qty, { showColorbar: show });
     }
 
     private syncToggleBtnState(btn: HTMLElement | null, checked: boolean) {
@@ -3643,12 +3443,7 @@ export class Telemetry3DViewport {
         const initLight = vpNode ? (vpNode.parameters.obstacles_lighting !== false) : true;
         const initOpacity = vpNode ? (vpNode.parameters.obstacles_opacity ?? 1.0) : 1.0;
         const initQty = vpNode ? (vpNode.parameters.obstacles_quantity || 'pressure') : 'pressure';
-        const initCmap = vpNode ? (vpNode.parameters.quantity_colormaps?.[initQty] || vpNode.parameters.obstacles_colormap || 'rainbow') : 'rainbow';
-
-        const qRanges = vpNode?.parameters.quantity_ranges || {};
-        const qtyRange = qRanges[initQty] || [101325.0, 1013250.0];
-        const initAuto = vpNode ? (vpNode.parameters.obstacles_auto_scale !== false) : true;
-        const initLog = vpNode ? (vpNode.parameters.obstacles_log_scale === true) : false;
+        const initCbShow = getQuantityStyle(vpNode?.parameters || {}, initQty).showColorbar;
 
         const tr = document.createElement('tr');
         tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
@@ -3688,6 +3483,7 @@ export class Telemetry3DViewport {
             if (vp) {
                 this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_solid: v });
                 this.worker.postMessage({ type: 'setConfig', data: { obstaclesSolid: v } });
+                this.requestColorbarUpdate();
             }
         });
         // Col 4: LINES (Obstacle surface gridlines)
@@ -3711,6 +3507,7 @@ export class Telemetry3DViewport {
         const tdQty = document.createElement('td');
         tdQty.style.padding = '3px 4px';
         const qtyPill = document.createElement('button');
+        qtyPill.id = this.getElId('viewport-obs-qty-pill');
         const qtyLabels: Record<string, string> = {
             pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
             species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
@@ -3727,23 +3524,13 @@ export class Telemetry3DViewport {
             this.showQuantityPopover(qtyPill, currentQty, 'cfd', (newQ) => {
                 const vp = this.getViewportNode();
                 if (vp) {
-                    const qCmaps = vp.parameters.quantity_colormaps || {};
-                    const newCmap = qCmaps[newQ] || 'rainbow';
-                    const qRanges = vp.parameters.quantity_ranges || {};
-                    const newRange = qRanges[newQ] || DEFAULT_QUANTITY_RANGES[newQ] || [0.0, 1.0];
-                    this.stateManager.updateNodeParametersInPlace(vp.id, {
-                        obstacles_quantity: newQ,
-                        obstacles_colormap: newCmap,
-                        obstacles_min_val: newRange[0],
-                        obstacles_max_val: newRange[1]
-                    });
+                    const merged = { ...vp.parameters, obstacles_quantity: newQ };
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_quantity: newQ });
                     this.worker.postMessage({
                         type: 'setConfig',
                         data: {
                             obstaclesQuantity: newQ,
-                            obstaclesColormap: newCmap,
-                            obstaclesMinVal: newRange[0],
-                            obstaclesMaxVal: newRange[1]
+                            quantityStyles: buildAllQuantityStylesMap(merged)
                         }
                     });
                     this.sendView3DConfig();
@@ -3754,89 +3541,24 @@ export class Telemetry3DViewport {
         tdQty.appendChild(qtyPill);
         tr.appendChild(tdQty);
 
-        // Col 7: COLOR (Colormap Popover Button + Colorbar Toggle)
-        const tdCmap = document.createElement('td');
-        tdCmap.style.padding = '3px 4px';
-        const cmapWrap = document.createElement('div');
-        cmapWrap.style.display = 'flex';
-        cmapWrap.style.gap = '3px';
-        cmapWrap.style.alignItems = 'center';
-
-        const cmapPill = document.createElement('button');
-        cmapPill.textContent = `${initCmap.charAt(0).toUpperCase() + initCmap.slice(1)} ▾`;
-        this.applyButtonStyle(cmapPill);
-        cmapPill.style.fontSize = '8.5px';
-        cmapPill.style.flex = '1';
-        cmapPill.style.padding = '2px 0';
-        cmapPill.onclick = (e) => {
-            e.stopPropagation();
-            const vp = this.getViewportNode();
-            const activeQty = vp?.parameters.obstacles_quantity || 'pressure';
-            const curCmap = vp?.parameters.quantity_colormaps?.[activeQty] || vp?.parameters.obstacles_colormap || 'rainbow';
-            this.showColormapPopover(cmapPill, curCmap, (newC) => {
-                this.setQuantityColormap(activeQty, newC);
-            });
-        };
-        cmapWrap.appendChild(cmapPill);
-
-        const initCbShow = vpNode ? (vpNode.parameters.obstacles_show_colorbar === true) : false;
+        // Col 7: BAR (Quantity Colour Bar Visibility Toggle)
+        const tdBar = document.createElement('td');
+        tdBar.style.padding = '3px 2px';
+        tdBar.style.textAlign = 'center';
         const cbToggleBtn = this.createToggleBtn('viewport-obs-cb-btn', '🎨', initCbShow, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { obstacles_show_colorbar: v });
-                this.syncControls(true);
-            }
+            const activeQty = this.getViewportNode()?.parameters.obstacles_quantity || 'pressure';
+            this.setQuantityShowColorbar(activeQty, v);
         });
-        cbToggleBtn.style.width = '20px';
-        cbToggleBtn.title = 'Toggle Color Bar for Obstacles in 3D Viewport';
-        cmapWrap.appendChild(cbToggleBtn);
+        cbToggleBtn.style.width = '22px';
+        cbToggleBtn.title = 'Show / Hide Quantity Colour Bar (configure Colormap, Scale & Range on Colour Bar)';
+        tdBar.appendChild(cbToggleBtn);
+        tr.appendChild(tdBar);
 
-        tdCmap.appendChild(cmapWrap);
-        tr.appendChild(tdCmap);
-
-        // Col 8: SCL (Auto, Log & Range Popover)
-        const tdScl = document.createElement('td');
-        tdScl.style.padding = '3px 2px';
-        const sclWrap = document.createElement('div');
-        sclWrap.style.display = 'flex';
-        sclWrap.style.gap = '2px';
-        sclWrap.appendChild(this.createToggleBtn('viewport-obs-auto-btn', 'A', initAuto, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const activeQty = vp.parameters.obstacles_quantity || 'pressure';
-                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
-                this.setQuantityRange(activeQty, curRange[0], curRange[1], v, initLog);
-            }
-        }));
-        sclWrap.appendChild(this.createToggleBtn('viewport-obs-log-btn', 'L', initLog, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const activeQty = vp.parameters.obstacles_quantity || 'pressure';
-                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
-                this.setQuantityRange(activeQty, curRange[0], curRange[1], initAuto, v);
-            }
-        }));
-
-        const cfgBtn = this.createToggleBtn('viewport-obs-cfg-btn', '⚙️', false, () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const activeQty = vp.parameters.obstacles_quantity || 'pressure';
-                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
-                const autoV = vp.parameters.obstacles_auto_scale !== false;
-                const logV = vp.parameters.obstacles_log_scale === true;
-                this.showRangePopover(cfgBtn, activeQty, curRange[0], curRange[1], autoV, logV, (minV, maxV, autoVal, logVal) => {
-                    this.setQuantityRange(activeQty, minV, maxV, autoVal, logVal);
-                });
-            }
-        });
-        sclWrap.appendChild(cfgBtn);
-        tdScl.appendChild(sclWrap);
-        tr.appendChild(tdScl);
-
-        // Col 9: OPACITY (Opacity Popover)
+        // Col 8: OPACITY (Opacity Popover)
         const tdOpac = document.createElement('td');
         tdOpac.style.padding = '3px 4px';
         const opacPill = document.createElement('button');
+        opacPill.id = this.getElId('viewport-obs-opac-pill');
         opacPill.textContent = `${Math.round(initOpacity * 100)}% ▾`;
         this.applyButtonStyle(opacPill);
         opacPill.style.fontSize = '8.5px';
@@ -3857,7 +3579,7 @@ export class Telemetry3DViewport {
         tdOpac.appendChild(opacPill);
         tr.appendChild(tdOpac);
 
-        // Col 10: Empty Delete Cell
+        // Col 9: Empty Delete Cell
         const tdDel = document.createElement('td');
         tdDel.innerHTML = '<span style="color:#444;">—</span>';
         tdDel.style.textAlign = 'center';
@@ -3874,12 +3596,7 @@ export class Telemetry3DViewport {
         const initOpacity = vpNode ? (vpNode.parameters.stl_opacity ?? 0.5) : 0.5;
         const initShowResults = vpNode ? (vpNode.parameters.stl_show_results !== false) : true;
         const initQty = vpNode ? (vpNode.parameters.stl_quantity || 'pressure') : 'pressure';
-        const initCmap = vpNode ? (vpNode.parameters.quantity_colormaps?.[initQty] || vpNode.parameters.stl_colormap || 'rainbow') : 'rainbow';
-
-        const qRanges = vpNode?.parameters.quantity_ranges || {};
-        const qtyRange = qRanges[initQty] || [101325.0, 1013250.0];
-        const initAuto = vpNode ? (vpNode.parameters.stl_auto_scale !== false) : true;
-        const initLog = vpNode ? (vpNode.parameters.stl_log_scale === true) : false;
+        const initCbShow = getQuantityStyle(vpNode?.parameters || {}, initQty).showColorbar;
 
         const tr = document.createElement('tr');
         tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
@@ -3936,6 +3653,7 @@ export class Telemetry3DViewport {
                 this.stateManager.updateNodeParametersInPlace(vp.id, { stl_show_results: v });
                 this.worker.postMessage({ type: 'setConfig', data: { stlShowResults: v } });
                 this.sendView3DConfig();
+                this.requestColorbarUpdate();
             }
         });
 
@@ -3943,6 +3661,7 @@ export class Telemetry3DViewport {
         const tdQty = document.createElement('td');
         tdQty.style.padding = '3px 4px';
         const qtyPill = document.createElement('button');
+        qtyPill.id = this.getElId('viewport-stl-qty-pill');
         const qtyLabels: Record<string, string> = {
             pressure: 'Press', density: 'Density', velocity: 'Speed', energy: 'Energy',
             species1: 'Reacted', species2: 'Unreacted', species3: 'Air',
@@ -3959,23 +3678,13 @@ export class Telemetry3DViewport {
             this.showQuantityPopover(qtyPill, currentQty, 'cfd', (newQ) => {
                 const vp = this.getViewportNode();
                 if (vp) {
-                    const qCmaps = vp.parameters.quantity_colormaps || {};
-                    const newCmap = qCmaps[newQ] || 'rainbow';
-                    const qRanges = vp.parameters.quantity_ranges || {};
-                    const newRange = qRanges[newQ] || DEFAULT_QUANTITY_RANGES[newQ] || [0.0, 1.0];
-                    this.stateManager.updateNodeParametersInPlace(vp.id, {
-                        stl_quantity: newQ,
-                        stl_colormap: newCmap,
-                        stl_min_val: newRange[0],
-                        stl_max_val: newRange[1]
-                    });
+                    const merged = { ...vp.parameters, stl_quantity: newQ };
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { stl_quantity: newQ });
                     this.worker.postMessage({
                         type: 'setConfig',
                         data: {
                             stlQuantity: newQ,
-                            stlColormap: newCmap,
-                            stlMinVal: newRange[0],
-                            stlMaxVal: newRange[1]
+                            quantityStyles: buildAllQuantityStylesMap(merged)
                         }
                     });
                     this.sendView3DConfig();
@@ -3986,89 +3695,24 @@ export class Telemetry3DViewport {
         tdQty.appendChild(qtyPill);
         tr.appendChild(tdQty);
 
-        // Col 7: COLOR (Colormap Popover Button + Colorbar Toggle)
-        const tdCmap = document.createElement('td');
-        tdCmap.style.padding = '3px 4px';
-        const cmapWrap = document.createElement('div');
-        cmapWrap.style.display = 'flex';
-        cmapWrap.style.gap = '3px';
-        cmapWrap.style.alignItems = 'center';
-
-        const cmapPill = document.createElement('button');
-        cmapPill.textContent = `${initCmap.charAt(0).toUpperCase() + initCmap.slice(1)} ▾`;
-        this.applyButtonStyle(cmapPill);
-        cmapPill.style.fontSize = '8.5px';
-        cmapPill.style.flex = '1';
-        cmapPill.style.padding = '2px 0';
-        cmapPill.onclick = (e) => {
-            e.stopPropagation();
-            const vp = this.getViewportNode();
-            const activeQty = vp?.parameters.stl_quantity || 'pressure';
-            const curCmap = vp?.parameters.quantity_colormaps?.[activeQty] || vp?.parameters.stl_colormap || 'rainbow';
-            this.showColormapPopover(cmapPill, curCmap, (newC) => {
-                this.setQuantityColormap(activeQty, newC);
-            });
-        };
-        cmapWrap.appendChild(cmapPill);
-
-        const initCbShow = vpNode ? (vpNode.parameters.stl_show_colorbar === true) : false;
+        // Col 7: BAR (Quantity Colour Bar Visibility Toggle)
+        const tdBar = document.createElement('td');
+        tdBar.style.padding = '3px 2px';
+        tdBar.style.textAlign = 'center';
         const cbToggleBtn = this.createToggleBtn('viewport-stl-cb-btn', '🎨', initCbShow, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { stl_show_colorbar: v });
-                this.syncControls(true);
-            }
+            const activeQty = this.getViewportNode()?.parameters.stl_quantity || 'pressure';
+            this.setQuantityShowColorbar(activeQty, v);
         });
-        cbToggleBtn.style.width = '20px';
-        cbToggleBtn.title = 'Toggle Color Bar for STL Mesh in 3D Viewport';
-        cmapWrap.appendChild(cbToggleBtn);
+        cbToggleBtn.style.width = '22px';
+        cbToggleBtn.title = 'Show / Hide Quantity Colour Bar (configure Colormap, Scale & Range on Colour Bar)';
+        tdBar.appendChild(cbToggleBtn);
+        tr.appendChild(tdBar);
 
-        tdCmap.appendChild(cmapWrap);
-        tr.appendChild(tdCmap);
-
-        // Col 8: SCL (Auto, Log & Range Popover)
-        const tdScl = document.createElement('td');
-        tdScl.style.padding = '3px 2px';
-        const sclWrap = document.createElement('div');
-        sclWrap.style.display = 'flex';
-        sclWrap.style.gap = '2px';
-        sclWrap.appendChild(this.createToggleBtn('viewport-stl-autoscale-btn', 'A', initAuto, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const activeQty = vp.parameters.stl_quantity || 'pressure';
-                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
-                this.setQuantityRange(activeQty, curRange[0], curRange[1], v, initLog);
-            }
-        }));
-        sclWrap.appendChild(this.createToggleBtn('viewport-stl-logscale-btn', 'L', initLog, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const activeQty = vp.parameters.stl_quantity || 'pressure';
-                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
-                this.setQuantityRange(activeQty, curRange[0], curRange[1], initAuto, v);
-            }
-        }));
-
-        const cfgBtn = this.createToggleBtn('viewport-stl-cfg-btn', '⚙️', false, () => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                const activeQty = vp.parameters.stl_quantity || 'pressure';
-                const curRange = vp.parameters.quantity_ranges?.[activeQty] || [101325.0, 1013250.0];
-                const autoV = vp.parameters.stl_auto_scale !== false;
-                const logV = vp.parameters.stl_log_scale === true;
-                this.showRangePopover(cfgBtn, activeQty, curRange[0], curRange[1], autoV, logV, (minV, maxV, autoVal, logVal) => {
-                    this.setQuantityRange(activeQty, minV, maxV, autoVal, logVal);
-                });
-            }
-        });
-        sclWrap.appendChild(cfgBtn);
-        tdScl.appendChild(sclWrap);
-        tr.appendChild(tdScl);
-
-        // Col 9: OPACITY (Opacity Popover)
+        // Col 8: OPACITY (Opacity Popover)
         const tdOpac = document.createElement('td');
         tdOpac.style.padding = '3px 4px';
         const opacPill = document.createElement('button');
+        opacPill.id = this.getElId('viewport-stl-opac-pill');
         opacPill.textContent = `${Math.round(initOpacity * 100)}% ▾`;
         this.applyButtonStyle(opacPill);
         opacPill.style.fontSize = '8.5px';
@@ -4089,7 +3733,7 @@ export class Telemetry3DViewport {
         tdOpac.appendChild(opacPill);
         tr.appendChild(tdOpac);
 
-        // Col 10: Empty Delete Cell
+        // Col 9: Empty Delete Cell
         const tdDel = document.createElement('td');
         tdDel.innerHTML = '<span style="color:#444;">—</span>';
         tdDel.style.textAlign = 'center';
@@ -4097,8 +3741,6 @@ export class Telemetry3DViewport {
 
         parent.appendChild(tr);
     }
-
-
 
     private buildChargeRow(parent: HTMLElement) {
         const vpNode = this.getViewportNode();
@@ -4160,21 +3802,15 @@ export class Telemetry3DViewport {
             }
         });
 
-        const tdQty = document.createElement('td');
-        tdQty.innerHTML = '<span style="color:#444;">—</span>';
-        tdQty.style.textAlign = 'center';
-        tr.appendChild(tdQty);
+        // Col 6, 7: QTY & BAR (Empty)
+        for (let i = 0; i < 2; i++) {
+            const tdEmpty = document.createElement('td');
+            tdEmpty.innerHTML = '<span style="color:#444;">—</span>';
+            tdEmpty.style.textAlign = 'center';
+            tr.appendChild(tdEmpty);
+        }
 
-        const tdCmap = document.createElement('td');
-        tdCmap.innerHTML = '<span style="color:#444;">—</span>';
-        tdCmap.style.textAlign = 'center';
-        tr.appendChild(tdCmap);
-
-        const tdScl = document.createElement('td');
-        tdScl.innerHTML = '<span style="color:#444;">—</span>';
-        tdScl.style.textAlign = 'center';
-        tr.appendChild(tdScl);
-
+        // Col 8: OPACITY
         const tdOpac = document.createElement('td');
         tdOpac.style.padding = '3px 4px';
         const opacPill = document.createElement('button');
@@ -4198,6 +3834,7 @@ export class Telemetry3DViewport {
         tdOpac.appendChild(opacPill);
         tr.appendChild(tdOpac);
 
+        // Col 9: Empty Delete Cell
         const tdDel = document.createElement('td');
         tdDel.innerHTML = '<span style="color:#444;">—</span>';
         tdDel.style.textAlign = 'center';
@@ -4266,21 +3903,15 @@ export class Telemetry3DViewport {
             }
         });
 
-        const tdQty = document.createElement('td');
-        tdQty.innerHTML = '<span style="color:#444;">—</span>';
-        tdQty.style.textAlign = 'center';
-        tr.appendChild(tdQty);
+        // Col 6, 7: QTY & BAR (Empty)
+        for (let i = 0; i < 2; i++) {
+            const tdEmpty = document.createElement('td');
+            tdEmpty.innerHTML = '<span style="color:#444;">—</span>';
+            tdEmpty.style.textAlign = 'center';
+            tr.appendChild(tdEmpty);
+        }
 
-        const tdCmap = document.createElement('td');
-        tdCmap.innerHTML = '<span style="color:#444;">—</span>';
-        tdCmap.style.textAlign = 'center';
-        tr.appendChild(tdCmap);
-
-        const tdScl = document.createElement('td');
-        tdScl.innerHTML = '<span style="color:#444;">—</span>';
-        tdScl.style.textAlign = 'center';
-        tr.appendChild(tdScl);
-
+        // Col 8: OPACITY
         const tdOpac = document.createElement('td');
         tdOpac.style.padding = '3px 4px';
         const opacPill = document.createElement('button');
@@ -4305,6 +3936,7 @@ export class Telemetry3DViewport {
         tdOpac.appendChild(opacPill);
         tr.appendChild(tdOpac);
 
+        // Col 9: Empty Delete Cell
         const tdDel = document.createElement('td');
         tdDel.innerHTML = '<span style="color:#444;">—</span>';
         tdDel.style.textAlign = 'center';
@@ -4373,15 +4005,15 @@ export class Telemetry3DViewport {
         tdMsh.appendChild(mshWrap);
         tr.appendChild(tdMsh);
 
-        // Col 5, 6, 7, 8: Empty
-        for (let i = 0; i < 4; i++) {
+        // Col 5, 6, 7: Empty (RES, QTY, BAR)
+        for (let i = 0; i < 3; i++) {
             const tdEmpty = document.createElement('td');
             tdEmpty.innerHTML = '<span style="color:#555;">—</span>';
             tdEmpty.style.textAlign = 'center';
             tr.appendChild(tdEmpty);
         }
 
-        // Col 9: OPACITY (Opacity Popover)
+        // Col 8: OPACITY (Opacity Popover)
         const tdOpac = document.createElement('td');
         tdOpac.style.padding = '3px 4px';
         const opacPill = document.createElement('button');
@@ -4405,7 +4037,7 @@ export class Telemetry3DViewport {
         tdOpac.appendChild(opacPill);
         tr.appendChild(tdOpac);
 
-        // Col 10: Empty Delete Cell
+        // Col 9: Empty Delete Cell
         const tdDel = document.createElement('td');
         tdDel.innerHTML = '<span style="color:#444;">—</span>';
         tdDel.style.textAlign = 'center';
@@ -4517,15 +4149,13 @@ export class Telemetry3DViewport {
         tdQty.appendChild(qtyPill);
         tr.appendChild(tdQty);
 
-        // Col 7, 8: COLOR & SCL (Empty)
-        for (let i = 0; i < 2; i++) {
-            const tdEmpty = document.createElement('td');
-            tdEmpty.innerHTML = '<span style="color:#555;">—</span>';
-            tdEmpty.style.textAlign = 'center';
-            tr.appendChild(tdEmpty);
-        }
+        // Col 7: BAR (Empty)
+        const tdEmpty = document.createElement('td');
+        tdEmpty.innerHTML = '<span style="color:#555;">—</span>';
+        tdEmpty.style.textAlign = 'center';
+        tr.appendChild(tdEmpty);
 
-        // Col 9: OPACITY (Opacity Popover)
+        // Col 8: OPACITY (Opacity Popover)
         const tdOpac = document.createElement('td');
         tdOpac.style.padding = '3px 4px';
         const opacPill = document.createElement('button');
@@ -4549,7 +4179,7 @@ export class Telemetry3DViewport {
         tdOpac.appendChild(opacPill);
         tr.appendChild(tdOpac);
 
-        // Col 10: Empty Delete Cell
+        // Col 9: Empty Delete Cell
         const tdDel = document.createElement('td');
         tdDel.innerHTML = '<span style="color:#444;">—</span>';
         tdDel.style.textAlign = 'center';
@@ -4659,7 +4289,13 @@ export class Telemetry3DViewport {
         tdAmb.appendChild(ambPill);
         tr.appendChild(tdAmb);
 
-        // Col 7: COLOR (Specular Level Popover Pill)
+        // Col 7: BAR (Empty)
+        const tdBarEmpty = document.createElement('td');
+        tdBarEmpty.innerHTML = '<span style="color:#444;">—</span>';
+        tdBarEmpty.style.textAlign = 'center';
+        tr.appendChild(tdBarEmpty);
+
+        // Col 8: OPACITY column hosts Specular Level Popover Pill
         const tdSpec = document.createElement('td');
         tdSpec.style.padding = '3px 4px';
         const specPill = document.createElement('button');
@@ -4683,13 +4319,11 @@ export class Telemetry3DViewport {
         tdSpec.appendChild(specPill);
         tr.appendChild(tdSpec);
 
-        // Col 8, 9, 10: Empty (SCL, OPAC, DELETE)
-        for (let i = 0; i < 3; i++) {
-            const tdEmpty = document.createElement('td');
-            tdEmpty.innerHTML = '<span style="color:#444;">—</span>';
-            tdEmpty.style.textAlign = 'center';
-            tr.appendChild(tdEmpty);
-        }
+        // Col 9: Empty Delete Cell
+        const tdDel = document.createElement('td');
+        tdDel.innerHTML = '<span style="color:#444;">—</span>';
+        tdDel.style.textAlign = 'center';
+        tr.appendChild(tdDel);
 
         parent.appendChild(tr);
     }
@@ -4886,27 +4520,169 @@ export class Telemetry3DViewport {
         }
     }
 
-    private createColorbarCard(spec: {
-        id: string;
-        title: string;
+    private showColorbarSettingsPopover(targetEl: HTMLElement, spec: {
         quantity: string;
         colormap: string;
         autoScale: boolean;
         logScale: boolean;
-        isLocked?: boolean;
+        contourLevels?: number;
+        smoothContours?: boolean;
+        interpolate?: boolean;
+        onToggleAuto: () => void;
+        onToggleLog: () => void;
+        onSelectColormap: (cmap: string) => void;
+        onSetContourLevels?: (levels: number) => void;
+        onToggleSmooth?: (smooth: boolean) => void;
+        onToggleInterpolate?: (interpolate: boolean) => void;
+    }) {
+        const normCurrent = normalizeColormapId(spec.colormap);
+
+        this.showPopover(targetEl, (popover) => {
+            popover.style.minWidth = '165px';
+
+            const togglesGrid = document.createElement('div');
+            togglesGrid.style.display = 'grid';
+            togglesGrid.style.gridTemplateColumns = '1fr 1fr';
+            togglesGrid.style.gap = '4px';
+            togglesGrid.style.marginBottom = '6px';
+            togglesGrid.style.paddingBottom = '6px';
+            togglesGrid.style.borderBottom = '1px solid rgba(255,255,255,0.1)';
+
+            const makePill = (label: string, active: boolean, activeColor: string, onClick: () => void) => {
+                const btn = document.createElement('button');
+                btn.textContent = label;
+                this.applyButtonStyle(btn);
+                btn.style.fontSize = '8px';
+                btn.style.fontWeight = '700';
+                btn.style.padding = '3px 4px';
+                btn.style.background = active ? `${activeColor}33` : 'rgba(255,255,255,0.06)';
+                btn.style.borderColor = active ? activeColor : 'rgba(255,255,255,0.15)';
+                btn.style.color = active ? activeColor : '#cbd5e1';
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    onClick();
+                    this.closePopover();
+                };
+                return btn;
+            };
+
+            togglesGrid.appendChild(makePill(
+                spec.autoScale ? 'Range: AUTO' : 'Range: MAN',
+                spec.autoScale,
+                spec.autoScale ? '#38bdf8' : '#fbbf24',
+                () => spec.onToggleAuto()
+            ));
+
+            togglesGrid.appendChild(makePill(
+                spec.logScale ? 'Scale: LOG' : 'Scale: LIN',
+                spec.logScale,
+                '#c084fc',
+                () => spec.onToggleLog()
+            ));
+
+            if (spec.onToggleInterpolate) {
+                const isSmoothInterp = spec.interpolate !== false;
+                togglesGrid.appendChild(makePill(
+                    isSmoothInterp ? 'Shade: SMOOTH' : 'Shade: CELL',
+                    isSmoothInterp,
+                    isSmoothInterp ? '#38bdf8' : '#fbbf24',
+                    () => spec.onToggleInterpolate!(!isSmoothInterp)
+                ));
+            }
+
+            if (spec.onSetContourLevels) {
+                const isSmooth = spec.smoothContours !== undefined
+                    ? Boolean(spec.smoothContours)
+                    : (spec.contourLevels === undefined || spec.contourLevels <= 1);
+                const curLevels = spec.contourLevels ?? 0;
+                togglesGrid.appendChild(makePill(
+                    isSmooth ? 'Bands: CONT' : `Bands: ${curLevels}`,
+                    !isSmooth,
+                    '#38bdf8',
+                    () => {
+                        const levelsCycle = CONTOUR_BAND_PRESETS as readonly number[];
+                        const curIdx = isSmooth ? 0 : levelsCycle.indexOf(curLevels);
+                        const nextLevels = levelsCycle[(curIdx + 1) % levelsCycle.length];
+                        if (nextLevels <= 1) {
+                            spec.onToggleSmooth?.(true);
+                            spec.onSetContourLevels?.(0);
+                        } else {
+                            spec.onToggleSmooth?.(false);
+                            spec.onSetContourLevels?.(nextLevels);
+                        }
+                    }
+                ));
+            }
+
+            popover.appendChild(togglesGrid);
+
+            const title = document.createElement('div');
+            title.textContent = 'Colormap';
+            title.style.fontWeight = 'bold';
+            title.style.color = '#00adff';
+            title.style.marginBottom = '4px';
+            title.style.fontSize = '8.5px';
+            title.style.textTransform = 'uppercase';
+            popover.appendChild(title);
+
+            COLORMAP_OPTIONS.forEach(c => {
+                const item = document.createElement('div');
+                item.style.display = 'flex';
+                item.style.alignItems = 'center';
+                item.style.justifyContent = 'space-between';
+                item.style.gap = '8px';
+                item.style.padding = '3px 6px';
+                item.style.borderRadius = '3px';
+                item.style.cursor = 'pointer';
+                item.style.background = c.id === normCurrent ? '#007acc' : 'transparent';
+                item.style.color = c.id === normCurrent ? '#fff' : '#ccc';
+
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = c.label;
+                item.appendChild(nameSpan);
+
+                const swatch = document.createElement('div');
+                swatch.style.width = '40px';
+                swatch.style.height = '10px';
+                swatch.style.borderRadius = '2px';
+                swatch.style.background = buildColormapCSSGradient(c.id, 'to right', 0, true);
+                swatch.style.border = '1px solid rgba(255,255,255,0.3)';
+                item.appendChild(swatch);
+
+                item.onmouseenter = () => { if (c.id !== normCurrent) item.style.background = 'rgba(255,255,255,0.1)'; };
+                item.onmouseleave = () => { if (c.id !== normCurrent) item.style.background = 'transparent'; };
+                item.onclick = (e) => {
+                    e.stopPropagation();
+                    spec.onSelectColormap(c.id);
+                    this.closePopover();
+                };
+                popover.appendChild(item);
+            });
+        });
+    }
+
+    private createColorbarCard(spec: {
+        id: string;
+        title: string;
+        tooltip?: string;
+        quantity: string;
+        colormap: string;
+        autoScale: boolean;
+        logScale: boolean;
         minVal: number;
         maxVal: number;
         contourLevels?: number;
         smoothContours?: boolean;
+        interpolate?: boolean;
         onToggleOff: () => void;
         onToggleAuto: () => void;
         onToggleLog: () => void;
-        onToggleLock?: () => void;
-        onSelectColormap: (anchorEl: HTMLElement) => void;
+        onSelectColormap: (cmap: string) => void;
         onSetMinMax: (min: number, max: number) => void;
         onSelectQuantity: (anchorEl: HTMLElement) => void;
         onSetContourLevels?: (levels: number) => void;
         onToggleSmooth?: (smooth: boolean) => void;
+        onToggleInterpolate?: (interpolate: boolean) => void;
     }): HTMLElement {
         const card = document.createElement('div');
         card.id = this.getElId(`viewport-colorbar-card-${spec.id}`);
@@ -4918,7 +4694,7 @@ export class Telemetry3DViewport {
         card.style.padding = '5px 6px';
         card.style.display = 'flex';
         card.style.flexDirection = 'column';
-        card.style.gap = '3px';
+        card.style.gap = '4px';
         card.style.color = '#e2e8f0';
         card.style.fontFamily = 'system-ui, -apple-system, sans-serif';
         card.style.fontSize = '9px';
@@ -4933,7 +4709,7 @@ export class Telemetry3DViewport {
         topRow.style.display = 'flex';
         topRow.style.alignItems = 'center';
         topRow.style.justifyContent = 'space-between';
-        topRow.style.gap = '6px';
+        topRow.style.gap = '5px';
         topRow.style.cursor = 'grab';
         topRow.title = 'Drag to reposition card';
 
@@ -4956,10 +4732,10 @@ export class Telemetry3DViewport {
         titleSpan.style.color = '#38bdf8';
         titleSpan.style.cursor = 'pointer';
         titleSpan.style.fontSize = '8.5px';
-        titleSpan.style.letterSpacing = '0.3px';
+        titleSpan.style.letterSpacing = '0.2px';
         titleSpan.style.whiteSpace = 'nowrap';
         titleSpan.textContent = spec.title;
-        titleSpan.title = `${spec.title} (Click to change quantity)`;
+        titleSpan.title = spec.tooltip || `${spec.title} (Click to change quantity)`;
         titleSpan.onclick = (e) => {
             e.stopPropagation();
             spec.onSelectQuantity(titleSpan);
@@ -5014,168 +4790,12 @@ export class Telemetry3DViewport {
 
         card.appendChild(topRow);
 
-        // 2. Badges Row (Auto, Log, Colormap, Lock, Levels)
-        const badgesRow = document.createElement('div');
-        badgesRow.style.display = 'flex';
-        badgesRow.style.alignItems = 'center';
-        badgesRow.style.gap = '3px';
-        badgesRow.style.marginTop = '1px';
-
-        // Auto/Manual badge
-        const autoBadge = document.createElement('span');
-        autoBadge.className = 'viewport-colorbar-auto-badge';
-        autoBadge.style.fontSize = '7.5px';
-        autoBadge.style.fontWeight = '700';
-        autoBadge.style.padding = '1px 3px';
-        autoBadge.style.borderRadius = '2px';
-        autoBadge.style.cursor = 'pointer';
-        autoBadge.style.lineHeight = '1.1';
-        autoBadge.style.minWidth = '24px';
-        autoBadge.style.textAlign = 'center';
-        autoBadge.style.display = 'inline-block';
-        autoBadge.style.boxSizing = 'border-box';
-        autoBadge.textContent = spec.autoScale ? 'AUTO' : 'MAN';
-        autoBadge.style.background = spec.autoScale ? 'rgba(56, 189, 248, 0.2)' : 'rgba(245, 158, 11, 0.2)';
-        autoBadge.style.color = spec.autoScale ? '#38bdf8' : '#fbbf24';
-        autoBadge.style.border = spec.autoScale ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid rgba(245, 158, 11, 0.35)';
-        autoBadge.title = 'Click to toggle Auto / Manual range';
-        autoBadge.onclick = (e) => {
-            e.stopPropagation();
-            spec.onToggleAuto();
-        };
-        badgesRow.appendChild(autoBadge);
-
-        // Log badge
-        const logBadge = document.createElement('span');
-        logBadge.className = 'viewport-colorbar-log-badge';
-        logBadge.style.fontSize = '7.5px';
-        logBadge.style.fontWeight = '700';
-        logBadge.style.padding = '1px 3px';
-        logBadge.style.borderRadius = '2px';
-        logBadge.style.cursor = 'pointer';
-        logBadge.style.lineHeight = '1.1';
-        logBadge.style.minWidth = '24px';
-        logBadge.style.textAlign = 'center';
-        logBadge.style.display = 'inline-block';
-        logBadge.style.boxSizing = 'border-box';
-        logBadge.textContent = spec.logScale ? 'LOG' : 'LIN';
-        logBadge.style.background = spec.logScale ? 'rgba(168, 85, 247, 0.2)' : 'rgba(255, 255, 255, 0.08)';
-        logBadge.style.color = spec.logScale ? '#c084fc' : '#94a3b8';
-        logBadge.style.border = spec.logScale ? '1px solid rgba(168, 85, 247, 0.35)' : '1px solid rgba(255, 255, 255, 0.15)';
-        logBadge.title = 'Click to toggle Linear / Logarithmic scale';
-        logBadge.onclick = (e) => {
-            e.stopPropagation();
-            spec.onToggleLog();
-        };
-        badgesRow.appendChild(logBadge);
-
-        // Colormap badge
-        const cmapBadge = document.createElement('span');
-        cmapBadge.className = 'viewport-colorbar-cmap-badge';
-        cmapBadge.style.fontSize = '7.5px';
-        cmapBadge.style.fontWeight = '700';
-        cmapBadge.style.padding = '1px 3px';
-        cmapBadge.style.borderRadius = '2px';
-        cmapBadge.style.cursor = 'pointer';
-        cmapBadge.style.lineHeight = '1.1';
-        cmapBadge.style.background = 'rgba(255, 255, 255, 0.08)';
-        cmapBadge.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-        cmapBadge.style.color = '#f1f5f9';
-        cmapBadge.style.whiteSpace = 'nowrap';
-        cmapBadge.textContent = spec.colormap.toUpperCase();
-        cmapBadge.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
-        cmapBadge.onclick = (e) => {
-            e.stopPropagation();
-            spec.onSelectColormap(cmapBadge);
-        };
-        badgesRow.appendChild(cmapBadge);
-
-        // Contour Levels badge
-        if (spec.contourLevels !== undefined || spec.onSetContourLevels) {
-            const levelsBadge = document.createElement('span');
-            levelsBadge.className = 'viewport-colorbar-levels-badge';
-            levelsBadge.style.fontSize = '7.5px';
-            levelsBadge.style.fontWeight = '700';
-            levelsBadge.style.padding = '1px 3px';
-            levelsBadge.style.borderRadius = '2px';
-            levelsBadge.style.cursor = 'pointer';
-            levelsBadge.style.lineHeight = '1.1';
-            levelsBadge.style.minWidth = '24px';
-            levelsBadge.style.textAlign = 'center';
-            levelsBadge.style.display = 'inline-block';
-            levelsBadge.style.boxSizing = 'border-box';
-            const isSmooth = spec.smoothContours !== undefined
-                ? Boolean(spec.smoothContours)
-                : (spec.contourLevels === undefined || spec.contourLevels <= 1);
-            const curLevels = spec.contourLevels ?? 0;
-            levelsBadge.textContent = isSmooth ? 'SMOOTH' : `${curLevels} BANDS`;
-            levelsBadge.style.background = isSmooth ? 'rgba(255, 255, 255, 0.08)' : 'rgba(56, 189, 248, 0.2)';
-            levelsBadge.style.color = isSmooth ? '#94a3b8' : '#38bdf8';
-            levelsBadge.style.border = isSmooth ? '1px solid rgba(255, 255, 255, 0.15)' : '1px solid rgba(56, 189, 248, 0.35)';
-            levelsBadge.title = isSmooth
-                ? 'Smooth (Continuous Gradient). Left-click to select banded levels, right-click to toggle.'
-                : `${curLevels} Discrete Contour Bands. Left-click to cycle levels, right-click for smooth.`;
-            levelsBadge.onclick = (e) => {
-                e.stopPropagation();
-                const levelsCycle = [0, 5, 8, 10, 12, 16, 20, 24, 32];
-                const curIdx = isSmooth ? 0 : levelsCycle.indexOf(curLevels);
-                const nextLevels = levelsCycle[(curIdx + 1) % levelsCycle.length];
-                if (nextLevels <= 1) {
-                    spec.onToggleSmooth?.(true);
-                    spec.onSetContourLevels?.(0);
-                } else {
-                    spec.onToggleSmooth?.(false);
-                    spec.onSetContourLevels?.(nextLevels);
-                }
-            };
-            levelsBadge.oncontextmenu = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const newSmooth = !isSmooth;
-                spec.onToggleSmooth?.(newSmooth);
-                if (newSmooth) {
-                    spec.onSetContourLevels?.(0);
-                } else if (curLevels <= 1) {
-                    spec.onSetContourLevels?.(10);
-                }
-            };
-            badgesRow.appendChild(levelsBadge);
-        }
-
-        // Lock / Unified Range badge
-        const lockBadge = document.createElement('span');
-        lockBadge.className = 'viewport-colorbar-lock-badge';
-        lockBadge.style.fontSize = '7.5px';
-        lockBadge.style.fontWeight = '700';
-        lockBadge.style.padding = '1px 3px';
-        lockBadge.style.borderRadius = '2px';
-        lockBadge.style.cursor = 'pointer';
-        lockBadge.style.lineHeight = '1.1';
-        lockBadge.style.minWidth = '24px';
-        lockBadge.style.textAlign = 'center';
-        lockBadge.style.display = (spec.onToggleLock && spec.isLocked !== undefined) ? 'inline-block' : 'none';
-        lockBadge.style.boxSizing = 'border-box';
-        lockBadge.textContent = spec.isLocked ? '🔒 UNIFIED' : '🔓 INDEP';
-        lockBadge.style.background = spec.isLocked ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)';
-        lockBadge.style.color = spec.isLocked ? '#34d399' : '#f87171';
-        lockBadge.style.border = spec.isLocked ? '1px solid rgba(52, 211, 153, 0.35)' : '1px solid rgba(239, 68, 68, 0.35)';
-        lockBadge.title = spec.isLocked
-            ? 'Unified Field Range: ALL slices, CAD models, and obstacles displaying this quantity share the same range. Click to unlock.'
-            : 'Independent Range: This object uses an independent min/max range. Click to lock to unified range.';
-        lockBadge.onclick = (e) => {
-            e.stopPropagation();
-            spec.onToggleLock?.();
-        };
-        badgesRow.appendChild(lockBadge);
-        card.appendChild(badgesRow);
-
-        // 3. Main Body (Gradient Bar + Ticks)
+        // 2. Main Body (Gradient Bar + Ticks)
         const bodyRow = document.createElement('div');
         bodyRow.style.display = 'flex';
         bodyRow.style.alignItems = 'stretch';
         bodyRow.style.gap = '4px';
 
-        // Gradient Bar using exact colormap defined for this object!
         const gradBar = document.createElement('div');
         gradBar.className = 'viewport-colorbar-grad-bar';
         gradBar.style.width = '10px';
@@ -5184,12 +4804,18 @@ export class Telemetry3DViewport {
         gradBar.style.border = '1px solid rgba(255, 255, 255, 0.2)';
         gradBar.style.boxShadow = 'inset 0 0 3px rgba(0,0,0,0.5)';
         gradBar.style.cursor = 'pointer';
-        const effectiveLevels = (spec.smoothContours !== false && (spec.contourLevels === undefined || spec.contourLevels <= 1)) ? 0 : (spec.contourLevels ?? 0);
-        gradBar.style.background = this.getColormapCssGradient(spec.colormap, 'to top', effectiveLevels);
-        gradBar.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
+        gradBar.style.background = buildColormapCSSGradient(
+            spec.colormap,
+            'to top',
+            spec.contourLevels ?? 0,
+            spec.smoothContours !== false
+        );
+        const bandsLabel = (spec.smoothContours === false && (spec.contourLevels ?? 0) > 1) ? `${spec.contourLevels} Bands` : 'Continuous';
+        const interpLabel = spec.interpolate === false ? 'Cell' : 'Smooth';
+        gradBar.title = `Colormap: ${getColormapLabel(spec.colormap)} | ${spec.autoScale ? 'Auto' : 'Manual'} | ${spec.logScale ? 'Log' : 'Linear'} | ${bandsLabel} | ${interpLabel} (Click to configure)`;
         gradBar.onclick = (e) => {
             e.stopPropagation();
-            spec.onSelectColormap(gradBar);
+            this.showColorbarSettingsPopover(gradBar, spec);
         };
         bodyRow.appendChild(gradBar);
 
@@ -5213,29 +4839,30 @@ export class Telemetry3DViewport {
     private updateColorbarCard(card: HTMLElement, spec: {
         id: string;
         title: string;
+        tooltip?: string;
         quantity: string;
         colormap: string;
         autoScale: boolean;
         logScale: boolean;
-        isLocked?: boolean;
         minVal: number;
         maxVal: number;
         contourLevels?: number;
         smoothContours?: boolean;
+        interpolate?: boolean;
         onToggleOff: () => void;
         onToggleAuto: () => void;
         onToggleLog: () => void;
-        onToggleLock?: () => void;
-        onSelectColormap: (anchorEl: HTMLElement) => void;
+        onSelectColormap: (cmap: string) => void;
         onSetMinMax: (min: number, max: number) => void;
         onSelectQuantity: (anchorEl: HTMLElement) => void;
         onSetContourLevels?: (levels: number) => void;
         onToggleSmooth?: (smooth: boolean) => void;
+        onToggleInterpolate?: (interpolate: boolean) => void;
     }) {
         const titleSpan = card.querySelector('.viewport-colorbar-title') as HTMLElement;
         if (titleSpan) {
             titleSpan.textContent = spec.title;
-            titleSpan.title = `${spec.title} (Click to change quantity)`;
+            titleSpan.title = spec.tooltip || `${spec.title} (Click to change quantity)`;
             titleSpan.onclick = (e) => {
                 e.stopPropagation();
                 spec.onSelectQuantity(titleSpan);
@@ -5250,109 +4877,25 @@ export class Telemetry3DViewport {
             };
         }
 
-        const autoBadge = card.querySelector('.viewport-colorbar-auto-badge') as HTMLElement;
-        if (autoBadge) {
-            const expectedText = spec.autoScale ? 'AUTO' : 'MAN';
-            autoBadge.textContent = expectedText;
-            autoBadge.style.background = spec.autoScale ? 'rgba(0, 173, 255, 0.2)' : 'rgba(245, 158, 11, 0.2)';
-            autoBadge.style.color = spec.autoScale ? '#38bdf8' : '#fbbf24';
-            autoBadge.style.border = spec.autoScale ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid rgba(245, 158, 11, 0.35)';
-            autoBadge.onclick = (e) => {
-                e.stopPropagation();
-                spec.onToggleAuto();
-            };
-        }
-
-        const logBadge = card.querySelector('.viewport-colorbar-log-badge') as HTMLElement;
-        if (logBadge) {
-            const expectedText = spec.logScale ? 'LOG' : 'LIN';
-            logBadge.textContent = expectedText;
-            logBadge.style.background = spec.logScale ? 'rgba(168, 85, 247, 0.2)' : 'rgba(255, 255, 255, 0.08)';
-            logBadge.style.color = spec.logScale ? '#c084fc' : '#94a3b8';
-            logBadge.style.border = spec.logScale ? '1px solid rgba(168, 85, 247, 0.35)' : '1px solid rgba(255, 255, 255, 0.15)';
-            logBadge.onclick = (e) => {
-                e.stopPropagation();
-                spec.onToggleLog();
-            };
-        }
-
-        const cmapBadge = card.querySelector('.viewport-colorbar-cmap-badge') as HTMLElement;
-        if (cmapBadge) {
-            cmapBadge.textContent = spec.colormap.toUpperCase();
-            cmapBadge.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
-            cmapBadge.onclick = (e) => {
-                e.stopPropagation();
-                spec.onSelectColormap(cmapBadge);
-            };
-        }
-
-        const levelsBadge = card.querySelector('.viewport-colorbar-levels-badge') as HTMLElement;
-        if (levelsBadge && (spec.contourLevels !== undefined || spec.onSetContourLevels)) {
-            const isSmooth = spec.smoothContours !== undefined
-                ? Boolean(spec.smoothContours)
-                : (spec.contourLevels === undefined || spec.contourLevels <= 1);
-            const curLevels = spec.contourLevels ?? 0;
-            levelsBadge.textContent = isSmooth ? 'SMOOTH' : `${curLevels} BANDS`;
-            levelsBadge.style.background = isSmooth ? 'rgba(255, 255, 255, 0.08)' : 'rgba(56, 189, 248, 0.2)';
-            levelsBadge.style.color = isSmooth ? '#94a3b8' : '#38bdf8';
-            levelsBadge.style.border = isSmooth ? '1px solid rgba(255, 255, 255, 0.15)' : '1px solid rgba(56, 189, 248, 0.35)';
-            levelsBadge.title = isSmooth
-                ? 'Smooth (Continuous Gradient). Left-click to select banded levels, right-click to toggle.'
-                : `${curLevels} Discrete Contour Bands. Left-click to cycle levels, right-click for smooth.`;
-            levelsBadge.onclick = (e) => {
-                e.stopPropagation();
-                const levelsCycle = [0, 5, 8, 10, 12, 16, 20, 24, 32];
-                const curIdx = isSmooth ? 0 : levelsCycle.indexOf(curLevels);
-                const nextLevels = levelsCycle[(curIdx + 1) % levelsCycle.length];
-                if (nextLevels <= 1) {
-                    spec.onToggleSmooth?.(true);
-                    spec.onSetContourLevels?.(0);
-                } else {
-                    spec.onToggleSmooth?.(false);
-                    spec.onSetContourLevels?.(nextLevels);
-                }
-            };
-            levelsBadge.oncontextmenu = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const newSmooth = !isSmooth;
-                spec.onToggleSmooth?.(newSmooth);
-                if (newSmooth) {
-                    spec.onSetContourLevels?.(0);
-                } else if (curLevels <= 1) {
-                    spec.onSetContourLevels?.(10);
-                }
-            };
-        }
-
-        const lockBadge = card.querySelector('.viewport-colorbar-lock-badge') as HTMLElement;
-        if (lockBadge) {
-            lockBadge.style.display = (spec.onToggleLock && spec.isLocked !== undefined) ? 'inline-block' : 'none';
-            const expectedText = spec.isLocked ? '🔒 UNIFIED' : '🔓 INDEP';
-            lockBadge.textContent = expectedText;
-            lockBadge.style.background = spec.isLocked ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)';
-            lockBadge.style.color = spec.isLocked ? '#34d399' : '#f87171';
-            lockBadge.style.border = spec.isLocked ? '1px solid rgba(52, 211, 153, 0.35)' : '1px solid rgba(239, 68, 68, 0.35)';
-            lockBadge.onclick = (e) => {
-                e.stopPropagation();
-                spec.onToggleLock?.();
-            };
-        }
-
         const gradBar = card.querySelector('.viewport-colorbar-grad-bar') as HTMLElement;
         if (gradBar) {
-            const effectiveLevels = (spec.smoothContours !== false && (spec.contourLevels === undefined || spec.contourLevels <= 1)) ? 0 : (spec.contourLevels ?? 0);
-            const expectedGrad = this.getColormapCssGradient(spec.colormap, 'to top', effectiveLevels);
-            gradBar.style.background = expectedGrad;
-            gradBar.title = `Color Scheme: ${spec.colormap.toUpperCase()} (Click to change)`;
+            gradBar.style.background = buildColormapCSSGradient(
+                spec.colormap,
+                'to top',
+                spec.contourLevels ?? 0,
+                spec.smoothContours !== false
+            );
+            const bandsLabel = (spec.smoothContours === false && (spec.contourLevels ?? 0) > 1) ? `${spec.contourLevels} Bands` : 'Continuous';
+            const interpLabel = spec.interpolate === false ? 'Cell' : 'Smooth';
+            gradBar.title = `Colormap: ${getColormapLabel(spec.colormap)} | ${spec.autoScale ? 'Auto' : 'Manual'} | ${spec.logScale ? 'Log' : 'Linear'} | ${bandsLabel} | ${interpLabel} (Click to configure)`;
             gradBar.onclick = (e) => {
                 e.stopPropagation();
-                spec.onSelectColormap(gradBar);
+                this.showColorbarSettingsPopover(gradBar, spec);
             };
         }
 
         const ticksCol = card.querySelector('.viewport-colorbar-ticks-col') as HTMLElement;
-        const isMaterials = spec.colormap === 'materials' || spec.colormap === 'material' || spec.colormap === 'phase' || spec.quantity === 'materials' || spec.quantity === 'material' || spec.quantity === 'phase';
+        const isMaterials = normalizeColormapId(spec.colormap) === 'materials' || spec.quantity === 'materials' || spec.quantity === 'material' || spec.quantity === 'phase';
         if (ticksCol) {
             const wasMaterials = ticksCol.dataset.isMaterials === 'true';
             if (wasMaterials !== isMaterials) {
@@ -5497,937 +5040,260 @@ export class Telemetry3DViewport {
             momentOrForce: 'Force/Mom'
         };
 
-        const formatCbTitle = (source: string, qty: string) => {
+        const formatUnifiedCbTitle = (qty: string) => {
             const cQ = canonicalizeQuantity(qty);
             const label = qtyDisplayMap[cQ] || qtyDisplayMap[qty] || qty;
             const unit = unitMap[cQ] || unitMap[qty] ? ` (${unitMap[cQ] || unitMap[qty]})` : '';
-            return `${source}: ${label}${unit}`;
+            return `${label}${unit}`;
         };
+
+        interface QtyGroup {
+            qty: string;
+            rawQty: string;
+            domain: 'cfd' | 'mpm' | 'fem' | 'beam';
+            sources: Array<{ type: 'slice' | 'obstacles' | 'stl' | 'mpm' | 'fem' | 'beam'; sliceIdx?: number; label: string }>;
+            style: QuantityContourStyle;
+            hasEmpiricalRange: boolean;
+            empiricalMin: number;
+            empiricalMax: number;
+        }
+
+        const groupsByQty = new Map<string, QtyGroup>();
+
+        const addSourceToGroup = (
+            rawQty: string,
+            domain: 'cfd' | 'mpm' | 'fem' | 'beam',
+            source: { type: 'slice' | 'obstacles' | 'stl' | 'mpm' | 'fem' | 'beam'; sliceIdx?: number; label: string },
+            empiricalRange?: { min: number; max: number } | null
+        ) => {
+            const qty = canonicalizeQuantity(rawQty);
+            let grp = groupsByQty.get(qty);
+            if (!grp) {
+                grp = {
+                    qty,
+                    rawQty,
+                    domain,
+                    sources: [],
+                    style: getQuantityStyle(params, qty),
+                    hasEmpiricalRange: false,
+                    empiricalMin: Infinity,
+                    empiricalMax: -Infinity
+                };
+                groupsByQty.set(qty, grp);
+            }
+            grp.sources.push(source);
+            if (empiricalRange && isFinite(empiricalRange.min) && isFinite(empiricalRange.max) && empiricalRange.max > empiricalRange.min) {
+                grp.hasEmpiricalRange = true;
+                if (empiricalRange.min < grp.empiricalMin) grp.empiricalMin = empiricalRange.min;
+                if (empiricalRange.max > grp.empiricalMax) grp.empiricalMax = empiricalRange.max;
+            }
+        };
+
+        const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
+        const modelNodes = activeModel?.nodes || [];
+        const hasCFD = modelNodes.some((n: any) =>
+            ['CFDSolver3D', 'CFDSolver2D', 'MarineHarbourDomain'].includes(n.type) ||
+            isDomainMesh3DNode(n.type) ||
+            n.type === 'DomainMesh'
+        );
+        const hasObstacles = modelNodes.some((n: any) =>
+            ['ObstacleDomain3D', 'CSGObstacle3D', 'ObstacleBox3D', 'ObstacleCylinder3D', 'ObstacleSphere3D', 'Obstacle3D', 'ImmersedObstacle', 'Obstacle'].includes(n.type) &&
+            n.parameters?.visible !== false && !n.parameters?.hidden
+        ) || Boolean(this.latestObstaclesRange);
+        const hasSTL = this.getAllSTLGeometryNodes(activeModel).some(e => e.transform?.visible !== false) || Boolean(this.latestSTLRange);
+        const hasMPM = Boolean(
+            modelNodes.some((n: any) => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || (n.type === 'MarineHarbourDomain' && isMarineHarbourMPMActive(n))) ||
+            this.latestMPMRange
+        );
+        const discoveredFEM = this.getDiscoveredFEMParts();
+        const hasSolidFEM = discoveredFEM.some(p => !p.isLine && p.visible !== false) || Boolean(this.latestFEMRange);
+        const hasBeamFEM = discoveredFEM.some(p => p.isLine && p.visible !== false) || Boolean(this.latestBeamRange);
+
+        // 1. Visible Slices
+        const slices = params.slices || [];
+        if (params.show_slices !== false && (hasCFD || slices.length > 0)) {
+            slices.forEach((slice: any, idx: number) => {
+                if (slice.enabled !== false) {
+                    const rawQty = slice.quantities?.[0] || 'pressure';
+                    const emp = (this.latestSliceRanges && this.latestSliceRanges[idx]) ? this.latestSliceRanges[idx] : this.latestEmpiricalRange;
+                    addSourceToGroup(rawQty, 'cfd', { type: 'slice', sliceIdx: idx, label: `Slice #${idx + 1}` }, emp);
+                }
+            });
+        }
+
+        // 2. Visible Obstacles
+        if (hasObstacles && params.show_obstacles !== false && params.obstacles_solid !== false) {
+            const rawQty = params.obstacles_quantity || 'pressure';
+            addSourceToGroup(rawQty, 'cfd', { type: 'obstacles', label: 'Obstacles' }, this.latestObstaclesRange);
+        }
+
+        // 3. Visible STL Mesh Results
+        if (hasSTL && params.show_stl !== false && params.stl_show_results !== false) {
+            const rawQty = params.stl_quantity || 'pressure';
+            addSourceToGroup(rawQty, 'cfd', { type: 'stl', label: 'STL' }, this.latestSTLRange);
+        }
+
+        // 4. Visible MPM Particles
+        if (hasMPM && params.showMPMParticles !== false) {
+            const rawQty = params.mpmParticleQuantity || 'vonMises';
+            addSourceToGroup(rawQty, 'mpm', { type: 'mpm', label: 'MPM' }, this.latestMPMRange);
+        }
+
+        // 5. Visible Solid FEM Mesh Results
+        if (hasSolidFEM && params.showFEMMesh !== false && params.femResults !== false) {
+            const rawQty = params.femQuantity || 'vonMises';
+            addSourceToGroup(rawQty, 'fem', { type: 'fem', label: 'FEM' }, this.latestFEMRange);
+        }
+
+        // 6. Visible Beams / 1D Elements
+        if (hasBeamFEM && params.showBeams !== false && params.showRebar !== false && params.femResults !== false) {
+            const rawQty = params.beamQuantity || 'plasticStrain';
+            addSourceToGroup(rawQty, 'beam', { type: 'beam', label: 'Beams (1D)' }, this.latestBeamRange);
+        }
 
         const specs: Array<{
             id: string;
             title: string;
+            tooltip: string;
             quantity: string;
             colormap: string;
             autoScale: boolean;
             logScale: boolean;
-            isLocked: boolean;
             minVal: number;
             maxVal: number;
             contourLevels?: number;
             smoothContours?: boolean;
+            interpolate?: boolean;
             onToggleOff: () => void;
             onToggleAuto: () => void;
             onToggleLog: () => void;
-            onToggleLock?: (() => void) | undefined;
-            onSelectColormap: (anchorEl: HTMLElement) => void;
+            onSelectColormap: (cmap: string) => void;
             onSetMinMax: (min: number, max: number) => void;
             onSelectQuantity: (anchorEl: HTMLElement) => void;
             onSetContourLevels?: (levels: number) => void;
             onToggleSmooth?: (smooth: boolean) => void;
+            onToggleInterpolate?: (interpolate: boolean) => void;
         }> = [];
 
-        const isGloballyLocked = params.lock_quantity_ranges !== false;
+        groupsByQty.forEach((grp) => {
+            const qty = grp.qty;
+            const style = grp.style;
+            if (style.showColorbar === false) return;
 
-        const toggleGlobalLock = (seedQty?: string, seedSpec?: { colormap: string, logScale: boolean, autoScale: boolean, minVal: number, maxVal: number }) => {
-            const newLock = !isGloballyLocked;
-            if (newLock && seedQty && seedSpec) {
-                const cQ = canonicalizeQuantity(seedQty);
-                this.setQuantityColormap(cQ, seedSpec.colormap);
-                this.setQuantityLogScale(cQ, seedSpec.logScale);
-                this.setQuantityAutoScale(cQ, seedSpec.autoScale);
-                this.setQuantityRange(cQ, seedSpec.minVal, seedSpec.maxVal, seedSpec.autoScale, seedSpec.logScale);
-            }
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { lock_quantity_ranges: newLock });
-            this.worker.postMessage({ type: 'setConfig', data: { lockQuantityRanges: newLock } });
-            this.syncControls(false);
-        };
-
-        // 1. Slices
-        const slices = params.slices || [];
-        slices.forEach((slice: any, idx: number) => {
-            if (slice.show_colorbar === true && slice.enabled !== false) {
-                const rawQty = slice.quantities?.[0] || 'pressure';
-                const qty = canonicalizeQuantity(rawQty);
-                const sliceIsLocked = (params.lock_quantity_ranges !== false) && (slice.lock_quantity_range !== false);
-                const colormap = (sliceIsLocked ? (params.quantity_colormaps?.[qty] || params.quantity_colormaps?.[rawQty]) : undefined) || slice.colormap || 'rainbow';
-                const autoScale = (sliceIsLocked ? (params.quantity_auto_scales?.[qty] ?? params.quantity_auto_scales?.[rawQty]) : undefined) ?? (slice.auto_scale !== false);
-                const logScale = (sliceIsLocked ? (params.quantity_log_scales?.[qty] ?? params.quantity_log_scales?.[rawQty]) : undefined) ?? (slice.log_scale === true);
-                const defaultSliceRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
-                let minVal = slice.min_val ?? defaultSliceRange[0];
-                let maxVal = slice.max_val ?? defaultSliceRange[1];
-                if (autoScale && this.latestSliceRanges && this.latestSliceRanges[idx]) {
-                    minVal = this.latestSliceRanges[idx].min;
-                    maxVal = this.latestSliceRanges[idx].max;
-                } else if (autoScale && this.latestEmpiricalRange) {
-                    const rangeSpan = this.latestEmpiricalRange.max - this.latestEmpiricalRange.min;
-                    if (rangeSpan > Math.max(1e-4 * Math.abs(this.latestEmpiricalRange.max), 1e-4)) {
-                        minVal = this.latestEmpiricalRange.min;
-                        maxVal = this.latestEmpiricalRange.max;
+            let minVal = style.minVal;
+            let maxVal = style.maxVal;
+            if (style.autoScale) {
+                const liveQRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[grp.rawQty];
+                if (liveQRange && isFinite(liveQRange[0]) && isFinite(liveQRange[1]) && liveQRange[1] > liveQRange[0]) {
+                    minVal = liveQRange[0];
+                    maxVal = liveQRange[1];
+                } else if (grp.hasEmpiricalRange && grp.empiricalMax > grp.empiricalMin) {
+                    const isFraction = (qty === 'plastic_strain' || qty === 'damage' || qty === 'has_failed' || qty === 'species1' || qty === 'species2' || qty === 'species3' || qty === 'solid');
+                    if (!isFraction || grp.empiricalMax > 1e-4) {
+                        minVal = grp.empiricalMin;
+                        maxVal = grp.empiricalMax;
                     }
-                } else if (sliceIsLocked) {
-                    minVal = defaultSliceRange[0];
-                    maxVal = defaultSliceRange[1];
                 }
-                specs.push({
-                    id: `slice-${idx}`,
-                    title: formatCbTitle(`Slice #${idx + 1}`, qty),
-                    quantity: qty,
-                    colormap: colormap,
-                    autoScale: autoScale,
-                    logScale: logScale,
-                    isLocked: sliceIsLocked,
-                    minVal: minVal,
-                    maxVal: maxVal,
-                    contourLevels: slice.contour_levels ?? params.sliceContourLevels ?? 0,
-                    smoothContours: slice.smooth_contours ?? params.sliceSmoothContours ?? true,
-                    onSetContourLevels: (lvl: number) => {
-                        this.updateSliceProperty(idx, { contour_levels: lvl, smooth_contours: lvl <= 1 });
-                    },
-                    onToggleSmooth: (smooth: boolean) => {
-                        this.updateSliceProperty(idx, { smooth_contours: smooth });
-                    },
-                    onToggleOff: () => {
-                        this.updateSliceProperty(idx, { show_colorbar: false });
-                    },
-                    onToggleAuto: () => {
-                        if (sliceIsLocked) {
-                            this.setQuantityAutoScale(qty, !autoScale);
-                        } else {
-                            this.updateSliceProperty(idx, { auto_scale: !autoScale });
-                        }
-                    },
-                    onToggleLog: () => {
-                        if (sliceIsLocked) {
-                            this.setQuantityLogScale(qty, !logScale);
-                        } else {
-                            this.updateSliceProperty(idx, { log_scale: !logScale });
-                        }
-                    },
-                    onToggleLock: () => {
-                        const newLock = !sliceIsLocked;
-                        if (newLock) {
-                            this.setQuantityColormap(qty, colormap);
-                            this.setQuantityLogScale(qty, logScale);
-                            this.setQuantityAutoScale(qty, autoScale);
-                            this.setQuantityRange(qty, minVal, maxVal, autoScale, logScale);
-                        }
-                        this.updateSliceProperty(idx, { lock_quantity_range: newLock });
-                    },
-                    onSelectColormap: (anchorEl: HTMLElement) => {
-                        this.showColormapPopover(anchorEl, colormap, (newCmap) => {
-                            if (sliceIsLocked) {
-                                this.setQuantityColormap(qty, newCmap);
-                            } else {
-                                this.updateSliceProperty(idx, { colormap: newCmap });
-                            }
-                        });
-                    },
-                    onSetMinMax: (minN: number, maxN: number) => {
-                        if (sliceIsLocked) {
-                            this.setQuantityRange(qty, minN, maxN, false);
-                        } else {
-                            this.updateSliceProperty(idx, { auto_scale: false, min_val: minN, max_val: maxN });
-                        }
-                    },
-                    onSelectQuantity: (anchorEl: HTMLElement) => {
-                        this.showQuantityPopover(anchorEl, qty, 'cfd', (newQ) => {
-                            const cNewQ = canonicalizeQuantity(newQ);
-                            const qCmaps = params.quantity_colormaps || {};
-                            const newCmap = sliceIsLocked ? (qCmaps[cNewQ] || qCmaps[newQ] || 'rainbow') : colormap;
-                            const qRanges = this.latestQuantityRanges || params.quantity_ranges || {};
-                            const newRange = sliceIsLocked ? (qRanges[cNewQ] || qRanges[newQ] || DEFAULT_QUANTITY_RANGES[cNewQ] || [0.0, 1.0]) : [minVal, maxVal];
-                            const qLogs = params.quantity_log_scales || {};
-                            const newLog = sliceIsLocked ? (qLogs[cNewQ] ?? qLogs[newQ] ?? (cNewQ === 'peak_overpressure' || cNewQ === 'energy')) : logScale;
-                            const qAutos = params.quantity_auto_scales || {};
-                            const newAuto = sliceIsLocked ? (qAutos[cNewQ] ?? qAutos[newQ] ?? true) : autoScale;
-                            this.updateSliceProperty(idx, {
-                                quantities: [cNewQ],
-                                colormap: newCmap,
-                                min_val: newRange[0],
-                                max_val: newRange[1],
-                                log_scale: newLog,
-                                auto_scale: newAuto
-                            });
-                        });
-                    }
-                });
             }
+
+            const title = formatUnifiedCbTitle(qty);
+            const activeLabels = grp.sources.map(s => s.label).join(', ');
+            const tooltip = `${title} — Active on: ${activeLabels} (Click to switch quantity)`;
+
+            specs.push({
+                id: `qty-${qty}`,
+                title,
+                tooltip,
+                quantity: qty,
+                colormap: style.colormap,
+                autoScale: style.autoScale,
+                logScale: style.logScale,
+                minVal,
+                maxVal,
+                contourLevels: style.contourLevels,
+                smoothContours: style.smoothContours,
+                interpolate: style.interpolate,
+                onToggleOff: () => {
+                    this.setQuantityShowColorbar(qty, false);
+                },
+                onToggleAuto: () => {
+                    this.setQuantityAutoScale(qty, !style.autoScale);
+                },
+                onToggleLog: () => {
+                    this.setQuantityLogScale(qty, !style.logScale);
+                },
+                onSelectColormap: (newCmap: string) => {
+                    this.setQuantityColormap(qty, newCmap);
+                },
+                onSetMinMax: (minN: number, maxN: number) => {
+                    this.setQuantityRange(qty, minN, maxN, false);
+                },
+                onSetContourLevels: (lvl: number) => {
+                    this.setQuantityContourLevels(qty, lvl, lvl <= 1);
+                },
+                onToggleSmooth: (smooth: boolean) => {
+                    this.setQuantityContourLevels(qty, smooth ? 0 : (style.contourLevels > 1 ? style.contourLevels : 10), smooth);
+                },
+                onToggleInterpolate: (interp: boolean) => {
+                    this.setQuantityInterpolate(qty, interp);
+                },
+                onSelectQuantity: (anchorEl: HTMLElement) => {
+                    this.showQuantityPopover(anchorEl, qty, grp.domain, (newQ) => {
+                        const cNewQ = canonicalizeQuantity(newQ);
+                        const currentSlices = params.slices ? [...params.slices] : [];
+                        let slicesChanged = false;
+                        const vpUpdates: any = {};
+                        const workerUpdates: any = {};
+
+                        for (const src of grp.sources) {
+                            if (src.type === 'slice' && src.sliceIdx !== undefined && currentSlices[src.sliceIdx]) {
+                                currentSlices[src.sliceIdx] = {
+                                    ...currentSlices[src.sliceIdx],
+                                    quantities: [cNewQ]
+                                };
+                                slicesChanged = true;
+                            } else if (src.type === 'obstacles') {
+                                vpUpdates.obstacles_quantity = cNewQ;
+                                workerUpdates.obstaclesQuantity = cNewQ;
+                            } else if (src.type === 'stl') {
+                                vpUpdates.stl_quantity = cNewQ;
+                                workerUpdates.stlQuantity = cNewQ;
+                            } else if (src.type === 'mpm') {
+                                vpUpdates.mpmParticleQuantity = cNewQ;
+                                workerUpdates.mpmParticleQuantity = cNewQ;
+                            } else if (src.type === 'fem') {
+                                vpUpdates.femQuantity = cNewQ;
+                                workerUpdates.femQuantity = cNewQ;
+                            } else if (src.type === 'beam') {
+                                vpUpdates.beamQuantity = cNewQ;
+                                workerUpdates.beamQuantity = cNewQ;
+                            }
+                        }
+
+                        if (slicesChanged) {
+                            vpUpdates.slices = currentSlices;
+                            this.updateSlices(currentSlices);
+                        }
+                        if (Object.keys(vpUpdates).length > 0) {
+                            this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
+                        }
+                        // Ensure the newly selected quantity's Colour Bar is visible without altering its range/colormap
+                        this.setQuantityShowColorbar(cNewQ, true);
+                        const updatedVp = this.getViewportNode();
+                        workerUpdates.quantityStyles = buildAllQuantityStylesMap(updatedVp?.parameters || { ...params, ...vpUpdates });
+                        this.worker.postMessage({ type: 'setConfig', data: workerUpdates });
+                        this.sendView3DConfig();
+                        this.syncControls(false);
+                    });
+                }
+            });
         });
-
-        // 2. Obstacles
-        if (params.obstacles_show_colorbar === true && params.show_obstacles !== false) {
-            const rawQty = params.obstacles_quantity || 'pressure';
-            const qty = canonicalizeQuantity(rawQty);
-            const obsIsLocked = (params.lock_quantity_ranges !== false) && (params.obstacles_lock_quantity_range !== false);
-            const colormap = (obsIsLocked ? (params.quantity_colormaps?.[qty] || params.quantity_colormaps?.[rawQty]) : undefined) || params.obstacles_colormap || 'rainbow';
-            const autoScale = (obsIsLocked ? (params.quantity_auto_scales?.[qty] ?? params.quantity_auto_scales?.[rawQty]) : undefined) ?? (params.obstacles_auto_scale !== false);
-            const logScale = (obsIsLocked ? (params.quantity_log_scales?.[qty] ?? params.quantity_log_scales?.[rawQty]) : undefined) ?? (params.obstacles_log_scale === true);
-            const defaultObsRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
-            let minVal = params.obstacles_min_val ?? defaultObsRange[0];
-            let maxVal = params.obstacles_max_val ?? defaultObsRange[1];
-            if (autoScale && this.latestObstaclesRange) {
-                minVal = this.latestObstaclesRange.min;
-                maxVal = this.latestObstaclesRange.max;
-            } else if (obsIsLocked) {
-                minVal = defaultObsRange[0];
-                maxVal = defaultObsRange[1];
-            }
-            specs.push({
-                id: 'obstacles',
-                title: formatCbTitle('Obstacles', qty),
-                quantity: qty,
-                colormap: colormap,
-                autoScale: autoScale,
-                logScale: logScale,
-                isLocked: obsIsLocked,
-                minVal: minVal,
-                maxVal: maxVal,
-                onToggleOff: () => {
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_show_colorbar: false });
-                    const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'ObstacleDomain3D' || n.type === 'CSGObstacle3D' || n.type === 'ObstacleBox3D' || n.type === 'ObstacleCylinder3D' || n.type === 'ObstacleSphere3D')
-                            .forEach(n => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { showColorbar: false, obstacles_show_colorbar: false });
-                            });
-                    }
-                    this.syncControls(false);
-                    const tc = (window as any).transportController;
-                    if (tc) {
-                        tc.syncStateFromViewport?.();
-                        tc.requestTabRender?.();
-                    }
-                },
-                onToggleAuto: () => {
-                    if (obsIsLocked) {
-                        this.setQuantityAutoScale(qty, !autoScale);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_auto_scale: !autoScale });
-                        this.worker.postMessage({ type: 'setConfig', data: { obstaclesAutoScale: !autoScale } });
-                        this.syncControls(false);
-                    }
-                },
-                onToggleLog: () => {
-                    if (obsIsLocked) {
-                        this.setQuantityLogScale(qty, !logScale);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_log_scale: !logScale });
-                        this.worker.postMessage({ type: 'setConfig', data: { obstaclesLogScale: !logScale } });
-                        this.syncControls(false);
-                    }
-                },
-                onToggleLock: () => {
-                    const newLock = !obsIsLocked;
-                    if (newLock) {
-                        this.setQuantityColormap(qty, colormap);
-                        this.setQuantityLogScale(qty, logScale);
-                        this.setQuantityAutoScale(qty, autoScale);
-                        this.setQuantityRange(qty, minVal, maxVal, autoScale, logScale);
-                    }
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_lock_quantity_range: newLock });
-                    this.worker.postMessage({ type: 'setConfig', data: { obstaclesLockQuantityRange: newLock } });
-                    this.syncControls(false);
-                },
-                onSelectColormap: (anchorEl: HTMLElement) => {
-                    this.showColormapPopover(anchorEl, colormap, (newCmap) => {
-                        if (obsIsLocked) {
-                            this.setQuantityColormap(qty, newCmap);
-                        } else {
-                            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_colormap: newCmap });
-                            this.worker.postMessage({ type: 'setConfig', data: { obstaclesColormap: newCmap } });
-                            this.syncControls(false);
-                        }
-                    });
-                },
-                onSetMinMax: (minN: number, maxN: number) => {
-                    if (obsIsLocked) {
-                        this.setQuantityRange(qty, minN, maxN, false);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_auto_scale: false, obstacles_min_val: minN, obstacles_max_val: maxN });
-                        this.worker.postMessage({ type: 'setConfig', data: { obstaclesAutoScale: false, obstaclesMinVal: minN, obstaclesMaxVal: maxN } });
-                        this.syncControls(false);
-                    }
-                },
-                onSelectQuantity: (anchorEl: HTMLElement) => {
-                    this.showQuantityPopover(anchorEl, qty, 'cfd', (newQ) => {
-                        const cNewQ = canonicalizeQuantity(newQ);
-                        const qCmaps = params.quantity_colormaps || {};
-                        const newCmap = obsIsLocked ? (qCmaps[cNewQ] || qCmaps[newQ] || 'rainbow') : colormap;
-                        const qRanges = this.latestQuantityRanges || params.quantity_ranges || {};
-                        const newRange = obsIsLocked ? (qRanges[cNewQ] || qRanges[newQ] || DEFAULT_QUANTITY_RANGES[cNewQ] || [0.0, 1.0]) : [minVal, maxVal];
-                        const qLogs = params.quantity_log_scales || {};
-                        const newLog = obsIsLocked ? (qLogs[cNewQ] ?? qLogs[newQ] ?? (cNewQ === 'peak_overpressure' || cNewQ === 'energy')) : logScale;
-                        const qAutos = params.quantity_auto_scales || {};
-                        const newAuto = obsIsLocked ? (qAutos[cNewQ] ?? qAutos[newQ] ?? true) : autoScale;
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, {
-                            obstacles_quantity: cNewQ,
-                            obstacles_colormap: newCmap,
-                            obstacles_min_val: newRange[0],
-                            obstacles_max_val: newRange[1],
-                            obstacles_log_scale: newLog,
-                            obstacles_auto_scale: newAuto
-                        });
-                        this.worker.postMessage({
-                            type: 'setConfig',
-                            data: {
-                                obstaclesQuantity: cNewQ,
-                                obstaclesColormap: newCmap,
-                                obstaclesMinVal: newRange[0],
-                                obstaclesMaxVal: newRange[1],
-                                obstaclesLogScale: newLog,
-                                obstaclesAutoScale: newAuto
-                            }
-                        });
-                        this.sendView3DConfig();
-                        this.syncControls(false);
-                    });
-                }
-            });
-        }
-
-        // 3. STL Mesh
-        if (params.stl_show_colorbar === true && params.show_stl !== false) {
-            const rawQty = params.stl_quantity || 'pressure';
-            const qty = canonicalizeQuantity(rawQty);
-            const stlIsLocked = (params.lock_quantity_ranges !== false) && (params.stl_lock_quantity_range !== false);
-            const colormap = (stlIsLocked ? (params.quantity_colormaps?.[qty] || params.quantity_colormaps?.[rawQty]) : undefined) || params.stl_colormap || 'rainbow';
-            const autoScale = (stlIsLocked ? (params.quantity_auto_scales?.[qty] ?? params.quantity_auto_scales?.[rawQty]) : undefined) ?? (params.stl_auto_scale !== false);
-            const logScale = (stlIsLocked ? (params.quantity_log_scales?.[qty] ?? params.quantity_log_scales?.[rawQty]) : undefined) ?? (params.stl_log_scale === true);
-            const defaultStlRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 1.0];
-            let minVal = params.stl_min_val ?? defaultStlRange[0];
-            let maxVal = params.stl_max_val ?? defaultStlRange[1];
-            if (autoScale && this.latestSTLRange) {
-                minVal = this.latestSTLRange.min;
-                maxVal = this.latestSTLRange.max;
-            } else if (stlIsLocked) {
-                minVal = defaultStlRange[0];
-                maxVal = defaultStlRange[1];
-            }
-            specs.push({
-                id: 'stl',
-                title: formatCbTitle('STL', qty),
-                quantity: qty,
-                colormap: colormap,
-                autoScale: autoScale,
-                logScale: logScale,
-                isLocked: stlIsLocked,
-                minVal: minVal,
-                maxVal: maxVal,
-                onToggleOff: () => {
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_show_colorbar: false });
-                    const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'STLGeometry3D' || n.type === 'CADImporter3D' || n.type === 'STLGeometry')
-                            .forEach(n => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { showColorbar: false, stl_show_colorbar: false });
-                            });
-                    }
-                    this.syncControls(false);
-                    const tc = (window as any).transportController;
-                    if (tc) {
-                        tc.syncStateFromViewport?.();
-                        tc.requestTabRender?.();
-                    }
-                },
-                onToggleAuto: () => {
-                    if (stlIsLocked) {
-                        this.setQuantityAutoScale(qty, !autoScale);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_auto_scale: !autoScale });
-                        const stlNode = this.getGeometryNode();
-                        if (stlNode && stlNode.type === 'STLGeometry') {
-                            this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_auto_scale: !autoScale });
-                        }
-                        this.worker.postMessage({ type: 'setConfig', data: { stlAutoScale: !autoScale } });
-                        this.syncControls(false);
-                    }
-                },
-                onToggleLog: () => {
-                    if (stlIsLocked) {
-                        this.setQuantityLogScale(qty, !logScale);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_log_scale: !logScale });
-                        const stlNode = this.getGeometryNode();
-                        if (stlNode && stlNode.type === 'STLGeometry') {
-                            this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_log_scale: !logScale });
-                        }
-                        this.worker.postMessage({ type: 'setConfig', data: { stlLogScale: !logScale } });
-                        this.syncControls(false);
-                    }
-                },
-                onToggleLock: () => {
-                    const newLock = !stlIsLocked;
-                    if (newLock) {
-                        this.setQuantityColormap(qty, colormap);
-                        this.setQuantityLogScale(qty, logScale);
-                        this.setQuantityAutoScale(qty, autoScale);
-                        this.setQuantityRange(qty, minVal, maxVal, autoScale, logScale);
-                    }
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_lock_quantity_range: newLock });
-                    const stlNode = this.getGeometryNode();
-                    if (stlNode && stlNode.type === 'STLGeometry') {
-                        this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_lock_quantity_range: newLock });
-                    }
-                    this.worker.postMessage({ type: 'setConfig', data: { stlLockQuantityRange: newLock } });
-                    this.syncControls(false);
-                },
-                onSelectColormap: (anchorEl: HTMLElement) => {
-                    this.showColormapPopover(anchorEl, colormap, (newCmap) => {
-                        if (stlIsLocked) {
-                            this.setQuantityColormap(qty, newCmap);
-                        } else {
-                            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_colormap: newCmap });
-                            const stlNode = this.getGeometryNode();
-                            if (stlNode && stlNode.type === 'STLGeometry') {
-                                this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_colormap: newCmap, colormap: newCmap });
-                            }
-                            this.worker.postMessage({ type: 'setConfig', data: { stlColormap: newCmap } });
-                            this.syncControls(false);
-                        }
-                    });
-                },
-                onSetMinMax: (minN: number, maxN: number) => {
-                    if (stlIsLocked) {
-                        this.setQuantityRange(qty, minN, maxN, false);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_auto_scale: false, stl_min_val: minN, stl_max_val: maxN });
-                        const stlNode = this.getGeometryNode();
-                        if (stlNode && stlNode.type === 'STLGeometry') {
-                            this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_auto_scale: false, stl_min_val: minN, stl_max_val: maxN });
-                        }
-                        this.worker.postMessage({ type: 'setConfig', data: { stlAutoScale: false, stlMinVal: minN, stlMaxVal: maxN } });
-                        this.syncControls(false);
-                    }
-                },
-                onSelectQuantity: (anchorEl: HTMLElement) => {
-                    this.showQuantityPopover(anchorEl, qty, 'cfd', (newQ) => {
-                        const cNewQ = canonicalizeQuantity(newQ);
-                        const qCmaps = params.quantity_colormaps || {};
-                        const newCmap = isGloballyLocked ? (qCmaps[cNewQ] || qCmaps[newQ] || 'rainbow') : colormap;
-                        const qRanges = params.quantity_ranges || {};
-                        const newRange = isGloballyLocked ? (qRanges[cNewQ] || qRanges[newQ] || DEFAULT_QUANTITY_RANGES[cNewQ] || [0.0, 1.0]) : [minVal, maxVal];
-                        const qLogs = params.quantity_log_scales || {};
-                        const newLog = isGloballyLocked ? (qLogs[cNewQ] ?? qLogs[newQ] ?? (cNewQ === 'peak_overpressure' || cNewQ === 'energy')) : logScale;
-                        const qAutos = params.quantity_auto_scales || {};
-                        const newAuto = isGloballyLocked ? (qAutos[cNewQ] ?? qAutos[newQ] ?? true) : autoScale;
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, {
-                            stl_quantity: cNewQ,
-                            stl_colormap: newCmap,
-                            stl_min_val: newRange[0],
-                            stl_max_val: newRange[1],
-                            stl_log_scale: newLog,
-                            stl_auto_scale: newAuto
-                        });
-                        const stlNode = this.getGeometryNode();
-                        if (stlNode && stlNode.type === 'STLGeometry') {
-                            this.stateManager.updateNodeParametersInPlace(stlNode.id, {
-                                stl_quantity: cNewQ,
-                                quantity: cNewQ,
-                                stl_colormap: newCmap,
-                                colormap: newCmap,
-                                stl_min_val: newRange[0],
-                                stl_max_val: newRange[1],
-                                stl_log_scale: newLog,
-                                stl_auto_scale: newAuto
-                            });
-                        }
-                        this.worker.postMessage({
-                            type: 'setConfig',
-                            data: {
-                                stlQuantity: cNewQ,
-                                stlColormap: newCmap,
-                                stlMinVal: newRange[0],
-                                stlMaxVal: newRange[1],
-                                stlLogScale: newLog,
-                                stlAutoScale: newAuto
-                            }
-                        });
-                        this.sendView3DConfig();
-                        this.syncControls(false);
-                    });
-                }
-            });
-        }
-
-        // 4. MPM Particles
-        const targetModel = this.getTargetModel();
-        const hasMPM = Boolean(targetModel?.nodes?.some((n: any) => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || (n.type === 'MarineHarbourDomain' && isMarineHarbourMPMActive(n))) || this.latestMPMRange);
-        if ((params.mpmParticleShowColorbar === true || (params.mpmParticleShowColorbar !== false && hasMPM)) && params.showMPMParticles !== false) {
-            const rawQty = params.mpmParticleQuantity || 'vonMises';
-            const qty = canonicalizeQuantity(rawQty);
-            const mpmIsLocked = (params.lock_quantity_ranges !== false) && (params.mpm_lock_quantity_range !== false);
-            const colormap = (mpmIsLocked ? (params.quantity_colormaps?.[qty] || params.quantity_colormaps?.[rawQty]) : undefined) || params.mpmParticleColormap || 'rainbow';
-            const autoScale = (mpmIsLocked ? (params.quantity_auto_scales?.[qty] ?? params.quantity_auto_scales?.[rawQty]) : undefined) ?? (params.mpmParticleAutoScale !== false);
-            const logScale = (mpmIsLocked ? (params.quantity_log_scales?.[qty] ?? params.quantity_log_scales?.[rawQty]) : undefined) ?? (params.mpmParticleLogScale === true);
-            const defaultRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, 500000000.0];
-            let minVal = params.mpmParticleMinVal ?? defaultRange[0];
-            let maxVal = params.mpmParticleMaxVal ?? defaultRange[1];
-            if (mpmIsLocked) {
-                minVal = defaultRange[0];
-                maxVal = defaultRange[1];
-            } else if (autoScale && (this.latestMPMRange || this.latestEmpiricalRange)) {
-                const r = this.latestMPMRange || this.latestEmpiricalRange!;
-                const isFraction = (qty === 'plastic_strain' || qty === 'damage' || qty === 'has_failed' || qty === 'species1' || qty === 'species2' || qty === 'species3' || qty === 'solid');
-                if (isFraction && r.max <= 1e-4) {
-                    minVal = defaultRange[0];
-                    maxVal = defaultRange[1];
-                } else {
-                    minVal = r.min;
-                    maxVal = r.max;
-                }
-            }
-            specs.push({
-                id: 'mpm',
-                title: formatCbTitle('MPM', qty),
-                quantity: qty,
-                colormap: colormap,
-                autoScale: autoScale,
-                logScale: logScale,
-                isLocked: mpmIsLocked,
-                minVal: minVal,
-                maxVal: maxVal,
-                contourLevels: params.mpmContourLevels ?? 0,
-                smoothContours: params.mpmSmoothContours ?? true,
-                onSetContourLevels: (lvl: number) => {
-                    const sm = lvl <= 1;
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmContourLevels: lvl, mpmSmoothContours: sm });
-                    this.worker.postMessage({ type: 'setConfig', data: { mpmContourLevels: lvl, mpmSmoothContours: sm } });
-                    this.syncControls(false);
-                },
-                onToggleSmooth: (smooth: boolean) => {
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmSmoothContours: smooth });
-                    this.worker.postMessage({ type: 'setConfig', data: { mpmSmoothContours: smooth } });
-                    this.syncControls(false);
-                },
-                onToggleOff: () => {
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleShowColorbar: false });
-                    const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'MPMObject3D' || n.type === 'MPMDomain3D')
-                            .forEach(n => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { showColorbar: false, mpmParticleShowColorbar: false });
-                            });
-                    }
-                    this.syncControls(false);
-                    const tc = (window as any).transportController;
-                    if (tc) {
-                        tc.syncStateFromViewport?.();
-                        tc.requestTabRender?.();
-                    }
-                },
-                onToggleAuto: () => {
-                    if (mpmIsLocked) {
-                        this.setQuantityAutoScale(qty, !autoScale);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleAutoScale: !autoScale });
-                        this.worker.postMessage({ type: 'setConfig', data: { mpmParticleAutoScale: !autoScale } });
-                        this.syncControls(false);
-                    }
-                },
-                onToggleLog: () => {
-                    if (mpmIsLocked) {
-                        this.setQuantityLogScale(qty, !logScale);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleLogScale: !logScale });
-                        this.worker.postMessage({ type: 'setConfig', data: { mpmParticleLogScale: !logScale } });
-                        this.syncControls(false);
-                    }
-                },
-                onToggleLock: () => {
-                    const newLock = !mpmIsLocked;
-                    if (newLock) {
-                        this.setQuantityColormap(qty, colormap);
-                        this.setQuantityLogScale(qty, logScale);
-                        this.setQuantityAutoScale(qty, autoScale);
-                        this.setQuantityRange(qty, minVal, maxVal, autoScale, logScale);
-                    }
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpm_lock_quantity_range: newLock });
-                    this.worker.postMessage({ type: 'setConfig', data: { mpmLockQuantityRange: newLock } });
-                    this.syncControls(false);
-                },
-                onSelectColormap: (anchorEl: HTMLElement) => {
-                    this.showColormapPopover(anchorEl, colormap, (newCmap) => {
-                        if (mpmIsLocked) {
-                            this.setQuantityColormap(qty, newCmap);
-                        } else {
-                            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleColormap: newCmap });
-                            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleColormap: newCmap } });
-                            this.syncControls(false);
-                        }
-                    });
-                },
-                onSetMinMax: (minN: number, maxN: number) => {
-                    if (mpmIsLocked) {
-                        this.setQuantityRange(qty, minN, maxN, false);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleAutoScale: false, mpmParticleMinVal: minN, mpmParticleMaxVal: maxN });
-                        this.worker.postMessage({ type: 'setConfig', data: { mpmParticleAutoScale: false, mpmParticleMinVal: minN, mpmParticleMaxVal: maxN } });
-                        this.syncControls(false);
-                    }
-                },
-                onSelectQuantity: (anchorEl: HTMLElement) => {
-                    this.showQuantityPopover(anchorEl, qty, 'mpm', (newQ) => {
-                        const cNewQ = canonicalizeQuantity(newQ);
-                        const qCmaps = params.quantity_colormaps || {};
-                        const newCmap = mpmIsLocked ? (qCmaps[cNewQ] || qCmaps[newQ] || 'rainbow') : colormap;
-                        const qRanges = this.latestQuantityRanges || params.quantity_ranges || {};
-                        const newRange = mpmIsLocked ? (qRanges[cNewQ] || qRanges[newQ] || DEFAULT_QUANTITY_RANGES[cNewQ] || [0.0, 500000000.0]) : [minVal, maxVal];
-                        const qLogs = params.quantity_log_scales || {};
-                        const newLog = mpmIsLocked ? (qLogs[cNewQ] ?? qLogs[newQ] ?? (cNewQ === 'plastic_strain' || cNewQ === 'energy')) : logScale;
-                        const qAutos = params.quantity_auto_scales || {};
-                        const newAuto = mpmIsLocked ? (qAutos[cNewQ] ?? qAutos[newQ] ?? true) : autoScale;
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, {
-                            mpmParticleQuantity: cNewQ,
-                            mpmParticleColormap: newCmap,
-                            mpmParticleMinVal: newRange[0],
-                            mpmParticleMaxVal: newRange[1],
-                            mpmParticleLogScale: newLog,
-                            mpmParticleAutoScale: newAuto
-                        });
-                        this.worker.postMessage({
-                            type: 'setConfig',
-                            data: {
-                                mpmParticleQuantity: cNewQ,
-                                mpmParticleColormap: newCmap,
-                                mpmParticleMinVal: newRange[0],
-                                mpmParticleMaxVal: newRange[1],
-                                mpmParticleLogScale: newLog,
-                                mpmParticleAutoScale: newAuto
-                            }
-                        });
-                        this.syncControls(false);
-                    });
-                }
-            });
-        }
-
-        // 5. FEM Mesh
-        const state = this.stateManager.getCurrentState();
-        const nodes = state?.nodes || [];
-        const hasFEMNodes = nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMFSICoupler3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D');
-        const showFEMColorbar = (params.femShowColorbar === true) || (params.femShowColorbar !== false && (hasFEMNodes || this.latestFEMRange !== undefined || params.show_colorbar === true));
-        if (showFEMColorbar && params.showFEMMesh !== false) {
-            const rawQty = params.femQuantity || 'vonMises';
-            const qty = canonicalizeQuantity(rawQty);
-            const femIsLocked = (params.lock_quantity_ranges !== false) && (params.fem_lock_quantity_range !== false);
-            const colormap = (femIsLocked ? (params.quantity_colormaps?.[qty] || params.quantity_colormaps?.[rawQty]) : undefined) || params.femColormap || 'rainbow';
-            const autoScale = (femIsLocked ? (params.quantity_auto_scales?.[qty] ?? params.quantity_auto_scales?.[rawQty]) : undefined) ?? (params.femAutoScale !== false);
-            const logScale = (femIsLocked ? (params.quantity_log_scales?.[qty] ?? params.quantity_log_scales?.[rawQty]) : undefined) ?? (params.femLogScale === true);
-            const defaultRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, (qty === 'plastic_strain' ? 1.0 : 500000000.0)];
-            let minVal = params.femMinVal ?? defaultRange[0];
-            let maxVal = params.femMaxVal ?? defaultRange[1];
-            if (autoScale && (this.latestFEMRange || this.latestEmpiricalRange)) {
-                const r = this.latestFEMRange || this.latestEmpiricalRange!;
-                const isFraction = (qty === 'plastic_strain' || qty === 'damage' || qty === 'has_failed');
-                if (isFraction && r.max <= 1e-4) {
-                    minVal = defaultRange[0];
-                    maxVal = defaultRange[1];
-                } else {
-                    minVal = r.min;
-                    maxVal = r.max;
-                }
-            } else if (femIsLocked) {
-                minVal = defaultRange[0];
-                maxVal = defaultRange[1];
-            }
-            specs.push({
-                id: 'fem',
-                title: formatCbTitle('FEM', qty),
-                quantity: qty,
-                colormap: colormap,
-                autoScale: autoScale,
-                logScale: logScale,
-                isLocked: femIsLocked,
-                minVal: minVal,
-                maxVal: maxVal,
-                contourLevels: params.femContourLevels ?? 0,
-                smoothContours: params.femSmoothContours ?? true,
-                onSetContourLevels: (lvl: number) => {
-                    const sm = lvl <= 1;
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { femContourLevels: lvl, femSmoothContours: sm });
-                    this.worker.postMessage({ type: 'setConfig', data: { femContourLevels: lvl, femSmoothContours: sm } });
-                    this.syncControls(false);
-                },
-                onToggleSmooth: (smooth: boolean) => {
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { femSmoothContours: smooth });
-                    this.worker.postMessage({ type: 'setConfig', data: { femSmoothContours: smooth } });
-                    this.syncControls(false);
-                },
-                onToggleOff: () => {
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { femShowColorbar: false });
-                    const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'FEMObject3D' || n.type === 'FEMDomain3D' || n.type === 'LSDynaImporter3D')
-                            .forEach(n => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { showColorbar: false, femShowColorbar: false });
-                            });
-                    }
-                    this.syncControls(false);
-                    const tc = (window as any).transportController;
-                    if (tc) {
-                        tc.syncStateFromViewport?.();
-                        tc.requestTabRender?.();
-                    }
-                },
-                onToggleAuto: () => {
-                    if (femIsLocked) {
-                        this.setQuantityAutoScale(qty, !autoScale);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { femAutoScale: !autoScale });
-                        this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: !autoScale } });
-                        this.syncControls(false);
-                    }
-                },
-                onToggleLog: () => {
-                    if (femIsLocked) {
-                        this.setQuantityLogScale(qty, !logScale);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { femLogScale: !logScale });
-                        this.worker.postMessage({ type: 'setConfig', data: { femLogScale: !logScale } });
-                        this.syncControls(false);
-                    }
-                },
-                onToggleLock: () => {
-                    const newLock = !femIsLocked;
-                    if (newLock) {
-                        this.setQuantityColormap(qty, colormap);
-                        this.setQuantityLogScale(qty, logScale);
-                        this.setQuantityAutoScale(qty, autoScale);
-                        this.setQuantityRange(qty, minVal, maxVal, autoScale, logScale);
-                    }
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { fem_lock_quantity_range: newLock });
-                    this.worker.postMessage({ type: 'setConfig', data: { femLockQuantityRange: newLock } });
-                    this.syncControls(false);
-                },
-                onSelectColormap: (anchorEl: HTMLElement) => {
-                    this.showColormapPopover(anchorEl, colormap, (newCmap) => {
-                        if (femIsLocked) {
-                            this.setQuantityColormap(qty, newCmap);
-                        } else {
-                            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femColormap: newCmap });
-                            this.worker.postMessage({ type: 'setConfig', data: { femColormap: newCmap } });
-                            this.syncControls(false);
-                        }
-                    });
-                },
-                onSetMinMax: (minN: number, maxN: number) => {
-                    if (femIsLocked) {
-                        this.setQuantityRange(qty, minN, maxN, false);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { femAutoScale: false, femMinVal: minN, femMaxVal: maxN });
-                        this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: false, femMinVal: minN, femMaxVal: maxN } });
-                        this.syncControls(false);
-                    }
-                },
-                onSelectQuantity: (anchorEl: HTMLElement) => {
-                    this.showQuantityPopover(anchorEl, qty, 'fem', (newQ) => {
-                        const cNewQ = canonicalizeQuantity(newQ);
-                        const qCmaps = params.quantity_colormaps || {};
-                        const newCmap = femIsLocked ? (qCmaps[cNewQ] || qCmaps[newQ] || 'rainbow') : colormap;
-                        const qRanges = this.latestQuantityRanges || params.quantity_ranges || {};
-                        const newRange = femIsLocked ? (qRanges[cNewQ] || qRanges[newQ] || DEFAULT_QUANTITY_RANGES[cNewQ] || [0.0, (cNewQ === 'plastic_strain' ? 1.0 : 500000000.0)]) : [minVal, maxVal];
-                        const qLogs = params.quantity_log_scales || {};
-                        const newLog = femIsLocked ? (qLogs[cNewQ] ?? qLogs[newQ] ?? (cNewQ === 'plastic_strain' || cNewQ === 'energy')) : logScale;
-                        const qAutos = params.quantity_auto_scales || {};
-                        const newAuto = femIsLocked ? (qAutos[cNewQ] ?? qAutos[newQ] ?? true) : autoScale;
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, {
-                            femQuantity: cNewQ,
-                            femColormap: newCmap,
-                            femMinVal: newRange[0],
-                            femMaxVal: newRange[1],
-                            femLogScale: newLog,
-                            femAutoScale: newAuto
-                        });
-                        this.worker.postMessage({
-                            type: 'setConfig',
-                            data: {
-                                femQuantity: cNewQ,
-                                femColormap: newCmap,
-                                femMinVal: newRange[0],
-                                femMaxVal: newRange[1],
-                                femLogScale: newLog,
-                                femAutoScale: newAuto
-                            }
-                        });
-                        this.syncControls(false);
-                    });
-                }
-            });
-        }
-
-        // 6. Beams / 1D Elements
-        const showBeamColorbar = (params.beamShowColorbar === true) || (params.beamShowColorbar !== false && (hasFEMNodes || params.show_colorbar === true));
-        if (showBeamColorbar && (params.showBeams !== false && params.showRebar !== false)) {
-            const rawQty = params.beamQuantity || 'plasticStrain';
-            const qty = canonicalizeQuantity(rawQty);
-            const beamIsLocked = (params.lock_quantity_ranges !== false) && (params.beam_lock_quantity_range !== false);
-            const colormap = (beamIsLocked ? (params.quantity_colormaps?.[qty] || params.quantity_colormaps?.[rawQty]) : undefined) || params.beamColormap || 'rainbow';
-            const autoScale = (beamIsLocked ? (params.quantity_auto_scales?.[qty] ?? params.quantity_auto_scales?.[rawQty]) : undefined) ?? (params.beamAutoScale !== false);
-            const logScale = (beamIsLocked ? (params.quantity_log_scales?.[qty] ?? params.quantity_log_scales?.[rawQty]) : undefined) ?? (params.beamLogScale === true);
-            const defaultRange = this.latestQuantityRanges?.[qty] || this.latestQuantityRanges?.[rawQty] || params.quantity_ranges?.[qty] || params.quantity_ranges?.[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || [0.0, (qty === 'plastic_strain' ? 0.05 : (qty === 'momentOrForce' ? 1000.0 : 500000000.0))];
-            let minVal = params.beamMinVal ?? defaultRange[0];
-            let maxVal = params.beamMaxVal ?? defaultRange[1];
-            if (autoScale && (this.latestBeamRange || this.latestEmpiricalRange)) {
-                const r = this.latestBeamRange || this.latestEmpiricalRange!;
-                const isFraction = (qty === 'plastic_strain' || qty === 'damage' || qty === 'has_failed');
-                if (isFraction && r.max <= 1e-4) {
-                    minVal = defaultRange[0];
-                    maxVal = defaultRange[1];
-                } else {
-                    minVal = r.min;
-                    maxVal = r.max;
-                }
-            } else if (beamIsLocked) {
-                minVal = defaultRange[0];
-                maxVal = defaultRange[1];
-            }
-            specs.push({
-                id: 'beam',
-                title: formatCbTitle('Beams (1D)', qty),
-                quantity: qty,
-                colormap: colormap,
-                autoScale: autoScale,
-                logScale: logScale,
-                isLocked: beamIsLocked,
-                minVal: minVal,
-                maxVal: maxVal,
-                contourLevels: params.beamContourLevels ?? 0,
-                smoothContours: params.beamSmoothContours ?? true,
-                onSetContourLevels: (lvl: number) => {
-                    const sm = lvl <= 1;
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamContourLevels: lvl, beamSmoothContours: sm });
-                    this.worker.postMessage({ type: 'setConfig', data: { beamContourLevels: lvl, beamSmoothContours: sm } });
-                    this.syncControls(false);
-                },
-                onToggleSmooth: (smooth: boolean) => {
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamSmoothContours: smooth });
-                    this.worker.postMessage({ type: 'setConfig', data: { beamSmoothContours: smooth } });
-                    this.syncControls(false);
-                },
-                onToggleOff: () => {
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamShowColorbar: false });
-                    const activeModel = this.getTargetModel() || this.stateManager.getActiveModel();
-                    if (activeModel) {
-                        activeModel.nodes
-                            .filter((n: any) => n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D')
-                            .forEach(n => {
-                                this.stateManager.updateNodeParametersInPlace(n.id, { showColorbar: false, beamShowColorbar: false });
-                            });
-                    }
-                    this.syncControls(false);
-                    const tc = (window as any).transportController;
-                    if (tc) {
-                        tc.syncStateFromViewport?.();
-                        tc.requestTabRender?.();
-                    }
-                },
-                onToggleAuto: () => {
-                    if (beamIsLocked) {
-                        this.setQuantityAutoScale(qty, !autoScale);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamAutoScale: !autoScale });
-                        this.worker.postMessage({ type: 'setConfig', data: { beamAutoScale: !autoScale } });
-                        this.syncControls(false);
-                    }
-                },
-                onToggleLog: () => {
-                    if (beamIsLocked) {
-                        this.setQuantityLogScale(qty, !logScale);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamLogScale: !logScale });
-                        this.worker.postMessage({ type: 'setConfig', data: { beamLogScale: !logScale } });
-                        this.syncControls(false);
-                    }
-                },
-                onToggleLock: () => {
-                    const newLock = !beamIsLocked;
-                    if (newLock) {
-                        this.setQuantityColormap(qty, colormap);
-                        this.setQuantityLogScale(qty, logScale);
-                        this.setQuantityAutoScale(qty, autoScale);
-                        this.setQuantityRange(qty, minVal, maxVal, autoScale, logScale);
-                    }
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, { beam_lock_quantity_range: newLock });
-                    this.worker.postMessage({ type: 'setConfig', data: { beamLockQuantityRange: newLock } });
-                    this.syncControls(false);
-                },
-                onSelectColormap: (anchorEl: HTMLElement) => {
-                    this.showColormapPopover(anchorEl, colormap, (newCmap) => {
-                        if (beamIsLocked) {
-                            this.setQuantityColormap(qty, newCmap);
-                        } else {
-                            this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamColormap: newCmap });
-                            this.worker.postMessage({ type: 'setConfig', data: { beamColormap: newCmap } });
-                            this.syncControls(false);
-                        }
-                    });
-                },
-                onSetMinMax: (minN: number, maxN: number) => {
-                    if (beamIsLocked) {
-                        this.setQuantityRange(qty, minN, maxN, false);
-                    } else {
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, { beamAutoScale: false, beamMinVal: minN, beamMaxVal: maxN });
-                        this.worker.postMessage({ type: 'setConfig', data: { beamAutoScale: false, beamMinVal: minN, beamMaxVal: maxN } });
-                        this.syncControls(false);
-                    }
-                },
-                onSelectQuantity: (anchorEl: HTMLElement) => {
-                    this.showQuantityPopover(anchorEl, qty, 'fem', (newQ) => {
-                        const cNewQ = canonicalizeQuantity(newQ);
-                        const qCmaps = params.quantity_colormaps || {};
-                        const newCmap = beamIsLocked ? (qCmaps[cNewQ] || qCmaps[newQ] || 'rainbow') : colormap;
-                        const qRanges = this.latestQuantityRanges || params.quantity_ranges || {};
-                        const newRange = beamIsLocked ? (qRanges[cNewQ] || qRanges[newQ] || DEFAULT_QUANTITY_RANGES[cNewQ] || [0.0, (cNewQ === 'plastic_strain' ? 0.05 : 1000.0)]) : [minVal, maxVal];
-                        const qLogs = params.quantity_log_scales || {};
-                        const newLog = beamIsLocked ? (qLogs[cNewQ] ?? qLogs[newQ] ?? (cNewQ === 'plastic_strain' || cNewQ === 'energy')) : logScale;
-                        const qAutos = params.quantity_auto_scales || {};
-                        const newAuto = beamIsLocked ? (qAutos[cNewQ] ?? qAutos[newQ] ?? true) : autoScale;
-                        this.stateManager.updateNodeParametersInPlace(vpNode.id, {
-                            beamQuantity: cNewQ,
-                            beamColormap: newCmap,
-                            beamMinVal: newRange[0],
-                            beamMaxVal: newRange[1],
-                            beamLogScale: newLog,
-                            beamAutoScale: newAuto
-                        });
-                        this.worker.postMessage({
-                            type: 'setConfig',
-                            data: {
-                                beamQuantity: cNewQ,
-                                beamColormap: newCmap,
-                                beamMinVal: newRange[0],
-                                beamMaxVal: newRange[1],
-                                beamLogScale: newLog,
-                                beamAutoScale: newAuto
-                            }
-                        });
-                        this.syncControls(false);
-                    });
-                }
-            });
-        }
 
         if (specs.length === 0) {
             this.colorbarContainer.style.display = 'none';
             this.colorbarContainer.innerHTML = '';
             return;
         }
-
-        const qtyCounts: Record<string, number> = {};
-        specs.forEach(s => {
-            qtyCounts[s.quantity] = (qtyCounts[s.quantity] || 0) + 1;
-        });
-        specs.forEach(s => {
-            if ((qtyCounts[s.quantity] || 0) <= 1) {
-                s.onToggleLock = undefined;
-                s.isLocked = false;
-            }
-        });
 
         this.colorbarContainer.style.display = 'flex';
         const activeCardIds = new Set<string>();
@@ -6456,7 +5322,7 @@ export class Telemetry3DViewport {
         }
         const state = this.getTargetModel();
         if (state) {
-            const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
+            const mpmMesh = state.nodes.find(n => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
             const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain');
             const xmin = Number(mpmMesh?.parameters['xmin'] ?? mpmMesh?.parameters['x_min'] ?? 0);
             const xmax = Number(mpmMesh?.parameters['xmax'] ?? mpmMesh?.parameters['x_max'] ?? 1);
@@ -6487,7 +5353,6 @@ export class Telemetry3DViewport {
         const initDiam = Number(vpNode?.parameters.mpmParticleDiameter && vpNode.parameters.mpmParticleDiameter > 0 ? vpNode.parameters.mpmParticleDiameter : autoDiam);
         const initSize = vpNode ? (vpNode.parameters.mpmParticleSize ?? 4.0) : 4.0;
         const initQty = vpNode ? (vpNode.parameters.mpmParticleQuantity || 'vonMises') : 'vonMises';
-        const initCmap = vpNode ? (vpNode.parameters.mpmParticleColormap || 'rainbow') : 'rainbow';
 
         const tr = document.createElement('tr');
         tr.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
@@ -6515,7 +5380,7 @@ export class Telemetry3DViewport {
         if (state) {
             let totalEst = 0;
             let objCount = 0;
-            const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+            const mpmMesh = state.nodes.find(n => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh');
             const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain3D');
             const cellSize = Number(mpmMesh?.parameters['cell_size'] ?? mpmDomain?.parameters['cell_size'] ?? 0.01);
             const domainPpc = Number(mpmDomain?.parameters['ppc'] ?? mpmMesh?.parameters['ppc'] ?? 8);
@@ -6764,154 +5629,45 @@ export class Telemetry3DViewport {
         qtyPill.style.border = '1px solid rgba(0, 173, 255, 0.3)';
         qtyPill.style.color = '#00adff';
         qtyPill.style.fontWeight = '500';
-        qtyPill.textContent = initQty;
+        qtyPill.textContent = `${initQty} ▾`;
         qtyPill.onclick = (e) => {
             e.stopPropagation();
-            this.showQuantityPopover(qtyPill, initQty, 'mpm', (newQ) => {
+            const curQ = this.getViewportNode()?.parameters.mpmParticleQuantity || initQty;
+            this.showQuantityPopover(qtyPill, curQ, 'mpm', (newQ) => {
                 const vp = this.getViewportNode();
                 if (vp) {
-                    this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleQuantity: newQ, mpmParticleAutoScale: true });
-                    this.worker.postMessage({ type: 'setConfig', data: { mpmParticleQuantity: newQ, mpmParticleAutoScale: true } });
-                    qtyPill.textContent = newQ;
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleQuantity: newQ });
+                    const updatedVp = this.getViewportNode();
+                    this.worker.postMessage({
+                        type: 'setConfig',
+                        data: {
+                            mpmParticleQuantity: newQ,
+                            quantityStyles: buildAllQuantityStylesMap(updatedVp?.parameters || vp.parameters)
+                        }
+                    });
+                    qtyPill.textContent = `${newQ} ▾`;
+                    this.syncControls(false);
                 }
             });
         };
         tdQty.appendChild(qtyPill);
         tr.appendChild(tdQty);
 
-        // Col 7: COLOR (Colormap Selector Pill + Colorbar Toggle)
-        const tdCmap = document.createElement('td');
-        tdCmap.style.padding = '3px 4px';
-        const cmapWrap = document.createElement('div');
-        cmapWrap.style.display = 'flex';
-        cmapWrap.style.gap = '3px';
-        cmapWrap.style.alignItems = 'center';
-
-        const cmapPill = document.createElement('div');
-        cmapPill.id = this.getElId('viewport-mpm-cmap-pill');
-        cmapPill.style.fontSize = '9px';
-        cmapPill.style.padding = '2px 4px';
-        cmapPill.style.borderRadius = '3px';
-        cmapPill.style.cursor = 'pointer';
-        cmapPill.style.background = 'rgba(255, 255, 255, 0.08)';
-        cmapPill.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-        cmapPill.style.color = '#e0e0e0';
-        cmapPill.style.flex = '1';
-        cmapPill.textContent = initCmap;
-        cmapPill.onclick = (e) => {
-            e.stopPropagation();
-            this.showColormapPopover(cmapPill, initCmap, (newC) => {
-                const vp = this.getViewportNode();
-                if (vp) {
-                    this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleColormap: newC });
-                    this.worker.postMessage({ type: 'setConfig', data: { mpmParticleColormap: newC } });
-                    cmapPill.textContent = newC;
-                    this.syncControls(true);
-                }
-            });
-        };
-        cmapWrap.appendChild(cmapPill);
-
-        const initCbShow = vpNode ? (vpNode.parameters.mpmParticleShowColorbar === true) : false;
+        // Col 7: BAR (Quantity Colour Bar Toggle)
+        const tdBar = document.createElement('td');
+        tdBar.style.padding = '3px 2px';
+        tdBar.style.textAlign = 'center';
+        const initCbShow = getQuantityStyle(vpNode?.parameters || {}, initQty).showColorbar !== false;
         const cbToggleBtn = this.createToggleBtn('viewport-mpm-cb-btn', '🎨', initCbShow, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleShowColorbar: v });
-                this.syncControls(true);
-            }
+            const curQ = this.getViewportNode()?.parameters.mpmParticleQuantity || initQty;
+            this.setQuantityShowColorbar(curQ, v);
         });
-        cbToggleBtn.style.width = '20px';
-        cbToggleBtn.title = 'Toggle Color Bar for MPM Particles in 3D Viewport';
-        cmapWrap.appendChild(cbToggleBtn);
+        cbToggleBtn.style.width = '22px';
+        cbToggleBtn.title = 'Toggle Quantity Colour Bar (configure colormap, range, scale & bands on the Colour Bar)';
+        tdBar.appendChild(cbToggleBtn);
+        tr.appendChild(tdBar);
 
-        tdCmap.appendChild(cmapWrap);
-        tr.appendChild(tdCmap);
-
-        // Col 8: SCL / Range Limit
-        const tdScl = document.createElement('td');
-        tdScl.style.padding = '3px 2px';
-        tdScl.style.textAlign = 'center';
-        
-        const sclWrap = document.createElement('div');
-        sclWrap.style.display = 'inline-flex';
-        sclWrap.style.gap = '2px';
-        sclWrap.style.justifyContent = 'center';
-        tdScl.appendChild(sclWrap);
-
-        const initAuto = vpNode ? (vpNode.parameters.mpmParticleAutoScale !== false) : true;
-        const initLog = vpNode ? (vpNode.parameters.mpmParticleLogScale === true) : false;
-
-        sclWrap.appendChild(this.createToggleBtn('viewport-mpm-auto-btn', 'A', initAuto, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleAutoScale: v });
-                this.worker.postMessage({ type: 'setConfig', data: { mpmParticleAutoScale: v } });
-                this.syncControls(true);
-            }
-        }));
-
-        sclWrap.appendChild(this.createToggleBtn('viewport-mpm-log-btn', 'L', initLog, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { mpmParticleLogScale: v });
-                this.worker.postMessage({ type: 'setConfig', data: { mpmParticleLogScale: v } });
-                this.syncControls(true);
-            }
-        }));
-
-        const rangeBtn = this.createToggleBtn('viewport-mpm-cfg-btn', '⚙️', false, () => {
-            this.showPopover(rangeBtn, (popover) => {
-                const vp = this.getViewportNode();
-                const minV = vp?.parameters.mpmParticleMinVal ?? 0.0;
-                const maxV = vp?.parameters.mpmParticleMaxVal ?? 500e6;
-
-                popover.innerHTML = `
-                    <div style="font-weight:bold; color:#00adff; margin-bottom:6px;">MPM Particle Range</div>
-                    <div style="display:flex; flex-direction:column; gap:4px;">
-                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
-                            <span>Min:</span>
-                            <input type="number" step="any" id="popover-mpm-min" value="${minV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
-                        </label>
-                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
-                            <span>Max:</span>
-                            <input type="number" step="any" id="popover-mpm-max" value="${maxV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
-                        </label>
-                        <button id="popover-apply-mpm-range" style="margin-top:4px; background:#007acc; color:#fff; border:none; border-radius:3px; padding:3px; cursor:pointer;">Apply Range</button>
-                    </div>
-                `;
-                const applyBtn = popover.querySelector('#popover-apply-mpm-range') as HTMLButtonElement;
-                if (applyBtn) {
-                    applyBtn.onclick = () => {
-                        const minInp = popover.querySelector('#popover-mpm-min') as HTMLInputElement;
-                        const maxInp = popover.querySelector('#popover-mpm-max') as HTMLInputElement;
-                        if (minInp && maxInp && vp) {
-                            const minN = Number(minInp.value);
-                            const maxN = Number(maxInp.value);
-                            this.stateManager.updateNodeParametersInPlace(vp.id, {
-                                mpmParticleAutoScale: false,
-                                mpmParticleMinVal: minN,
-                                mpmParticleMaxVal: maxN
-                            });
-                            this.worker.postMessage({
-                                type: 'setConfig',
-                                data: {
-                                    mpmParticleAutoScale: false,
-                                    mpmParticleMinVal: minN,
-                                    mpmParticleMaxVal: maxN
-                                }
-                            });
-                            this.syncControls(true);
-                            this.closePopover();
-                        }
-                    };
-                }
-            });
-        });
-        sclWrap.appendChild(rangeBtn);
-        tdScl.appendChild(sclWrap);
-        tr.appendChild(tdScl);
-
-        // Col 9: OPACITY (Opacity Popover)
+        // Col 8: OPACITY (Opacity Popover)
         const tdOpac = document.createElement('td');
         tdOpac.style.padding = '3px 4px';
         const initOpacity = vpNode ? (vpNode.parameters.mpmParticleOpacity ?? 1.0) : 1.0;
@@ -6937,7 +5693,7 @@ export class Telemetry3DViewport {
         tdOpac.appendChild(opacPill);
         tr.appendChild(tdOpac);
 
-        // Col 10: Empty Delete Cell
+        // Col 9: Empty Delete Cell
         const tdDel = document.createElement('td');
         tdDel.innerHTML = '<span style="color:#444;">—</span>';
         tdDel.style.textAlign = 'center';
@@ -6953,7 +5709,6 @@ export class Telemetry3DViewport {
         const initWir = vpNode ? (vpNode.parameters.femWireframe !== false) : true;
         const initRes = vpNode ? (vpNode.parameters.femResults !== false) : true;
         const initQty = vpNode ? (vpNode.parameters.femQuantity || 'vonMises') : 'vonMises';
-        const initCmap = vpNode ? (vpNode.parameters.femColormap || 'rainbow') : 'rainbow';
         const initOpac = vpNode ? (vpNode.parameters.femOpacity ?? 1.0) : 1.0;
 
         const tr = document.createElement('tr');
@@ -7046,181 +5801,45 @@ export class Telemetry3DViewport {
         qtyPill.style.border = '1px solid rgba(0, 255, 102, 0.3)';
         qtyPill.style.color = '#00ff66';
         qtyPill.style.fontWeight = '500';
-        qtyPill.textContent = initQty;
+        qtyPill.textContent = `${initQty} ▾`;
         qtyPill.onclick = (e) => {
             e.stopPropagation();
-            this.showQuantityPopover(qtyPill, initQty, 'fem', (newQ) => {
+            const curQ = this.getViewportNode()?.parameters.femQuantity || initQty;
+            this.showQuantityPopover(qtyPill, curQ, 'fem', (newQ) => {
                 const vp = this.getViewportNode();
                 if (vp) {
-                    this.stateManager.updateNodeParametersInPlace(vp.id, { femQuantity: newQ, femAutoScale: true });
-                    this.worker.postMessage({ type: 'setConfig', data: { femQuantity: newQ, femAutoScale: true } });
-                    qtyPill.textContent = newQ;
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { femQuantity: newQ });
+                    const updatedVp = this.getViewportNode();
+                    this.worker.postMessage({
+                        type: 'setConfig',
+                        data: {
+                            femQuantity: newQ,
+                            quantityStyles: buildAllQuantityStylesMap(updatedVp?.parameters || vp.parameters)
+                        }
+                    });
+                    qtyPill.textContent = `${newQ} ▾`;
+                    this.syncControls(false);
                 }
             });
         };
         tdQty.appendChild(qtyPill);
         tr.appendChild(tdQty);
 
-        // Col 7: COLOR (Colormap Selector Pill + Colorbar Toggle)
-        const tdCmap = document.createElement('td');
-        tdCmap.style.padding = '3px 4px';
-        const cmapWrap = document.createElement('div');
-        cmapWrap.style.display = 'flex';
-        cmapWrap.style.gap = '3px';
-        cmapWrap.style.alignItems = 'center';
-
-        const cmapPill = document.createElement('div');
-        cmapPill.id = this.getElId('viewport-fem-cmap-pill');
-        cmapPill.style.fontSize = '9px';
-        cmapPill.style.padding = '2px 4px';
-        cmapPill.style.borderRadius = '3px';
-        cmapPill.style.cursor = 'pointer';
-        cmapPill.style.background = 'rgba(255, 255, 255, 0.08)';
-        cmapPill.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-        cmapPill.style.color = '#e0e0e0';
-        cmapPill.style.flex = '1';
-        cmapPill.textContent = initCmap;
-        cmapPill.onclick = (e) => {
-            e.stopPropagation();
-            this.showColormapPopover(cmapPill, initCmap, (newC) => {
-                const vp = this.getViewportNode();
-                if (vp) {
-                    this.stateManager.updateNodeParametersInPlace(vp.id, { femColormap: newC });
-                    this.worker.postMessage({ type: 'setConfig', data: { femColormap: newC } });
-                    cmapPill.textContent = newC;
-                    this.syncControls(true);
-                }
-            });
-        };
-        cmapWrap.appendChild(cmapPill);
-
-        const initCbShow = vpNode ? (vpNode.parameters.femShowColorbar !== false) : true;
+        // Col 7: BAR (Quantity Colour Bar Toggle)
+        const tdBar = document.createElement('td');
+        tdBar.style.padding = '3px 2px';
+        tdBar.style.textAlign = 'center';
+        const initCbShow = getQuantityStyle(vpNode?.parameters || {}, initQty).showColorbar !== false;
         const cbToggleBtn = this.createToggleBtn('viewport-fem-cb-btn', '🎨', initCbShow, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { femShowColorbar: v });
-                this.syncControls(true);
-            }
+            const curQ = this.getViewportNode()?.parameters.femQuantity || initQty;
+            this.setQuantityShowColorbar(curQ, v);
         });
-        cbToggleBtn.style.width = '20px';
-        cbToggleBtn.title = 'Toggle Color Bar for FEM Mesh in 3D Viewport';
-        cmapWrap.appendChild(cbToggleBtn);
+        cbToggleBtn.style.width = '22px';
+        cbToggleBtn.title = 'Toggle Quantity Colour Bar (configure colormap, range, scale & bands on the Colour Bar)';
+        tdBar.appendChild(cbToggleBtn);
+        tr.appendChild(tdBar);
 
-        const initLevels = vpNode ? (vpNode.parameters.femContourLevels ?? 0) : 0;
-        const lvlPill = document.createElement('div');
-        lvlPill.id = this.getElId('viewport-fem-lvl-pill');
-        lvlPill.style.fontSize = '8.5px';
-        lvlPill.style.fontWeight = '700';
-        lvlPill.style.padding = '2px 4px';
-        lvlPill.style.borderRadius = '3px';
-        lvlPill.style.cursor = 'pointer';
-        lvlPill.style.background = initLevels > 1 ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.08)';
-        lvlPill.style.border = initLevels > 1 ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid rgba(255, 255, 255, 0.15)';
-        lvlPill.style.color = initLevels > 1 ? '#38bdf8' : '#94a3b8';
-        lvlPill.textContent = initLevels > 1 ? `${initLevels}L` : 'CONT';
-        lvlPill.title = `FEM Contour Levels: ${initLevels > 1 ? initLevels + ' discrete bands' : 'Continuous'}. Click to cycle.`;
-        lvlPill.onclick = (e) => {
-            e.stopPropagation();
-            const levelsCycle = [0, 5, 8, 10, 12, 16, 20, 32];
-            const vp = this.getViewportNode();
-            const curLvl = vp?.parameters.femContourLevels ?? 0;
-            const curIdx = levelsCycle.indexOf(curLvl);
-            const nextLvl = levelsCycle[(curIdx + 1) % levelsCycle.length];
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { femContourLevels: nextLvl, femSmoothContours: nextLvl <= 1 });
-                this.worker.postMessage({ type: 'setConfig', data: { femContourLevels: nextLvl, femSmoothContours: nextLvl <= 1 } });
-                this.syncControls(true);
-            }
-        };
-        cmapWrap.appendChild(lvlPill);
-
-        tdCmap.appendChild(cmapWrap);
-        tr.appendChild(tdCmap);
-
-        // Col 8: SCL / Range Limits
-        const tdScl = document.createElement('td');
-        tdScl.style.padding = '3px 2px';
-        tdScl.style.textAlign = 'center';
-
-        const sclWrap = document.createElement('div');
-        sclWrap.style.display = 'inline-flex';
-        sclWrap.style.gap = '2px';
-        sclWrap.style.justifyContent = 'center';
-        tdScl.appendChild(sclWrap);
-
-        const initAuto = vpNode ? (vpNode.parameters.femAutoScale !== false) : true;
-        const initLog = vpNode ? (vpNode.parameters.femLogScale === true) : false;
-
-        sclWrap.appendChild(this.createToggleBtn('viewport-fem-auto-btn', 'A', initAuto, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { femAutoScale: v });
-                this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: v } });
-                this.syncControls(true);
-            }
-        }));
-
-        sclWrap.appendChild(this.createToggleBtn('viewport-fem-log-btn', 'L', initLog, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { femLogScale: v });
-                this.worker.postMessage({ type: 'setConfig', data: { femLogScale: v } });
-                this.syncControls(true);
-            }
-        }));
-
-        const rangeBtn = this.createToggleBtn('viewport-fem-cfg-btn', '⚙️', false, () => {
-            this.showPopover(rangeBtn, (popover) => {
-                const vp = this.getViewportNode();
-                const minV = vp?.parameters.femMinVal ?? 0.0;
-                const maxV = vp?.parameters.femMaxVal ?? 500e6;
-
-                popover.innerHTML = `
-                    <div style="font-weight:bold; color:#00ff66; margin-bottom:6px;">FEM Mesh Range</div>
-                    <div style="display:flex; flex-direction:column; gap:4px;">
-                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
-                            <span>Min:</span>
-                            <input type="number" step="any" id="popover-fem-min" value="${minV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
-                        </label>
-                        <label style="display:flex; justify-content:space-between; align-items:center; gap:6px;">
-                            <span>Max:</span>
-                            <input type="number" step="any" id="popover-fem-max" value="${maxV}" style="width:70px; background:#111; color:#fff; border:1px solid #444; border-radius:3px; padding:2px;">
-                        </label>
-                        <button id="popover-apply-fem-range" style="margin-top:4px; background:#007acc; color:#fff; border:none; border-radius:3px; padding:3px; cursor:pointer;">Apply Range</button>
-                    </div>
-                `;
-                const applyBtn = popover.querySelector('#popover-apply-fem-range') as HTMLButtonElement;
-                if (applyBtn) {
-                    applyBtn.onclick = () => {
-                        const minInp = popover.querySelector('#popover-fem-min') as HTMLInputElement;
-                        const maxInp = popover.querySelector('#popover-fem-max') as HTMLInputElement;
-                        if (minInp && maxInp && vp) {
-                            const minN = Number(minInp.value);
-                            const maxN = Number(maxInp.value);
-                            this.stateManager.updateNodeParametersInPlace(vp.id, {
-                                femAutoScale: false,
-                                femMinVal: minN,
-                                femMaxVal: maxN
-                            });
-                            this.worker.postMessage({
-                                type: 'setConfig',
-                                data: {
-                                    femAutoScale: false,
-                                    femMinVal: minN,
-                                    femMaxVal: maxN
-                                }
-                            });
-                            this.closePopover();
-                            this.syncControls(true);
-                        }
-                    };
-                }
-            });
-        });
-        sclWrap.appendChild(rangeBtn);
-        tr.appendChild(tdScl);
-
-        // Col 9: OPACITY (Opacity Slider)
+        // Col 8: OPACITY (Opacity Select)
         const tdOpac = document.createElement('td');
         tdOpac.style.padding = '3px 4px';
         tdOpac.style.textAlign = 'center';
@@ -7248,7 +5867,7 @@ export class Telemetry3DViewport {
         tdOpac.appendChild(opacSel);
         tr.appendChild(tdOpac);
 
-        // Col 10: Delete / Empty
+        // Col 9: Delete / Empty
         const tdDel = document.createElement('td');
         tdDel.style.padding = '3px 2px';
         tdDel.style.textAlign = 'center';
@@ -7265,7 +5884,6 @@ export class Telemetry3DViewport {
         const initWir = vpNode ? (vpNode.parameters.beamWireframe !== false && vpNode.parameters.rebarWireframe !== false) : true;
         const initRes = vpNode ? (vpNode.parameters.femResults !== false) : true;
         const initQty = vpNode ? (vpNode.parameters.beamQuantity || 'plasticStrain') : 'plasticStrain';
-        const initCmap = vpNode ? (vpNode.parameters.beamColormap || 'rainbow') : 'rainbow';
         const initRadius = vpNode ? (vpNode.parameters.beamRadius ?? vpNode.parameters.rebarRadius ?? 0.008) : 0.008;
 
         const tr = document.createElement('tr');
@@ -7358,87 +5976,45 @@ export class Telemetry3DViewport {
         qtyPill.style.border = '1px solid rgba(255, 170, 0, 0.3)';
         qtyPill.style.color = '#ffaa00';
         qtyPill.style.fontWeight = '500';
-        qtyPill.textContent = initQty;
+        qtyPill.textContent = `${initQty} ▾`;
         qtyPill.onclick = (e) => {
             e.stopPropagation();
-            this.showQuantityPopover(qtyPill, initQty, 'beam', (newQ) => {
+            const curQ = this.getViewportNode()?.parameters.beamQuantity || initQty;
+            this.showQuantityPopover(qtyPill, curQ, 'beam', (newQ) => {
                 const vp = this.getViewportNode();
                 if (vp) {
-                    this.stateManager.updateNodeParametersInPlace(vp.id, { beamQuantity: newQ, beamAutoScale: true });
-                    this.worker.postMessage({ type: 'setConfig', data: { beamQuantity: newQ, beamAutoScale: true } });
-                    qtyPill.textContent = newQ;
-                    this.syncControls(true);
+                    this.stateManager.updateNodeParametersInPlace(vp.id, { beamQuantity: newQ });
+                    const updatedVp = this.getViewportNode();
+                    this.worker.postMessage({
+                        type: 'setConfig',
+                        data: {
+                            beamQuantity: newQ,
+                            quantityStyles: buildAllQuantityStylesMap(updatedVp?.parameters || vp.parameters)
+                        }
+                    });
+                    qtyPill.textContent = `${newQ} ▾`;
+                    this.syncControls(false);
                 }
             });
         };
         tdQty.appendChild(qtyPill);
         tr.appendChild(tdQty);
 
-        // Col 7: COLOR (Colormap Selector Pill + Colorbar Toggle)
-        const tdCmap = document.createElement('td');
-        tdCmap.style.padding = '3px 4px';
-        const cmapWrap = document.createElement('div');
-        cmapWrap.style.display = 'flex';
-        cmapWrap.style.gap = '3px';
-        cmapWrap.style.alignItems = 'center';
-
-        const cmapPill = document.createElement('div');
-        cmapPill.id = this.getElId('viewport-beam-cmap-pill');
-        cmapPill.style.fontSize = '9px';
-        cmapPill.style.padding = '2px 4px';
-        cmapPill.style.borderRadius = '3px';
-        cmapPill.style.cursor = 'pointer';
-        cmapPill.style.background = 'rgba(255, 255, 255, 0.08)';
-        cmapPill.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-        cmapPill.style.color = '#e0e0e0';
-        cmapPill.style.flex = '1';
-        cmapPill.textContent = initCmap;
-        cmapPill.onclick = (e) => {
-            e.stopPropagation();
-            this.showColormapPopover(cmapPill, initCmap, (newC) => {
-                const vp = this.getViewportNode();
-                if (vp) {
-                    this.stateManager.updateNodeParametersInPlace(vp.id, { beamColormap: newC });
-                    this.worker.postMessage({ type: 'setConfig', data: { beamColormap: newC } });
-                    cmapPill.textContent = newC;
-                    this.syncControls(true);
-                }
-            });
-        };
-        cmapWrap.appendChild(cmapPill);
-
-        const initCbShow = vpNode ? (vpNode.parameters.beamShowColorbar === true) : false;
+        // Col 7: BAR (Quantity Colour Bar Toggle)
+        const tdBar = document.createElement('td');
+        tdBar.style.padding = '3px 2px';
+        tdBar.style.textAlign = 'center';
+        const initCbShow = getQuantityStyle(vpNode?.parameters || {}, initQty).showColorbar !== false;
         const cbToggleBtn = this.createToggleBtn('viewport-beam-cb-btn', '🎨', initCbShow, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { beamShowColorbar: v });
-                this.syncControls(true);
-            }
+            const curQ = this.getViewportNode()?.parameters.beamQuantity || initQty;
+            this.setQuantityShowColorbar(curQ, v);
         });
-        cbToggleBtn.style.width = '20px';
-        cbToggleBtn.title = 'Toggle Color Bar for Beams / 1D Elements in 3D Viewport';
-        cmapWrap.appendChild(cbToggleBtn);
+        cbToggleBtn.style.width = '22px';
+        cbToggleBtn.title = 'Toggle Quantity Colour Bar (configure colormap, range, scale & bands on the Colour Bar)';
+        tdBar.appendChild(cbToggleBtn);
+        tr.appendChild(tdBar);
 
-        tdCmap.appendChild(cmapWrap);
-        tr.appendChild(tdCmap);
-
-        // Col 8: SCL / Auto-Scale
-        const tdScl = document.createElement('td');
-        tdScl.style.padding = '3px 2px';
-        tdScl.style.textAlign = 'center';
-        const initAuto = vpNode ? (vpNode.parameters.beamAutoScale !== false) : true;
-        const autoBtn = this.createToggleBtn('viewport-beam-auto-btn', 'A', initAuto, (v) => {
-            const vp = this.getViewportNode();
-            if (vp) {
-                this.stateManager.updateNodeParametersInPlace(vp.id, { beamAutoScale: v });
-                this.worker.postMessage({ type: 'setConfig', data: { beamAutoScale: v } });
-                this.syncControls(true);
-            }
-        });
-        tdScl.appendChild(autoBtn);
-        tr.appendChild(tdScl);
-
-        // Col 9: RADIUS / SECTION DIAMETER
+        // Col 8: RADIUS / SECTION DIAMETER
         const tdRadius = document.createElement('td');
         tdRadius.style.padding = '3px 4px';
         tdRadius.style.textAlign = 'center';
@@ -7470,7 +6046,7 @@ export class Telemetry3DViewport {
         tdRadius.appendChild(radSel);
         tr.appendChild(tdRadius);
 
-        // Col 10: Delete / Empty
+        // Col 9: Delete / Empty
         const tdDel = document.createElement('td');
         tdDel.style.padding = '3px 2px';
         tdDel.style.textAlign = 'center';
@@ -7551,7 +6127,7 @@ export class Telemetry3DViewport {
             let node = targetModel?.nodes.find(n => n.type === 'Telemetry3DViewport');
             if (!node && targetModel) {
                 const has3D = targetModel.nodes.some(n => 
-                    n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || 
+                    isDomainMesh3DNode(n.type) || n.type === 'CFDSolver3D' || 
                     n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || 
                     n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || 
                     n.type === 'STLGeometry'
@@ -7649,6 +6225,10 @@ export class Telemetry3DViewport {
 
         const doSend = () => {
             let targetModelId = this.getCurrentModelId() || this.stateManager.getActiveModelId() || vpNode.id;
+            const modelStatus = targetModelId ? this.stateManager.getModelStatus(targetModelId) : 'UNINITIALIZED';
+            if (modelStatus === 'UNINITIALIZED' || modelStatus === 'INCOMPLETE' || modelStatus === 'TERMINATED' || modelStatus === 'ERROR') {
+                return;
+            }
 
             const showObstacles = vpNode.parameters.show_obstacles !== false;
             const obstaclesQuantity = vpNode.parameters.obstacles_quantity || 'pressure';
@@ -7930,7 +6510,7 @@ export class Telemetry3DViewport {
             const connToSolver = targetModel.connections.find((c: any) => c.toNode === solverNode.id && c.toPort === 'mesh');
             if (connToSolver) {
                 const currNode = targetModel.nodes.find((n: any) => n.id === connToSolver.fromNode);
-                if (currNode && (currNode.type === 'DomainMesh3D' || currNode.type === 'DomainMesh2D' || currNode.type === 'DomainMesh')) {
+                if (currNode && (isDomainMesh3DNode(currNode.type) || isDomainMesh2DNode(currNode.type) || currNode.type === 'DomainMesh')) {
                     return currNode;
                 }
             }
@@ -7939,7 +6519,7 @@ export class Telemetry3DViewport {
             }
         }
         // Fallback to explicit DomainMesh in targetModel
-        const explicitMesh = targetModel.nodes.find((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh');
+        const explicitMesh = targetModel.nodes.find((n: any) => isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type) || n.type === 'DomainMesh');
         if (explicitMesh) return explicitMesh;
 
         // Fallback: check if domain node has explicit spatial parameters
@@ -7960,7 +6540,7 @@ export class Telemetry3DViewport {
         if (cfd) {
             if (cfd.type === 'MarineHarbourDomain') return false;
             if (cfd.parameters?.init_mode === 'Ideal Gas' || cfd.parameters?.is_ideal_gas === true) return true;
-            if (['Multi-Material JWL', 'From1D', 'From2D', 'JWL', 'Hydrostatic_Stratified_3D'].includes(cfd.parameters?.init_mode)) return false;
+            if (['Multi-Material JWL', 'From1D', 'From2D', 'From3D', 'JWL', 'Hydrostatic_Stratified_3D'].includes(cfd.parameters?.init_mode)) return false;
         }
         const mat = targetModel.nodes.find((n: any) => ['Material', 'ExplosiveMaterial'].includes(n.type));
         if (mat) {
@@ -8039,7 +6619,7 @@ export class Telemetry3DViewport {
             colormap: 'rainbow',
             auto_scale,
             log_scale: false,
-            interpolate: false,
+            interpolate: true,
             min_val,
             max_val,
             enabled: true,
@@ -8114,7 +6694,7 @@ export class Telemetry3DViewport {
                 if (newQty === 'solid') {
                     slices[index].interpolate = false;
                 } else if (slices[index].interpolate === undefined) {
-                    slices[index].interpolate = false;
+                    slices[index].interpolate = true;
                 }
             }
 
@@ -8341,7 +6921,7 @@ export class Telemetry3DViewport {
             // Use model-scoped solver/domain nodes to avoid bleeding from other models
             const solverNode3D = this.getSolverNode();
             const domainMesh3DNode = this.getMeshNode();
-            let domainMesh3D: any = (domainMesh3DNode && (domainMesh3DNode.type === 'DomainMesh3D' || domainMesh3DNode.type === 'MarineHarbourDomain' || domainMesh3DNode.type === 'MPMDomain3D' || domainMesh3DNode.type === 'FEMDomain3D')) ? domainMesh3DNode : null;
+            let domainMesh3D: any = (domainMesh3DNode && (isDomainMesh3DNode(domainMesh3DNode.type) || domainMesh3DNode.type === 'MarineHarbourDomain' || domainMesh3DNode.type === 'MPMDomain3D' || domainMesh3DNode.type === 'FEMDomain3D')) ? domainMesh3DNode : null;
             if (!domainMesh3D && solverNode3D && (solverNode3D.type === 'MarineHarbourDomain' || solverNode3D.type === 'MPMDomain3D' || solverNode3D.type === 'FEMDomain3D')) {
                 domainMesh3D = solverNode3D;
             }
@@ -8397,6 +6977,8 @@ export class Telemetry3DViewport {
                     chargeParams.det_y = Number(detNode.parameters.detonator_y ?? detNode.parameters.det_y ?? detNode.parameters.trigger_y ?? detNode.parameters.y ?? cy);
                     chargeParams.det_z = Number(detNode.parameters.detonator_z ?? detNode.parameters.det_z ?? detNode.parameters.trigger_z ?? detNode.parameters.z ?? cz);
                 }
+            } else if (modelState) {
+                chargeParams = this.resolveRemap3DChargeParams(modelState, xmin, xmax, ymin, ymax, zmin, zmax);
             }
 
             const mpmObjects = this.getDiscoveredMPMObjects(modelState);
@@ -8528,7 +7110,7 @@ export class Telemetry3DViewport {
                     obstaclesOpacity: vpNode.parameters.obstacles_opacity ?? 1.0,
                     obstaclesAutoScale: vpNode.parameters.obstacles_auto_scale !== false,
                     obstaclesLogScale: vpNode.parameters.obstacles_log_scale === true,
-                    obstaclesInterpolate: vpNode.parameters.obstacles_interpolate === true,
+                    obstaclesInterpolate: vpNode.parameters.obstacles_interpolate !== false,
                     showCharge: vpNode.parameters.show_charge !== false,
                     chargeSolid: vpNode.parameters.charge_solid !== false,
                     chargeWireframe: vpNode.parameters.charge_wireframe !== false,
@@ -8562,7 +7144,7 @@ export class Telemetry3DViewport {
                     } : undefined,
                     stlTransforms: allStlEntries.map(e => e.transform),
                     submeshes: submeshes,
-                    ppc: Number(modelState?.nodes.find((n: any) => n.type === 'MPMObject3D')?.parameters['ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain')?.parameters['nearfield_ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain')?.parameters['ppc'] ?? 8),
+                    ppc: Number(modelState?.nodes.find((n: any) => n.type === 'MPMObject3D')?.parameters['ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || isDomainMesh3DNode(n.type) || n.type === 'MarineHarbourDomain')?.parameters['nearfield_ppc'] ?? modelState?.nodes.find((n: any) => n.type === 'MPMDomain3D' || isDomainMesh3DNode(n.type) || n.type === 'MarineHarbourDomain')?.parameters['ppc'] ?? 8),
                     showMPMParticles: vpNode.parameters.showMPMParticles !== false,
                     mpmParticleDiameter: (vpNode.parameters.mpmParticleDiameter !== undefined && vpNode.parameters.mpmParticleDiameter !== null)
                         ? Number(vpNode.parameters.mpmParticleDiameter)
@@ -8630,7 +7212,7 @@ export class Telemetry3DViewport {
             const selNodeId = this.stateManager.selectedNodeId;
             if (selNodeId) {
                 const selNode = modelState?.nodes.find((n: any) => n.id === selNodeId);
-                if (selNode && !['Telemetry3DViewport', 'DomainMesh3D', 'DomainMesh', 'CFDSolver3D', 'CFDSolver', 'CFDSolver2D'].includes(selNode.type)) {
+                if (selNode && !['Telemetry3DViewport', 'DomainMesh', 'CFDSolver3D', 'CFDSolver', 'CFDSolver2D'].includes(selNode.type) && !isDomainMesh3DNode(selNode.type)) {
                     const selGeom = this.extractObjectGeometryData(selNode);
                     if (selGeom) {
                         this.worker.postMessage({
@@ -8807,7 +7389,7 @@ export class Telemetry3DViewport {
                     // Col 5: RES (Interpolate / Smooth Contours Toggle)
                     const tdRes = document.createElement('td');
                     tdRes.style.padding = '3px 2px';
-                    const initInterp = slice.interpolate === true;
+                    const initInterp = slice.interpolate !== false;
                     tdRes.appendChild(this.createToggleBtn(`slice-interp-btn-${idx}`, 'Int', initInterp, (v) => {
                         this.updateSliceProperty(idx, { interpolate: v });
                     }));
@@ -8881,7 +7463,7 @@ export class Telemetry3DViewport {
                     sclWrap.style.display = 'flex';
                     sclWrap.style.gap = '2px';
                     
-                    const interpScaleVal = slice.interpolate === true;
+                    const interpScaleVal = slice.interpolate !== false;
                     sclWrap.appendChild(this.createToggleBtn(`slice-auto-btn-${idx}`, 'A', autoScaleVal, (v) => {
                         const curRange = vpNode.parameters.quantity_ranges?.[qty] || [slice.min_val ?? 101325.0, slice.max_val ?? 1013250.0];
                         this.setQuantityRange(qty, curRange[0], curRange[1], v, logScaleVal, interpScaleVal);
@@ -8970,7 +7552,7 @@ export class Telemetry3DViewport {
 
                     // 4. Int toggle
                     const interpBtn = document.getElementById(this.getElId(`slice-interp-btn-${idx}`));
-                    this.syncToggleBtnState(interpBtn, slice.interpolate === true);
+                    this.syncToggleBtnState(interpBtn, slice.interpolate !== false);
 
                     // 5. Qty Pill
                     const qty = slice.quantities?.[0] || 'pressure';
@@ -9018,7 +7600,7 @@ export class Telemetry3DViewport {
         let dimX = 1.0, dimY = 1.0, dimZ = 1.0, cellSize = 0.01;
         let xmin = 0.0, ymin = 0.0, zmin = 0.0;
         let xmax = 1.0, ymax = 1.0, zmax = 1.0;
-        if (meshNode && meshNode.type === 'DomainMesh3D') {
+        if (meshNode && isDomainMesh3DNode(meshNode.type)) {
             xmin = Number(meshNode.parameters?.xmin ?? meshNode.parameters?.x_min ?? 0.0);
             xmax = Number(meshNode.parameters?.xmax ?? meshNode.parameters?.x_max ?? 1.0);
             ymin = Number(meshNode.parameters?.ymin ?? meshNode.parameters?.y_min ?? 0.0);
@@ -9156,7 +7738,7 @@ export class Telemetry3DViewport {
             showGridBox: this.isGridBoxEnabled(vpNode),
             useLogScale: vpNode.parameters.log_scale === true,
             showCellEdges: vpNode.parameters.cell_edges === true,
-            interpolate: vpNode.parameters.interpolate === true,
+            interpolate: vpNode.parameters.interpolate !== false,
             showSTL: vpNode.parameters.show_stl !== false,
             stlWireframe: !!vpNode.parameters.stl_wireframe,
             stlSolids: vpNode.parameters.stl_solids !== false,
@@ -9164,7 +7746,7 @@ export class Telemetry3DViewport {
             stlColormap: resStlCmap,
             stlShowResults: vpNode.parameters.stl_show_results !== false,
             stlQuantity: stlQty,
-            stlSamplingMode: vpNode.parameters.stl_sampling_mode || 'nearest',
+            stlSamplingMode: vpNode.parameters.stl_sampling_mode || 'linear',
             stlAutoScale: vpNode.parameters.stl_auto_scale !== false,
             stlLogScale: vpNode.parameters.stl_log_scale === true,
             stlMinVal: vpNode.parameters.stl_min_val ?? 101325.0,
@@ -9925,6 +8507,109 @@ export class Telemetry3DViewport {
         return null;
     }
 
+    private resolveRemap3DChargeParams(
+        modelState: any,
+        xmin: number, xmax: number,
+        ymin: number, ymax: number,
+        zmin: number, zmax: number
+    ): any {
+        if (!modelState || !Array.isArray(modelState.nodes)) return null;
+        const remapNode = modelState.nodes.find((n: any) =>
+            n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode' || n.type === 'Remap3DTo3DNode'
+        );
+        if (!remapNode) return null;
+
+        const allModels = this.stateManager.getAllModels();
+        const ws = this.stateManager.getActiveWorkspace();
+        const findUpstreamModel = (rNode: any): any => {
+            if (!rNode) return null;
+            const explicitId = String(rNode.parameters?.source_model_id || '');
+            if (explicitId) {
+                const found = allModels.find(m => m.id === explicitId);
+                if (found) return found;
+            }
+            const conn = ws?.connections?.find((c: any) => c.toNode === rNode.id);
+            if (conn) {
+                return allModels.find(m => m.nodes.some((n: any) => n.id === conn.fromNode)) || null;
+            }
+            return null;
+        };
+
+        const upModel1 = findUpstreamModel(remapNode);
+        const upRemapNode = upModel1?.nodes?.find((n: any) =>
+            n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode'
+        );
+        const upModel2 = upRemapNode ? findUpstreamModel(upRemapNode) : null;
+
+        const srcChargeModel =
+            (upModel1?.nodes?.some((n: any) => n.type === 'Charge1D' || n.type === 'Charge2D') ? upModel1 : null) ||
+            (upModel2?.nodes?.some((n: any) => n.type === 'Charge1D' || n.type === 'Charge2D') ? upModel2 : null);
+        const srcChargeNode = srcChargeModel?.nodes?.find((n: any) => n.type === 'Charge1D' || n.type === 'Charge2D');
+        const jwlMat = srcChargeModel?.nodes?.find((n: any) =>
+            (n.type === 'Material' || n.type === 'ExplosiveMaterial') &&
+            String(n.parameters?.eos_type || n.type).toUpperCase().includes('JWL')
+        );
+        const rho0 = Number(jwlMat?.parameters?.rho ?? jwlMat?.parameters?.density ?? 1630.0) || 1630.0;
+        const chargeMass = Number(srcChargeNode?.parameters?.charge_mass ?? 0);
+        let coreRadius = Number(
+            srcChargeNode?.parameters?.charge_radius ??
+            srcChargeNode?.parameters?.explosive_radius ??
+            srcChargeNode?.parameters?.explosive_r ?? 0
+        );
+        if (chargeMass > 0 && coreRadius <= 0) {
+            const vol = chargeMass / rho0;
+            coreRadius = Math.pow((3.0 * vol) / (4.0 * Math.PI), 1.0 / 3.0);
+        }
+        if (coreRadius <= 0) {
+            coreRadius = Math.max(0.02, Math.min(xmax - xmin, ymax - ymin, zmax - zmin) * 0.025);
+        }
+
+        const cx = Number(remapNode.parameters?.explosive_x ?? ((xmin + xmax) * 0.5));
+        const cy = Number(remapNode.parameters?.explosive_y ?? ((ymin + ymax) * 0.5));
+        let cz = Number(remapNode.parameters?.explosive_z ?? ((zmin + zmax) * 0.5));
+        let remapShape: 'Sphere' | 'Cylinder' = 'Sphere';
+        let remapRadiusVal = 0.0;
+
+        if (remapNode.type === 'Remap2DTo3DNode') {
+            remapShape = 'Cylinder';
+            const up2DCharge = upModel1?.nodes?.find((n: any) => n.type === 'Charge2D');
+            const up2DMesh = upModel1?.nodes?.find((n: any) => isDomainMesh2DNode(n.type) || n.type === 'DomainMesh');
+            const up2DMaxZ = Number(up2DMesh?.parameters?.max_z ?? 1.0);
+            const up2DBurstZ = up2DCharge
+                ? Number(up2DCharge.parameters?.charge_z ?? up2DCharge.parameters?.z_offset ?? (up2DMaxZ * 0.5))
+                : (upRemapNode ? Number(upRemapNode.parameters?.explosive_z ?? (up2DMaxZ * 0.5)) : 0.0);
+            cz = Number(remapNode.parameters?.explosive_z ?? 0.0) + up2DBurstZ;
+            const cutR = Number(remapNode.parameters?.remap_radius ?? 0);
+            const up2DMaxR = Number(up2DMesh?.parameters?.max_r ?? 0);
+            remapRadiusVal = cutR > 0 ? cutR : up2DMaxR;
+        } else {
+            const rr = Number(remapNode.parameters?.remap_radius ?? 0);
+            const up1DMesh = upModel1?.nodes?.find((n: any) => n.type === 'DomainMesh');
+            const up1DMaxR = Number(up1DMesh?.parameters?.domain_radius ?? 0);
+            remapRadiusVal = rr > 0 ? rr : up1DMaxR;
+        }
+
+        return {
+            id: remapNode.id,
+            type: remapNode.type,
+            shape: 'Sphere',
+            x: cx,
+            y: cy,
+            z: cz,
+            radius: coreRadius,
+            height: coreRadius * 2.0,
+            lx: coreRadius * 2.0,
+            ly: coreRadius * 2.0,
+            lz: coreRadius * 2.0,
+            rot_x: 0.0,
+            rot_y: 0.0,
+            rot_z: 0.0,
+            remap_radius: remapRadiusVal,
+            remap_shape: remapShape,
+            visible: (remapNode.parameters?.visible !== false && !remapNode.parameters?.hidden)
+        };
+    }
+
     private getVirtualGauges(): any[] {
         const vpNode = this.getViewportNode();
         if (!vpNode) return [];
@@ -9960,6 +8645,20 @@ export class Telemetry3DViewport {
             if (vgNode.parameters?.gauges && Array.isArray(vgNode.parameters.gauges)) {
                 for (const g of vgNode.parameters.gauges) {
                     const gVis = isNodeVis && g.visible !== false && !g.hidden && g.plot !== false && g.active !== false;
+                    allGauges.push({
+                        ...g,
+                        visible: gVis,
+                        hidden: !gVis
+                    });
+                }
+            }
+        }
+
+        if (allGauges.length === 0) {
+            const dmNode = targetModel.nodes.find((n: any) => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh');
+            if (dmNode && Array.isArray(dmNode.parameters?.gauges)) {
+                for (const g of dmNode.parameters.gauges) {
+                    const gVis = g.visible !== false && !g.hidden && g.plot !== false && g.active !== false;
                     allGauges.push({
                         ...g,
                         visible: gVis,
@@ -10604,7 +9303,7 @@ export class Telemetry3DViewport {
                 );
                 if (!hasSoilMpm) {
                     const isFullDomain = (bedType === 'Full_Domain_MPM' || bedType === 'Pure_MPM');
-                    const meshNode = model.nodes.find((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+                    const meshNode = model.nodes.find((n: any) => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh');
                     const xmin = Number(meshNode?.parameters?.xmin ?? meshNode?.parameters?.x_min ?? -20.0);
                     const xmax = Number(meshNode?.parameters?.xmax ?? meshNode?.parameters?.x_max ?? 20.0);
                     const ymin = Number(meshNode?.parameters?.ymin ?? meshNode?.parameters?.y_min ?? -20.0);
@@ -10879,75 +9578,88 @@ export class Telemetry3DViewport {
         bar.style.color = '#e0e0e0';
         bar.style.userSelect = 'none';
 
-        // Left group: Model Title & Status Badge
+        // Left group: Model Title & Focus Pill
         const leftGroup = document.createElement('div');
         leftGroup.style.display = 'flex';
         leftGroup.style.alignItems = 'center';
         leftGroup.style.gap = '8px';
+        leftGroup.style.minWidth = '0';
 
         const modelBadge = document.createElement('span');
         modelBadge.id = this.getElId('viewport-top-model-badge');
         modelBadge.style.fontWeight = '700';
         modelBadge.style.color = '#38bdf8';
         modelBadge.style.letterSpacing = '0.3px';
+        modelBadge.style.whiteSpace = 'nowrap';
+        modelBadge.style.overflow = 'hidden';
+        modelBadge.style.textOverflow = 'ellipsis';
         const targetModel = this.getTargetModel();
         modelBadge.innerHTML = `🧊 ${targetModel?.name || '3D Viewport'}`;
         leftGroup.appendChild(modelBadge);
 
+        const focusPill = document.createElement('span');
+        focusPill.className = 'viewport-focus-pill';
+        focusPill.textContent = '● FOCUSED';
+        focusPill.title = 'Active 3D Viewport (receives camera keyboard shortcuts)';
+        leftGroup.appendChild(focusPill);
+
         bar.appendChild(leftGroup);
 
-        // Right group: Master Drawer Toggles & Quick Actions
+        // Right group: Clean 1-to-1 Drawer Tab Toggles
         const rightGroup = document.createElement('div');
         rightGroup.style.display = 'flex';
         rightGroup.style.alignItems = 'center';
-        rightGroup.style.gap = '6px';
+        rightGroup.style.gap = '4px';
+        rightGroup.style.flexShrink = '0';
 
-        // 1. Colorbars Manager button
-        const cbBtn = document.createElement('button');
-        cbBtn.id = this.getElId('viewport-top-cb-btn');
-        cbBtn.innerHTML = '🎨 Colorbars';
-        this.applyButtonStyle(cbBtn);
-        cbBtn.style.padding = '2px 8px';
-        cbBtn.style.fontSize = '10px';
-        cbBtn.style.background = 'rgba(168, 85, 247, 0.18)';
-        cbBtn.style.border = '1px solid rgba(168, 85, 247, 0.4)';
-        cbBtn.style.color = '#c084fc';
-        cbBtn.title = 'Open Colorbar Manager (colormaps, ranges, linear/log, unified lock)';
-        cbBtn.onclick = () => this.openDrawerTab('colorbars');
-        rightGroup.appendChild(cbBtn);
+        const topTabs: { id: 'parts' | 'matrix' | 'colorbars' | 'view', elSuffix: string, label: string, title: string }[] = [
+            { id: 'parts', elSuffix: 'parts', label: '🧩 Parts', title: 'Toggle Structural Parts & Mesh visibility' },
+            { id: 'matrix', elSuffix: 'matrix', label: '⚡ Layers', title: 'Toggle Display & Layer Matrix' },
+            { id: 'colorbars', elSuffix: 'cb', label: '🎨 Colorbars', title: 'Toggle Colorbar Manager (colormaps, ranges, linear/log)' },
+            { id: 'view', elSuffix: 'view', label: '🎥 Scene', title: 'Toggle Camera, Projection & Scene Settings' }
+        ];
 
-        // 2. FEM Parts & Components button
-        const partsBtn = document.createElement('button');
-        partsBtn.id = this.getElId('viewport-top-parts-btn');
-        partsBtn.innerHTML = '🧩 Parts & Mesh';
-        this.applyButtonStyle(partsBtn);
-        partsBtn.style.padding = '2px 8px';
-        partsBtn.style.fontSize = '10px';
-        partsBtn.style.background = 'rgba(56, 189, 248, 0.18)';
-        partsBtn.style.border = '1px solid rgba(56, 189, 248, 0.4)';
-        partsBtn.style.color = '#38bdf8';
-        partsBtn.title = 'Manage Structural FEA Components, Rebar Cages, and Visibility';
-        partsBtn.onclick = () => this.openDrawerTab('parts');
-        rightGroup.appendChild(partsBtn);
-
-        // 3. Display & Layer Matrix button
-        const matrixBtn = document.createElement('button');
-        matrixBtn.id = this.getElId('viewport-top-matrix-btn');
-        matrixBtn.innerHTML = '⚡ Display Matrix ▾';
-        this.applyButtonStyle(matrixBtn);
-        matrixBtn.style.padding = '2px 8px';
-        matrixBtn.style.fontSize = '10px';
-        matrixBtn.style.fontWeight = 'bold';
-        matrixBtn.style.background = 'rgba(16, 185, 129, 0.18)';
-        matrixBtn.style.border = '1px solid rgba(52, 211, 153, 0.4)';
-        matrixBtn.style.color = '#34d399';
-        matrixBtn.title = 'Open Full Display & Layer Matrix Controls Drawer';
-        matrixBtn.onclick = () => this.toggleDrawer();
-        rightGroup.appendChild(matrixBtn);
+        topTabs.forEach(t => {
+            const btn = document.createElement('button');
+            btn.id = this.getElId(`viewport-top-${t.elSuffix}-btn`);
+            btn.className = 'viewport-top-tab-btn';
+            btn.textContent = t.label;
+            btn.title = t.title;
+            btn.onclick = () => this.toggleDrawerTab(t.id);
+            rightGroup.appendChild(btn);
+        });
 
         bar.appendChild(rightGroup);
         this.topControlsBar = bar;
         this.container.appendChild(bar);
+        this.updateTopBarActiveStates();
+    }
+
+    private updateTopBarActiveStates() {
+        const mapping: { tab: 'parts' | 'matrix' | 'colorbars' | 'view', elSuffix: string }[] = [
+            { tab: 'parts', elSuffix: 'parts' },
+            { tab: 'matrix', elSuffix: 'matrix' },
+            { tab: 'colorbars', elSuffix: 'cb' },
+            { tab: 'view', elSuffix: 'view' }
+        ];
+        mapping.forEach(m => {
+            const btn = document.getElementById(this.getElId(`viewport-top-${m.elSuffix}-btn`));
+            if (btn) {
+                btn.classList.toggle('is-active', this.isOpen && this.activeDrawerTab === m.tab);
+            }
+        });
+    }
+
+    public toggleDrawerTab(tab: 'parts' | 'matrix' | 'colorbars' | 'view') {
+        if (this.isOpen && this.activeDrawerTab === tab) {
+            this.isOpen = false;
+            if (this.controlsOverlay) {
+                this.controlsOverlay.style.display = 'none';
+            }
+            this.updateTopBarActiveStates();
+            return;
+        }
+        this.openDrawerTab(tab);
     }
 
     public openDrawerTab(tab: 'parts' | 'matrix' | 'colorbars' | 'view') {
@@ -10960,6 +9672,7 @@ export class Telemetry3DViewport {
             this.controlsOverlay.style.display = 'flex';
             this.renderDrawerContent();
         }
+        this.updateTopBarActiveStates();
     }
 
     public toggleDrawer() {
@@ -10973,6 +9686,7 @@ export class Telemetry3DViewport {
                 this.renderDrawerContent();
             }
         }
+        this.updateTopBarActiveStates();
     }
 
     public buildControlsOverlay() {
@@ -11029,6 +9743,7 @@ export class Telemetry3DViewport {
             tabBtn.onclick = () => {
                 this.activeDrawerTab = t.id;
                 this.renderDrawerContent();
+                this.updateTopBarActiveStates();
             };
             tabsRow.appendChild(tabBtn);
         });
@@ -11043,6 +9758,7 @@ export class Telemetry3DViewport {
         closeBtn.onclick = () => {
             this.isOpen = false;
             overlay.style.display = 'none';
+            this.updateTopBarActiveStates();
         };
         header.appendChild(closeBtn);
         overlay.appendChild(header);
@@ -11401,23 +10117,6 @@ export class Telemetry3DViewport {
         };
         actionsRow.appendChild(hideAllBtn);
 
-        const lockAllBtn = document.createElement('button');
-        const isGloballyLocked = params.lock_quantity_ranges !== false;
-        lockAllBtn.innerHTML = isGloballyLocked ? '🔒 Unified Range' : '🔓 Indep Range';
-        this.applyButtonStyle(lockAllBtn);
-        lockAllBtn.style.padding = '2px 6px';
-        lockAllBtn.style.fontSize = '9px';
-        lockAllBtn.style.background = isGloballyLocked ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)';
-        lockAllBtn.style.borderColor = isGloballyLocked ? '#10b981' : '#ef4444';
-        lockAllBtn.style.color = isGloballyLocked ? '#34d399' : '#f87171';
-        lockAllBtn.onclick = () => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { lock_quantity_ranges: !isGloballyLocked });
-            this.worker.postMessage({ type: 'setConfig', data: { lockQuantityRanges: !isGloballyLocked } });
-            this.syncControls(false);
-            this.renderDrawerContent();
-        };
-        actionsRow.appendChild(lockAllBtn);
-
         headerCard.appendChild(actionsRow);
         parent.appendChild(headerCard);
 
@@ -11583,158 +10282,119 @@ export class Telemetry3DViewport {
         // Render CFD Slices
         const slices = params.slices || [];
         slices.forEach((s: any, idx: number) => {
-            const qty = s.quantities?.[0] || 'pressure';
+            const qty = canonicalizeQuantity(s.quantities?.[0] || 'pressure');
             const isShown = s.show_colorbar === true;
-            const cmap = s.colormap || 'rainbow';
-            const autoScale = s.auto_scale !== false;
-            const logScale = s.log_scale === true;
-            const minV = s.min_val ?? 0.0;
-            const maxV = s.max_val ?? 1.0;
+            const cmap = params.quantity_colormaps?.[qty] || s.colormap || 'rainbow';
+            const autoScale = (params.quantity_auto_scales?.[qty] !== undefined) ? Boolean(params.quantity_auto_scales[qty]) : (s.auto_scale !== false);
+            const logScale = (params.quantity_log_scales?.[qty] !== undefined) ? Boolean(params.quantity_log_scales[qty]) : (s.log_scale === true);
+            const qRange = params.quantity_ranges?.[qty] || DEFAULT_QUANTITY_RANGES[qty] || [s.min_val ?? 0.0, s.max_val ?? 1.0];
+            const minV = qRange[0];
+            const maxV = qRange[1];
             renderItem(`🥞 Slice #${idx + 1} (${qty})`, isShown, (show) => {
-                this.updateSliceProperty(idx, { show_colorbar: show });
+                this.setQuantityShowColorbar(qty, show);
             }, qty, (q) => {
                 this.updateSliceProperty(idx, { quantities: [q] });
             }, cmap, (c) => {
-                this.updateSliceProperty(idx, { colormap: c });
+                this.setQuantityColormap(qty, c);
             }, minV, maxV, (minN, maxN) => {
-                this.updateSliceProperty(idx, { auto_scale: false, min_val: minN, max_val: maxN });
+                this.setQuantityRange(qty, minN, maxN);
             }, autoScale, () => {
-                this.updateSliceProperty(idx, { auto_scale: !autoScale });
+                this.setQuantityAutoScale(qty, !autoScale);
             }, logScale, () => {
-                this.updateSliceProperty(idx, { log_scale: !logScale });
+                this.setQuantityLogScale(qty, !logScale);
             });
         });
 
         // Render FEM Mesh
-        const femQty = params.femQuantity || 'vonMises';
+        const femQty = canonicalizeQuantity(params.femQuantity || 'vonMises');
         const femShown = params.femShowColorbar === true;
-        const femCmap = params.femColormap || 'rainbow';
-        const femAuto = params.femAutoScale !== false;
-        const femLog = params.femLogScale === true;
-        const femMin = params.femMinVal ?? 0.0;
-        const femMax = params.femMaxVal ?? 500000000.0;
+        const femCmap = params.quantity_colormaps?.[femQty] || params.femColormap || 'rainbow';
+        const femAuto = (params.quantity_auto_scales?.[femQty] !== undefined) ? Boolean(params.quantity_auto_scales[femQty]) : (params.femAutoScale !== false);
+        const femLog = (params.quantity_log_scales?.[femQty] !== undefined) ? Boolean(params.quantity_log_scales[femQty]) : (params.femLogScale === true);
+        const femRange = params.quantity_ranges?.[femQty] || DEFAULT_QUANTITY_RANGES[femQty] || [params.femMinVal ?? 0.0, params.femMaxVal ?? 500000000.0];
         renderItem(`🏗️ FEM Solid Mesh (${femQty})`, femShown, (show) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femShowColorbar: show });
-            this.syncControls(false);
+            this.setQuantityShowColorbar(femQty, show);
         }, femQty, (q) => {
             this.stateManager.updateNodeParametersInPlace(vpNode.id, { femQuantity: q });
             this.worker.postMessage({ type: 'setConfig', data: { femQuantity: q } });
             this.syncControls(false);
         }, femCmap, (c) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femColormap: c });
-            this.worker.postMessage({ type: 'setConfig', data: { femColormap: c } });
-            this.syncControls(false);
-        }, femMin, femMax, (minN, maxN) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femAutoScale: false, femMinVal: minN, femMaxVal: maxN });
-            this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: false, femMinVal: minN, femMaxVal: maxN } });
-            this.syncControls(false);
+            this.setQuantityColormap(femQty, c);
+        }, femRange[0], femRange[1], (minN, maxN) => {
+            this.setQuantityRange(femQty, minN, maxN);
         }, femAuto, () => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femAutoScale: !femAuto });
-            this.worker.postMessage({ type: 'setConfig', data: { femAutoScale: !femAuto } });
-            this.syncControls(false);
+            this.setQuantityAutoScale(femQty, !femAuto);
         }, femLog, () => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { femLogScale: !femLog });
-            this.worker.postMessage({ type: 'setConfig', data: { femLogScale: !femLog } });
-            this.syncControls(false);
+            this.setQuantityLogScale(femQty, !femLog);
         });
 
         // Render MPM Particles
-        const mpmQty = params.mpmParticleQuantity || 'velocity';
+        const mpmQty = canonicalizeQuantity(params.mpmParticleQuantity || 'velocity');
         const mpmShown = params.mpmParticleShowColorbar === true;
-        const mpmCmap = params.mpmParticleColormap || 'rainbow';
-        const mpmAuto = params.mpmParticleAutoScale !== false;
-        const mpmLog = params.mpmParticleLogScale === true;
-        const mpmMin = params.mpmParticleMinVal ?? 0.0;
-        const mpmMax = params.mpmParticleMaxVal ?? 1000.0;
+        const mpmCmap = params.quantity_colormaps?.[mpmQty] || params.mpmParticleColormap || 'rainbow';
+        const mpmAuto = (params.quantity_auto_scales?.[mpmQty] !== undefined) ? Boolean(params.quantity_auto_scales[mpmQty]) : (params.mpmParticleAutoScale !== false);
+        const mpmLog = (params.quantity_log_scales?.[mpmQty] !== undefined) ? Boolean(params.quantity_log_scales[mpmQty]) : (params.mpmParticleLogScale === true);
+        const mpmRange = params.quantity_ranges?.[mpmQty] || DEFAULT_QUANTITY_RANGES[mpmQty] || [params.mpmParticleMinVal ?? 0.0, params.mpmParticleMaxVal ?? 1000.0];
         renderItem(`✨ MPM Particles (${mpmQty})`, mpmShown, (show) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleShowColorbar: show });
-            this.syncControls(false);
+            this.setQuantityShowColorbar(mpmQty, show);
         }, mpmQty, (q) => {
             this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleQuantity: q });
             this.worker.postMessage({ type: 'setConfig', data: { mpmParticleQuantity: q } });
             this.syncControls(false);
         }, mpmCmap, (c) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleColormap: c });
-            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleColormap: c } });
-            this.syncControls(false);
-        }, mpmMin, mpmMax, (minN, maxN) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleAutoScale: false, mpmParticleMinVal: minN, mpmParticleMaxVal: maxN });
-            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleAutoScale: false, mpmParticleMinVal: minN, mpmParticleMaxVal: maxN } });
-            this.syncControls(false);
+            this.setQuantityColormap(mpmQty, c);
+        }, mpmRange[0], mpmRange[1], (minN, maxN) => {
+            this.setQuantityRange(mpmQty, minN, maxN);
         }, mpmAuto, () => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleAutoScale: !mpmAuto });
-            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleAutoScale: !mpmAuto } });
-            this.syncControls(false);
+            this.setQuantityAutoScale(mpmQty, !mpmAuto);
         }, mpmLog, () => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { mpmParticleLogScale: !mpmLog });
-            this.worker.postMessage({ type: 'setConfig', data: { mpmParticleLogScale: !mpmLog } });
-            this.syncControls(false);
+            this.setQuantityLogScale(mpmQty, !mpmLog);
         });
 
         // Render CAD / STL Mesh
-        const stlQty = params.stl_quantity || 'pressure';
+        const stlQty = canonicalizeQuantity(params.stl_quantity || 'pressure');
         const stlShown = params.stl_show_colorbar === true;
-        const stlCmap = params.stl_colormap || 'rainbow';
-        const stlAuto = params.stl_auto_scale !== false;
-        const stlLog = params.stl_log_scale === true;
-        const stlMin = params.stl_min_val ?? 0.0;
-        const stlMax = params.stl_max_val ?? 1.0;
+        const stlCmap = params.quantity_colormaps?.[stlQty] || params.stl_colormap || 'rainbow';
+        const stlAuto = (params.quantity_auto_scales?.[stlQty] !== undefined) ? Boolean(params.quantity_auto_scales[stlQty]) : (params.stl_auto_scale !== false);
+        const stlLog = (params.quantity_log_scales?.[stlQty] !== undefined) ? Boolean(params.quantity_log_scales[stlQty]) : (params.stl_log_scale === true);
+        const stlRange = params.quantity_ranges?.[stlQty] || DEFAULT_QUANTITY_RANGES[stlQty] || [params.stl_min_val ?? 0.0, params.stl_max_val ?? 1.0];
         renderItem(`📐 CAD / STL Mesh (${stlQty})`, stlShown, (show) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_show_colorbar: show });
-            this.syncControls(false);
+            this.setQuantityShowColorbar(stlQty, show);
         }, stlQty, (q) => {
             this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_quantity: q });
             this.worker.postMessage({ type: 'setConfig', data: { stlQuantity: q } });
             this.syncControls(false);
         }, stlCmap, (c) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_colormap: c });
-            this.worker.postMessage({ type: 'setConfig', data: { stlColormap: c } });
-            this.syncControls(false);
-        }, stlMin, stlMax, (minN, maxN) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_auto_scale: false, stl_min_val: minN, max_val: maxN });
-            this.worker.postMessage({ type: 'setConfig', data: { stlAutoScale: false, stlMinVal: minN, stlMaxVal: maxN } });
-            this.syncControls(false);
+            this.setQuantityColormap(stlQty, c);
+        }, stlRange[0], stlRange[1], (minN, maxN) => {
+            this.setQuantityRange(stlQty, minN, maxN);
         }, stlAuto, () => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_auto_scale: !stlAuto });
-            this.worker.postMessage({ type: 'setConfig', data: { stlAutoScale: !stlAuto } });
-            this.syncControls(false);
+            this.setQuantityAutoScale(stlQty, !stlAuto);
         }, stlLog, () => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { stl_log_scale: !stlLog });
-            this.worker.postMessage({ type: 'setConfig', data: { stlLogScale: !stlLog } });
-            this.syncControls(false);
+            this.setQuantityLogScale(stlQty, !stlLog);
         });
 
         // Render Obstacles Mesh
-        const obsQty = params.obstacles_quantity || 'pressure';
+        const obsQty = canonicalizeQuantity(params.obstacles_quantity || 'pressure');
         const obsShown = params.obstacles_show_colorbar === true;
-        const obsCmap = params.obstacles_colormap || 'rainbow';
-        const obsAuto = params.obstacles_auto_scale !== false;
-        const obsLog = params.obstacles_log_scale === true;
-        const obsMin = params.obstacles_min_val ?? 0.0;
-        const obsMax = params.obstacles_max_val ?? 1.0;
+        const obsCmap = params.quantity_colormaps?.[obsQty] || params.obstacles_colormap || 'rainbow';
+        const obsAuto = (params.quantity_auto_scales?.[obsQty] !== undefined) ? Boolean(params.quantity_auto_scales[obsQty]) : (params.obstacles_auto_scale !== false);
+        const obsLog = (params.quantity_log_scales?.[obsQty] !== undefined) ? Boolean(params.quantity_log_scales[obsQty]) : (params.obstacles_log_scale === true);
+        const obsRange = params.quantity_ranges?.[obsQty] || DEFAULT_QUANTITY_RANGES[obsQty] || [params.obstacles_min_val ?? 0.0, params.obstacles_max_val ?? 1.0];
         renderItem(`🧱 Obstacles Mesh (${obsQty})`, obsShown, (show) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_show_colorbar: show });
-            this.syncControls(false);
+            this.setQuantityShowColorbar(obsQty, show);
         }, obsQty, (q) => {
             this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_quantity: q });
             this.worker.postMessage({ type: 'setConfig', data: { obstaclesQuantity: q } });
             this.syncControls(false);
         }, obsCmap, (c) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_colormap: c });
-            this.worker.postMessage({ type: 'setConfig', data: { obstaclesColormap: c } });
-            this.syncControls(false);
-        }, obsMin, obsMax, (minN, maxN) => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_auto_scale: false, obstacles_min_val: minN, obstacles_max_val: maxN });
-            this.worker.postMessage({ type: 'setConfig', data: { obstaclesAutoScale: false, obstaclesMinVal: minN, obstaclesMaxVal: maxN } });
-            this.syncControls(false);
+            this.setQuantityColormap(obsQty, c);
+        }, obsRange[0], obsRange[1], (minN, maxN) => {
+            this.setQuantityRange(obsQty, minN, maxN);
         }, obsAuto, () => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_auto_scale: !obsAuto });
-            this.worker.postMessage({ type: 'setConfig', data: { obstaclesAutoScale: !obsAuto } });
-            this.syncControls(false);
+            this.setQuantityAutoScale(obsQty, !obsAuto);
         }, obsLog, () => {
-            this.stateManager.updateNodeParametersInPlace(vpNode.id, { obstacles_log_scale: !obsLog });
-            this.worker.postMessage({ type: 'setConfig', data: { obstaclesLogScale: !obsLog } });
-            this.syncControls(false);
+            this.setQuantityLogScale(obsQty, !obsLog);
         });
 
         parent.appendChild(list);
@@ -12242,7 +10902,7 @@ export class Telemetry3DViewport {
             workerData.slices = slices;
             if (activeModel) {
                 activeModel.nodes
-                    .filter((n: any) => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D')
+                    .filter((n: any) => isDomainMesh3DNode(n.type) || n.type === 'CFDSolver3D')
                     .forEach((n: any) => {
                         const nodeSlices = Array.isArray(n.parameters?.slices)
                             ? n.parameters.slices.map((s: any) => ({ ...s, enabled: active, visible: active }))
@@ -12412,7 +11072,10 @@ export class Telemetry3DViewport {
             updates.show_charge = active;
             workerData.showCharge = active;
             if (activeModel) {
-                const chargeObjs = activeModel.nodes.filter((n: any) => n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'ExplosiveMaterial' || n.type === 'Charge');
+                const chargeObjs = activeModel.nodes.filter((n: any) =>
+                    n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'ExplosiveMaterial' ||
+                    n.type === 'Charge' || n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode' || n.type === 'Remap3DTo3DNode'
+                );
                 chargeObjs.forEach((n: any) => {
                     this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_charge: active });
                 });
@@ -12433,7 +11096,7 @@ export class Telemetry3DViewport {
             updates.show_grid_box = active;
             workerData.showGridBox = active;
             if (activeModel) {
-                const gridObjs = activeModel.nodes.filter((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+                const gridObjs = activeModel.nodes.filter((n: any) => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh');
                 gridObjs.forEach((n: any) => {
                     this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_grid: active, show_grid_box: active });
                 });
@@ -12442,7 +11105,7 @@ export class Telemetry3DViewport {
             updates.show_grid_box = active;
             workerData.showGridBox = active;
             if (activeModel) {
-                const gridObjs = activeModel.nodes.filter((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+                const gridObjs = activeModel.nodes.filter((n: any) => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh');
                 gridObjs.forEach((n: any) => {
                     this.stateManager.updateNodeParametersInPlace(n.id, { visible: active, hidden: !active, show_grid_box: active });
                 });
@@ -12502,9 +11165,12 @@ export class Telemetry3DViewport {
         this.scheduleSyncControls(false);
     }
 
-    public setRefreshRate(rate: number): void {
+    public setRefreshRate(rate: number, targetModelId?: string): void {
         const vp = this.getViewportNode();
         const targetModel = this.getTargetModel();
+        if (targetModelId && (!targetModel || targetModel.id !== targetModelId)) {
+            return;
+        }
         if (targetModel) {
             this.stateManager.setModelRefreshRate(targetModel.id, rate);
         } else if (vp) {

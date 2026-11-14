@@ -1,6 +1,9 @@
-import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection, NodeType, Port, ModelViewConfig, ModelViewCamera, ModelViewSlice, ModelViewToggles } from './types.js';
+import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection, NodeType, Port, ModelViewConfig, ModelViewCamera, ModelViewSlice, ModelViewToggles, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { MPM_MATERIAL_PRESETS, getPresetsForConstitutiveModel, getDefaultPresetForModel } from './mpm-presets.js';
 import { isAirMaterialNode } from './serialization.js';
+import { classifyError, ModelErrorEntry } from './error-diagnostics.js';
+import { canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, getQuantityStyle } from './contour-style.js';
+export { canonicalizeQuantity, DEFAULT_QUANTITY_RANGES };
 
 export function syncMPMMaterialParameters(node: Node, parameters: Record<string, any>, updatedKey?: string): void {
     if (node.type !== 'Material' && (node.type as any) !== 'MPMMaterialSteel' && (node.type as any) !== 'MPMMaterial' && (node.type as any) !== 'MaterialSteel') {
@@ -243,6 +246,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'failure_strain', 'tensile_failure_stress',
             'enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress',
             'enable_timestep_erosion', 'timestep_erosion_factor',
+            'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio', 'erode_to_fv_grid',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
             'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'initial_temperature', 'Cp',
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
@@ -259,7 +263,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
             'afterburn_ambient_o2_fraction',
             'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_G2', 'lt_e', 'lt_g', 'lt_z',
-            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
+            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min', 'jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0',
             'directional_crack_band', 'nonlocal_radius',
             'solid_model', 'burn_model', 'product_model'
         ];
@@ -283,7 +287,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         if (!parameters['burn_model']) parameters['burn_model'] = 'Programmed Wavefront Burn';
         if (!parameters['product_model']) parameters['product_model'] = 'JWL Product Gas';
     } else if (modelName === 'Lee-Tarver Ignition & Growth') {
-        if (!parameters['solid_model']) parameters['solid_model'] = 'Mie-Grüneisen Shock Reactant';
+        if (!parameters['solid_model']) parameters['solid_model'] = 'Unreacted JWL (Lee-Tarver)';
         if (!parameters['burn_model']) parameters['burn_model'] = 'Lee-Tarver 3-Stage ODE';
         if (!parameters['product_model']) parameters['product_model'] = 'JWL Product Gas';
     } else if (modelName === 'CREST Reactive Burn') {
@@ -303,6 +307,8 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             if (parameters['davis_cv'] === undefined) parameters['davis_cv'] = 1000.0;
             if (parameters['davis_t0'] === undefined) parameters['davis_t0'] = 293.0;
             if (parameters['davis_rho0'] === undefined) parameters['davis_rho0'] = parameters['density'] || 1895.0;
+        } else if (solid.includes('JWL')) {
+            // Unreacted JWL (Lee-Tarver): jwlr_* populated by the Lee-Tarver burn-model defaults below.
         } else {
             if (parameters['mg_c0'] === undefined) parameters['mg_c0'] = 2500.0;
             if (parameters['mg_s'] === undefined) parameters['mg_s'] = 1.5;
@@ -311,23 +317,31 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
 
         const burn = parameters['burn_model'] || (modelName === 'Lee-Tarver Ignition & Growth' ? 'Lee-Tarver 3-Stage ODE' : (modelName === 'CREST Reactive Burn' ? 'CREST Shock Entropy Kinetics' : 'Programmed Wavefront Burn'));
         if (burn.includes('Lee-Tarver')) {
-            if (parameters['det_vel'] === undefined) parameters['det_vel'] = 6930.0;
-            if (parameters['detonation_energy'] === undefined) parameters['detonation_energy'] = 4.29e6;
-            if (parameters['lt_I'] === undefined) parameters['lt_I'] = 44.0;
-            if (parameters['lt_a'] === undefined) parameters['lt_a'] = 0.667;
+            if (parameters['det_vel'] === undefined) parameters['det_vel'] = 8800.0;
+            if (parameters['detonation_energy'] === undefined) parameters['detonation_energy'] = 5.1686e6;
+            if (parameters['lt_I'] === undefined) parameters['lt_I'] = 1.4e17;
+            if (parameters['lt_a'] === undefined) parameters['lt_a'] = 0.0;
             if (parameters['lt_b'] === undefined) parameters['lt_b'] = 0.667;
-            if (parameters['lt_x'] === undefined) parameters['lt_x'] = 7.0;
-            if (parameters['lt_G1'] === undefined) parameters['lt_G1'] = 8.5e-6;
+            if (parameters['lt_x'] === undefined) parameters['lt_x'] = 20.0;
+            if (parameters['lt_G1'] === undefined) parameters['lt_G1'] = 1.3e-14;
             if (parameters['lt_c'] === undefined) parameters['lt_c'] = 0.667;
-            if (parameters['lt_d'] === undefined) parameters['lt_d'] = 0.333;
+            if (parameters['lt_d'] === undefined) parameters['lt_d'] = 0.277;
             if (parameters['lt_y'] === undefined) parameters['lt_y'] = 2.0;
-            if (parameters['lt_G2'] === undefined) parameters['lt_G2'] = 400.0e-6;
+            if (parameters['lt_G2'] === undefined) parameters['lt_G2'] = 4.0e-14;
             if (parameters['lt_e'] === undefined) parameters['lt_e'] = 0.333;
-            if (parameters['lt_g'] === undefined) parameters['lt_g'] = 0.667;
-            if (parameters['lt_z'] === undefined) parameters['lt_z'] = 3.0;
-            if (parameters['lt_F_ig_max'] === undefined) parameters['lt_F_ig_max'] = 0.02;
-            if (parameters['lt_F_G1_max'] === undefined) parameters['lt_F_G1_max'] = 0.50;
-            if (parameters['lt_F_G2_min'] === undefined) parameters['lt_F_G2_min'] = 0.50;
+            if (parameters['lt_g'] === undefined) parameters['lt_g'] = 1.0;
+            if (parameters['lt_z'] === undefined) parameters['lt_z'] = 2.0;
+            if (parameters['lt_F_ig_max'] === undefined) parameters['lt_F_ig_max'] = 0.3;
+            if (parameters['lt_F_G1_max'] === undefined) parameters['lt_F_G1_max'] = 0.5;
+            if (parameters['lt_F_G2_min'] === undefined) parameters['lt_F_G2_min'] = 0.5;
+            if (parameters['jwlr_A'] === undefined) parameters['jwlr_A'] = 7.32e14;
+            if (parameters['jwlr_B'] === undefined) parameters['jwlr_B'] = -5.2654e9;
+            if (parameters['jwlr_R1'] === undefined) parameters['jwlr_R1'] = 14.1;
+            if (parameters['jwlr_R2'] === undefined) parameters['jwlr_R2'] = 1.41;
+            if (parameters['jwlr_omega'] === undefined) parameters['jwlr_omega'] = 0.8867;
+            if (parameters['jwlr_Cv'] === undefined) parameters['jwlr_Cv'] = 2.7806e6;
+            if (parameters['jwlr_T0'] === undefined) parameters['jwlr_T0'] = 298.0;
+            if (parameters['mixture_rule'] === undefined) parameters['mixture_rule'] = 'Pressure Equilibrium (Volume Additive)';
         } else if (burn.includes('CREST')) {
             if (parameters['crest_b1'] === undefined) parameters['crest_b1'] = 1.2e7;
             if (parameters['crest_c1'] === undefined) parameters['crest_c1'] = 0.67;
@@ -420,6 +434,10 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
     if (parameters['jc_d3'] === undefined) parameters['jc_d3'] = 0.0;
     if (parameters['jc_d4'] === undefined) parameters['jc_d4'] = 0.0;
     if (parameters['jc_d5'] === undefined) parameters['jc_d5'] = 0.0;
+    if (parameters['enable_density_erosion'] === undefined) parameters['enable_density_erosion'] = false;
+    if (parameters['erosion_min_density'] === undefined) parameters['erosion_min_density'] = 0.0;
+    if (parameters['erosion_min_density_ratio'] === undefined) parameters['erosion_min_density_ratio'] = 0.05;
+    if (parameters['erode_to_fv_grid'] === undefined) parameters['erode_to_fv_grid'] = true;
 }
 
 export function syncFEMObjectParameters(
@@ -885,12 +903,13 @@ export const DISPLAY_ONLY_KEYS = new Set([
     'show_obstacles', 'obstacles_colormap', 'obstacles_gridlines', 'obstacles_solid',
     'obstacles_lighting', 'obstacles_opacity', 'obstacles_quantity', 'obstacles_auto_scale',
     'obstacles_log_scale', 'obstacles_show_colorbar', 'obstacles_interpolate',
-    'obstacles_min_val', 'obstacles_max_val',
+    'obstacles_min_val', 'obstacles_max_val', 'obstacles_contour_levels', 'obstacles_smooth_contours',
 
     // STL / CAD Display
     'show_stl', 'stl_colormap', 'stl_wireframe', 'stl_solids', 'stl_opacity',
     'stl_show_results', 'stl_quantity', 'stl_sampling_mode', 'stl_auto_scale',
     'stl_log_scale', 'stl_show_colorbar', 'stl_min_val', 'stl_max_val',
+    'stl_contour_levels', 'stl_smooth_contours',
 
     // MPM Display
     'showMPMParticles', 'mpmParticleRenderMode', 'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleQuantity', 'mpmParticleColormap',
@@ -904,7 +923,7 @@ export const DISPLAY_ONLY_KEYS = new Set([
     // FEM Display
     'showFEMMesh', 'femSolid', 'femWireframe', 'femResults', 'femQuantity',
     'femColormap', 'femOpacity', 'femLighting', 'femAutoScale', 'femLogScale',
-    'femShowColorbar', 'femMinVal', 'femMaxVal', 'femContourLevels', 'femSmoothContours',
+    'femShowColorbar', 'femMinVal', 'femMaxVal', 'femContourLevels', 'femSmoothContours', 'femInterpolate',
 
     // Beams & Rebar Display
     'showBeams', 'showRebar', 'beamSolid', 'beamWireframe', 'rebarSolid', 'rebarWireframe',
@@ -974,23 +993,41 @@ export function resolveResourcePath(rawPath: string, modelFilename?: string | nu
 
     // If already absolute or windows drive
     if (trimmed.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(trimmed)) {
-        return trimmed;
+        return trimmed.length > 1 ? trimmed.replace(/\/+$/, '') : trimmed;
     }
-
-    const cleanRel = trimmed.startsWith('./') ? trimmed.substring(2) : trimmed;
 
     let effectiveModelFilename = modelFilename;
     if (!effectiveModelFilename && activeStateManagerInstance) {
         effectiveModelFilename = activeStateManagerInstance.getActiveModel()?.filename || null;
     }
 
-    if (effectiveModelFilename && typeof effectiveModelFilename === 'string' && effectiveModelFilename.includes('/')) {
-        const lastSlash = effectiveModelFilename.lastIndexOf('/');
-        const dir = lastSlash !== -1 ? effectiveModelFilename.substring(0, lastSlash) : '.';
-        return `${dir}/${cleanRel}`;
+    let baseDir = '/home/chris/antigrav/blastdemon';
+    if (effectiveModelFilename && typeof effectiveModelFilename === 'string') {
+        const normModel = effectiveModelFilename.replace(/\\/g, '/');
+        const lastSlash = normModel.lastIndexOf('/');
+        if (lastSlash > 0) {
+            baseDir = normModel.substring(0, lastSlash);
+        } else if (lastSlash === 0) {
+            baseDir = '/';
+        }
     }
 
-    return `/home/chris/antigrav/blastdemon/${cleanRel}`;
+    const normRel = trimmed.replace(/\\/g, '/');
+    if (normRel === '.' || normRel === './') {
+        return baseDir;
+    }
+
+    const baseParts = baseDir.split('/').filter(Boolean);
+    const relParts = normRel.split('/').filter(Boolean);
+    for (const seg of relParts) {
+        if (seg === '.') continue;
+        if (seg === '..') {
+            if (baseParts.length > 0) baseParts.pop();
+        } else {
+            baseParts.push(seg);
+        }
+    }
+    return '/' + baseParts.join('/');
 }
 
 /**
@@ -1112,11 +1149,35 @@ export function prepareModelSavePayload(model: Model, targetFilePath: string): P
     };
 }
 
+export const DOMAIN_MESH_2D_DEFAULTS: Record<string, any> = {
+    cell_size: 0.005,
+    min_r: 0.0,
+    max_r: 1.0,
+    min_z: 0.0,
+    max_z: 1.0,
+    bc_r_min: 'Reflecting',
+    bc_r_max: 'Terminate',
+    bc_z_min: 'Reflecting',
+    bc_z_max: 'Terminate',
+    coordinate_system: 'Axisymmetric'
+};
+
+export const DOMAIN_MESH_3D_DEFAULTS: Record<string, any> = {
+    xmin: 0.0, xmax: 1.0,
+    ymin: 0.0, ymax: 1.0,
+    zmin: 0.0, zmax: 1.0,
+    cell_size: 0.01,
+    bc_x_min: 'Reflecting', bc_x_max: 'Transmitting',
+    bc_y_min: 'Reflecting', bc_y_max: 'Transmitting',
+    bc_z_min: 'Reflecting', bc_z_max: 'Transmitting',
+    slices: []
+};
+
 export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'DomainMesh': {
         domain_radius: 1.0,
         cell_size: 0.001,
-        left_bc: 'Transmitting',
+        left_bc: 'Reflecting',
         right_bc: 'Transmitting'
     },
     'Material': {
@@ -1139,6 +1200,10 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         erosion_stress: 400.0e6,
         enable_timestep_erosion: false,
         timestep_erosion_factor: 0.10,
+        enable_density_erosion: false,
+        erosion_min_density: 0.0,
+        erosion_min_density_ratio: 0.05,
+        erode_to_fv_grid: true,
         enable_heterogeneity: false,
         weibull_modulus: 0.0,
         weibull_scale: 1.0,
@@ -1286,21 +1351,28 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         burn_zone_cells: 4,
         tau_burn_min: 1.0e-7,
         // Lee-Tarver I&G
-        lt_I: 4.0e6,
-        lt_a: 0.24,
+        lt_I: 1.4e17,
+        lt_a: 0.0,
         lt_b: 0.667,
-        lt_x: 7.0,
-        lt_G1: 2.5e-3,
+        lt_x: 20.0,
+        lt_G1: 1.3e-14,
         lt_c: 0.667,
-        lt_d: 0.333,
+        lt_d: 0.277,
         lt_y: 2.0,
-        lt_G2: 0.05,
-        lt_e: 0.667,
-        lt_g: 0.333,
-        lt_z: 3.0,
-        lt_F_ig_max: 0.02,
-        lt_F_G1_max: 0.30,
-        lt_F_G2_min: 0.30,
+        lt_G2: 4.0e-14,
+        lt_e: 0.333,
+        lt_g: 1.0,
+        lt_z: 2.0,
+        lt_F_ig_max: 0.3,
+        lt_F_G1_max: 0.5,
+        lt_F_G2_min: 0.5,
+        jwlr_A: 7.32e14,
+        jwlr_B: -5.2654e9,
+        jwlr_R1: 14.1,
+        jwlr_R2: 1.41,
+        jwlr_omega: 0.8867,
+        jwlr_Cv: 2.7806e6,
+        jwlr_T0: 298.0,
         ideal_gamma: 1.4,
         ideal_rho_0: 1630,
         ideal_e_0: 4290000,
@@ -1345,7 +1417,6 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         external_bounds_min_z: 0,
         external_bounds_max_z: 0,
         pinned_probe_ids: [],
-        storage_backend: 'HDF5 Stream',
         sampling_stride_steps: 1,
         telemetry_channel: 0,
         enable_gauges: 'Enabled',
@@ -1368,16 +1439,17 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         qty_impulse: true
     },
     'CFDSolver': {
+        domain_mesh: '',
         ambient_air_material: '',
         explosive_charge: '',
         init_mode: 'Multi-Material JWL',
-        cfl: 0.6,
-        endtime: 1.0,
+        cfl: 0.4,
+        endtime: 0.0005,
         flux_scheme: 'AUSM+',
-        space_time_scheme: 'MUSCL-Hancock (2nd-Order Space/Time)',
+        space_time_scheme: 'ADER-2 (2nd-Order Space/Time)',
         spatial_order: 2,
-        temporal_order: 4,
-        precision: 'single'
+        temporal_order: 2,
+        precision: 'double'
     },
     'TelemetryGraph': {
         telemetry_channel: 0,
@@ -1388,18 +1460,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         show_grid: true,
         colormap: 'rainbow'
     },
-    'DomainMesh2D': {
-        cell_size: 0.005,
-        min_r: 0.0,
-        max_r: 1.0,
-        min_z: 0.0,
-        max_z: 1.0,
-        bc_r_min: 'Reflecting',
-        bc_r_max: 'Terminate',
-        bc_z_min: 'Reflecting',
-        bc_z_max: 'Terminate',
-        coordinate_system: 'Axisymmetric'
-    },
+    'DomainMesh2D': { ...DOMAIN_MESH_2D_DEFAULTS },
+    'SparseDomainMesh2D': { ...DOMAIN_MESH_2D_DEFAULTS },
     'Obstacle': {
         r1: 0.2,
         r2: 0.4,
@@ -1451,45 +1513,39 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         source_model_id: '',
         target_solver: '',
         explosive_r: 0.0,
-        explosive_z: 0.1,
-        remap_radius: 0.5,
-        trigger_type: 'end',
-        trigger_val: 0.0
+        explosive_z: 0.5,
+        remap_radius: 0.0
     },
     'Remap1DTo2DNode': {
         source_model_id: '',
         target_solver: '',
         explosive_r: 0.0,
-        explosive_z: 0.1,
-        remap_radius: 0.5,
-        trigger_type: 'end',
-        trigger_val: 0.0
+        explosive_z: 0.5,
+        remap_radius: 0.0
     },
     'Remap1DTo3DNode': {
         source_model_id: '',
         target_solver: '',
-        center_x: 0.5,
-        center_y: 0.5,
-        center_z: 0.5,
         explosive_x: 0.5,
         explosive_y: 0.5,
         explosive_z: 0.5,
-        remap_radius: 0.2,
-        trigger_type: 'end',
-        trigger_val: 0.0
+        remap_radius: 0.0
     },
     'Remap2DTo3DNode': {
         source_model_id: '',
         target_solver: '',
-        center_x: 0.5,
-        center_y: 0.5,
-        z_offset: 0.0,
         explosive_x: 0.5,
         explosive_y: 0.5,
         explosive_z: 0.5,
-        remap_radius: 0.2,
-        trigger_type: 'end',
-        trigger_val: 0.0
+        remap_radius: 0.0
+    },
+    'Remap3DTo3DNode': {
+        source_model_id: '',
+        target_solver: '',
+        explosive_x: 0.5,
+        explosive_y: 0.5,
+        explosive_z: 0.5,
+        remap_radius: 0.0
     },
     'HardwareConfig': {
         device: 'cpu',
@@ -1498,13 +1554,13 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'CFDSolver2D': {
         ambient_air_material: '',
         explosive_charge: '',
-        init_mode: 'From1D',
-        cfl: 0.6,
-        endtime: 1.0,
+        init_mode: 'Multi-Material JWL',
+        cfl: 0.4,
+        endtime: 0.005,
         flux_scheme: 'AUSM+',
-        space_time_scheme: 'MUSCL-Hancock (2nd-Order Space/Time)',
+        space_time_scheme: 'ADER-2 (2nd-Order Space/Time)',
         spatial_order: 2,
-        temporal_order: 4,
+        temporal_order: 2,
         mesh_type: 'regular',
         amr_max_levels: 3,
         amr_threshold: 0.05,
@@ -1581,16 +1637,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         volume_stride: 1,
         slice_stride: 1
     },
-    'DomainMesh3D': {
-        xmin: 0.0, xmax: 1.0,
-        ymin: 0.0, ymax: 1.0,
-        zmin: 0.0, zmax: 1.0,
-        cell_size: 0.01,
-        bc_x_min: 'Reflecting', bc_x_max: 'Transmitting',
-        bc_y_min: 'Reflecting', bc_y_max: 'Transmitting',
-        bc_z_min: 'Reflecting', bc_z_max: 'Transmitting',
-        slices: []
-    },
+    'DomainMesh3D': { ...DOMAIN_MESH_3D_DEFAULTS },
+    'SparseDomainMesh3D': { ...DOMAIN_MESH_3D_DEFAULTS },
     'Charge3D': {
         material: '',
         target_domain: '',
@@ -1619,7 +1667,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         flux_scheme: 'AUSM+',
         space_time_scheme: 'MUSCL-Hancock (2nd-Order Space/Time)',
         spatial_order: 2,
-        temporal_order: 4,
+        temporal_order: 2,
         precision: 'single',
         telemetry_mode: 'Enabled',
         telemetry_interval_ms: 100,
@@ -1628,6 +1676,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     },
     'Telemetry3DViewport': {
         colormap: 'rainbow',
+        quantity_styles: {},
         quantity_colormaps: {
             pressure: 'rainbow',
             density: 'rainbow',
@@ -1700,7 +1749,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         show_grid_box: true,
         grid_opacity: 1.0,
         cell_edges: false,
-        interpolate: false,
+        interpolate: true,
         // Lighting — explicit defaults so overlay sliders initialise correctly
         lightingEnabled: true,
         aoEnabled: true,
@@ -1737,6 +1786,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         femShowColorbar: true,
         femContourLevels: 0,
         femSmoothContours: true,
+        femInterpolate: true,
         femOpacity: 1.0,
         femMinVal: 0.0,
         // Beams & 1D Elements Defaults
@@ -1766,6 +1816,8 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         stl_show_colorbar: false,
         stl_min_val: 101325.0,
         stl_max_val: 1013250.0,
+        stl_contour_levels: 0,
+        stl_smooth_contours: true,
         show_gauges: true,
         gauge_size: 1.0,
         gauge_opacity: 1.0,
@@ -1781,9 +1833,11 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         obstacles_auto_scale: true,
         obstacles_log_scale: false,
         obstacles_show_colorbar: false,
-        obstacles_interpolate: false,
+        obstacles_interpolate: true,
         obstacles_min_val: 101325.0,
         obstacles_max_val: 101325.0 * 10.0,
+        obstacles_contour_levels: 0,
+        obstacles_smooth_contours: true,
         // Charge & Detonator Display Defaults
         show_charge: true,
         charge_solid: true,
@@ -1887,11 +1941,19 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     },
     'FSICoupler2D': {
         cfl: 0.6,
-        endtime: 1.0
+        endtime: 1.0,
+        enable_density_erosion: false,
+        erosion_min_density: 0.0,
+        erosion_min_density_ratio: 0.05,
+        erode_to_fv_grid: true
     },
     'FSICoupler3D': {
         cfl: 0.6,
-        endtime: 1.0
+        endtime: 1.0,
+        enable_density_erosion: false,
+        erosion_min_density: 0.0,
+        erosion_min_density_ratio: 0.05,
+        erode_to_fv_grid: true
     },
     'FEMDomain3D': {
         device: 'cpu',
@@ -2011,7 +2073,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         flux_scheme: 'AUSM+',
         space_time_scheme: 'ADER-2 (2nd-Order Space/Time)',
         spatial_order: 2,
-        temporal_order: 4,
+        temporal_order: 2,
         gravity_z: -9.81,
         water_surface_z: 10.0,
         seabed_surface_z: 2.0,
@@ -2074,6 +2136,7 @@ export class StateManager {
     private focusedViewportListeners: ((viewportNodeId: string | null, panelId: string | null) => void)[] = [];
 
     private modelStatuses: Map<string, SimulationStatus> = new Map();
+    private modelErrors: Map<string, ModelErrorEntry[]> = new Map();
     private modelProgresses: Map<string, number> = new Map();
     private modelSimTimes: Map<string, number> = new Map();
     private modelSteps: Map<string, number> = new Map();
@@ -2199,7 +2262,7 @@ export class StateManager {
                     reason: "No background grid connected. A DomainMesh3D node must be defined and connected to MPM Domain 3D."
                 };
             }
-            const connectedMesh = model.nodes.find(n => n.type === 'DomainMesh3D' && (model.connections || []).some(c =>
+            const connectedMesh = model.nodes.find(n => isDomainMesh3DNode(n.type) && (model.connections || []).some(c =>
                 ((c.toNode === mpmDomain3D.id && c.fromNode === n.id) || (c.fromNode === mpmDomain3D.id && c.toNode === n.id)) &&
                 (c.toPort === 'mesh' || c.fromPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')
             ));
@@ -2207,12 +2270,12 @@ export class StateManager {
                 return {
                     complete: false,
                     missingGrid: true,
-                    reason: "Connected background grid is not a valid DomainMesh3D node."
+                    reason: "Connected background grid is not a valid DomainMesh3D or SparseDomainMesh3D node."
                 };
             }
         }
 
-        // 2. MPM 2D: Background grid (DomainMesh2D) and at least one MPMObject2D are mandatory
+        // 2. MPM 2D: Background grid (DomainMesh2D / SparseDomainMesh2D) and at least one MPMObject2D are mandatory
         const mpmDomain2D = model.nodes.find(n => n.type === 'MPMDomain2D');
         if (mpmDomain2D) {
             const hasMeshConn = (model.connections || []).some(c =>
@@ -2226,7 +2289,7 @@ export class StateManager {
                     reason: "No background grid connected. A DomainMesh2D node must be defined and connected to MPM Domain 2D."
                 };
             }
-            const connectedMesh = model.nodes.find(n => n.type === 'DomainMesh2D' && (model.connections || []).some(c =>
+            const connectedMesh = model.nodes.find(n => isDomainMesh2DNode(n.type) && (model.connections || []).some(c =>
                 ((c.toNode === mpmDomain2D.id && c.fromNode === n.id) || (c.fromNode === mpmDomain2D.id && c.toNode === n.id)) &&
                 (c.toPort === 'mesh' || c.fromPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')
             ));
@@ -2234,7 +2297,7 @@ export class StateManager {
                 return {
                     complete: false,
                     missingGrid: true,
-                    reason: "Connected background grid is not a valid DomainMesh2D node."
+                    reason: "Connected background grid is not a valid DomainMesh2D or SparseDomainMesh2D node."
                 };
             }
             const hasObjConn = (model.connections || []).some(c =>
@@ -2379,7 +2442,7 @@ export class StateManager {
         // 9. Remap Nodes: Must have an upstream source specified (via source_model_id or incoming wire)
         const remapNodes = model.nodes.filter(n =>
             n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode' ||
-            n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode'
+            n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode' || n.type === 'Remap3DTo3DNode'
         );
         for (const remapNode of remapNodes) {
             let hasSource = false;
@@ -2399,7 +2462,9 @@ export class StateManager {
                 hasSource = model.connections.some(c => c.toNode === remapNode.id && c.toPort === 'in');
             }
             if (!hasSource) {
-                const remapTypeLabel = remapNode.type === 'Remap2DTo3DNode' ? '2D ➔ 3D Remap' : (remapNode.type === 'Remap1DTo3DNode' ? '1D ➔ 3D Remap' : '1D ➔ 2D Remap');
+                const remapTypeLabel = remapNode.type === 'Remap3DTo3DNode' ? '3D ➔ 3D Remap'
+                    : (remapNode.type === 'Remap2DTo3DNode' ? '2D ➔ 3D Remap'
+                        : (remapNode.type === 'Remap1DTo3DNode' ? '1D ➔ 3D Remap' : '1D ➔ 2D Remap'));
                 return {
                     complete: false,
                     missingGrid: false,
@@ -2423,6 +2488,99 @@ export class StateManager {
         return status || 'UNINITIALIZED';
     }
 
+    public recordModelError(
+        modelId: string,
+        entry: {
+            message: string;
+            errorCode?: string;
+            summary?: string;
+            details?: string;
+            step?: number;
+            simTime?: number;
+            dt?: number;
+            scope?: string;
+            level?: string;
+            timestamp?: number;
+            device?: string;
+            precision?: string;
+            kernelPhase?: string;
+            exitCode?: number;
+            signal?: number;
+        }
+    ): void {
+        if (!modelId) return;
+        const rawMsg = String(entry.message || 'Unknown solver error');
+        const diag = classifyError(rawMsg, entry.scope, {
+            errorCode: entry.errorCode,
+            summary: entry.summary,
+            details: entry.details
+        });
+        const list = this.modelErrors.get(modelId) || [];
+        list.push({
+            message: rawMsg,
+            errorCode: diag.errorCode,
+            summary: diag.summary,
+            details: diag.details,
+            timestamp: entry.timestamp ?? Date.now(),
+            step: entry.step,
+            simTime: entry.simTime,
+            dt: entry.dt,
+            scope: entry.scope,
+            level: entry.level || 'ERROR',
+            device: entry.device,
+            precision: entry.precision,
+            kernelPhase: entry.kernelPhase,
+            exitCode: entry.exitCode,
+            signal: entry.signal
+        });
+        if (list.length > 25) {
+            list.splice(0, list.length - 25);
+        }
+        this.modelErrors.set(modelId, list);
+    }
+
+    public getModelErrors(modelId: string): ModelErrorEntry[] {
+        return this.modelErrors.get(modelId) || [];
+    }
+
+    public getLatestModelError(modelId: string): ModelErrorEntry | null {
+        const list = this.modelErrors.get(modelId);
+        if (!list || list.length === 0) return null;
+        for (let i = list.length - 1; i >= 0; i--) {
+            const e = list[i];
+            if (e.errorCode !== 'ERR_WORKER_CRASH' && !e.message.includes('terminated or crashed unexpectedly')) {
+                return e;
+            }
+        }
+        return list[list.length - 1];
+    }
+
+    public clearModelErrors(modelId: string): void {
+        this.modelErrors.delete(modelId);
+    }
+
+    public invalidateDownstreamRemapModels(sourceModelId: string, visited: Set<string> = new Set()): void {
+        if (!sourceModelId || visited.has(sourceModelId)) return;
+        visited.add(sourceModelId);
+        const srcModel = this.appState.models[sourceModelId];
+        const srcNodeIds = new Set((srcModel?.nodes || []).map(n => n.id));
+        const wsConns = this.getActiveWorkspace()?.connections || [];
+
+        for (const m of Object.values(this.appState.models)) {
+            if (!m || m.id === sourceModelId || visited.has(m.id)) continue;
+            const hasDownstreamRemap = (m.nodes || []).some(n => {
+                if (!['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(n.type)) return false;
+                if (n.parameters?.source_model_id === sourceModelId) return true;
+                return wsConns.some(c => c.toNode === n.id && srcNodeIds.has(c.fromNode));
+            });
+            if (hasDownstreamRemap) {
+                this.setModelProgress(m.id, 0);
+                this.setModelStatus(m.id, 'UNINITIALIZED');
+                this.invalidateDownstreamRemapModels(m.id, visited);
+            }
+        }
+    }
+
     setModelStatus(modelId: string, status: SimulationStatus): void {
         let effectiveStatus = status;
         if (status === 'UNINITIALIZED' || status === 'INITIALIZED') {
@@ -2441,6 +2599,7 @@ export class StateManager {
                 this.modelSimTimes.set(modelId, 0.0);
                 this.modelDts.set(modelId, 0.0);
                 this.modelTelemetryTiming.delete(modelId);
+                this.modelErrors.delete(modelId);
             }
 
             if (effectiveStatus === 'UNINITIALIZED' || effectiveStatus === 'INCOMPLETE') {
@@ -2448,10 +2607,20 @@ export class StateManager {
                 this.telemetryStore.delete("latest-fem-mesh");
                 this.telemetryStore.delete(modelId + "-binary");
                 this.telemetryStore.delete("latest-binary");
+                this.telemetryStore.delete(modelId + "-gauges");
+                const targetModel = this.appState.models[modelId];
+                if (targetModel && Array.isArray(targetModel.nodes)) {
+                    targetModel.nodes.forEach(vg => {
+                        if (vg.type === 'VirtualGauges' || (vg.type as string) === 'VirtualGauges3D') {
+                            this.telemetryStore.delete(vg.id);
+                        }
+                    });
+                }
                 const pb = (window as any).playbackBuffer;
                 if (pb && typeof pb.clear === 'function') {
                     try { pb.clear(modelId); } catch (e) {}
                 }
+                this.invalidateDownstreamRemapModels(modelId);
             }
 
             if (effectiveStatus === 'PAUSED' && oldStatus === 'RUNNING') {
@@ -2847,6 +3016,252 @@ export class StateManager {
     }
 
     /**
+     * Creates a complete, ready-to-run 1D Spherical CFD Blast Source Stage model
+     * (`DomainMesh`, Ambient Air `Material`, TNT JWL `Material`, `Charge1D`, `CFDSolver`, `TelemetryGraph`),
+     * inserts it immediately upstream of `targetModelId` in the active workspace, and wires it to `remapNodeId`.
+     */
+    createAndWire1DSourceStageForRemap(targetModelId: string, remapNodeId: string): Model | null {
+        const targetModel = this.appState.models[targetModelId];
+        if (!targetModel) return null;
+        const remapNode = targetModel.nodes.find(n => n.id === remapNodeId);
+        if (!remapNode) return null;
+
+        const rRemap = Number(remapNode.parameters?.remap_radius ?? 0);
+        const domainRadius1D = rRemap > 0 ? Math.max(0.5, Number((rRemap * 1.25).toFixed(3))) : 1.0;
+        const targetMesh = targetModel.nodes.find(n => isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type));
+        const targetDx = Number(targetMesh?.parameters?.cell_size ?? 0.02);
+        const dx1D = Math.max(0.0005, Math.min(0.005, Number((targetDx / 10.0).toFixed(5))));
+
+        const suffix = Math.random().toString(36).substr(2, 6);
+        const stage1Id = `model-1d-${suffix}`;
+        const meshId = `mesh1d_${suffix}`;
+        const airId = `air1d_${suffix}`;
+        const tntMatId = `tnt1d_${suffix}`;
+        const chargeId = `chg1d_${suffix}`;
+        const solverId = `cfd1d_${suffix}`;
+        const graphId = `graph1d_${suffix}`;
+
+        const defaultMass = 1.0;
+        const defaultRho = 1630.0;
+        const defaultChargeRadius = Number(Math.cbrt((3.0 * defaultMass) / (4.0 * Math.PI * defaultRho)).toFixed(5));
+
+        const stage1Model: Model = {
+            id: stage1Id,
+            name: `Stage 1: 1D Spherical Source (${targetModel.name || 'Blast'})`,
+            filename: null,
+            refresh_rate: 0.2,
+            fps: 5,
+            nodes: [
+                {
+                    id: meshId,
+                    type: 'DomainMesh',
+                    x: 80,
+                    y: 80,
+                    inputs: this.getDefaultInputs('DomainMesh'),
+                    outputs: this.getDefaultOutputs('DomainMesh'),
+                    parameters: {
+                        ...JSON.parse(JSON.stringify(NODE_DEFAULT_PARAMETERS['DomainMesh'] || {})),
+                        name: '1D Spherical Mesh',
+                        domain_radius: domainRadius1D,
+                        cell_size: dx1D,
+                        left_bc: 'Reflecting',
+                        right_bc: 'Transmitting'
+                    }
+                },
+                {
+                    id: airId,
+                    type: 'Material',
+                    x: 80,
+                    y: 220,
+                    inputs: this.getDefaultInputs('Material'),
+                    outputs: this.getDefaultOutputs('Material'),
+                    parameters: {
+                        name: 'Ambient Air (1D)',
+                        material_model: 'Ideal Gas',
+                        preset: 'Ambient Air (Sea Level)',
+                        density: 1.225,
+                        atm_pressure: 101325.0,
+                        atm_temperature: 298.15,
+                        initial_temperature: 298.15,
+                        gamma: 1.4,
+                        ambient_air_target: solverId
+                    }
+                },
+                {
+                    id: tntMatId,
+                    type: 'Material',
+                    x: 80,
+                    y: 360,
+                    inputs: this.getDefaultInputs('Material'),
+                    outputs: this.getDefaultOutputs('Material'),
+                    parameters: {
+                        name: 'TNT (JWL Products)',
+                        material_model: 'JWL Detonation Gas',
+                        preset: 'TNT',
+                        composition: 'TNT',
+                        rho: defaultRho,
+                        detonation_energy: 4.29e6,
+                        det_vel: 6930.0,
+                        initial_temperature: 298.15,
+                        jwl_A: 3.712e11,
+                        jwl_B: 3.231e9,
+                        jwl_R1: 4.15,
+                        jwl_R2: 0.95,
+                        jwl_omega: 0.30,
+                        afterburn_enabled: false
+                    }
+                },
+                {
+                    id: chargeId,
+                    type: 'Charge1D',
+                    x: 310,
+                    y: 340,
+                    inputs: this.getDefaultInputs('Charge1D'),
+                    outputs: this.getDefaultOutputs('Charge1D'),
+                    parameters: {
+                        ...JSON.parse(JSON.stringify(NODE_DEFAULT_PARAMETERS['Charge1D'] || {})),
+                        name: '1D Spherical Charge',
+                        material: tntMatId,
+                        target_domain: solverId,
+                        charge_mass: defaultMass,
+                        charge_shape: 'Sphere',
+                        charge_radius: defaultChargeRadius
+                    }
+                },
+                {
+                    id: solverId,
+                    type: 'CFDSolver',
+                    x: 560,
+                    y: 180,
+                    inputs: this.getDefaultInputs('CFDSolver'),
+                    outputs: this.getDefaultOutputs('CFDSolver'),
+                    parameters: {
+                        ...JSON.parse(JSON.stringify(NODE_DEFAULT_PARAMETERS['CFDSolver'] || {})),
+                        name: '1D Spherical CFD Solver',
+                        domain_mesh: meshId,
+                        ambient_air_material: airId,
+                        explosive_charge: chargeId,
+                        init_mode: 'Multi-Material JWL',
+                        device: 'cpu',
+                        precision: 'double',
+                        cfl: 0.4,
+                        endtime: 0.0002,
+                        flux_scheme: 'AUSM+',
+                        space_time_scheme: 'MUSCL-Hancock (2nd-Order Space/Time)',
+                        spatial_order: 2,
+                        temporal_order: 2
+                    }
+                },
+                {
+                    id: graphId,
+                    type: 'TelemetryGraph',
+                    x: 830,
+                    y: 180,
+                    inputs: this.getDefaultInputs('TelemetryGraph'),
+                    outputs: this.getDefaultOutputs('TelemetryGraph'),
+                    parameters: {
+                        ...JSON.parse(JSON.stringify(NODE_DEFAULT_PARAMETERS['TelemetryGraph'] || {})),
+                        name: '1D Radial Profiles',
+                        telemetry_channel: 0,
+                        x_axis_mode: 'radius',
+                        plot_stride: 1
+                    }
+                }
+            ],
+            connections: [
+                { fromNode: meshId, fromPort: 'mesh', toNode: solverId, toPort: 'mesh' },
+                { fromNode: airId, fromPort: 'air', toNode: solverId, toPort: 'air' },
+                { fromNode: tntMatId, fromPort: 'material', toNode: chargeId, toPort: 'material' },
+                { fromNode: chargeId, fromPort: 'charge', toNode: solverId, toPort: 'charge' },
+                { fromNode: solverId, fromPort: 'telemetry', toNode: graphId, toPort: 'telemetry' }
+            ]
+        };
+
+        this.appState.models[stage1Id] = stage1Model;
+        const activeWs = this.getActiveWorkspace();
+        const targetIdx = activeWs.modelIds.indexOf(targetModelId);
+        if (targetIdx >= 0) {
+            activeWs.modelIds.splice(targetIdx, 0, stage1Id);
+        } else {
+            activeWs.modelIds.push(stage1Id);
+        }
+
+        // Wire workspace remap link from Stage 1 CFDSolver -> Stage 2 Remap node
+        if (!activeWs.connections) activeWs.connections = [];
+        activeWs.connections = activeWs.connections.filter(c => c.toNode !== remapNode.id);
+        activeWs.connections.push({
+            fromNode: solverId,
+            fromPort: 'telemetry',
+            toNode: remapNode.id,
+            toPort: 'in'
+        });
+
+        remapNode.parameters = remapNode.parameters || {};
+        remapNode.parameters.source_model_id = stage1Id;
+
+        // Auto-wire Remap node to downstream target solver if unique and set init_mode = 'From1D'
+        const is3D = remapNode.type === 'Remap1DTo3DNode' || remapNode.type === 'Remap2DTo3DNode';
+        const targetSolvers = targetModel.nodes.filter(n =>
+            is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D'
+        );
+        let targetSolver = targetModel.nodes.find(n => n.id === remapNode.parameters.target_solver);
+        if (!targetSolver && targetSolvers.length === 1) {
+            targetSolver = targetSolvers[0];
+        }
+        if (targetSolver) {
+            remapNode.parameters.target_solver = targetSolver.id;
+            targetSolver.parameters = targetSolver.parameters || {};
+            targetSolver.parameters.remap = remapNode.id;
+            if (targetSolver.type !== 'MarineHarbourDomain' || targetSolver.parameters.init_mode !== 'Hydrostatic_Stratified_3D') {
+                targetSolver.parameters.init_mode = 'From1D';
+            }
+            if (!targetModel.connections.some(c => c.fromNode === remapNode.id && c.toNode === targetSolver!.id)) {
+                targetModel.connections.push({
+                    fromNode: remapNode.id,
+                    fromPort: 'remap',
+                    toNode: targetSolver.id,
+                    toPort: 'remap'
+                });
+            }
+        }
+
+        // Sync current active state if targetModel is currently active
+        if (activeWs.activeModelId === targetModelId) {
+            const curState = this.getCurrentState();
+            if (curState) {
+                const curRemap = curState.nodes.find(n => n.id === remapNode.id);
+                if (curRemap) {
+                    curRemap.parameters.source_model_id = stage1Id;
+                    if (targetSolver) curRemap.parameters.target_solver = targetSolver.id;
+                }
+                if (targetSolver) {
+                    const curSolver = curState.nodes.find(n => n.id === targetSolver!.id);
+                    if (curSolver) {
+                        curSolver.parameters.remap = remapNode.id;
+                        if (curSolver.type !== 'MarineHarbourDomain' || curSolver.parameters.init_mode !== 'Hydrostatic_Stratified_3D') {
+                            curSolver.parameters.init_mode = 'From1D';
+                        }
+                    }
+                    if (!curState.connections.some(c => c.fromNode === remapNode.id && c.toNode === targetSolver!.id)) {
+                        curState.connections.push({
+                            fromNode: remapNode.id,
+                            fromPort: 'remap',
+                            toNode: targetSolver.id,
+                            toPort: 'remap'
+                        });
+                    }
+                }
+            }
+        }
+
+        this.setModelStatus(stage1Id, 'UNINITIALIZED');
+        this.setModelStatus(targetModelId, 'UNINITIALIZED');
+        this.pushAppState(this.appState);
+        this.notifyChange();
+        return stage1Model;
+    }
+
+    /**
      * Gets the authoritative telemetry streaming refresh rate (in seconds) for a model.
      * Checks model.refresh_rate, then viewport/contour node parameters, then view toggles, defaulting to 0.5s (2 FPS).
      */
@@ -2863,6 +3278,10 @@ export class StateManager {
         const contour = model.nodes.find(n => n.type === 'TelemetryContour');
         if (contour?.parameters?.refresh_rate !== undefined && !isNaN(Number(contour.parameters.refresh_rate)) && Number(contour.parameters.refresh_rate) > 0) {
             return Number(contour.parameters.refresh_rate);
+        }
+        const graph = model.nodes.find(n => n.type === 'TelemetryGraph');
+        if (graph?.parameters?.refresh_rate !== undefined && !isNaN(Number(graph.parameters.refresh_rate)) && Number(graph.parameters.refresh_rate) > 0) {
+            return Number(graph.parameters.refresh_rate);
         }
         if (model.views && model.views.length > 0) {
             const activeView = model.views.find(v => v.id === model.activeViewId) || model.views[0];
@@ -2882,8 +3301,45 @@ export class StateManager {
     }
 
     /**
+     * Returns the authoritative solver simulation end time (in seconds) for a model.
+     */
+    getModelEndTime(modelId: string): number {
+        const model = this.appState.models[modelId];
+        if (!model || !model.nodes) return 1.0;
+
+        const coupler = model.nodes.find(n => n.type === 'FEMFSICoupler3D' || n.type === 'FSICoupler3D' || n.type === 'FSICoupler2D');
+        if (coupler?.parameters?.endtime !== undefined && !isNaN(Number(coupler.parameters.endtime)) && Number(coupler.parameters.endtime) > 0) {
+            return Number(coupler.parameters.endtime);
+        }
+        const fem = model.nodes.find(n => n.type === 'FEMDomain3D');
+        if (fem?.parameters?.endtime !== undefined && !isNaN(Number(fem.parameters.endtime)) && Number(fem.parameters.endtime) > 0) {
+            return Number(fem.parameters.endtime);
+        }
+        const mpm = model.nodes.find(n => n.type === 'MPMDomain3D' || n.type === 'MPMDomain2D');
+        if (mpm?.parameters?.endtime !== undefined && !isNaN(Number(mpm.parameters.endtime)) && Number(mpm.parameters.endtime) > 0) {
+            return Number(mpm.parameters.endtime);
+        }
+        const solver = model.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+        if (solver?.parameters?.endtime !== undefined && !isNaN(Number(solver.parameters.endtime)) && Number(solver.parameters.endtime) > 0) {
+            return Number(solver.parameters.endtime);
+        }
+        return 1.0;
+    }
+
+    /**
+     * Returns true when a model is PAUSED because it reached its configured end time.
+     */
+    isModelAtEndTime(modelId: string): boolean {
+        if (this.getModelStatus(modelId) !== 'PAUSED') return false;
+        const endTime = this.getModelEndTime(modelId);
+        const simTime = this.getModelSimTime(modelId) || 0;
+        if (endTime <= 0 || simTime <= 0) return false;
+        return simTime >= endTime - Math.max(1e-12, endTime * 1e-9);
+    }
+
+    /**
      * Sets and persists the telemetry streaming refresh rate (in seconds) and FPS for a specific model.
-     * Updates model.refresh_rate, model.fps, attached Telemetry3DViewport / TelemetryContour node parameters,
+     * Updates model.refresh_rate, model.fps, attached Telemetry3DViewport / TelemetryContour / TelemetryGraph node parameters,
      * and any active view toggles.
      */
     setModelRefreshRate(modelId: string, rate: number): void {
@@ -2910,6 +3366,24 @@ export class StateManager {
             contourNode.parameters.refresh_rate = validRate;
             contourNode.parameters.fps = fps;
             this.notifyInPlaceParameterListeners(contourNode.id, { refresh_rate: validRate, fps });
+        }
+
+        // Update TelemetryGraph node in this model (1D)
+        const graphNode = model.nodes.find(n => n.type === 'TelemetryGraph');
+        if (graphNode) {
+            graphNode.parameters = graphNode.parameters || {};
+            graphNode.parameters.refresh_rate = validRate;
+            graphNode.parameters.fps = fps;
+            this.notifyInPlaceParameterListeners(graphNode.id, { refresh_rate: validRate, fps });
+        }
+
+        // Keep CFDSolver3D node's telemetry_interval_ms aligned with model FPS without resetting model state
+        const cfd3dNode = model.nodes.find(n => n.type === 'CFDSolver3D');
+        if (cfd3dNode) {
+            const intervalMs = Math.max(16, Math.round(validRate * 1000));
+            cfd3dNode.parameters = cfd3dNode.parameters || {};
+            cfd3dNode.parameters.telemetry_interval_ms = intervalMs;
+            this.notifyInPlaceParameterListeners(cfd3dNode.id, { telemetry_interval_ms: intervalMs });
         }
 
         // Update active view toggles if present
@@ -2939,16 +3413,16 @@ export class StateManager {
         if (ws) {
             this.healModelGraph(model);
             this.healNodes(model.nodes, model);
-            if (!this.appState.models[model.id]) {
-                this.appState.models[model.id] = model;
-            }
+            this.appState.models[model.id] = model;
             if (!ws.modelIds.includes(model.id)) {
                 ws.modelIds.push(model.id);
             }
             if (!ws.activeModelId) {
                 ws.activeModelId = model.id;
             }
+            this.healDuplicateNodeIds(this.appState);
             this.pushAppState(this.appState);
+            this.setModelStatus(model.id, 'UNINITIALIZED');
         }
     }
 
@@ -3094,6 +3568,7 @@ export class StateManager {
             'TelemetryText': 'node-log',
             'TelemetryGraph': 'node-chart',
             'DomainMesh2D': 'node-mesh2d',
+            'SparseDomainMesh2D': 'node-sparse-mesh2d',
             'DetonatorLocation': 'node-detonator',
             'TriggerLocation': 'node-detonator',
             'DetonatorLocation3D': 'node-detonator',
@@ -3102,6 +3577,7 @@ export class StateManager {
             'Remap1DTo2DNode': 'node-remap',
             'Remap1DTo3DNode': 'node-remap',
             'Remap2DTo3DNode': 'node-remap',
+            'Remap3DTo3DNode': 'node-remap',
             'HardwareConfig': 'node-hardware',
             'CFDSolver2D': 'node-solver2d',
             'TelemetryContour': 'node-contour',
@@ -3109,6 +3585,7 @@ export class StateManager {
             'VirtualGauges': 'node-gauges',
             'VirtualGauges3D': 'node-gauges',
             'DomainMesh3D': 'node-mesh3d',
+            'SparseDomainMesh3D': 'node-sparse-mesh3d',
             'Charge3D': 'node-charge3d',
             'CFDSolver3D': 'node-solver3d',
             'Telemetry3DViewport': 'node-viewport3d',
@@ -3245,7 +3722,8 @@ export class StateManager {
         return {
             nodes: model ? JSON.parse(JSON.stringify(model.nodes)) : [],
             connections: model ? JSON.parse(JSON.stringify(model.connections)) : [],
-            layout: JSON.parse(JSON.stringify(ws.layout))
+            layout: JSON.parse(JSON.stringify(ws.layout)),
+            refresh_rate: model ? this.getModelRefreshRate(targetModelId) : undefined
         };
     }
 
@@ -3399,7 +3877,7 @@ export class StateManager {
             const m = appStateCopy.models[mId];
             if (!m) return;
             m.nodes.forEach(n => {
-                if (['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(n.type) && n.parameters?.source_model_id) {
+                if (['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(n.type) && n.parameters?.source_model_id) {
                     const srcModel = appStateCopy.models[n.parameters.source_model_id];
                     if (srcModel) {
                         const is2D = n.type === 'Remap2DTo3DNode';
@@ -3535,7 +4013,7 @@ export class StateManager {
                                 const newProgress = Math.min(99, Math.max(0, Math.floor((currentSimTime / newEndTime) * 100)));
                                 this.setModelProgress(targetModelId, newProgress);
                             }
-                            if (currentStatus === 'PAUSED' || currentStatus === 'TERMINATED') {
+                            if (currentStatus === 'PAUSED') {
                                 this.setModelStatus(targetModelId, 'PAUSED');
                             }
                         } else if (newEndTime <= currentSimTime && currentSimTime > 0) {
@@ -3556,6 +4034,9 @@ export class StateManager {
             if (targetModelId && isPhysicalChange) {
                 this.setModelStatus(targetModelId, 'UNINITIALIZED');
                 this.setModelProgress(targetModelId, 0);
+                this.invalidateDownstreamRemapModels(targetModelId);
+            } else if (targetModelId && (parameters['endtime'] !== undefined || parameters['cfl'] !== undefined)) {
+                this.invalidateDownstreamRemapModels(targetModelId);
             }
             const activeNode = this.getCurrentState()?.nodes.find(n => n.id === nodeId);
             if (activeNode?.type === 'TelemetryText') {
@@ -3651,7 +4132,7 @@ export class StateManager {
                                 const newProgress = Math.min(99, Math.max(0, Math.floor((currentSimTime / newEndTime) * 100)));
                                 this.setModelProgress(targetModelId, newProgress);
                             }
-                            if (currentStatus === 'PAUSED' || currentStatus === 'TERMINATED') {
+                            if (currentStatus === 'PAUSED') {
                                 this.setModelStatus(targetModelId, 'PAUSED');
                             }
                         } else if (newEndTime <= currentSimTime && currentSimTime > 0) {
@@ -3698,6 +4179,9 @@ export class StateManager {
             if (targetModelId && isPhysicalChange) {
                 this.setModelStatus(targetModelId, 'UNINITIALIZED');
                 this.setModelProgress(targetModelId, 0);
+                this.invalidateDownstreamRemapModels(targetModelId);
+            } else if (targetModelId && (parameters['endtime'] !== undefined || parameters['cfl'] !== undefined)) {
+                this.invalidateDownstreamRemapModels(targetModelId);
             }
             if (foundNode?.type === 'TelemetryText') {
                 this.reformatTelemetryTextNode(nodeId);
@@ -3964,29 +4448,48 @@ export class StateManager {
         if (Array.isArray(rawGh)) {
             list = rawGh;
             rawGh.forEach((item: any, idx: number) => {
-                const gId = item.id || `G${idx + 1}`;
-                if (item.times && Array.isArray(item.times) && times.length === 0) {
+                const gId = String(item?.id || item?.name || `G${idx + 1}`);
+                if (item?.times && Array.isArray(item.times) && item.times.length > times.length) {
                     times = item.times;
                 }
-                if (item.channel_values && Array.isArray(item.channel_values)) {
+                if (item?.channel_values && Array.isArray(item.channel_values)) {
                     values[gId] = item.channel_values;
+                    values[gId.toUpperCase()] = item.channel_values;
+                    values[gId.toLowerCase()] = item.channel_values;
                     values[String(idx)] = item.channel_values;
+                    values[`G${idx + 1}`] = item.channel_values;
                 }
             });
         } else if (rawGh.values && typeof rawGh.values === 'object') {
-            times = Array.isArray(rawGh.times) ? rawGh.times : [];
+            times = Array.isArray(rawGh.times)
+                ? rawGh.times
+                : (Array.isArray(rawGh.gauge_times) ? rawGh.gauge_times : []);
             values = { ...rawGh.values };
             Object.entries(rawGh.values).forEach(([id, chVals], idx) => {
+                if (!Array.isArray(chVals)) return;
                 list.push({
                     id: id,
                     channel_values: chVals,
                     times: times
                 });
+                values[id] = chVals as number[][];
+                values[id.toUpperCase()] = chVals as number[][];
+                values[id.toLowerCase()] = chVals as number[][];
                 values[String(idx)] = chVals as number[][];
-                values['G' + (idx + 1)] = chVals as number[][];
+                if (!values['G' + (idx + 1)]) {
+                    values['G' + (idx + 1)] = chVals as number[][];
+                }
             });
         } else if (rawGh.gauges_history) {
             return this.normalizeGaugesTelemetry(rawGh.gauges_history);
+        }
+
+        // Fallback: if channel samples exist but `times` was omitted, synthesize sample indices so curves still render
+        if (times.length === 0 && list.length > 0) {
+            const firstCh = Array.isArray(list[0]?.channel_values?.[0]) ? list[0].channel_values[0] : [];
+            if (firstCh.length > 0) {
+                times = firstCh.map((_: any, i: number) => i);
+            }
         }
 
         const normalized: any = {
@@ -4019,10 +4522,12 @@ export class StateManager {
             }
         }
         if (!val) {
-            const activeModel = this.getActiveModel();
-            const node = activeModel?.nodes.find(n => n.id === nodeId);
-            if (node && (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') && activeModel) {
-                val = this.telemetryStore.get(activeModel.id + "-gauges");
+            for (const m of this.getAllModels()) {
+                const node = m.nodes.find(n => n.id === nodeId);
+                if (node && (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D')) {
+                    val = this.telemetryStore.get(m.id + "-gauges");
+                    if (val) break;
+                }
             }
         }
         return val;
@@ -4484,8 +4989,17 @@ export class StateManager {
         if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
             const normalizedGauges = this.normalizeGaugesTelemetry(data.gauges_history);
             data.gauges_history = normalizedGauges;
-            if (modelId) {
-                this.telemetryStore.set(modelId + "-gauges", normalizedGauges);
+            if (normalizedGauges) {
+                if (modelId) {
+                    this.telemetryStore.set(modelId + "-gauges", normalizedGauges);
+                    this.notifyTelemetryUpdate(modelId + "-gauges", normalizedGauges);
+                }
+                nodes.forEach(vg => {
+                    if (vg.type === 'VirtualGauges' || vg.type === 'VirtualGauges3D') {
+                        this.telemetryStore.set(vg.id, normalizedGauges);
+                        this.notifyTelemetryUpdate(vg.id, normalizedGauges);
+                    }
+                });
             }
         }
 
@@ -4536,10 +5050,7 @@ export class StateManager {
                          this.notifyTelemetryUpdate(connectedNode.id, data);
                     }
                 } else if (connectedNode.type === 'VirtualGauges' || connectedNode.type === 'VirtualGauges3D') {
-                    if (data && !(data instanceof ArrayBuffer) && data.gauges_history) {
-                         this.telemetryStore.set(connectedNode.id, data.gauges_history);
-                         this.notifyTelemetryUpdate(connectedNode.id, data.gauges_history);
-                    }
+                    // Already stored and notified for all VirtualGauges/VirtualGauges3D nodes in the model above
                 } else if (connectedNode.type === 'TelemetryContour' || connectedNode.type === 'Telemetry3DViewport') {
                     if (data instanceof ArrayBuffer || (data && (data.type === 'TELEMETRY_3D' || data.type === 'TELEMETRY_2D' || data.type === 'TELEMETRY_MPM_2D' || data.type === 'TELEMETRY_FEM_3D'))) {
                          this.telemetryStore.set(connectedNode.id, data);
@@ -4998,13 +5509,214 @@ export class StateManager {
     }
 
     loadAppState(newAppState: AppState): void {
+        if (!newAppState || !newAppState.models || !Array.isArray(newAppState.workspaces) || newAppState.workspaces.length === 0) {
+            throw new Error('Invalid workspace state: missing models or workspaces.');
+        }
+        const fallbackLayout = this.getActiveWorkspace()?.layout;
+        newAppState.workspaces.forEach(ws => {
+            ws.modelIds = Array.isArray(ws.modelIds) ? ws.modelIds.filter(id => !!newAppState.models[id]) : [];
+            if (!ws.activeModelId || !ws.modelIds.includes(ws.activeModelId)) {
+                ws.activeModelId = ws.modelIds[0] || null;
+            }
+            ws.connections = Array.isArray(ws.connections) ? ws.connections : [];
+            if (!ws.layout && fallbackLayout) {
+                ws.layout = JSON.parse(JSON.stringify(fallbackLayout));
+            }
+        });
+        if (!newAppState.activeWorkspaceId || !newAppState.workspaces.some(w => w.id === newAppState.activeWorkspaceId)) {
+            newAppState.activeWorkspaceId = newAppState.workspaces[0].id;
+        }
+        if (typeof newAppState.workspaceCounter !== 'number') {
+            newAppState.workspaceCounter = newAppState.workspaces.length;
+        }
+
         this.appState = newAppState;
+        this.selectedNodeId = null;
         this.healDuplicateNodeIds();
         Object.values(this.appState.models).forEach(model => {
             this.healModelGraph(model);
             this.healNodes(model.nodes, model);
+            if (typeof window !== 'undefined') {
+                (window as any).playbackBuffer?.clear(model.id);
+            }
         });
         this.pushAppState(this.appState);
+        Object.keys(this.appState.models).forEach(mId => {
+            this.setModelStatus(mId, 'UNINITIALIZED');
+        });
+    }
+
+    /**
+     * Loads a single Model payload (from JSON or Binary) cleanly without cross-model node ID clobbering.
+     * Preserves name, filename, refresh_rate, fps, views, activeViewId, and custom output directories.
+     */
+    loadModelData(
+        loaded: any,
+        filePath?: string | null,
+        options?: { mode?: 'replace_active' | 'add_to_workspace'; targetModelId?: string }
+    ): Model {
+        const appStateCopy = JSON.parse(JSON.stringify(this.appState)) as AppState;
+        const ws = appStateCopy.workspaces.find(w => w.id === appStateCopy.activeWorkspaceId) || appStateCopy.workspaces[0];
+        if (!ws) {
+            throw new Error('No active workspace available to load model into.');
+        }
+
+        const normPath = filePath ? filePath.trim() : null;
+        let derivedName = '';
+        if (normPath) {
+            const slash = Math.max(normPath.lastIndexOf('/'), normPath.lastIndexOf('\\'));
+            const base = slash >= 0 ? normPath.substring(slash + 1) : normPath;
+            derivedName = base.replace(/\.(json|blst|bin|model)$/i, '');
+        }
+
+        const requestedMode = options?.mode || 'replace_active';
+        let targetId = options?.targetModelId || ws.activeModelId || null;
+        const currentTarget = targetId ? appStateCopy.models[targetId] : null;
+        const isCurrentEmpty = !currentTarget || !Array.isArray(currentTarget.nodes) || currentTarget.nodes.length === 0;
+
+        const createNew = (requestedMode === 'add_to_workspace' && !isCurrentEmpty && !options?.targetModelId) || !targetId || !appStateCopy.models[targetId];
+        if (createNew) {
+            targetId = `model-${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+        }
+
+        const prevModel = appStateCopy.models[targetId!];
+        const prevNodeIds = new Set<string>(prevModel?.nodes?.map(n => n.id) || []);
+
+        const loadedNodes: any[] = Array.isArray(loaded.nodes) ? loaded.nodes : [];
+        const loadedVp = loadedNodes.find((n: any) => n.type === 'Telemetry3DViewport');
+        const loadedContour = loadedNodes.find((n: any) => n.type === 'TelemetryContour');
+        const loadedGraph = loadedNodes.find((n: any) => n.type === 'TelemetryGraph');
+        const loadedViews: any[] = Array.isArray(loaded.views) ? loaded.views : [];
+        const loadedActiveView = loadedViews.find((v: any) => v.id === loaded.activeViewId) || loadedViews[0];
+        const candidateLoadedRate = loaded.refresh_rate
+            ?? (loaded.fps && Number(loaded.fps) > 0 ? Number((1.0 / Number(loaded.fps)).toFixed(4)) : undefined)
+            ?? loadedVp?.parameters?.refresh_rate
+            ?? loadedContour?.parameters?.refresh_rate
+            ?? loadedGraph?.parameters?.refresh_rate
+            ?? loadedActiveView?.toggles?.refresh_rate
+            ?? 0.5;
+        const rate = (!isNaN(Number(candidateLoadedRate)) && Number(candidateLoadedRate) > 0)
+            ? Number(candidateLoadedRate)
+            : 0.5;
+        const fps = (loaded.fps !== undefined && !isNaN(Number(loaded.fps)) && Number(loaded.fps) > 0)
+            ? Number(loaded.fps)
+            : StateManager.rateToFps(rate);
+
+        const newModel: Model = {
+            id: targetId!,
+            name: (typeof loaded.name === 'string' && loaded.name.trim()) ? loaded.name.trim() : (derivedName || prevModel?.name || 'Loaded Model'),
+            filename: normPath || (typeof loaded.filename === 'string' ? loaded.filename : null),
+            refresh_rate: rate,
+            fps,
+            nodes: Array.isArray(loaded.nodes) ? JSON.parse(JSON.stringify(loaded.nodes)) : [],
+            connections: Array.isArray(loaded.connections) ? JSON.parse(JSON.stringify(loaded.connections)) : [],
+            views: Array.isArray(loaded.views) ? JSON.parse(JSON.stringify(loaded.views)) : undefined,
+            activeViewId: typeof loaded.activeViewId === 'string' ? loaded.activeViewId : undefined
+        };
+
+        // Default empty output_dir / vtk_dir to the loaded model's folder without overwriting user-configured paths
+        if (normPath && (normPath.includes('/') || normPath.includes('\\'))) {
+            const normSlashes = normPath.replace(/\\/g, '/');
+            const lastSlash = normSlashes.lastIndexOf('/');
+            const dirPath = lastSlash > 0 ? normSlashes.substring(0, lastSlash) : (lastSlash === 0 ? '/' : '');
+            if (dirPath) {
+                newModel.nodes.forEach(n => {
+                    n.parameters = n.parameters || {};
+                    if (n.type === 'VirtualGauges' || (n.type as string) === 'VirtualGauges3D') {
+                        if (!n.parameters.output_dir || String(n.parameters.output_dir).trim() === '') {
+                            n.parameters.output_dir = dirPath;
+                        }
+                    } else if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
+                        if (!n.parameters.vtk_dir || String(n.parameters.vtk_dir).trim() === '') {
+                            n.parameters.vtk_dir = dirPath;
+                        }
+                    }
+                });
+            }
+        }
+
+        // Remove stale workspace-level cross-model connections referencing replaced model's old nodes
+        if (!createNew && prevNodeIds.size > 0 && Array.isArray(ws.connections)) {
+            ws.connections = ws.connections.filter(c => !prevNodeIds.has(c.fromNode) && !prevNodeIds.has(c.toNode));
+        }
+
+        // Restore layout only if single-model workspace and loaded payload carries a valid layout tree
+        if (loaded.layout && (loaded.layout.type === 'split' || loaded.layout.type === 'panel') && ws.modelIds.length <= 1 && !createNew) {
+            ws.layout = JSON.parse(JSON.stringify(loaded.layout));
+        }
+
+        appStateCopy.models[newModel.id] = newModel;
+        if (!ws.modelIds.includes(newModel.id)) {
+            ws.modelIds.push(newModel.id);
+        }
+        ws.activeModelId = newModel.id;
+
+        // Deduplicate node IDs across all models BEFORE healing
+        this.healDuplicateNodeIds(appStateCopy);
+        const savedModelRef = appStateCopy.models[newModel.id];
+        this.healModelGraph(savedModelRef);
+        this.healNodes(savedModelRef.nodes, savedModelRef);
+
+        this.selectedNodeId = null;
+        if (typeof window !== 'undefined') {
+            (window as any).playbackBuffer?.clear(newModel.id);
+        }
+        try {
+            localStorage.setItem('blast_pipeline_active_model_id', newModel.id);
+        } catch {}
+
+        this.pushAppState(appStateCopy);
+        this.setModelStatus(newModel.id, 'UNINITIALIZED');
+        return this.appState.models[newModel.id];
+    }
+
+    /**
+     * Updates model filename and bundled local `./basename` resource references after a host save
+     * WITHOUT invalidating an already-initialized or paused simulation status.
+     */
+    commitSavedModelMetadata(modelId: string, filePath: string, updateBundledResourceRefs: boolean = true): void {
+        const model = this.appState.models[modelId];
+        if (!model) return;
+
+        model.filename = filePath;
+
+        const normSlashes = filePath.replace(/\\/g, '/');
+        const lastSlash = normSlashes.lastIndexOf('/');
+        const dirPath = lastSlash > 0 ? normSlashes.substring(0, lastSlash) : (lastSlash === 0 ? '/' : '');
+
+        model.nodes.forEach(n => {
+            n.parameters = n.parameters || {};
+            if (dirPath) {
+                if (n.type === 'VirtualGauges' || (n.type as string) === 'VirtualGauges3D') {
+                    if (!n.parameters.output_dir || String(n.parameters.output_dir).trim() === '') {
+                        n.parameters.output_dir = dirPath;
+                    }
+                } else if (n.type === 'VTKOutput' || n.type === 'Telemetry3DViewport') {
+                    if (!n.parameters.vtk_dir || String(n.parameters.vtk_dir).trim() === '') {
+                        n.parameters.vtk_dir = dirPath;
+                    }
+                }
+            }
+            if (updateBundledResourceRefs) {
+                ['stl_file', 'k_file', 'external_file_path', 'file_path'].forEach(key => {
+                    const val = n.parameters[key];
+                    if (val && typeof val === 'string' && val.trim() !== '' && val !== 'None specified') {
+                        const normVal = val.replace(/\\/g, '/');
+                        const slash = normVal.lastIndexOf('/');
+                        const baseName = slash !== -1 ? normVal.substring(slash + 1) : (normVal.startsWith('./') ? normVal.substring(2) : normVal);
+                        if (baseName) {
+                            n.parameters[key] = `./${baseName}`;
+                        }
+                    }
+                });
+            }
+        });
+
+        if (this.currentIndex >= 0 && this.currentIndex < this.history.length) {
+            this.history[this.currentIndex] = JSON.parse(JSON.stringify(this.appState));
+        }
+        this.saveWorkspace();
+        this.notifyListeners();
     }
 
     clearWorkspace(): void {
@@ -5041,7 +5753,7 @@ export class StateManager {
 
         // 5. Ensure 3D simulation models have a Telemetry3DViewport node
         const has3DEntities = model.nodes.some(n => 
-            n.type === 'DomainMesh3D' || 
+            isDomainMesh3DNode(n.type) || 
             n.type === 'CFDSolver3D' || 
             n.type === 'MarineHarbourDomain' ||
             n.type === 'MPMDomain3D' || 
@@ -5069,11 +5781,11 @@ export class StateManager {
 
             const hasVpConn = model.connections.some(c => c.toNode === vpNode!.id);
             if (!hasVpConn) {
-                const sourceNode = model.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'DomainMesh3D');
+                const sourceNode = model.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || isDomainMesh3DNode(n.type));
                 if (sourceNode) {
                     model.connections.push({
                         fromNode: sourceNode.id,
-                        fromPort: sourceNode.type === 'DomainMesh3D' ? 'mesh' : 'telemetry',
+                        fromPort: isDomainMesh3DNode(sourceNode.type) ? 'mesh' : 'telemetry',
                         toNode: vpNode.id,
                         toPort: 'in'
                     });
@@ -5104,9 +5816,9 @@ export class StateManager {
         }
 
         // 7. Auto-heal Background Grid connections
-        let meshNodes = model.nodes.filter(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh');
+        let meshNodes = model.nodes.filter(n => isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type) || n.type === 'DomainMesh');
         const has3DSolver = model.nodes.some(n => ['CFDSolver3D', 'MPMDomain3D', 'MarineHarbourDomain', 'FEMDomain3D'].includes(n.type));
-        const has3DMesh = meshNodes.some(n => n.type === 'DomainMesh3D');
+        const has3DMesh = meshNodes.some(n => isDomainMesh3DNode(n.type));
         if (has3DSolver && !has3DMesh) {
             const solver = model.nodes.find(n => ['MarineHarbourDomain', 'CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D'].includes(n.type))!;
             const newMeshId = this.getUniqueNodeId('DomainMesh3D', tempExistingIds);
@@ -5127,8 +5839,8 @@ export class StateManager {
         }
 
         for (const mesh of meshNodes) {
-            const isMesh3D = mesh.type === 'DomainMesh3D';
-            const isMesh2D = mesh.type === 'DomainMesh2D';
+            const isMesh3D = isDomainMesh3DNode(mesh.type);
+            const isMesh2D = isDomainMesh2DNode(mesh.type);
             const targetSolvers = model.nodes.filter(s => isMesh3D 
                 ? ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MarineHarbourDomain'].includes(s.type)
                 : (isMesh2D ? ['MPMDomain2D', 'CFDSolver2D'].includes(s.type) : s.type === 'CFDSolver'));
@@ -5530,6 +6242,23 @@ export class StateManager {
 
         // 9c. Sync pipeline connection parameters for Solvers, Charges, and Materials
         for (const solver of cfdSolvers) {
+            if (solver.type === 'CFDSolver') {
+                if (solver.parameters['domain_mesh'] === undefined) {
+                    solver.parameters['domain_mesh'] = '';
+                }
+                const meshConn = model.connections.find(c =>
+                    (c.toNode === solver.id && (c.toPort === 'mesh' || c.toPort === 'grid' || c.toPort === 'in')) ||
+                    (c.fromNode === solver.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
+                );
+                if (meshConn) {
+                    const connectedMeshId = meshConn.toNode === solver.id ? meshConn.fromNode : meshConn.toNode;
+                    const meshNode = model.nodes.find(n => n.id === connectedMeshId && n.type === 'DomainMesh');
+                    if (meshNode && solver.parameters['domain_mesh'] !== meshNode.id) {
+                        solver.parameters['domain_mesh'] = meshNode.id;
+                        changed = true;
+                    }
+                }
+            }
             if (solver.parameters['ambient_air_material'] === undefined) {
                 solver.parameters['ambient_air_material'] = '';
             }
@@ -5579,6 +6308,47 @@ export class StateManager {
             } else {
                 if ('ambient_air_target' in mat.parameters) {
                     delete mat.parameters['ambient_air_target'];
+                    changed = true;
+                }
+            }
+        }
+
+        // 9d. Auto-heal Remap nodes <-> CFD Solver wiring and init_mode synchronization
+        const remapNodes = model.nodes.filter(n => ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(n.type));
+        for (const remapNode of remapNodes) {
+            if (!remapNode.parameters) remapNode.parameters = {};
+            const is3DRemap = remapNode.type === 'Remap1DTo3DNode' || remapNode.type === 'Remap2DTo3DNode' || remapNode.type === 'Remap3DTo3DNode';
+            const compatibleSolvers = model.nodes.filter(s => is3DRemap
+                ? (s.type === 'CFDSolver3D' || s.type === 'MarineHarbourDomain')
+                : s.type === 'CFDSolver2D');
+            const existingRemapConn = model.connections.find(c => c.fromNode === remapNode.id && (c.toPort === 'remap' || c.toPort === 'in'));
+            let targetSolver = existingRemapConn
+                ? compatibleSolvers.find(s => s.id === existingRemapConn.toNode)
+                : undefined;
+            if (!targetSolver && remapNode.parameters['target_solver']) {
+                targetSolver = compatibleSolvers.find(s => s.id === remapNode.parameters['target_solver']);
+            }
+            if (!targetSolver && compatibleSolvers.length === 1) {
+                targetSolver = compatibleSolvers[0];
+            }
+            if (targetSolver) {
+                if (!existingRemapConn) {
+                    model.connections.push({
+                        fromNode: remapNode.id,
+                        fromPort: 'out',
+                        toNode: targetSolver.id,
+                        toPort: 'remap'
+                    });
+                    changed = true;
+                }
+                if (remapNode.parameters['target_solver'] !== targetSolver.id) {
+                    remapNode.parameters['target_solver'] = targetSolver.id;
+                    changed = true;
+                }
+                const expectedInitMode = remapNode.type === 'Remap3DTo3DNode' ? 'From3D' : (remapNode.type === 'Remap2DTo3DNode' ? 'From2D' : 'From1D');
+                if (!targetSolver.parameters) targetSolver.parameters = {};
+                if (targetSolver.parameters['init_mode'] !== expectedInitMode) {
+                    targetSolver.parameters['init_mode'] = expectedInitMode;
                     changed = true;
                 }
             }
@@ -5734,7 +6504,7 @@ export class StateManager {
         // Ensure model has valid views and activeViewId
         if (!model.views || !Array.isArray(model.views) || model.views.length === 0) {
             const vpNode = model.nodes.find(n => n.type === 'Telemetry3DViewport');
-            const meshNode = model.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+            const meshNode = model.nodes.find(n => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh');
             const solverNode = model.nodes.find(n => n.type === 'CFDSolver3D');
 
             const carrierSlices = (vpNode?.parameters?.slices && Array.isArray(vpNode.parameters.slices))
@@ -5806,8 +6576,9 @@ export class StateManager {
         if (model.refresh_rate === undefined || model.refresh_rate === null || isNaN(Number(model.refresh_rate)) || Number(model.refresh_rate) <= 0) {
             const vpNode = model.nodes.find(n => n.type === 'Telemetry3DViewport');
             const contourNode = model.nodes.find(n => n.type === 'TelemetryContour');
+            const graphNode = model.nodes.find(n => n.type === 'TelemetryGraph');
             const activeView = model.views?.find(v => v.id === model.activeViewId) || model.views?.[0];
-            const candidateRate = vpNode?.parameters?.refresh_rate ?? contourNode?.parameters?.refresh_rate ?? activeView?.toggles?.refresh_rate ?? 0.5;
+            const candidateRate = vpNode?.parameters?.refresh_rate ?? contourNode?.parameters?.refresh_rate ?? graphNode?.parameters?.refresh_rate ?? activeView?.toggles?.refresh_rate ?? 0.5;
             model.refresh_rate = Number(candidateRate) || 0.5;
             model.fps = StateManager.rateToFps(model.refresh_rate);
             changed = true;
@@ -5902,24 +6673,51 @@ export class StateManager {
     }
 
     public unSmergeWorkspaceModels(targetAppState: AppState = this.appState): void {
-        const solverTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'MPMDomain3D', 'FEMDomain3D', 'FSICoupler2D', 'FSICoupler3D', 'FEMFSICoupler3D', 'DomainMesh', 'DomainMesh2D', 'DomainMesh3D'];
+        const solverTypes = ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MPMDomain2D', 'MPMDomain3D', 'FEMDomain3D', 'FSICoupler2D', 'FSICoupler3D', 'FEMFSICoupler3D', 'DomainMesh', 'DomainMesh2D', 'SparseDomainMesh2D', 'DomainMesh3D', 'SparseDomainMesh3D'];
 
         Object.values(targetAppState.models).forEach(model => {
-            const seenTypes = new Set<string>();
+            const firstByType = new Map<string, Node>();
             const duplicateIds = new Set<string>();
+            const replacementMap = new Map<string, string>();
+            const hasCFD3D = model.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
+            const hasMPM3D = model.nodes.some(n => n.type === 'MPMDomain3D');
+            const hasCFD2D = model.nodes.some(n => n.type === 'CFDSolver2D');
+            const hasMPM2D = model.nodes.some(n => n.type === 'MPMDomain2D');
+            const allowDualMesh3D = hasCFD3D && hasMPM3D;
+            const allowDualMesh2D = hasCFD2D && hasMPM2D;
 
             model.nodes.forEach(n => {
                 if (solverTypes.includes(n.type)) {
-                    if (seenTypes.has(n.type)) {
-                        duplicateIds.add(n.id);
+                    const isMeshCanonical = isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type) || n.type === 'DomainMesh';
+                    const canonicalType = (isDomainMesh3DNode(n.type) && !allowDualMesh3D)
+                        ? 'DomainMesh3D'
+                        : ((isDomainMesh2DNode(n.type) && !allowDualMesh2D) ? 'DomainMesh2D' : n.type);
+                    const prev = firstByType.get(canonicalType);
+                    if (prev) {
+                        if (isMeshCanonical) {
+                            // Keep the newly added mesh node (later in array) and replace the older mesh node
+                            duplicateIds.add(prev.id);
+                            replacementMap.set(prev.id, n.id);
+                            firstByType.set(canonicalType, n);
+                        } else {
+                            duplicateIds.add(n.id);
+                            replacementMap.set(n.id, prev.id);
+                        }
                     } else {
-                        seenTypes.add(n.type);
+                        firstByType.set(canonicalType, n);
                     }
                 }
             });
 
             if (duplicateIds.size > 0) {
                 console.warn(`[UNSMERGE] Purging ${duplicateIds.size} duplicate solver/mesh nodes from model "${model.name}"`);
+                model.connections.forEach(c => {
+                    if (replacementMap.has(c.fromNode)) c.fromNode = replacementMap.get(c.fromNode)!;
+                    if (replacementMap.has(c.toNode)) c.toNode = replacementMap.get(c.toNode)!;
+                });
+                if (this.selectedNodeId && replacementMap.has(this.selectedNodeId)) {
+                    this.selectedNodeId = replacementMap.get(this.selectedNodeId)!;
+                }
                 model.nodes = model.nodes.filter(n => !duplicateIds.has(n.id));
                 model.connections = model.connections.filter(c => !duplicateIds.has(c.fromNode) && !duplicateIds.has(c.toNode));
             }
@@ -6028,7 +6826,7 @@ export class StateManager {
                     curr = model.nodes.find(n => n.id === parentConn.fromNode);
                     depth++;
                 }
-                if (curr && curr.type === 'DomainMesh3D') {
+                if (curr && isDomainMesh3DNode(curr.type)) {
                     console.warn(`[HEAL] Re-routing CFDSolver3D.mesh from RefinementMesh3D "${meshConn.fromNode}" to DomainMesh3D "${curr.id}"`);
                     model.connections[meshConnIdx] = {
                         fromNode: curr.id,
@@ -6101,6 +6899,75 @@ export class StateManager {
                 delete node.parameters['output_mode'];
                 delete node.parameters['output_interval'];
             }
+            if (node.type === 'CFDSolver') {
+                delete node.parameters['connected_detonators'];
+                delete node.parameters['device'];
+                delete node.parameters['enable_vtk'];
+                delete node.parameters['plot_stride'];
+                delete node.parameters['refresh_rate'];
+                delete node.parameters['mesh_type'];
+                delete node.parameters['amr_max_levels'];
+                delete node.parameters['amr_threshold'];
+                delete node.parameters['amr_coarsen_ratio'];
+                if (node.parameters['init_mode'] === 'From1D' || node.parameters['init_mode'] === 'From2D') {
+                    node.parameters['init_mode'] = 'Multi-Material JWL';
+                }
+            }
+            if (node.type === 'VirtualGauges') {
+                delete node.parameters['channel'];
+                delete node.parameters['sample_rate'];
+                delete node.parameters['plot_stride'];
+                delete node.parameters['storage_backend'];
+            }
+            if (node.type === 'Remap1DTo2DNode') {
+                delete node.parameters['trigger_type'];
+                delete node.parameters['trigger_val'];
+                delete node.parameters['remap_time'];
+                delete node.parameters['target_cell_size'];
+                delete node.parameters['interpolation_method'];
+            }
+            if (node.type === 'Remap1DTo3DNode') {
+                if (node.parameters['explosive_x'] === undefined && node.parameters['center_x'] !== undefined) {
+                    node.parameters['explosive_x'] = node.parameters['center_x'];
+                }
+                if (node.parameters['explosive_y'] === undefined && node.parameters['center_y'] !== undefined) {
+                    node.parameters['explosive_y'] = node.parameters['center_y'];
+                }
+                if (node.parameters['explosive_z'] === undefined && node.parameters['center_z'] !== undefined) {
+                    node.parameters['explosive_z'] = node.parameters['center_z'];
+                }
+                delete node.parameters['center_x'];
+                delete node.parameters['center_y'];
+                delete node.parameters['center_z'];
+                delete node.parameters['trigger_type'];
+                delete node.parameters['trigger_val'];
+                delete node.parameters['remap_time'];
+                delete node.parameters['target_cell_size'];
+                delete node.parameters['interpolation_method'];
+            }
+            if (node.type === 'Remap2DTo3DNode') {
+                if (node.parameters['explosive_x'] === undefined && node.parameters['center_x'] !== undefined) {
+                    node.parameters['explosive_x'] = node.parameters['center_x'];
+                }
+                if (node.parameters['explosive_y'] === undefined && node.parameters['center_y'] !== undefined) {
+                    node.parameters['explosive_y'] = node.parameters['center_y'];
+                }
+                if (node.parameters['explosive_z'] === undefined && node.parameters['z_offset'] !== undefined) {
+                    node.parameters['explosive_z'] = node.parameters['z_offset'];
+                }
+                delete node.parameters['center_x'];
+                delete node.parameters['center_y'];
+                delete node.parameters['z_offset'];
+                delete node.parameters['trigger_type'];
+                delete node.parameters['trigger_val'];
+                delete node.parameters['remap_time'];
+                delete node.parameters['target_cell_size'];
+                delete node.parameters['interpolation_method'];
+            }
+            if (node.type === 'Charge1D') {
+                delete node.parameters['charge_shape'];
+                delete node.parameters['charge_opacity'];
+            }
             if (node.type === 'CFDSolver3D') {
                 delete node.parameters['stl_file'];
                 delete node.parameters['geometry_hash'];
@@ -6158,8 +7025,13 @@ export class StateManager {
                     node.parameters['right_bc'] = node.parameters['x_max_bc'];
                     delete node.parameters['x_max_bc'];
                 }
+                // 1D spherical origin r = 0 is strictly a Reflecting symmetry axis
+                node.parameters['left_bc'] = 'Reflecting';
+                if (!['Transmitting', 'Reflecting', 'Terminate'].includes(node.parameters['right_bc'])) {
+                    node.parameters['right_bc'] = 'Transmitting';
+                }
             }
-            if (node.type === 'DomainMesh3D') {
+            if (isDomainMesh3DNode(node.type)) {
                 if (node.parameters['xmin'] === undefined && node.parameters['origin_x'] !== undefined) {
                     const ox = Number(node.parameters['origin_x'] ?? 0.0);
                     const dx = Number(node.parameters['dim_x'] ?? 1.0);
@@ -6334,6 +7206,7 @@ export class StateManager {
             case 'Remap1DTo2DNode':
             case 'Remap1DTo3DNode': return [{ id: 'in', label: '1D Solver' }];
             case 'Remap2DTo3DNode': return [{ id: 'in', label: '2D Solver' }];
+            case 'Remap3DTo3DNode': return [{ id: 'in', label: '3D Solver' }];
             case 'TelemetryContour': return [
                 { id: 'in', label: 'CFD Stream' },
                 { id: 'mpm_in', label: 'MPM Stream' }
@@ -6384,7 +7257,8 @@ export class StateManager {
             case 'Charge2D': return [{ id: 'out', label: 'Charge' }];
             case 'ThePainter': return [{ id: 'out', label: 'State' }];
             case 'CFDSolver': return [{ id: 'telemetry', label: 'Telemetry' }];
-            case 'DomainMesh2D': return [{ id: 'mesh', label: 'Mesh Spec' }];
+            case 'DomainMesh2D':
+            case 'SparseDomainMesh2D': return [{ id: 'mesh', label: 'Mesh Spec' }];
             case 'DetonatorLocation':
             case 'DetonatorLocation3D':
             case 'TriggerLocation':
@@ -6392,10 +7266,12 @@ export class StateManager {
             case 'RemapNode':
             case 'Remap1DTo2DNode':
             case 'Remap1DTo3DNode':
-            case 'Remap2DTo3DNode': return [{ id: 'remap', label: 'Remap Spec' }];
+            case 'Remap2DTo3DNode':
+            case 'Remap3DTo3DNode': return [{ id: 'remap', label: 'Remap Spec' }];
             case 'HardwareConfig': return [{ id: 'hardware', label: 'Hardware Spec' }];
             case 'CFDSolver2D': return [{ id: 'telemetry', label: 'Telemetry' }];
-            case 'DomainMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];
+            case 'DomainMesh3D':
+            case 'SparseDomainMesh3D': return [{ id: 'mesh', label: 'Mesh Spec' }];
             case 'Charge3D': return [{ id: 'out', label: 'Charge Spec' }];
             case 'CFDSolver3D': return [{ id: 'telemetry', label: 'Telemetry' }];
             case 'VirtualGauges': return [{ id: 'out', label: 'Gauges Spec' }];
@@ -6419,6 +7295,71 @@ export class StateManager {
             case 'Obstacle': return [{ id: 'obstacle', label: 'Obstacle Spec' }];
             default: return [];
         }
+    }
+
+    isMeshSparseSupported(nodeId: string, modelId?: string): boolean {
+        const targetModelId = modelId || this.getActiveModelId();
+        if (!targetModelId || !this.appState.models[targetModelId]) return false;
+        const model = this.appState.models[targetModelId];
+        const node = model.nodes.find(n => n.id === nodeId);
+        if (!node || (!isDomainMesh3DNode(node.type) && !isDomainMesh2DNode(node.type))) return false;
+
+        const fvSolverTypes = new Set(['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MarineHarbourDomain']);
+        const mpmSolverTypes = new Set(['MPMDomain2D', 'MPMDomain3D']);
+        const conns = model.connections || [];
+
+        const connectedSolvers = conns
+            .filter(c => c.fromNode === nodeId || c.toNode === nodeId)
+            .map(c => model.nodes.find(n => n.id === (c.fromNode === nodeId ? c.toNode : c.fromNode)))
+            .filter((n): n is Node => !!n);
+
+        if (connectedSolvers.some(s => fvSolverTypes.has(s.type))) {
+            return false;
+        }
+        if (connectedSolvers.length === 0) {
+            const hasFV = model.nodes.some(n => fvSolverTypes.has(n.type));
+            const hasMPM = model.nodes.some(n => mpmSolverTypes.has(n.type));
+            if (hasFV && !hasMPM) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    toggleMeshSparsity(nodeId: string, modelId?: string): NodeType | null {
+        const targetModelId = modelId || this.getActiveModelId();
+        if (!targetModelId || !this.appState.models[targetModelId]) return null;
+        const model = this.appState.models[targetModelId];
+        const node = model.nodes.find(n => n.id === nodeId);
+        if (!node) return null;
+
+        let newType: NodeType | null = null;
+        if (node.type === 'DomainMesh3D') newType = 'SparseDomainMesh3D';
+        else if (node.type === 'SparseDomainMesh3D') newType = 'DomainMesh3D';
+        else if (node.type === 'DomainMesh2D') newType = 'SparseDomainMesh2D';
+        else if (node.type === 'SparseDomainMesh2D') newType = 'DomainMesh2D';
+        if (!newType) return null;
+
+        if ((newType === 'SparseDomainMesh3D' || newType === 'SparseDomainMesh2D') && !this.isMeshSparseSupported(nodeId, targetModelId)) {
+            return null;
+        }
+
+        node.type = newType;
+        if (node.parameters) {
+            const curName = String(node.parameters['name'] || '');
+            if (!curName || curName === 'Domain Mesh 3D' || curName === 'Sparse Domain Mesh 3D' || curName === 'DomainMesh3D' || curName === 'SparseDomainMesh3D') {
+                if (newType === 'SparseDomainMesh3D') node.parameters['name'] = 'Sparse Domain Mesh 3D';
+                else if (newType === 'DomainMesh3D') node.parameters['name'] = 'Domain Mesh 3D';
+            } else if (curName === 'Domain Mesh 2D' || curName === 'Sparse Domain Mesh 2D' || curName === 'DomainMesh2D' || curName === 'SparseDomainMesh2D') {
+                if (newType === 'SparseDomainMesh2D') node.parameters['name'] = 'Sparse Domain Mesh 2D';
+                else if (newType === 'DomainMesh2D') node.parameters['name'] = 'Domain Mesh 2D';
+            }
+        }
+        node.inputs = this.getDefaultInputs(newType);
+        node.outputs = this.getDefaultOutputs(newType);
+        this.setModelStatus(targetModelId, 'UNINITIALIZED');
+        this.notifyListeners();
+        return newType;
     }
 
     registerSTLVertices(filePath: string, vertices: Float32Array): STLGeometryMeta {
@@ -6585,56 +7526,6 @@ function ensureMenuBar(node: LayoutNode): LayoutNode {
     };
 }
 
-export function canonicalizeQuantity(q: string | undefined | null): string {
-    if (!q) return 'pressure';
-    const s = q.trim().toLowerCase();
-    if (s === 'overpressure' || s === 'peak_overpressure' || s === 'peak_pressure' || s === 'pk_press') return 'peak_overpressure';
-    if (s === 'impulse' || s === 'peak_impulse' || s === 'pk_impulse') return 'peak_impulse';
-    if (s === 'species1' || s === 'species_1' || s === 'species' || s === 'products' || s === 'detonation_products' || s === 'detonation' || s === 'reacted' || s === 'reacted_gas' || s === 'alpha1' || s === 'alpha_1') return 'species1';
-    if (s === 'species2' || s === 'species_2' || s === 'unreacted' || s === 'unreacted_solid' || s === 'solid_he' || s === 'alpha2' || s === 'alpha_2') return 'species2';
-    if (s === 'species3' || s === 'species_3' || s === 'air' || s === 'ambient_air' || s === 'alpha3' || s === 'alpha_3') return 'species3';
-    if (s === 'plastic_strain' || s === 'plasticstrain' || s === 'eps_p' || s === 'ep' || s === 'fem_strain' || s === 'mpm_strain') return 'plastic_strain';
-    if (s === 'vonmises' || s === 'von_mises' || s === 'vm_stress' || s === 'stress' || s === 'fem_stress' || s === 'mpm_stress') return 'vonMises';
-    if (s === 'temperature' || s === 'temp' || s === 'fem_temp' || s === 'mpm_temp') return 'temperature';
-    if (s === 'displacement' || s === 'disp' || s === 'fem_disp' || s === 'mpm_disp') return 'displacement';
-    if (s === 'damage' || s === 'fem_damage' || s === 'mpm_damage') return 'damage';
-    if (s === 'has_failed' || s === 'failure' || s === 'failed') return 'has_failed';
-    if (s === 'cluster_id' || s === 'cluster' || s === 'fragment_id' || s === 'fragments') return 'cluster_id';
-    if (s === 'object_id' || s === 'obj_id' || s === 'object') return 'object_id';
-    if (s === 'velocity' || s === 'speed' || s === 'vel') return 'velocity';
-    if (s === 'materials' || s === 'material' || s === 'phase') return 'materials';
-    if (s === 'pressure' || s === 'density' || s === 'energy' || s === 'solid' || s === 'amr_level') return s;
-    return s;
-}
-
-export const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
-    pressure: [101325.0, 101325.0 * 100.0],
-    density: [1.2, 100.0],
-    velocity: [0.0, 1000.0],
-    speed: [0.0, 1000.0],
-    energy: [200000.0, 10000000.0],
-    species1: [0.0, 1.0],
-    species2: [0.0, 1.0],
-    species3: [0.0, 1.0],
-    solid: [0.0, 1.0],
-    materials: [0.0, 5.0],
-    overpressure: [0.0, 101325.0 * 99.0],
-    impulse: [0.0, 10000.0],
-    peak_overpressure: [0.0, 101325.0 * 99.0],
-    peak_impulse: [0.0, 10000.0],
-    vonMises: [0.0, 500000000.0],
-    von_mises: [0.0, 500000000.0],
-    plasticStrain: [0.0, 1.0],
-    plastic_strain: [0.0, 1.0],
-    damage: [0.0, 1.0],
-    has_failed: [0.0, 1.0],
-    cluster_id: [0.0, 50.0],
-    object_id: [0.0, 10.0],
-    temperature: [300.0, 3000.0],
-    displacement: [0.0, 0.1],
-    momentOrForce: [0.0, 1000.0]
-};
-
 function syncQuantityRanges(node: Node, parameters: Record<string, any>, merged: Record<string, any>) {
     if (node.type !== 'Telemetry3DViewport') return;
 
@@ -6648,7 +7539,7 @@ function syncQuantityRanges(node: Node, parameters: Record<string, any>, merged:
     const rawQty = slice.quantities?.[0] || 'pressure';
     const cQty = canonicalizeQuantity(rawQty);
 
-    if (parameters.min_val !== undefined || parameters.max_val !== undefined) {
+    if (parameters.quantity_styles === undefined && (parameters.min_val !== undefined || parameters.max_val !== undefined)) {
         const currentMin = parameters.min_val !== undefined ? parameters.min_val : merged.min_val;
         const currentMax = parameters.max_val !== undefined ? parameters.max_val : merged.max_val;
         merged.quantity_ranges[cQty] = [currentMin, currentMax];
@@ -6658,15 +7549,21 @@ function syncQuantityRanges(node: Node, parameters: Record<string, any>, merged:
         if (cQty === 'peak_impulse') merged.quantity_ranges['impulse'] = [currentMin, currentMax];
         if (cQty === 'plastic_strain') merged.quantity_ranges['plasticStrain'] = [currentMin, currentMax];
         if (cQty === 'vonMises') merged.quantity_ranges['von_mises'] = [currentMin, currentMax];
+        const prevStyle = getQuantityStyle(merged, cQty);
+        merged.quantity_styles = {
+            ...(merged.quantity_styles || {}),
+            [cQty]: { ...prevStyle, minVal: Number(currentMin), maxVal: Number(currentMax) }
+        };
     } else {
-        const range = merged.quantity_ranges[cQty] || merged.quantity_ranges[rawQty] || DEFAULT_QUANTITY_RANGES[cQty] || [0.0, 1.0];
-        merged.min_val = range[0];
-        merged.max_val = range[1];
+        const style = getQuantityStyle(merged, cQty);
+        merged.min_val = style.minVal;
+        merged.max_val = style.maxVal;
     }
 }
 
+
 function constrainAllSlices(model: any): boolean {
-    const meshNode = model.nodes.find((n: any) => n.type === 'DomainMesh3D');
+    const meshNode = model.nodes.find((n: any) => isDomainMesh3DNode(n.type));
     if (!meshNode) return false;
 
     const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
@@ -6887,13 +7784,13 @@ export function resolveMeshCounts(node: Node, state?: SimulationState): MeshCoun
         const radius = Number(node.parameters['domain_radius'] ?? 1.0);
         const n_cells = Math.max(1, Math.round(radius / cellSize));
         return { dimension: '1D', n_cells, nr: 0, nz: 0, nx: 0, ny: 0, totalCells: n_cells, cellSize, radius, dim_x: radius, dim_y: 0, dim_z: 0, volume: 0 };
-    } else if (node.type === 'DomainMesh2D') {
+    } else if (isDomainMesh2DNode(node.type)) {
         const max_r = Number(node.parameters['max_r'] ?? 1.0);
         const max_z = Number(node.parameters['max_z'] ?? 1.0);
         const nr = Math.max(1, Math.round(max_r / cellSize));
         const nz = Math.max(1, Math.round(max_z / cellSize));
         return { dimension: '2D', n_cells: nr * nz, nr, nz, nx: 0, ny: 0, totalCells: nr * nz, cellSize, max_r, max_z, dim_x: max_r, dim_y: 0, dim_z: max_z, volume: 0 };
-    } else if (node.type === 'DomainMesh3D') {
+    } else if (isDomainMesh3DNode(node.type)) {
         const xmin = Number(node.parameters['xmin'] ?? 0.0);
         const xmax = Number(node.parameters['xmax'] ?? 1.0);
         const ymin = Number(node.parameters['ymin'] ?? 0.0);
@@ -6925,8 +7822,13 @@ export function resolveMeshCounts(node: Node, state?: SimulationState): MeshCoun
                 meshNode = state.nodes.find(n => n.id === node.parameters.mesh);
             }
             if (!meshNode) {
-                const targetMeshType = (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'MarineHarbourDomain') ? 'DomainMesh3D' : ((node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') ? 'DomainMesh2D' : 'DomainMesh');
-                meshNode = state.nodes.find(n => n.type === targetMeshType);
+                if (node.type === 'CFDSolver3D' || node.type === 'MPMDomain3D' || node.type === 'MarineHarbourDomain') {
+                    meshNode = state.nodes.find(n => isDomainMesh3DNode(n.type));
+                } else if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') {
+                    meshNode = state.nodes.find(n => isDomainMesh2DNode(n.type));
+                } else {
+                    meshNode = state.nodes.find(n => n.type === 'DomainMesh');
+                }
             }
         }
         if (meshNode) {
@@ -6968,13 +7870,13 @@ export function calculateCFDMemory(node: Node, state?: SimulationState, totalCel
             solverNode = state.nodes.find(n => n.id === otherId && ['CFDSolver3D', 'CFDSolver2D', 'CFDSolver', 'FSICoupler3D', 'FEMFSICoupler3D', 'FSICoupler2D'].includes(n.type));
         }
         if (!solverNode) {
-            const targetType = node.type === 'DomainMesh3D' ? 'CFDSolver3D' : (node.type === 'DomainMesh2D' ? 'CFDSolver2D' : 'CFDSolver');
+            const targetType = isDomainMesh3DNode(node.type) ? 'CFDSolver3D' : (isDomainMesh2DNode(node.type) ? 'CFDSolver2D' : 'CFDSolver');
             solverNode = state.nodes.find(n => n.type === targetType || (targetType === 'CFDSolver3D' && (n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D')));
         }
     }
 
-    const is3D = node.type === 'DomainMesh3D' || node.type === 'CFDSolver3D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D';
-    const is2D = node.type === 'DomainMesh2D' || node.type === 'CFDSolver2D' || node.type === 'FSICoupler2D';
+    const is3D = isDomainMesh3DNode(node.type) || node.type === 'CFDSolver3D' || node.type === 'FSICoupler3D' || node.type === 'FEMFSICoupler3D';
+    const is2D = isDomainMesh2DNode(node.type) || node.type === 'CFDSolver2D' || node.type === 'FSICoupler2D';
     const is1D = !is3D && !is2D;
 
     // Resolve freshest parameters from state or node
@@ -6983,15 +7885,15 @@ export function calculateCFDMemory(node: Node, state?: SimulationState, totalCel
     const params = { ...(freshNode.parameters || {}), ...(freshSolver.parameters || {}) };
     
     // Precision
-    const precision = String(params['precision'] ?? 'single').toLowerCase();
+    const precision = String(params['precision'] ?? (is1D ? 'double' : 'single')).toLowerCase();
     const isDouble = precision === 'double' || precision === 'float64';
-    const realBytes = (isDouble || is1D) ? 8 : 4;
+    const realBytes = isDouble ? 8 : 4;
     const precShort = isDouble ? 'Float64' : 'Float32';
     const precisionLabel = isDouble ? 'Double Precision (FP64)' : 'Single Precision (FP32)';
 
     // Device
-    const device = String(params['device'] ?? 'cuda').toLowerCase();
-    const isCpu = device === 'cpu';
+    const device = String(params['device'] ?? (is1D ? 'cpu' : 'cuda')).toLowerCase();
+    const isCpu = is1D || device === 'cpu';
     const deviceLabel = isCpu ? 'CPU RAM' : 'CUDA VRAM';
 
     // Multi-Material vs Single-Material (Ideal Gas)
@@ -7029,9 +7931,9 @@ export function calculateCFDMemory(node: Node, state?: SimulationState, totalCel
     let schemeName = String(params['space_time_scheme'] ?? '');
     if (!schemeName) {
         const so = Number(params['spatial_order'] ?? 2);
-        const to = Number(params['temporal_order'] ?? 4);
-        if (so === 3 && (to === 6 || to === 3)) schemeName = 'ADER-3 (3rd-Order Space/Time)';
-        else if (so === 2 && (to === 5 || to === 2)) schemeName = 'ADER-2 (2nd-Order Space/Time)';
+        const to = Number(params['temporal_order'] ?? 2);
+        if (so === 3 || to === 6 || to === 3) schemeName = 'ADER-3 (3rd-Order Space/Time)';
+        else if (to === 5) schemeName = 'ADER-2 (2nd-Order Space/Time)';
         else schemeName = 'MUSCL-Hancock (2nd-Order Space/Time)';
     }
 
@@ -7111,9 +8013,9 @@ export function calculateCFDMemory(node: Node, state?: SimulationState, totalCel
         const overheadBytes = 0.5;
         bytesPerCell = consBytes + primBytes + schemeBytes + geomBytes + fluxBytes + overheadBytes;
     } else {
-        // 1D Radial / Planar (Double Precision FP64)
+        // 1D Spherical Radial (FP64 or FP32)
         const numVars = isMultiMat ? 7 : 4;
-        bytesPerCell = (numVars * 2 + 5) * 8; // Cons + Prim + Predictor/Limiter
+        bytesPerCell = (numVars * 2 + 5) * realBytes; // Cons + Prim + Predictor/Limiter
     }
 
     const cells = totalCells ?? (resolveMeshCounts(node, state).totalCells);
@@ -7151,25 +8053,32 @@ export function calculateCFDMemory(node: Node, state?: SimulationState, totalCel
 export function getMeshDisplayHTML(node: Node, state?: SimulationState): string {
     const counts = resolveMeshCounts(node, state);
     const mem = calculateCFDMemory(node, state, counts.totalCells);
+    const isSparse = node.type === 'SparseDomainMesh3D' || node.type === 'SparseDomainMesh2D';
 
     if (counts.dimension === '1D') {
         const n_cells = counts.n_cells;
         return `<div style="background: rgba(56, 189, 248, 0.08); border: 1px solid #38bdf8; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
-               `<div style="color: #38bdf8; font-weight: bold; margin-bottom: 2px;">📐 1D Radial Mesh Specification</div>` +
-               `<div>Calculated Grid: <b style="color: #fff;">${n_cells.toLocaleString()} cells</b> (dx = ${(counts.cellSize * 1000).toFixed(2)} mm)</div>` +
+               `<div style="color: #38bdf8; font-weight: bold; margin-bottom: 2px;">📐 1D Spherical Radial Mesh Specification</div>` +
+               `<div>Calculated Grid: <b style="color: #fff;">${n_cells.toLocaleString()} cells</b> (dr = ${(counts.cellSize * 1000).toFixed(2)} mm)</div>` +
                `<div>Domain Radius: <b>${(counts.radius ?? 1.0).toFixed(3)} m</b></div>` +
-               `<div>Est. CFD State Memory: <b style="color: #4ec9b0;">${mem.formattedMemory}</b> <span style="font-size: 10px; color: #94a3b8;">(${mem.matShort} · FP64)</span></div>` +
+               `<div>Est. CFD State RAM (CPU): <b style="color: #4ec9b0;">${mem.formattedMemory}</b> <span style="font-size: 10px; color: #94a3b8;">(${mem.schemeShort} · ${mem.matShort} · ${mem.precShort} · ${mem.fluxShort})</span></div>` +
                `</div>`;
     } else if (counts.dimension === '2D') {
         const nr = counts.nr;
         const nz = counts.nz;
         const total = counts.totalCells;
-        return `<div style="background: rgba(56, 189, 248, 0.08); border: 1px solid #38bdf8; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
-               `<div style="color: #38bdf8; font-weight: bold; margin-bottom: 2px;">📐 2D Axisymmetric Grid Specification</div>` +
-               `<div>Grid Discretization: <b style="color: #fff;">${nr} x ${nz} cells</b> (Total: <b style="color: #38bdf8;">${total.toLocaleString()}</b>)</div>` +
+        const ntx = Math.floor((nr + 1 + 7) / 8);
+        const nty = Math.floor((nz + 1 + 7) / 8);
+        const dirKB = (ntx * nty * 4) / 1024;
+        const sparseLine = isSparse
+            ? `<div>Sparse 8×8 Tile Directory: <b style="color: #c084fc;">${ntx} × ${nty} tiles</b> (${dirKB.toFixed(1)} KB index · On-Demand MPM Pool)</div>`
+            : `<div>Est. CFD State ${mem.isCpu ? 'RAM (CPU)' : 'VRAM'}: <b style="color: #4ec9b0;">${mem.formattedMemory}</b> <span style="font-size: 10px; color: #94a3b8;">(${mem.schemeShort} · ${mem.matShort} · ${mem.precShort} · ${mem.fluxShort})</span></div>`;
+        return `<div style="background: rgba(56, 189, 248, 0.08); border: 1px solid ${isSparse ? '#c084fc' : '#38bdf8'}; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
+               `<div style="color: ${isSparse ? '#c084fc' : '#38bdf8'}; font-weight: bold; margin-bottom: 2px;">📐 2D ${isSparse ? 'Sparse Tile (8×8)' : 'Axisymmetric'} Grid Specification</div>` +
+               `<div>Virtual Index Grid: <b style="color: #fff;">${nr} x ${nz} cells</b> (Total: <b style="color: #38bdf8;">${total.toLocaleString()}</b>)</div>` +
                `<div>Cell Resolution: <b>dr = dz = ${(counts.cellSize * 1000).toFixed(2)} mm</b></div>` +
                `<div>Domain Bounds: <b>R = ${(counts.max_r ?? 1.0).toFixed(2)} m</b> × <b>Z = ${(counts.max_z ?? 1.0).toFixed(2)} m</b></div>` +
-               `<div>Est. CFD State ${mem.isCpu ? 'RAM (CPU)' : 'VRAM'}: <b style="color: #4ec9b0;">${mem.formattedMemory}</b> <span style="font-size: 10px; color: #94a3b8;">(${mem.schemeShort} · ${mem.matShort} · ${mem.precShort} · ${mem.fluxShort})</span></div>` +
+               sparseLine +
                `</div>`;
     } else if (counts.dimension === '3D') {
         const nx = counts.nx;
@@ -7179,11 +8088,17 @@ export function getMeshDisplayHTML(node: Node, state?: SimulationState): string 
         const vol = counts.volume;
 
         const isMPM = node.type === 'MPMDomain3D';
-        const title = isMPM ? '📐 MPM Background Grid Specification' : '📐 3D Cartesian Grid Specification';
-        const memLine = !isMPM ? `<div>Est. CFD State ${mem.isCpu ? 'RAM (CPU)' : 'VRAM'}: <b style="color: #4ec9b0;">${mem.formattedMemory}</b> <span style="font-size: 10px; color: #94a3b8;">(${mem.schemeShort} · ${mem.matShort} · ${mem.precShort} · ${mem.fluxShort})</span></div>` : '';
+        const title = isSparse ? '🟣 3D Sparse Tile (8×8×8) Grid Specification' : (isMPM ? '📐 MPM Background Grid Specification' : '📐 3D Cartesian Grid Specification');
+        const ntx = Math.floor((nx + 7) / 8);
+        const nty = Math.floor((ny + 7) / 8);
+        const ntz = Math.floor((nz + 7) / 8);
+        const dirMB = (ntx * nty * ntz * 4) / (1024 * 1024);
+        const memLine = isSparse
+            ? `<div>Sparse 8×8×8 Tile Directory: <b style="color: #c084fc;">${ntx}×${nty}×${ntz} tiles</b> (Dir: <b>${dirMB.toFixed(2)} MB</b> vs Dense MPM: <b>${((total * 104) / (1024 * 1024)).toFixed(1)} MB</b>)</div>`
+            : (!isMPM ? `<div>Est. CFD State ${mem.isCpu ? 'RAM (CPU)' : 'VRAM'}: <b style="color: #4ec9b0;">${mem.formattedMemory}</b> <span style="font-size: 10px; color: #94a3b8;">(${mem.schemeShort} · ${mem.matShort} · ${mem.precShort} · ${mem.fluxShort})</span></div>` : '');
 
-        return `<div style="background: rgba(56, 189, 248, 0.08); border: 1px solid #38bdf8; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
-               `<div style="color: #38bdf8; font-weight: bold; margin-bottom: 2px;">${title}</div>` +
+        return `<div style="background: rgba(56, 189, 248, 0.08); border: 1px solid ${isSparse ? '#c084fc' : '#38bdf8'}; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
+               `<div style="color: ${isSparse ? '#c084fc' : '#38bdf8'}; font-weight: bold; margin-bottom: 2px;">${title}</div>` +
                `<div>Grid Discretization: <b style="color: #fff;">${nx} x ${ny} x ${nz} cells</b> (Total: <b style="color: #38bdf8;">${total.toLocaleString()}</b>)</div>` +
                `<div>Cell Size: <b>dx = dy = dz = ${(counts.cellSize * 1000).toFixed(2)} mm</b></div>` +
                `<div>Domain Box: <b>${(counts.dim_x ?? 1).toFixed(2)}m × ${(counts.dim_y ?? 1).toFixed(2)}m × ${(counts.dim_z ?? 1).toFixed(2)}m</b> (Vol: ${vol.toFixed(4)} m³)</div>` +
@@ -7212,8 +8127,8 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
     let zmin = 0.0, zmax = 1.0;
     let cellSize = 0.01;
 
-    // 1. If node is directly a DomainMesh3D
-    if (node && node.type === 'DomainMesh3D') {
+    // 1. If node is directly a DomainMesh3D or SparseDomainMesh3D
+    if (node && isDomainMesh3DNode(node.type)) {
         xmin = Number(node.parameters?.xmin ?? node.parameters?.x_min ?? node.parameters?.origin_x ?? 0.0);
         xmax = Number(node.parameters?.xmax ?? node.parameters?.x_max ?? (xmin + Number(node.parameters?.length_x ?? 1.0)));
         ymin = Number(node.parameters?.ymin ?? node.parameters?.y_min ?? node.parameters?.origin_y ?? 0.0);
@@ -7232,7 +8147,7 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
         const meshConn = connections.find(c => c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in'));
         if (meshConn) {
             const meshNode = nodes.find(n => n.id === meshConn.fromNode);
-            if (meshNode && meshNode.type === 'DomainMesh3D') {
+            if (meshNode && isDomainMesh3DNode(meshNode.type)) {
                 return resolveDomain3DBounds(meshNode, state, model);
             }
         }
@@ -7251,14 +8166,14 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
         const incoming = connections.filter(c => c.toNode === node.id);
         for (const conn of incoming) {
             const upNode = nodes.find(n => n.id === conn.fromNode);
-            if (upNode && upNode.type === 'DomainMesh3D') {
+            if (upNode && isDomainMesh3DNode(upNode.type)) {
                 return resolveDomain3DBounds(upNode, state, model);
             }
             if (upNode && (upNode.type === 'CFDSolver3D' || upNode.type === 'MPMDomain3D' || upNode.type === 'FEMDomain3D' || upNode.type === 'MarineHarbourDomain')) {
                 const solverMeshConn = connections.find(c => c.toNode === upNode.id && (c.toPort === 'mesh' || c.toPort === 'in'));
                 if (solverMeshConn) {
                     const meshNode = nodes.find(n => n.id === solverMeshConn.fromNode);
-                    if (meshNode && meshNode.type === 'DomainMesh3D') {
+                    if (meshNode && isDomainMesh3DNode(meshNode.type)) {
                         return resolveDomain3DBounds(meshNode, state, model);
                     }
                 }
@@ -7269,8 +8184,8 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
         }
     }
 
-    // Search model/state for DomainMesh3D
-    const meshNode3D = nodes.find(n => n.type === 'DomainMesh3D');
+    // Search model/state for DomainMesh3D / SparseDomainMesh3D
+    const meshNode3D = nodes.find(n => isDomainMesh3DNode(n.type));
     if (meshNode3D) {
         return resolveDomain3DBounds(meshNode3D, state, model);
     }
@@ -7281,7 +8196,7 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
         const meshConn = connections.find(c => c.toNode === harbourDomain.id && (c.toPort === 'mesh' || c.toPort === 'in'));
         if (meshConn) {
             const meshNode = nodes.find(n => n.id === meshConn.fromNode);
-            if (meshNode && meshNode.type === 'DomainMesh3D') {
+            if (meshNode && isDomainMesh3DNode(meshNode.type)) {
                 return resolveDomain3DBounds(meshNode, state, model);
             }
         }
@@ -7308,8 +8223,8 @@ export function resolveDomain3DBounds(node?: Node | null, state?: SimulationStat
         return { xmin, xmax, ymin, ymax, zmin, zmax, dim_x: Math.max(1e-5, xmax - xmin), dim_y: Math.max(1e-5, ymax - ymin), dim_z: Math.max(1e-5, zmax - zmin), cellSize };
     }
 
-    // Search model/state for DomainMesh2D
-    const meshNode2D = nodes.find(n => n.type === 'DomainMesh2D');
+    // Search model/state for DomainMesh2D / SparseDomainMesh2D
+    const meshNode2D = nodes.find(n => isDomainMesh2DNode(n.type));
     if (meshNode2D) {
         const max_r = Number(meshNode2D.parameters?.max_r ?? 1.0);
         const max_z = Number(meshNode2D.parameters?.max_z ?? 1.0);
@@ -7992,7 +8907,6 @@ function resolveMPMGridAndDomain(node: Node, state?: SimulationState) {
 
     const is3D = node.type === 'MPMObject3D' || node.type === 'MPMDomain3D';
     const domainType = is3D ? 'MPMDomain3D' : 'MPMDomain2D';
-    const meshType = is3D ? 'DomainMesh3D' : 'DomainMesh2D';
 
     let domainNode: Node | undefined;
     if (node.type === domainType) {
@@ -8020,7 +8934,7 @@ function resolveMPMGridAndDomain(node: Node, state?: SimulationState) {
     }
 
     if (!meshNode) {
-        meshNode = state.nodes.find(n => n.type === meshType);
+        meshNode = state.nodes.find(n => is3D ? isDomainMesh3DNode(n.type) : isDomainMesh2DNode(n.type));
     }
     if (meshNode && meshNode.parameters['cell_size'] !== undefined) {
         cellSize = Number(meshNode.parameters['cell_size']);
@@ -8135,9 +9049,10 @@ export function resolveGeometryCounts(node: Node, _state?: SimulationState) {
         const primitives = Array.isArray(node.parameters['primitives']) ? node.parameters['primitives'] : [];
         const count = primitives.length;
         const spheres = primitives.filter((p: any) => p.type === 'sphere').length;
-        const boxes = primitives.filter((p: any) => p.type === 'box').length;
+        const boxes = primitives.filter((p: any) => p.type === 'box' || p.type === 'cuboid' || p.type === 'cube').length;
         const cylinders = primitives.filter((p: any) => p.type === 'cylinder').length;
-        return { count, spheres, boxes, cylinders, primitives };
+        const wedges = primitives.filter((p: any) => p.type === 'wedge').length;
+        return { count, spheres, boxes, cylinders, wedges, primitives };
     }
     return { count: 0 };
 }
@@ -8169,10 +9084,11 @@ export function getGeometryDisplayHTML(node: Node, state?: SimulationState): str
                `</div>`;
     } else if (node.type === 'PrimitiveGeometry3D') {
         const counts = resolveGeometryCounts(node, state);
+        const wedgesPart = (counts.wedges ?? 0) > 0 ? ` · <b>${counts.wedges} Wedges</b>` : '';
         return `<div style="background: rgba(234, 179, 8, 0.08); border: 1px solid #eab308; border-radius: 4px; padding: 6px 8px; font-size: 11px;">` +
                `<div style="color: #facc15; font-weight: bold; margin-bottom: 3px;">🔷 CSG Primitives Composite Spec</div>` +
                `<div>Total Primitives: <b style="color: #fff;">${counts.count} shapes</b></div>` +
-               `<div>Breakdown: <b>${counts.boxes ?? 0} Boxes</b> · <b>${counts.spheres ?? 0} Spheres</b> · <b>${counts.cylinders ?? 0} Cylinders</b></div>` +
+               `<div>Breakdown: <b>${counts.boxes ?? 0} Boxes</b> · <b>${counts.spheres ?? 0} Spheres</b> · <b>${counts.cylinders ?? 0} Cylinders</b>${wedgesPart}</div>` +
                `</div>`;
     }
     return '';
@@ -8184,7 +9100,7 @@ export function resolveCouplerCounts(node: Node, state?: SimulationState) {
     let solidParticles = 0;
 
     if (state) {
-        const meshNode = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh');
+        const meshNode = state.nodes.find(n => isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type) || n.type === 'DomainMesh');
         if (meshNode) {
             const meshCounts = resolveMeshCounts(meshNode, state);
             fluidCells = meshCounts.totalCells;
@@ -8283,7 +9199,7 @@ export function resolveTelemetryCounts(node: Node, _state?: SimulationState) {
         return { gaugeCount: gauges.length, activeFieldsCount: activeFields.length };
     } else if (node.type === 'VTKOutput') {
         const domains: string[] = [];
-        const is3D = _state ? _state.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'Telemetry3DViewport' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D') : true;
+        const is3D = _state ? _state.nodes.some(n => n.type === 'CFDSolver3D' || isDomainMesh3DNode(n.type) || n.type === 'Telemetry3DViewport' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D') : true;
         if (!is3D) {
             if (node.parameters['export_cfd_2d'] !== false) domains.push('2D CFD Grid');
             if (node.parameters['export_fem'] && _state?.nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D')) domains.push('FEM Elements');
@@ -8461,7 +9377,7 @@ export function getMaterialDisplayHTML(node: Node, state?: SimulationState): str
 }
 
 export function getEntityStatsHTML(node: Node, state?: SimulationState): string {
-    if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D') {
+    if (node.type === 'DomainMesh' || isDomainMesh2DNode(node.type) || isDomainMesh3DNode(node.type) || node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D') {
         return getMeshDisplayHTML(node, state);
     }
     if (node.type === 'MPMObject3D' || node.type === 'MPMObject2D' || node.type === 'MPMDomain3D' || node.type === 'MPMDomain2D') {

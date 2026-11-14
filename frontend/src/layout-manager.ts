@@ -1,5 +1,5 @@
 import { StateManager } from './state-manager.js';
-import { LayoutNode, SplitNode, PanelNode, SimulationState, PanelType } from './types.js';
+import { LayoutNode, SplitNode, PanelNode, SimulationState, PanelType, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { GraphRenderer } from './graph-renderer.js';
 import { PropertyEditor } from './property-editor.js';
 import { NodeViewer } from './node-viewer.js';
@@ -1462,19 +1462,23 @@ class MenuBarComponent {
         const activeWs = this.stateManager.getActiveWorkspace();
         const workspaces = this.stateManager.getAllWorkspaces();
         
+        const hintStyle = 'float: right; margin-left: 18px; font-size: 10px; opacity: 0.6; pointer-events: none; font-family: monospace;';
         let fileMenuHTML = `
             <div class="menu-item dropdown">
                 <span class="menu-title">File</span>
-                <div class="dropdown-content">
+                <div class="dropdown-content" style="min-width: 245px;">
                     <div id="menu-new-model">New Model</div>
                     <div id="menu-rename-model">Rename Active Model...</div>
                     <div class="menu-separator"></div>
-                    <div id="menu-load-json">Load Model (JSON)...</div>
-                    <div id="menu-save-json">Save Model (JSON)</div>
-                    <div id="menu-save-as-local">Save Model As...</div>
+                    <div id="menu-load-json">Open Model (JSON)...<span style="${hintStyle}">Ctrl+O</span></div>
+                    <div id="menu-import-model-ws">Import Model into Workspace...</div>
+                    <div id="menu-recent-folders">🕒 Open from Recent Folder...</div>
                     <div class="menu-separator"></div>
-                    <div id="menu-load-binary">Load Model (Binary)...</div>
-                    <div id="menu-save-binary">Save Model (Binary)</div>
+                    <div id="menu-save-json">Save Model (JSON)<span style="${hintStyle}">Ctrl+S</span></div>
+                    <div id="menu-save-as-local">Save Model As...<span style="${hintStyle}">Ctrl+Shift+S</span></div>
+                    <div class="menu-separator"></div>
+                    <div id="menu-load-binary">Open Model (Binary .blst)...</div>
+                    <div id="menu-save-binary">Save Model (Binary .blst)...</div>
                     <div class="menu-separator"></div>
                     <div id="menu-copy-model">Copy Active Model</div>
                     <div id="menu-paste-model">Paste Model</div>
@@ -1485,18 +1489,19 @@ class MenuBarComponent {
         let wsMenuHTML = `
             <div class="menu-item dropdown">
                 <span class="menu-title">Workspace</span>
-                <div class="dropdown-content">
+                <div class="dropdown-content" style="min-width: 230px;">
                     <div id="menu-new-workspace">New Workspace</div>
                     <div id="menu-dup-layout">Duplicate Layout</div>
                     <div class="menu-separator"></div>
-                    <div id="menu-add-model">Add Model to Workspace...</div>
+                    <div id="menu-add-model">Add Existing Model...</div>
                     <div id="menu-remove-model">Remove Model...</div>
                     <div class="menu-separator"></div>
-                    <div id="menu-save-workspace">Save All</div>
-                    <div id="menu-export-workspace">Export Workspace (JSON)...</div>
-                    <div id="menu-import-workspace">Import Workspace (JSON)...</div>
+                    <div id="menu-save-workspace">Save Snapshot (Browser Storage)</div>
                     <div id="menu-save-workspace-host">Save Workspace to Host...</div>
-                    <div id="menu-load-workspace-host">Load Workspace from Host...</div>
+                    <div id="menu-load-workspace-host">Open Workspace from Host...</div>
+                    <div class="menu-separator"></div>
+                    <div id="menu-export-workspace">Export Project Archive (Local JSON)...</div>
+                    <div id="menu-import-workspace">Import Project Archive (Local JSON)...</div>
                     <div class="menu-separator"></div>
                     <div id="menu-reset-all" style="color:#ef4444">Reset All (Danger)</div>
                 </div>
@@ -1650,6 +1655,9 @@ const NODE_ICONS: Record<string, string> = {
     'TelemetryText': '📝',
     'TelemetryGraph': '📈',
     'DomainMesh2D': '🌐',
+    'SparseDomainMesh2D': '⚡',
+    'DomainMesh3D': '🌐',
+    'SparseDomainMesh3D': '⚡',
     'DetonatorLocation': '🎯',
     'TriggerLocation': '🎯',
     'DetonatorLocation3D': '🎯',
@@ -2240,9 +2248,29 @@ class ExecutionManagerComponent {
         const ws = this.stateManager.getActiveWorkspace();
         if (!ws) return null;
 
-        const wsConns = ws.connections as Array<{fromNode:string,fromPort:string,toNode:string,toPort:string}>;
         const allModels = this.stateManager.getAllModels();
+        const targetModel = allModels.find(m => m.id === modelId);
+        if (!targetModel) return null;
 
+        const isRemapType = (t: string) =>
+            t === 'RemapNode' || t === 'Remap1DTo2DNode' || t === 'Remap1DTo3DNode' || t === 'Remap2DTo3DNode';
+
+        const remapNode = targetModel.nodes.find(n => isRemapType(n.type));
+        if (remapNode) {
+            const explicitSourceId = String(remapNode.parameters?.source_model_id ?? '').trim();
+            if (explicitSourceId && explicitSourceId !== modelId) {
+                const srcModel = allModels.find(m => m.id === explicitSourceId);
+                if (srcModel?.nodes.some(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D')) {
+                    return {
+                        model1dId: explicitSourceId,
+                        model2dId: modelId,
+                        processId: modelId,
+                    };
+                }
+            }
+        }
+
+        const wsConns = ws.connections as Array<{fromNode:string,fromPort:string,toNode:string,toPort:string}>;
         const nodeToModel = new Map<string, string>();
         for (const mId of ws.modelIds) {
             const m = allModels.find(x => x.id === mId);
@@ -2256,12 +2284,11 @@ class ExecutionManagerComponent {
 
             const toModel  = allModels.find(m => m.id === toModelId);
             const toNode   = toModel?.nodes.find(n => n.id === conn.toNode);
-            if (toNode?.type !== 'RemapNode') continue;
+            if (!toNode || !isRemapType(toNode.type)) continue;
 
             const fromModel = allModels.find(m => m.id === fromModelId);
-            if (!fromModel?.nodes.some(n => n.type === 'CFDSolver')) continue;
+            if (!fromModel?.nodes.some(n => n.type === 'CFDSolver' || n.type === 'CFDSolver2D')) continue;
 
-            // ONLY match if modelId is the 2D target model!
             if (modelId === toModelId) {
                 return {
                     model1dId: fromModelId,
@@ -2461,6 +2488,18 @@ class ExecutionManagerComponent {
         reorderGroup.appendChild(createReorderBtn('⤋', 'Move to Bottom', 'bottom'));
         headerRow.appendChild(reorderGroup);
 
+        const getStageDispatchExtra = (forceRestart: boolean): Record<string, any> => {
+            const hasRemap = Boolean(model.nodes?.some((n: any) =>
+                (n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode' || n.type === 'Remap3DTo3DNode' || n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode') &&
+                ((n.parameters?.source_model_id && String(n.parameters.source_model_id).trim() !== '' && String(n.parameters.source_model_id).trim() !== model.id) ||
+                    Boolean(this.stateManager.getActiveWorkspace()?.connections?.some((c: any) => c.toNode === n.id)))
+            ));
+            return {
+                forceRestart,
+                ...(hasRemap ? { skipUpstreamAutoRun: true, allowAutoRun: false } : {})
+            };
+        };
+
         // Quick mini action button on header (visible when collapsed)
         const quickBtn = document.createElement('button');
         quickBtn.className = 'execution-target-quick-btn';
@@ -2470,10 +2509,12 @@ class ExecutionManagerComponent {
             e.stopPropagation();
             this.stateManager.setActiveModel(model.id);
             const status = this.stateManager.getModelStatus(model.id);
-            if (status === 'RUNNING') {
+            const upstreamBusy = Boolean((window as any).isUpstreamAutoRunningFor?.(model.id));
+            if (status === 'RUNNING' || upstreamBusy) {
                 document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'PAUSE' } }));
             } else {
-                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'EXEC_ALL' } }));
+                const atEnd = this.stateManager.isModelAtEndTime(model.id);
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'EXEC_ALL', ...getStageDispatchExtra(atEnd) } }));
             }
         };
         headerRow.appendChild(quickBtn);
@@ -2522,12 +2563,13 @@ class ExecutionManagerComponent {
         progressContainer.appendChild(progressText);
         cardBody.appendChild(progressContainer);
 
-        // State Actions Row
+        // State Actions Row (3 spacious controls: Init/Re-Init, Run/Pause/Cont., Term)
         const actionsRow = document.createElement('div');
         actionsRow.className = 'execution-controls-row';
 
         const createMiniBtn = (text: string, title: string, classes: string, onClick: () => void) => {
             const btn = document.createElement('button');
+            btn.type = 'button';
             btn.className = `execution-btn execution-btn-state ${classes}`;
             btn.textContent = text;
             btn.title = title;
@@ -2538,26 +2580,28 @@ class ExecutionManagerComponent {
             return btn;
         };
 
-        const initBtn = createMiniBtn('Init', 'Initialize Solver Process', 'execution-btn-init', () => {
+        const initBtn = createMiniBtn('Init', 'Initialize / Re-Initialize Stage at t₀', 'execution-btn-init', () => {
             this.stateManager.setActiveModel(model.id);
-            document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'INIT' } }));
+            document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'INIT', ...getStageDispatchExtra(true) } }));
         });
-        const playBtn = createMiniBtn('Run', 'Run to Completion', 'execution-btn-run', () => {
+        const playBtn = createMiniBtn('▶ Run', 'Run / Pause / Continue Stage', 'execution-btn-run', () => {
             this.stateManager.setActiveModel(model.id);
-            document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'EXEC_ALL' } }));
+            const curStatus = this.stateManager.getModelStatus(model.id);
+            const upstreamBusy = Boolean((window as any).isUpstreamAutoRunningFor?.(model.id));
+            if (curStatus === 'RUNNING' || upstreamBusy) {
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'PAUSE' } }));
+            } else {
+                const atEnd = this.stateManager.isModelAtEndTime(model.id);
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'EXEC_ALL', ...getStageDispatchExtra(atEnd) } }));
+            }
         });
-        const pauseBtn = createMiniBtn('Pause', 'Pause execution', 'execution-btn-pause', () => {
-            this.stateManager.setActiveModel(model.id);
-            document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'PAUSE' } }));
-        });
-        const termBtn = createMiniBtn('Term', 'Terminate Solver & Clear Memory', 'execution-btn-term', () => {
+        const termBtn = createMiniBtn('⏹ Term', 'Terminate Solver Process', 'execution-btn-term', () => {
             this.stateManager.setActiveModel(model.id);
             document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'TERMINATE' } }));
         });
 
         actionsRow.appendChild(initBtn);
         actionsRow.appendChild(playBtn);
-        actionsRow.appendChild(pauseBtn);
         actionsRow.appendChild(termBtn);
         cardBody.appendChild(actionsRow);
 
@@ -2581,7 +2625,7 @@ class ExecutionManagerComponent {
             btn.onclick = (e) => {
                 e.stopPropagation();
                 this.stateManager.setActiveModel(model.id);
-                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'STEP', steps } }));
+                document.dispatchEvent(new CustomEvent('model-action', { detail: { modelId: model.id, command: 'STEP', steps, ...getStageDispatchExtra(false) } }));
             };
             stepGrid.appendChild(btn);
         });
@@ -2658,11 +2702,18 @@ class ExecutionManagerComponent {
             cardBody.style.display = isCollapsed ? 'none' : 'flex';
         }
 
+        const isUpstreamRunning = Boolean((window as any).isUpstreamAutoRunningFor?.(model.id));
+
         // Update badge
         const badge = card.querySelector('.status-badge') as HTMLElement;
         if (badge) {
-            badge.className = `status-badge badge-${status.toLowerCase()}`;
-            badge.textContent = status;
+            if (isUpstreamRunning && (status === 'UNINITIALIZED' || status === 'TERMINATED')) {
+                badge.className = 'status-badge badge-running';
+                badge.textContent = 'UPSTREAM…';
+            } else {
+                badge.className = `status-badge badge-${status.toLowerCase()}`;
+                badge.textContent = status;
+            }
         }
 
         // Compact progress text for collapsed view
@@ -2672,6 +2723,8 @@ class ExecutionManagerComponent {
                 compactProgress.style.display = 'inline';
                 if (status === 'RUNNING') {
                     compactProgress.textContent = `${progress}% | ${simTime.toExponential(2)}s`;
+                } else if (isUpstreamRunning) {
+                    compactProgress.textContent = 'Upstream…';
                 } else if (simTime > 0) {
                     compactProgress.textContent = `${simTime.toExponential(2)}s`;
                 } else {
@@ -2684,19 +2737,35 @@ class ExecutionManagerComponent {
 
         // Quick mini action button on header (visible when collapsed & connected)
         const quickBtn = card.querySelector('.execution-target-quick-btn') as HTMLButtonElement;
+        const isAtEnd = this.stateManager.isModelAtEndTime(model.id);
         if (quickBtn) {
             if (isCollapsed && isConnected) {
                 quickBtn.style.display = 'inline-block';
-                if (status === 'RUNNING') {
+                if (status === 'RUNNING' || isUpstreamRunning) {
                     quickBtn.textContent = '⏸';
                     quickBtn.title = 'Pause Execution';
                     quickBtn.style.color = '#fb923c';
                     quickBtn.disabled = false;
-                } else if (status === 'INITIALIZED' || status === 'PAUSED') {
+                } else if (status === 'PAUSED' && isAtEnd) {
+                    quickBtn.textContent = '↻';
+                    quickBtn.title = 'Reached end time — click to Re-Run from t₀ (or increase End Time to continue)';
+                    quickBtn.style.color = '#00f0ff';
+                    quickBtn.disabled = false;
+                } else if (status === 'PAUSED') {
+                    quickBtn.textContent = '▶';
+                    quickBtn.title = 'Continue Execution';
+                    quickBtn.style.color = '#4ade80';
+                    quickBtn.disabled = false;
+                } else if (status === 'INITIALIZED') {
                     quickBtn.textContent = '▶';
                     quickBtn.title = 'Run Execution';
                     quickBtn.style.color = '#4ade80';
                     quickBtn.disabled = false;
+                } else if (status === 'INCOMPLETE') {
+                    quickBtn.textContent = '▶';
+                    quickBtn.title = 'Model Incomplete';
+                    quickBtn.style.color = '#64748b';
+                    quickBtn.disabled = true;
                 } else {
                     quickBtn.textContent = '▶';
                     quickBtn.title = 'Initialize / Run Execution';
@@ -2711,7 +2780,7 @@ class ExecutionManagerComponent {
         // Update progress bar fill
         const progressFill = card.querySelector('.progress-bar-fill') as HTMLElement;
         if (progressFill) {
-            const isIndeterminate = has2D && status === 'RUNNING' && progress === 0;
+            const isIndeterminate = (has2D && status === 'RUNNING' && progress === 0) || isUpstreamRunning;
             if (isIndeterminate) {
                 progressFill.classList.add('indeterminate');
                 progressFill.style.width = '';
@@ -2731,6 +2800,8 @@ class ExecutionManagerComponent {
                 } else {
                     progressText.textContent = `${progress}% | ${simTime.toExponential(3)}s`;
                 }
+            } else if (isUpstreamRunning) {
+                progressText.textContent = 'Running Upstream…';
             } else if (status === 'INITIALIZED' || status === 'PAUSED' || status === 'TERMINATED') {
                 progressText.textContent = `${simTime.toExponential(3)}s`;
             } else {
@@ -2741,31 +2812,66 @@ class ExecutionManagerComponent {
         // Update buttons disabled state
         const initBtn = card.querySelector('.execution-btn-init') as HTMLButtonElement;
         const playBtn = card.querySelector('.execution-btn-run') as HTMLButtonElement;
-        const pauseBtn = card.querySelector('.execution-btn-pause') as HTMLButtonElement;
         const termBtn = card.querySelector('.execution-btn-term') as HTMLButtonElement;
         const stepButtons = Array.from(card.querySelectorAll('.execution-btn-step')) as HTMLButtonElement[];
         const stepRow = card.querySelector('.execution-step-row') as HTMLElement;
 
+        const isSimActive = status === 'INITIALIZED' || status === 'PAUSED' || status === 'RUNNING';
+        const isBusy = status === 'RUNNING' || isUpstreamRunning;
+
         if (!isConnected) {
             if (initBtn) initBtn.disabled = true;
-            if (playBtn) playBtn.disabled = true;
-            if (pauseBtn) pauseBtn.disabled = true;
+            if (playBtn) {
+                playBtn.classList.remove('execution-btn-pause-state', 'execution-btn-continue-state');
+                playBtn.disabled = true;
+            }
             if (termBtn) termBtn.disabled = true;
             stepButtons.forEach(b => b.disabled = true);
         } else {
             // Keep all buttons visible side-by-side in fixed positions
             if (playBtn) playBtn.style.display = 'inline-flex';
-            if (pauseBtn) pauseBtn.style.display = 'inline-flex';
             if (stepRow) stepRow.style.display = 'flex';
 
-            // Init, Run, Step, and Term are always active when connected
-            if (initBtn) initBtn.disabled = false;
-            if (playBtn) playBtn.disabled = false;
-            if (termBtn) termBtn.disabled = false;
-            stepButtons.forEach(b => b.disabled = false);
-
-            // Pause is active when currently running
-            if (pauseBtn) pauseBtn.disabled = (status !== 'RUNNING');
+            if (initBtn) {
+                initBtn.textContent = isSimActive ? 'Re-Init' : 'Init';
+                initBtn.title = isSimActive ? 'Re-initialize / Restart Stage at t₀' : 'Initialize Stage';
+                initBtn.disabled = status === 'INCOMPLETE' || isUpstreamRunning;
+            }
+            if (playBtn) {
+                if (isBusy) {
+                    playBtn.textContent = '⏸ Pause';
+                    playBtn.classList.toggle('execution-btn-pause-state', true);
+                    playBtn.classList.toggle('execution-btn-continue-state', false);
+                    playBtn.disabled = false;
+                    playBtn.title = isUpstreamRunning ? 'Pause Active Upstream Stage' : 'Pause Stage';
+                } else if (status === 'PAUSED' && isAtEnd) {
+                    playBtn.textContent = '↻ Re-Run';
+                    playBtn.classList.toggle('execution-btn-pause-state', false);
+                    playBtn.classList.toggle('execution-btn-continue-state', false);
+                    playBtn.disabled = false;
+                    playBtn.title = 'Reached end time — click to re-initialize & run from t₀ (or increase End Time to continue)';
+                } else if (status === 'PAUSED') {
+                    playBtn.textContent = '▶ Cont.';
+                    playBtn.classList.toggle('execution-btn-pause-state', false);
+                    playBtn.classList.toggle('execution-btn-continue-state', true);
+                    playBtn.disabled = false;
+                    playBtn.title = 'Continue Paused Stage';
+                } else if (status === 'INITIALIZED') {
+                    playBtn.textContent = '▶ Run';
+                    playBtn.classList.toggle('execution-btn-pause-state', false);
+                    playBtn.classList.toggle('execution-btn-continue-state', false);
+                    playBtn.disabled = false;
+                    playBtn.title = 'Run Initialized Stage';
+                } else {
+                    playBtn.textContent = '▶ Run';
+                    playBtn.classList.toggle('execution-btn-pause-state', false);
+                    playBtn.classList.toggle('execution-btn-continue-state', false);
+                    playBtn.disabled = status === 'INCOMPLETE';
+                    playBtn.title = status === 'INCOMPLETE' ? 'Model Incomplete' : 'Initialize & Run Stage';
+                }
+            }
+            if (termBtn) termBtn.disabled = !(isSimActive || isUpstreamRunning);
+            stepButtons.forEach(b => b.disabled = isBusy || status === 'INCOMPLETE');
         }
     }
 
@@ -3442,7 +3548,7 @@ class CompareModelsComponent {
                             const offset = MIN_HEADER + clampedChannel * n_cells * 4;
                             const yPoints = new Float32Array(telemetryBuffer, offset, n_cells);
                             
-                            const meshNode = model.nodes.find(n => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D');
+                            const meshNode = model.nodes.find(n => n.type === 'DomainMesh' || isDomainMesh2DNode(n.type) || isDomainMesh3DNode(n.type));
                             const cellSize = Number(meshNode?.parameters?.cell_size ?? 0.001);
                             
                             for (let i = 0; i < n_cells; i++) {
@@ -3562,7 +3668,7 @@ class CompareModelsComponent {
                             const offset = MIN_HEADER + clampedChannel * n_cells * 4;
                             const yPoints = new Float32Array(telemetryBuffer, offset, n_cells);
                             
-                            const meshNode = model.nodes.find(n => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D');
+                            const meshNode = model.nodes.find(n => n.type === 'DomainMesh' || isDomainMesh2DNode(n.type) || isDomainMesh3DNode(n.type));
                             const cellSize = Number(meshNode?.parameters?.cell_size ?? 0.001);
                             
                             const xPoints = new Float32Array(n_cells);

@@ -117,6 +117,87 @@ HD_JWL_FUNC T computeJWLSoundSpeed(
 }
 
 // ============================================================================
+// Unreacted-Explosive JWL Equation of State (temperature form, strict SI)
+// ============================================================================
+//
+// Published form (Lee-Tarver / Tarver et al.):
+//     p = A exp(-R1 V) + B exp(-R2 V) + omega * Cv * T / V          [V = v / v0]
+// with A, B in Pa and Cv in Pa/K (energy per INITIAL volume per kelvin).
+//
+// The solver carries e_th (J/kg) measured from the initial state (V = 1, T = T0).
+// With the cold-curve energy  Ec(V) = (A/R1) exp(-R1 V) + (B/R2) exp(-R2 V)  [J/m^3],
+//     Cv*T = rho0 * e_th + Cv*T0 + Ec(1) - Ec(V)
+// so that p(V = 1, e_th = 0) = A e^-R1 + B e^-R2 + omega Cv T0 = 0 when B is the
+// calibrated value for T0. Evaluated in double because Ec(1) - Ec(V) is a
+// difference of large, nearly equal terms.
+//
+// Realizability floor: thermal energy Cv*T is clamped at 0 (T >= 0).
+
+template <typename T>
+HD_JWL_FUNC double jwlReactantThermalEnergyVol(
+    T v_rel, T e_th, T A, T B, T R1, T R2, T Cv_vol, T T0, T rho0
+) {
+    const double V = (v_rel < static_cast<T>(0.05)) ? 0.05 : static_cast<double>(v_rel);
+    const double Ec1 = static_cast<double>(A) / R1 * std::exp(-static_cast<double>(R1))
+                     + static_cast<double>(B) / R2 * std::exp(-static_cast<double>(R2));
+    const double EcV = static_cast<double>(A) / R1 * std::exp(-static_cast<double>(R1) * V)
+                     + static_cast<double>(B) / R2 * std::exp(-static_cast<double>(R2) * V);
+    double CvT = static_cast<double>(rho0) * e_th + static_cast<double>(Cv_vol) * T0 + Ec1 - EcV;
+    return (CvT > 0.0) ? CvT : 0.0;
+}
+
+template <typename T>
+HD_JWL_FUNC T computeJWLReactantPressure(
+    T v_rel,            // Relative volume V / V0
+    T e_th,             // Specific energy from the initial state (J/kg)
+    T A, T B,           // Pa
+    T R1, T R2,         // dimensionless
+    T omega,            // dimensionless Gruneisen
+    T Cv_vol,           // Pa/K (per initial volume)
+    T T0,               // K reference temperature at which p(V=1)=0
+    T rho0              // kg/m^3 initial density
+) {
+    const double V = (v_rel < static_cast<T>(0.05)) ? 0.05 : static_cast<double>(v_rel);
+    const double CvT = jwlReactantThermalEnergyVol<T>(static_cast<T>(V), e_th, A, B, R1, R2, Cv_vol, T0, rho0);
+    const double p = static_cast<double>(A) * std::exp(-static_cast<double>(R1) * V)
+                   + static_cast<double>(B) * std::exp(-static_cast<double>(R2) * V)
+                   + static_cast<double>(omega) * CvT / V;
+    return static_cast<T>(p);
+}
+
+// Temperature (K) of the unreacted phase
+template <typename T>
+HD_JWL_FUNC T computeJWLReactantTemperature(
+    T v_rel, T e_th, T A, T B, T R1, T R2, T Cv_vol, T T0, T rho0
+) {
+    const double CvT = jwlReactantThermalEnergyVol<T>(v_rel, e_th, A, B, R1, R2, Cv_vol, T0, rho0);
+    return static_cast<T>(CvT / static_cast<double>(Cv_vol > static_cast<T>(1.0) ? Cv_vol : static_cast<T>(1.0)));
+}
+
+// Adiabatic sound speed from the thermodynamic identity
+//     c^2 = (dp/drho)_e + (p / rho^2) (dp/de)_rho
+// with analytic partials of the temperature-form EOS. With rho = rho0 / V:
+//     (dp/drho)_e = -(V^2 / rho0) (dp/dV)_e
+//     d(CvT)/dV|_e = A e^{-R1 V} + B e^{-R2 V}
+template <typename T>
+HD_JWL_FUNC T computeJWLReactantSoundSpeed(
+    T v_rel, T e_th, T A, T B, T R1, T R2, T omega, T Cv_vol, T T0, T rho0
+) {
+    const double V = (v_rel < static_cast<T>(0.05)) ? 0.05 : static_cast<double>(v_rel);
+    const double rho = static_cast<double>(rho0) / V;
+    const double p = computeJWLReactantPressure<T>(static_cast<T>(V), e_th, A, B, R1, R2, omega, Cv_vol, T0, rho0);
+    const double eA = static_cast<double>(A) * std::exp(-static_cast<double>(R1) * V);
+    const double eB = static_cast<double>(B) * std::exp(-static_cast<double>(R2) * V);
+    const double CvT = jwlReactantThermalEnergyVol<T>(static_cast<T>(V), e_th, A, B, R1, R2, Cv_vol, T0, rho0);
+    const double dp_dV = -static_cast<double>(R1) * eA - static_cast<double>(R2) * eB
+                       + static_cast<double>(omega) * ((eA + eB) / V - CvT / (V * V));
+    const double dp_de = static_cast<double>(omega) * static_cast<double>(rho0) / V;
+    double c2 = -(V * V / static_cast<double>(rho0)) * dp_dV + (p / (rho * rho)) * dp_de;
+    if (!(c2 > 10000.0)) c2 = 10000.0; // 100 m/s floor, same as the product-gas floor
+    return static_cast<T>(std::sqrt(c2));
+}
+
+// ============================================================================
 // Programmed Wavefront Burn Arrival & Reaction Progress
 // ============================================================================
 

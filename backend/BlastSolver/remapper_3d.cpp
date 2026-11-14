@@ -22,14 +22,19 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
     const auto& mat = solver_3d.getMaterialParameters();
 
     double r_max_1d = r_1d.back();
+    double cut_r = (R_remap > 0.0) ? std::min(R_remap, r_max_1d) : r_max_1d;
     MultiMaterialState amb_state = states_1d.back();
     if (solver_3d.getAmbientP() > 0.0) amb_state.p = solver_3d.getAmbientP();
     if (solver_3d.getAmbientRho() > 0.0) amb_state.rho = solver_3d.getAmbientRho();
     amb_state.u = 0.0;
+    amb_state.alpha1 = 0.0;
+    amb_state.alpha2 = 0.0;
+    amb_state.arho1 = 0.0;
+    amb_state.arho2 = 0.0;
 
     auto interp_1d = [&](double r) -> MultiMaterialState {
+        if (r > cut_r || r >= r_1d.back()) return amb_state;
         if (r <= r_1d.front()) return states_1d.front();
-        if (r >= r_1d.back()) return amb_state;
 
         auto it = std::lower_bound(r_1d.begin(), r_1d.end(), r);
         size_t idx = std::distance(r_1d.begin(), it);
@@ -37,7 +42,7 @@ void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<MultiMate
 
         double r0 = r_1d[idx-1];
         double r1 = r_1d[idx];
-        double t = (r - r0) / (r1 - r0);
+        double t = (r1 > r0) ? ((r - r0) / (r1 - r0)) : 0.0;
 
         const auto& s0 = states_1d[idx-1];
         const auto& s1 = states_1d[idx];
@@ -390,6 +395,192 @@ void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<Stat
                     double a1_avg = sum_alpha1 * inv27;
                     double a2_avg = sum_alpha2 * inv27;
                     // Ambient is alpha1=0, alpha2=0
+                    double ar1_avg = sum_arho1 * inv27;
+                    double ar2_avg = sum_arho2 * inv27;
+
+                    CellState3D<true> s3d;
+                    s3d.rho = rho_avg;
+                    s3d.ux = ux_avg;
+                    s3d.uy = uy_avg;
+                    s3d.uz = uz_avg;
+                    s3d.p = p_avg;
+                    s3d.E = MultiMat::getMixtureEnergy(p_avg, rho_avg, a1_avg, a2_avg, ar1_avg, ar2_avg, gamma, mat.products, mat.unreacted) + ke_avg;
+                    s3d.alpha1 = a1_avg;
+                    s3d.alpha2 = a2_avg;
+                    s3d.arho1 = ar1_avg;
+                    s3d.arho2 = ar2_avg;
+                    solver_3d.setCellStateMulti(i, j, k, s3d);
+                }
+            }
+        }
+    }
+    solver_3d.commitStates();
+}
+
+/**
+ * remap_3d_to_3d
+ * Projects 3D Cartesian simulation results onto another 3D Cartesian grid.
+ * Supports origin translation (x_expl - src_x_expl, ...) and optional radial cutoff R_remap.
+ * Uses 27-point subgrid CONSERVATIVE volume integration per cell.
+ */
+void remap_3d_to_3d(const CFDBulkSnapshot3D& src, CFDSolver3D& solver_3d,
+                    double x_expl, double y_expl, double z_expl, double R_remap,
+                    double src_x_expl, double src_y_expl, double src_z_expl) {
+    if (src.nx <= 0 || src.ny <= 0 || src.nz <= 0 || src.cellSize <= 0.0 || src.p.empty() || src.rho.empty()) {
+        return;
+    }
+
+    int nx = solver_3d.getNx();
+    int ny = solver_3d.getNy();
+    int nz = solver_3d.getNz();
+    double dx = solver_3d.getCellSize();
+    double gamma = solver_3d.getGamma();
+    bool is_ideal = solver_3d.isIdealGas();
+    const auto& mat = solver_3d.getMaterialParameters();
+
+    double amb_p = (solver_3d.getAmbientP() > 0.0) ? solver_3d.getAmbientP() : 101325.0;
+    double amb_rho = (solver_3d.getAmbientRho() > 0.0) ? solver_3d.getAmbientRho() : 1.225;
+
+    double off_x = x_expl - src_x_expl;
+    double off_y = y_expl - src_y_expl;
+    double off_z = z_expl - src_z_expl;
+
+    double src_xmax = src.xmin + src.nx * src.cellSize;
+    double src_ymax = src.ymin + src.ny * src.cellSize;
+    double src_zmax = src.zmin + src.nz * src.cellSize;
+    double inv_src_dx = 1.0 / src.cellSize;
+
+    auto sample_src = [&](double sx, double sy, double sz,
+                          double& out_rho, double& out_ux, double& out_uy, double& out_uz,
+                          double& out_p, double& out_a1, double& out_a2) {
+        if (sx < src.xmin || sx > src_xmax || sy < src.ymin || sy > src_ymax || sz < src.zmin || sz > src_zmax) {
+            out_rho = amb_rho; out_ux = 0.0; out_uy = 0.0; out_uz = 0.0;
+            out_p = amb_p; out_a1 = 0.0; out_a2 = 0.0;
+            return;
+        }
+        double fx = (sx - src.xmin) * inv_src_dx - 0.5;
+        double fy = (sy - src.ymin) * inv_src_dx - 0.5;
+        double fz = (sz - src.zmin) * inv_src_dx - 0.5;
+
+        int i0 = std::max(0, std::min(src.nx - 1, (int)std::floor(fx)));
+        int j0 = std::max(0, std::min(src.ny - 1, (int)std::floor(fy)));
+        int k0 = std::max(0, std::min(src.nz - 1, (int)std::floor(fz)));
+        int i1 = std::min(src.nx - 1, i0 + 1);
+        int j1 = std::min(src.ny - 1, j0 + 1);
+        int k1 = std::min(src.nz - 1, k0 + 1);
+
+        double tx = std::max(0.0, std::min(1.0, fx - i0));
+        double ty = std::max(0.0, std::min(1.0, fy - j0));
+        double tz = std::max(0.0, std::min(1.0, fz - k0));
+
+        int idx000 = src.index(i0, j0, k0);
+        int idx100 = src.index(i1, j0, k0);
+        int idx010 = src.index(i0, j1, k0);
+        int idx110 = src.index(i1, j1, k0);
+        int idx001 = src.index(i0, j0, k1);
+        int idx101 = src.index(i1, j0, k1);
+        int idx011 = src.index(i0, j1, k1);
+        int idx111 = src.index(i1, j1, k1);
+
+        auto trilerp = [&](const std::vector<float>& arr, size_t stride, size_t comp, double def_val) -> double {
+            if (arr.empty()) return def_val;
+            double v000 = arr[idx000 * stride + comp];
+            double v100 = arr[idx100 * stride + comp];
+            double v010 = arr[idx010 * stride + comp];
+            double v110 = arr[idx110 * stride + comp];
+            double v001 = arr[idx001 * stride + comp];
+            double v101 = arr[idx101 * stride + comp];
+            double v011 = arr[idx011 * stride + comp];
+            double v111 = arr[idx111 * stride + comp];
+            double c00 = v000 * (1.0 - tx) + v100 * tx;
+            double c10 = v010 * (1.0 - tx) + v110 * tx;
+            double c01 = v001 * (1.0 - tx) + v101 * tx;
+            double c11 = v011 * (1.0 - tx) + v111 * tx;
+            double c0 = c00 * (1.0 - ty) + c10 * ty;
+            double c1 = c01 * (1.0 - ty) + c11 * ty;
+            return c0 * (1.0 - tz) + c1 * tz;
+        };
+
+        out_rho = std::max(1e-7, trilerp(src.rho, 1, 0, amb_rho));
+        out_p   = std::max(1e-6, trilerp(src.p, 1, 0, amb_p));
+        if (src.has_vel && !src.vel.empty()) {
+            out_ux = trilerp(src.vel, 3, 0, 0.0);
+            out_uy = trilerp(src.vel, 3, 1, 0.0);
+            out_uz = trilerp(src.vel, 3, 2, 0.0);
+        } else {
+            out_ux = 0.0; out_uy = 0.0; out_uz = 0.0;
+        }
+        if (src.has_species && !src.alpha1.empty()) {
+            out_a1 = std::max(0.0, std::min(1.0, trilerp(src.alpha1, 1, 0, 0.0)));
+            out_a2 = std::max(0.0, std::min(1.0 - out_a1, trilerp(src.alpha2, 1, 0, 0.0)));
+        } else {
+            out_a1 = 0.0; out_a2 = 0.0;
+        }
+    };
+
+    double xmin = solver_3d.getXMin();
+    double ymin = solver_3d.getYMin();
+    double zmin = solver_3d.getZMin();
+
+    #pragma omp parallel for collapse(2)
+    for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                double cx = xmin + (i + 0.5) * dx;
+                double cy = ymin + (j + 0.5) * dx;
+                double cz = zmin + (k + 0.5) * dx;
+
+                double sum_rho = 0.0, sum_rhoux = 0.0, sum_rhouy = 0.0, sum_rhouz = 0.0, sum_p = 0.0;
+                double sum_alpha1 = 0.0, sum_alpha2 = 0.0, sum_arho1 = 0.0, sum_arho2 = 0.0;
+
+                for (int sk = -1; sk <= 1; ++sk) {
+                    for (int sj = -1; sj <= 1; ++sj) {
+                        for (int si = -1; si <= 1; ++si) {
+                            double px = cx + si * (dx / 3.0);
+                            double py = cy + sj * (dx / 3.0);
+                            double pz = cz + sk * (dx / 3.0);
+
+                            double s_rho = amb_rho, s_ux = 0.0, s_uy = 0.0, s_uz = 0.0, s_p = amb_p, s_a1 = 0.0, s_a2 = 0.0;
+                            double dist = std::sqrt((px - x_expl) * (px - x_expl) + (py - y_expl) * (py - y_expl) + (pz - z_expl) * (pz - z_expl));
+                            if (R_remap <= 0.0 || dist <= R_remap) {
+                                sample_src(px - off_x, py - off_y, pz - off_z, s_rho, s_ux, s_uy, s_uz, s_p, s_a1, s_a2);
+                            }
+
+                            sum_rho += s_rho;
+                            sum_rhoux += s_rho * s_ux;
+                            sum_rhouy += s_rho * s_uy;
+                            sum_rhouz += s_rho * s_uz;
+                            sum_p += s_p;
+                            if (!is_ideal) {
+                                sum_alpha1 += s_a1;
+                                sum_alpha2 += s_a2;
+                                sum_arho1 += s_a1 * s_rho;
+                                sum_arho2 += s_a2 * s_rho;
+                            }
+                        }
+                    }
+                }
+
+                double inv27 = 1.0 / 27.0;
+                double rho_avg = sum_rho * inv27;
+                double ux_avg = (sum_rhoux * inv27) / std::max(1e-9, rho_avg);
+                double uy_avg = (sum_rhouy * inv27) / std::max(1e-9, rho_avg);
+                double uz_avg = (sum_rhouz * inv27) / std::max(1e-9, rho_avg);
+                double p_avg = std::max(1e-6, sum_p * inv27);
+                double ke_avg = 0.5 * rho_avg * (ux_avg * ux_avg + uy_avg * uy_avg + uz_avg * uz_avg);
+
+                if (is_ideal) {
+                    CellState3D<false> s_gas;
+                    s_gas.rho = rho_avg;
+                    s_gas.ux = ux_avg;
+                    s_gas.uy = uy_avg;
+                    s_gas.uz = uz_avg;
+                    s_gas.p = p_avg;
+                    s_gas.E = p_avg / (gamma - 1.0) + ke_avg;
+                    solver_3d.setCellStateIdeal(i, j, k, s_gas);
+                } else {
+                    double a1_avg = sum_alpha1 * inv27;
+                    double a2_avg = sum_alpha2 * inv27;
                     double ar1_avg = sum_arho1 * inv27;
                     double ar2_avg = sum_arho2 * inv27;
 

@@ -1,6 +1,7 @@
 #include "TelemetryService.hpp"
 #include "SolverState.hpp"
 #include "GaugeService.hpp"
+#include "ErrorDiagnostics.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -65,6 +66,18 @@ void emit_kernel_log(const std::string& level, const std::string& msg, double t,
     }
     if (!global_model_id.empty()) {
         log["modelId"] = global_model_id;
+    }
+    if (level == "ERROR") {
+        auto diag = BlastDiagnostics::classify_error(msg, scope);
+        log["error_code"] = diag.error_code;
+        log["summary"] = diag.summary;
+        log["details"] = diag.details;
+        std::string phase = BlastDiagnostics::get_kernel_phase();
+        if (!phase.empty()) log["kernel_phase"] = phase;
+        if (!BlastDiagnostics::g_active_device.empty()) log["device"] = BlastDiagnostics::g_active_device;
+        if (!BlastDiagnostics::g_active_precision.empty()) log["precision"] = BlastDiagnostics::g_active_precision;
+        double last_dt = BlastDiagnostics::g_last_dt.load(std::memory_order_relaxed);
+        if (last_dt > 0.0) log["dt"] = last_dt;
     }
     std::cout << log.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
 }
@@ -668,7 +681,7 @@ void async_telemetry_thread_func() {
             std::cout << envelope.dump() << std::endl;
 
             const uint32_t n_cells    = static_cast<uint32_t>(payload->n_cells);
-            const uint32_t n_channels = 7;
+            const uint32_t n_channels = (n_cells > 0) ? static_cast<uint32_t>(payload->grid_data.size() / n_cells) : 7;
             size_t header_bytes  = sizeof(uint32_t) * 2;
             size_t payload_bytes = payload->grid_data.size() * sizeof(float);
             size_t total_bytes   = header_bytes + payload_bytes;
@@ -985,9 +998,10 @@ void emit_telemetry(const CFDSolver& solver, double elapsed, bool is_terminated,
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
         if (!global_gauges.empty()) {
-            static auto last_gauge_emit_time = std::chrono::steady_clock::now();
+            static auto last_gauge_emit_time = std::chrono::steady_clock::now() - std::chrono::seconds(10);
             auto now = std::chrono::steady_clock::now();
-            bool emit_gauges = is_terminated || (step >= 0) || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 100);
+            bool emit_gauges = is_terminated || (step >= 0) || (elapsed == 0.0) || (global_gauge_times.size() <= 2) ||
+                               (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 100);
             if (emit_gauges) {
                 payload->has_gauges = true;
                 payload->gauge_times = global_gauge_times;
@@ -1007,16 +1021,23 @@ void emit_telemetry_2d(double elapsed, bool is_terminated, int step) {
     if (stride < 1) stride = 1;
 
     int nr = 0, nz = 0;
-    std::vector<float> downsampled;
-    
     if (global_solver_2d_cuda) {
-        downsampled = global_solver_2d_cuda->getTelemetry2D(stride);
         nr = global_solver_2d_cuda->getNr();
         nz = global_solver_2d_cuda->getNz();
     } else if (global_solver_2d) {
-        downsampled = global_solver_2d->getTelemetry2D(stride);
         nr = global_solver_2d->getNr();
         nz = global_solver_2d->getNz();
+    }
+
+    if (!global_is_amr_2d && stride == 1 && std::max(nr, nz) > 512) {
+        stride = std::max(1, (std::max(nr, nz) + 511) / 512);
+    }
+
+    std::vector<float> downsampled;
+    if (global_solver_2d_cuda) {
+        downsampled = global_solver_2d_cuda->getTelemetry2D(stride);
+    } else if (global_solver_2d) {
+        downsampled = global_solver_2d->getTelemetry2D(stride);
     }
 
     int out_nr = (nr + stride - 1) / stride;
@@ -1037,10 +1058,11 @@ void emit_telemetry_2d(double elapsed, bool is_terminated, int step) {
     if (global_solver_mpm_2d) {
         const auto& particles = global_solver_mpm_2d->getParticles();
         if (!particles.empty()) {
-            payload->mpm_particles.resize(particles.size() * 2);
+            payload->mpm_particles.reserve(particles.size() * 2);
             for (size_t k = 0; k < particles.size(); ++k) {
-                payload->mpm_particles[k * 2 + 0] = particles[k].x[0];
-                payload->mpm_particles[k * 2 + 1] = particles[k].x[1];
+                if (particles[k].state == 2) continue;
+                payload->mpm_particles.push_back(particles[k].x[0]);
+                payload->mpm_particles.push_back(particles[k].x[1]);
             }
         }
     }
@@ -1054,12 +1076,13 @@ void emit_telemetry_2d(double elapsed, bool is_terminated, int step) {
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
         if (!global_gauges.empty()) {
-            static auto last_gauge_emit_time = std::chrono::steady_clock::now();
+            static auto last_gauge_emit_time = std::chrono::steady_clock::now() - std::chrono::seconds(10);
             auto now = std::chrono::steady_clock::now();
-            bool emit_gauges = is_terminated || (step >= 0) || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 100);
+            void flush_solver_gauges_locked();
+            flush_solver_gauges_locked();
+            bool emit_gauges = is_terminated || (step >= 0) || (elapsed == 0.0) || (global_gauge_times.size() <= 2) ||
+                               (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 100);
             if (emit_gauges) {
-                void flush_solver_gauges_locked();
-                flush_solver_gauges_locked();
                 payload->has_gauges = true;
                 payload->gauge_times = global_gauge_times;
                 payload->gauges_history = global_gauges_history;
@@ -1101,6 +1124,21 @@ void emit_telemetry_mpm_2d(double elapsed, bool is_terminated, int step) {
         envelope["modelId"] = global_model_id;
     }
     {
+        std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
+        if (!global_gauges.empty() && !global_gauges_history.empty()) {
+            flush_solver_gauges_locked();
+            nlohmann::json gh = nlohmann::json::array();
+            for (const auto& h : global_gauges_history) {
+                nlohmann::json item;
+                item["id"] = h.id;
+                item["times"] = global_gauge_times;
+                item["channel_values"] = h.channel_values;
+                gh.push_back(item);
+            }
+            envelope["gauges_history"] = gh;
+        }
+    }
+    {
         std::lock_guard<std::mutex> lock(cout_mutex);
         std::cout << envelope.dump() << std::endl;
     }
@@ -1109,7 +1147,7 @@ void emit_telemetry_mpm_2d(double elapsed, bool is_terminated, int step) {
     int nz = global_solver_mpm_2d->getNy();
     if (nr <= 0 || nz <= 0) return;
 
-    int n_ch = 7;
+    int n_ch = 9;
     size_t dest_stride = static_cast<size_t>(nr) * static_cast<size_t>(nz);
     std::vector<float> grid_data(n_ch * dest_stride, 0.0f);
 
@@ -1122,23 +1160,32 @@ void emit_telemetry_mpm_2d(double elapsed, bool is_terminated, int step) {
     for (int i = 0; i < nr; ++i) {
         for (int j = 0; j < nz; ++j) {
             int idx = i * nz + j;
-            grid_data[0 * dest_stride + idx] = (idx < (int)press.size()) ? press[idx] : 0.0f;
-            grid_data[1 * dest_stride + idx] = (idx < (int)rho.size()) ? rho[idx] : 0.0f;
-            grid_data[2 * dest_stride + idx] = (idx < (int)vel.size()) ? vel[idx] : 0.0f;
+            const float p_val = (idx < (int)press.size()) ? press[idx] : 0.0f;
+            const float rho_val = (idx < (int)rho.size()) ? rho[idx] : 0.0f;
+            const float vel_val = (idx < (int)vel.size()) ? vel[idx] : 0.0f;
+            const float vm_val = (idx < (int)vm.size()) ? vm[idx] : 0.0f;
+            const float ep_val = (idx < (int)ep.size()) ? ep[idx] : 0.0f;
+            grid_data[0 * dest_stride + idx] = p_val;
+            grid_data[1 * dest_stride + idx] = rho_val;
+            grid_data[2 * dest_stride + idx] = vel_val;
             grid_data[3 * dest_stride + idx] = 0.0f;
-            grid_data[4 * dest_stride + idx] = (idx < (int)vm.size()) ? vm[idx] : 0.0f;
-            grid_data[5 * dest_stride + idx] = (idx < (int)ep.size()) ? ep[idx] : 0.0f;
+            grid_data[4 * dest_stride + idx] = vm_val;
+            grid_data[5 * dest_stride + idx] = ep_val;
             grid_data[6 * dest_stride + idx] = 0.0f;
+            grid_data[7 * dest_stride + idx] = vm_val;
+            grid_data[8 * dest_stride + idx] = ep_val;
         }
     }
 
     const auto& particles = global_solver_mpm_2d->getParticles();
-    uint32_t n_particles_u = static_cast<uint32_t>(particles.size());
-    std::vector<float> particle_data(n_particles_u * 2);
+    std::vector<float> particle_data;
+    particle_data.reserve(particles.size() * 2);
     for (size_t k = 0; k < particles.size(); ++k) {
-        particle_data[k * 2 + 0] = particles[k].x[0];
-        particle_data[k * 2 + 1] = particles[k].x[1];
+        if (particles[k].state == 2) continue;
+        particle_data.push_back(particles[k].x[0]);
+        particle_data.push_back(particles[k].x[1]);
     }
+    uint32_t n_particles_u = static_cast<uint32_t>(particle_data.size() / 2);
 
     const uint32_t out_nr_u = static_cast<uint32_t>(nr);
     const uint32_t out_nz_u = static_cast<uint32_t>(nz);
@@ -1242,15 +1289,33 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool in
     float dz = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getDz() : global_solver_mpm_3d->getDz();
 
     size_t mpm_vram = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getAllocatedVRAM() : 0;
-    char log_buf[256];
+    bool is_sparse_mpm = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->isSparseGridMode()
+                                                   : (global_solver_mpm_3d ? global_solver_mpm_3d->isSparseGridMode() : false);
+    int sparse_tiles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getSparseActiveTileCount()
+                                                 : (global_solver_mpm_3d ? global_solver_mpm_3d->getSparseActiveTileCount() : 0);
+    int max_sparse_tiles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getSparseMaxActiveTiles()
+                                                     : (global_solver_mpm_3d ? global_solver_mpm_3d->getSparseMaxActiveTiles() : 0);
+    char log_buf[320];
     if (mpm_vram > 0) {
-        snprintf(log_buf, sizeof(log_buf),
-                 "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu (VRAM: %.2f MB)",
-                 current_step, sim_time, dt, cfl, v_max, num_particles, mpm_vram / (1024.0 * 1024.0));
+        if (is_sparse_mpm) {
+            snprintf(log_buf, sizeof(log_buf),
+                     "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu | Sparse Tiles = %d/%d (VRAM: %.2f MB)",
+                     current_step, sim_time, dt, cfl, v_max, num_particles, sparse_tiles, max_sparse_tiles, mpm_vram / (1024.0 * 1024.0));
+        } else {
+            snprintf(log_buf, sizeof(log_buf),
+                     "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu (VRAM: %.2f MB)",
+                     current_step, sim_time, dt, cfl, v_max, num_particles, mpm_vram / (1024.0 * 1024.0));
+        }
     } else {
-        snprintf(log_buf, sizeof(log_buf),
-                 "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu",
-                 current_step, sim_time, dt, cfl, v_max, num_particles);
+        if (is_sparse_mpm) {
+            snprintf(log_buf, sizeof(log_buf),
+                     "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu | Sparse Tiles = %d/%d",
+                     current_step, sim_time, dt, cfl, v_max, num_particles, sparse_tiles, max_sparse_tiles);
+        } else {
+            snprintf(log_buf, sizeof(log_buf),
+                     "Step %d | Time = %.4e s | dt = %.2e s | CFL = %.2f | v_max = %.1f m/s | Particles = %zu",
+                     current_step, sim_time, dt, cfl, v_max, num_particles);
+        }
     }
     emit_kernel_log("SYSTEM", log_buf, sim_time, "mpm_3d", current_step);
 
@@ -1315,13 +1380,14 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool in
             global_solver_mpm_3d_cuda->extractSliceToHost(sp.data, s.axis, static_cast<float>(s.offset), req_qty);
         } else if (global_solver_mpm_3d) {
             const auto& grid = global_solver_mpm_3d->getGrid();
+            const auto gv = global_solver_mpm_3d->getHostGridView();
             if (s.axis == "xy") {
                 int k = std::clamp(static_cast<int>(s.offset / dz), 0, nz - 1);
                 sp.w = nx; sp.h = ny; sp.data.resize(nx * ny);
                 for (int j = 0; j < ny; ++j) {
                     for (int i = 0; i < nx; ++i) {
-                        int idx = (i * ny + j) * nz + k;
-                        sp.data[i + j * nx] = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
+                        const long long slot = gv.slotIndex(i, j, k);
+                        sp.data[i + j * nx] = (slot >= 0 && slot < static_cast<long long>(grid.size())) ? getMPMGridQuantity(grid[slot], req_qty) : 0.0f;
                     }
                 }
             } else if (s.axis == "xz") {
@@ -1329,8 +1395,8 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool in
                 sp.w = nx; sp.h = nz; sp.data.resize(nx * nz);
                 for (int k = 0; k < nz; ++k) {
                     for (int i = 0; i < nx; ++i) {
-                        int idx = (i * ny + j_slice) * nz + k;
-                        sp.data[i + k * nx] = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
+                        const long long slot = gv.slotIndex(i, j_slice, k);
+                        sp.data[i + k * nx] = (slot >= 0 && slot < static_cast<long long>(grid.size())) ? getMPMGridQuantity(grid[slot], req_qty) : 0.0f;
                     }
                 }
             } else {
@@ -1338,8 +1404,8 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool in
                 sp.w = ny; sp.h = nz; sp.data.resize(ny * nz);
                 for (int k = 0; k < nz; ++k) {
                     for (int j = 0; j < ny; ++j) {
-                        int idx = (i_slice * ny + j) * nz + k;
-                        sp.data[j + k * ny] = (idx < (int)grid.size()) ? getMPMGridQuantity(grid[idx], req_qty) : 0.0f;
+                        const long long slot = gv.slotIndex(i_slice, j, k);
+                        sp.data[j + k * ny] = (slot >= 0 && slot < static_cast<long long>(grid.size())) ? getMPMGridQuantity(grid[slot], req_qty) : 0.0f;
                     }
                 }
             }
@@ -2105,12 +2171,13 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
     {
         std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
         if (!global_gauges.empty()) {
-            static auto last_gauge_emit_time = std::chrono::steady_clock::now();
+            static auto last_gauge_emit_time = std::chrono::steady_clock::now() - std::chrono::seconds(10);
             auto now = std::chrono::steady_clock::now();
-            bool emit_gauges = is_terminated || (step >= 0) || (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 100);
+            void flush_solver_gauges_locked();
+            flush_solver_gauges_locked();
+            bool emit_gauges = is_terminated || (step >= 0) || (elapsed == 0.0) || (global_gauge_times.size() <= 2) ||
+                               (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gauge_emit_time).count() >= 100);
             if (emit_gauges) {
-                void flush_solver_gauges_locked();
-                flush_solver_gauges_locked();
                 payload->has_gauges = true;
                 payload->gauge_times = global_gauge_times;
                 payload->gauges_history = global_gauges_history;

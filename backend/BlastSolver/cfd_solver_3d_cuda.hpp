@@ -100,6 +100,7 @@ private:
 
     std::vector<ObstacleFace> obstacle_faces;
     void* d_fsi_mpm_grid = nullptr;
+    void* m_fsi_mpm_solver = nullptr;
     Blast::ZonalHandoff3DParams m_zonal_handoff_params;
 
 private:
@@ -123,6 +124,10 @@ public:
     }
     void setDetonatorLocation(double x, double y, double z, double start_time = 0.0) override;
     void setFluxScheme(const std::string& scheme_name) override;
+    void setSpaceTimeScheme(SpaceTimeScheme3D scheme) override {
+        CFDSolver3DImplBase::setSpaceTimeScheme(scheme);
+        constants_dirty = true;
+    }
     void setSpatialOrder(int order) override;
     void setTemporalOrder(int order) override;
     void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) override;
@@ -167,6 +172,7 @@ public:
     bool getFluidVelocity(int i, int j, int k, float& u, float& v, float& w, float& rho, float& p) const override;
     std::vector<float> extractPressureField() const override;
     void coupleFSIWithMPMGPU(void* mpm_solver_cuda) override;
+    int erodeMPMParticlesToCFDGPU(void* mpm_solver_cuda) override;
     void coupleZonalHandoffWithMPMGPU(void* mpm_solver_cuda) override;
     void synchronizeFluidSleeveWithMPMGPU(void* mpm_solver_cuda) override;
     void setZonalHandoffParams(const Blast::ZonalHandoff3DParams& params) override;
@@ -179,6 +185,7 @@ public:
 
     void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) override;
     void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z = 0.0) override;
+    void initializeFrom3D(const CFDBulkSnapshot3D& src, double x_expl, double y_expl, double z_expl, double R_remap, double src_x_expl, double src_y_expl, double src_z_expl) override;
 
     void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) override;
     void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) override;

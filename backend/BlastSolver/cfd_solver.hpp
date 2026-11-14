@@ -10,7 +10,7 @@
 class CFDSolver {
 public:
     enum FluxScheme { RUSANOV, AUSM_PLUS };
-    enum BCType { REFLECTIVE, TRANSMISSIVE };
+    enum BCType { REFLECTIVE, TRANSMISSIVE, TERMINATE };
 
     virtual ~CFDSolver() = default;
 
@@ -83,7 +83,7 @@ public:
 
     int getNumCells() const override { return n_cells; }
     int getActiveIndex() const override { return active_r_idx; }
-    bool is_terminated() const override { return active_r_idx >= n_cells; }
+    bool is_terminated() const override { return (bcRight == TERMINATE) && (active_r_idx >= n_cells); }
     double getRadius() const override { return radius; }
     double getCellSize() const override { return dr; }
     double getTime() const override { return currentTime; }
@@ -111,8 +111,8 @@ private:
     double gamma;
     double currentTime;
     FluxScheme currentScheme;
-    int spatialOrder = 1;
-    int temporalOrder = 1;
+    int spatialOrder = 2;
+    int temporalOrder = 2;
     BCType bcLeft = REFLECTIVE;
     BCType bcRight = TRANSMISSIVE;
     double ambient_rho;

@@ -231,7 +231,7 @@ typename CFDSolverImpl<RealType, IsMultiMaterial>::ConservedState CFDSolverImpl<
 
     // Right interface (i+1)
     if (i == n_cells - 1) {
-        if (bcRight == TRANSMISSIVE) {
+        if (bcRight == TRANSMISSIVE || bcRight == TERMINATE) {
             F_right = flux(states_current[i]);
             v_int[i+1] = states_current[i].u;
         } else {
@@ -367,7 +367,7 @@ void CFDSolverImpl<RealType, IsMultiMaterial>::step(double dt) {
             }
         }
         U = next_U;
-    } else if (temporalOrder == 2) {
+    } else if (temporalOrder == 2 || temporalOrder == 5) {
         std::vector<ConservedState> U1 = U;
         std::vector<PrimitiveState> states1 = states;
         for (int i = 0; i < active_r_idx; ++i) {
@@ -399,7 +399,7 @@ void CFDSolverImpl<RealType, IsMultiMaterial>::step(double dt) {
                 U[i].arho2  += (RealType)(0.5 * dt) * (dU0.arho2  + dU1.arho2);
             }
         }
-    } else if (temporalOrder == 3) {
+    } else if (temporalOrder == 3 || temporalOrder >= 6) {
         std::vector<ConservedState> U1 = U, U2 = U;
         std::vector<PrimitiveState> states1 = states, states2 = states;
 
@@ -652,7 +652,7 @@ std::vector<double> CFDSolverImpl<RealType, IsMultiMaterial>::getLocalTimesteps(
 template <typename RealType, bool IsMultiMaterial>
 std::vector<float> CFDSolverImpl<RealType, IsMultiMaterial>::getTelemetryChannels() const {
     const uint32_t n = n_cells;
-    const uint32_t n_channels = 7;
+    const uint32_t n_channels = 9;
     std::vector<float> frame;
     frame.reserve(n * n_channels);
 
@@ -691,6 +691,22 @@ std::vector<float> CFDSolverImpl<RealType, IsMultiMaterial>::getTelemetryChannel
             frame.push_back(static_cast<float>(std::clamp((double)air_frac, 0.0, 1.0)));
         } else {
             frame.push_back(1.0f);
+        }
+    }
+    // Channel 7: Partial Density (burned products arho1)
+    for (uint32_t i = 0; i < n; ++i) {
+        if constexpr (IsMultiMaterial) {
+            frame.push_back(static_cast<float>(states[i].arho1));
+        } else {
+            frame.push_back(0.0f);
+        }
+    }
+    // Channel 8: Partial Density (unburnt reactant arho2)
+    for (uint32_t i = 0; i < n; ++i) {
+        if constexpr (IsMultiMaterial) {
+            frame.push_back(static_cast<float>(states[i].arho2));
+        } else {
+            frame.push_back(0.0f);
         }
     }
 

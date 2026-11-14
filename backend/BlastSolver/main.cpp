@@ -26,9 +26,11 @@
 #include <omp.h>
 #include <nlohmann/json.hpp>
 #include "SolverState.hpp"
+#include "services/ReactiveMaterialJson.hpp"
 #include "GaugeService.hpp"
 #include "VTKService.hpp"
 #include "TelemetryService.hpp"
+#include "services/ErrorDiagnostics.hpp"
 
 using json = nlohmann::json;
 #include "PrimitiveGeometry.hpp"
@@ -62,25 +64,41 @@ using json = nlohmann::json;
 #include "fem_fsi_coupler_3d_cuda.hpp"
 #include <unordered_set>
 
-inline void parse_cfd_space_time_scheme(const nlohmann::json& j, int& spatial_order, int& temporal_order, int default_t_order = 4) {
+inline void parse_cfd_space_time_scheme(const nlohmann::json& j, int& spatial_order, int& temporal_order, int default_t_order = 2) {
     if (j.contains("space_time_scheme") && !j["space_time_scheme"].is_null()) {
         std::string sts = j["space_time_scheme"].is_string() ? j["space_time_scheme"].get<std::string>() : "";
         if (sts == "ADER-2 (2nd-Order Space/Time)") {
             spatial_order = 2;
-            temporal_order = (default_t_order == 2) ? 2 : 5;
+            temporal_order = 2;
             return;
         } else if (sts == "ADER-3 (3rd-Order Space/Time)") {
             spatial_order = 3;
-            temporal_order = (default_t_order == 2) ? 3 : 6;
+            temporal_order = 3;
             return;
         } else if (sts == "MUSCL-Hancock (2nd-Order Space/Time)") {
             spatial_order = 2;
-            temporal_order = default_t_order;
+            temporal_order = 2;
             return;
         }
     }
     spatial_order = get_json_int(j, "spatial_order", spatial_order);
-    temporal_order = get_json_int(j, "temporal_order", temporal_order);
+    temporal_order = get_json_int(j, "temporal_order", default_t_order);
+    if (temporal_order >= 5) temporal_order = (temporal_order == 6) ? 3 : 2;
+}
+
+inline SpaceTimeScheme3D parse_cfd_space_time_scheme_3d(const nlohmann::json& j, SpaceTimeScheme3D default_scheme = SpaceTimeScheme3D::MUSCL_HANCOCK) {
+    if (j.contains("space_time_scheme") && !j["space_time_scheme"].is_null()) {
+        std::string sts = j["space_time_scheme"].is_string() ? j["space_time_scheme"].get<std::string>() : "";
+        if (sts == "ADER-2 (2nd-Order Space/Time)") return SpaceTimeScheme3D::ADER_2;
+        if (sts == "ADER-3 (3rd-Order Space/Time)") return SpaceTimeScheme3D::ADER_3;
+        if (sts == "MUSCL-Hancock (2nd-Order Space/Time)") return SpaceTimeScheme3D::MUSCL_HANCOCK;
+    }
+    int s = get_json_int(j, "spatial_order", 2);
+    int t = get_json_int(j, "temporal_order", -1);
+    if (t == 5) return SpaceTimeScheme3D::ADER_2;
+    if (t == 6 || t == 3 || s == 3) return SpaceTimeScheme3D::ADER_3;
+    if (t == 4 || t == 2) return SpaceTimeScheme3D::MUSCL_HANCOCK;
+    return default_scheme;
 }
 
 // Single source of truth for the water Tait EOS used by the FV solver. The zonal MPM sleeve
@@ -284,7 +302,7 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
         mat.burn_model = Blast::ReactionKinetics::CRESTEntropy;
         mat.product_model = Blast::DetonationProductEOS::DavisProduct;
     } else if (mat.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth) {
-        mat.solid_model = Blast::SolidReactantEOS::MieGruneisen;
+        mat.solid_model = Blast::SolidReactantEOS::JWLReactant;
         mat.burn_model = Blast::ReactionKinetics::LeeTarverODE;
         mat.product_model = Blast::DetonationProductEOS::JWLProductGas;
     } else if (mat.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn) {
@@ -301,6 +319,7 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     if (!solid_str.empty()) {
         if (solid_str.find("Davis") != std::string::npos) mat.solid_model = Blast::SolidReactantEOS::DavisSolid;
         else if (solid_str.find("Mie") != std::string::npos || solid_str.find("Gruneisen") != std::string::npos || solid_str.find("Grüneisen") != std::string::npos) mat.solid_model = Blast::SolidReactantEOS::MieGruneisen;
+        else if (solid_str.find("JWL") != std::string::npos) mat.solid_model = Blast::SolidReactantEOS::JWLReactant;
     }
     if (!burn_str.empty()) {
         if (burn_str.find("CREST") != std::string::npos) mat.burn_model = Blast::ReactionKinetics::CRESTEntropy;
@@ -338,6 +357,10 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", mat.tensile_failure_stress));
     mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", false);
     mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
+    mat.enable_density_erosion = get_json_bool(obj, "enable_density_erosion", false);
+    mat.erosion_min_density = static_cast<float>(get_json_double(obj, "erosion_min_density", 0.0));
+    mat.erosion_min_density_ratio = static_cast<float>(get_json_double(obj, "erosion_min_density_ratio", 0.0));
+    mat.erode_to_fv_grid = get_json_bool(obj, "erode_to_fv_grid", true);
     
     // JC
     mat.jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
@@ -416,22 +439,9 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.burn_zone_cells = get_json_int(obj, "burn_zone_cells", 4);
     mat.tau_burn_min = static_cast<float>(get_json_double(obj, "tau_burn_min", 1.0e-7));
 
-    // Lee-Tarver Ignition & Growth Parameters
-    mat.lt_I = static_cast<float>(get_json_double(obj, "lt_I", 4.0e6));
-    mat.lt_a = static_cast<float>(get_json_double(obj, "lt_a", 0.24));
-    mat.lt_b = static_cast<float>(get_json_double(obj, "lt_b", 0.667));
-    mat.lt_x = static_cast<float>(get_json_double(obj, "lt_x", 7.0));
-    mat.lt_G1 = static_cast<float>(get_json_double(obj, "lt_G1", 130.0e-6));
-    mat.lt_c = static_cast<float>(get_json_double(obj, "lt_c", 0.667));
-    mat.lt_d = static_cast<float>(get_json_double(obj, "lt_d", 0.333));
-    mat.lt_y = static_cast<float>(get_json_double(obj, "lt_y", 2.0));
-    mat.lt_G2 = static_cast<float>(get_json_double(obj, "lt_G2", 400.0e-6));
-    mat.lt_e = static_cast<float>(get_json_double(obj, "lt_e", 0.333));
-    mat.lt_g = static_cast<float>(get_json_double(obj, "lt_g", 0.667));
-    mat.lt_z = static_cast<float>(get_json_double(obj, "lt_z", 3.0));
-    mat.lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", get_json_double(obj, "lt_F_ig_max", 0.02)));
-    mat.lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", get_json_double(obj, "lt_F_G1_max", 0.50)));
-    mat.lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", get_json_double(obj, "lt_F_G2_min", 0.50)));
+    // Lee-Tarver Ignition & Growth + unreacted JWL + mixture rule (strict SI, single reader)
+    Blast::ReactiveJson::readLeeTarverParams(obj, mat.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth ||
+        mat.burn_model == Blast::ReactionKinetics::LeeTarverODE).apply(mat);
 
     // Concrete Base
     mat.fc = static_cast<float>(get_json_double(obj, "fc", 35.0e6));
@@ -1642,6 +1652,8 @@ static Blast::MPMTransferScheme parseTransferScheme(const std::string& str) {
     }
 }
 
+static std::atomic<int> global_telemetry_interval_ms_1d{500};
+
 void worker_thread_func() {
     if (!global_solver) {
         sim_running = false;
@@ -1726,7 +1738,8 @@ void worker_thread_func() {
 
         auto now = std::chrono::steady_clock::now();
         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_telemetry_time).count();
-        if (elapsed_ms >= 33) {
+        int target_interval_ms = std::max(16, global_telemetry_interval_ms_1d.load());
+        if (elapsed_ms >= target_interval_ms) {
             int steps_in_interval = std::max(1, interval_steps);
             global_last_compute_ms = interval_compute_ms / steps_in_interval;
             global_last_io_ms = interval_io_ms / steps_in_interval;
@@ -1780,7 +1793,7 @@ void worker_thread_func() {
 
     double final_end_time = global_endtime.load();
     bool reached_end = (final_end_time > 0.0 && global_t >= final_end_time - 1e-12);
-    bool term = !reached_end && global_solver->is_terminated();
+    bool term = sim_terminate.load() || (!reached_end && global_solver && global_solver->is_terminated());
     emit_telemetry(*global_solver, global_t, term, global_step_1d.load());
     flush_async_telemetry();
     
@@ -1791,6 +1804,7 @@ void worker_thread_func() {
     progress_msg["step"] = global_step_1d.load();
     progress_msg["scope"] = "1d";
     progress_msg["percent"] = 100;
+    progress_msg["is_terminated"] = term;
     progress_msg["mode"] = global_exec_until_end.load() ? "EXEC_ALL" : "STEP";
     {
         std::lock_guard<std::mutex> lock(cout_mutex);
@@ -2136,7 +2150,10 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             global_t3d = start_time;
             global_wallclock_3d = 0.0;
             emit_kernel_log("REMAP", "1D->3D remap applied successfully.", start_time, "3d");
-            emit_telemetry_3d(global_t3d, false);
+            if (solver_3d == global_solver_3d.get()) {
+                sync_gauges_after_remap(msg, start_time);
+                emit_telemetry_3d(global_t3d, false);
+            }
         } else if (solver_2d) {
             double start_time = msg.value("time", msg.value("sim_time", 0.0));
             solver_2d->setGamma(gamma);
@@ -2150,6 +2167,7 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             global_t2d = start_time;
             global_wallclock_2d = 0.0;
             solver2d_initialized = true;
+            sync_gauges_after_remap(msg, start_time);
             emit_kernel_log("REMAP", "1D->2D remap applied successfully.", start_time, "2d");
             emit_telemetry_2d(global_t2d, false);
         } else if (solver_2d_cuda) {
@@ -2165,6 +2183,7 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             global_t2d = start_time;
             global_wallclock_2d = 0.0;
             solver2d_initialized = true;
+            sync_gauges_after_remap(msg, start_time);
             emit_kernel_log("REMAP", "1D->2D remap applied successfully.", start_time, "2d");
             emit_telemetry_2d(global_t2d, false);
         }
@@ -2250,6 +2269,9 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
                       << (solver_3d ? (solver_3d->isMultiMaterial() ? "MultiMaterial" : "SingleMaterial") : "null")
                       << " needed IsMultiMaterial=" << is_multimat_needed << std::endl;
             emit_kernel_log("REMAP_2D", std::string("3D Solver Engine allocated: ") + (is_multimat_needed ? "Multi-Material JWL" : "Single-Material Ideal Gas") + " on " + req_device, 0.0, "3d");
+            SpaceTimeScheme3D prev_scheme = parse_cfd_space_time_scheme_3d(msg);
+            std::string prev_flux = msg.value("flux_scheme", "AUSM+");
+
             int nx_val = req_nx;
             int ny_val = req_ny;
             int nz_val = req_nz;
@@ -2278,6 +2300,8 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
                     else global_solver_3d = std::make_unique<CFDSolver3DImpl<float, false>>(nx_val, ny_val, nz_val, cellSize, xmin, ymin, zmin);
                 }
             }
+            global_solver_3d->setFluxScheme(prev_flux);
+            global_solver_3d->setSpaceTimeScheme(prev_scheme);
             solver_3d = global_solver_3d.get();
         }
 
@@ -2306,7 +2330,164 @@ void apply_remap_payload(const nlohmann::json& msg, const std::string& type, CFD
             global_t3d = start_time;
             global_wallclock_3d = 0.0;
             emit_kernel_log("REMAP_2D", "2D->3D remap applied successfully.", start_time, "3d");
-            emit_telemetry_3d(global_t3d, false);
+            if (solver_3d == global_solver_3d.get()) {
+                sync_gauges_after_remap(msg, start_time);
+                emit_telemetry_3d(global_t3d, false);
+            }
+        }
+    } else if (type == "3D") {
+        std::string remap_file = msg.value("remap_file", "");
+        if (remap_file.empty()) {
+            emit_kernel_log("ERROR", "REMAP_3D missing remap_file path.", 0.0, "3d");
+            return;
+        }
+        std::ifstream ifs(remap_file, std::ios::binary);
+        if (!ifs.is_open()) {
+            emit_kernel_log("ERROR", std::string("REMAP_3D failed to open remap_file: ") + remap_file, 0.0, "3d");
+            return;
+        }
+
+        uint32_t magic = 0;
+        ifs.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        if (magic != 0x424C3344) { // 'BL3D'
+            emit_kernel_log("ERROR", "REMAP_3D invalid binary header magic.", 0.0, "3d");
+            return;
+        }
+
+        CFDBulkSnapshot3D src;
+        double src_time = 0.0;
+        uint8_t flags = 0;
+        ifs.read(reinterpret_cast<char*>(&src.nx), sizeof(int));
+        ifs.read(reinterpret_cast<char*>(&src.ny), sizeof(int));
+        ifs.read(reinterpret_cast<char*>(&src.nz), sizeof(int));
+        ifs.read(reinterpret_cast<char*>(&src.cellSize), sizeof(double));
+        ifs.read(reinterpret_cast<char*>(&src.xmin), sizeof(double));
+        ifs.read(reinterpret_cast<char*>(&src.ymin), sizeof(double));
+        ifs.read(reinterpret_cast<char*>(&src.zmin), sizeof(double));
+        ifs.read(reinterpret_cast<char*>(&src_time), sizeof(double));
+        ifs.read(reinterpret_cast<char*>(&flags), sizeof(uint8_t));
+        src.has_vel = (flags & 1) != 0;
+        src.has_E = (flags & 2) != 0;
+        src.has_species = (flags & 4) != 0;
+
+        size_t n_cells = static_cast<size_t>(src.nx) * static_cast<size_t>(src.ny) * static_cast<size_t>(src.nz);
+        if (n_cells == 0 || !ifs.good()) {
+            emit_kernel_log("ERROR", "REMAP_3D corrupted snapshot dimensions.", 0.0, "3d");
+            return;
+        }
+        src.p.resize(n_cells);
+        src.rho.resize(n_cells);
+        ifs.read(reinterpret_cast<char*>(src.p.data()), n_cells * sizeof(float));
+        ifs.read(reinterpret_cast<char*>(src.rho.data()), n_cells * sizeof(float));
+        if (src.has_vel) {
+            src.vel.resize(n_cells * 3);
+            ifs.read(reinterpret_cast<char*>(src.vel.data()), n_cells * 3 * sizeof(float));
+        }
+        if (src.has_E) {
+            src.E.resize(n_cells);
+            ifs.read(reinterpret_cast<char*>(src.E.data()), n_cells * sizeof(float));
+        }
+        if (src.has_species) {
+            src.alpha1.resize(n_cells);
+            src.alpha2.resize(n_cells);
+            ifs.read(reinterpret_cast<char*>(src.alpha1.data()), n_cells * sizeof(float));
+            ifs.read(reinterpret_cast<char*>(src.alpha2.data()), n_cells * sizeof(float));
+        }
+        ifs.close();
+
+        double explosive_x = msg.value("explosive_x", 0.5);
+        double explosive_y = msg.value("explosive_y", 0.5);
+        double explosive_z = msg.value("explosive_z", 0.5);
+        double source_explosive_x = msg.value("source_explosive_x", explosive_x);
+        double source_explosive_y = msg.value("source_explosive_y", explosive_y);
+        double source_explosive_z = msg.value("source_explosive_z", explosive_z);
+        double remap_radius = msg.value("remap_radius", 0.0);
+
+        double gamma_val = msg.value("gamma", 1.4);
+        std::string explosive_type = msg.value("explosive_type", "");
+        std::string material_type = msg.value("material_type", "");
+        bool is_ideal_gas_val = (get_json_bool(msg, "is_ideal_gas", false) || explosive_type == "MaterialIdealGas" || msg.value("init_mode", "") == "Ideal Gas" || material_type == "Ideal Gas Charge");
+        bool is_multimat_needed = !is_ideal_gas_val;
+        MultiMat::MaterialSet matSet_val = parseMaterialSet(msg);
+
+        double amb_p_val = msg.value("ambient_p", msg.value("atm_pressure", 101325.0));
+        double amb_rho_val = msg.value("ambient_rho", 1.225);
+
+        int req_nx = msg.value("nx_3d", msg.value("nx", 64));
+        int req_ny = msg.value("ny_3d", msg.value("ny", 64));
+        int req_nz = msg.value("nz_3d", msg.value("nz", 64));
+        double req_cellSize = msg.value("cell_size_3d", msg.value("cell_size", 0.01));
+
+        bool needs_realloc = false;
+        std::string req_device = msg.value("device", "cuda");
+        if (!solver_3d) {
+            needs_realloc = true;
+        } else if (solver_3d->isMultiMaterial() != is_multimat_needed) {
+            needs_realloc = true;
+        } else if (solver_3d->isCUDA() != is_cuda_device(req_device)) {
+            needs_realloc = true;
+        } else if (solver_3d->getNx() != req_nx || solver_3d->getNy() != req_ny || solver_3d->getNz() != req_nz || std::abs(solver_3d->getCellSize() - req_cellSize) > 1e-6) {
+            needs_realloc = true;
+        }
+
+        if (needs_realloc) {
+            SpaceTimeScheme3D prev_scheme = parse_cfd_space_time_scheme_3d(msg);
+            std::string prev_flux = msg.value("flux_scheme", "AUSM+");
+            double xmin = msg.value("xmin_3d", msg.value("xmin", 0.0));
+            double ymin = msg.value("ymin_3d", msg.value("ymin", 0.0));
+            double zmin = msg.value("zmin_3d", msg.value("zmin", 0.0));
+            std::string precision = msg.value("precision", "single");
+            select_cuda_device(req_device);
+            if (is_cuda_device(req_device)) {
+                if (precision == "double") {
+                    if (is_multimat_needed) global_solver_3d = std::make_unique<CFDSolver3DCuda<double, true>>(req_nx, req_ny, req_nz, req_cellSize, xmin, ymin, zmin);
+                    else global_solver_3d = std::make_unique<CFDSolver3DCuda<double, false>>(req_nx, req_ny, req_nz, req_cellSize, xmin, ymin, zmin);
+                } else {
+                    if (is_multimat_needed) global_solver_3d = std::make_unique<CFDSolver3DCuda<float, true>>(req_nx, req_ny, req_nz, req_cellSize, xmin, ymin, zmin);
+                    else global_solver_3d = std::make_unique<CFDSolver3DCuda<float, false>>(req_nx, req_ny, req_nz, req_cellSize, xmin, ymin, zmin);
+                }
+            } else {
+                if (precision == "double") {
+                    if (is_multimat_needed) global_solver_3d = std::make_unique<CFDSolver3DImpl<double, true>>(req_nx, req_ny, req_nz, req_cellSize, xmin, ymin, zmin);
+                    else global_solver_3d = std::make_unique<CFDSolver3DImpl<double, false>>(req_nx, req_ny, req_nz, req_cellSize, xmin, ymin, zmin);
+                } else {
+                    if (is_multimat_needed) global_solver_3d = std::make_unique<CFDSolver3DImpl<float, true>>(req_nx, req_ny, req_nz, req_cellSize, xmin, ymin, zmin);
+                    else global_solver_3d = std::make_unique<CFDSolver3DImpl<float, false>>(req_nx, req_ny, req_nz, req_cellSize, xmin, ymin, zmin);
+                }
+            }
+            global_solver_3d->setFluxScheme(prev_flux);
+            global_solver_3d->setSpaceTimeScheme(prev_scheme);
+            solver_3d = global_solver_3d.get();
+        }
+
+        if (solver_3d) {
+            auto map_bc_3d = [](const std::string& str) {
+                if (str == "Terminate" || str == "OUTFLOW_RIEMANN" || str == "Riemann" || str == "NonReflecting" || str == "Absorbing" || str == "Lysmer" || str == "Transmitting" || str == "TRANSMISSIVE") return BCType3D::OUTFLOW_RIEMANN;
+                if (str == "Outflow" || str == "Neumann") return BCType3D::TRANSMISSIVE;
+                return BCType3D::REFLECTIVE;
+            };
+            solver_3d->setBoundaryConditions(
+                map_bc_3d(msg.value("bc_x_min", "Reflecting")), map_bc_3d(msg.value("bc_x_max", "Transmitting")),
+                map_bc_3d(msg.value("bc_y_min", "Reflecting")), map_bc_3d(msg.value("bc_y_max", "Transmitting")),
+                map_bc_3d(msg.value("bc_z_min", "Reflecting")), map_bc_3d(msg.value("bc_z_max", "Transmitting"))
+            );
+            solver_3d->setGamma(gamma_val);
+            solver_3d->setIdealGas(is_ideal_gas_val);
+            solver_3d->setMaterialParameters(matSet_val);
+            solver_3d->setAmbientState(amb_rho_val, amb_p_val);
+            if (msg.contains("charge_radius")) {
+                solver_3d->setChargeRadius(msg.value("charge_radius", 0.05));
+            }
+            double start_time = msg.value("time", msg.value("sim_time", src_time));
+            solver_3d->initializeFrom3D(src, explosive_x, explosive_y, explosive_z, remap_radius, source_explosive_x, source_explosive_y, source_explosive_z);
+            solver_3d->setTime(start_time);
+            global_t3d = start_time;
+            global_wallclock_3d = 0.0;
+            emit_kernel_log("REMAP_3D", "3D->3D remap applied successfully.", start_time, "3d");
+            if (solver_3d == global_solver_3d.get()) {
+                sync_gauges_after_remap(msg, start_time);
+                emit_telemetry_3d(global_t3d, false);
+            }
         }
     }
 }
@@ -2354,8 +2535,13 @@ void init_3d_thread_func(nlohmann::json msg) {
             global_telemetry_interval_ms = 5000;
         } else {
             global_telemetry_enabled = true;
-            int interval_param = msg.value("telemetry_interval_ms", 100);
-            if (interval_param > 0) global_telemetry_interval_ms = interval_param;
+            if (msg.contains("refresh_rate") && get_json_double(msg, "refresh_rate", 0.0) > 0.0) {
+                double rate = get_json_double(msg, "refresh_rate", 0.5);
+                global_telemetry_interval_ms = std::max(16, static_cast<int>(std::round(rate * 1000.0)));
+            } else {
+                int interval_param = msg.value("telemetry_interval_ms", 100);
+                if (interval_param > 0) global_telemetry_interval_ms = std::max(16, interval_param);
+            }
         }
 
         global_endtime_3d = msg.value("endtime", 1.0);
@@ -2402,13 +2588,8 @@ void init_3d_thread_func(nlohmann::json msg) {
 
 
         std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
-        int spatial_order = 2;
-        int temporal_order = 4;
-        parse_cfd_space_time_scheme(msg, spatial_order, temporal_order, 4);
-
         local_solver_3d->setFluxScheme(flux_scheme);
-        local_solver_3d->setSpatialOrder(spatial_order);
-        local_solver_3d->setTemporalOrder(temporal_order);
+        local_solver_3d->setSpaceTimeScheme(parse_cfd_space_time_scheme_3d(msg));
         apply_cfd_tait_config(msg, local_solver_3d.get());
 
         Charge3DParams cp;
@@ -2432,7 +2613,7 @@ void init_3d_thread_func(nlohmann::json msg) {
         cp.rot_y = msg.value("charge_rot_y", msg.value("rot_y", 0.0));
         cp.rot_z = msg.value("charge_rot_z", msg.value("rot_z", 0.0));
 
-        if (init_mode == "From1D" || init_mode == "From2D") {
+        if (init_mode == "From1D" || init_mode == "From2D" || init_mode == "From3D") {
             cp.radius = 0.0;
             cp.lx = 0.0;
             cp.ly = 0.0;
@@ -2574,12 +2755,16 @@ void init_3d_thread_func(nlohmann::json msg) {
         local_solver_3d->uploadObstacleFaces(global_obstacle_faces);
 
         // Check if a REMAP command arrived while voxelization was running
+        bool applied_pending_remap = false;
+        nlohmann::json applied_remap_msg;
         {
             std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
             if (g_pending_remap.has_pending) {
-                if (init_mode == "From1D" || init_mode == "From2D") {
+                if (init_mode == "From1D" || init_mode == "From2D" || init_mode == "From3D") {
                     std::cout << "[INFO] Applying queued pending " << g_pending_remap.type << " remap onto 3D solver..." << std::endl;
+                    applied_remap_msg = g_pending_remap.msg;
                     apply_remap_payload(g_pending_remap.msg, g_pending_remap.type, local_solver_3d.get(), nullptr, nullptr);
+                    applied_pending_remap = true;
                 } else {
                     std::cout << "[INFO] Ignoring queued pending remap because solver init_mode is '" << init_mode << "'." << std::endl;
                 }
@@ -2598,11 +2783,17 @@ void init_3d_thread_func(nlohmann::json msg) {
         std::cout << "[DEBUG] Mesh sent. Initializing phase tracking particles and gauges..." << std::endl;
         setup_phase_tracking_particles_3d(msg);
         init_gauges(msg);
+        if (applied_pending_remap) {
+            sync_gauges_after_remap(applied_remap_msg, global_t3d);
+        } else {
+            record_gauges_3d(global_t3d);
+        }
         std::string precision_str = msg.value("precision", "single");
         std::string device_str = msg.value("device", "cpu");
         std::string engine_str = (is_multimat ? "Multi-Material JWL" : "Single-Material Ideal Gas");
-        emit_kernel_log("SYSTEM", "3D Solver Initialized: " + engine_str + " on " + device_str + " (" + precision_str + ")", 0.0, "3d");
-        emit_telemetry_3d(0.0, false);
+        BlastDiagnostics::set_solver_context(device_str, precision_str);
+        emit_kernel_log("SYSTEM", "3D Solver Initialized: " + engine_str + " on " + device_str + " (" + precision_str + ")", global_t3d, "3d");
+        emit_telemetry_3d(global_t3d, false, 0);
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] Exception in 3D solver initialization thread: " << e.what() << std::endl;
         emit_kernel_log("ERROR", std::string("Initialization failed: ") + e.what(), 0.0, "3d");
@@ -2625,7 +2816,7 @@ void init_3d_thread_func(nlohmann::json msg) {
             g_pending_exec_3d.has_pending = false;
             emit_kernel_log("INFO", "Executing queued " + cmd + " after 3D initialization completed.", 0.0, "3d");
             if (cmd == "STEP_3D") {
-                init_gauges(p_msg);
+                init_gauges(p_msg, false);
                 int steps = p_msg.value("steps", 1);
                 global_cfl_3d = p_msg.value("cfl", 0.6);
                 if (p_msg.contains("endtime")) global_endtime_3d = p_msg.value("endtime", 1.0);
@@ -2641,7 +2832,7 @@ void init_3d_thread_func(nlohmann::json msg) {
                     sim3d_paused = false;
                 }
             } else if (cmd == "EXEC_ALL_3D") {
-                init_gauges(p_msg);
+                init_gauges(p_msg, false);
                 global_cfl_3d = p_msg.value("cfl", 0.6);
                 if (p_msg.contains("endtime")) global_endtime_3d = p_msg.value("endtime", 1.0);
                 global_exec_until_end_3d = true;
@@ -2803,7 +2994,7 @@ void worker_3d_thread_func() {
 
     double final_end_time = global_endtime_3d.load();
     bool reached_end = (final_end_time > 0.0 && global_t3d >= final_end_time - 1e-12);
-    bool term_3d = !reached_end && global_solver_3d->is_terminated();
+    bool term_3d = sim3d_terminate.load() || (!reached_end && global_solver_3d && global_solver_3d->is_terminated());
     emit_telemetry_3d(global_t3d, term_3d, global_step_3d.load());
     flush_async_telemetry();
 
@@ -2841,11 +3032,11 @@ void worker_3d_thread_func() {
         global_target_steps_3d = 0;
         global_exec_until_end_3d = false;
     } catch (const std::exception& e) {
-        emit_kernel_log("ERROR", std::string("3D worker thread error: ") + e.what(), global_t3d, "3d");
+        emit_kernel_log("ERROR", std::string("3D worker thread error: ") + e.what(), global_t3d, "3d", global_step_3d.load());
         sim3d_running = false;
         std::exit(1);
     } catch (...) {
-        emit_kernel_log("ERROR", "3D worker thread error: unknown exception", global_t3d, "3d");
+        emit_kernel_log("ERROR", "3D worker thread error: unknown exception", global_t3d, "3d", global_step_3d.load());
         sim3d_running = false;
         std::exit(1);
     }
@@ -3023,8 +3214,8 @@ void worker_2d_thread_func() {
 
     double final_end_time = global_endtime_2d.load();
     bool reached_end = (final_end_time > 0.0 && global_t2d >= final_end_time - 1e-12);
-    bool term_2d = false;
-    if (!reached_end) {
+    bool term_2d = sim2d_terminate.load();
+    if (!term_2d && !reached_end) {
         if (global_solver_2d_cuda) term_2d = global_solver_2d_cuda->checkTerminationCondition();
         else if (global_solver_2d) term_2d = global_solver_2d->checkTerminationCondition();
     }
@@ -3114,6 +3305,7 @@ void worker_mpm_2d_thread_func() {
             auto step_start = std::chrono::steady_clock::now();
             float cfl = global_cfl_mpm.load();
             global_solver_mpm_2d->step(cfl);
+            record_gauges_2d(global_solver_mpm_2d->getSimTime());
             auto step_end = std::chrono::steady_clock::now();
             double comp_ms = std::chrono::duration<double, std::milli>(step_end - step_start).count();
             interval_compute_ms += comp_ms;
@@ -3207,7 +3399,7 @@ void worker_mpm_2d_thread_func() {
     int final_step = global_solver_mpm_2d ? global_solver_mpm_2d->getStepCount() : 0;
     double final_end_time = global_endtime_mpm.load();
     bool reached_end = (final_end_time > 0.0 && final_sim_time >= final_end_time - 1e-12);
-    bool term_mpm_2d = !reached_end && global_solver_mpm_2d && global_solver_mpm_2d->is_terminated();
+    bool term_mpm_2d = sim_mpm_terminate.load() || (!reached_end && global_solver_mpm_2d && global_solver_mpm_2d->is_terminated());
     emit_telemetry_mpm_2d(final_sim_time, term_mpm_2d, final_step);
     flush_async_telemetry();
 
@@ -3503,8 +3695,8 @@ void worker_mpm_3d_thread_func() {
     int final_step = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getStepCount() : (global_solver_mpm_3d ? global_solver_mpm_3d->getStepCount() : 0);
     double end_time = global_endtime_mpm_3d.load();
     bool reached_end = (end_time > 0.0 && final_sim_time >= end_time - 1e-12);
-    bool term_mpm_3d = !reached_end && ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->is_terminated()) ||
-                                        (global_solver_mpm_3d && global_solver_mpm_3d->is_terminated()));
+    bool term_mpm_3d = sim_mpm_3d_terminate.load() || (!reached_end && ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->is_terminated()) ||
+                                        (global_solver_mpm_3d && global_solver_mpm_3d->is_terminated())));
     if (global_enable_vtk.load() && reached_end && should_write_final_vtk(final_sim_time, global_last_vtk_time_mpm_3d.load())) {
         write_vtk_outputs(final_step, final_sim_time);
         update_last_vtk_time(global_last_vtk_time_mpm_3d, final_sim_time);
@@ -3901,6 +4093,7 @@ void worker_fem_3d_thread_func() {
         progress_msg["step"] = final_step;
         progress_msg["scope"] = "fem_3d";
         progress_msg["percent"] = 100;
+        progress_msg["is_terminated"] = sim_fem_3d_terminate.load();
         progress_msg["mode"] = global_exec_until_end_fem_3d.load() ? "EXEC_ALL_FEM_3D" : "STEP_FEM_3D";
         {
             std::lock_guard<std::mutex> lock(cout_mutex);
@@ -4038,6 +4231,7 @@ void worker_fsi_2d_thread_func() {
 
                 if (!cfd_states.empty() && nr > 0 && nz > 0) {
                     auto& mpm_grid = global_solver_mpm_2d->getGrid();
+                    const auto gv_2d = global_solver_mpm_2d->getHostGridView();
                     int mpm_nx = global_solver_mpm_2d->getNx();
                     int mpm_ny = global_solver_mpm_2d->getNy();
 
@@ -4059,8 +4253,9 @@ void worker_fsi_2d_thread_func() {
                                 solid_vel[2 * cfd_idx + 1] = 0.0;
                             }
                             if (i < mpm_nx && j < mpm_ny) {
-                                int mpm_idx = i * mpm_ny + j;
-                                const auto& m_node = mpm_grid[mpm_idx];
+                                const long long mpm_slot = gv_2d.slotIndex(i, j);
+                                if (mpm_slot < 0) continue;
+                                const auto& m_node = mpm_grid[mpm_slot];
 
                                 // Hysteresis threshold: turn solid at mass > 1.0e-8, stay solid until mass < 2.0e-9
                                 bool was_solid = (prev_solid_mask[cfd_idx] != 0);
@@ -4080,8 +4275,9 @@ void worker_fsi_2d_thread_func() {
                     for (int i = 0; i < nr; ++i) {
                         for (int j = 0; j < nz; ++j) {
                             if (i < mpm_nx && j < mpm_ny) {
-                                int mpm_idx = i * mpm_ny + j;
-                                auto& m_node = mpm_grid[mpm_idx];
+                                const long long mpm_slot = gv_2d.slotIndex(i, j);
+                                if (mpm_slot < 0) continue;
+                                auto& m_node = mpm_grid[mpm_slot];
 
                                 if (m_node.m > 1.0e-14f) {
                                     // Check if node is on the surface (adjacent to fluid)
@@ -4248,9 +4444,9 @@ void worker_fsi_2d_thread_func() {
     }
     double final_end_time = global_endtime_fsi.load();
     bool reached_end = (final_end_time > 0.0 && final_sim_time >= final_end_time - 1e-12);
-    bool term_fsi_2d = !reached_end && ((global_solver_mpm_2d && global_solver_mpm_2d->is_terminated()) ||
+    bool term_fsi_2d = sim_fsi_terminate.load() || (!reached_end && ((global_solver_mpm_2d && global_solver_mpm_2d->is_terminated()) ||
                                         (global_solver_2d_cuda && global_solver_2d_cuda->checkTerminationCondition()) ||
-                                        (global_solver_2d && global_solver_2d->checkTerminationCondition()));
+                                        (global_solver_2d && global_solver_2d->checkTerminationCondition())));
     if (has_solver_2d()) emit_telemetry_2d(global_t2d, term_fsi_2d, global_step_fsi_2d.load());
     else if (global_solver_mpm_2d) emit_telemetry_mpm_2d(final_sim_time, term_fsi_2d, global_step_fsi_2d.load());
     flush_async_telemetry();
@@ -4340,33 +4536,64 @@ void worker_fsi_3d_thread_func() {
 
                 // Step 2: Coupled 3D FSI exchange — use populated grid to build solid mask and inject fluid pressure forces
                 if ((global_solver_mpm_3d || global_solver_mpm_3d_cuda) && global_solver_3d) {
-                    int nx = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNx() : global_solver_mpm_3d->getNx();
-                    int ny = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNy() : global_solver_mpm_3d->getNy();
-                    int nz = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNz() : global_solver_mpm_3d->getNz();
+                    int mpm_nx = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNx() : global_solver_mpm_3d->getNx();
+                    int mpm_ny = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNy() : global_solver_mpm_3d->getNy();
+                    int mpm_nz = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getNz() : global_solver_mpm_3d->getNz();
                     float dx = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getDx() : global_solver_mpm_3d->getDx();
                     float dy = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getDy() : global_solver_mpm_3d->getDy();
                     float dz = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getDz() : global_solver_mpm_3d->getDz();
+                    float mpm_xmin = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getXMin() : global_solver_mpm_3d->getXMin();
+                    float mpm_ymin = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getYMin() : global_solver_mpm_3d->getYMin();
+                    float mpm_zmin = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getZMin() : global_solver_mpm_3d->getZMin();
+
+                    int cfd_nx = global_solver_3d->getNx();
+                    int cfd_ny = global_solver_3d->getNy();
+                    int cfd_nz = global_solver_3d->getNz();
+                    double cfd_dx = global_solver_3d->getDx();
+                    double cfd_dy = global_solver_3d->getDy();
+                    double cfd_dz = global_solver_3d->getDz();
+                    double cfd_xmin = global_solver_3d->getXMin();
+                    double cfd_ymin = global_solver_3d->getYMin();
+                    double cfd_zmin = global_solver_3d->getZMin();
 
                     // Grid is now populated from P2G — read it to build solid mask and inject pressure forces
+                    // Note: for global_solver_mpm_3d_cuda, particleToGridOnly() unpacks m_host_grid to dense mpm_nx*mpm_ny*mpm_nz
                     auto& grid = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getGrid() : global_solver_mpm_3d->getGrid();
-                    std::vector<uint8_t> solid_mask(static_cast<size_t>(nx) * ny * nz, 0);
-                    std::vector<double> solid_vel(3 * static_cast<size_t>(nx) * ny * nz, 0.0);
+                    Blast::MPMGridView3D gv_host{};
+                    if (!global_solver_mpm_3d_cuda && global_solver_mpm_3d) {
+                        gv_host = global_solver_mpm_3d->getHostGridView();
+                    }
+                    auto resolve_host_slot = [&](int xi, int yi, int zi) -> long long {
+                        if (xi < 0 || xi >= mpm_nx || yi < 0 || yi >= mpm_ny || zi < 0 || zi >= mpm_nz) return -1;
+                        if (gv_host.nx > 0) return gv_host.slotIndex(xi, yi, zi);
+                        return static_cast<long long>((static_cast<size_t>(xi) * mpm_ny + yi) * mpm_nz + zi);
+                    };
+                    std::vector<uint8_t> solid_mask(static_cast<size_t>(cfd_nx) * cfd_ny * cfd_nz, 0);
+                    std::vector<double> solid_vel(3 * static_cast<size_t>(cfd_nx) * cfd_ny * cfd_nz, 0.0);
 
-                    for (int i = 0; i < nx; ++i) {
-                        for (int j = 0; j < ny; ++j) {
-                            for (int k = 0; k < nz; ++k) {
-                                size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
-                                auto& node = grid[node_idx];
-                                size_t cfd_idx = static_cast<size_t>(i) + static_cast<size_t>(j) * nx + static_cast<size_t>(k) * nx * ny;
-                                double z_node = global_solver_3d->getZMin() + (static_cast<double>(k) + 0.5) * global_solver_3d->getDz();
+                    for (int i = 0; i < mpm_nx; ++i) {
+                        for (int j = 0; j < mpm_ny; ++j) {
+                            for (int k = 0; k < mpm_nz; ++k) {
+                                const long long slot = resolve_host_slot(i, j, k);
+                                if (slot < 0) continue;
+                                auto& node = grid[slot];
+                                double x_node = static_cast<double>(mpm_xmin) + (static_cast<double>(i) + 0.5) * static_cast<double>(dx);
+                                double y_node = static_cast<double>(mpm_ymin) + (static_cast<double>(j) + 0.5) * static_cast<double>(dy);
+                                double z_node = static_cast<double>(mpm_zmin) + (static_cast<double>(k) + 0.5) * static_cast<double>(dz);
                                 if (g_is_stratified_fsi.load() && z_node < g_strat_fsi_params.seabed_surface_z) {
                                     continue;
                                 }
                                 if (node.m_solid > 1.0e-8f) {
-                                    solid_mask[cfd_idx] = 1;
-                                    solid_vel[3 * cfd_idx + 0] = node.v(0);
-                                    solid_vel[3 * cfd_idx + 1] = node.v(1);
-                                    solid_vel[3 * cfd_idx + 2] = node.v(2);
+                                    int ci = static_cast<int>(std::floor((x_node - cfd_xmin) / cfd_dx));
+                                    int cj = static_cast<int>(std::floor((y_node - cfd_ymin) / cfd_dy));
+                                    int ck = static_cast<int>(std::floor((z_node - cfd_zmin) / cfd_dz));
+                                    if (ci >= 0 && ci < cfd_nx && cj >= 0 && cj < cfd_ny && ck >= 0 && ck < cfd_nz) {
+                                        size_t cfd_idx = static_cast<size_t>(ci) + static_cast<size_t>(cj) * cfd_nx + static_cast<size_t>(ck) * cfd_nx * cfd_ny;
+                                        solid_mask[cfd_idx] = 1;
+                                        solid_vel[3 * cfd_idx + 0] = node.v(0);
+                                        solid_vel[3 * cfd_idx + 1] = node.v(1);
+                                        solid_vel[3 * cfd_idx + 2] = node.v(2);
+                                    }
                                 }
                             }
                         }
@@ -4382,26 +4609,30 @@ void worker_fsi_3d_thread_func() {
                     bool use_bulk = !pfield.empty();
 
                     // Inject fluid pressure gradient as external force into populated grid nodes
-                    for (int i = 0; i < nx; ++i) {
-                        for (int j = 0; j < ny; ++j) {
-                            for (int k = 0; k < nz; ++k) {
-                                size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
-                                auto& node = grid[node_idx];
+                    for (int i = 0; i < mpm_nx; ++i) {
+                        for (int j = 0; j < mpm_ny; ++j) {
+                            for (int k = 0; k < mpm_nz; ++k) {
+                                const long long slot = resolve_host_slot(i, j, k);
+                                if (slot < 0) continue;
+                                auto& node = grid[slot];
                                 if (node.m > 1.0e-8f) {
                                     auto is_fluid = [&](int xi, int yi, int zi) -> bool {
-                                        if (xi < 0 || xi >= nx || yi < 0 || yi >= ny || zi < 0 || zi >= nz) return false;
-                                        size_t idx = (static_cast<size_t>(xi) * ny + yi) * nz + zi;
-                                        return (grid[idx].m_solid <= 1.0e-8f);
+                                        if (xi < 0 || xi >= mpm_nx || yi < 0 || yi >= mpm_ny || zi < 0 || zi >= mpm_nz) return false;
+                                        const long long n_slot = resolve_host_slot(xi, yi, zi);
+                                        return (n_slot < 0) ? true : (grid[n_slot].m_solid <= 1.0e-8f);
                                     };
 
-                                    auto pidx = [&](int xi, int yi, int zi) -> double {
-                                        xi = std::clamp(xi, 0, nx-1);
-                                        yi = std::clamp(yi, 0, ny-1);
-                                        zi = std::clamp(zi, 0, nz-1);
+                                    auto pidx_mpm = [&](int xi, int yi, int zi) -> double {
+                                        double x_p = static_cast<double>(mpm_xmin) + (static_cast<double>(xi) + 0.5) * static_cast<double>(dx);
+                                        double y_p = static_cast<double>(mpm_ymin) + (static_cast<double>(yi) + 0.5) * static_cast<double>(dy);
+                                        double z_p = static_cast<double>(mpm_zmin) + (static_cast<double>(zi) + 0.5) * static_cast<double>(dz);
+                                        int ci = std::clamp(static_cast<int>(std::floor((x_p - cfd_xmin) / cfd_dx)), 0, cfd_nx - 1);
+                                        int cj = std::clamp(static_cast<int>(std::floor((y_p - cfd_ymin) / cfd_dy)), 0, cfd_ny - 1);
+                                        int ck = std::clamp(static_cast<int>(std::floor((z_p - cfd_zmin) / cfd_dz)), 0, cfd_nz - 1);
                                         if (use_bulk) {
-                                            return pfield[xi + yi * nx + zi * nx * ny];
+                                            return pfield[ci + cj * cfd_nx + ck * cfd_nx * cfd_ny];
                                         } else {
-                                            auto cv = global_solver_3d->getCellValues(xi, yi, zi);
+                                            auto cv = global_solver_3d->getCellValues(ci, cj, ck);
                                             return (!cv.empty()) ? cv[0] : 0.0;
                                         }
                                     };
@@ -4409,12 +4640,12 @@ void worker_fsi_3d_thread_func() {
                                     double f_x = 0.0, f_y = 0.0, f_z = 0.0;
                                     if (node.m_solid > 1.0e-8f) {
                                         // Solid boundary node: surface pressure from fluid neighbor cells
-                                        if (is_fluid(i-1, j, k)) f_x += pidx(i-1, j, k);
-                                        if (is_fluid(i+1, j, k)) f_x -= pidx(i+1, j, k);
-                                        if (is_fluid(i, j-1, k)) f_y += pidx(i, j-1, k);
-                                        if (is_fluid(i, j+1, k)) f_y -= pidx(i, j+1, k);
-                                        if (is_fluid(i, j, k-1)) f_z += pidx(i, j, k-1);
-                                        if (is_fluid(i, j, k+1)) f_z -= pidx(i, j, k+1);
+                                        if (is_fluid(i-1, j, k)) f_x += pidx_mpm(i-1, j, k);
+                                        if (is_fluid(i+1, j, k)) f_x -= pidx_mpm(i+1, j, k);
+                                        if (is_fluid(i, j-1, k)) f_y += pidx_mpm(i, j-1, k);
+                                        if (is_fluid(i, j+1, k)) f_y -= pidx_mpm(i, j+1, k);
+                                        if (is_fluid(i, j, k-1)) f_z += pidx_mpm(i, j, k-1);
+                                        if (is_fluid(i, j, k+1)) f_z -= pidx_mpm(i, j, k+1);
 
                                         node.f_ext[0] = static_cast<float>(f_x * dy * dz);
                                         node.f_ext[1] = static_cast<float>(f_y * dx * dz);
@@ -4467,6 +4698,124 @@ void worker_fsi_3d_thread_func() {
                 global_solver_mpm_3d_cuda->stepWithDt(static_cast<float>(dt_common), false);
             } else if (global_solver_mpm_3d) {
                 global_solver_mpm_3d->stepWithDt(static_cast<float>(dt_common), false);
+            }
+
+            // Conservative handoff of low-density MPM fluid/explosive particles into overlapping FV CFD cells
+            if (global_solver_mpm_3d_cuda && global_solver_3d && global_solver_3d->isCUDA()) {
+                global_solver_3d->erodeMPMParticlesToCFDGPU(global_solver_mpm_3d_cuda.get());
+            } else if (global_solver_mpm_3d && global_solver_3d) {
+                auto& particles = global_solver_mpm_3d->getParticles();
+                double f_xmin = global_solver_3d->getXMin();
+                double f_ymin = global_solver_3d->getYMin();
+                double f_zmin = global_solver_3d->getZMin();
+                double f_dx = global_solver_3d->getDx();
+                double f_dy = global_solver_3d->getDy();
+                double f_dz = global_solver_3d->getDz();
+                double f_cell_vol = f_dx * f_dy * f_dz;
+                int f_nx = global_solver_3d->getNx();
+                int f_ny = global_solver_3d->getNy();
+                int f_nz = global_solver_3d->getNz();
+                int num_mat_tables = static_cast<int>(global_solver_mpm_3d->getMaterialTables().size());
+                bool any_eroded_to_fv = false;
+                for (auto& p : particles) {
+                    if (p.state == 2 || p.m <= 0.0f) continue;
+                    int obj_id = p.object_id;
+                    if (obj_id < 0 || obj_id >= num_mat_tables) continue;
+                    const auto& mat = global_solver_mpm_3d->getMaterialTable(obj_id);
+                    if (!mat.enable_density_erosion || !mat.erode_to_fv_grid) continue;
+                    bool is_energetic = (mat.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn ||
+                                         mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn ||
+                                         mat.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth);
+                    bool is_fluid = (mat.material_model == Blast::MPMMaterialModel::TaitWater);
+                    if (!is_energetic && !is_fluid) continue;
+
+                    float rho0 = (mat.density > 1.0e-6f) ? mat.density : (is_fluid ? mat.tait_rho0 : 1630.0f);
+                    float rho_p = (p.V > 1.0e-18f) ? (p.m / p.V) : rho0;
+                    float rho_thresh = mat.erosion_min_density;
+                    if (mat.erosion_min_density_ratio > 0.0f) {
+                        rho_thresh = std::max(rho_thresh, mat.erosion_min_density_ratio * rho0);
+                    }
+                    if (rho_thresh > 0.0f && rho_p < rho_thresh) {
+                        int ci = static_cast<int>(std::floor((static_cast<double>(p.x[0]) - f_xmin) / f_dx));
+                        int cj = static_cast<int>(std::floor((static_cast<double>(p.x[1]) - f_ymin) / f_dy));
+                        int ck = static_cast<int>(std::floor((static_cast<double>(p.x[2]) - f_zmin) / f_dz));
+                        if (ci >= 0 && ci < f_nx && cj >= 0 && cj < f_ny && ck >= 0 && ck < f_nz && f_cell_vol > 1.0e-24) {
+                            auto cv = global_solver_3d->getCellValues(ci, cj, ck);
+                            if (cv.size() >= 10) {
+                                double rho_old = std::max(1.0e-6, static_cast<double>(cv[1]));
+                                double E_old = static_cast<double>(cv[3]);
+                                double a1_old = std::clamp(static_cast<double>(cv[4]), 0.0, 1.0);
+                                double vx_old = static_cast<double>(cv[7]);
+                                double vy_old = static_cast<double>(cv[8]);
+                                double vz_old = static_cast<double>(cv[9]);
+
+                                double dm = static_cast<double>(p.m) / f_cell_vol;
+                                double drhou = dm * static_cast<double>(p.v[0]);
+                                double drhov = dm * static_cast<double>(p.v[1]);
+                                double drhow = dm * static_cast<double>(p.v[2]);
+                                double v2_p = static_cast<double>(p.v[0]) * p.v[0] + static_cast<double>(p.v[1]) * p.v[1] + static_cast<double>(p.v[2]) * p.v[2];
+                                double e_spec_p = std::max(0.0, static_cast<double>(p.e_int));
+                                if (is_energetic && e_spec_p < 1.0) {
+                                    double p_trace = -static_cast<double>(p.sigma.data[0] + p.sigma.data[1] + p.sigma.data[2]) / 3.0;
+                                    if (p_trace > 0.0 && mat.jwl_omega > 1.0e-4f && rho_p > 1.0e-6f) {
+                                        e_spec_p = p_trace / (static_cast<double>(mat.jwl_omega) * static_cast<double>(rho_p));
+                                    }
+                                }
+                                double dE = dm * (e_spec_p + 0.5 * v2_p);
+
+                                double rho_new = rho_old + dm;
+                                double rhou_new = rho_old * vx_old + drhou;
+                                double rhov_new = rho_old * vy_old + drhov;
+                                double rhow_new = rho_old * vz_old + drhow;
+                                double E_new = std::max(1.0, E_old + dE);
+                                double dv_frac = std::clamp(static_cast<double>(p.V) / f_cell_vol, 0.0, 1.0);
+
+                                if (global_solver_3d->isMultiMaterial()) {
+                                    double arho1_old = a1_old * rho_old;
+                                    double arho2_old = std::max(0.0, rho_old - arho1_old);
+                                    double arho1_new = is_energetic ? (arho1_old + dm) : arho1_old;
+                                    double arho2_new = is_energetic ? arho2_old : (arho2_old + dm);
+                                    double a1_new = is_energetic
+                                        ? std::clamp(a1_old + (1.0 - a1_old) * dv_frac, 1.0e-6, 1.0 - 1.0e-6)
+                                        : std::clamp(a1_old * (1.0 - dv_frac), 1.0e-6, 1.0 - 1.0e-6);
+                                    CellState3D<true> s3d;
+                                    s3d.rho = rho_new;
+                                    s3d.ux = rhou_new / std::max(1.0e-6, rho_new);
+                                    s3d.uy = rhov_new / std::max(1.0e-6, rho_new);
+                                    s3d.uz = rhow_new / std::max(1.0e-6, rho_new);
+                                    s3d.arho1 = arho1_new;
+                                    s3d.arho2 = arho2_new;
+                                    s3d.alpha1 = a1_new;
+                                    s3d.alpha2 = 1.0 - a1_new;
+                                    s3d.E = E_new;
+                                    s3d.p = std::max(1.0, static_cast<double>(cv[10]));
+                                    global_solver_3d->setCellStateMulti(ci, cj, ck, s3d);
+                                } else {
+                                    double ke_new = 0.5 * (rhou_new * rhou_new + rhov_new * rhov_new + rhow_new * rhow_new) / std::max(1.0e-6, rho_new);
+                                    double p_new = std::max(1.0, (global_solver_3d->getGamma() - 1.0) * std::max(1.0, E_new - ke_new));
+                                    CellState3D<false> s_gas;
+                                    s_gas.rho = rho_new;
+                                    s_gas.ux = rhou_new / std::max(1.0e-6, rho_new);
+                                    s_gas.uy = rhov_new / std::max(1.0e-6, rho_new);
+                                    s_gas.uz = rhow_new / std::max(1.0e-6, rho_new);
+                                    s_gas.E = E_new;
+                                    s_gas.p = p_new;
+                                    global_solver_3d->setCellStateIdeal(ci, cj, ck, s_gas);
+                                }
+                            }
+                        }
+                        p.state = 2;
+                        p.m = 0.0f;
+                        p.V = 0.0f;
+                        any_eroded_to_fv = true;
+                    }
+                }
+                if (any_eroded_to_fv) {
+                    particles.erase(
+                        std::remove_if(particles.begin(), particles.end(),
+                                       [](const Blast::MPMParticle3D& pt) { return pt.state == 2 || pt.m <= 0.0f; }),
+                        particles.end());
+                }
             }
 
             if (global_solver_3d) {
@@ -4809,9 +5158,9 @@ void worker_fsi_3d_thread_func() {
     double final_sim_time = global_t3d;
     double final_end_time = global_endtime_fsi_3d.load();
     bool reached_end = (final_end_time > 0.0 && final_sim_time >= final_end_time - 1e-12);
-    bool term_fsi_3d = !reached_end && ((global_solver_3d && global_solver_3d->is_terminated()) ||
+    bool term_fsi_3d = sim_fsi_3d_terminate.load() || (!reached_end && ((global_solver_3d && global_solver_3d->is_terminated()) ||
                                         (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->is_terminated()) ||
-                                        (global_solver_mpm_3d && global_solver_mpm_3d->is_terminated()));
+                                        (global_solver_mpm_3d && global_solver_mpm_3d->is_terminated())));
     if (global_enable_vtk.load() && reached_end && should_write_final_vtk(final_sim_time, global_last_vtk_time_fsi_3d.load())) {
         write_vtk_outputs(global_step_fsi_3d.load(), final_sim_time);
         update_last_vtk_time(global_last_vtk_time_fsi_3d, final_sim_time);
@@ -5090,9 +5439,9 @@ void worker_fem_fsi_3d_thread_func() {
         }
         double final_end_time = global_endtime_fem_fsi_3d.load();
         bool reached_end = (final_end_time > 0.0 && final_sim_time >= final_end_time - 1e-12);
-        bool term_fem_fsi_3d = !reached_end && ((global_solver_3d && global_solver_3d->is_terminated()) ||
+        bool term_fem_fsi_3d = sim_fem_fsi_3d_terminate.load() || (!reached_end && ((global_solver_3d && global_solver_3d->is_terminated()) ||
                                                 (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->is_terminated()) ||
-                                                (global_solver_mpm_3d && global_solver_mpm_3d->is_terminated()));
+                                                (global_solver_mpm_3d && global_solver_mpm_3d->is_terminated())));
         if (global_enable_vtk.load() && reached_end && should_write_final_vtk(final_sim_time, global_last_vtk_time_fem_fsi_3d.load())) {
             write_vtk_outputs(final_step, final_sim_time);
             update_last_vtk_time(global_last_vtk_time_fem_fsi_3d, final_sim_time);
@@ -5534,8 +5883,11 @@ static void ensure_mpm_debris_solver(const nlohmann::json& msg_obj, bool use_gpu
         auto mpm_bc5 = parse_bc_mpm3d(msg_obj.value("bc_z_min", "Reflecting"));
         auto mpm_bc6 = parse_bc_mpm3d(msg_obj.value("bc_z_max", "Transmitting"));
 
+        bool is_sparse_mpm = get_json_bool(msg_obj, "mpm_sparse_grid", get_json_bool(msg_obj, "sparse_grid", false));
+
         if (!global_solver_mpm_3d) {
             global_solver_mpm_3d = std::make_unique<Blast::MPMSolver3D>();
+            global_solver_mpm_3d->setSparseGridMode(is_sparse_mpm);
             global_solver_mpm_3d->initializeGrid(nx, ny, nz, cs, cs, cs, xmin_d, ymin_d, zmin_d);
             global_solver_mpm_3d->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
         } else {
@@ -5544,6 +5896,7 @@ static void ensure_mpm_debris_solver(const nlohmann::json& msg_obj, bool use_gpu
 
         if (use_gpu && !global_solver_mpm_3d_cuda) {
             global_solver_mpm_3d_cuda = std::make_unique<Blast::MPMSolver3DCUDA>();
+            global_solver_mpm_3d_cuda->setSparseGridMode(is_sparse_mpm);
             global_solver_mpm_3d_cuda->initializeGrid(nx, ny, nz, cs, cs, cs, xmin_d, ymin_d, zmin_d);
             global_solver_mpm_3d_cuda->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
             emit_kernel_log("INFO", "Auto-initialized background GPU CUDA MPM solver for coupled multi-physics / debris.", 0.0, "fem_3d", 0);
@@ -5577,6 +5930,15 @@ int main() {
     });
 
     std::thread stdin_listener_thread([]() {
+        auto emit_paused_ack = [](const std::string& scope, bool was_active) {
+            if (!was_active) return;
+            nlohmann::json st;
+            st["type"] = "status";
+            st["status"] = "PAUSED";
+            if (!scope.empty()) st["scope"] = scope;
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << st.dump() << std::endl;
+        };
         std::string line;
         while (std::getline(std::cin, line)) {
             if (line.empty()) continue;
@@ -5592,6 +5954,32 @@ int main() {
                 }
                 if (msg.contains("model_filename") && !msg["model_filename"].is_null()) {
                     global_model_filename = msg.value("model_filename", "");
+                }
+                if (msg.contains("refresh_rate")) {
+                    double rate = get_json_double(msg, "refresh_rate", 0.5);
+                    if (rate > 0.0) {
+                        int interval = std::max(16, static_cast<int>(std::round(rate * 1000.0)));
+                        global_telemetry_interval_ms = interval;
+                        if (command == "INIT" || command == "STEP" || command == "EXEC_ALL" || command == "EXEC_END" || command == "TELEMETRY_CONFIG" || command == "CONTOUR_CONFIG" || command == "REFRESH_STATE" || command == "REFRESH" || command == "POLL_STATE") {
+                            global_telemetry_interval_ms_1d = interval;
+                        }
+                        global_refresh_rate_mpm = rate;
+                        global_refresh_rate_mpm_3d = rate;
+                        global_refresh_rate_fem_3d = rate;
+                    }
+                } else if (msg.contains("telemetry_interval_ms")) {
+                    int interval = get_json_int(msg, "telemetry_interval_ms", 0);
+                    if (interval > 0) {
+                        interval = std::max(16, interval);
+                        global_telemetry_interval_ms = interval;
+                        if (command == "INIT" || command == "STEP" || command == "EXEC_ALL" || command == "EXEC_END" || command == "TELEMETRY_CONFIG" || command == "CONTOUR_CONFIG" || command == "REFRESH_STATE" || command == "REFRESH" || command == "POLL_STATE") {
+                            global_telemetry_interval_ms_1d = interval;
+                        }
+                        double rate = static_cast<double>(interval) / 1000.0;
+                        global_refresh_rate_mpm = rate;
+                        global_refresh_rate_mpm_3d = rate;
+                        global_refresh_rate_fem_3d = rate;
+                    }
                 }
 
                 if (command.rfind("INIT", 0) == 0) {
@@ -5649,21 +6037,22 @@ int main() {
                         }
                     }
 
-                    // Set boundary conditions
-                    std::string left_bc_str = msg.value("left_bc", "Transmitting");
+                    // Set boundary conditions (r = 0 spherical origin is always REFLECTIVE)
                     std::string right_bc_str = msg.value("right_bc", "Transmitting");
                     auto map_bc_1d = [](const std::string& str) {
-                        if (str == "Transmitting" || str == "transmitting" || str == "TRANSMISSIVE" || str == "transmissive" || str == "Terminate" || str == "terminate") {
+                        if (str == "Terminate" || str == "terminate" || str == "TERMINATE") {
+                            return CFDSolver::TERMINATE;
+                        } else if (str == "Transmitting" || str == "transmitting" || str == "TRANSMISSIVE" || str == "transmissive" || str == "Outflow" || str == "NonReflecting" || str == "Riemann" || str == "Absorbing" || str == "Lysmer") {
                             return CFDSolver::TRANSMISSIVE;
                         } else {
                             return CFDSolver::REFLECTIVE;
                         }
                     };
-                    global_solver->setBCTypes(map_bc_1d(left_bc_str), map_bc_1d(right_bc_str));
+                    global_solver->setBCTypes(CFDSolver::REFLECTIVE, map_bc_1d(right_bc_str));
 
                     int s_order = 2;
-                    int t_order = 4;
-                    parse_cfd_space_time_scheme(msg, s_order, t_order, 4);
+                    int t_order = 2;
+                    parse_cfd_space_time_scheme(msg, s_order, t_order, 2);
 
                     global_solver->setFluxScheme(msg.value("flux_scheme", "AUSM+"));
                     global_solver->setSpatialOrder(s_order);
@@ -5819,6 +6208,7 @@ int main() {
 
                 } else if (command == "STEP") {
                     if (!global_solver) continue;
+                    init_gauges(msg, false);
                     int steps = msg.value("steps", 1);
                     global_cfl = msg.value("cfl", 0.6);
                     if (msg.contains("endtime")) global_endtime = msg.value("endtime", 1.0);
@@ -5835,6 +6225,7 @@ int main() {
                     }
                 } else if (command == "EXEC_ALL" || command == "EXEC_END") {
                     if (!global_solver) continue;
+                    init_gauges(msg, false);
                     global_cfl = msg.value("cfl", 0.6);
                     if (msg.contains("endtime")) global_endtime = msg.value("endtime", 1.0);
                     global_exec_until_end = true;
@@ -5845,8 +6236,10 @@ int main() {
                         std::thread(worker_thread_func).detach();
                     } else { sim_paused = false; }
                 } else if (command == "PAUSE") {
+                    bool was_running = sim_running.load();
                     sim_paused = true;
                     global_target_steps = 0;
+                    emit_paused_ack("1d", was_running);
                 } else if (command == "RESUME") {
                     sim_paused = false;
                 } else if (command == "TERMINATE") {
@@ -5859,6 +6252,7 @@ int main() {
                     global_t = 0.0;
                     global_wallclock_1d = 0.0;
                     step_progress = 0;
+                    std::exit(0);
                 } else if (command == "INIT_2D") {
                     sim2d_terminate = true;
                     while (sim2d_running.load()) {
@@ -6241,7 +6635,7 @@ int main() {
                     emit_telemetry_2d(global_t2d, false);
                 } else if (command == "STEP_2D") {
                     if (!has_solver_2d()) continue;
-                    init_gauges(msg);
+                    init_gauges(msg, false);
                     int steps = msg.value("steps", 1);
                     global_cfl_2d = msg.value("cfl", 0.6);
                     if (msg.contains("endtime")) global_endtime_2d = msg.value("endtime", 1.0);
@@ -6258,7 +6652,7 @@ int main() {
                     }
                 } else if (command == "EXEC_ALL_2D") {
                     if (!has_solver_2d()) continue;
-                    init_gauges(msg);
+                    init_gauges(msg, false);
                     global_cfl_2d = msg.value("cfl", 0.6);
                     if (msg.contains("endtime")) global_endtime_2d = msg.value("endtime", 1.0);
                     global_exec_until_end_2d = true;
@@ -6269,8 +6663,10 @@ int main() {
                         std::thread(worker_2d_thread_func).detach();
                     } else { sim2d_paused = false; }
                 } else if (command == "PAUSE_2D") {
+                    bool was_running = sim2d_running.load();
                     sim2d_paused = true;
                     global_target_steps_2d = 0;
+                    emit_paused_ack("2d", was_running);
                 } else if (command == "RESUME_2D") {
                     sim2d_paused = false;
                 } else if (command == "TERMINATE_2D") {
@@ -6287,7 +6683,17 @@ int main() {
                     global_wallclock_2d = 0.0;
                     step_progress_2d = 0;
                     solver2d_initialized = false;
+                    std::exit(0);
                 } else if (command == "INIT_MPM" || command == "INIT_2D_MPM") {
+                    sim_mpm_terminate = true;
+                    while (sim_mpm_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    global_solver_mpm_2d.reset();
+                    sim_mpm_terminate = false;
+                    sim_mpm_paused = false;
+                    global_target_steps_mpm = 0;
+                    global_exec_until_end_mpm = false;
                     global_solver_mpm_2d = std::make_unique<Blast::MPMSolver2D>();
                     global_endtime_mpm = msg.value("endtime", 1.0);
 
@@ -6298,6 +6704,8 @@ int main() {
                     float dx = static_cast<float>(max_x / nx);
                     float dy = static_cast<float>(max_y / ny);
 
+                    bool is_sparse_mpm = get_json_bool(msg, "mpm_sparse_grid", get_json_bool(msg, "sparse_grid", false));
+                    global_solver_mpm_2d->setSparseGridMode(is_sparse_mpm);
                     global_solver_mpm_2d->initializeGrid(nx, ny, dx, dy);
                     global_solver_mpm_2d->setBoundaryConditions(
                         parse_bc_mpm2d(msg.value("bc_x_min", msg.value("bc_r_min", "FreeSlip"))),
@@ -6388,13 +6796,14 @@ int main() {
                                 burn_model = Blast::ReactionKinetics::CRESTEntropy;
                                 product_model = Blast::DetonationProductEOS::DavisProduct;
                             } else if (mat_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth) {
-                                solid_model = Blast::SolidReactantEOS::MieGruneisen;
+                                solid_model = Blast::SolidReactantEOS::JWLReactant;
                                 burn_model = Blast::ReactionKinetics::LeeTarverODE;
                                 product_model = Blast::DetonationProductEOS::JWLProductGas;
                             }
                             if (!solid_str.empty()) {
                                 if (solid_str.find("Davis") != std::string::npos) solid_model = Blast::SolidReactantEOS::DavisSolid;
                                 else if (solid_str.find("Mie") != std::string::npos || solid_str.find("Gruneisen") != std::string::npos || solid_str.find("Grüneisen") != std::string::npos) solid_model = Blast::SolidReactantEOS::MieGruneisen;
+                                else if (solid_str.find("JWL") != std::string::npos) solid_model = Blast::SolidReactantEOS::JWLReactant;
                             }
                             if (!burn_str.empty()) {
                                 if (burn_str.find("CREST") != std::string::npos) burn_model = Blast::ReactionKinetics::CRESTEntropy;
@@ -6416,21 +6825,8 @@ int main() {
                             int burn_zone_cells = get_json_int(obj, "burn_zone_cells", 4);
                             float tau_burn_min = static_cast<float>(get_json_double(obj, "tau_burn_min", 1.0e-7));
 
-                            float lt_I = static_cast<float>(get_json_double(obj, "lt_I", 4.0e6));
-                            float lt_a = static_cast<float>(get_json_double(obj, "lt_a", 0.24));
-                            float lt_b = static_cast<float>(get_json_double(obj, "lt_b", 0.667));
-                            float lt_x = static_cast<float>(get_json_double(obj, "lt_x", 7.0));
-                            float lt_G1 = static_cast<float>(get_json_double(obj, "lt_G1", 130.0e-6));
-                            float lt_c = static_cast<float>(get_json_double(obj, "lt_c", 0.667));
-                            float lt_d = static_cast<float>(get_json_double(obj, "lt_d", 0.333));
-                            float lt_y = static_cast<float>(get_json_double(obj, "lt_y", 2.0));
-                            float lt_G2 = static_cast<float>(get_json_double(obj, "lt_G2", 400.0e-6));
-                            float lt_e = static_cast<float>(get_json_double(obj, "lt_e", 0.333));
-                            float lt_g = static_cast<float>(get_json_double(obj, "lt_g", 0.667));
-                            float lt_z = static_cast<float>(get_json_double(obj, "lt_z", 3.0));
-                            float lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", get_json_double(obj, "lt_F_ig_max", 0.02)));
-                            float lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", get_json_double(obj, "lt_F_G1_max", 0.50)));
-                            float lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", get_json_double(obj, "lt_F_G2_min", 0.50)));
+                            const Blast::ReactiveJson::LeeTarverParams ltp = Blast::ReactiveJson::readLeeTarverParams(obj,
+                                mat_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth || burn_model == Blast::ReactionKinetics::LeeTarverODE);
 
                             float davis_c0 = static_cast<float>(get_json_double(obj, "davis_c0", 2050.0));
                             float davis_s1 = static_cast<float>(get_json_double(obj, "davis_s1", 2.12));
@@ -6526,21 +6922,7 @@ int main() {
                                     p.detonation_energy = detonation_energy;
                                     p.burn_zone_cells = burn_zone_cells;
                                     p.tau_burn_min = tau_burn_min;
-                                    p.lt_I = lt_I;
-                                    p.lt_a = lt_a;
-                                    p.lt_b = lt_b;
-                                    p.lt_x = lt_x;
-                                    p.lt_G1 = lt_G1;
-                                    p.lt_c = lt_c;
-                                    p.lt_d = lt_d;
-                                    p.lt_y = lt_y;
-                                    p.lt_G2 = lt_G2;
-                                    p.lt_e = lt_e;
-                                    p.lt_g = lt_g;
-                                    p.lt_z = lt_z;
-                                    p.lt_ig_max = lt_ig_max;
-                                    p.lt_growth_max = lt_growth_max;
-                                    p.lt_comp_min = lt_comp_min;
+                                    ltp.apply(p);
                                     p.davis_c0 = davis_c0;
                                     p.davis_s1 = davis_s1;
                                     p.davis_gamma0 = davis_gamma0;
@@ -6601,6 +6983,15 @@ int main() {
                                     p.anisotropy_ratio = aniso_ratio;
                                     p.anisotropy_dir[0] = aniso_dir_x;
                                     p.anisotropy_dir[1] = aniso_dir_y;
+                                    p.enable_density_erosion = get_json_bool(obj, "enable_density_erosion", get_json_bool(msg, "enable_density_erosion", false));
+                                    p.erosion_min_density = static_cast<float>(get_json_double(obj, "erosion_min_density", get_json_double(msg, "erosion_min_density", 0.0)));
+                                    p.erosion_min_density_ratio = static_cast<float>(get_json_double(obj, "erosion_min_density_ratio", get_json_double(msg, "erosion_min_density_ratio", 0.0)));
+                                    p.erode_to_fv_grid = get_json_bool(obj, "erode_to_fv_grid", get_json_bool(msg, "erode_to_fv_grid", true));
+                                    p.tait_rho0 = static_cast<float>(get_json_double(obj, "tait_rho0", get_json_double(obj, "density", 1000.0)));
+                                    p.tait_B = static_cast<float>(get_json_double(obj, "tait_B", 300.0e6));
+                                    p.tait_gamma = static_cast<float>(get_json_double(obj, "tait_gamma", 7.15));
+                                    p.tait_p0 = static_cast<float>(get_json_double(obj, "tait_p0", 101325.0));
+                                    p.mu_visc = static_cast<float>(get_json_double(obj, "mu_visc", 1.0e-3));
                                 }
                             }
                         }
@@ -6612,11 +7003,14 @@ int main() {
                     }
 
                     global_solver_mpm_2d->particleToGrid();
-                    emit_telemetry_mpm_2d(0.0, false);
+                    init_gauges(msg);
+                    record_gauges_2d(0.0);
+                    emit_telemetry_mpm_2d(0.0, false, 0);
                     std::string init_log = "2D MPM Solver Initialized (" + std::to_string(global_solver_mpm_2d->getParticles().size()) + " particles, PPC=" + std::to_string(domain_ppc) + ")";
                     emit_kernel_log("SYSTEM", init_log, 0.0, "mpm_2d");
                 } else if (command == "STEP_MPM" || command == "STEP_2D_MPM") {
                     if (!global_solver_mpm_2d) continue;
+                    init_gauges(msg, false);
                     int steps = get_json_int(msg, "steps", 1);
                     global_cfl_mpm = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     if (msg.contains("endtime")) global_endtime_mpm = msg.value("endtime", 1.0);
@@ -6633,6 +7027,7 @@ int main() {
                     }
                 } else if (command == "EXEC_ALL_MPM") {
                     if (!global_solver_mpm_2d) continue;
+                    init_gauges(msg, false);
                     global_cfl_mpm = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     if (msg.contains("endtime")) global_endtime_mpm = msg.value("endtime", 1.0);
                     global_exec_until_end_mpm = true;
@@ -6645,8 +7040,10 @@ int main() {
                         sim_mpm_paused = false;
                     }
                 } else if (command == "PAUSE_MPM") {
+                    bool was_running = sim_mpm_running.load();
                     sim_mpm_paused = true;
                     global_target_steps_mpm = 0;
+                    emit_paused_ack("2d", was_running);
                 } else if (command == "RESUME_MPM") {
                     sim_mpm_paused = false;
                 } else if (command == "TERMINATE_MPM") {
@@ -6655,6 +7052,7 @@ int main() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     }
                     global_solver_mpm_2d.reset();
+                    std::exit(0);
                 } else if (command == "INIT_MPM_3D" || command == "INIT_3D_MPM") {
                     try {
                         sim_mpm_3d_terminate = true;
@@ -6693,10 +7091,14 @@ int main() {
                         }
                     }
                     if (msg.contains("refresh_rate")) {
-                        global_refresh_rate_mpm_3d = get_json_double(msg, "refresh_rate", 0.5);
-                    }
-                    if (msg.contains("telemetry_interval_ms")) {
-                        global_telemetry_interval_ms = get_json_int(msg, "telemetry_interval_ms", 100);
+                        double rate = get_json_double(msg, "refresh_rate", 0.5);
+                        global_refresh_rate_mpm_3d = rate;
+                        if (rate > 0.0) {
+                            global_telemetry_interval_ms = std::max(16, static_cast<int>(std::round(rate * 1000.0)));
+                        }
+                    } else if (msg.contains("telemetry_interval_ms")) {
+                        int interval_param = get_json_int(msg, "telemetry_interval_ms", 100);
+                        if (interval_param > 0) global_telemetry_interval_ms = std::max(16, interval_param);
                     }
                     if (msg.contains("particle_stride")) {
                         global_mpm_particle_stride = std::max(1, msg.value("particle_stride", 1));
@@ -6739,13 +7141,16 @@ int main() {
                     }
 
                     bool is_cuda_mpm = is_cuda_device(device);
+                    bool is_sparse_mpm = get_json_bool(msg, "mpm_sparse_grid", get_json_bool(msg, "sparse_grid", false));
                     size_t est_particles = estimateMPMTotalParticles(msg, dx, dy, dz);
-                    auto est_mpm = Blast::estimateMPM3DMemory(nx, ny, nz, est_particles, is_cuda_mpm);
+                    auto est_mpm = Blast::estimateMPM3DMemory(nx, ny, nz, est_particles, is_cuda_mpm, is_sparse_mpm);
                     Blast::validateMemoryBudget(est_mpm.ram_bytes, est_mpm.vram_bytes, is_cuda_mpm, "3D MPM Solver");
 
                     if (global_solver_mpm_3d_cuda) {
+                        global_solver_mpm_3d_cuda->setSparseGridMode(is_sparse_mpm);
                         global_solver_mpm_3d_cuda->initializeGrid(nx, ny, nz, dx, dy, dz, xmin, ymin, zmin);
                     } else {
+                        global_solver_mpm_3d->setSparseGridMode(is_sparse_mpm);
                         global_solver_mpm_3d->initializeGrid(nx, ny, nz, dx, dy, dz, xmin, ymin, zmin);
                     }
 
@@ -6952,6 +7357,18 @@ int main() {
                         for (const auto& obj : msg["mpm_objects"]) {
                             obj_idx++;
                             Blast::MaterialTable3D parsed_mat = parseMaterialTable3D(obj);
+                            if (!obj.contains("enable_density_erosion") && msg.contains("enable_density_erosion")) {
+                                parsed_mat.enable_density_erosion = get_json_bool(msg, "enable_density_erosion", false);
+                            }
+                            if (!obj.contains("erosion_min_density") && msg.contains("erosion_min_density")) {
+                                parsed_mat.erosion_min_density = static_cast<float>(get_json_double(msg, "erosion_min_density", 0.0));
+                            }
+                            if (!obj.contains("erosion_min_density_ratio") && msg.contains("erosion_min_density_ratio")) {
+                                parsed_mat.erosion_min_density_ratio = static_cast<float>(get_json_double(msg, "erosion_min_density_ratio", 0.0));
+                            }
+                            if (!obj.contains("erode_to_fv_grid") && msg.contains("erode_to_fv_grid")) {
+                                parsed_mat.erode_to_fv_grid = get_json_bool(msg, "erode_to_fv_grid", true);
+                            }
                             std::string mat_model_str = obj.value("material_model", "Hypoelastic");
                             std::cout << "[BlastSolver] Object " << obj_idx << " Constitutive Model: " << mat_model_str
                                       << " -> Enum=" << static_cast<int>(parsed_mat.material_model) << std::endl;
@@ -7308,8 +7725,10 @@ int main() {
                     }
 
                 } else if (command == "PAUSE_MPM_3D") {
+                    bool was_running = sim_mpm_3d_running.load();
                     sim_mpm_3d_paused = true;
                     global_target_steps_mpm_3d = 0;
+                    emit_paused_ack("3d", was_running);
 
                 } else if (command == "RESUME_MPM_3D") {
                     sim_mpm_3d_paused = false;
@@ -7321,12 +7740,14 @@ int main() {
                     }
                     global_solver_mpm_3d.reset();
                     global_solver_mpm_3d_cuda.reset();
+                    std::exit(0);
                 } else if (command == "INIT_FSI_2D" || command == "INIT_FSI") {
                     try {
                         sim2d_terminate = true;
-                    while (sim2d_running.load() || sim_fsi_running.load()) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    }
+                        sim_fsi_terminate = true;
+                        while (sim2d_running.load() || sim_fsi_running.load()) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                        }
                     global_solver_2d.reset();
                     global_solver_2d_cuda.reset();
                     global_solver_mpm_2d.reset();
@@ -7432,6 +7853,8 @@ int main() {
                     global_solver_mpm_2d = std::make_unique<Blast::MPMSolver2D>();
                     float dx = static_cast<float>(max_r / nr);
                     float dy = static_cast<float>(max_z / nz);
+                    bool is_sparse_mpm = get_json_bool(msg, "mpm_sparse_grid", get_json_bool(msg, "sparse_grid", false));
+                    global_solver_mpm_2d->setSparseGridMode(is_sparse_mpm);
                     global_solver_mpm_2d->initializeGrid(nr, nz, dx, dy);
                     global_solver_mpm_2d->setBoundaryConditions(
                         parse_bc_mpm2d(msg.value("bc_r_min", msg.value("bc_x_min", "FreeSlip"))),
@@ -7517,13 +7940,14 @@ int main() {
                                 burn_model = Blast::ReactionKinetics::CRESTEntropy;
                                 product_model = Blast::DetonationProductEOS::DavisProduct;
                             } else if (mat_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth) {
-                                solid_model = Blast::SolidReactantEOS::MieGruneisen;
+                                solid_model = Blast::SolidReactantEOS::JWLReactant;
                                 burn_model = Blast::ReactionKinetics::LeeTarverODE;
                                 product_model = Blast::DetonationProductEOS::JWLProductGas;
                             }
                             if (!solid_str.empty()) {
                                 if (solid_str.find("Davis") != std::string::npos) solid_model = Blast::SolidReactantEOS::DavisSolid;
                                 else if (solid_str.find("Mie") != std::string::npos || solid_str.find("Gruneisen") != std::string::npos || solid_str.find("Grüneisen") != std::string::npos) solid_model = Blast::SolidReactantEOS::MieGruneisen;
+                                else if (solid_str.find("JWL") != std::string::npos) solid_model = Blast::SolidReactantEOS::JWLReactant;
                             }
                             if (!burn_str.empty()) {
                                 if (burn_str.find("CREST") != std::string::npos) burn_model = Blast::ReactionKinetics::CRESTEntropy;
@@ -7545,21 +7969,8 @@ int main() {
                             int burn_zone_cells = get_json_int(obj, "burn_zone_cells", 4);
                             float tau_burn_min = static_cast<float>(get_json_double(obj, "tau_burn_min", 1.0e-7));
 
-                            float lt_I = static_cast<float>(get_json_double(obj, "lt_I", 4.0e6));
-                            float lt_a = static_cast<float>(get_json_double(obj, "lt_a", 0.24));
-                            float lt_b = static_cast<float>(get_json_double(obj, "lt_b", 0.667));
-                            float lt_x = static_cast<float>(get_json_double(obj, "lt_x", 7.0));
-                            float lt_G1 = static_cast<float>(get_json_double(obj, "lt_G1", 130.0e-6));
-                            float lt_c = static_cast<float>(get_json_double(obj, "lt_c", 0.667));
-                            float lt_d = static_cast<float>(get_json_double(obj, "lt_d", 0.333));
-                            float lt_y = static_cast<float>(get_json_double(obj, "lt_y", 2.0));
-                            float lt_G2 = static_cast<float>(get_json_double(obj, "lt_G2", 400.0e-6));
-                            float lt_e = static_cast<float>(get_json_double(obj, "lt_e", 0.333));
-                            float lt_g = static_cast<float>(get_json_double(obj, "lt_g", 0.667));
-                            float lt_z = static_cast<float>(get_json_double(obj, "lt_z", 3.0));
-                            float lt_ig_max = static_cast<float>(get_json_double(obj, "lt_ig_max", get_json_double(obj, "lt_F_ig_max", 0.02)));
-                            float lt_growth_max = static_cast<float>(get_json_double(obj, "lt_growth_max", get_json_double(obj, "lt_F_G1_max", 0.50)));
-                            float lt_comp_min = static_cast<float>(get_json_double(obj, "lt_comp_min", get_json_double(obj, "lt_F_G2_min", 0.50)));
+                            const Blast::ReactiveJson::LeeTarverParams ltp = Blast::ReactiveJson::readLeeTarverParams(obj,
+                                mat_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth || burn_model == Blast::ReactionKinetics::LeeTarverODE);
 
                             float davis_c0 = static_cast<float>(get_json_double(obj, "davis_c0", 2050.0));
                             float davis_s1 = static_cast<float>(get_json_double(obj, "davis_s1", 2.12));
@@ -7655,21 +8066,7 @@ int main() {
                                     p.detonation_energy = detonation_energy;
                                     p.burn_zone_cells = burn_zone_cells;
                                     p.tau_burn_min = tau_burn_min;
-                                    p.lt_I = lt_I;
-                                    p.lt_a = lt_a;
-                                    p.lt_b = lt_b;
-                                    p.lt_x = lt_x;
-                                    p.lt_G1 = lt_G1;
-                                    p.lt_c = lt_c;
-                                    p.lt_d = lt_d;
-                                    p.lt_y = lt_y;
-                                    p.lt_G2 = lt_G2;
-                                    p.lt_e = lt_e;
-                                    p.lt_g = lt_g;
-                                    p.lt_z = lt_z;
-                                    p.lt_ig_max = lt_ig_max;
-                                    p.lt_growth_max = lt_growth_max;
-                                    p.lt_comp_min = lt_comp_min;
+                                    ltp.apply(p);
                                     p.davis_c0 = davis_c0;
                                     p.davis_s1 = davis_s1;
                                     p.davis_gamma0 = davis_gamma0;
@@ -7745,6 +8142,15 @@ int main() {
                                     p.anisotropy_ratio = aniso_ratio;
                                     p.anisotropy_dir[0] = aniso_dir_x;
                                     p.anisotropy_dir[1] = aniso_dir_y;
+                                    p.enable_density_erosion = get_json_bool(obj, "enable_density_erosion", get_json_bool(msg, "enable_density_erosion", false));
+                                    p.erosion_min_density = static_cast<float>(get_json_double(obj, "erosion_min_density", get_json_double(msg, "erosion_min_density", 0.0)));
+                                    p.erosion_min_density_ratio = static_cast<float>(get_json_double(obj, "erosion_min_density_ratio", get_json_double(msg, "erosion_min_density_ratio", 0.0)));
+                                    p.erode_to_fv_grid = get_json_bool(obj, "erode_to_fv_grid", get_json_bool(msg, "erode_to_fv_grid", true));
+                                    p.tait_rho0 = static_cast<float>(get_json_double(obj, "tait_rho0", get_json_double(obj, "density", 1000.0)));
+                                    p.tait_B = static_cast<float>(get_json_double(obj, "tait_B", 300.0e6));
+                                    p.tait_gamma = static_cast<float>(get_json_double(obj, "tait_gamma", 7.15));
+                                    p.tait_p0 = static_cast<float>(get_json_double(obj, "tait_p0", 101325.0));
+                                    p.mu_visc = static_cast<float>(get_json_double(obj, "mu_visc", 1.0e-3));
                                 }
                             }
                         }
@@ -7794,8 +8200,12 @@ int main() {
                         sim_fsi_paused = false;
                     }
                 } else if (command == "PAUSE_FSI_2D" || command == "PAUSE_FSI") {
+                    bool was_running = sim_fsi_running.load();
                     sim_fsi_paused = true;
                     global_target_steps_fsi = 0;
+                    emit_paused_ack("2d", was_running);
+                } else if (command == "RESUME_FSI_2D" || command == "RESUME_FSI") {
+                    sim_fsi_paused = false;
                 } else if (command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI") {
                     sim_fsi_terminate = true;
                     while (sim_fsi_running.load()) {
@@ -7804,6 +8214,7 @@ int main() {
                     global_solver_2d.reset();
                     global_solver_mpm_2d.reset();
                     solver2d_initialized = false;
+                    std::exit(0);
                 } else if (command == "INIT_FSI_3D") {
                     try {
                         sim3d_terminate = true;
@@ -7892,11 +8303,30 @@ int main() {
                     bool is_double = (precision == "double");
                     auto est_cfd = Blast::estimateCFD3DMemory(nx, ny, nz, is_cuda_cfd, is_double, is_multimat);
 
-                    float mpm_dx = static_cast<float>(cellSize);
-                    float mpm_dy = static_cast<float>(cellSize);
-                    float mpm_dz = static_cast<float>(cellSize);
+                    double mpm_cellSize = get_json_double(msg, "mpm_cell_size", cellSize);
+                    if (mpm_cellSize <= 0.0) mpm_cellSize = cellSize;
+                    double mpm_xmin = get_json_double(msg, "mpm_xmin", xmin);
+                    double mpm_ymin = get_json_double(msg, "mpm_ymin", ymin);
+                    double mpm_zmin = get_json_double(msg, "mpm_zmin", zmin);
+                    double mpm_xmax = get_json_double(msg, "mpm_xmax", xmax);
+                    double mpm_ymax = get_json_double(msg, "mpm_ymax", ymax);
+                    double mpm_zmax = get_json_double(msg, "mpm_zmax", zmax);
+                    int default_mpm_nx = std::max(1, static_cast<int>(std::round((mpm_xmax - mpm_xmin) / mpm_cellSize)));
+                    int default_mpm_ny = std::max(1, static_cast<int>(std::round((mpm_ymax - mpm_ymin) / mpm_cellSize)));
+                    int default_mpm_nz = std::max(1, static_cast<int>(std::round((mpm_zmax - mpm_zmin) / mpm_cellSize)));
+                    int mpm_nx = get_json_int(msg, "mpm_nx", default_mpm_nx);
+                    int mpm_ny = get_json_int(msg, "mpm_ny", default_mpm_ny);
+                    int mpm_nz = get_json_int(msg, "mpm_nz", default_mpm_nz);
+                    if (mpm_nx <= 0) mpm_nx = default_mpm_nx;
+                    if (mpm_ny <= 0) mpm_ny = default_mpm_ny;
+                    if (mpm_nz <= 0) mpm_nz = default_mpm_nz;
+
+                    float mpm_dx = static_cast<float>(mpm_cellSize);
+                    float mpm_dy = static_cast<float>(mpm_cellSize);
+                    float mpm_dz = static_cast<float>(mpm_cellSize);
+                    bool is_sparse_mpm = get_json_bool(msg, "mpm_sparse_grid", get_json_bool(msg, "sparse_grid", false));
                     size_t est_mpm_particles = estimateMPMTotalParticles(msg, mpm_dx, mpm_dy, mpm_dz);
-                    auto est_mpm = Blast::estimateMPM3DMemory(nx, ny, nz, est_mpm_particles, is_cuda_cfd);
+                    auto est_mpm = Blast::estimateMPM3DMemory(mpm_nx, mpm_ny, mpm_nz, est_mpm_particles, is_cuda_cfd, is_sparse_mpm);
 
                     size_t total_ram = est_cfd.ram_bytes + est_mpm.ram_bytes;
                     size_t total_vram = est_cfd.vram_bytes + est_mpm.vram_bytes;
@@ -7922,13 +8352,8 @@ int main() {
                     }
 
                     std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
-                    int spatial_order = 2;
-                    int temporal_order = 4;
-                    parse_cfd_space_time_scheme(msg, spatial_order, temporal_order, 4);
-
                     global_solver_3d->setFluxScheme(flux_scheme);
-                    global_solver_3d->setSpatialOrder(spatial_order);
-                    global_solver_3d->setTemporalOrder(temporal_order);
+                    global_solver_3d->setSpaceTimeScheme(parse_cfd_space_time_scheme_3d(msg));
                     apply_cfd_tait_config(msg, global_solver_3d.get());
 
                     Charge3DParams cp;
@@ -7952,7 +8377,7 @@ int main() {
                     cp.rot_y = get_json_double(msg, "charge_rot_y", get_json_double(msg, "rot_y", 0.0));
                     cp.rot_z = get_json_double(msg, "charge_rot_z", get_json_double(msg, "rot_z", 0.0));
 
-                    if (init_mode == "From1D" || init_mode == "From2D") {
+                    if (init_mode == "From1D" || init_mode == "From2D" || init_mode == "From3D") {
                         cp.radius = 0.0;
                         cp.lx = 0.0;
                         cp.ly = 0.0;
@@ -8021,7 +8446,7 @@ int main() {
                     {
                         std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
                         if (g_pending_remap.has_pending) {
-                            if (init_mode == "From1D" || init_mode == "From2D") {
+                            if (init_mode == "From1D" || init_mode == "From2D" || init_mode == "From3D") {
                                 std::cout << "[INFO] Applying queued pending " << g_pending_remap.type << " remap onto 3D solver in INIT_FSI_3D..." << std::endl;
                                 apply_remap_payload(g_pending_remap.msg, g_pending_remap.type, global_solver_3d.get(), nullptr, nullptr);
                             }
@@ -8041,17 +8466,23 @@ int main() {
                         map_bc_3d(msg.value("bc_z_min", "Reflecting")), map_bc_3d(msg.value("bc_z_max", "Transmitting"))
                     );
 
-                    // 2. Initialize MPM 3D solver
-                    float dx = static_cast<float>(cellSize);
-                    float dy = static_cast<float>(cellSize);
-                    float dz = static_cast<float>(cellSize);
+                    // 2. Initialize MPM 3D solver (supports dual-resolution MPM grid coupled to CFD grid)
+                    float dx = mpm_dx;
+                    float dy = mpm_dy;
+                    float dz = mpm_dz;
                     if (is_cuda_device(device)) {
                         global_solver_mpm_3d_cuda = std::make_unique<Blast::MPMSolver3DCUDA>();
-                        global_solver_mpm_3d_cuda->initializeGrid(nx, ny, nz, dx, dy, dz, xmin, ymin, zmin);
+                        global_solver_mpm_3d_cuda->setSparseGridMode(is_sparse_mpm);
+                        global_solver_mpm_3d_cuda->setDeferFVErosionToCoupler(true);
+                        global_solver_mpm_3d_cuda->initializeGrid(mpm_nx, mpm_ny, mpm_nz, dx, dy, dz,
+                                                                  static_cast<float>(mpm_xmin), static_cast<float>(mpm_ymin), static_cast<float>(mpm_zmin));
                         global_solver_mpm_3d_cuda->setZonalHandoffParams(zonal_params);
                     } else {
                         global_solver_mpm_3d = std::make_unique<Blast::MPMSolver3D>();
-                        global_solver_mpm_3d->initializeGrid(nx, ny, nz, dx, dy, dz, xmin, ymin, zmin);
+                        global_solver_mpm_3d->setSparseGridMode(is_sparse_mpm);
+                        global_solver_mpm_3d->setDeferFVErosionToCoupler(true);
+                        global_solver_mpm_3d->initializeGrid(mpm_nx, mpm_ny, mpm_nz, dx, dy, dz,
+                                                             static_cast<float>(mpm_xmin), static_cast<float>(mpm_ymin), static_cast<float>(mpm_zmin));
                     }
 
                     std::string transfer_scheme = msg.value("transfer_scheme", "BSpline");
@@ -8257,6 +8688,18 @@ int main() {
                         for (const auto& obj : msg["mpm_objects"]) {
                             obj_idx++;
                             Blast::MaterialTable3D parsed_mat = parseMaterialTable3D(obj);
+                            if (!obj.contains("enable_density_erosion") && msg.contains("enable_density_erosion")) {
+                                parsed_mat.enable_density_erosion = get_json_bool(msg, "enable_density_erosion", false);
+                            }
+                            if (!obj.contains("erosion_min_density") && msg.contains("erosion_min_density")) {
+                                parsed_mat.erosion_min_density = static_cast<float>(get_json_double(msg, "erosion_min_density", 0.0));
+                            }
+                            if (!obj.contains("erosion_min_density_ratio") && msg.contains("erosion_min_density_ratio")) {
+                                parsed_mat.erosion_min_density_ratio = static_cast<float>(get_json_double(msg, "erosion_min_density_ratio", 0.0));
+                            }
+                            if (!obj.contains("erode_to_fv_grid") && msg.contains("erode_to_fv_grid")) {
+                                parsed_mat.erode_to_fv_grid = get_json_bool(msg, "erode_to_fv_grid", true);
+                            }
                             std::string mat_model_str = obj.value("material_model", "Hypoelastic");
                             std::cout << "[BlastSolver] FSI Object " << obj_idx << " Constitutive Model: " << mat_model_str
                                       << " -> Enum=" << static_cast<int>(parsed_mat.material_model) << std::endl;
@@ -8597,16 +9040,17 @@ int main() {
 
                     setup_phase_tracking_particles_3d(msg);
                     init_gauges(msg);
-                    emit_kernel_log("SYSTEM", "3D Coupled FSI Solver (CFD + MPM) Initialized", 0.0, "3d");
+                    record_gauges_3d(global_t3d);
+                    emit_kernel_log("SYSTEM", "3D Coupled FSI Solver (CFD + MPM) Initialized", global_t3d, "3d");
 
-                    emit_telemetry_3d(0.0, false);
+                    emit_telemetry_3d(global_t3d, false, 0);
 
                     nlohmann::json prog_report;
                     prog_report["type"] = "progress";
                     prog_report["percent"] = 100;
                     prog_report["scope"] = "3d";
                     prog_report["mode"] = "INIT_FSI_3D";
-                    prog_report["sim_time"] = 0.0;
+                    prog_report["sim_time"] = global_t3d;
                     prog_report["step"] = 0;
                     {
                         std::lock_guard<std::mutex> lock(cout_mutex);
@@ -8622,6 +9066,14 @@ int main() {
                         std::exit(1);
                     }
                 } else if (command == "INIT_FEM_3D" || command == "INIT_3D_FEM") {
+                    sim_fem_3d_terminate = true;
+                    while (sim_fem_3d_running.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    sim_fem_3d_terminate = false;
+                    sim_fem_3d_paused = false;
+                    global_target_steps_fem_3d = 0;
+                    global_exec_until_end_fem_3d = false;
                     std::string model_id = msg.value("modelId", msg.value("model_id", global_model_id.empty() ? "default_fem" : global_model_id));
                     global_model_id = model_id;
                     global_endtime_fem_3d = msg.value("endtime", 1.0);
@@ -8862,7 +9314,11 @@ int main() {
                     global_cfl_fem_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     if (msg.contains("endtime")) global_endtime_fem_3d = msg.value("endtime", 1.0);
                     if (msg.contains("refresh_rate")) {
-                        global_refresh_rate_fem_3d = get_json_double(msg, "refresh_rate", 0.5);
+                        double rate = get_json_double(msg, "refresh_rate", 0.5);
+                        global_refresh_rate_fem_3d = rate;
+                        if (rate > 0.0) {
+                            global_telemetry_interval_ms = std::max(16, static_cast<int>(std::round(rate * 1000.0)));
+                        }
                     }
                     global_exec_until_end_fem_3d = false;
                     if (!sim_fem_3d_running) {
@@ -8882,7 +9338,11 @@ int main() {
                     global_cfl_fem_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
                     if (msg.contains("endtime")) global_endtime_fem_3d = msg.value("endtime", 1.0);
                     if (msg.contains("refresh_rate")) {
-                        global_refresh_rate_fem_3d = get_json_double(msg, "refresh_rate", 0.5);
+                        double rate = get_json_double(msg, "refresh_rate", 0.5);
+                        global_refresh_rate_fem_3d = rate;
+                        if (rate > 0.0) {
+                            global_telemetry_interval_ms = std::max(16, static_cast<int>(std::round(rate * 1000.0)));
+                        }
                     }
                     global_exec_until_end_fem_3d = true;
                     if (!sim_fem_3d_running) {
@@ -8895,8 +9355,13 @@ int main() {
                     }
 
                 } else if (command == "PAUSE_FEM_3D") {
+                    bool was_running = sim_fem_3d_running.load();
                     sim_fem_3d_paused = true;
                     global_target_steps_fem_3d = 0;
+                    emit_paused_ack("3d", was_running);
+
+                } else if (command == "RESUME_FEM_3D") {
+                    sim_fem_3d_paused = false;
 
                 } else if (command == "TERMINATE_FEM_3D") {
                     sim_fem_3d_terminate = true;
@@ -8907,6 +9372,7 @@ int main() {
                     global_fem_solvers_double.clear();
                     global_fem_solvers_cuda_float.clear();
                     global_fem_solvers_cuda_double.clear();
+                    std::exit(0);
                 } else if (command == "STEP_FSI_3D") {
                     int steps = get_json_int(msg, "steps", 1);
                     global_cfl_fsi_3d = static_cast<float>(get_json_double(msg, "cfl", 0.6));
@@ -8937,8 +9403,13 @@ int main() {
                     }
 
                 } else if (command == "PAUSE_FSI_3D") {
+                    bool was_running = sim_fsi_3d_running.load();
                     sim_fsi_3d_paused = true;
                     global_target_steps_fsi_3d = 0;
+                    emit_paused_ack("3d", was_running);
+
+                } else if (command == "RESUME_FSI_3D") {
+                    sim_fsi_3d_paused = false;
 
                 } else if (command == "TERMINATE_FSI_3D") {
                     sim_fsi_3d_terminate = true;
@@ -8949,6 +9420,7 @@ int main() {
                     global_phase_particles_3d.reset();
                     global_solver_mpm_3d.reset();
                     global_solver_mpm_3d_cuda.reset();
+                    std::exit(0);
                 } else if (command == "INIT_FEM_FSI_3D") {
                     try {
                         sim3d_terminate = true;
@@ -9056,13 +9528,8 @@ int main() {
                         }
 
                         std::string flux_scheme = msg.value("flux_scheme", "AUSM+");
-                        int spatial_order = 2;
-                        int temporal_order = 4;
-                        parse_cfd_space_time_scheme(msg, spatial_order, temporal_order, 4);
-
                         global_solver_3d->setFluxScheme(flux_scheme);
-                        global_solver_3d->setSpatialOrder(spatial_order);
-                        global_solver_3d->setTemporalOrder(temporal_order);
+                        global_solver_3d->setSpaceTimeScheme(parse_cfd_space_time_scheme_3d(msg));
                         apply_cfd_tait_config(msg, global_solver_3d.get());
 
                         Charge3DParams cp;
@@ -9086,7 +9553,7 @@ int main() {
                         cp.rot_y = get_json_double(msg, "charge_rot_y", get_json_double(msg, "rot_y", 0.0));
                         cp.rot_z = get_json_double(msg, "charge_rot_z", get_json_double(msg, "rot_z", 0.0));
 
-                        if (init_mode == "From1D" || init_mode == "From2D") {
+                        if (init_mode == "From1D" || init_mode == "From2D" || init_mode == "From3D") {
                             cp.radius = 0.0;
                             cp.lx = 0.0;
                             cp.ly = 0.0;
@@ -9124,7 +9591,7 @@ int main() {
                         {
                             std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
                             if (g_pending_remap.has_pending) {
-                                if (init_mode == "From1D" || init_mode == "From2D") {
+                                if (init_mode == "From1D" || init_mode == "From2D" || init_mode == "From3D") {
                                     std::cout << "[INFO] Applying queued pending " << g_pending_remap.type << " remap onto 3D solver in INIT_FEM_FSI_3D..." << std::endl;
                                     apply_remap_payload(g_pending_remap.msg, g_pending_remap.type, global_solver_3d.get(), nullptr, nullptr);
                                 }
@@ -9410,16 +9877,17 @@ int main() {
 
                         setup_phase_tracking_particles_3d(msg);
                         init_gauges(msg);
-                        emit_kernel_log("SYSTEM", "3D Coupled Multi-Physics Solver (CFD + MPM + FEM) Initialized", 0.0, "3d");
-                        emit_telemetry_3d(0.0, false);
-                        emit_telemetry_fem_3d(0.0, false);
+                        record_gauges_3d(global_t3d);
+                        emit_kernel_log("SYSTEM", "3D Coupled Multi-Physics Solver (CFD + MPM + FEM) Initialized", global_t3d, "3d");
+                        emit_telemetry_3d(global_t3d, false, 0);
+                        emit_telemetry_fem_3d(global_t3d, false);
 
                         nlohmann::json prog_report;
                         prog_report["type"] = "progress";
                         prog_report["percent"] = 100;
                         prog_report["scope"] = "3d";
                         prog_report["mode"] = "INIT_FEM_FSI_3D";
-                        prog_report["sim_time"] = 0.0;
+                        prog_report["sim_time"] = global_t3d;
                         prog_report["step"] = 0;
                         {
                             std::lock_guard<std::mutex> lock(cout_mutex);
@@ -9462,8 +9930,14 @@ int main() {
                         sim_fem_fsi_3d_paused = false;
                     }
                 } else if (command == "PAUSE_FEM_FSI_3D") {
+                    bool was_running = sim_fem_fsi_3d_running.load();
                     sim_fem_fsi_3d_paused = true;
                     global_target_steps_fem_fsi_3d = 0;
+                    emit_paused_ack("3d", was_running);
+
+                } else if (command == "RESUME_FEM_FSI_3D") {
+                    sim_fem_fsi_3d_paused = false;
+
                 } else if (command == "TERMINATE_FEM_FSI_3D") {
                     sim_fem_fsi_3d_terminate = true;
                     while (sim_fem_fsi_3d_running.load()) {
@@ -9478,6 +9952,7 @@ int main() {
                     global_fem_fsi_couplers_double.clear();
                     global_fem_fsi_couplers_cuda_float.clear();
                     global_fem_fsi_couplers_cuda_double.clear();
+                    std::exit(0);
                 } else if (command == "REMAP") {
                     if (sim3d_init_in_progress.load()) {
                         std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
@@ -9514,6 +9989,76 @@ int main() {
                         g_pending_remap.msg = msg;
                         emit_kernel_log("REMAP_2D", "Received 2D remap payload before solver creation. Queued for completion.", 0.0, "3d");
                     }
+                } else if (command == "REMAP_3D") {
+                    if (sim3d_init_in_progress.load()) {
+                        std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
+                        g_pending_remap.has_pending = true;
+                        g_pending_remap.type = "3D";
+                        g_pending_remap.msg = msg;
+                        emit_kernel_log("REMAP_3D", "Received 3D remap payload during 3D initialization. Queued for completion.", 0.0, "3d");
+                    } else if (global_solver_3d) {
+                        apply_remap_payload(msg, "3D", global_solver_3d.get(), nullptr, nullptr);
+                    } else {
+                        std::lock_guard<std::mutex> lock(g_pending_remap_mutex);
+                        g_pending_remap.has_pending = true;
+                        g_pending_remap.type = "3D";
+                        g_pending_remap.msg = msg;
+                        emit_kernel_log("REMAP_3D", "Received 3D remap payload before solver creation. Queued for completion.", 0.0, "3d");
+                    }
+                } else if (command == "EXPORT_REMAP_3D") {
+                    std::string src_mid = msg.value("modelId", global_model_id);
+                    std::string target_mid = msg.value("targetModelId", "");
+                    std::string remap_file = msg.value("remap_file", std::string("/tmp/blastdaemon_remap3d_") + src_mid + ".bin");
+                    if (!global_solver_3d) {
+                        emit_kernel_log("ERROR", "EXPORT_REMAP_3D called but 3D solver is not initialized.", 0.0, "3d");
+                    } else {
+                        CFDBulkSnapshot3D snap;
+                        global_solver_3d->captureBulkSnapshot(snap, true, true, true);
+                        std::ofstream ofs(remap_file, std::ios::binary | std::ios::trunc);
+                        if (!ofs.is_open()) {
+                            emit_kernel_log("ERROR", std::string("EXPORT_REMAP_3D failed to open file: ") + remap_file, 0.0, "3d");
+                        } else {
+                            uint32_t magic = 0x424C3344; // 'BL3D'
+                            double sim_t = global_solver_3d->getTime();
+                            uint8_t flags = (snap.has_vel ? 1 : 0) | (snap.has_E ? 2 : 0) | (snap.has_species ? 4 : 0);
+                            ofs.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+                            ofs.write(reinterpret_cast<const char*>(&snap.nx), sizeof(int));
+                            ofs.write(reinterpret_cast<const char*>(&snap.ny), sizeof(int));
+                            ofs.write(reinterpret_cast<const char*>(&snap.nz), sizeof(int));
+                            ofs.write(reinterpret_cast<const char*>(&snap.cellSize), sizeof(double));
+                            ofs.write(reinterpret_cast<const char*>(&snap.xmin), sizeof(double));
+                            ofs.write(reinterpret_cast<const char*>(&snap.ymin), sizeof(double));
+                            ofs.write(reinterpret_cast<const char*>(&snap.zmin), sizeof(double));
+                            ofs.write(reinterpret_cast<const char*>(&sim_t), sizeof(double));
+                            ofs.write(reinterpret_cast<const char*>(&flags), sizeof(uint8_t));
+                            size_t n_cells = static_cast<size_t>(snap.nx) * static_cast<size_t>(snap.ny) * static_cast<size_t>(snap.nz);
+                            ofs.write(reinterpret_cast<const char*>(snap.p.data()), n_cells * sizeof(float));
+                            ofs.write(reinterpret_cast<const char*>(snap.rho.data()), n_cells * sizeof(float));
+                            if (snap.has_vel && !snap.vel.empty()) {
+                                ofs.write(reinterpret_cast<const char*>(snap.vel.data()), n_cells * 3 * sizeof(float));
+                            }
+                            if (snap.has_E && !snap.E.empty()) {
+                                ofs.write(reinterpret_cast<const char*>(snap.E.data()), n_cells * sizeof(float));
+                            }
+                            if (snap.has_species && !snap.alpha1.empty() && !snap.alpha2.empty()) {
+                                ofs.write(reinterpret_cast<const char*>(snap.alpha1.data()), n_cells * sizeof(float));
+                                ofs.write(reinterpret_cast<const char*>(snap.alpha2.data()), n_cells * sizeof(float));
+                            }
+                            ofs.close();
+                            nlohmann::json ready_msg = {
+                                {"type", "REMAP_3D_READY"},
+                                {"modelId", src_mid},
+                                {"targetModelId", target_mid},
+                                {"remap_file", remap_file},
+                                {"time", sim_t},
+                                {"nx", snap.nx},
+                                {"ny", snap.ny},
+                                {"nz", snap.nz},
+                                {"cellSize", snap.cellSize}
+                            };
+                            std::cout << ready_msg.dump() << std::endl;
+                        }
+                    }
                 } else if (command == "STEP_3D") {
                     if (sim3d_init_in_progress.load()) {
                         std::lock_guard<std::mutex> lock(g_pending_exec_3d_mutex);
@@ -9524,7 +10069,7 @@ int main() {
                         continue;
                     }
                     if (!global_solver_3d) continue;
-                    init_gauges(msg);
+                    init_gauges(msg, false);
                     int steps = msg.value("steps", 1);
                     global_cfl_3d = msg.value("cfl", 0.6);
                     if (msg.contains("endtime")) global_endtime_3d = msg.value("endtime", 1.0);
@@ -9549,7 +10094,7 @@ int main() {
                         continue;
                     }
                     if (!global_solver_3d) continue;
-                    init_gauges(msg);
+                    init_gauges(msg, false);
                     global_cfl_3d = msg.value("cfl", 0.6);
                     if (msg.contains("endtime")) global_endtime_3d = msg.value("endtime", 1.0);
                     global_exec_until_end_3d = true;
@@ -9560,8 +10105,24 @@ int main() {
                         std::thread(worker_3d_thread_func).detach();
                     } else { sim3d_paused = false; }
                 } else if (command == "PAUSE_3D") {
+                    bool canceled_pending_exec = false;
+                    {
+                        std::lock_guard<std::mutex> lock(g_pending_exec_3d_mutex);
+                        if (g_pending_exec_3d.has_pending) {
+                            g_pending_exec_3d.has_pending = false;
+                            canceled_pending_exec = true;
+                        }
+                    }
+                    bool was_running = sim3d_running.load();
                     sim3d_paused = true;
                     global_target_steps_3d = 0;
+                    if (sim3d_init_in_progress.load()) {
+                        if (canceled_pending_exec) {
+                            emit_kernel_log("INFO", "Canceled queued 3D execution; initialization still completing.", 0.0, "3d");
+                        }
+                    } else {
+                        emit_paused_ack("3d", was_running);
+                    }
                 } else if (command == "RESUME_3D") {
                     sim3d_paused = false;
                 } else if (command == "TERMINATE_3D") {
@@ -9579,6 +10140,7 @@ int main() {
                     global_dt_3d = 0.0;
                     global_wallclock_3d = 0.0;
                     step_progress_3d = 0;
+                    std::exit(0);
                 } else if (command == "INIT_3D") {
                     sim3d_terminate = true;
                     {
@@ -9658,16 +10220,17 @@ int main() {
                     std::string scope = msg.value("scope", "3d");
                     emit_kernel_log("SYSTEM", "End time updated to " + std::to_string(endtime) + " s", 0.0, scope);
 
-                } else if (command == "CONTOUR_CONFIG" || command == "VIEW3D_CONFIG" || command == "REFRESH_STATE" || command == "REFRESH" || command == "POLL_STATE") {
+                } else if (command == "TELEMETRY_CONFIG" || command == "CONTOUR_CONFIG" || command == "VIEW3D_CONFIG" || command == "REFRESH_STATE" || command == "REFRESH" || command == "POLL_STATE") {
                     global_telemetry_stride = msg.value("stride", 1);
                     if (msg.contains("particle_stride")) {
                         global_mpm_particle_stride = std::max(1, msg.value("particle_stride", 1));
                     }
                     if (msg.contains("refresh_rate")) {
                         double rate = msg.value("refresh_rate", 0.0);
-                        int interval = (rate > 0.0) ? static_cast<int>(rate * 1000.0) : 16;
+                        int interval = (rate > 0.0) ? static_cast<int>(std::round(rate * 1000.0)) : 16;
                         if (interval < 16) interval = 16;
                         global_telemetry_interval_ms = interval;
+                        global_telemetry_interval_ms_1d = interval;
                         global_refresh_rate_mpm = rate;
                         global_refresh_rate_mpm_3d = rate;
                         global_refresh_rate_fem_3d = rate;

@@ -11,7 +11,9 @@
 
 import { PlaybackRingBuffer, BufferedFrame } from './playback-buffer.js';
 import { StateManager, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, getSliceAxisLabel } from './state-manager.js';
-import { SimulationStatus } from './types.js';
+import { Model, SimulationStatus, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
+import { GaugeManagerModal } from './gauge-manager-modal.js';
+import { showModelErrorModal, getErrorBadgeTooltip } from './model-error-modal.js';
 
 export type CameraPreset = 'iso' | '+x' | '-x' | '+y' | '-y' | '+z' | '-z' | 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'reset';
 export type ColormapType = 'rainbow' | 'plasma' | 'viridis' | 'inferno' | 'magma' | 'coolwarm' | 'cividis' | 'turbo' | 'jet' | 'grayscale';
@@ -31,11 +33,11 @@ export interface TransportControllerOptions {
     onColormapChange?: (colormap: ColormapType | string, min?: number, max?: number, targetLayer?: string) => void;
     onQuantityChange?: (quantity: string, targetLayer?: string) => void;
     onLayerToggle?: (layer: string, active: boolean) => void;
-    onRefreshRateChange?: (rate: number) => void;
+    onRefreshRateChange?: (rate: number, modelId?: string) => void;
     onShadingChange?: (key: string, value: any) => void;
     onROIChange?: (roi: any) => void;
     onParticleFilterChange?: (filter: any) => void;
-    onSimCommand?: (command: 'INIT' | 'STEP' | 'EXEC_ALL' | 'PAUSE' | 'TERMINATE' | 'RESET' | 'RUN' | 'REFRESH', extra?: { steps?: number }) => void;
+    onSimCommand?: (command: 'INIT' | 'STEP' | 'EXEC_ALL' | 'PAUSE' | 'TERMINATE' | 'RESET' | 'RUN' | 'REFRESH', extra?: { steps?: number; skipUpstreamAutoRun?: boolean; forceScope?: '1d' | '2d'; forceFullPipeline?: boolean; allowAutoRun?: boolean; forceRestart?: boolean }) => void;
     onManualRefresh?: () => void;
 }
 
@@ -82,6 +84,8 @@ export interface ContextualVisualSettings {
     visibility: boolean;
     lighting?: boolean;
     interpolate?: boolean;
+    showPeaks?: boolean;
+    isAxisymmetric?: boolean;
 
     // Slice-specific
     sliceAxis?: string;
@@ -157,6 +161,8 @@ export class TransportController {
     private refreshRate: number = 0.5;
     private simRunnerFpsSelect: HTMLSelectElement | null = null;
     private cameraTabFpsSelect: HTMLSelectElement | null = null;
+    private simRunnerFpsLabel: HTMLElement | null = null;
+    private cameraTabFpsLabel: HTMLElement | null = null;
 
     // ROI & Filter State
     private roiEnabled: boolean = false;
@@ -180,6 +186,7 @@ export class TransportController {
     private pendingDt?: number;
     private pendingFrame?: BufferedFrame;
     private pendingTotalCount?: number;
+    private lastActiveModelId: string | null = null;
 
     // Callbacks
     private onFrameDispatch?: (frame: BufferedFrame, isLive: boolean, source?: TransportController) => void;
@@ -191,12 +198,16 @@ export class TransportController {
     private onColormapChange?: (colormap: ColormapType | string, min?: number, max?: number, targetLayer?: string) => void;
     private onQuantityChange?: (quantity: string, targetLayer?: string) => void;
     private onLayerToggle?: (layer: string, active: boolean) => void;
-    private onRefreshRateChange?: (rate: number) => void;
+    private onRefreshRateChange?: (rate: number, modelId?: string) => void;
     private onShadingChange?: (key: string, value: any) => void;
     private onROIChange?: (roi: any) => void;
     private onParticleFilterChange?: (filter: any) => void;
-    private onSimCommand?: (command: 'INIT' | 'STEP' | 'EXEC_ALL' | 'PAUSE' | 'TERMINATE' | 'RESET' | 'RUN' | 'REFRESH', extra?: { steps?: number }) => void;
+    private onSimCommand?: (command: 'INIT' | 'STEP' | 'EXEC_ALL' | 'PAUSE' | 'TERMINATE' | 'RESET' | 'RUN' | 'REFRESH', extra?: { steps?: number; skipUpstreamAutoRun?: boolean; forceScope?: '1d' | '2d'; forceFullPipeline?: boolean; allowAutoRun?: boolean; forceRestart?: boolean }) => void;
     private onManualRefresh?: () => void;
+
+    public triggerSimCommand(command: 'INIT' | 'STEP' | 'EXEC_ALL' | 'PAUSE' | 'TERMINATE' | 'RESET' | 'RUN' | 'REFRESH', extra?: { steps?: number; skipUpstreamAutoRun?: boolean; forceScope?: '1d' | '2d'; forceFullPipeline?: boolean; allowAutoRun?: boolean; forceRestart?: boolean }): void {
+        this.onSimCommand?.(command, extra);
+    }
 
     // Multi-Instance & Lifecycle State
     private unbinds: (() => void)[] = [];
@@ -216,6 +227,13 @@ export class TransportController {
     private bufferCountDisplay!: HTMLElement;
     private statusBadge!: HTMLElement;
     private modelInfoBadge!: HTMLElement;
+
+    // Pod 1 Solver Command Buttons
+    private solverInitBtn?: HTMLButtonElement;
+    private solverRunBtn?: HTMLButtonElement;
+    private solverPipelineBtn?: HTMLButtonElement;
+    private solverTermBtn?: HTMLButtonElement;
+    private solverStepBtns: HTMLButtonElement[] = [];
 
     // Live Execution Stats Elements (Step, Total Time, dt)
     private execStepValue: HTMLElement | null = null;
@@ -284,6 +302,32 @@ export class TransportController {
     }
 
     public isLayerActive(key: string): boolean {
+        const wm = (window as any).workspaceManager;
+        const paneCtx = wm?.getActivePaneContext?.();
+        if (paneCtx && (paneCtx.viewType === '2D_CONTOUR' || paneCtx.viewType === '1D_CHART' || paneCtx.viewType === 'GAUGE_CHART')) {
+            const activeModel = this.stateManager.getActiveModel();
+            if (paneCtx.viewType === '2D_CONTOUR') {
+                const cfg = wm.buildContourConfig(activeModel, paneCtx.overrides || {});
+                if (key === 'grid' || key === 'gridBox') return Boolean(cfg.showGridlines);
+                if (key === 'mpm') return Boolean(cfg.showMPMParticles);
+                if (key === 'obstacles') return Boolean(cfg.showObstacles);
+                if (key === 'gauges') return Boolean(cfg.showGauges);
+                if (key === 'charge') return Boolean(cfg.showCharge);
+                if (key === 'detonator') return Boolean(cfg.showDetonator);
+                if (key === 'slices') return Boolean(cfg.showColorbarCard);
+                if (key === 'peaks') return Boolean(cfg.showExtrema);
+                if (key === 'mirror') return Boolean(cfg.isAxisymmetric);
+            } else {
+                const cfg = wm.buildChartConfig(activeModel, paneCtx.overrides || {}, paneCtx.viewType);
+                if (key === 'grid' || key === 'gridBox') return Boolean(cfg.showGrid);
+                if (key === 'gauges') return Boolean(cfg.showGauges);
+                if (key === 'charge') return Boolean(cfg.showCharge);
+                if (key === 'detonator') return Boolean(cfg.showDetonator);
+                if (key === 'slices') return Boolean(cfg.showChartCard);
+                if (key === 'peaks') return Boolean(cfg.showPeaks !== false);
+            }
+            return this.activeLayers[key] !== false;
+        }
         const vpNode = this.getActiveViewportNode();
         if (!vpNode || !vpNode.parameters) {
             return this.activeLayers[key] !== false;
@@ -352,10 +396,73 @@ export class TransportController {
         }
     }
 
+    private getTargetModel(): Model | null {
+        const wm = (window as any).workspaceManager;
+        const paneCtx = wm?.getActivePaneContext?.();
+        const paneModelId = paneCtx?.modelId;
+        if (paneModelId) {
+            const allModels = this.stateManager.getAllModels();
+            const found = allModels.find(m => m.id === paneModelId);
+            if (found) return found;
+        }
+        return this.stateManager.getActiveModel() || null;
+    }
+
+    private getModelDimension(model: Model | null): '1D' | '2D' | '3D' {
+        if (!model || !Array.isArray(model.nodes)) return '3D';
+        const has3D = model.nodes.some(n =>
+            isDomainMesh3DNode(n.type) ||
+            ['CFDSolver3D', 'MarineHarbourDomain', 'MPMDomain3D', 'FEMDomain3D', 'FSICoupler3D', 'FEMFSICoupler3D', 'Telemetry3DViewport'].includes(n.type)
+        );
+        if (has3D) return '3D';
+        const has2D = model.nodes.some(n =>
+            isDomainMesh2DNode(n.type) ||
+            ['CFDSolver2D', 'MPMDomain2D', 'MPMObject2D', 'FSICoupler2D', 'TelemetryContour'].includes(n.type)
+        );
+        if (has2D) return '2D';
+        return '1D';
+    }
+
+    private getFpsContextInfo(model: Model | null): {
+        dim: '1D' | '2D' | '3D';
+        shortLabel: string;
+        fullLabel: string;
+        title: string;
+    } {
+        const dim = this.getModelDimension(model);
+        const pipeCtx = this.getPipelineContext(model?.id);
+        const domainNoun = dim === '1D' ? '1D Profile' : (dim === '2D' ? '2D Contour' : '3D Viewport');
+        const modelName = model?.name || 'Active Model';
+        const stageTag = pipeCtx.isPartOfPipeline ? ` · S${pipeCtx.stageIndex + 1}` : '';
+        const stageDetail = pipeCtx.isPartOfPipeline ? ` (Pipeline Stage ${pipeCtx.stageIndex + 1}/${pipeCtx.chainModelIds.length})` : '';
+        return {
+            dim,
+            shortLabel: `FPS (${dim}${stageTag}):`,
+            fullLabel: `${domainNoun} FPS${pipeCtx.isPartOfPipeline ? ` (S${pipeCtx.stageIndex + 1})` : ''}:`,
+            title: `Live ${domainNoun} Telemetry Refresh Rate — ${modelName}${stageDetail}`
+        };
+    }
+
     public syncStateFromViewport(): void {
-        const activeModel = this.stateManager.getActiveModel();
-        if (activeModel) {
-            this.refreshRate = this.stateManager.getModelRefreshRate(activeModel.id);
+        const targetModel = this.getTargetModel();
+        if (targetModel) {
+            this.refreshRate = this.stateManager.getModelRefreshRate(targetModel.id);
+        }
+
+        const fpsInfo = this.getFpsContextInfo(targetModel);
+        if (this.simRunnerFpsLabel) {
+            this.simRunnerFpsLabel.textContent = fpsInfo.shortLabel;
+            this.simRunnerFpsLabel.title = fpsInfo.title;
+        }
+        if (this.cameraTabFpsLabel) {
+            this.cameraTabFpsLabel.textContent = fpsInfo.fullLabel;
+            this.cameraTabFpsLabel.title = fpsInfo.title;
+        }
+        if (this.simRunnerFpsSelect) {
+            this.simRunnerFpsSelect.title = fpsInfo.title;
+        }
+        if (this.cameraTabFpsSelect) {
+            this.cameraTabFpsSelect.title = fpsInfo.title;
         }
 
         const syncSelect = (sel: HTMLSelectElement | null) => {
@@ -371,10 +478,6 @@ export class TransportController {
         syncSelect(this.simRunnerFpsSelect);
         syncSelect(this.cameraTabFpsSelect);
 
-        const vpNode = this.getActiveViewportNode();
-        if (!vpNode || !vpNode.parameters) return;
-        const p = vpNode.parameters;
-
         this.activeLayers = {
             slices: this.isLayerActive('slices'),
             grid: this.isLayerActive('grid'),
@@ -385,23 +488,31 @@ export class TransportController {
             stl: this.isLayerActive('stl'),
             obstacles: this.isLayerActive('obstacles'),
             gauges: this.isLayerActive('gauges'),
-            lighting: this.isLayerActive('lighting')
+            lighting: this.isLayerActive('lighting'),
+            charge: this.isLayerActive('charge'),
+            detonator: this.isLayerActive('detonator'),
+            peaks: this.isLayerActive('peaks'),
+            mirror: this.isLayerActive('mirror')
         };
 
-        if (p.usePerspective !== undefined) {
-            this.usePerspective = p.usePerspective !== false;
-            this.syncProjectionButtons();
-        }
-        if (!activeModel && p.refresh_rate !== undefined) {
-            this.refreshRate = Number(p.refresh_rate);
-            syncSelect(this.simRunnerFpsSelect);
-            syncSelect(this.cameraTabFpsSelect);
-        }
-        if (p.colormap !== undefined) {
-            this.activeColormap = p.colormap;
-        }
-        if (p.focusedQuantity !== undefined) {
-            this.activeQuantity = p.focusedQuantity;
+        const vpNode = this.getActiveViewportNode();
+        if (vpNode && vpNode.parameters) {
+            const p = vpNode.parameters;
+            if (p.usePerspective !== undefined) {
+                this.usePerspective = p.usePerspective !== false;
+                this.syncProjectionButtons();
+            }
+            if (!targetModel && p.refresh_rate !== undefined) {
+                this.refreshRate = Number(p.refresh_rate);
+                syncSelect(this.simRunnerFpsSelect);
+                syncSelect(this.cameraTabFpsSelect);
+            }
+            if (p.colormap !== undefined) {
+                this.activeColormap = p.colormap;
+            }
+            if (p.focusedQuantity !== undefined) {
+                this.activeQuantity = p.focusedQuantity;
+            }
         }
 
         this.updateAllLayerChips();
@@ -602,7 +713,7 @@ export class TransportController {
             let vp = targetModel.nodes.find(n => n.type === 'Telemetry3DViewport');
             if (!vp) {
                 const has3D = targetModel.nodes.some(n => 
-                    n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || 
+                    isDomainMesh3DNode(n.type) || n.type === 'CFDSolver3D' || 
                     n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || 
                     n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || 
                     n.type === 'STLGeometry'
@@ -612,6 +723,13 @@ export class TransportController {
                     vp = targetModel.nodes.find(n => n.type === 'Telemetry3DViewport');
                 }
             }
+            if (!vp) {
+                vp = targetModel.nodes.find(n =>
+                    n.type === 'TelemetryContour' || n.type === 'TelemetryGraph' ||
+                    n.type === 'CFDSolver2D' || isDomainMesh2DNode(n.type) || n.type === 'MPMDomain2D' ||
+                    n.type === 'CFDSolver' || n.type === 'DomainMesh'
+                );
+            }
             if (vp) return vp;
         }
 
@@ -619,7 +737,10 @@ export class TransportController {
         if (!targetModel) {
             return this.stateManager.getAllModels()
                 .flatMap(m => m.nodes)
-                .find(n => n.type === 'Telemetry3DViewport') || null;
+                .find(n =>
+                    n.type === 'Telemetry3DViewport' || n.type === 'TelemetryContour' || n.type === 'TelemetryGraph' ||
+                    n.type === 'CFDSolver2D' || isDomainMesh2DNode(n.type) || n.type === 'CFDSolver'
+                ) || null;
         }
         return null;
     }
@@ -627,7 +748,7 @@ export class TransportController {
     private getActiveDomainNode(): any {
         const targetModel = this.stateManager.getActiveModel();
         if (targetModel) {
-            const mesh = targetModel.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'DomainMesh2D');
+            const mesh = targetModel.nodes.find(n => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh' || isDomainMesh2DNode(n.type));
             if (mesh) return mesh;
             const solver = targetModel.nodes.find(n => ['CFDSolver3D', 'CFDSolver2D', 'CFDSolver', 'MPMDomain3D', 'MPMDomain2D', 'FEMDomain3D'].includes(n.type));
             if (solver) return solver;
@@ -638,7 +759,7 @@ export class TransportController {
     private getAutoParticleDiameter(): number {
         const state = this.stateManager.getCurrentState();
         if (state) {
-            const mpmMesh = state.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'MPMDomain3D' || n.type === 'DomainMesh' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
+            const mpmMesh = state.nodes.find(n => isDomainMesh3DNode(n.type) || n.type === 'MPMDomain3D' || n.type === 'DomainMesh' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
             const xmin = Number(mpmMesh?.parameters['xmin'] ?? mpmMesh?.parameters['x_min'] ?? 0);
             const xmax = Number(mpmMesh?.parameters['xmax'] ?? mpmMesh?.parameters['x_max'] ?? 1);
             const nx = Number(mpmMesh?.parameters['nx'] ?? 0);
@@ -782,6 +903,14 @@ export class TransportController {
         this.statusBadge = document.createElement('span');
         this.statusBadge.className = 'workstation-status-pill ready';
         this.statusBadge.textContent = 'READY';
+        this.statusBadge.addEventListener('click', (e) => {
+            const activeModelId = this.stateManager.getActiveModelId();
+            if (!activeModelId) return;
+            if (this.stateManager.getModelStatus(activeModelId) === 'ERROR') {
+                e.stopPropagation();
+                showModelErrorModal(this.stateManager, [activeModelId]);
+            }
+        });
 
         this.modelInfoBadge = document.createElement('span');
         this.modelInfoBadge.className = 'workstation-model-pill';
@@ -809,6 +938,8 @@ export class TransportController {
     }
 
     private tabRenderRafId: number | null = null;
+    private lastRenderedModelId: string | null = null;
+    private lastRenderedTab: string = '';
 
     public requestTabRender(): void {
         if (this.tabRenderRafId !== null) return;
@@ -822,22 +953,29 @@ export class TransportController {
      * Render the active tab content.
      */
     private renderActiveTabContent(force: boolean = false): void {
-        if (!force && this.tabContentContainer) {
+        const activeModelId = this.stateManager.getActiveModelId();
+        const modelChanged = activeModelId !== this.lastRenderedModelId;
+        const tabChanged = this.activeTab !== this.lastRenderedTab;
+
+        if (!force && !modelChanged && !tabChanged && this.tabContentContainer) {
             const activeEl = document.activeElement;
             if (activeEl && this.tabContentContainer.contains(activeEl)) {
                 const tag = activeEl.tagName.toLowerCase();
-                if (tag === 'input' || tag === 'select' || tag === 'textarea') {
+                if (tag === 'input' || tag === 'textarea') {
                     return;
                 }
             }
         }
 
-        if (force && this.tabContentContainer) {
+        if ((force || modelChanged || tabChanged) && this.tabContentContainer) {
             const activeEl = document.activeElement;
             if (activeEl && this.tabContentContainer.contains(activeEl)) {
                 (activeEl as HTMLElement).blur?.();
             }
         }
+
+        this.lastRenderedModelId = activeModelId;
+        this.lastRenderedTab = this.activeTab;
 
         if (this.tabRenderRafId !== null) {
             cancelAnimationFrame(this.tabRenderRafId);
@@ -868,6 +1006,97 @@ export class TransportController {
         }
     }
 
+    private getPipelineContext(modelId?: string | null): {
+        isPartOfPipeline: boolean;
+        chainModelIds: string[];
+        stageIndex: number;
+        isUpstreamSource: boolean;
+        isDownstreamTarget: boolean;
+        sourceType?: '1D' | '2D';
+    } {
+        const empty = { isPartOfPipeline: false, chainModelIds: [], stageIndex: -1, isUpstreamSource: false, isDownstreamTarget: false };
+        if (!modelId) return empty;
+        const allModels = this.stateManager.getAllModels();
+        const ws = this.stateManager.getActiveWorkspace();
+        if (!allModels || allModels.length === 0) return empty;
+
+        const nextMap = new Map<string, string>();
+        const prevMap = new Map<string, string>();
+        const nodeToModel = new Map<string, string>();
+        allModels.forEach(m => m.nodes.forEach(n => nodeToModel.set(n.id, m.id)));
+
+        for (const m of allModels) {
+            const remapNode = m.nodes.find(n =>
+                n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode' || n.type === 'Remap3DTo3DNode' ||
+                n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode'
+            );
+            let srcId = remapNode?.parameters?.source_model_id ? String(remapNode.parameters.source_model_id).trim() : '';
+            if ((!srcId || srcId === m.id) && remapNode && ws?.connections) {
+                const wsConn = ws.connections.find((c: any) => c.toNode === remapNode.id);
+                if (wsConn) {
+                    const mapped = nodeToModel.get(wsConn.fromNode);
+                    if (mapped && mapped !== m.id) srcId = mapped;
+                }
+            }
+            if (srcId && srcId !== m.id && allModels.some(x => x.id === srcId)) {
+                nextMap.set(srcId, m.id);
+                prevMap.set(m.id, srcId);
+            }
+        }
+
+        if (!nextMap.has(modelId) && !prevMap.has(modelId)) {
+            return empty;
+        }
+
+        // Walk back to root
+        let rootId = modelId;
+        const visited = new Set<string>([rootId]);
+        while (prevMap.has(rootId)) {
+            const p = prevMap.get(rootId)!;
+            if (visited.has(p)) break;
+            visited.add(p);
+            rootId = p;
+        }
+
+        // Walk forward to build ordered chain
+        const chain: string[] = [rootId];
+        const chainSet = new Set<string>([rootId]);
+        let curr = rootId;
+        while (nextMap.has(curr)) {
+            const nxt = nextMap.get(curr)!;
+            if (chainSet.has(nxt)) break;
+            chainSet.add(nxt);
+            chain.push(nxt);
+            curr = nxt;
+        }
+
+        if (chain.length < 2) return empty;
+        const stageIndex = chain.indexOf(modelId);
+        const activeM = allModels.find(m => m.id === modelId);
+        const is2D = Boolean(activeM?.nodes.some(n => n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D'));
+        const is1D = !is2D && Boolean(activeM?.nodes.some(n => n.type === 'CFDSolver'));
+
+        return {
+            isPartOfPipeline: true,
+            chainModelIds: chain,
+            stageIndex,
+            isUpstreamSource: stageIndex === 0,
+            isDownstreamTarget: stageIndex > 0,
+            sourceType: is2D ? '2D' : (is1D ? '1D' : undefined)
+        };
+    }
+
+    private getStageDispatchExtra(modelId: string | null): Record<string, any> | undefined {
+        const pipeCtx = this.getPipelineContext(modelId);
+        if (pipeCtx.isDownstreamTarget) {
+            return { skipUpstreamAutoRun: true, allowAutoRun: false };
+        }
+        if (pipeCtx.isUpstreamSource && pipeCtx.sourceType) {
+            return { forceScope: (pipeCtx.sourceType === '2D' ? '2d' : '1d') as ('1d' | '2d') };
+        }
+        return undefined;
+    }
+
     // =========================================================================
     // TAB 1: SIMULATION & TRANSPORT (Integrated Simulation Cockpit Deck)
     // Upper Deck: 4-Column Controls Grid (Solver, Views, Fields/Colormaps, Mesh Layers)
@@ -892,38 +1121,64 @@ export class TransportController {
         const b1 = document.createElement('div');
         b1.className = 'card-body';
 
-        // 3-Column Split: Flow Stack (Init, End, Pause), Step Keypad (2x2), Execution Stats Box
+        const activeModelId = this.stateManager.getActiveModelId();
+        const pipeCtx = this.getPipelineContext(activeModelId);
+
+        // 3-Column Split: Flow Stack, Step Keypad (2x2), Execution Stats Box
         const colsContainer = document.createElement('div');
         colsContainer.className = 'solver-columns-container';
 
-        // Column 1: Vertically Stacked Primary Flow Buttons (Init, End All, Pause)
+        this.solverStepBtns = [];
+        this.solverPipelineBtn = undefined;
+
+        // Column 1: Vertically Stacked Primary Flow Buttons (Adaptive Play/Pause, Init/Re-Init, [Run Pipeline])
         const flowCol = document.createElement('div');
         flowCol.className = 'solver-flow-col';
 
-        const initBtn = this.createButton('⚡ Init', 'transport-btn init primary-action v-flow-btn', () => {
-            this.onSimCommand?.('INIT');
+        const runLabel = pipeCtx.isPartOfPipeline
+            ? `▶ Run Stg ${pipeCtx.stageIndex + 1}`
+            : '▶ Run (All)';
+        const execEndBtn = this.createButton(runLabel, 'transport-btn exec-end-action v-flow-btn solver-hero-btn', () => {
+            const curModelId = this.stateManager.getActiveModelId();
+            const curStatus = curModelId ? this.stateManager.getModelStatus(curModelId) : 'UNINITIALIZED';
+            const upstreamBusy = Boolean(curModelId && (window as any).isUpstreamAutoRunningFor?.(curModelId));
+            if (curStatus === 'RUNNING' || upstreamBusy) {
+                this.onSimCommand?.('PAUSE');
+            } else {
+                const dynamicExtra = this.getStageDispatchExtra(curModelId);
+                const atEnd = Boolean(curModelId && this.stateManager.isModelAtEndTime(curModelId));
+                this.onSimCommand?.('EXEC_ALL', { ...(dynamicExtra || {}), forceRestart: atEnd });
+            }
         });
-        initBtn.title = 'Initialize solver state with current DAG node parameters';
-
-        const execEndBtn = this.createButton('▶ End (All)', 'transport-btn exec-end-action v-flow-btn', () => {
-            this.onSimCommand?.('EXEC_ALL');
-        });
-        execEndBtn.title = 'Execute simulation to completion / max steps';
-
-        const pauseBtn = this.createButton('⏸ Pause', 'transport-btn pause pause-action v-flow-btn', () => {
-            this.onSimCommand?.('PAUSE');
-        });
-        pauseBtn.title = 'Pause running simulation';
-
-        const refreshBtn = this.createButton('🔄 Refresh', 'transport-btn refresh-btn v-flow-btn', () => {
-            this.requestAndPlotCurrentState();
-        });
-        refreshBtn.title = 'Manual Telemetry Refresh: Request current state from solver and plot across viewports';
-
-        flowCol.appendChild(initBtn);
+        this.solverRunBtn = execEndBtn;
         flowCol.appendChild(execEndBtn);
-        flowCol.appendChild(pauseBtn);
-        flowCol.appendChild(refreshBtn);
+
+        const initBtn = this.createButton('⚡ Init', 'transport-btn init primary-action v-flow-btn', () => {
+            const curModelId = this.stateManager.getActiveModelId();
+            const dynamicExtra = this.getStageDispatchExtra(curModelId);
+            this.onSimCommand?.('INIT', { ...(dynamicExtra || {}), forceRestart: true });
+        });
+        this.solverInitBtn = initBtn;
+        flowCol.appendChild(initBtn);
+
+        if (pipeCtx.isPartOfPipeline) {
+            const runPipelineBtn = this.createButton('⛓️ Run Pipeline', 'transport-btn v-flow-btn solver-pipeline-btn', () => {
+                const curModelId = this.stateManager.getActiveModelId();
+                const latestPipe = this.getPipelineContext(curModelId);
+                const chainIds = latestPipe.isPartOfPipeline ? latestPipe.chainModelIds : pipeCtx.chainModelIds;
+                if ((window as any).executeWorkspacePipeline) {
+                    (window as any).executeWorkspacePipeline(chainIds);
+                } else {
+                    const lastId = chainIds[chainIds.length - 1];
+                    this.stateManager.setModelStatus(lastId, 'UNINITIALIZED');
+                    (window as any).executeModelCommand?.(lastId, 'EXEC_ALL', { forceFullPipeline: true });
+                }
+            });
+            runPipelineBtn.title = `Execute entire ${pipeCtx.chainModelIds.length}-stage remap pipeline sequentially (Stage 1 ➔ Remap ➔ Target)`;
+            this.solverPipelineBtn = runPipelineBtn;
+            flowCol.appendChild(runPipelineBtn);
+        }
+
         colsContainer.appendChild(flowCol);
 
         // Column 2: Vertically Stacked Step Keypad Grid (2x2)
@@ -933,9 +1188,14 @@ export class TransportController {
         const stepCounts = [1, 10, 100, 1000];
         stepCounts.forEach(count => {
             const btn = this.createButton(`${count}`, 'transport-exec-btn step-keypad-btn', () => {
-                this.onSimCommand?.('STEP', { steps: count });
+                const curModelId = this.stateManager.getActiveModelId();
+                const dynamicExtra = this.getStageDispatchExtra(curModelId);
+                this.onSimCommand?.('STEP', { steps: count, ...(dynamicExtra || {}), forceRestart: false });
             });
-            btn.title = `Execute ${count} solver step${count > 1 ? 's' : ''}`;
+            btn.title = pipeCtx.isPartOfPipeline
+                ? `Execute ${count} solver step${count > 1 ? 's' : ''} on Stage ${pipeCtx.stageIndex + 1}`
+                : `Execute ${count} solver step${count > 1 ? 's' : ''}`;
+            this.solverStepBtns.push(btn);
             stepsCol.appendChild(btn);
         });
         colsContainer.appendChild(stepsCol);
@@ -1034,6 +1294,7 @@ export class TransportController {
             this.onSimCommand?.('TERMINATE');
         });
         termBtn.title = 'Terminate active solver process (Safety protected)';
+        this.solverTermBtn = termBtn;
 
         bottomRow.appendChild(solverInfo);
         bottomRow.appendChild(termBtn);
@@ -1041,9 +1302,10 @@ export class TransportController {
 
         card1.appendChild(b1);
         deck.appendChild(card1);
+        this.syncSolverButtons();
 
         // ---------------------------------------------------------------------
-        // POD 2: Standard Views & Projections
+        // POD 2: Standard Views & Projections (3D or 1D/2D/Gauge Adaptive)
         // ---------------------------------------------------------------------
         const card2 = document.createElement('div');
         card2.className = 'sim-cockpit-card camera-card';
@@ -1051,59 +1313,7 @@ export class TransportController {
         const b2 = document.createElement('div');
         b2.className = 'card-body';
 
-        // 3x3 Spatial / Directional Standard Views & Projection Matrix
-        const snapGrid = document.createElement('div');
-        snapGrid.className = 'sim-camera-grid';
-
-        const resetBtn = this.createButton('🏠 Reset', 'snap-btn compact-snap-btn', () => this.onCameraSnap?.('reset'));
-        resetBtn.title = 'Reset camera framing & center';
-
-        const topBtn = this.createButton('+Z Top', 'snap-btn compact-snap-btn', () => this.onCameraSnap?.('+z'));
-        topBtn.title = '+Z Top View (Looking down from above)';
-
-        const isoBtn = this.createButton('⬡ Iso', 'snap-btn compact-snap-btn', () => this.onCameraSnap?.('iso'));
-        isoBtn.title = 'Isometric 3D Perspective Angle';
-
-        const lftBtn = this.createButton('-X Lft', 'snap-btn compact-snap-btn', () => this.onCameraSnap?.('-x'));
-        lftBtn.title = '-X Left View (Looking from left side)';
-
-        const frtBtn = this.createButton('-Y Frt', 'snap-btn compact-snap-btn', () => this.onCameraSnap?.('-y'));
-        frtBtn.title = '-Y Front View (Looking at front face)';
-
-        const rgtBtn = this.createButton('+X Rgt', 'snap-btn compact-snap-btn', () => this.onCameraSnap?.('+x'));
-        rgtBtn.title = '+X Right View (Looking from right side)';
-
-        const projBtn = this.createButton(this.usePerspective ? '👁️ Persp' : '📐 Ortho', 'snap-btn compact-snap-btn', () => {
-            this.usePerspective = !this.usePerspective;
-            this.syncProjectionButtons();
-            const vpNode = this.getActiveViewportNode();
-            if (vpNode) {
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { usePerspective: this.usePerspective });
-            }
-            this.onProjectionToggle?.(this.usePerspective);
-        });
-        projBtn.title = 'Toggle Perspective / Orthographic projection';
-        this.cockpitProjBtn = projBtn;
-
-        const btmBtn = this.createButton('-Z Btm', 'snap-btn compact-snap-btn', () => this.onCameraSnap?.('-z'));
-        btmBtn.title = '-Z Bottom View (Looking up from below)';
-
-        const bckBtn = this.createButton('+Y Bck', 'snap-btn compact-snap-btn', () => this.onCameraSnap?.('+y'));
-        bckBtn.title = '+Y Back View (Looking at back face)';
-
-        // Row 1: Reset, +Z Top, Iso
-        snapGrid.appendChild(resetBtn);
-        snapGrid.appendChild(topBtn);
-        snapGrid.appendChild(isoBtn);
-        // Row 2: -X Lft, -Y Frt, +X Rgt
-        snapGrid.appendChild(lftBtn);
-        snapGrid.appendChild(frtBtn);
-        snapGrid.appendChild(rgtBtn);
-        // Row 3: Persp/Ortho, -Z Btm, +Y Bck
-        snapGrid.appendChild(projBtn);
-        snapGrid.appendChild(btmBtn);
-        snapGrid.appendChild(bckBtn);
-
+        const snapGrid = this.buildAdaptiveCameraGrid(true);
         b2.appendChild(snapGrid);
         card2.appendChild(b2);
         deck.appendChild(card2);
@@ -1126,17 +1336,7 @@ export class TransportController {
         const layersGrid = document.createElement('div');
         layersGrid.className = 'sim-layers-grid';
 
-        [
-            { key: 'slices', label: '🥞 Slices' },
-            { key: 'grid', label: '🌐 Mesh/Grid' },
-            { key: 'gridBox', label: '📦 Bounds' },
-            { key: 'fem', label: '🏗️ FEM' },
-            { key: 'mpm', label: '✨ MPM' },
-            { key: 'beams', label: '🔩 Beams' },
-            { key: 'stl', label: '📐 CAD' },
-            { key: 'obstacles', label: '🧱 Obsts' },
-            { key: 'gauges', label: '🎯 Gauges' }
-        ].forEach(ly => {
+        this.getContextualLayerChipSpecs(true).forEach(ly => {
             const active = this.isLayerActive(ly.key);
             this.activeLayers[ly.key] = active;
             const chip = this.createButton(ly.label, `layer-chip compact-layer-chip ${active ? 'active' : ''}`, () => {
@@ -1190,11 +1390,19 @@ export class TransportController {
         readouts.appendChild(this.bufferCountDisplay);
         rowPlayback.appendChild(readouts);
 
-        // Viewport Live Telemetry FPS (Streaming Update Rate)
+        // Viewport Live Telemetry FPS (Streaming Update Rate — per-model, context-sensitive 1D/2D/3D & pipeline-aware)
+        const targetModelForFps = this.getTargetModel();
+        if (targetModelForFps) {
+            this.refreshRate = this.stateManager.getModelRefreshRate(targetModelForFps.id);
+        }
+        const fpsInfo = this.getFpsContextInfo(targetModelForFps);
+
         const fpsWrap = document.createElement('div');
         fpsWrap.className = 'transport-speed-wrap';
         const fpsLabel = document.createElement('span');
-        fpsLabel.textContent = 'FPS:';
+        this.simRunnerFpsLabel = fpsLabel;
+        fpsLabel.textContent = fpsInfo.shortLabel;
+        fpsLabel.title = fpsInfo.title;
         fpsLabel.style.fontSize = '9px';
         fpsLabel.style.color = '#888';
         fpsWrap.appendChild(fpsLabel);
@@ -1223,12 +1431,12 @@ export class TransportController {
             if (Math.abs(f.val - this.refreshRate) < 0.0005 || (f.val > 0 && Math.abs(f.val - this.refreshRate) / f.val < 0.05)) opt.selected = true;
             fpsSelect.appendChild(opt);
         });
-        fpsSelect.title = 'Live 3D Viewport Telemetry Refresh Rate / FPS';
+        fpsSelect.title = fpsInfo.title;
         fpsSelect.addEventListener('change', () => {
             this.refreshRate = parseFloat(fpsSelect.value);
-            const activeModel = this.stateManager.getActiveModel();
-            if (activeModel) {
-                this.stateManager.setModelRefreshRate(activeModel.id, this.refreshRate);
+            const currentTarget = this.getTargetModel();
+            if (currentTarget) {
+                this.stateManager.setModelRefreshRate(currentTarget.id, this.refreshRate);
             } else {
                 const vpNode = this.getActiveViewportNode();
                 if (vpNode) {
@@ -1238,13 +1446,74 @@ export class TransportController {
             if (this.cameraTabFpsSelect && this.cameraTabFpsSelect !== fpsSelect) {
                 this.cameraTabFpsSelect.value = fpsSelect.value;
             }
-            this.onRefreshRateChange?.(this.refreshRate);
+            this.onRefreshRateChange?.(this.refreshRate, currentTarget?.id);
         });
         fpsWrap.appendChild(fpsSelect);
         rowPlayback.appendChild(fpsWrap);
 
         wrap.appendChild(rowPlayback);
         this.tabContentContainer.appendChild(wrap);
+    }
+
+    private getContextualLayerChipSpecs(compact: boolean): Array<{ key: string; label: string }> {
+        const paneViewType = (window as any).workspaceManager?.getActivePaneContext?.()?.viewType;
+        const activeModel = this.stateManager.getActiveModel();
+        if (paneViewType === '2D_CONTOUR') {
+            const hasMPM2D = Boolean(activeModel?.nodes.some(n =>
+                n.type === 'MPMDomain2D' || n.type === 'MPMObject2D' || n.type === 'FSICoupler2D'
+            ));
+            const chips: Array<{ key: string; label: string }> = [
+                { key: 'slices', label: compact ? '🎨 Scale' : '🎨 Colorbar' },
+                { key: 'grid', label: compact ? '🌐 Mesh' : '🌐 Mesh Grid' },
+                { key: 'gauges', label: '🎯 Gauges' },
+                { key: 'charge', label: '🧨 Charge' },
+                { key: 'detonator', label: compact ? '⚡ Deton' : '⚡ Detonator' },
+                { key: 'obstacles', label: compact ? '🧱 Obsts' : '🧱 Obstacles' }
+            ];
+            if (hasMPM2D) {
+                chips.push({ key: 'mpm', label: compact ? '✨ MPM' : '✨ MPM Particles' });
+            }
+            chips.push(
+                { key: 'mirror', label: '🪞 Mirror' },
+                { key: 'peaks', label: '▲▼ Peaks' }
+            );
+            return chips;
+        }
+        if (paneViewType === '1D_CHART' || paneViewType === 'GAUGE_CHART') {
+            return [
+                { key: 'slices', label: compact ? '🎛️ Panel' : '🎛️ Controls' },
+                { key: 'grid', label: compact ? '🌐 Grid' : '🌐 Chart Grid' },
+                { key: 'gauges', label: '🎯 Gauges' },
+                { key: 'charge', label: '🧨 Charge' },
+                { key: 'detonator', label: compact ? '⚡ Deton' : '⚡ Detonator' },
+                { key: 'peaks', label: '▲▼ Peaks' }
+            ];
+        }
+        if (compact) {
+            return [
+                { key: 'slices', label: '🥞 Slices' },
+                { key: 'grid', label: '🌐 Mesh/Grid' },
+                { key: 'gridBox', label: '📦 Bounds' },
+                { key: 'fem', label: '🏗️ FEM' },
+                { key: 'mpm', label: '✨ MPM' },
+                { key: 'beams', label: '🔩 Beams' },
+                { key: 'stl', label: '📐 CAD' },
+                { key: 'obstacles', label: '🧱 Obsts' },
+                { key: 'gauges', label: '🎯 Gauges' }
+            ];
+        }
+        return [
+            { key: 'slices', label: '🥞 Slices' },
+            { key: 'fem', label: '🏗️ FEM Solids' },
+            { key: 'mpm', label: '✨ MPM Particles' },
+            { key: 'beams', label: '🔩 Beams/Rebar' },
+            { key: 'stl', label: '📐 STL CAD' },
+            { key: 'obstacles', label: '🧱 Obstacles' },
+            { key: 'grid', label: '🌐 Domain Grid' },
+            { key: 'gridBox', label: '📦 Bounding Box' },
+            { key: 'gauges', label: '🎯 Gauges' },
+            { key: 'lighting', label: '💡 Lighting' }
+        ];
     }
 
     // =========================================================================
@@ -1263,59 +1532,7 @@ export class TransportController {
         const body1 = document.createElement('div');
         body1.className = 'card-body';
 
-        // 3x3 Spatial / Directional Standard Views & Projection Matrix
-        const snapGrid = document.createElement('div');
-        snapGrid.className = 'camera-snap-grid';
-
-        const resetBtn = this.createButton('🏠 Reset', 'snap-btn', () => this.onCameraSnap?.('reset'));
-        resetBtn.title = 'Reset camera framing & center';
-
-        const topBtn = this.createButton('+Z Top', 'snap-btn', () => this.onCameraSnap?.('+z'));
-        topBtn.title = '+Z Top View (Looking down from above)';
-
-        const isoBtn = this.createButton('⬡ Iso', 'snap-btn', () => this.onCameraSnap?.('iso'));
-        isoBtn.title = 'Isometric 3D Perspective Angle';
-
-        const lftBtn = this.createButton('-X Lft', 'snap-btn', () => this.onCameraSnap?.('-x'));
-        lftBtn.title = '-X Left View (Looking from left side)';
-
-        const frtBtn = this.createButton('-Y Frt', 'snap-btn', () => this.onCameraSnap?.('-y'));
-        frtBtn.title = '-Y Front View (Looking at front face)';
-
-        const rgtBtn = this.createButton('+X Rgt', 'snap-btn', () => this.onCameraSnap?.('+x'));
-        rgtBtn.title = '+X Right View (Looking from right side)';
-
-        const projBtn = this.createButton(this.usePerspective ? '👁️ Persp' : '📐 Ortho', 'snap-btn', () => {
-            this.usePerspective = !this.usePerspective;
-            this.syncProjectionButtons();
-            const vpNode = this.getActiveViewportNode();
-            if (vpNode) {
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, { usePerspective: this.usePerspective });
-            }
-            this.onProjectionToggle?.(this.usePerspective);
-        });
-        projBtn.title = 'Toggle Perspective / Orthographic projection';
-        this.tabProjBtn = projBtn;
-
-        const btmBtn = this.createButton('-Z Btm', 'snap-btn', () => this.onCameraSnap?.('-z'));
-        btmBtn.title = '-Z Bottom View (Looking up from below)';
-
-        const bckBtn = this.createButton('+Y Bck', 'snap-btn', () => this.onCameraSnap?.('+y'));
-        bckBtn.title = '+Y Back View (Looking at back face)';
-
-        // Row 1: Reset, +Z Top, Iso
-        snapGrid.appendChild(resetBtn);
-        snapGrid.appendChild(topBtn);
-        snapGrid.appendChild(isoBtn);
-        // Row 2: -X Lft, -Y Frt, +X Rgt
-        snapGrid.appendChild(lftBtn);
-        snapGrid.appendChild(frtBtn);
-        snapGrid.appendChild(rgtBtn);
-        // Row 3: Persp/Ortho, -Z Btm, +Y Bck
-        snapGrid.appendChild(projBtn);
-        snapGrid.appendChild(btmBtn);
-        snapGrid.appendChild(bckBtn);
-
+        const snapGrid = this.buildAdaptiveCameraGrid(false);
         body1.appendChild(snapGrid);
         card1.appendChild(body1);
         grid.appendChild(card1);
@@ -1338,18 +1555,7 @@ export class TransportController {
         const layersGrid = document.createElement('div');
         layersGrid.className = 'layers-chip-grid';
 
-        [
-            { key: 'slices', label: '🥞 Slices' },
-            { key: 'fem', label: '🏗️ FEM Solids' },
-            { key: 'mpm', label: '✨ MPM Particles' },
-            { key: 'beams', label: '🔩 Beams/Rebar' },
-            { key: 'stl', label: '📐 STL CAD' },
-            { key: 'obstacles', label: '🧱 Obstacles' },
-            { key: 'grid', label: '🌐 Domain Grid' },
-            { key: 'gridBox', label: '📦 Bounding Box' },
-            { key: 'gauges', label: '🎯 Gauges' },
-            { key: 'lighting', label: '💡 Lighting' }
-        ].forEach(ly => {
+        this.getContextualLayerChipSpecs(false).forEach(ly => {
             const active = this.isLayerActive(ly.key);
             this.activeLayers[ly.key] = active;
             const chip = this.createButton(ly.label, `layer-chip ${active ? 'active' : ''}`, () => {
@@ -2018,15 +2224,24 @@ export class TransportController {
         gridOpRow.appendChild(gridOpSlider);
         body2.appendChild(gridOpRow);
 
-        // Viewport FPS Selector Dropdown
+        // Viewport FPS Selector Dropdown (per-model, context-sensitive 1D/2D/3D & pipeline-aware)
+        const targetModelForFps = this.getTargetModel();
+        if (targetModelForFps) {
+            this.refreshRate = this.stateManager.getModelRefreshRate(targetModelForFps.id);
+        }
+        const fpsInfo = this.getFpsContextInfo(targetModelForFps);
+
         const fpsRow = document.createElement('div');
         fpsRow.className = 'card-row';
         const fpsLabel = document.createElement('span');
+        this.cameraTabFpsLabel = fpsLabel;
         fpsLabel.className = 'card-slider-label';
-        fpsLabel.textContent = 'Viewport FPS:';
+        fpsLabel.textContent = fpsInfo.fullLabel;
+        fpsLabel.title = fpsInfo.title;
         const fpsSelect = document.createElement('select');
         this.cameraTabFpsSelect = fpsSelect;
         fpsSelect.className = 'transport-select full-width';
+        fpsSelect.title = fpsInfo.title;
         [
             { label: '60 FPS (16.6ms / Max)', val: 0.016 },
             { label: '30 FPS (33.3ms)', val: 0.033 },
@@ -2050,9 +2265,9 @@ export class TransportController {
         });
         fpsSelect.addEventListener('change', () => {
             this.refreshRate = parseFloat(fpsSelect.value);
-            const activeModel = this.stateManager.getActiveModel();
-            if (activeModel) {
-                this.stateManager.setModelRefreshRate(activeModel.id, this.refreshRate);
+            const currentTarget = this.getTargetModel();
+            if (currentTarget) {
+                this.stateManager.setModelRefreshRate(currentTarget.id, this.refreshRate);
             } else {
                 const vpNode = this.getActiveViewportNode();
                 if (vpNode) {
@@ -2062,7 +2277,7 @@ export class TransportController {
             if (this.simRunnerFpsSelect && this.simRunnerFpsSelect !== fpsSelect) {
                 this.simRunnerFpsSelect.value = fpsSelect.value;
             }
-            this.onRefreshRateChange?.(this.refreshRate);
+            this.onRefreshRateChange?.(this.refreshRate, currentTarget?.id);
         });
         fpsRow.appendChild(fpsLabel);
         fpsRow.appendChild(fpsSelect);
@@ -2081,6 +2296,12 @@ export class TransportController {
         const grid = document.createElement('div');
         grid.className = 'workstation-cards-grid two-col';
 
+        const targetModel = this.stateManager.getActiveModel();
+        const is1DModel = Boolean(targetModel && (targetModel.nodes.some((n: any) => n.type === 'CFDSolver' || n.type === 'DomainMesh') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || isDomainMesh2DNode(n.type) || n.type === 'MPMDomain2D' || n.type === 'CFDSolver3D' || isDomainMesh3DNode(n.type))));
+        const is2DModel = Boolean(targetModel && !is1DModel && (targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || isDomainMesh2DNode(n.type) || n.type === 'MPMDomain2D') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver3D' || isDomainMesh3DNode(n.type))));
+        const gaugeNode = targetModel?.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge');
+        const domainNode = targetModel?.nodes.find((n: any) => n.type === 'DomainMesh' || isDomainMesh2DNode(n.type) || isDomainMesh3DNode(n.type) || n.type === 'MarineHarbourDomain');
+
         // CARD 1: Virtual Sensor Gauges Probes
         const card1 = document.createElement('div');
         card1.className = 'workstation-card';
@@ -2090,21 +2311,42 @@ export class TransportController {
 
         const gTop = document.createElement('div');
         gTop.className = 'card-row';
-        const addG = this.createButton('➕ Add Gauge Probe', 'transport-tool-btn', () => {
+        gTop.style.flexWrap = 'wrap';
+        gTop.style.gap = '4px';
+        const addG = this.createButton('➕ Add Probe', 'transport-tool-btn', () => {
             this.addGaugeProbe();
         });
-        const toggleAllG = this.createButton('🎯 Virtual Gauges', `chip-btn fixed-toggle-btn ${this.activeLayers.gauges ? 'active' : ''}`, () => {
+        const toggleAllG = this.createButton('🎯 Show Probes', `chip-btn fixed-toggle-btn ${this.activeLayers.gauges ? 'active' : ''}`, () => {
             this.activeLayers.gauges = !this.activeLayers.gauges;
             toggleAllG.classList.toggle('active', this.activeLayers.gauges);
             this.onLayerToggle?.('gauges', this.activeLayers.gauges);
         });
+        const plotWaveformsBtn = this.createButton('📈 Waveforms f(t)', 'transport-tool-btn', () => {
+            const wm = (window as any).workspaceManager;
+            if (wm && typeof wm.openGaugeWaveformView === 'function') {
+                wm.openGaugeWaveformView(targetModel?.id);
+            } else {
+                window.dispatchEvent(new CustomEvent('blastdemon-open-gauge-waveforms', { detail: { modelId: targetModel?.id } }));
+            }
+        });
+        plotWaveformsBtn.title = 'Switch active workspace viewport to Virtual Gauge Time-History Waveforms f(t)';
+
+        const openMgrBtn = this.createButton('🗔 Manager', 'transport-tool-btn', () => {
+            if (!targetModel) return;
+            const vg = targetModel.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge') || domainNode;
+            if (vg) {
+                new GaugeManagerModal(this.stateManager, vg, targetModel, null, () => {
+                    this.renderActiveTabContent(true);
+                });
+            }
+        });
+        openMgrBtn.title = 'Open Virtual Gauge Manager & Data Grid (Linear Rake, CSV Import/Export, Live Sparklines)';
+
         gTop.appendChild(addG);
         gTop.appendChild(toggleAllG);
+        gTop.appendChild(plotWaveformsBtn);
+        gTop.appendChild(openMgrBtn);
         body1.appendChild(gTop);
-
-        const targetModel = this.stateManager.getActiveModel();
-        const is1DModel = Boolean(targetModel && (targetModel.nodes.some((n: any) => n.type === 'CFDSolver' || n.type === 'DomainMesh') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || n.type === 'DomainMesh2D' || n.type === 'MPMDomain2D' || n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D')));
-        const is2DModel = Boolean(targetModel && !is1DModel && (targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || n.type === 'DomainMesh2D' || n.type === 'MPMDomain2D') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D')));
 
         const gTable = document.createElement('table');
         gTable.className = 'slices-matrix-table';
@@ -2147,36 +2389,80 @@ export class TransportController {
         `;
         const gBody = gTable.querySelector('tbody')!;
 
-        const gaugeNode = targetModel?.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge');
-        const domainNode = targetModel?.nodes.find((n: any) => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain');
         const gauges: any[] = gaugeNode?.parameters?.gauges || domainNode?.parameters?.gauges || [];
+
+        const commitGaugeCoordUpdate = (idx: number, patch: Record<string, number>) => {
+            if (!targetModel) return;
+            const ownerNode = gaugeNode || domainNode;
+            if (!ownerNode) return;
+            const nextGauges = gauges.map((item: any, i: number) => i === idx ? { ...item, ...patch } : { ...item });
+            this.stateManager.updateNodeParameters(ownerNode.id, { gauges: nextGauges });
+            this.stateManager.setModelStatus(targetModel.id, 'UNINITIALIZED');
+        };
 
         gauges.forEach((g: any, gIdx: number) => {
             const gTr = document.createElement('tr');
+            const inputStyle = 'width:68px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:3px;padding:1px 4px;font-size:11px;font-family:monospace;';
             if (is1DModel) {
+                const rVal = Number(g.r ?? g.x ?? 0);
                 gTr.innerHTML = `
                     <td>#${gIdx + 1}</td>
                     <td><strong>${g.id || 'G' + (gIdx + 1)}</strong></td>
-                    <td>${Number(g.r ?? g.x ?? 0).toFixed(3)}</td>
-                    <td><button class="table-icon-btn danger">✖</button></td>
+                    <td><input type="number" step="0.01" class="gauge-coord-r" value="${rVal.toFixed(3)}" style="${inputStyle}" /></td>
+                    <td><button class="table-icon-btn danger" title="Remove probe">✖</button></td>
                 `;
+                const rInp = gTr.querySelector('.gauge-coord-r') as HTMLInputElement | null;
+                rInp?.addEventListener('change', () => {
+                    const val = parseFloat(rInp.value);
+                    if (!isNaN(val)) commitGaugeCoordUpdate(gIdx, { r: val, x: val });
+                });
             } else if (is2DModel) {
+                const rVal = Number(g.r ?? g.x ?? 0);
+                const zVal = Number(g.z ?? g.y ?? 0);
                 gTr.innerHTML = `
                     <td>#${gIdx + 1}</td>
                     <td><strong>${g.id || 'G' + (gIdx + 1)}</strong></td>
-                    <td>${Number(g.r ?? g.x ?? 0).toFixed(3)}</td>
-                    <td>${Number(g.z ?? g.y ?? 0).toFixed(3)}</td>
-                    <td><button class="table-icon-btn danger">✖</button></td>
+                    <td><input type="number" step="0.01" class="gauge-coord-r" value="${rVal.toFixed(3)}" style="${inputStyle}" /></td>
+                    <td><input type="number" step="0.01" class="gauge-coord-z" value="${zVal.toFixed(3)}" style="${inputStyle}" /></td>
+                    <td><button class="table-icon-btn danger" title="Remove probe">✖</button></td>
                 `;
+                const rInp = gTr.querySelector('.gauge-coord-r') as HTMLInputElement | null;
+                const zInp = gTr.querySelector('.gauge-coord-z') as HTMLInputElement | null;
+                rInp?.addEventListener('change', () => {
+                    const val = parseFloat(rInp.value);
+                    if (!isNaN(val)) commitGaugeCoordUpdate(gIdx, { r: val, x: val });
+                });
+                zInp?.addEventListener('change', () => {
+                    const val = parseFloat(zInp.value);
+                    if (!isNaN(val)) commitGaugeCoordUpdate(gIdx, { z: val, y: val });
+                });
             } else {
+                const xVal = Number(g.x ?? 0);
+                const yVal = Number(g.y ?? 0);
+                const zVal = Number(g.z ?? 0);
                 gTr.innerHTML = `
                     <td>#${gIdx + 1}</td>
                     <td><strong>${g.id || 'P' + (gIdx + 1)}</strong></td>
-                    <td>${Number(g.x ?? 0).toFixed(3)}</td>
-                    <td>${Number(g.y ?? 0).toFixed(3)}</td>
-                    <td>${Number(g.z ?? 0).toFixed(3)}</td>
-                    <td><button class="table-icon-btn danger">✖</button></td>
+                    <td><input type="number" step="0.01" class="gauge-coord-x" value="${xVal.toFixed(3)}" style="${inputStyle}" /></td>
+                    <td><input type="number" step="0.01" class="gauge-coord-y" value="${yVal.toFixed(3)}" style="${inputStyle}" /></td>
+                    <td><input type="number" step="0.01" class="gauge-coord-z" value="${zVal.toFixed(3)}" style="${inputStyle}" /></td>
+                    <td><button class="table-icon-btn danger" title="Remove probe">✖</button></td>
                 `;
+                const xInp = gTr.querySelector('.gauge-coord-x') as HTMLInputElement | null;
+                const yInp = gTr.querySelector('.gauge-coord-y') as HTMLInputElement | null;
+                const zInp = gTr.querySelector('.gauge-coord-z') as HTMLInputElement | null;
+                xInp?.addEventListener('change', () => {
+                    const val = parseFloat(xInp.value);
+                    if (!isNaN(val)) commitGaugeCoordUpdate(gIdx, { x: val });
+                });
+                yInp?.addEventListener('change', () => {
+                    const val = parseFloat(yInp.value);
+                    if (!isNaN(val)) commitGaugeCoordUpdate(gIdx, { y: val });
+                });
+                zInp?.addEventListener('change', () => {
+                    const val = parseFloat(zInp.value);
+                    if (!isNaN(val)) commitGaugeCoordUpdate(gIdx, { z: val });
+                });
             }
             gTr.querySelector('.danger')?.addEventListener('click', () => {
                 this.removeGaugeProbe(gIdx);
@@ -2325,7 +2611,7 @@ export class TransportController {
         if (cfdSolver) {
             const initMode = cfdSolver.parameters?.init_mode;
             if (initMode === 'Ideal Gas') return true;
-            if (initMode === 'Multi-Material JWL' || initMode === 'From1D' || initMode === 'From2D' || initMode === 'JWL') return false;
+            if (initMode === 'Multi-Material JWL' || initMode === 'From1D' || initMode === 'From2D' || initMode === 'From3D' || initMode === 'JWL') return false;
             if (cfdSolver.parameters?.is_ideal_gas === true) return true;
         }
 
@@ -2417,7 +2703,7 @@ export class TransportController {
             return vpNode.parameters.slices;
         }
         const activeModel = this.stateManager.getActiveModel();
-        const meshNode = activeModel?.nodes.find((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+        const meshNode = activeModel?.nodes.find((n: any) => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh');
         if (meshNode?.parameters?.slices && Array.isArray(meshNode.parameters.slices) && meshNode.parameters.slices.length > 0) {
             return meshNode.parameters.slices;
         }
@@ -2429,7 +2715,7 @@ export class TransportController {
         let max = 1.0;
         const ax = String(axis || 'xy').toLowerCase();
         const activeModel = this.stateManager.getActiveModel();
-        const meshNode = activeModel?.nodes.find((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'DomainMesh2D');
+        const meshNode = activeModel?.nodes.find((n: any) => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh' || isDomainMesh2DNode(n.type));
         if (meshNode) {
             const xmin = Number(meshNode.parameters?.xmin ?? meshNode.parameters?.x_min ?? 0.0);
             const xmax = Number(meshNode.parameters?.xmax ?? meshNode.parameters?.x_max ?? 1.0);
@@ -2451,11 +2737,279 @@ export class TransportController {
         return { min, max };
     }
 
+    private buildAdaptiveCameraGrid(isCompact: boolean): HTMLElement {
+        const snapGrid = document.createElement('div');
+        snapGrid.className = isCompact ? 'sim-camera-grid' : 'camera-snap-grid';
+        const btnCls = isCompact ? 'snap-btn compact-snap-btn' : 'snap-btn';
+
+        const wm = (window as any).workspaceManager;
+        const paneCtx = wm?.getActivePaneContext?.();
+        const activeViewType: string = paneCtx?.viewType || '3D_VIEWPORT';
+        const activeModel = this.stateManager.getActiveModel();
+        const is3DModel = Boolean(activeModel?.nodes?.some((n: any) =>
+            isDomainMesh3DNode(n.type) || ['CFDSolver3D', 'MarineHarbourDomain', 'MPMDomain3D', 'FEMDomain3D', 'FSICoupler3D', 'FEMFSICoupler3D'].includes(n.type)
+        ));
+        const is2DModel = Boolean(activeModel?.nodes?.some((n: any) =>
+            isDomainMesh2DNode(n.type) || ['CFDSolver2D', 'MPMDomain2D', 'MPMObject2D', 'FSICoupler2D'].includes(n.type)
+        ));
+
+        if (activeViewType === '2D_CONTOUR' || activeViewType === '1D_CHART' || activeViewType === 'GAUGE_CHART') {
+            const fitBtn = this.createButton('🏠 Fit', btnCls, () => this.onCameraSnap?.('reset'));
+            fitBtn.title = 'Fit domain / chart axes to viewport (Double-click canvas also resets)';
+
+            const zoomInBtn = this.createButton('🔍 Zoom+', btnCls, () => {
+                if (wm?.zoomActivePane) wm.zoomActivePane(1.25);
+                else this.onCameraSnap?.('zoom_in');
+            });
+            zoomInBtn.title = 'Zoom in (1.25×)';
+
+            const zoomOutBtn = this.createButton('🔎 Zoom-', btnCls, () => {
+                if (wm?.zoomActivePane) wm.zoomActivePane(0.8);
+                else this.onCameraSnap?.('zoom_out');
+            });
+            zoomOutBtn.title = 'Zoom out (0.8×)';
+
+            const isChartView = activeViewType === '1D_CHART' || activeViewType === 'GAUGE_CHART';
+            const fourthBtn = isChartView
+                ? (() => {
+                    const peaksActive = this.isLayerActive('peaks');
+                    const btn = this.createButton('▲▼ Peaks', `${btnCls} ${peaksActive ? 'active' : ''}`, () => {
+                        this.toggleLayer('peaks');
+                    });
+                    btn.title = 'Toggle Peak / Extrema Value Callouts';
+                    return btn;
+                })()
+                : (() => {
+                    const isSym = Boolean(wm?.buildContourConfig?.(activeModel, paneCtx?.overrides || {})?.isAxisymmetric);
+                    const btn = this.createButton('🪞 Sym', `${btnCls} ${isSym ? 'active' : ''}`, () => {
+                        wm?.toggleActivePaneSymmetry?.();
+                    });
+                    btn.title = 'Toggle Axisymmetric R-Z Mirror Reflection across r = 0';
+                    return btn;
+                })();
+
+            const gridActive = this.isLayerActive('grid');
+            const gridBtn = this.createButton('🌐 Grid', `${btnCls} ${gridActive ? 'active' : ''}`, () => {
+                this.toggleLayer('grid');
+            });
+            gridBtn.title = 'Toggle Mesh / AMR Block / Chart Gridlines';
+
+            const barActive = this.isLayerActive('slices');
+            const barBtn = this.createButton(isChartView ? '🎛️ Panel' : '🎨 Scale', `${btnCls} ${barActive ? 'active' : ''}`, () => {
+                this.updateContextSetting('showColorbar', !barActive);
+            });
+            barBtn.title = isChartView ? 'Toggle Floating Chart Control Card' : 'Toggle Floating Colorbar Legend Card';
+
+            const primarySwitchBtn = is3DModel
+                ? this.createButton('🧊 3D', btnCls, () => wm?.switchActivePaneType?.('3D_VIEWPORT'))
+                : this.createButton('🗺️ 2D', `${btnCls} ${activeViewType === '2D_CONTOUR' ? 'active' : ''}`, () => {
+                    if (is2DModel) wm?.switchActivePaneType?.('2D_CONTOUR');
+                });
+            primarySwitchBtn.title = is3DModel ? 'Switch viewport back to 3D Stage' : 'Switch viewport to 2D Contour Slice View';
+            if (!is3DModel && !is2DModel) primarySwitchBtn.style.opacity = '0.45';
+
+            const profBtn = this.createButton('📈 Prof', `${btnCls} ${activeViewType === '1D_CHART' ? 'active' : ''}`, () => {
+                wm?.switchActivePaneType?.('1D_CHART');
+            });
+            profBtn.title = 'Switch viewport to 1D Radial Profile f(r)';
+
+            const gaugeBtn = this.createButton('🎯 Gauge', `${btnCls} ${activeViewType === 'GAUGE_CHART' ? 'active' : ''}`, () => {
+                wm?.switchActivePaneType?.('GAUGE_CHART');
+            });
+            gaugeBtn.title = 'Switch viewport to Virtual Gauge Waveforms f(t)';
+
+            snapGrid.appendChild(fitBtn);
+            snapGrid.appendChild(zoomInBtn);
+            snapGrid.appendChild(zoomOutBtn);
+            snapGrid.appendChild(fourthBtn);
+            snapGrid.appendChild(gridBtn);
+            snapGrid.appendChild(barBtn);
+            snapGrid.appendChild(primarySwitchBtn);
+            snapGrid.appendChild(profBtn);
+            snapGrid.appendChild(gaugeBtn);
+            return snapGrid;
+        }
+
+        // Standard 3x3 3D Camera Views
+        const resetBtn = this.createButton('🏠 Reset', btnCls, () => this.onCameraSnap?.('reset'));
+        resetBtn.title = 'Reset camera framing & center';
+
+        const topBtn = this.createButton('+Z Top', btnCls, () => this.onCameraSnap?.('+z'));
+        topBtn.title = '+Z Top View (Looking down from above)';
+
+        const isoBtn = this.createButton('⬡ Iso', btnCls, () => this.onCameraSnap?.('iso'));
+        isoBtn.title = 'Isometric 3D Perspective Angle';
+
+        const lftBtn = this.createButton('-X Lft', btnCls, () => this.onCameraSnap?.('-x'));
+        lftBtn.title = '-X Left View (Looking from left side)';
+
+        const frtBtn = this.createButton('-Y Frt', btnCls, () => this.onCameraSnap?.('-y'));
+        frtBtn.title = '-Y Front View (Looking at front face)';
+
+        const rgtBtn = this.createButton('+X Rgt', btnCls, () => this.onCameraSnap?.('+x'));
+        rgtBtn.title = '+X Right View (Looking from right side)';
+
+        const projBtn = this.createButton(this.usePerspective ? '👁️ Persp' : '📐 Ortho', btnCls, () => {
+            this.usePerspective = !this.usePerspective;
+            this.syncProjectionButtons();
+            const vpNode = this.getActiveViewportNode();
+            if (vpNode) {
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, { usePerspective: this.usePerspective });
+            }
+            this.onProjectionToggle?.(this.usePerspective);
+        });
+        projBtn.title = 'Toggle Perspective / Orthographic projection';
+        if (isCompact) this.cockpitProjBtn = projBtn;
+        else this.tabProjBtn = projBtn;
+
+        const btmBtn = this.createButton('-Z Btm', btnCls, () => this.onCameraSnap?.('-z'));
+        btmBtn.title = '-Z Bottom View (Looking up from below)';
+
+        const bckBtn = this.createButton('+Y Bck', btnCls, () => this.onCameraSnap?.('+y'));
+        bckBtn.title = '+Y Back View (Looking at back face)';
+
+        snapGrid.appendChild(resetBtn);
+        snapGrid.appendChild(topBtn);
+        snapGrid.appendChild(isoBtn);
+        snapGrid.appendChild(lftBtn);
+        snapGrid.appendChild(frtBtn);
+        snapGrid.appendChild(rgtBtn);
+        snapGrid.appendChild(projBtn);
+        snapGrid.appendChild(btmBtn);
+        snapGrid.appendChild(bckBtn);
+        return snapGrid;
+    }
+
     public getCurrentContextSettings(): ContextualVisualSettings {
         const vpNode = this.getActiveViewportNode();
         const params = vpNode?.parameters || {};
         const activeModel = this.stateManager.getActiveModel();
-        const isGloballyLocked = params.lock_quantity_ranges !== false;
+        const isGloballyLocked = true;
+
+        // 0. Check if active Workspace pane is 2D_CONTOUR, 1D_CHART, or GAUGE_CHART
+        const wm = (window as any).workspaceManager;
+        const paneCtx = wm?.getActivePaneContext?.();
+        if (paneCtx && paneCtx.viewType === '2D_CONTOUR') {
+            const cfg = wm.buildContourConfig(activeModel, paneCtx.overrides || {});
+            const chToKey: Record<number, string> = {
+                0: 'pressure',
+                10: 'overpressure',
+                1: 'density',
+                9: 'velocity',
+                2: 'ur',
+                3: 'uz',
+                4: 'energy',
+                5: 'species1',
+                6: 'species2',
+                7: 'vonMises',
+                8: 'plastic_strain'
+            };
+            const qKey = chToKey[Number(cfg.channel ?? 0)] || 'pressure';
+            const hasMPM2D = Boolean(activeModel?.nodes.some(n =>
+                n.type === 'MPMDomain2D' || n.type === 'MPMObject2D' || n.type === 'FSICoupler2D'
+            ));
+            const hasCFD2D = !activeModel || activeModel.nodes.some(n =>
+                n.type === 'CFDSolver2D' || isDomainMesh2DNode(n.type) || n.type === 'CFDSolver' || n.type === 'DomainMesh'
+            ) || !hasMPM2D;
+            const all2DQuantities = [
+                { val: 'pressure', label: 'Pressure P (Pa)', kind: 'cfd' },
+                { val: 'overpressure', label: 'Overpressure ΔP (Pa)', kind: 'cfd' },
+                { val: 'density', label: 'Density ρ (kg/m³)', kind: 'cfd' },
+                { val: 'velocity', label: 'Velocity Mag |u| (m/s)', kind: 'cfd' },
+                { val: 'ur', label: 'Radial Vel u_r (m/s)', kind: 'cfd' },
+                { val: 'uz', label: 'Axial Vel u_z (m/s)', kind: 'cfd' },
+                { val: 'energy', label: 'Specific Energy e (J/kg)', kind: 'cfd' },
+                { val: 'species1', label: 'Reacted Products α₁', kind: 'cfd' },
+                { val: 'species2', label: 'Unreacted Solid α₂', kind: 'cfd' },
+                { val: 'vonMises', label: 'MPM von Mises (Pa)', kind: 'mpm' },
+                { val: 'plastic_strain', label: 'MPM Plastic Strain ε_p', kind: 'mpm' }
+            ];
+            const available2D = all2DQuantities
+                .filter(q => (q.kind === 'cfd' && hasCFD2D) || (q.kind === 'mpm' && hasMPM2D) || q.val === qKey)
+                .map(({ val, label }) => ({ val, label }));
+            const liveMin = (cfg.autoScale && paneCtx.liveBounds) ? paneCtx.liveBounds.min : Number(cfg.minVal ?? 0);
+            const liveMax = (cfg.autoScale && paneCtx.liveBounds) ? paneCtx.liveBounds.max : Number(cfg.maxVal ?? 1e6);
+            const cLevels = Number(cfg.contourLevels ?? 0);
+            return {
+                targetType: 'global',
+                targetLabel: '2D Contour Slice',
+                targetIcon: '🗺️',
+                nodeId: vpNode?.id,
+                quantity: qKey,
+                availableQuantities: available2D,
+                colormap: (cfg.colormap || 'rainbow') as ColormapType,
+                autoScale: Boolean(cfg.autoScale),
+                minVal: liveMin,
+                maxVal: liveMax,
+                logScale: Boolean(cfg.logScale),
+                isLocked: false,
+                contourLevels: cLevels,
+                smoothContours: cLevels <= 1,
+                showColorbar: Boolean(cfg.showColorbarCard),
+                showMeshLines: Boolean(cfg.showGridlines),
+                visibility: true,
+                interpolate: Boolean(cfg.interpolate),
+                showPeaks: Boolean(cfg.showExtrema),
+                isAxisymmetric: Boolean(cfg.isAxisymmetric)
+            };
+        }
+        if (paneCtx && (paneCtx.viewType === '1D_CHART' || paneCtx.viewType === 'GAUGE_CHART')) {
+            const cfg = wm.buildChartConfig(activeModel, paneCtx.overrides || {}, paneCtx.viewType);
+            const isGauges = cfg.chartMode === 'gauges';
+            const chToKey1D: Record<number, string> = isGauges
+                ? { 0: 'pressure', 7: 'overpressure', 8: 'impulse', 1: 'density', 2: 'velocity', 3: 'energy', 4: 'species1', 5: 'species2', 6: 'species3' }
+                : { 0: 'pressure', 8: 'overpressure', 1: 'density', 2: 'velocity', 3: 'energy', 4: 'species', 5: 'species1', 6: 'species2', 7: 'species3' };
+            const qKey = chToKey1D[Number(cfg.channel ?? 0)] || 'pressure';
+            const vgNode = activeModel?.nodes.find(n => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D');
+            const allGaugeQuantities = [
+                { val: 'pressure', label: 'Pressure P(t) [Pa]', param: 'qty_pressure' },
+                { val: 'overpressure', label: 'Overpressure ΔP(t) [Pa]', param: 'qty_overpressure' },
+                { val: 'impulse', label: 'Specific Impulse I(t) [Pa·s]', param: 'qty_impulse' },
+                { val: 'density', label: 'Density ρ(t) [kg/m³]', param: 'qty_density' },
+                { val: 'velocity', label: 'Velocity |u|(t) [m/s]', param: 'qty_velocity' },
+                { val: 'energy', label: 'Specific Energy e(t) [J/kg]', param: 'qty_energy' },
+                { val: 'species1', label: 'Reacted Products α₁(t)', param: 'qty_reacted' },
+                { val: 'species2', label: 'Unreacted Solid α₂(t)', param: 'qty_unreacted' },
+                { val: 'species3', label: 'Ambient Air α_air(t)', param: 'qty_air' }
+            ];
+            let filteredGaugeQuantities = vgNode?.parameters
+                ? allGaugeQuantities.filter(q => vgNode.parameters[q.param] !== false || q.val === qKey)
+                : allGaugeQuantities;
+            if (filteredGaugeQuantities.length === 0) filteredGaugeQuantities = allGaugeQuantities;
+
+            const liveMin = (cfg.autoScale && paneCtx.liveBounds) ? paneCtx.liveBounds.min : Number(cfg.min ?? 0);
+            const liveMax = (cfg.autoScale && paneCtx.liveBounds) ? paneCtx.liveBounds.max : Number(cfg.max ?? 1e6);
+            return {
+                targetType: 'global',
+                targetLabel: isGauges ? 'Gauge Waveforms f(t)' : '1D Radial Profile f(r)',
+                targetIcon: isGauges ? '🎯' : '📈',
+                nodeId: vpNode?.id,
+                quantity: qKey,
+                availableQuantities: isGauges
+                    ? filteredGaugeQuantities.map(({ val, label }) => ({ val, label }))
+                    : [
+                        { val: 'pressure', label: 'Pressure P(r) [Pa]' },
+                        { val: 'overpressure', label: 'Overpressure ΔP(r) [Pa]' },
+                        { val: 'density', label: 'Density ρ(r) [kg/m³]' },
+                        { val: 'velocity', label: 'Radial Velocity u_r(r) [m/s]' },
+                        { val: 'energy', label: 'Specific Energy e(r) [J/kg]' },
+                        { val: 'species', label: 'All Species (α₁, α₂, Air)' },
+                        { val: 'species1', label: 'Reacted Products α₁(r)' },
+                        { val: 'species2', label: 'Unreacted Solid α₂(r)' },
+                        { val: 'species3', label: 'Ambient Air α_air(r)' }
+                    ],
+                colormap: 'rainbow',
+                autoScale: Boolean(cfg.autoScale),
+                minVal: liveMin,
+                maxVal: liveMax,
+                logScale: Boolean(cfg.logScale),
+                isLocked: false,
+                showColorbar: Boolean(cfg.showChartCard),
+                showMeshLines: Boolean(cfg.showGrid),
+                visibility: true,
+                showPeaks: Boolean(cfg.showPeaks !== false)
+            };
+        }
 
         // 1. Check if Slice is selected
         const isExplicitNonSlice = this.selectedObject && this.selectedObject.objectType !== 'Slice';
@@ -2562,6 +3116,7 @@ export class TransportController {
                 isLocked: isGloballyLocked,
                 contourLevels: femLevels,
                 smoothContours: femSmooth,
+                interpolate: (selectedNode?.parameters?.femInterpolate ?? params.femInterpolate) !== false,
                 showColorbar: femBar,
                 showMeshLines: femWire,
                 visibility: femVis,
@@ -2665,6 +3220,9 @@ export class TransportController {
                 maxVal: stlMax,
                 logScale: stlLog,
                 isLocked: isGloballyLocked,
+                contourLevels: params.stl_contour_levels ?? 0,
+                smoothContours: params.stl_smooth_contours ?? true,
+                interpolate: (params.stl_sampling_mode ?? 'linear') === 'linear',
                 showColorbar: stlBar,
                 showMeshLines: stlWire,
                 visibility: stlVis,
@@ -2700,6 +3258,9 @@ export class TransportController {
                 maxVal: obsMax,
                 logScale: obsLog,
                 isLocked: isGloballyLocked,
+                contourLevels: params.obstacles_contour_levels ?? 0,
+                smoothContours: params.obstacles_smooth_contours ?? true,
+                interpolate: params.obstacles_interpolate !== false,
                 showColorbar: obsBar,
                 showMeshLines: obsGrid,
                 visibility: obsVis,
@@ -2783,7 +3344,7 @@ export class TransportController {
         }
 
         // 8. Global Modality-Aware Viewport Fallback
-        const hasMPM = activeModel?.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D');
+        const hasMPM = activeModel?.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || n.type === 'MPMDomain2D' || n.type === 'MPMObject2D');
         const hasFEM = activeModel?.nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
         const hasCFD = activeModel?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
 
@@ -2841,6 +3402,7 @@ export class TransportController {
                 isLocked: isGloballyLocked,
                 contourLevels: params.femContourLevels ?? 0,
                 smoothContours: params.femSmoothContours ?? true,
+                interpolate: params.femInterpolate !== false,
                 showColorbar: (params.femShowColorbar !== undefined ? params.femShowColorbar : params.show_colorbar) !== false,
                 showMeshLines: params.femWireframe !== false,
                 visibility: this.isLayerActive('fem')
@@ -2881,9 +3443,24 @@ export class TransportController {
         const targets: Array<{ id: string; label: string; icon: string; targetType: ContextTargetType; sliceIndex?: number; nodeId?: string }> = [];
         
         const activeModel = this.stateManager.getActiveModel();
-        const hasMPM = activeModel?.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D');
+        const hasMPM = activeModel?.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || n.type === 'MPMDomain2D' || n.type === 'MPMObject2D');
         const hasFEM = activeModel?.nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
         const hasCFD = activeModel?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
+
+        const wm = (window as any).workspaceManager;
+        const paneCtx = wm?.getActivePaneContext?.();
+        if (paneCtx && paneCtx.viewType === '2D_CONTOUR') {
+            targets.push({ id: 'global', label: '2D Contour Slice View', icon: '🗺️', targetType: 'global' });
+            return targets;
+        }
+        if (paneCtx && paneCtx.viewType === '1D_CHART') {
+            targets.push({ id: 'global', label: '1D Radial Profile f(r)', icon: '📈', targetType: 'global' });
+            return targets;
+        }
+        if (paneCtx && paneCtx.viewType === 'GAUGE_CHART') {
+            targets.push({ id: 'global', label: 'Gauge Waveforms f(t)', icon: '🎯', targetType: 'global' });
+            return targets;
+        }
 
         let globalLabel = 'Global CFD / Viewport';
         let globalIcon = '🌐';
@@ -2933,7 +3510,7 @@ export class TransportController {
                         targetType: 'obstacles',
                         nodeId: n.id
                     });
-                } else if (n.type === 'MPMObject3D' || n.type === 'MPMDomain3D') {
+                } else if (n.type === 'MPMObject3D' || n.type === 'MPMDomain3D' || n.type === 'MPMObject2D' || n.type === 'MPMDomain2D') {
                     targets.push({
                         id: `mpm_${n.id}`,
                         label: n.parameters?.name || 'MPM Particles',
@@ -2986,7 +3563,7 @@ export class TransportController {
                         targetType: 'detonator',
                         nodeId: n.id
                     });
-                } else if (n.type === 'Charge3D' || n.type === 'Charge2D') {
+                } else if (n.type === 'Charge3D' || n.type === 'Charge2D' || n.type === 'Charge1D') {
                     targets.push({
                         id: `charge_${n.id}`,
                         label: n.parameters?.name || 'Explosive Charge',
@@ -3192,6 +3769,151 @@ export class TransportController {
                 }
                 this.onShadingChange?.('logScale', bVal);
                 this.onShadingChange?.('quantityLogScales', qLogScales);
+                this.renderActiveTabContent();
+                return;
+            }
+        }
+
+        if (ctx.isLocked && (key === 'contourLevels' || key === 'smoothContours')) {
+            const q = ctx.quantity ? canonicalizeQuantity(ctx.quantity) : null;
+            if (q && vpNode) {
+                const cl = key === 'contourLevels' ? Math.max(0, Math.round(Number(value))) : (Boolean(value) ? 0 : Math.max(2, Number(ctx.contourLevels ?? 10)));
+                const sm = key === 'smoothContours' ? Boolean(value) : (cl <= 1);
+                const vpUpdates: any = {};
+                if (canonicalizeQuantity(params.stl_quantity || 'pressure') === q) {
+                    vpUpdates.stl_contour_levels = cl;
+                    vpUpdates.stl_smooth_contours = sm;
+                    this.onShadingChange?.('stl_contour_levels', cl);
+                    this.onShadingChange?.('stl_smooth_contours', sm);
+                }
+                if (canonicalizeQuantity(params.obstacles_quantity || 'pressure') === q) {
+                    vpUpdates.obstacles_contour_levels = cl;
+                    vpUpdates.obstacles_smooth_contours = sm;
+                    this.onShadingChange?.('obstacles_contour_levels', cl);
+                    this.onShadingChange?.('obstacles_smooth_contours', sm);
+                }
+                if (canonicalizeQuantity(params.mpmParticleQuantity || 'vonMises') === q) {
+                    vpUpdates.mpmContourLevels = cl;
+                    vpUpdates.mpmSmoothContours = sm;
+                    this.onShadingChange?.('mpmContourLevels', cl);
+                    this.onShadingChange?.('mpmSmoothContours', sm);
+                }
+                if (canonicalizeQuantity(params.femQuantity || 'vonMises') === q) {
+                    vpUpdates.femContourLevels = cl;
+                    vpUpdates.femSmoothContours = sm;
+                    this.onShadingChange?.('femContourLevels', cl);
+                    this.onShadingChange?.('femSmoothContours', sm);
+                }
+                if (canonicalizeQuantity(params.beamQuantity || 'plasticStrain') === q) {
+                    vpUpdates.beamContourLevels = cl;
+                    vpUpdates.beamSmoothContours = sm;
+                    this.onShadingChange?.('beamContourLevels', cl);
+                    this.onShadingChange?.('beamSmoothContours', sm);
+                }
+                const allSlices = vpNode.parameters?.slices ? [...vpNode.parameters.slices] : [];
+                let sliceChanged = false;
+                allSlices.forEach((s: any) => {
+                    if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === q) {
+                        s.contour_levels = cl;
+                        s.smooth_contours = sm;
+                        sliceChanged = true;
+                    }
+                });
+                if (sliceChanged) {
+                    vpUpdates.slices = allSlices;
+                    vpUpdates.sliceContourLevels = cl;
+                    vpUpdates.sliceSmoothContours = sm;
+                    if (domainNode && domainNode.id !== vpNode.id) {
+                        this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: allSlices });
+                    }
+                    this.onSliceConfigChange?.(allSlices);
+                }
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
+                this.renderActiveTabContent();
+                return;
+            }
+        }
+
+        if (ctx.isLocked && key === 'interpolate') {
+            const q = ctx.quantity ? canonicalizeQuantity(ctx.quantity) : null;
+            if (q && vpNode) {
+                const interp = Boolean(value);
+                const vpUpdates: any = {};
+                if (canonicalizeQuantity(params.stl_quantity || 'pressure') === q) {
+                    const mode = interp ? 'linear' : 'nearest';
+                    vpUpdates.stl_sampling_mode = mode;
+                    this.onShadingChange?.('stl_sampling_mode', mode);
+                }
+                if (canonicalizeQuantity(params.obstacles_quantity || 'pressure') === q) {
+                    vpUpdates.obstacles_interpolate = interp;
+                    this.onShadingChange?.('obstacles_interpolate', interp);
+                }
+                if (canonicalizeQuantity(params.femQuantity || 'vonMises') === q) {
+                    vpUpdates.femInterpolate = interp;
+                    this.onShadingChange?.('femInterpolate', interp);
+                }
+                const allSlices = vpNode.parameters?.slices ? [...vpNode.parameters.slices] : [];
+                let sliceChanged = false;
+                allSlices.forEach((s: any) => {
+                    if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === q) {
+                        s.interpolate = interp;
+                        sliceChanged = true;
+                    }
+                });
+                if (sliceChanged) {
+                    vpUpdates.slices = allSlices;
+                    if (domainNode && domainNode.id !== vpNode.id) {
+                        this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: allSlices });
+                    }
+                    this.onSliceConfigChange?.(allSlices);
+                }
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
+                this.renderActiveTabContent();
+                return;
+            }
+        }
+
+        if (ctx.isLocked && key === 'showColorbar') {
+            const q = ctx.quantity ? canonicalizeQuantity(ctx.quantity) : null;
+            if (q && vpNode) {
+                const show = Boolean(value);
+                const vpUpdates: any = {};
+                if (canonicalizeQuantity(params.stl_quantity || 'pressure') === q) {
+                    vpUpdates.stl_show_colorbar = show;
+                    this.onShadingChange?.('stl_show_colorbar', show);
+                }
+                if (canonicalizeQuantity(params.obstacles_quantity || 'pressure') === q) {
+                    vpUpdates.obstacles_show_colorbar = show;
+                    this.onShadingChange?.('obstacles_show_colorbar', show);
+                }
+                if (canonicalizeQuantity(params.mpmParticleQuantity || 'vonMises') === q) {
+                    vpUpdates.mpmParticleShowColorbar = show;
+                    this.onShadingChange?.('mpmParticleShowColorbar', show);
+                }
+                if (canonicalizeQuantity(params.femQuantity || 'vonMises') === q) {
+                    vpUpdates.femShowColorbar = show;
+                    this.onShadingChange?.('femShowColorbar', show);
+                }
+                if (canonicalizeQuantity(params.beamQuantity || 'plasticStrain') === q) {
+                    vpUpdates.beamShowColorbar = show;
+                    this.onShadingChange?.('beamShowColorbar', show);
+                }
+                const allSlices = vpNode.parameters?.slices ? [...vpNode.parameters.slices] : [];
+                let sliceChanged = false;
+                allSlices.forEach((s: any) => {
+                    if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === q) {
+                        s.show_colorbar = show;
+                        sliceChanged = true;
+                    }
+                });
+                if (sliceChanged) {
+                    vpUpdates.slices = allSlices;
+                    if (domainNode && domainNode.id !== vpNode.id) {
+                        this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: allSlices });
+                    }
+                    this.onSliceConfigChange?.(allSlices);
+                }
+                this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
                 this.renderActiveTabContent();
                 return;
             }
@@ -3424,6 +4146,11 @@ export class TransportController {
                     nodeUpdates.femSmoothContours = sm;
                     vpUpdates.femSmoothContours = sm;
                     this.onShadingChange?.('femSmoothContours', sm);
+                } else if (key === 'interpolate') {
+                    const interp = Boolean(value);
+                    nodeUpdates.femInterpolate = interp;
+                    vpUpdates.femInterpolate = interp;
+                    this.onShadingChange?.('femInterpolate', interp);
                 } else if (key === 'visibility') {
                     if (selectedNode && (selectedNode.type === 'FEMObject3D' || selectedNode.type === 'LSDynaImporter3D' || selectedNode.type === 'FEMDomain3D')) {
                         nodeUpdates.visible = value;
@@ -3658,6 +4385,26 @@ export class TransportController {
                 nodeUpdates.stl_opacity = Number(value);
                 vpUpdates.stl_opacity = Number(value);
                 this.onShadingChange?.('stl_opacity', Number(value));
+            } else if (key === 'contourLevels') {
+                const cl = Number(value);
+                nodeUpdates.stl_contour_levels = cl;
+                vpUpdates.stl_contour_levels = cl;
+                this.onShadingChange?.('stl_contour_levels', cl);
+                if (cl <= 1) {
+                    nodeUpdates.stl_smooth_contours = true;
+                    vpUpdates.stl_smooth_contours = true;
+                    this.onShadingChange?.('stl_smooth_contours', true);
+                }
+            } else if (key === 'smoothContours') {
+                const sm = Boolean(value);
+                nodeUpdates.stl_smooth_contours = sm;
+                vpUpdates.stl_smooth_contours = sm;
+                this.onShadingChange?.('stl_smooth_contours', sm);
+            } else if (key === 'interpolate') {
+                const mode = Boolean(value) ? 'linear' : 'nearest';
+                nodeUpdates.stl_sampling_mode = mode;
+                vpUpdates.stl_sampling_mode = mode;
+                this.onShadingChange?.('stl_sampling_mode', mode);
             }
             if (selectedNode && selectedNode.id !== vpNode?.id) {
                 this.stateManager.updateNodeParametersInPlace(selectedNode.id, nodeUpdates);
@@ -3750,6 +4497,26 @@ export class TransportController {
                 nodeUpdates.obstacles_opacity = Number(value);
                 vpUpdates.obstacles_opacity = Number(value);
                 this.onShadingChange?.('obstacles_opacity', Number(value));
+            } else if (key === 'contourLevels') {
+                const cl = Number(value);
+                nodeUpdates.obstacles_contour_levels = cl;
+                vpUpdates.obstacles_contour_levels = cl;
+                this.onShadingChange?.('obstacles_contour_levels', cl);
+                if (cl <= 1) {
+                    nodeUpdates.obstacles_smooth_contours = true;
+                    vpUpdates.obstacles_smooth_contours = true;
+                    this.onShadingChange?.('obstacles_smooth_contours', true);
+                }
+            } else if (key === 'smoothContours') {
+                const sm = Boolean(value);
+                nodeUpdates.obstacles_smooth_contours = sm;
+                vpUpdates.obstacles_smooth_contours = sm;
+                this.onShadingChange?.('obstacles_smooth_contours', sm);
+            } else if (key === 'interpolate') {
+                const interp = Boolean(value);
+                nodeUpdates.obstacles_interpolate = interp;
+                vpUpdates.obstacles_interpolate = interp;
+                this.onShadingChange?.('obstacles_interpolate', interp);
             }
             if (selectedNode && selectedNode.id !== vpNode?.id) {
                 this.stateManager.updateNodeParametersInPlace(selectedNode.id, nodeUpdates);
@@ -3789,9 +4556,67 @@ export class TransportController {
             }
             this.onShadingChange?.(key, value);
         } else {
-            // Global Modality-Aware Viewport
+            // Global Modality-Aware Viewport (with first-class 2D Contour / 1D Profile / Gauge Chart routing)
+            const wm = (window as any).workspaceManager;
+            const paneCtx = wm?.getActivePaneContext?.();
+            if (paneCtx && (paneCtx.viewType === '2D_CONTOUR' || paneCtx.viewType === '1D_CHART' || paneCtx.viewType === 'GAUGE_CHART')) {
+                if (key === 'quantity') {
+                    this.activeQuantity = String(value);
+                    wm.setQuantity(String(value));
+                } else if (key === 'colormap') {
+                    this.activeColormap = value;
+                    wm.setColormap(String(value));
+                } else if (key === 'autoScale') {
+                    this.autoScale = Boolean(value);
+                    if (!value && paneCtx.liveBounds) {
+                        wm.setShadingConfig({
+                            autoScale: false,
+                            minVal: paneCtx.liveBounds.min,
+                            maxVal: paneCtx.liveBounds.max
+                        });
+                    } else {
+                        wm.setShadingConfig({ autoScale: Boolean(value) });
+                    }
+                } else if (key === 'minVal') {
+                    this.minScalarVal = Number(value);
+                    this.autoScale = false;
+                    const curMax = paneCtx.liveBounds && ctx.autoScale ? paneCtx.liveBounds.max : ctx.maxVal;
+                    wm.setShadingConfig({ autoScale: false, minVal: Number(value), maxVal: curMax });
+                } else if (key === 'maxVal') {
+                    this.maxScalarVal = Number(value);
+                    this.autoScale = false;
+                    const curMin = paneCtx.liveBounds && ctx.autoScale ? paneCtx.liveBounds.min : ctx.minVal;
+                    wm.setShadingConfig({ autoScale: false, minVal: curMin, maxVal: Number(value) });
+                } else if (key === 'logScale') {
+                    this.logScale = Boolean(value);
+                    wm.setShadingConfig({ logScale: Boolean(value) });
+                } else if (key === 'showColorbar') {
+                    wm.setShadingConfig({ showColorbar: Boolean(value) });
+                } else if (key === 'showMeshLines') {
+                    this.activeLayers.grid = Boolean(value);
+                    wm.setLayerVisibility('grid', Boolean(value));
+                } else if (key === 'contourLevels') {
+                    wm.setShadingConfig({ contourLevels: Number(value) });
+                } else if (key === 'smoothContours') {
+                    if (value) wm.setShadingConfig({ contourLevels: 0 });
+                } else if (key === 'interpolate') {
+                    wm.setShadingConfig({ interpolate: Boolean(value) });
+                } else if (key === 'showPeaks') {
+                    this.activeLayers.peaks = Boolean(value);
+                    wm.setShadingConfig({ showPeaks: Boolean(value), showExtrema: Boolean(value) });
+                } else if (key === 'isAxisymmetric') {
+                    this.activeLayers.mirror = Boolean(value);
+                    wm.setShadingConfig({ isAxisymmetric: Boolean(value) });
+                } else if (key === 'visibility') {
+                    wm.setShadingConfig({ showColorbar: Boolean(value) });
+                }
+                this.updateAllLayerChips();
+                this.renderActiveTabContent();
+                return;
+            }
+
             const activeModel = this.stateManager.getActiveModel();
-            const hasMPM = activeModel?.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D');
+            const hasMPM = activeModel?.nodes.some(n => n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || n.type === 'MPMDomain2D' || n.type === 'MPMObject2D');
             const hasFEM = activeModel?.nodes.some(n => n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D');
             const hasCFD = activeModel?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'CFDSolver');
 
@@ -4203,215 +5028,299 @@ export class TransportController {
         rowField.appendChild(qtySelect);
         b.appendChild(rowField);
 
-        // 3. Row 2: Colormap Selector Dropdown
-        const rowCmap = document.createElement('div');
-        rowCmap.className = 'card-row';
-        const cmapLbl = document.createElement('span');
-        cmapLbl.className = 'sim-select-label';
-        cmapLbl.textContent = 'MAP:';
+        const paneViewType = (window as any).workspaceManager?.getActivePaneContext?.()?.viewType;
+        const isChartPane = paneViewType === '1D_CHART' || paneViewType === 'GAUGE_CHART';
+        const isContourPane = paneViewType === '2D_CONTOUR';
 
-        const cmapSelect = document.createElement('select');
-        cmapSelect.className = `transport-select full-width ${isCockpit ? 'compact-select' : ''}`;
-        (['rainbow', 'plasma', 'viridis', 'turbo', 'inferno', 'coolwarm', 'jet', 'magma', 'grayscale', 'cividis'] as ColormapType[]).forEach(cm => {
-            const opt = document.createElement('option');
-            opt.value = cm;
-            opt.textContent = cm.toUpperCase();
-            if (cm === ctx.colormap) opt.selected = true;
-            cmapSelect.appendChild(opt);
-        });
-        cmapSelect.addEventListener('change', () => {
-            this.updateContextSetting('colormap', cmapSelect.value as ColormapType);
-        });
-        rowCmap.appendChild(cmapLbl);
-        rowCmap.appendChild(cmapSelect);
-        b.appendChild(rowCmap);
+        // 3. Row 2: Colormap Selector Dropdown (3D & 2D Contours only — line charts use probe/series colors)
+        if (!isChartPane) {
+            const rowCmap = document.createElement('div');
+            rowCmap.className = 'card-row';
+            const cmapLbl = document.createElement('span');
+            cmapLbl.className = 'sim-select-label';
+            cmapLbl.textContent = 'MAP:';
 
-        // 3b. Row 2b: Contour Levels / Bands Selector
-        if (ctx.contourLevels !== undefined || ctx.targetType === 'fem' || ctx.targetType === 'global' || ctx.targetType === 'slice' || ctx.targetType === 'mpm') {
-            const rowLevels = document.createElement('div');
-            rowLevels.className = 'card-row';
-            rowLevels.style.display = 'flex';
-            rowLevels.style.alignItems = 'center';
-            rowLevels.style.gap = '6px';
-
-            const isSmooth = ctx.smoothContours !== undefined
-                ? Boolean(ctx.smoothContours)
-                : (ctx.contourLevels === undefined || ctx.contourLevels <= 1);
-            const curLvl = ctx.contourLevels && ctx.contourLevels > 1 ? ctx.contourLevels : 10;
-
-            // Segmented mode toggle: Smooth vs Stepped
-            const modeToggleGroup = document.createElement('div');
-            modeToggleGroup.style.display = 'inline-flex';
-            modeToggleGroup.style.borderRadius = '4px';
-            modeToggleGroup.style.overflow = 'hidden';
-            modeToggleGroup.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-            modeToggleGroup.style.flexShrink = '0';
-
-            const smoothBtn = document.createElement('button');
-            smoothBtn.type = 'button';
-            smoothBtn.textContent = 'Smooth';
-            smoothBtn.style.padding = '2px 7px';
-            smoothBtn.style.fontSize = '8.5px';
-            smoothBtn.style.fontWeight = '600';
-            smoothBtn.style.cursor = 'pointer';
-            smoothBtn.style.border = 'none';
-            smoothBtn.style.background = isSmooth ? '#0284c7' : 'rgba(255, 255, 255, 0.06)';
-            smoothBtn.style.color = isSmooth ? '#ffffff' : '#94a3b8';
-            smoothBtn.title = 'Render continuous, smooth scalar field gradient';
-            smoothBtn.onclick = () => {
-                this.updateContextSetting('smoothContours', true);
-                this.updateContextSetting('contourLevels', 0);
-            };
-
-            const steppedBtn = document.createElement('button');
-            steppedBtn.type = 'button';
-            steppedBtn.textContent = 'Stepped';
-            steppedBtn.style.padding = '2px 7px';
-            steppedBtn.style.fontSize = '8.5px';
-            steppedBtn.style.fontWeight = '600';
-            steppedBtn.style.cursor = 'pointer';
-            steppedBtn.style.border = 'none';
-            steppedBtn.style.borderLeft = '1px solid rgba(255, 255, 255, 0.15)';
-            steppedBtn.style.background = !isSmooth ? '#0284c7' : 'rgba(255, 255, 255, 0.06)';
-            steppedBtn.style.color = !isSmooth ? '#ffffff' : '#94a3b8';
-            steppedBtn.title = 'Render discretized isocontour bands';
-            steppedBtn.onclick = () => {
-                this.updateContextSetting('smoothContours', false);
-                this.updateContextSetting('contourLevels', curLvl > 1 ? curLvl : 10);
-            };
-
-            modeToggleGroup.appendChild(smoothBtn);
-            modeToggleGroup.appendChild(steppedBtn);
-            rowLevels.appendChild(modeToggleGroup);
-
-            // Level selector (dropdown)
-            const lvlSelect = document.createElement('select');
-            lvlSelect.className = `transport-select full-width ${isCockpit ? 'compact-select' : ''}`;
-            lvlSelect.style.flex = '1';
-            const levelOptions = [
-                { val: 5, label: '5 Discrete Bands' },
-                { val: 8, label: '8 Discrete Bands' },
-                { val: 10, label: '10 Standard CAE Bands' },
-                { val: 12, label: '12 Standard CAE Bands' },
-                { val: 16, label: '16 Discrete Bands' },
-                { val: 20, label: '20 Discrete Bands' },
-                { val: 24, label: '24 Discrete Bands' },
-                { val: 32, label: '32 High-Def Bands' }
-            ];
-            levelOptions.forEach(opt => {
-                const o = document.createElement('option');
-                o.value = String(opt.val);
-                o.textContent = opt.label;
-                if (opt.val === curLvl) o.selected = true;
-                lvlSelect.appendChild(o);
+            const cmapSelect = document.createElement('select');
+            cmapSelect.className = `transport-select full-width ${isCockpit ? 'compact-select' : ''}`;
+            (['rainbow', 'plasma', 'viridis', 'turbo', 'inferno', 'coolwarm', 'jet', 'magma', 'grayscale', 'cividis'] as ColormapType[]).forEach(cm => {
+                const opt = document.createElement('option');
+                opt.value = cm;
+                opt.textContent = cm.toUpperCase();
+                if (cm === ctx.colormap) opt.selected = true;
+                cmapSelect.appendChild(opt);
             });
-            if (isSmooth) {
-                lvlSelect.style.opacity = '0.55';
+            cmapSelect.addEventListener('change', () => {
+                this.updateContextSetting('colormap', cmapSelect.value as ColormapType);
+            });
+            rowCmap.appendChild(cmapLbl);
+            rowCmap.appendChild(cmapSelect);
+            b.appendChild(rowCmap);
+
+            // 3b. Row 2b: Contour Levels / Bands Selector
+            if (ctx.contourLevels !== undefined || ctx.targetType === 'fem' || ctx.targetType === 'global' || ctx.targetType === 'slice' || ctx.targetType === 'mpm' || ctx.targetType === 'stl' || ctx.targetType === 'obstacles') {
+                const rowLevels = document.createElement('div');
+                rowLevels.className = 'card-row';
+                rowLevels.style.display = 'flex';
+                rowLevels.style.alignItems = 'center';
+                rowLevels.style.gap = '6px';
+
+                const isSmooth = ctx.smoothContours !== undefined
+                    ? Boolean(ctx.smoothContours)
+                    : (ctx.contourLevels === undefined || ctx.contourLevels <= 1);
+                const curLvl = ctx.contourLevels && ctx.contourLevels > 1 ? ctx.contourLevels : 10;
+
+                // Segmented mode toggle: Continuous vs Banded
+                const modeToggleGroup = document.createElement('div');
+                modeToggleGroup.style.display = 'inline-flex';
+                modeToggleGroup.style.borderRadius = '4px';
+                modeToggleGroup.style.overflow = 'hidden';
+                modeToggleGroup.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+                modeToggleGroup.style.flexShrink = '0';
+
+                const smoothBtn = document.createElement('button');
+                smoothBtn.type = 'button';
+                smoothBtn.textContent = 'Continuous';
+                smoothBtn.style.padding = '2px 7px';
+                smoothBtn.style.fontSize = '8.5px';
+                smoothBtn.style.fontWeight = '600';
+                smoothBtn.style.cursor = 'pointer';
+                smoothBtn.style.border = 'none';
+                smoothBtn.style.background = isSmooth ? '#0284c7' : 'rgba(255, 255, 255, 0.06)';
+                smoothBtn.style.color = isSmooth ? '#ffffff' : '#94a3b8';
+                smoothBtn.title = 'Render continuous scalar field gradient (no discrete bands)';
+                smoothBtn.onclick = () => {
+                    this.updateContextSetting('smoothContours', true);
+                    this.updateContextSetting('contourLevels', 0);
+                };
+
+                const steppedBtn = document.createElement('button');
+                steppedBtn.type = 'button';
+                steppedBtn.textContent = 'Banded';
+                steppedBtn.style.padding = '2px 7px';
+                steppedBtn.style.fontSize = '8.5px';
+                steppedBtn.style.fontWeight = '600';
+                steppedBtn.style.cursor = 'pointer';
+                steppedBtn.style.border = 'none';
+                steppedBtn.style.borderLeft = '1px solid rgba(255, 255, 255, 0.15)';
+                steppedBtn.style.background = !isSmooth ? '#0284c7' : 'rgba(255, 255, 255, 0.06)';
+                steppedBtn.style.color = !isSmooth ? '#ffffff' : '#94a3b8';
+                steppedBtn.title = 'Render discretized isocontour bands';
+                steppedBtn.onclick = () => {
+                    this.updateContextSetting('smoothContours', false);
+                    this.updateContextSetting('contourLevels', curLvl > 1 ? curLvl : 10);
+                };
+
+                modeToggleGroup.appendChild(smoothBtn);
+                modeToggleGroup.appendChild(steppedBtn);
+                rowLevels.appendChild(modeToggleGroup);
+
+                // Level selector (dropdown)
+                const lvlSelect = document.createElement('select');
+                lvlSelect.className = `transport-select full-width ${isCockpit ? 'compact-select' : ''}`;
+                lvlSelect.style.flex = '1';
+                const levelOptions = [
+                    { val: 5, label: '5 Discrete Bands' },
+                    { val: 8, label: '8 Discrete Bands' },
+                    { val: 10, label: '10 Standard CAE Bands' },
+                    { val: 12, label: '12 Standard CAE Bands' },
+                    { val: 16, label: '16 Discrete Bands' },
+                    { val: 20, label: '20 Discrete Bands' },
+                    { val: 24, label: '24 Discrete Bands' },
+                    { val: 32, label: '32 High-Def Bands' }
+                ];
+                levelOptions.forEach(opt => {
+                    const o = document.createElement('option');
+                    o.value = String(opt.val);
+                    o.textContent = opt.label;
+                    if (opt.val === curLvl) o.selected = true;
+                    lvlSelect.appendChild(o);
+                });
+                if (isSmooth) {
+                    lvlSelect.style.opacity = '0.55';
+                }
+                lvlSelect.addEventListener('change', () => {
+                    const v = parseInt(lvlSelect.value, 10);
+                    this.updateContextSetting('smoothContours', false);
+                    this.updateContextSetting('contourLevels', v);
+                });
+                rowLevels.appendChild(lvlSelect);
+                b.appendChild(rowLevels);
             }
-            lvlSelect.addEventListener('change', () => {
-                const v = parseInt(lvlSelect.value, 10);
-                this.updateContextSetting('smoothContours', false);
-                this.updateContextSetting('contourLevels', v);
-            });
-            rowLevels.appendChild(lvlSelect);
-            b.appendChild(rowLevels);
         }
 
-        // 4. Row 3: Toggles Grid (Display Overlays, Math/Shading, Lock)
+        // 4. Row 3: Toggles Grid (Context-Appropriate Display Overlays, Math/Shading, Lock)
         const rowToggles = document.createElement('div');
         rowToggles.className = 'card-row sim-toggles-row';
 
-        // Visibility Toggle Chip
-        const visBtn = this.createButton(
-            '👁️ Vis',
-            `chip-btn compact-chip ${ctx.visibility ? 'active' : ''}`,
-            () => {
-                this.updateContextSetting('visibility', !ctx.visibility);
-            }
-        );
-        visBtn.title = 'Toggle visibility of this entity in the 3D viewport';
-        rowToggles.appendChild(visBtn);
+        if (isContourPane) {
+            const barBtn = this.createButton(
+                '🎨 Bar',
+                `chip-btn compact-chip ${ctx.showColorbar ? 'active active-colorbar' : ''}`,
+                () => this.updateContextSetting('showColorbar', !ctx.showColorbar)
+            );
+            barBtn.title = 'Toggle floating colorbar legend card';
+            rowToggles.appendChild(barBtn);
 
-        // Mesh lines / Wireframe toggle (fixed label '📐 Wire' or '🌐 Mesh')
-        const meshLabel = ctx.targetType === 'fem' || ctx.targetType === 'stl' || ctx.targetType === 'charge' || ctx.targetType === 'detonator'
-            ? '📐 Wire'
-            : '🌐 Mesh';
-        const meshBtn = this.createButton(
-            meshLabel,
-            `chip-btn compact-chip ${ctx.showMeshLines ? 'active active-mesh' : ''}`,
-            () => {
-                this.updateContextSetting('showMeshLines', !ctx.showMeshLines);
-            }
-        );
-        meshBtn.title = 'Toggle mesh lines, gridlines, or wireframe outline for this item';
-        rowToggles.appendChild(meshBtn);
+            const meshBtn = this.createButton(
+                '🌐 Mesh',
+                `chip-btn compact-chip ${ctx.showMeshLines ? 'active active-mesh' : ''}`,
+                () => this.updateContextSetting('showMeshLines', !ctx.showMeshLines)
+            );
+            meshBtn.title = 'Toggle background gridlines and AMR block boundaries';
+            rowToggles.appendChild(meshBtn);
 
-        // Colorbar toggle (fixed label '🎨 Bar', state indicated by .active.active-colorbar)
-        const barBtn = this.createButton(
-            '🎨 Bar',
-            `chip-btn compact-chip ${ctx.showColorbar ? 'active active-colorbar' : ''}`,
-            () => {
-                this.updateContextSetting('showColorbar', !ctx.showColorbar);
-            }
-        );
-        barBtn.title = 'Toggle on-screen color bar legend for this item';
-        rowToggles.appendChild(barBtn);
-
-        // Log / Lin toggle (fixed label '📐 Log', state indicated by .active.active-log)
-        const logBtn = this.createButton(
-            '📐 Log',
-            `chip-btn compact-chip ${ctx.logScale ? 'active active-log' : ''}`,
-            () => {
-                this.updateContextSetting('logScale', !ctx.logScale);
-            }
-        );
-        logBtn.title = 'Toggle logarithmic (Log10) scalar color transfer';
-        rowToggles.appendChild(logBtn);
-
-        // Optional 6th toggle (Interp for slice, Light for FEM/STL/Obstacles)
-        const hasExtraToggle = (ctx.targetType === 'slice') ||
-            (ctx.targetType === 'fem' || ctx.targetType === 'stl' || ctx.targetType === 'obstacles');
-
-        // Lock / Unified Range Toggle Chip
-        // When there is no 6th toggle (e.g. Global mode), lock spans 2 columns to symmetrically fill the 3-column row
-        const lockSpanClass = hasExtraToggle ? '' : 'span-2-col';
-        const lockLabel = hasExtraToggle
-            ? (ctx.isLocked ? '🔒 Lock' : '🔓 Indep')
-            : (ctx.isLocked ? '🔒 Lock Range' : '🔓 Indep Range');
-
-        const lockBtn = this.createButton(
-            lockLabel,
-            `chip-btn compact-chip ${lockSpanClass} ${ctx.isLocked ? 'active active-auto' : ''}`,
-            () => {
-                this.updateContextSetting('lockRanges', !ctx.isLocked);
-            }
-        );
-        lockBtn.title = ctx.isLocked
-            ? 'Unified Field Range: ALL slices, CAD models, and obstacles displaying this quantity share the same range. Click to separate.'
-            : 'Independent Range: This object uses independent scaling. Click to lock to unified range.';
-        rowToggles.appendChild(lockBtn);
-
-        // If slice, add optional Interp toggle chip (fixed label '〰️ Interp')
-        if (ctx.targetType === 'slice') {
             const interpBtn = this.createButton(
-                '〰️ Interp',
-                `chip-btn compact-chip ${ctx.interpolate ? 'active' : ''}`,
-                () => {
-                    this.updateContextSetting('interpolate', !ctx.interpolate);
-                }
+                ctx.interpolate !== false ? '〰️ Smooth' : '🧱 Cell',
+                `chip-btn compact-chip ${ctx.interpolate !== false ? 'active' : ''}`,
+                () => this.updateContextSetting('interpolate', !(ctx.interpolate !== false))
             );
-            interpBtn.title = 'Toggle bilinear interpolation vs discrete pixel cells';
+            interpBtn.title = 'Smooth (Nodal) vs Cell-Based: Toggle bilinear nodal interpolation vs crisp discrete cell values';
             rowToggles.appendChild(interpBtn);
-        } else if (ctx.targetType === 'fem' || ctx.targetType === 'stl' || ctx.targetType === 'obstacles') {
-            const lightBtn = this.createButton(
-                '💡 Light',
-                `chip-btn compact-chip ${ctx.lighting !== false ? 'active' : ''}`,
+
+            const logBtn = this.createButton(
+                '📐 Log',
+                `chip-btn compact-chip ${ctx.logScale ? 'active active-log' : ''}`,
+                () => this.updateContextSetting('logScale', !ctx.logScale)
+            );
+            logBtn.title = 'Toggle logarithmic (Log10) scalar color transfer';
+            rowToggles.appendChild(logBtn);
+
+            const mirrorBtn = this.createButton(
+                '🪞 Mirror',
+                `chip-btn compact-chip ${ctx.isAxisymmetric ? 'active' : ''}`,
+                () => this.updateContextSetting('isAxisymmetric', !ctx.isAxisymmetric)
+            );
+            mirrorBtn.title = 'Toggle axisymmetric reflection across r = 0';
+            rowToggles.appendChild(mirrorBtn);
+
+            const peaksBtn = this.createButton(
+                '▲▼ Peaks',
+                `chip-btn compact-chip ${ctx.showPeaks ? 'active' : ''}`,
+                () => this.updateContextSetting('showPeaks', !ctx.showPeaks)
+            );
+            peaksBtn.title = 'Toggle min/max extrema markers on contour plot';
+            rowToggles.appendChild(peaksBtn);
+        } else if (isChartPane) {
+            const panelBtn = this.createButton(
+                '🎛️ Panel',
+                `chip-btn compact-chip ${ctx.showColorbar ? 'active active-colorbar' : ''}`,
+                () => this.updateContextSetting('showColorbar', !ctx.showColorbar)
+            );
+            panelBtn.title = 'Toggle floating chart control card';
+            rowToggles.appendChild(panelBtn);
+
+            const gridBtn = this.createButton(
+                '🌐 Grid',
+                `chip-btn compact-chip ${ctx.showMeshLines ? 'active active-mesh' : ''}`,
+                () => this.updateContextSetting('showMeshLines', !ctx.showMeshLines)
+            );
+            gridBtn.title = 'Toggle chart background gridlines';
+            rowToggles.appendChild(gridBtn);
+
+            const logBtn = this.createButton(
+                '📐 Log',
+                `chip-btn compact-chip ${ctx.logScale ? 'active active-log' : ''}`,
+                () => this.updateContextSetting('logScale', !ctx.logScale)
+            );
+            logBtn.title = 'Toggle logarithmic (Log10) vertical Y-axis scaling';
+            rowToggles.appendChild(logBtn);
+
+            const peaksBtn = this.createButton(
+                '▲▼ Peaks',
+                `chip-btn compact-chip ${ctx.showPeaks ? 'active' : ''}`,
+                () => this.updateContextSetting('showPeaks', !ctx.showPeaks)
+            );
+            peaksBtn.title = 'Toggle peak/extrema callouts on curves';
+            rowToggles.appendChild(peaksBtn);
+
+            const gaugesActive = this.isLayerActive('gauges');
+            const probesBtn = this.createButton(
+                '🎯 Probes',
+                `chip-btn compact-chip span-2-col ${gaugesActive ? 'active' : ''}`,
+                () => this.toggleLayer('gauges')
+            );
+            probesBtn.title = 'Toggle virtual gauge probe markers on 1D radial profile';
+            rowToggles.appendChild(probesBtn);
+        } else {
+            // Visibility Toggle Chip
+            const visBtn = this.createButton(
+                '👁️ Vis',
+                `chip-btn compact-chip ${ctx.visibility ? 'active' : ''}`,
                 () => {
-                    this.updateContextSetting('lighting', !(ctx.lighting !== false));
+                    this.updateContextSetting('visibility', !ctx.visibility);
                 }
             );
-            lightBtn.title = 'Toggle directional lighting / Blinn-Phong shading';
-            rowToggles.appendChild(lightBtn);
+            visBtn.title = 'Toggle visibility of this entity in the 3D viewport';
+            rowToggles.appendChild(visBtn);
+
+            // Mesh lines / Wireframe toggle (fixed label '📐 Wire' or '🌐 Mesh')
+            const meshLabel = ctx.targetType === 'fem' || ctx.targetType === 'stl' || ctx.targetType === 'charge' || ctx.targetType === 'detonator'
+                ? '📐 Wire'
+                : '🌐 Mesh';
+            const meshBtn = this.createButton(
+                meshLabel,
+                `chip-btn compact-chip ${ctx.showMeshLines ? 'active active-mesh' : ''}`,
+                () => {
+                    this.updateContextSetting('showMeshLines', !ctx.showMeshLines);
+                }
+            );
+            meshBtn.title = 'Toggle mesh lines, gridlines, or wireframe outline for this item';
+            rowToggles.appendChild(meshBtn);
+
+            // Colorbar toggle (fixed label '🎨 Bar', state indicated by .active.active-colorbar)
+            const barBtn = this.createButton(
+                '🎨 Bar',
+                `chip-btn compact-chip ${ctx.showColorbar ? 'active active-colorbar' : ''}`,
+                () => {
+                    this.updateContextSetting('showColorbar', !ctx.showColorbar);
+                }
+            );
+            barBtn.title = 'Toggle on-screen color bar legend for this item';
+            rowToggles.appendChild(barBtn);
+
+            // Log / Lin toggle (fixed label '📐 Log', state indicated by .active.active-log)
+            const logBtn = this.createButton(
+                '📐 Log',
+                `chip-btn compact-chip ${ctx.logScale ? 'active active-log' : ''}`,
+                () => {
+                    this.updateContextSetting('logScale', !ctx.logScale);
+                }
+            );
+            logBtn.title = 'Toggle logarithmic (Log10) scalar color transfer';
+            rowToggles.appendChild(logBtn);
+
+            // If slice, add Smooth (Nodal) vs Cell toggle chip
+            if (ctx.targetType === 'slice') {
+                const interpBtn = this.createButton(
+                    ctx.interpolate !== false ? '〰️ Smooth' : '🧱 Cell',
+                    `chip-btn compact-chip span-2-col ${ctx.interpolate !== false ? 'active' : ''}`,
+                    () => {
+                        this.updateContextSetting('interpolate', !(ctx.interpolate !== false));
+                    }
+                );
+                interpBtn.title = 'Smooth (Nodal) vs Cell-Based: Toggle trilinear/bilinear nodal interpolation vs discrete cell values';
+                rowToggles.appendChild(interpBtn);
+            } else if (ctx.targetType === 'fem' || ctx.targetType === 'stl' || ctx.targetType === 'obstacles') {
+                const lightBtn = this.createButton(
+                    '💡 Light',
+                    `chip-btn compact-chip ${ctx.lighting !== false ? 'active' : ''}`,
+                    () => {
+                        this.updateContextSetting('lighting', !(ctx.lighting !== false));
+                    }
+                );
+                lightBtn.title = 'Toggle directional lighting / Blinn-Phong shading';
+                rowToggles.appendChild(lightBtn);
+
+                const interpBtn = this.createButton(
+                    ctx.interpolate !== false ? '〰️ Smooth' : '🧱 Cell',
+                    `chip-btn compact-chip ${ctx.interpolate !== false ? 'active' : ''}`,
+                    () => {
+                        this.updateContextSetting('interpolate', !(ctx.interpolate !== false));
+                    }
+                );
+                interpBtn.title = 'Smooth (Nodal) vs Cell-Based: Toggle nodal interpolation vs flat cell/element values';
+                rowToggles.appendChild(interpBtn);
+            }
         }
 
         b.appendChild(rowToggles);
@@ -4733,11 +5642,11 @@ export class TransportController {
     private addGaugeProbe(): void {
         let targetModel = this.stateManager.getActiveModel();
         if (!targetModel) return;
-        const is1DModel = Boolean(targetModel.nodes.some((n: any) => n.type === 'CFDSolver' || n.type === 'DomainMesh') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || n.type === 'DomainMesh2D' || n.type === 'MPMDomain2D' || n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D'));
-        const is2DModel = Boolean(!is1DModel && targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || n.type === 'DomainMesh2D' || n.type === 'MPMDomain2D') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D'));
+        const is1DModel = Boolean(targetModel.nodes.some((n: any) => n.type === 'CFDSolver' || n.type === 'DomainMesh') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || isDomainMesh2DNode(n.type) || n.type === 'MPMDomain2D' || n.type === 'CFDSolver3D' || isDomainMesh3DNode(n.type)));
+        const is2DModel = Boolean(!is1DModel && targetModel.nodes.some((n: any) => n.type === 'CFDSolver2D' || isDomainMesh2DNode(n.type) || n.type === 'MPMDomain2D') && !targetModel.nodes.some((n: any) => n.type === 'CFDSolver3D' || isDomainMesh3DNode(n.type)));
 
         let gaugeNode = targetModel.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge');
-        const domainNode = targetModel.nodes.find((n: any) => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain');
+        const domainNode = targetModel.nodes.find((n: any) => n.type === 'DomainMesh' || isDomainMesh2DNode(n.type) || isDomainMesh3DNode(n.type) || n.type === 'MarineHarbourDomain');
         if (!gaugeNode) {
             const state = this.stateManager.getCurrentState();
             const newNodeId = this.stateManager.generateUniqueNodeId('VirtualGauges');
@@ -4787,7 +5696,7 @@ export class TransportController {
         const targetModel = this.stateManager.getActiveModel();
         if (!targetModel) return;
         const gaugeNode = targetModel.nodes.find((n: any) => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D' || n.type === 'VirtualGauge');
-        const domainNode = targetModel.nodes.find((n: any) => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D' || n.type === 'MarineHarbourDomain');
+        const domainNode = targetModel.nodes.find((n: any) => n.type === 'DomainMesh' || isDomainMesh2DNode(n.type) || isDomainMesh3DNode(n.type) || n.type === 'MarineHarbourDomain');
         const baseList = gaugeNode?.parameters?.gauges || domainNode?.parameters?.gauges || [];
         if (idx >= 0 && idx < baseList.length) {
             const list = [...baseList];
@@ -4995,7 +5904,21 @@ export class TransportController {
         });
     }
 
+    private syncActiveModelStatsContext(): void {
+        const activeModelId = this.stateManager.getActiveModelId();
+        if (activeModelId === this.lastActiveModelId) return;
+        this.lastActiveModelId = activeModelId;
+        const latest = activeModelId ? (this.buffer.getLatestFrameForModel(activeModelId) || undefined) : undefined;
+        this.pendingFrame = latest;
+        this.pendingStep = activeModelId ? (this.stateManager.getModelStep(activeModelId) || latest?.step || 0) : 0;
+        this.pendingTime = activeModelId ? (this.stateManager.getModelSimTime(activeModelId) || latest?.time || 0) : 0;
+        const mDt = activeModelId ? (this.stateManager.getModelDt(activeModelId) || latest?.metrics?.dt || 0) : 0;
+        this.pendingDt = mDt > 0 ? mDt : undefined;
+    }
+
     private flushStatsNow(): void {
+        this.syncActiveModelStatsContext();
+
         if (this.pendingTotalCount !== undefined && this.scrubberSlider) {
             this.scrubberSlider.max = String(Math.max(0, this.pendingTotalCount - 1));
             if (this.isLiveLocked) {
@@ -5012,11 +5935,13 @@ export class TransportController {
         let curTime: number;
         let curDt: number | undefined;
 
+        const frameMatchesActive = !this.pendingFrame || !this.pendingFrame.modelId || !activeModelId || this.pendingFrame.modelId === activeModelId;
+
         if (this.isLiveLocked) {
-            // Live locked: master ground truth is active solver state, preventing any drop to zero
-            curStep = Math.max(this.pendingStep ?? 0, smStep);
-            curTime = Math.max(this.pendingTime ?? 0, smTime);
-            curDt = (this.pendingDt && this.pendingDt > 0) ? this.pendingDt : (smDt > 0 ? smDt : undefined);
+            // Live locked: master ground truth is active solver state for the active model
+            curStep = Math.max(frameMatchesActive ? (this.pendingStep ?? 0) : 0, smStep);
+            curTime = Math.max(frameMatchesActive ? (this.pendingTime ?? 0) : 0, smTime);
+            curDt = (frameMatchesActive && this.pendingDt && this.pendingDt > 0) ? this.pendingDt : (smDt > 0 ? smDt : undefined);
         } else {
             // Historical scrubbing: display inspected frame's values, falling back to model state
             curStep = this.pendingStep !== undefined ? this.pendingStep : smStep;
@@ -5024,7 +5949,7 @@ export class TransportController {
             curDt = (this.pendingDt && this.pendingDt > 0) ? this.pendingDt : (smDt > 0 ? smDt : undefined);
         }
 
-        if (this.pendingFrame) {
+        if (this.pendingFrame && frameMatchesActive) {
             const frame = this.pendingFrame;
             const t = (frame.time !== undefined && frame.time > 0) ? frame.time : (curTime || 0.0);
             if (this.timeDisplay) {
@@ -5039,6 +5964,13 @@ export class TransportController {
             if (this.stepDisplay) {
                 const s = (frame.step !== undefined && frame.step > 0) ? frame.step : (curStep || 0);
                 this.stepDisplay.textContent = `Step ${s}`;
+            }
+        } else {
+            if (this.timeDisplay) {
+                this.timeDisplay.textContent = `t = ${this.formatSimTime(curTime || 0)}`;
+            }
+            if (this.stepDisplay) {
+                this.stepDisplay.textContent = `Step ${curStep || 0}`;
             }
         }
         if (this.bufferCountDisplay) {
@@ -5056,36 +5988,149 @@ export class TransportController {
         }
     }
 
-    private updateModelStatusDisplay(): void {
+    public updateModelStatusDisplay(): void {
         const activeModelId = this.stateManager.getActiveModelId();
         if (!activeModelId) return;
         const status = this.stateManager.getModelStatus(activeModelId);
+        const isUpstreamRunning = Boolean((window as any).isUpstreamAutoRunningFor?.(activeModelId));
         if (this.statusBadge) {
-            this.statusBadge.textContent = status;
-            this.statusBadge.className = `workstation-status-pill ${status.toLowerCase()}`;
+            if (isUpstreamRunning && (status === 'UNINITIALIZED' || status === 'TERMINATED')) {
+                this.statusBadge.textContent = 'UPSTREAM RUNNING…';
+                this.statusBadge.className = 'workstation-status-pill running';
+                this.statusBadge.style.cursor = 'default';
+                this.statusBadge.title = '';
+            } else {
+                this.statusBadge.textContent = status;
+                this.statusBadge.className = `workstation-status-pill ${status.toLowerCase()}`;
+                if (status === 'ERROR') {
+                    this.statusBadge.style.cursor = 'pointer';
+                    this.statusBadge.title = getErrorBadgeTooltip(this.stateManager, [activeModelId]);
+                } else {
+                    this.statusBadge.style.cursor = 'default';
+                    this.statusBadge.title = '';
+                }
+            }
         }
         if (this.modelInfoBadge) {
             const m = this.stateManager.getActiveModel();
-            this.modelInfoBadge.textContent = m ? `${m.name}` : 'Model 1';
+            const pipeCtx = this.getPipelineContext(activeModelId);
+            if (pipeCtx.isPartOfPipeline) {
+                this.modelInfoBadge.textContent = `Stage ${pipeCtx.stageIndex + 1}/${pipeCtx.chainModelIds.length}: ${m ? m.name : activeModelId}`;
+                this.modelInfoBadge.title = pipeCtx.isUpstreamSource
+                    ? 'Upstream Source Stage — Transport controls run this stage only; use Run Pipeline for the full chain'
+                    : 'Downstream Remap Target — Transport controls remap from existing upstream results & run this stage only; use Run Pipeline for the full chain';
+            } else {
+                this.modelInfoBadge.textContent = m ? `${m.name}` : 'Model 1';
+                this.modelInfoBadge.title = '';
+            }
+        }
+        this.syncSolverButtons();
+    }
+
+    private syncSolverButtons(): void {
+        const activeModelId = this.stateManager.getActiveModelId();
+        const status = activeModelId ? this.stateManager.getModelStatus(activeModelId) : 'UNINITIALIZED';
+        const isUpstreamRunning = Boolean(activeModelId && (window as any).isUpstreamAutoRunningFor?.(activeModelId));
+        const pipeCtx = this.getPipelineContext(activeModelId);
+        const stageNum = pipeCtx.stageIndex + 1;
+        const isAtEnd = activeModelId ? this.stateManager.isModelAtEndTime(activeModelId) : false;
+        const canContinue = status === 'PAUSED' && !isAtEnd;
+        const isActive = status === 'INITIALIZED' || status === 'PAUSED' || status === 'RUNNING';
+        const isBusy = status === 'RUNNING' || isUpstreamRunning;
+
+        if (this.solverInitBtn) {
+            this.solverInitBtn.textContent = isActive ? '🔄 Re-Init' : '⚡ Init';
+            this.solverInitBtn.disabled = status === 'INCOMPLETE' || isUpstreamRunning;
+            this.solverInitBtn.title = isActive
+                ? (pipeCtx.isDownstreamTarget
+                    ? `Re-initialize / Restart Stage ${stageNum} at t₀ (remaps from existing Stage ${pipeCtx.stageIndex} results without re-running upstream)`
+                    : `Re-initialize / Restart ${pipeCtx.isPartOfPipeline ? `Stage ${stageNum}` : 'solver'} from t₀`)
+                : (pipeCtx.isDownstreamTarget
+                    ? `Initialize Stage ${stageNum} (remaps from existing Stage ${pipeCtx.stageIndex} results without re-running upstream)`
+                    : (pipeCtx.isUpstreamSource
+                        ? `Initialize Stage ${stageNum} only`
+                        : 'Initialize solver state with current DAG node parameters'));
+        }
+
+        if (this.solverRunBtn) {
+            this.solverRunBtn.classList.toggle('pause-action', isBusy);
+            this.solverRunBtn.classList.toggle('continue-action', !isBusy && canContinue);
+
+            if (isUpstreamRunning && (status === 'UNINITIALIZED' || status === 'TERMINATED')) {
+                this.solverRunBtn.textContent = pipeCtx.stageIndex > 0 ? `⏸ Pause Stg ${pipeCtx.stageIndex}` : '⏸ Pause Upstr.';
+                this.solverRunBtn.disabled = false;
+                this.solverRunBtn.title = 'Click to pause the active upstream pipeline stage';
+            } else if (status === 'RUNNING') {
+                this.solverRunBtn.textContent = pipeCtx.isPartOfPipeline ? `⏸ Pause Stg ${stageNum}` : '⏸ Pause';
+                this.solverRunBtn.disabled = false;
+                this.solverRunBtn.title = 'Pause running simulation (keeps current time/step for Continue)';
+            } else if (isAtEnd) {
+                this.solverRunBtn.textContent = pipeCtx.isPartOfPipeline ? `↻ Re-Run Stg ${stageNum}` : '↻ Re-Run';
+                this.solverRunBtn.disabled = false;
+                this.solverRunBtn.title = pipeCtx.isPartOfPipeline
+                    ? `Stage ${stageNum} reached end time — click to re-initialize & run from t₀ (or increase End Time to continue)`
+                    : 'Simulation reached end time — click to re-initialize & run from t₀ (or increase End Time to continue)';
+            } else if (canContinue) {
+                this.solverRunBtn.textContent = pipeCtx.isPartOfPipeline ? `▶ Cont. Stg ${stageNum}` : '▶ Continue';
+                this.solverRunBtn.disabled = false;
+                this.solverRunBtn.title = pipeCtx.isPartOfPipeline
+                    ? `Continue Stage ${stageNum} from current time/step without re-initializing or re-remapping`
+                    : 'Continue paused simulation from current time and step';
+            } else if (status === 'INITIALIZED') {
+                this.solverRunBtn.textContent = pipeCtx.isPartOfPipeline ? `▶ Run Stg ${stageNum}` : '▶ Run (All)';
+                this.solverRunBtn.disabled = false;
+                this.solverRunBtn.title = pipeCtx.isPartOfPipeline
+                    ? `Run initialized Stage ${stageNum} from t₀`
+                    : 'Run initialized simulation to completion / endtime';
+            } else {
+                this.solverRunBtn.textContent = pipeCtx.isPartOfPipeline ? `▶ Run Stg ${stageNum}` : '▶ Run (All)';
+                this.solverRunBtn.disabled = status === 'INCOMPLETE';
+                this.solverRunBtn.title = pipeCtx.isDownstreamTarget
+                    ? `Initialize/remap from Stage ${pipeCtx.stageIndex} and run Stage ${stageNum} only (skips re-running upstream)`
+                    : (pipeCtx.isUpstreamSource
+                        ? `Run Stage ${stageNum} only (does not run downstream stages)`
+                        : 'Initialize and execute simulation to completion / endtime');
+            }
+        }
+
+        if (this.solverPipelineBtn) {
+            this.solverPipelineBtn.disabled = isBusy || status === 'INCOMPLETE';
+        }
+
+        for (const stepBtn of this.solverStepBtns) {
+            stepBtn.disabled = isBusy || status === 'INCOMPLETE';
+        }
+
+        if (this.solverTermBtn) {
+            this.solverTermBtn.disabled = !(isActive || isUpstreamRunning);
+            this.solverTermBtn.title = isUpstreamRunning
+                ? 'Terminate active upstream pipeline run'
+                : 'Terminate active solver process cleanly (preserves recorded telemetry)';
         }
     }
 
     private attachBufferListeners(): void {
         const unbindBuffer = this.buffer.onFrameAdded((frame, totalCount) => {
             this.pendingTotalCount = totalCount;
+            const activeModelId = this.stateManager.getActiveModelId();
+            const isForActiveModel = !frame.modelId || !activeModelId || frame.modelId === activeModelId;
             if (this.isLiveLocked) {
                 this.currentFrameIndex = totalCount - 1;
-                this.pendingFrame = frame;
-                if (frame.step !== undefined && frame.step > 0) {
-                    this.pendingStep = frame.step;
+                if (isForActiveModel) {
+                    this.pendingFrame = frame;
+                    if (frame.step !== undefined && frame.step > 0) {
+                        this.pendingStep = frame.step;
+                    }
+                    if (frame.time !== undefined && frame.time > 0) {
+                        this.pendingTime = frame.time;
+                    }
+                    if (frame.metrics?.dt !== undefined && frame.metrics.dt > 0) {
+                        this.pendingDt = frame.metrics.dt;
+                    }
+                    this.requestStatsFlush();
+                } else if (activeModelId && (window as any).isUpstreamAutoRunningFor?.(activeModelId)) {
+                    this.updateModelStatusDisplay();
                 }
-                if (frame.time !== undefined && frame.time > 0) {
-                    this.pendingTime = frame.time;
-                }
-                if (frame.metrics?.dt !== undefined && frame.metrics.dt > 0) {
-                    this.pendingDt = frame.metrics.dt;
-                }
-                this.requestStatsFlush();
             } else {
                 if (this.scrubberSlider) {
                     this.scrubberSlider.max = String(Math.max(0, totalCount - 1));
@@ -5096,10 +6141,12 @@ export class TransportController {
             this.unbinds.push(unbindBuffer);
         }
 
-        const onModelStatus = (_modelId?: string, status?: SimulationStatus) => {
-            if (status === 'INITIALIZED' || status === 'UNINITIALIZED') {
+        const onModelStatus = (modelId?: string, status?: SimulationStatus) => {
+            const activeModelId = this.stateManager.getActiveModelId();
+            if ((!modelId || modelId === activeModelId) && (status === 'INITIALIZED' || status === 'UNINITIALIZED')) {
+                this.pendingFrame = undefined;
                 this.pendingStep = 0;
-                this.pendingTime = 0;
+                this.pendingTime = activeModelId ? (this.stateManager.getModelSimTime(activeModelId) || 0) : 0;
                 this.pendingDt = undefined;
             }
             this.syncStateFromViewport();
@@ -5110,6 +6157,7 @@ export class TransportController {
         this.unbinds.push(() => this.stateManager.offModelStatusChange(onModelStatus));
 
         const onState = () => {
+            this.syncActiveModelStatsContext();
             this.syncStateFromViewport();
             this.updateModelStatusDisplay();
             this.requestTabRender();
@@ -5133,9 +6181,11 @@ export class TransportController {
         this.stateManager.onInPlaceParameterChange(onInPlace);
         this.unbinds.push(() => this.stateManager.offInPlaceParameterChange(onInPlace));
 
-        const onTelemetry = (_nodeId: string, data: any) => {
+        const onTelemetry = (nodeId: string, data: any) => {
             if (data && typeof data === 'object' && !(data instanceof ArrayBuffer)) {
-                if (data.step !== undefined || data.time !== undefined || data.dt !== undefined) {
+                const activeModel = this.stateManager.getActiveModel();
+                const belongsToActive = activeModel && (nodeId === activeModel.id || activeModel.nodes.some((n: any) => n.id === nodeId));
+                if (belongsToActive && (data.step !== undefined || data.time !== undefined || data.dt !== undefined)) {
                     this.updateExecutionStats(data.step, data.time, data.dt);
                 }
             }
@@ -5161,7 +6211,7 @@ export class TransportController {
                 const targetModel = this.stateManager.getActiveModel();
                 const node = targetModel?.nodes.find((n: any) => n.id === nodeId);
                 if (node) {
-                    if (node.type === 'Telemetry3DViewport' || node.type === 'DomainMesh3D' || node.type === 'DomainMesh' || node.type === 'CFDSolver3D' || node.type === 'CFDSolver' || node.type === 'CFDSolver2D') {
+                    if (node.type === 'Telemetry3DViewport' || isDomainMesh3DNode(node.type) || node.type === 'DomainMesh' || node.type === 'CFDSolver3D' || node.type === 'CFDSolver' || node.type === 'CFDSolver2D') {
                         const sIdx = this.stateManager.getSelectedSliceIndex();
                         if (sIdx !== null && sIdx !== undefined) {
                             const slices = this.getSlices();
@@ -5212,7 +6262,7 @@ export class TransportController {
                             nodeId: node.id,
                             label: node.parameters?.name || 'Detonator'
                         };
-                    } else if (['Charge3D', 'Charge2D', 'ExplosiveMaterial'].includes(node.type)) {
+                    } else if (['Charge3D', 'Charge2D', 'Charge1D', 'ExplosiveMaterial'].includes(node.type)) {
                         this.selectedObject = {
                             objectType: 'Charge3D',
                             nodeId: node.id,
@@ -5279,12 +6329,31 @@ export class TransportController {
      * Request latest state from solver and plot across all active viewports.
      */
     public requestAndPlotCurrentState(): void {
+        const activeModelId = this.stateManager.getActiveModelId();
         const count = this.buffer.getFrameCount();
+        let dispatched = false;
         if (count > 0) {
-            const idx = this.currentFrameIndex >= 0 ? this.currentFrameIndex : count - 1;
-            const frame = this.buffer.getFrame(idx) || this.buffer.getLatestFrame();
-            if (frame) {
+            const idx = this.currentFrameIndex >= 0 && this.currentFrameIndex < count ? this.currentFrameIndex : count - 1;
+            const candidate = this.buffer.getFrame(idx);
+            if (candidate && (!activeModelId || !candidate.modelId || candidate.modelId === activeModelId)) {
                 this.seekToFrame(idx, this.isLiveLocked);
+                dispatched = true;
+            } else if (activeModelId) {
+                for (let i = count - 1; i >= 0; i--) {
+                    const f = this.buffer.getFrame(i);
+                    if (f && f.modelId === activeModelId) {
+                        this.seekToFrame(i, this.isLiveLocked);
+                        dispatched = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!dispatched && activeModelId) {
+            const cached = this.buffer.getLatestFrameForModel(activeModelId);
+            if (cached) {
+                this.updateReadouts(cached);
+                this.onFrameDispatch?.(cached, this.isLiveLocked, this);
             }
         }
         this.onManualRefresh?.();
@@ -5293,6 +6362,7 @@ export class TransportController {
 
     private createButton(text: string, className: string, onClick: () => void): HTMLButtonElement {
         const btn = document.createElement('button');
+        btn.type = 'button';
         btn.innerHTML = text;
         btn.className = className;
         btn.addEventListener('click', (e) => {

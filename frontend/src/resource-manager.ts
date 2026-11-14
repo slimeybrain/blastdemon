@@ -41,6 +41,14 @@ export class ResourceManager {
     };
     private alpha = 0.2; // Exponential moving average smoothing factor
 
+    private workerMetrics = new Map<string, {
+        timestamp: number;
+        cpu: number;
+        cpu_cores: number;
+        ram_alloc: number;
+        vram_blastdaemon: number;
+    }>();
+
     constructor(container: HTMLElement, stateManager: StateManager, panelId: string) {
         if (!container) {
             throw new Error("[RESOURCE MANAGER] Initialization failed: Target container is undefined.");
@@ -158,6 +166,7 @@ export class ResourceManager {
     }
 
     public updateMetrics(data: {
+        modelId?: string;
         cpu: number;
         cpu_cores?: number;
         cpu_system?: number;
@@ -171,22 +180,58 @@ export class ResourceManager {
         vram_total: number;
         gpu_temp: number;
     }) {
-        const cpu_bd_pct = data.cpu;
-        const cpu_cores = data.cpu_cores !== undefined ? data.cpu_cores : (cpu_bd_pct * (data.num_cores || 1));
+        const rawCpuCores = data.cpu_cores !== undefined ? data.cpu_cores : (data.cpu * (data.num_cores || 1));
+        const rawVramBd = data.vram_blastdaemon !== undefined ? data.vram_blastdaemon : 0;
+
+        // Aggregate per-worker metrics across active BlastSolver processes so multi-model
+        // heartbeats do not alternate/flicker between different workers' values.
+        const now = Date.now();
+        const workerKey = data.modelId || '__default__';
+        if (data.ram_total > 0 || data.cpu > 0 || data.ram_alloc > 0 || rawVramBd > 0) {
+            this.workerMetrics.set(workerKey, {
+                timestamp: now,
+                cpu: data.cpu,
+                cpu_cores: rawCpuCores,
+                ram_alloc: data.ram_alloc,
+                vram_blastdaemon: rawVramBd
+            });
+        }
+        for (const [key, entry] of this.workerMetrics.entries()) {
+            if (key !== workerKey && now - entry.timestamp > 3000) {
+                this.workerMetrics.delete(key);
+            }
+        }
+
+        let cpu_bd_pct = data.cpu;
+        let cpu_cores = rawCpuCores;
+        let ram_alloc_bytes = data.ram_alloc;
+        let vram_bd_bytes = rawVramBd;
+        if (this.workerMetrics.size > 0) {
+            cpu_bd_pct = 0;
+            cpu_cores = 0;
+            ram_alloc_bytes = 0;
+            vram_bd_bytes = 0;
+            for (const entry of this.workerMetrics.values()) {
+                cpu_bd_pct += entry.cpu;
+                cpu_cores += entry.cpu_cores;
+                ram_alloc_bytes += entry.ram_alloc;
+                vram_bd_bytes += entry.vram_blastdaemon;
+            }
+            cpu_bd_pct = Math.min(100, cpu_bd_pct);
+        }
+
         const cpu_sys_pct = data.cpu_system !== undefined && data.cpu_system > 0 ? data.cpu_system : cpu_bd_pct;
 
-        const ram_total_mb = data.ram_total > 0 ? data.ram_total / (1024 * 1024) : 16384;
-        const ram_alloc_mb = data.ram_alloc / (1024 * 1024);
-        const ram_system_bytes = data.ram_system !== undefined ? data.ram_system : data.ram_alloc;
+        const ram_alloc_mb = ram_alloc_bytes / (1024 * 1024);
+        const ram_system_bytes = data.ram_system !== undefined ? data.ram_system : ram_alloc_bytes;
         const ram_sys_mb = ram_system_bytes / (1024 * 1024);
         
         const ram_sys_pct = data.ram_total > 0 ? (ram_system_bytes / data.ram_total) * 100 : 0;
-        const ram_bd_pct = data.ram_total > 0 ? (data.ram_alloc / data.ram_total) * 100 : 0;
+        const ram_bd_pct = data.ram_total > 0 ? (ram_alloc_bytes / data.ram_total) * 100 : 0;
         
         const gpu_pct = data.gpu_util;
         const vram_total_mb = data.vram_total > 0 ? data.vram_total / (1024 * 1024) : 0;
         const vram_alloc_mb = data.vram_alloc / (1024 * 1024);
-        const vram_bd_bytes = data.vram_blastdaemon !== undefined ? data.vram_blastdaemon : 0;
         const vram_bd_mb = vram_bd_bytes / (1024 * 1024);
         
         const vram_sys_pct = data.vram_total > 0 ? (data.vram_alloc / data.vram_total) * 100 : 0;
@@ -228,10 +273,10 @@ export class ResourceManager {
             }
         };
 
-        // Text value update helper
+        // Text value update helper (only mutate DOM when text actually changes)
         const setTextValue = (elementId: string, text: string) => {
             const el = this.container.querySelector<HTMLElement>(`#${this.panelId}-${elementId}`);
-            if (el) el.innerText = text;
+            if (el && el.textContent !== text) el.textContent = text;
         };
 
         // Toggle Stress class
@@ -251,7 +296,7 @@ export class ResourceManager {
         setBarWidth('cpu-fill-inner', this.smoothed.cpu_bd);
         setTextValue('cpu-val', `${Math.round(this.smoothed.cpu_sys)}%`);
         const coreStr = (cpu_cores / 100).toFixed(1);
-        const bdCpuPctStr = cpu_bd_pct < 1.0 && cpu_bd_pct > 0.05 ? cpu_bd_pct.toFixed(1) : Math.round(cpu_bd_pct);
+        const bdCpuPctStr = this.smoothed.cpu_bd < 1.0 && this.smoothed.cpu_bd > 0.05 ? this.smoothed.cpu_bd.toFixed(1) : Math.round(this.smoothed.cpu_bd);
         setTextValue('cpu-bd-val', `${bdCpuPctStr}% (${coreStr}c)`);
         setTextValue('cpu-sys-val', `${Math.round(this.smoothed.cpu_sys)}%`);
         toggleStress('cpu', this.smoothed.cpu_sys, 85);
@@ -262,7 +307,7 @@ export class ResourceManager {
         setBarWidth('ram-fill-inner', this.smoothed.ram_bd_pct);
         const formatRAM = (mb: number) => mb < 1024 ? `${Math.round(mb)}MB` : `${(mb / 1024).toFixed(1)}GB`;
         setTextValue('ram-val', `${Math.round(this.smoothed.ram_sys_pct)}%`);
-        const ramBdPctStr = ram_bd_pct < 1.0 && ram_bd_pct > 0.05 ? ram_bd_pct.toFixed(1) : Math.round(ram_bd_pct);
+        const ramBdPctStr = this.smoothed.ram_bd_pct < 1.0 && this.smoothed.ram_bd_pct > 0.05 ? this.smoothed.ram_bd_pct.toFixed(1) : Math.round(this.smoothed.ram_bd_pct);
         setTextValue('ram-bd-val', `${formatRAM(ram_alloc_mb)} (${ramBdPctStr}%)`);
         setTextValue('ram-sys-val', `${formatRAM(ram_sys_mb)} (${Math.round(this.smoothed.ram_sys_pct)}%)`);
         toggleStress('ram', this.smoothed.ram_sys_pct, 85);
@@ -281,7 +326,7 @@ export class ResourceManager {
         setBarWidth('vram-fill-inner', this.smoothed.vram_bd_pct);
         const formatVRAM = (mb: number) => vram_total_mb > 0 ? (mb < 1024 ? `${Math.round(mb)}MB` : `${(mb / 1024).toFixed(1)}GB`) : '0MB';
         setTextValue('vram-val', vram_total_mb > 0 ? `${Math.round(this.smoothed.vram_sys_pct)}%` : '0%');
-        const vramBdPctStr = vram_bd_pct < 1.0 && vram_bd_pct > 0.05 ? vram_bd_pct.toFixed(1) : Math.round(vram_bd_pct);
+        const vramBdPctStr = this.smoothed.vram_bd_pct < 1.0 && this.smoothed.vram_bd_pct > 0.05 ? this.smoothed.vram_bd_pct.toFixed(1) : Math.round(this.smoothed.vram_bd_pct);
         setTextValue('vram-bd-val', vram_total_mb > 0 ? `${formatVRAM(vram_bd_mb)} (${vramBdPctStr}%)` : '0MB (0%)');
         setTextValue('vram-sys-val', vram_total_mb > 0 ? `${formatVRAM(vram_alloc_mb)} (${Math.round(this.smoothed.vram_sys_pct)}%)` : '0MB (0%)');
         toggleStress('vram', this.smoothed.vram_sys_pct, 85);
@@ -293,8 +338,10 @@ export class ResourceManager {
         const isStressed = this.smoothed.temp >= 80;
         const statusEl = this.container.querySelector<HTMLElement>(`#${this.panelId}-temp-status-val`);
         if (statusEl) {
-            statusEl.innerText = isStressed ? 'Throttling' : (this.smoothed.temp >= 70 ? 'Warm' : 'Nominal');
-            statusEl.style.color = isStressed ? '#ef4444' : (this.smoothed.temp >= 70 ? '#f59e0b' : '#10b981');
+            const nextStatus = isStressed ? 'Throttling' : (this.smoothed.temp >= 70 ? 'Warm' : 'Nominal');
+            const nextColor = isStressed ? '#ef4444' : (this.smoothed.temp >= 70 ? '#f59e0b' : '#10b981');
+            if (statusEl.textContent !== nextStatus) statusEl.textContent = nextStatus;
+            if (statusEl.style.color !== nextColor) statusEl.style.color = nextColor;
         }
         toggleStress('temp', this.smoothed.temp, 80);
         this.drawSparkline('temp-canvas', this.history.temp, '#ef4444');
@@ -395,6 +442,7 @@ export class ResourceManager {
     }
 
     public resetMetrics(): void {
+        this.workerMetrics.clear();
         this.smoothed = {
             cpu_sys: 0,
             cpu_bd: 0,

@@ -1,9 +1,12 @@
+#include <string>
 #include "vv_framework.hpp"
 #include "vv_l1_unit_elements.hpp"
 #include "vv_l2_canonical_benchmarks.hpp"
 #include "vv_l3_component_tests.hpp"
 #include "vv_l4_full_scale_systems.hpp"
 #include "vv_mpm_compact_contact.hpp"
+#include "vv_mpm_sparse_grid.hpp"
+#include "vv_lee_tarver.hpp"
 #include <iostream>
 #include <vector>
 #include <iomanip>
@@ -16,6 +19,13 @@ int main(int argc, char** argv) {
     std::cout << "========================================================================\n\n";
 
     std::vector<Blast::VV::BenchmarkResult> all_results;
+
+    if (argc > 1 && std::string(argv[1]) == "--lee-tarver") {
+        for (const auto& b : Blast::VV::run_lee_tarver_benchmarks()) {
+            std::cout << b.id << " " << (b.pending ? "PENDING" : (b.passed ? "PASS" : "FAIL")) << " | " << b.summary << "\n" << b.details << "\n";
+        }
+        return 0;
+    }
 
     // Run Level 1
     std::cout << "[RUNNING] Level 1: Unit & Single-Element / Constitutive Benchmarks...\n";
@@ -31,6 +41,16 @@ int main(int argc, char** argv) {
     std::cout << "[RUNNING] Level 2: GPU MPM compact multi-material storage parity...\n";
     auto l2_cmp = Blast::VV::run_mpm_compact_contact_benchmarks();
     all_results.insert(all_results.end(), l2_cmp.begin(), l2_cmp.end());
+
+    // Level 2 (MPM Sparse Grid): 2D CPU, 3D CPU, and 3D GPU sparse vs dense grid parity
+    std::cout << "[RUNNING] Level 2: MPM block-sparse vs dense grid parity...\n";
+    auto l2_spr = Blast::VV::run_mpm_sparse_grid_benchmarks();
+    all_results.insert(all_results.end(), l2_spr.begin(), l2_spr.end());
+
+    // Level 1/2 (Lee-Tarver): SI rate constants, JWLReactant EOS, mixture rule (pop-plot pending)
+    std::cout << "[RUNNING] Lee-Tarver Ignition & Growth / JWLReactant / mixture-rule verification...\n";
+    auto lt = Blast::VV::run_lee_tarver_benchmarks();
+    all_results.insert(all_results.end(), lt.begin(), lt.end());
 
     // Run Level 3
     std::cout << "[RUNNING] Level 3: Component & Subsystem Impact/Blast Tests...\n";

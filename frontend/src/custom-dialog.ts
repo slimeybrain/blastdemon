@@ -51,6 +51,10 @@ export class CustomDialog {
                 font-size: 12px;
                 line-height: 1.5;
                 color: #ddd;
+                white-space: pre-wrap;
+                word-break: break-word;
+                max-height: 60vh;
+                overflow-y: auto;
             }
 
             .cd-input-container {
@@ -127,6 +131,19 @@ export class CustomDialog {
             const overlay = document.createElement('div');
             overlay.className = 'cd-overlay';
 
+            const close = () => {
+                overlay.remove();
+                resolve();
+            };
+
+            overlay.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' || e.key === 'Enter') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    close();
+                }
+            });
+
             const box = document.createElement('div');
             box.className = 'cd-box';
 
@@ -146,10 +163,7 @@ export class CustomDialog {
             const okBtn = document.createElement('button');
             okBtn.className = 'cd-btn primary';
             okBtn.textContent = 'OK';
-            okBtn.onclick = () => {
-                overlay.remove();
-                resolve();
-            };
+            okBtn.onclick = () => close();
             footer.appendChild(okBtn);
             box.appendChild(footer);
 
@@ -159,11 +173,28 @@ export class CustomDialog {
         });
     }
 
-    public static confirm(message: string, title: string = 'BlastDemon Confirm'): Promise<boolean> {
+    public static confirm(
+        message: string,
+        title: string = 'BlastDemon Confirm',
+        options?: { confirmText?: string; cancelText?: string; danger?: boolean }
+    ): Promise<boolean> {
         this.injectStyles();
         return new Promise<boolean>((resolve) => {
             const overlay = document.createElement('div');
             overlay.className = 'cd-overlay';
+
+            const finish = (result: boolean) => {
+                overlay.remove();
+                resolve(result);
+            };
+
+            overlay.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    finish(false);
+                }
+            });
 
             const box = document.createElement('div');
             box.className = 'cd-box';
@@ -183,20 +214,18 @@ export class CustomDialog {
 
             const cancelBtn = document.createElement('button');
             cancelBtn.className = 'cd-btn';
-            cancelBtn.textContent = 'Cancel';
-            cancelBtn.onclick = () => {
-                overlay.remove();
-                resolve(false);
-            };
+            cancelBtn.textContent = options?.cancelText || 'Cancel';
+            cancelBtn.onclick = () => finish(false);
             footer.appendChild(cancelBtn);
 
             const confirmBtn = document.createElement('button');
             confirmBtn.className = 'cd-btn primary';
-            confirmBtn.textContent = 'Proceed';
-            confirmBtn.onclick = () => {
-                overlay.remove();
-                resolve(true);
-            };
+            confirmBtn.textContent = options?.confirmText || 'Proceed';
+            if (options?.danger) {
+                confirmBtn.style.background = '#b91c1c';
+                confirmBtn.style.borderColor = '#ef4444';
+            }
+            confirmBtn.onclick = () => finish(true);
             footer.appendChild(confirmBtn);
             box.appendChild(footer);
 

@@ -307,6 +307,29 @@ public:
     double getSimTime() const { return m_sim_time; }
     int getStepCount() const { return m_step_count; }
 
+    // Block-Sparse Background Grid Domain Support (8x8x8 = 512-node tiles)
+    void setSparseGridMode(bool sparse);
+    bool isSparseGridMode() const { return m_sparse_grid_mode; }
+    MPMGridView3D getDeviceGridView() const {
+        return MPMGridView3D{m_nx, m_ny, m_nz, m_ntx, m_nty, m_ntz, m_sparse_grid_mode ? d_tile_table : nullptr};
+    }
+    MPMGridView3D getHostGridView() const {
+        return MPMGridView3D{m_nx, m_ny, m_nz, m_ntx, m_nty, m_ntz,
+                             (m_sparse_grid_mode && !m_host_tile_table.empty()) ? m_host_tile_table.data() : nullptr};
+    }
+    size_t getNumActiveTiles() const {
+        return m_sparse_grid_mode ? static_cast<size_t>(m_num_active_tiles) : (static_cast<size_t>(m_ntx) * m_nty * m_ntz);
+    }
+    size_t getTileCapacity() const {
+        return m_sparse_grid_mode ? m_tile_capacity : (static_cast<size_t>(m_ntx) * m_nty * m_ntz);
+    }
+    size_t getTotalLogicalTiles() const { return static_cast<size_t>(m_ntx) * m_nty * m_ntz; }
+    int getSparseActiveTileCount() const { return static_cast<int>(getNumActiveTiles()); }
+    int getSparseMaxActiveTiles() const { return static_cast<int>(getTileCapacity()); }
+    size_t getAllocatedGridNodeCapacity() const { return m_allocated_grid_nodes; }
+    const std::vector<int>& getHostTileTable() const { return m_host_tile_table; }
+    const std::vector<int>& getHostActiveTiles() const { return m_host_active_tiles; }
+
     // Device memory getters
     MPMParticle3D* getDeviceParticles() { return d_particles; }
     const MPMParticle3DSoA& getDeviceParticlesSoA() const { return d_soa; }
@@ -315,8 +338,12 @@ public:
     int* getDeviceActiveNodes() { return d_active_nodes; }
     int getNumActiveNodes() const { return m_num_active_nodes; }
     MPMTile3D** getDeviceTilePtrs() { return nullptr; }
-    int* getDeviceTileTable() { return nullptr; }
+    int* getDeviceTileTable() { return m_sparse_grid_mode ? d_tile_table : nullptr; }
+    int* getDeviceActiveTiles() { return m_sparse_grid_mode ? d_active_tiles : nullptr; }
     MaterialTable3D* getDeviceMaterialTables() { return d_material_tables; }
+    int* getDeviceBoundaryFlags() { return d_boundary_flags; }
+    void setDeferFVErosionToCoupler(bool defer) { m_defer_fv_erosion_to_coupler = defer; }
+    bool getDeferFVErosionToCoupler() const { return m_defer_fv_erosion_to_coupler; }
     // Extract 2D slice directly on GPU to host vector (eliminates 512 MB PCIe downloads)
     void extractSliceToHost(std::vector<float>& out_slice, const std::string& axis, float offset, const std::string& req_qty = "plastic_strain");
     // Extract background grid cell particle density and mass density for VTK StructuredGrid (.vts)
@@ -344,6 +371,23 @@ private:
     int m_nx{32};
     int m_ny{32};
     int m_nz{32};
+    int m_ntx{4};
+    int m_nty{4};
+    int m_ntz{4};
+    bool m_sparse_grid_mode{false};
+    bool m_defer_fv_erosion_to_coupler{false};
+    size_t m_tile_capacity{0};
+    int m_num_active_tiles{0};
+    int* d_tile_table{nullptr};
+    int* d_active_tiles{nullptr};
+    int* d_num_active_tiles{nullptr};
+    size_t m_allocated_tile_table{0};
+    size_t m_allocated_active_tiles{0};
+    std::vector<int> m_host_tile_table;
+    std::vector<int> m_host_active_tiles;
+    bool m_fsi_forces_active{false};
+    void activateSparseTilesDevice(int num_particles, bool preserve_existing_tiles = false);
+
     float m_dx{0.01f};
     float m_dy{0.01f};
     float m_dz{0.01f};

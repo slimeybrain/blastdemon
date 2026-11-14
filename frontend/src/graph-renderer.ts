@@ -1,8 +1,8 @@
-import { SimulationState, Node, Connection, Port, NodeType } from './types.js';
-import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, getMaterialDisplayHTML, isExplosiveMaterialNode, syncMPMMaterialParameters, getCompatibleMaterialsForNode } from './state-manager.js';
+import { SimulationState, Node, Connection, Port, NodeType, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
+import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, getMaterialDisplayHTML, isExplosiveMaterialNode, syncMPMMaterialParameters, getCompatibleMaterialsForNode, resolveResourcePath } from './state-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
-import { HostFileBrowserModal } from './host-file-browser.js';
+import { HostFileBrowserModal, FileFilterPreset, showRecentFoldersQuickMenu, recordRecentFolder } from './host-file-browser.js';
 import { CustomDialog } from './custom-dialog.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getCategorizedPresetsForModel, getDefaultPresetForModel } from './mpm-presets.js';
 import { EXPLOSIVE_PRESETS } from './property-grid.js';
@@ -524,7 +524,7 @@ export class GraphRenderer {
             if (canvas) {
                 const gauges = node.parameters?.gauges || [];
                 const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
-                const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
+                const has2D = state?.nodes.some(n => isDomainMesh2DNode(n.type)) || false;
                 this.drawGaugesChart(canvas, data, gauges, currentChannel, has2D, node.id);
             }
         }
@@ -863,7 +863,7 @@ export class GraphRenderer {
 
         switch (toType) {
             case 'MarineHarbourDomain':
-                if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
+                if (toPortId === 'mesh') return isDomainMesh3DNode(fromType);
                 if (toPortId === 'air') return fromType === 'Material';
                 if (toPortId === 'water') return fromType === 'Material';
                 if (toPortId === 'charge' || toPortId === 'explosive') return fromType === 'Charge3D';
@@ -871,18 +871,18 @@ export class GraphRenderer {
                 if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation3D' || fromType === 'TriggerLocation3D';
                 if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D' || fromType === 'Obstacle3D';
                 if (toPortId === 'gauges') return fromType === 'VirtualGauges';
-                if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo3DNode' || fromType === 'Remap2DTo3DNode';
+                if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo3DNode' || fromType === 'Remap2DTo3DNode' || fromType === 'Remap3DTo3DNode';
                 if (toPortId === 'elements' || toPortId === 'objects' || toPortId === 'parts') return fromType === 'FEMObject3D' || fromType === 'FEMBeam3D' || fromType === 'FEMRebar3D';
                 return false;
             case 'CFDSolver3D':
-                // mesh port only accepts the root DomainMesh3D; subgrids hang off the domain via parent_mesh
-                if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
+                // mesh port accepts DomainMesh3D or SparseDomainMesh3D
+                if (toPortId === 'mesh') return isDomainMesh3DNode(fromType);
                 if (toPortId === 'air') return fromType === 'Material';
                 if (toPortId === 'charge' || toPortId === 'explosive') return fromType === 'Charge3D';
                 if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation3D' || fromType === 'TriggerLocation3D';
                 if (toPortId === 'stl') return fromType === 'STLGeometry' || fromType === 'PrimitiveGeometry3D' || fromType === 'Obstacle3D';
                 if (toPortId === 'gauges') return fromType === 'VirtualGauges';
-                if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo3DNode' || fromType === 'Remap2DTo3DNode';
+                if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo3DNode' || fromType === 'Remap2DTo3DNode' || fromType === 'Remap3DTo3DNode';
                 return false;
             case 'FEMBeam3D':
             case 'FEMRebar3D':
@@ -906,7 +906,7 @@ export class GraphRenderer {
                 if (toPortId === 'in') return fromType === 'ThePainter';
                 return false;
             case 'CFDSolver2D':
-                if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
+                if (toPortId === 'mesh') return isDomainMesh2DNode(fromType);
                 if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation' || fromType === 'TriggerLocation';
                 if (toPortId === 'remap') return fromType === 'RemapNode' || fromType === 'Remap1DTo2DNode';
                 if (toPortId === 'hardware') return fromType === 'HardwareConfig';
@@ -926,6 +926,9 @@ export class GraphRenderer {
             case 'Remap2DTo3DNode':
                 if (toPortId === 'in') return fromType === 'CFDSolver2D';
                 return false;
+            case 'Remap3DTo3DNode':
+                if (toPortId === 'in') return fromType === 'CFDSolver3D' || fromType === 'MarineHarbourDomain';
+                return false;
             case 'VirtualGauges':
                 if (toPortId === 'in') return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MarineHarbourDomain';
                 return false;
@@ -933,12 +936,12 @@ export class GraphRenderer {
             case 'TelemetryGraph':
                 return fromType === 'CFDSolver' || fromType === 'CFDSolver2D' || fromType === 'CFDSolver3D' || fromType === 'MarineHarbourDomain' || fromType === 'MPMDomain2D' || fromType === 'MPMDomain3D' || fromType === 'FSICoupler2D' || fromType === 'FSICoupler3D' || fromType === 'FEMDomain3D' || fromType === 'FEMFSICoupler3D';
             case 'MPMDomain2D':
-                if (toPortId === 'mesh') return fromType === 'DomainMesh2D';
+                if (toPortId === 'mesh') return isDomainMesh2DNode(fromType);
                 if (toPortId === 'objects') return fromType === 'MPMObject2D';
                 if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation' || fromType === 'TriggerLocation';
                 return false;
             case 'MPMDomain3D':
-                if (toPortId === 'mesh') return fromType === 'DomainMesh3D';
+                if (toPortId === 'mesh') return isDomainMesh3DNode(fromType);
                 if (toPortId === 'objects') return fromType === 'MPMObject3D';
                 if (toPortId === 'detonator' || toPortId === 'trigger') return fromType === 'DetonatorLocation3D' || fromType === 'TriggerLocation3D';
                 return false;
@@ -1093,6 +1096,15 @@ export class GraphRenderer {
                                     fromNode.parameters['target_domain'] = toNodeId;
                                     this.stateManager.updateNodeParametersInPlace(fromNode.id, { target_domain: toNodeId });
                                 }
+                            } else if (toPortId === 'mesh' && targetNode && targetNode.type === 'CFDSolver' && fromNode?.type === 'DomainMesh') {
+                                targetNode.parameters['domain_mesh'] = fromNodeId;
+                                this.stateManager.updateNodeParametersInPlace(targetNode.id, { domain_mesh: fromNodeId });
+                            } else if (toPortId === 'remap' && targetNode && fromNode && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(fromNode.type)) {
+                                const desiredInitMode = fromNode.type === 'Remap3DTo3DNode' ? 'From3D' : (fromNode.type === 'Remap2DTo3DNode' ? 'From2D' : 'From1D');
+                                fromNode.parameters['target_solver'] = toNodeId;
+                                this.stateManager.updateNodeParametersInPlace(fromNode.id, { target_solver: toNodeId });
+                                targetNode.parameters['init_mode'] = desiredInitMode;
+                                this.stateManager.updateNodeParametersInPlace(targetNode.id, { init_mode: desiredInitMode });
                             }
                             const owningModel = this.stateManager.getModelForNode(toNodeId) || this.stateManager.getActiveModel();
                             if (owningModel) {
@@ -1433,7 +1445,8 @@ export class GraphRenderer {
             {
                 name: '2D Simulation',
                 items: [
-                    { label: 'Domain Mesh 2D', type: 'DomainMesh2D' },
+                    { label: 'Domain Mesh 2D (Dense)', type: 'DomainMesh2D' },
+                    { label: 'Sparse Domain Mesh 2D (8×8 Tile)', type: 'SparseDomainMesh2D' },
                     { label: 'Detonator Location', type: 'DetonatorLocation' },
                     { label: 'Remapper (1D -> 2D)', type: 'Remap1DTo2DNode' },
                     { label: '2D Charge', type: 'Charge2D' },
@@ -1443,10 +1456,12 @@ export class GraphRenderer {
             {
                 name: '3D Simulation',
                 items: [
-                    { label: 'Domain Mesh 3D', type: 'DomainMesh3D' },
+                    { label: 'Domain Mesh 3D (Dense)', type: 'DomainMesh3D' },
+                    { label: 'Sparse Domain Mesh 3D (8×8×8 Tile)', type: 'SparseDomainMesh3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
                     { label: 'Remapper (1D -> 3D)', type: 'Remap1DTo3DNode' },
                     { label: 'Remapper (2D -> 3D)', type: 'Remap2DTo3DNode' },
+                    { label: 'Remapper (3D -> 3D)', type: 'Remap3DTo3DNode' },
                     { label: '3D Charge', type: 'Charge3D' },
                     { label: 'CFD Solver 3D', type: 'CFDSolver3D' },
                     { label: 'Marine Harbour Domain', type: 'MarineHarbourDomain' }
@@ -1463,6 +1478,7 @@ export class GraphRenderer {
             {
                 name: 'MPM Simulation (2D)',
                 items: [
+                    { label: 'Sparse Domain Mesh 2D (8×8 Tile)', type: 'SparseDomainMesh2D' },
                     { label: 'MPM Domain 2D', type: 'MPMDomain2D' },
                     { label: 'Detonator Location', type: 'DetonatorLocation' },
                     { label: 'MPM Object 2D (Primitive)', type: 'MPMObject2D' }
@@ -1471,6 +1487,7 @@ export class GraphRenderer {
             {
                 name: 'MPM Simulation (3D)',
                 items: [
+                    { label: 'Sparse Domain Mesh 3D (8×8×8 Tile)', type: 'SparseDomainMesh3D' },
                     { label: 'MPM Domain 3D', type: 'MPMDomain3D' },
                     { label: 'MPM Bardenhagen Coupler 3D', type: 'MPMContactCoupler3D' },
                     { label: 'Detonator Location 3D', type: 'DetonatorLocation3D' },
@@ -1638,7 +1655,7 @@ export class GraphRenderer {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
 
-        const isMesh = (t: string) => ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D'].includes(t);
+        const isMesh = (t: string) => ['DomainMesh', 'DomainMesh2D', 'SparseDomainMesh2D', 'DomainMesh3D', 'SparseDomainMesh3D'].includes(t);
 
         const ws = this.stateManager.getActiveWorkspace();
         const activeModelId = ws ? ws.activeModelId : null;
@@ -1658,9 +1675,26 @@ export class GraphRenderer {
             return;
         }
 
-        if (isMesh(type) && targetNodes.some(n => isMesh(n.type))) {
-            alert(`You can only have one Domain Mesh per model canvas. Please create a 'New Model' from the top menu for a separate simulation.`);
-            return;
+        if (isMesh(type)) {
+            const existingMesh = targetNodes.find(n => isMesh(n.type));
+            if (existingMesh) {
+                if ((existingMesh.type === 'DomainMesh3D' && type === 'SparseDomainMesh3D') ||
+                    (existingMesh.type === 'SparseDomainMesh3D' && type === 'DomainMesh3D') ||
+                    (existingMesh.type === 'DomainMesh2D' && type === 'SparseDomainMesh2D') ||
+                    (existingMesh.type === 'SparseDomainMesh2D' && type === 'DomainMesh2D')) {
+                    const targetModel = this.stateManager.getActiveModel();
+                    const switchingToSparse = type === 'SparseDomainMesh3D' || type === 'SparseDomainMesh2D';
+                    if (switchingToSparse && !this.stateManager.isMeshSparseSupported(existingMesh.id, targetModel?.id)) {
+                        alert(`Finite Volume (CFD) domains require a Dense Uniform Grid and do not support Sparse Block-Tile Grids.`);
+                        return;
+                    }
+                    this.stateManager.toggleMeshSparsity(existingMesh.id, targetModel?.id);
+                    this.stateManager.selectNode(targetModel?.id || '', existingMesh.id);
+                    return;
+                }
+                alert(`You can only have one Domain Mesh per model canvas. Please create a 'New Model' from the top menu for a separate simulation.`);
+                return;
+            }
         }
 
         const id = this.stateManager.generateUniqueNodeId(type);
@@ -1802,6 +1836,7 @@ export class GraphRenderer {
             case 'TelemetryText':   return 'LOG';
             case 'TelemetryGraph':  return 'CHART';
             case 'DomainMesh2D':    return 'MESH2D';
+            case 'SparseDomainMesh2D': return 'SMESH2D';
             case 'DetonatorLocation':
             case 'DetonatorLocation3D':
             case 'TriggerLocation':
@@ -1810,11 +1845,13 @@ export class GraphRenderer {
             case 'Remap1DTo2DNode': return 'REMAP 1D->2D';
             case 'Remap1DTo3DNode': return 'REMAP 1D->3D';
             case 'Remap2DTo3DNode': return 'REMAP 2D->3D';
+            case 'Remap3DTo3DNode': return 'REMAP 3D->3D';
             case 'HardwareConfig':   return 'HARDWARE';
             case 'CFDSolver2D':     return 'SOLVER2D';
             case 'TelemetryContour': return 'CONTOUR';
             case 'VTKOutput':       return 'VTK';
             case 'DomainMesh3D':    return 'MESH3D';
+            case 'SparseDomainMesh3D': return 'SMESH3D';
             case 'Charge3D':        return 'CHARGE3D';
             case 'CFDSolver3D':     return 'SOLVER3D';
             case 'Telemetry3DViewport': return 'VIEW3D';
@@ -1850,6 +1887,7 @@ export class GraphRenderer {
             case 'TelemetryText':     return 'Telemetry - Text';
             case 'TelemetryGraph':    return 'Telemetry - Graph';
             case 'DomainMesh2D':      return 'Domain Mesh 2D';
+            case 'SparseDomainMesh2D': return 'Sparse Domain Mesh 2D';
             case 'DetonatorLocation': return 'Detonator Location';
             case 'DetonatorLocation3D': return 'Detonator Location 3D';
             case 'TriggerLocation':   return 'Detonator Location';
@@ -1858,11 +1896,13 @@ export class GraphRenderer {
             case 'Remap1DTo2DNode':   return 'Remapper (1D -> 2D)';
             case 'Remap1DTo3DNode':   return 'Remapper (1D -> 3D)';
             case 'Remap2DTo3DNode':   return 'Remapper (2D -> 3D)';
+            case 'Remap3DTo3DNode':   return 'Remapper (3D -> 3D)';
             case 'HardwareConfig':    return 'Hardware Configuration';
             case 'CFDSolver2D':       return 'CFD Solver 2D';
             case 'TelemetryContour':  return 'Telemetry - Contour (2D)';
             case 'VTKOutput':         return 'VTK Output Controls';
             case 'DomainMesh3D':      return 'Domain Mesh 3D';
+            case 'SparseDomainMesh3D': return 'Sparse Domain Mesh 3D';
             case 'Charge3D':          return 'Charge (3D)';
             case 'CFDSolver3D':       return 'CFD Solver 3D';
             case 'MarineHarbourDomain': return 'Marine Harbour Domain';
@@ -2997,12 +3037,12 @@ export class GraphRenderer {
     }
 
     private getPortColorClass(nodeType: string, portId: string): string {
-        if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || portId === 'mesh') return 'domain';
+        if (nodeType === 'DomainMesh' || isDomainMesh2DNode(nodeType) || isDomainMesh3DNode(nodeType) || portId === 'mesh') return 'domain';
         if (nodeType === 'STLGeometry' || nodeType === 'PrimitiveGeometry3D' || nodeType === 'Obstacle3D' || portId === 'stl') return 'domain';
         if (nodeType === 'Charge1D' || nodeType === 'Charge2D' || portId === 'explosive') return 'explosive';
         if (portId === 'ideal_gas') return 'material';
         if (nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D' || nodeType === 'TriggerLocation' || nodeType === 'TriggerLocation3D' || portId === 'detonator' || portId === 'trigger') return 'detonator';
-        if (nodeType === 'RemapNode' || nodeType === 'Remap1DTo2DNode' || nodeType === 'Remap1DTo3DNode' || nodeType === 'Remap2DTo3DNode' || portId === 'remap') return 'remap';
+        if (nodeType === 'RemapNode' || nodeType === 'Remap1DTo2DNode' || nodeType === 'Remap1DTo3DNode' || nodeType === 'Remap2DTo3DNode' || nodeType === 'Remap3DTo3DNode' || portId === 'remap') return 'remap';
         if (nodeType === 'HardwareConfig' || portId === 'hardware') return 'hardware';
         if (portId === 'telemetry' || portId === 'mpm_in' || portId === 'in_2' || (portId === 'in' && (nodeType === 'TelemetryText' || nodeType === 'TelemetryGraph' || nodeType === 'TelemetryContour' || nodeType === 'Telemetry3DViewport'))) return 'telemetry';
         return 'material';
@@ -3174,15 +3214,20 @@ export class GraphRenderer {
                 body.scrollTop = body.scrollHeight;
             }
         } else if (node.type === 'TelemetryGraph') {
-            // Channel metadata
-            const CHANNELS: { label: string; color: string }[] = [
-                { label: 'Pressure',        color: '#00f0ff' },
-                { label: 'Density',         color: '#f0a000' },
-                { label: 'Velocity',        color: '#a0f000' },
-                { label: 'Int. Energy',     color: '#f000a0' },
-                { label: 'Mass Fraction',   color: '#a000f0' },
+            // Channel metadata matching ChartWorker 1D spatial channels
+            const CHANNELS: { id: number; label: string; color: string }[] = [
+                { id: 0, label: 'Pressure P',       color: '#00f0ff' },
+                { id: 8, label: 'Overpressure ΔP',  color: '#38bdf8' },
+                { id: 1, label: 'Density ρ',        color: '#f0a000' },
+                { id: 2, label: 'Velocity u_r',     color: '#a0f000' },
+                { id: 3, label: 'Int. Energy e',    color: '#f000a0' },
+                { id: 4, label: 'All Species',      color: '#a000f0' },
+                { id: 5, label: 'Reacted α₁',       color: '#f97316' },
+                { id: 6, label: 'Unreacted α₂',     color: '#ef4444' },
+                { id: 7, label: 'Ambient Air',      color: '#94a3b8' },
             ];
             const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+            const currentChannelDef = CHANNELS.find(c => c.id === currentChannel) ?? CHANNELS[0];
             const currentStride = Number(node.parameters?.plot_stride ?? 1);
             const STRIDES = [
                 { label: '1x', value: 1 },
@@ -3208,7 +3253,10 @@ export class GraphRenderer {
                     type: 'setConfig',
                     showAxes: node.displayMode === 'expanded',
                     channel: currentChannel,
-                    color: node.parameters?.color ?? CHANNELS[currentChannel]?.color ?? '#00f0ff',
+                    color: node.parameters?.color ?? currentChannelDef.color,
+                    autoScale: node.parameters?.auto_scale !== false,
+                    autoScaleY: node.parameters?.auto_scale !== false,
+                    logScale: node.parameters?.log_scale === true,
                     min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
                     max: node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1000000,
                     showGrid: node.parameters?.show_grid !== false,
@@ -3228,11 +3276,11 @@ export class GraphRenderer {
                 selectorBar.appendChild(channelLabelSpan);
 
                 const select = this.createCustomDropdown(
-                    CHANNELS.map((ch, idx) => ({ value: String(idx), label: ch.label })),
+                    CHANNELS.map(ch => ({ value: String(ch.id), label: ch.label })),
                     String(currentChannel),
                     (val) => {
                         const ch = parseInt(val, 10);
-                        const newColor = CHANNELS[ch]?.color ?? '#00f0ff';
+                        const newColor = CHANNELS.find(c => c.id === ch)?.color ?? '#00f0ff';
                         this.stateManager.updateNodeParametersInPlace(node.id, {
                             telemetry_channel: ch,
                             color: newColor
@@ -3289,7 +3337,10 @@ export class GraphRenderer {
                 newWorker.postMessage({
                     type: 'setConfig',
                     channel: currentChannel,
-                    color: node.parameters?.color ?? CHANNELS[currentChannel]?.color ?? '#00f0ff',
+                    color: node.parameters?.color ?? currentChannelDef.color,
+                    autoScale: node.parameters?.auto_scale !== false,
+                    autoScaleY: node.parameters?.auto_scale !== false,
+                    logScale: node.parameters?.log_scale === true,
                     min: node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0,
                     max: node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1000000,
                     showGrid: node.parameters?.show_grid !== false,
@@ -3324,9 +3375,8 @@ export class GraphRenderer {
                 if (select) {
                     const trigger = select.querySelector('.custom-select-trigger');
                     if (trigger) {
-                        const currentOpt = CHANNELS[currentChannel];
-                        if (currentOpt && trigger.textContent !== currentOpt.label) {
-                            trigger.textContent = currentOpt.label;
+                        if (currentChannelDef && trigger.textContent !== currentChannelDef.label) {
+                            trigger.textContent = currentChannelDef.label;
                             select.querySelectorAll('.custom-select-option').forEach(opt => {
                                 const optEl = opt as HTMLElement;
                                 if (optEl.dataset.value === String(currentChannel)) {
@@ -3436,29 +3486,32 @@ export class GraphRenderer {
             const hasMPM = connectedSolvers.some(n => n?.type === 'MPMDomain2D' || n?.type === 'FSICoupler2D');
             const hasCFD = connectedSolvers.some(n => n?.type === 'CFDSolver2D' || n?.type === 'FSICoupler2D') || connectedSolvers.length === 0;
 
-            const CHANNELS: { label: string }[] = [];
+            const CHANNELS: { id: number; label: string }[] = [];
             if (hasCFD) {
                 CHANNELS.push(
-                    { label: 'Pressure' },
-                    { label: 'Density' },
-                    { label: 'Radial Vel' },
-                    { label: 'Axial Vel' },
-                    { label: 'Spec Energy' },
-                    { label: 'Burn Frac' },
-                    { label: 'Unburnt Frac' }
+                    { id: 0, label: 'Pressure P' },
+                    { id: 10, label: 'Overpressure ΔP' },
+                    { id: 1, label: 'Density ρ' },
+                    { id: 9, label: 'Velocity |u|' },
+                    { id: 2, label: 'Radial Vel u_r' },
+                    { id: 3, label: 'Axial Vel u_z' },
+                    { id: 4, label: 'Spec Energy e' },
+                    { id: 5, label: 'Reacted α₁' },
+                    { id: 6, label: 'Unreacted α₂' }
                 );
             }
             if (hasMPM) {
                 CHANNELS.push(
-                    { label: 'Von Mises Stress' },
-                    { label: 'Plastic Strain' },
-                    { label: 'Object ID' }
+                    { id: 7, label: 'Von Mises Stress' },
+                    { id: 8, label: 'Plastic Strain' }
                 );
             }
             if (CHANNELS.length === 0) {
-                CHANNELS.push({ label: 'Pressure' }, { label: 'Density' }, { label: 'Velocity' });
+                CHANNELS.push({ id: 0, label: 'Pressure P' }, { id: 1, label: 'Density ρ' }, { id: 9, label: 'Velocity |u|' });
             }
-            const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
+            const defaultCh = CHANNELS[0].id;
+            const rawCh = Number(node.parameters?.telemetry_channel ?? defaultCh);
+            const currentChannel = CHANNELS.some(c => c.id === rawCh) ? rawCh : defaultCh;
             const currentStride = Number(node.parameters?.downsample_stride ?? 1);
             const currentRate = Number(node.parameters?.refresh_rate ?? 0.0);
 
@@ -3510,9 +3563,9 @@ export class GraphRenderer {
                     const modelNodes = ownerModel ? ownerModel.nodes : state.nodes;
 
                     const meshConn = state.connections.find(c => c.toNode === solverNode.id && c.toPort === 'mesh');
-                    meshNode = meshConn ? modelNodes.find(n => n.id === meshConn.fromNode && n.type === 'DomainMesh2D') : null;
+                    meshNode = meshConn ? modelNodes.find(n => n.id === meshConn.fromNode && isDomainMesh2DNode(n.type)) : null;
                     if (!meshNode) {
-                        meshNode = modelNodes.find(n => n.type === 'DomainMesh2D') || null;
+                        meshNode = modelNodes.find(n => isDomainMesh2DNode(n.type)) || null;
                     }
                     if (meshNode) {
                         isAxisymmetric = (meshNode.parameters?.coordinate_system ?? 'Axisymmetric') === 'Axisymmetric';
@@ -3604,8 +3657,12 @@ export class GraphRenderer {
 
             const COLORMAPS = [
                 { value: 'rainbow', label: 'Rainbow' },
+                { value: 'turbo', label: 'Turbo' },
                 { value: 'plasma', label: 'Plasma' },
                 { value: 'viridis', label: 'Viridis' },
+                { value: 'inferno', label: 'Inferno' },
+                { value: 'magma', label: 'Magma' },
+                { value: 'jet', label: 'Jet' },
                 { value: 'coolwarm', label: 'CoolWarm' },
                 { value: 'cividis', label: 'Cividis' },
                 { value: 'grayscale', label: 'Grayscale' }
@@ -3621,8 +3678,10 @@ export class GraphRenderer {
                 worker.postMessage({
                     type: 'setConfig',
                     channel: currentChannel,
-                    stride: 1,
+                    stride: currentStride,
                     refreshRate: currentRate,
+                    autoScale: autoScale,
+                    fillMode: 'aspect',
                     logScale: currentLogScale,
                     colormap: currentColorMap,
                     min: minY,
@@ -3631,6 +3690,7 @@ export class GraphRenderer {
                     chargeInfo: (node.parameters?.show_charge !== false) ? chargeInfo : null,
                     detonatorInfo: (node.parameters?.show_detonator !== false) ? detonatorInfo : null,
                     showGridlines: node.parameters?.show_gridlines === true,
+                    interpolate: node.parameters?.interpolate !== false,
                     max_r: max_r,
                     max_z: max_z,
                     meshType: solverNode?.parameters?.mesh_type || 'regular',
@@ -3668,7 +3728,7 @@ export class GraphRenderer {
                 chGroup.appendChild(labelSpan);
 
                 const select = this.createCustomDropdown(
-                    CHANNELS.map((ch, idx) => ({ value: String(idx), label: ch.label })),
+                    CHANNELS.map(ch => ({ value: String(ch.id), label: ch.label })),
                     String(currentChannel),
                     (val) => {
                         const ch = parseInt(val, 10);
@@ -4161,7 +4221,7 @@ export class GraphRenderer {
                 if (select) {
                     const trigger = select.querySelector('.custom-select-trigger');
                     if (trigger) {
-                        const currentOpt = CHANNELS[currentChannel];
+                        const currentOpt = CHANNELS.find(c => c.id === currentChannel);
                         if (currentOpt && trigger.textContent !== currentOpt.label) {
                             trigger.textContent = currentOpt.label;
                             select.querySelectorAll('.custom-select-option').forEach(opt => {
@@ -4287,9 +4347,17 @@ export class GraphRenderer {
 
                 const gridCheckbox = container.querySelector('.telemetry-grid-checkbox') as HTMLInputElement;
                 if (gridCheckbox) {
-                    const expected = node.parameters?.show_gridlines === true;
+                    const expected = node.parameters?.show_gridlines === true || node.parameters?.show_grid === true;
                     if (gridCheckbox.checked !== expected) {
                         gridCheckbox.checked = expected;
+                    }
+                }
+
+                const smoothCheckbox = container.querySelector('.telemetry-smooth-checkbox') as HTMLInputElement;
+                if (smoothCheckbox) {
+                    const expected = Boolean(node.parameters?.interpolate);
+                    if (smoothCheckbox.checked !== expected) {
+                        smoothCheckbox.checked = expected;
                     }
                 }
             }
@@ -4312,7 +4380,7 @@ export class GraphRenderer {
         const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
         const is3D = sourceNode 
             ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'MarineHarbourDomain' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D') 
-            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
+            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || isDomainMesh3DNode(n.type) || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
         let isCoupledModel = false;
         const allModels = this.stateManager.getAllModels();
         for (const m of allModels) {
@@ -4344,10 +4412,11 @@ export class GraphRenderer {
         if (form) {
             let needsRebuild = false;
             if (form.dataset.renderedVisibleKeys !== visibleKeysFingerprint) needsRebuild = true;
+            if (form.dataset.renderedNodeType && form.dataset.renderedNodeType !== node.type) needsRebuild = true;
             if (node.type === 'DomainMesh') {
                 const dim = node.parameters['dimension'] || '1D';
                 if (form.dataset.renderedDimension !== dim.toString()) needsRebuild = true;
-            } else if (node.type === 'DomainMesh2D') {
+            } else if (isDomainMesh2DNode(node.type)) {
                 const cs = node.parameters['coordinate_system'] || 'Axisymmetric';
                 if (form.dataset.renderedCoordinateSystem !== cs.toString()) needsRebuild = true;
             } else if (node.type === 'Material') {
@@ -4482,9 +4551,9 @@ export class GraphRenderer {
                             currentVal = 'Leapfrog';
                         } else {
                             const so = Number(node.parameters['spatial_order'] ?? 2);
-                            const to = Number(node.parameters['temporal_order'] ?? 4);
-                            if (so === 2 && (to === 5 || to === 2)) currentVal = 'ADER-2 (2nd-Order Space/Time)';
-                            else if (so === 3 && (to === 6 || to === 3)) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                            const to = Number(node.parameters['temporal_order'] ?? 2);
+                            if (so === 3 || to === 6 || to === 3) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                            else if (to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
                             else currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
                         }
                     }
@@ -4543,6 +4612,47 @@ export class GraphRenderer {
         form.style.padding = '4px 8px';
         form.onsubmit = (e) => e.preventDefault();
         form.dataset.renderedVisibleKeys = visibleKeysFingerprint;
+        form.dataset.renderedNodeType = node.type;
+
+        if (isDomainMesh3DNode(node.type) || isDomainMesh2DNode(node.type)) {
+            const isSparse = node.type === 'SparseDomainMesh3D' || node.type === 'SparseDomainMesh2D';
+            if (isSparse || this.stateManager.isMeshSparseSupported(node.id)) {
+                const btnWrap = document.createElement('div');
+                btnWrap.style.margin = '4px 0 8px 0';
+                btnWrap.style.width = '100%';
+
+                const toggleBtn = document.createElement('button');
+                toggleBtn.type = 'button';
+                toggleBtn.style.width = '100%';
+                toggleBtn.style.padding = '6px 10px';
+                toggleBtn.style.background = isSparse
+                    ? 'linear-gradient(135deg, #6b21a8, #9333ea)'
+                    : 'linear-gradient(135deg, #0f172a, #1e293b)';
+                toggleBtn.style.border = isSparse ? '1px solid #c084fc' : '1px solid #38bdf8';
+                toggleBtn.style.borderRadius = '5px';
+                toggleBtn.style.color = '#ffffff';
+                toggleBtn.style.fontWeight = '700';
+                toggleBtn.style.fontSize = '10.5px';
+                toggleBtn.style.letterSpacing = '0.3px';
+                toggleBtn.style.cursor = 'pointer';
+                toggleBtn.style.display = 'flex';
+                toggleBtn.style.alignItems = 'center';
+                toggleBtn.style.justifyContent = 'center';
+                toggleBtn.style.gap = '6px';
+                toggleBtn.innerHTML = isSparse
+                    ? '<span>🟣 Sparse Tile Grid Active · Click to Switch to Dense</span>'
+                    : '<span>📐 Dense Grid Active · Click to Switch to Sparse (8×8×8)</span>';
+                toggleBtn.title = 'Switch in-place between Dense Background Grid and Sparse 8×8×8 Tile Grid while preserving all bounds, resolution, and connections';
+                toggleBtn.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.stateManager.toggleMeshSparsity(node.id);
+                    this.render();
+                };
+                btnWrap.appendChild(toggleBtn);
+                form.appendChild(btnWrap);
+            }
+        }
 
         const isFEMNode = node.type === 'FEMObject3D' || node.type === 'FEMDomain3D' || node.type === 'LSDynaImporter3D' || node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D' || node.type === 'FEMFSICoupler3D' || !!node.parameters?.['fem_setup'];
         if (isFEMNode) {
@@ -4590,7 +4700,7 @@ export class GraphRenderer {
         if (node.type === 'DomainMesh') {
             const dim = node.parameters['dimension'] || '1D';
             form.dataset.renderedDimension = dim.toString();
-        } else if (node.type === 'DomainMesh2D') {
+        } else if (isDomainMesh2DNode(node.type)) {
             const cs = node.parameters['coordinate_system'] || 'Axisymmetric';
             form.dataset.renderedCoordinateSystem = cs.toString();
         } else if (node.type === 'Material') {
@@ -4681,7 +4791,7 @@ export class GraphRenderer {
         
         const nType: string = node.type;
         let gridInfoDiv: HTMLDivElement | null = null;
-        if (nType === 'DomainMesh' || nType === 'DomainMesh2D' || nType === 'DomainMesh3D' || nType === 'CFDSolver' || nType === 'CFDSolver2D' || nType === 'CFDSolver3D' || nType === 'MarineHarbourDomain') {
+        if (nType === 'DomainMesh' || isDomainMesh2DNode(nType) || isDomainMesh3DNode(nType) || nType === 'CFDSolver' || nType === 'CFDSolver2D' || nType === 'CFDSolver3D' || nType === 'MarineHarbourDomain') {
             const state = this.stateManager.getCurrentState();
             const info = document.createElement('div');
             info.className = 'grid-info-display';
@@ -4779,9 +4889,9 @@ export class GraphRenderer {
                     value = node.parameters['space_time_scheme'];
                     if (!value) {
                         const so = Number(node.parameters['spatial_order'] ?? 2);
-                        const to = Number(node.parameters['temporal_order'] ?? 4);
-                        if (so === 2 && (to === 5 || to === 2)) value = 'ADER-2 (2nd-Order Space/Time)';
-                        else if (so === 3 && (to === 6 || to === 3)) value = 'ADER-3 (3rd-Order Space/Time)';
+                        const to = Number(node.parameters['temporal_order'] ?? 2);
+                        if (so === 3 || to === 6 || to === 3) value = 'ADER-3 (3rd-Order Space/Time)';
+                        else if (to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
                         else value = 'MUSCL-Hancock (2nd-Order Space/Time)';
                     }
                 }
@@ -4970,7 +5080,8 @@ export class GraphRenderer {
                 'material_model': getConstitutiveModels(),
                 'tait_variant_str': ['Isentropic', 'CaloricGruneisen', 'ShockHugoniot'],
                 'tait_variant': ['0: Isentropic (Cole 1948)', '1: Caloric Grüneisen (Near-Field)', '2: Shock Hugoniot Reference'],
-                'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
+                'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant', 'Unreacted JWL (Lee-Tarver)'],
+            'mixture_rule': ['Pressure Equilibrium (Volume Additive)', 'Linear Blend'],
                 'burn_model': ['Programmed Wavefront Burn', 'Lee-Tarver 3-Stage ODE', 'CREST Shock Entropy Kinetics'],
                 'product_model': ['JWL Product Gas', 'Davis Detonation Product'],
                 'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
@@ -4986,8 +5097,8 @@ export class GraphRenderer {
                 'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
                 'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
                 'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
-                'left_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
-                'right_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+                'left_bc': ['Reflecting'],
+                'right_bc': ['Transmitting', 'Reflecting', 'Terminate'],
                 'bc_x_min': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
                 'bc_x_max': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
                 'bc_y_min': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
@@ -5008,7 +5119,8 @@ export class GraphRenderer {
                 'mesh_source': ['Box Generator', 'Cylinder Generator', 'Plate Generator', 'STL File', 'LS-DYNA Keyword File'],
                 'element_topology': ['Hex8', 'Tet4_ANP'],
                 'fsi_algorithm': ['CutCellPenalty', 'ImmersedBoundary', 'DirectMassCoupled'],
-                'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
+                'trigger_type': ['Step Interval', 'Time Interval'],
+                'ascii_delimiter': ['Comma', 'Tab', 'Space'],
                 'vtk_format': ['Binary', 'XDMF + HDF5', 'ASCII'],
                 'compression_level': ['1', '3', '6', '9'],
                 'float_precision': ['12-bit Mantissa (~4 sig. digits)', '16-bit Mantissa (~5 sig. digits)', 'Full 23-bit Float32 (Lossless)'],
@@ -5018,7 +5130,7 @@ export class GraphRenderer {
                 'undex_coupling_method': ['LocalCurvedDAA', 'HighFidelityCFD', 'ZonalHybrid_MPM_FV_FEM'],
                 'seabed_mesh_type': ['Pure_FV', 'Hybrid_MPM_Crater_FEM_FarField', 'Full_Domain_MPM', 'Local_Crater_MPM', 'Pure_Hex8_FEM', 'Pure_MPM'],
                 'water_discretization_mode': ['Pure_FV', 'Spherical_MPM_Sleeve', 'Full_Column_MPM_Cylinder', 'LPTP_Phase_Tracking_Sleeve', 'Full_Column_LPTP_Cylinder'],
-                'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
+                'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'From3D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : (node.type === 'CFDSolver' ? ['Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas']),
                 'flux_scheme': ['AUSM+', 'Rusanov'],
                 'spatial_order': ['1', '2', '3'],
                 'temporal_order': ['1', '2', '3'],
@@ -5469,15 +5581,16 @@ export class GraphRenderer {
                     },
                     key
                 );
-            } else if (key === 'source_model_id' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(node.type)) {
+            } else if (key === 'source_model_id' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(node.type)) {
                 const allModels = this.stateManager.getAllModels();
                 const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const is3Dto3D = node.type === 'Remap3DTo3DNode';
                 const is2Dto3D = node.type === 'Remap2DTo3DNode';
-                const sourceDim = is2Dto3D ? '2D' : '1D';
+                const sourceDim = is3Dto3D ? '3D' : (is2Dto3D ? '2D' : '1D');
 
                 const candidateModels = allModels.filter(m => {
                     if (owningModel && m.id === owningModel.id) return false;
-                    return m.nodes.some(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
+                    return m.nodes.some(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
                 });
 
                 let currentModelId = node.parameters['source_model_id'] || '';
@@ -5506,7 +5619,7 @@ export class GraphRenderer {
                             ws.connections = ws.connections.filter(c => c.toNode !== node.id);
                             if (newVal) {
                                 const srcM = allModels.find(m => m.id === newVal);
-                                const srcSolver = srcM?.nodes.find(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
+                                const srcSolver = srcM?.nodes.find(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
                                 if (srcSolver) {
                                     ws.connections.push({
                                         fromNode: srcSolver.id,
@@ -5515,6 +5628,14 @@ export class GraphRenderer {
                                         toPort: 'in'
                                     });
                                 }
+                            }
+                        }
+                        if (newVal && owningModel) {
+                            const remapOutConn = owningModel.connections.find(c => c.fromNode === node.id && (c.toPort === 'remap' || c.toPort === 'in'));
+                            const tSolverId = node.parameters['target_solver'] || remapOutConn?.toNode;
+                            const tSolver = tSolverId ? owningModel.nodes.find(n => n.id === tSolverId) : owningModel.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
+                            if (tSolver && tSolver.parameters && (tSolver.type === 'CFDSolver2D' || tSolver.type === 'CFDSolver3D')) {
+                                tSolver.parameters['init_mode'] = is3Dto3D ? 'From3D' : (is2Dto3D ? 'From2D' : 'From1D');
                             }
                         }
                         if (owningModel) {
@@ -5527,12 +5648,12 @@ export class GraphRenderer {
                     },
                     key
                 );
-            } else if (key === 'target_solver' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(node.type)) {
+            } else if (key === 'target_solver' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(node.type)) {
                 const state = this.stateManager.getCurrentState();
                 const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
                 const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
-                const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode';
-                const targetSolvers = candidateNodes.filter(n => is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D');
+                const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode';
+                const targetSolvers = candidateNodes.filter(n => is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (n.type === 'CFDSolver2D' || n.type === 'FSICoupler2D'));
 
                 let currentSolverId = node.parameters['target_solver'] || '';
                 if (!currentSolverId && state) {
@@ -5568,6 +5689,10 @@ export class GraphRenderer {
                                     toNode: newVal,
                                     toPort: 'remap'
                                 });
+                                const tSolver = candidateNodes.find(s => s.id === newVal);
+                                if (tSolver && tSolver.parameters && (tSolver.type === 'CFDSolver2D' || tSolver.type === 'CFDSolver3D')) {
+                                    tSolver.parameters['init_mode'] = node.type === 'Remap3DTo3DNode' ? 'From3D' : (node.type === 'Remap2DTo3DNode' ? 'From2D' : 'From1D');
+                                }
                             }
                             if (owningModel) {
                                 this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
@@ -5664,16 +5789,13 @@ export class GraphRenderer {
                                 this.stateManager.updateNodeParameters(node.id, { [key]: newVal });
                             } else {
                                 let s_order = 2;
-                                let t_order = 4;
-                                if (newVal === 'ADER-2 (2nd-Order Space/Time)') {
-                                    s_order = 2;
-                                    t_order = (node.type === 'CFDSolver3D') ? 5 : 2;
-                                } else if (newVal === 'ADER-3 (3rd-Order Space/Time)') {
+                                let t_order = 2;
+                                if (newVal === 'ADER-3 (3rd-Order Space/Time)') {
                                     s_order = 3;
-                                    t_order = (node.type === 'CFDSolver3D') ? 6 : 3;
+                                    t_order = 3;
                                 } else {
                                     s_order = 2;
-                                    t_order = 4;
+                                    t_order = 2;
                                 }
                                 
                                 this.stateManager.updateNodeParameters(node.id, {
@@ -5693,7 +5815,7 @@ export class GraphRenderer {
                             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride', 'tessellation_max_edge',
                             'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
                             // 2D CFD keys
-                            'nr', 'nz', 'min_r', 'min_z', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
+                            'nr', 'nz', 'min_r', 'min_z', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
                             'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
                             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
                             'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
@@ -5717,7 +5839,8 @@ export class GraphRenderer {
                             'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
                             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
                             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
-                            'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
+                            'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress', 'erosion_min_density', 'erosion_min_density_ratio',
+                            'mpm_cell_size', 'mpm_xmin', 'mpm_xmax', 'mpm_ymin', 'mpm_ymax', 'mpm_zmin', 'mpm_zmax',
                             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
                             'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                             'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
@@ -5754,7 +5877,7 @@ export class GraphRenderer {
                             'lt_I', 'lt_a', 'lt_b', 'lt_x',
                             'lt_G1', 'lt_c', 'lt_d', 'lt_y',
                             'lt_G2', 'lt_e', 'lt_g', 'lt_z',
-                            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
+                            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min', 'jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0',
                             // Afterburn & Aerobic Combustion
                             'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
                             'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
@@ -6049,11 +6172,32 @@ export class GraphRenderer {
                             }
                         }
                     } else {
+                        const isFileOrDirKey = key === 'stl_file' || key === 'k_file' || key === 'vtk_dir' || key === 'output_dir' || key === 'external_file_path' || key === 'file_path';
+                        const owningModel = isFileOrDirKey ? (this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel()) : null;
+                        if (isFileOrDirKey && typeof newVal === 'string' && newVal.trim()) {
+                            const resolved = resolveResourcePath(newVal.trim(), owningModel?.filename);
+                            if (resolved.startsWith('/') || resolved.startsWith('~') || /^[A-Za-z]:[\\/]/.test(resolved)) {
+                                recordRecentFolder(resolved, key === 'vtk_dir' || key === 'output_dir');
+                            }
+                            if (key === 'stl_file') {
+                                updates['geometry_hash'] = 'stl_' + Math.floor(Math.random() * 1000000).toString(36);
+                                (this.stateManager as any).invalidateSTLGeometry?.(node.id);
+                            } else if (key === 'k_file') {
+                                updates['geometry_hash'] = 'k_' + Math.floor(Math.random() * 1000000).toString(36);
+                            }
+                        }
                         this.stateManager.updateNodeParameters(node.id, updates);
+                        if (key === 'stl_file' && typeof newVal === 'string' && newVal.trim()) {
+                            const net = (window as any).networkManager;
+                            if (net && net.isConnected()) {
+                                const resolved = resolveResourcePath(newVal.trim(), owningModel?.filename);
+                                net.send({ command: 'LOAD_STL_GEOMETRY', filePath: resolved, modelId: owningModel?.id || 'default' });
+                            }
+                        }
                     }
                 });
 
-                if (key === 'stl_file' || key === 'k_file' || key === 'vtk_dir' || key === 'output_dir') {
+                if (key === 'stl_file' || key === 'k_file' || key === 'vtk_dir' || key === 'output_dir' || key === 'external_file_path' || key === 'file_path') {
                     const wrapper = document.createElement('div');
                     wrapper.style.display = 'flex';
                     wrapper.style.gap = '4px';
@@ -6061,11 +6205,86 @@ export class GraphRenderer {
                     wrapper.style.width = '100%';
 
                     input.style.flex = '1';
+                    input.style.minWidth = '0';
                     wrapper.appendChild(input);
+
+                    const isK = key === 'k_file';
+                    const isStl = key === 'stl_file';
+                    const isDir = key === 'vtk_dir' || key === 'output_dir';
+                    const isExternal = key === 'external_file_path' || key === 'file_path';
+
+                    const applyCanvasPath = (selectedPath: string) => {
+                        input.value = selectedPath;
+                        const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                        const resolved = resolveResourcePath(selectedPath, owningModel?.filename);
+                        if (resolved.startsWith('/') || resolved.startsWith('~') || /^[A-Za-z]:[\\/]/.test(resolved)) {
+                            recordRecentFolder(resolved, isDir);
+                        }
+                        const paramUpdates: Record<string, any> = { [key]: selectedPath };
+                        if (isK || isStl) {
+                            const rand = Math.floor(Math.random() * 1000000);
+                            paramUpdates['geometry_hash'] = (isK ? 'k_' : 'stl_') + rand.toString(36);
+                        }
+                        if (isStl) {
+                            (this.stateManager as any).invalidateSTLGeometry?.(node.id);
+                        }
+                        this.stateManager.updateNodeParameters(node.id, paramUpdates);
+                        if (isStl) {
+                            const net = (window as any).networkManager;
+                            if (net && net.isConnected()) {
+                                net.send({ command: 'LOAD_STL_GEOMETRY', filePath: resolved, modelId: owningModel?.id || 'default' });
+                            }
+                        }
+                    };
+
+                    const openCanvasBrowserAt = (initialOverride?: string) => {
+                        const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                        const rawCurrent = String(node.parameters[key] || '');
+                        const startPath = initialOverride !== undefined
+                            ? initialOverride
+                            : (rawCurrent ? resolveResourcePath(rawCurrent, owningModel?.filename) : '');
+
+                        let filters: FileFilterPreset[] | undefined = undefined;
+                        let title = 'Select File (Host)';
+                        if (isK) {
+                            title = 'Select LS-DYNA Keyword File (*.k, *.key)';
+                            filters = [
+                                { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
+                                { label: 'All Files (*.*)', extensions: ['*'] }
+                            ];
+                        } else if (isStl) {
+                            title = 'Select STL 3D Geometry (*.stl)';
+                            filters = [
+                                { label: 'STL 3D Geometry (*.stl)', extensions: ['.stl'] },
+                                { label: 'All Files (*.*)', extensions: ['*'] }
+                            ];
+                        } else if (isDir) {
+                            title = 'Select Output Directory (Host)';
+                        } else if (isExternal) {
+                            title = 'Select Data / Sensor File (Host)';
+                            filters = [
+                                { label: 'Data / CSV Files (*.dat, *.csv, *.txt)', extensions: ['.dat', '.csv', '.txt'] },
+                                { label: 'All Files (*.*)', extensions: ['*'] }
+                            ];
+                        }
+
+                        const browser = new HostFileBrowserModal(
+                            (window as any).networkManager,
+                            {
+                                title,
+                                mode: isDir ? 'save' : 'open',
+                                selectFolderOnly: isDir,
+                                filters,
+                                onSelect: (path: string) => applyCanvasPath(path)
+                            }
+                        );
+                        browser.open(startPath);
+                    };
 
                     const browseBtn = document.createElement('button');
                     browseBtn.type = 'button';
                     browseBtn.textContent = '...';
+                    browseBtn.title = isDir ? 'Browse host output directory' : 'Browse host filesystem';
                     browseBtn.style.padding = '1px 4px';
                     browseBtn.style.background = '#333';
                     browseBtn.style.color = '#fff';
@@ -6075,37 +6294,40 @@ export class GraphRenderer {
                     browseBtn.onclick = (e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        const startPath = node.parameters[key] || '';
-                        const isK = key === 'k_file';
-                        const isStl = key === 'stl_file';
-                        const isDir = key === 'vtk_dir' || key === 'output_dir';
-                        const browser = new HostFileBrowserModal(
-                            (window as any).networkManager,
-                            {
-                                title: isK ? 'Select LS-DYNA Keyword File (*.k, *.key)' : (isStl ? 'Select STL 3D Geometry (*.stl)' : 'Select Output Directory (Host)'),
-                                mode: isDir ? 'save' : 'open',
-                                selectFolderOnly: isDir,
-                                filters: isK ? [
-                                    { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
-                                    { label: 'All Files (*.*)', extensions: ['*'] }
-                                ] : (isStl ? [
-                                    { label: 'STL 3D Geometry (*.stl)', extensions: ['.stl'] },
-                                    { label: 'All Files (*.*)', extensions: ['*'] }
-                                ] : undefined),
-                                onSelect: (path: string) => {
-                                    this.stateManager.updateNodeParameters(node.id, { [key]: path });
-                                    if (isK || isStl) {
-                                        const rand = Math.floor(Math.random() * 1000000);
-                                        const prefix = isK ? 'k_' : 'stl_';
-                                        const simpleHash = prefix + rand.toString(36);
-                                        this.stateManager.updateNodeParameters(node.id, { geometry_hash: simpleHash });
-                                    }
-                                }
-                            }
-                        );
-                        browser.open(startPath);
+                        openCanvasBrowserAt();
                     };
                     wrapper.appendChild(browseBtn);
+
+                    const recentBtn = document.createElement('button');
+                    recentBtn.type = 'button';
+                    recentBtn.textContent = '🕒';
+                    recentBtn.title = isDir ? 'Pick from Recent Folders' : 'Browse from a Recent Folder';
+                    recentBtn.style.padding = '1px 4px';
+                    recentBtn.style.background = '#2a2d2e';
+                    recentBtn.style.color = '#ccc';
+                    recentBtn.style.border = '1px solid #555';
+                    recentBtn.style.cursor = 'pointer';
+                    recentBtn.style.fontSize = '10px';
+                    recentBtn.onclick = (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        showRecentFoldersQuickMenu(
+                            recentBtn,
+                            (folderPath) => {
+                                if (isDir) {
+                                    applyCanvasPath(folderPath);
+                                } else {
+                                    openCanvasBrowserAt(folderPath);
+                                }
+                            },
+                            {
+                                title: isDir ? 'Set Output Folder' : 'Browse Recent Folder',
+                                onBrowseOther: () => openCanvasBrowserAt()
+                            }
+                        );
+                    };
+                    wrapper.appendChild(recentBtn);
+
                     inputEl = wrapper;
                 } else {
                     inputEl = input;
@@ -7043,8 +7265,8 @@ export class GraphRenderer {
 
     private renderVirtualGaugesContent(node: Node, container: HTMLElement): void {
         const state = this.stateManager.getCurrentState();
-        const has2D = state?.nodes.some(n => n.type === 'DomainMesh2D') || false;
-        const is3D = state?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') || false;
+        const has2D = state?.nodes.some(n => isDomainMesh2DNode(n.type)) || false;
+        const is3D = state?.nodes.some(n => isDomainMesh3DNode(n.type) || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') || false;
         const gauges = node.parameters?.gauges || [];
 
         const setupKeyInterceptors = (input: HTMLInputElement) => {
@@ -7072,12 +7294,13 @@ export class GraphRenderer {
             { id: 8, param: 'qty_impulse',     label: 'Impulse (Pa·s)' }
         ];
 
-        const plottableChannels = ALL_CHANNELS.filter(ch => !!node.parameters?.[ch.param]);
+        const enabledChannels = ALL_CHANNELS.filter(ch => node.parameters?.[ch.param] !== false);
+        const plottableChannels = enabledChannels.length > 0 ? enabledChannels : ALL_CHANNELS;
         let currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
         if (plottableChannels.length > 0 && !plottableChannels.some(ch => ch.id === currentChannel)) {
             currentChannel = plottableChannels[0].id;
             setTimeout(() => {
-                this.stateManager.updateNodeParameters(node.id, { telemetry_channel: currentChannel });
+                this.stateManager.updateNodeParametersInPlace(node.id, { telemetry_channel: currentChannel });
             }, 0);
         }
 
@@ -7646,12 +7869,15 @@ export class GraphRenderer {
                 thSel.style.textAlign = 'center';
                 const masterCheck = document.createElement('input');
                 masterCheck.type = 'checkbox';
-                masterCheck.checked = gauges.length > 0 && gauges.every((g: any) => g.plot !== false);
+                const plottedCount = gauges.filter((g: any) => g.plot !== false).length;
+                masterCheck.checked = gauges.length > 0 && plottedCount === gauges.length;
+                masterCheck.indeterminate = plottedCount > 0 && plottedCount < gauges.length;
                 masterCheck.onmousedown = (e) => e.stopPropagation();
                 masterCheck.onchange = () => {
                     const checked = masterCheck.checked;
                     gauges.forEach((g: any) => { g.plot = checked; });
-                    this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
+                    this.stateManager.updateNodeParametersInPlace(node.id, { gauges: [...gauges] });
+                    this.render();
                 };
                 thSel.appendChild(masterCheck);
                 headerTr.appendChild(thSel);
@@ -7948,8 +8174,12 @@ export class GraphRenderer {
             delimSel.style.borderRadius = '3px';
             delimSel.style.fontSize = '9px';
             delimSel.style.padding = '1px';
-            delimSel.innerHTML = '<option value=",">Comma (,)</option><option value="\\t">Tab (\\t)</option><option value=" ">Space ( )</option>';
-            delimSel.value = node.parameters?.ascii_delimiter || ',';
+            delimSel.innerHTML = '<option value="Comma">Comma (,)</option><option value="Tab">Tab (\\t)</option><option value="Space">Space ( )</option>';
+            const rawDelim = node.parameters?.ascii_delimiter;
+            const normDelim = (rawDelim === 'Tab' || rawDelim === '\\t' || rawDelim === '\t')
+                ? 'Tab'
+                : ((rawDelim === 'Space' || rawDelim === ' ') ? 'Space' : 'Comma');
+            delimSel.value = normDelim;
             delimSel.onchange = () => {
                 this.stateManager.updateNodeParameters(node.id, { ascii_delimiter: delimSel.value });
             };
@@ -8004,15 +8234,49 @@ export class GraphRenderer {
             const dirWrap = document.createElement('div');
             dirWrap.style.display = 'flex';
             dirWrap.style.gap = '4px';
+            dirWrap.style.alignItems = 'center';
+
+            const applyGaugeDir = (folderPath: string) => {
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const resolved = resolveResourcePath(String(folderPath || '').trim(), owningModel?.filename);
+                if (resolved.startsWith('/') || resolved.startsWith('~') || /^[A-Za-z]:[\\/]/.test(resolved)) {
+                    recordRecentFolder(resolved, true);
+                }
+                if (dirInput instanceof HTMLInputElement) {
+                    dirInput.value = folderPath;
+                }
+                this.stateManager.updateNodeParameters(node.id, { output_dir: folderPath });
+            };
 
             const dirInput = mkInput('text', node.parameters?.output_dir ?? '', 'output_dir', (v) => {
-                this.stateManager.updateNodeParameters(node.id, { output_dir: v });
+                applyGaugeDir(String(v ?? ''));
             });
             dirInput.style.flex = '1';
+            dirInput.style.minWidth = '0';
             dirWrap.appendChild(dirInput);
 
+            const openGaugeDirBrowser = (initialOverride?: string) => {
+                const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                const rawCurrent = String(node.parameters?.output_dir || '');
+                const startPath = initialOverride !== undefined
+                    ? initialOverride
+                    : (rawCurrent ? resolveResourcePath(rawCurrent, owningModel?.filename) : '');
+                const modal = new HostFileBrowserModal(
+                    (window as any).networkManager,
+                    {
+                        title: 'Select Output Directory (Host)',
+                        mode: 'save',
+                        selectFolderOnly: true,
+                        onSelect: (folderPath) => applyGaugeDir(folderPath)
+                    }
+                );
+                modal.open(startPath);
+            };
+
             const browseBtn = document.createElement('button');
+            browseBtn.type = 'button';
             browseBtn.textContent = '...';
+            browseBtn.title = 'Browse host output directory';
             browseBtn.style.padding = '1px 6px';
             browseBtn.style.fontSize = '9px';
             browseBtn.style.background = '#333';
@@ -8021,21 +8285,38 @@ export class GraphRenderer {
             browseBtn.style.borderRadius = '3px';
             browseBtn.style.cursor = 'pointer';
             browseBtn.onmousedown = (e) => e.stopPropagation();
-            browseBtn.onclick = () => {
-                const modal = new HostFileBrowserModal(
-                    (window as any).networkManager,
-                    {
-                        title: 'Select Output Directory (Host)',
-                        mode: 'save',
-                        selectFolderOnly: true,
-                        onSelect: (folderPath) => {
-                            this.stateManager.updateNodeParameters(node.id, { output_dir: folderPath });
-                        }
-                    }
-                );
-                modal.open(node.parameters?.output_dir || '');
+            browseBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                openGaugeDirBrowser();
             };
             dirWrap.appendChild(browseBtn);
+
+            const recentBtn = document.createElement('button');
+            recentBtn.type = 'button';
+            recentBtn.textContent = '🕒';
+            recentBtn.title = 'Pick from Recent Folders';
+            recentBtn.style.padding = '1px 4px';
+            recentBtn.style.fontSize = '9px';
+            recentBtn.style.background = '#2a2d2e';
+            recentBtn.style.color = '#ccc';
+            recentBtn.style.border = '1px solid #444';
+            recentBtn.style.borderRadius = '3px';
+            recentBtn.style.cursor = 'pointer';
+            recentBtn.onmousedown = (e) => e.stopPropagation();
+            recentBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                showRecentFoldersQuickMenu(
+                    recentBtn,
+                    (folderPath) => applyGaugeDir(folderPath),
+                    {
+                        title: 'Set Output Folder',
+                        onBrowseOther: () => openGaugeDirBrowser()
+                    }
+                );
+            };
+            dirWrap.appendChild(recentBtn);
             panelContent.appendChild(mkRow('OUTPUT DIR', dirWrap));
 
             // QUANTITIES
@@ -8044,15 +8325,15 @@ export class GraphRenderer {
             qtyGrid.style.display = 'grid';
             qtyGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
             qtyGrid.style.gap = '4px';
-            qtyGrid.appendChild(createCheckboxField('qty_pressure', !!node.parameters?.qty_pressure, 'Pressure'));
-            qtyGrid.appendChild(createCheckboxField('qty_density', !!node.parameters?.qty_density, 'Density'));
-            qtyGrid.appendChild(createCheckboxField('qty_velocity', !!node.parameters?.qty_velocity, 'Velocity'));
-            qtyGrid.appendChild(createCheckboxField('qty_energy', !!node.parameters?.qty_energy, 'Energy'));
-            qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters?.qty_reacted, 'Reacted'));
-            qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters?.qty_unreacted, 'Unreacted'));
-            qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters?.qty_air, 'Air'));
-            qtyGrid.appendChild(createCheckboxField('qty_overpressure', !!node.parameters?.qty_overpressure, 'Overpressure'));
-            qtyGrid.appendChild(createCheckboxField('qty_impulse', !!node.parameters?.qty_impulse, 'Impulse'));
+            qtyGrid.appendChild(createCheckboxField('qty_pressure', node.parameters?.qty_pressure !== false, 'Pressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_density', node.parameters?.qty_density !== false, 'Density'));
+            qtyGrid.appendChild(createCheckboxField('qty_velocity', node.parameters?.qty_velocity !== false, 'Velocity'));
+            qtyGrid.appendChild(createCheckboxField('qty_energy', node.parameters?.qty_energy !== false, 'Energy'));
+            qtyGrid.appendChild(createCheckboxField('qty_reacted', node.parameters?.qty_reacted !== false, 'Reacted'));
+            qtyGrid.appendChild(createCheckboxField('qty_unreacted', node.parameters?.qty_unreacted !== false, 'Unreacted'));
+            qtyGrid.appendChild(createCheckboxField('qty_air', node.parameters?.qty_air !== false, 'Air'));
+            qtyGrid.appendChild(createCheckboxField('qty_overpressure', node.parameters?.qty_overpressure !== false, 'Overpressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_impulse', node.parameters?.qty_impulse !== false, 'Impulse'));
             panelContent.appendChild(qtyGrid);
         }
 

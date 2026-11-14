@@ -260,13 +260,13 @@ void read_external_gauge_file(const std::string& filepath, const std::string& fo
     }
 }
 
-void init_gauges(const nlohmann::json& msg) {
+void init_gauges(const nlohmann::json& msg, bool reset_history) {
     std::lock_guard<std::mutex> lock(global_gauges_mutex);
-    global_gauges.clear();
-    global_gauge_times.clear();
-    global_gauges_history.clear();
-    global_pinned_gauge_ids.clear();
-    global_pinned_gauge_indices.clear();
+    const std::vector<GaugeDef> prev_gauges = global_gauges;
+    const std::vector<std::string> prev_pinned_ids = global_pinned_gauge_ids;
+
+    std::vector<GaugeDef> parsed_gauges;
+    std::vector<std::string> parsed_pinned_ids;
 
     if (msg.contains("model_filename") && !msg["model_filename"].is_null()) {
         global_model_filename = msg.value("model_filename", "");
@@ -282,12 +282,41 @@ void init_gauges(const nlohmann::json& msg) {
 
     if (msg.contains("pinned_gauge_ids") && msg["pinned_gauge_ids"].is_array()) {
         for (const auto& pid : msg["pinned_gauge_ids"]) {
-            if (pid.is_string()) global_pinned_gauge_ids.push_back(pid.get<std::string>());
-            else if (pid.is_number()) global_pinned_gauge_ids.push_back(std::to_string(pid.get<int>()));
+            if (pid.is_string()) parsed_pinned_ids.push_back(pid.get<std::string>());
+            else if (pid.is_number()) parsed_pinned_ids.push_back(std::to_string(pid.get<int>()));
         }
     }
-    
-    if (msg.contains("nodes")) {
+
+    auto append_gauge_json = [&](const nlohmann::json& gauge) {
+        if (!gauge.is_object()) return;
+        GaugeDef g;
+        g.id = gauge.value("id", gauge.value("name", ""));
+        if (g.id.empty()) g.id = "G" + std::to_string(parsed_gauges.size() + 1);
+        const bool has_r = gauge.contains("r");
+        const bool has_xy = gauge.contains("x") || gauge.contains("y");
+        if (has_r) {
+            g.r = get_json_double(gauge, "r", 0.0);
+            g.z = gauge.contains("z") ? get_json_double(gauge, "z", 0.0) : get_json_double(gauge, "y", 0.0);
+            g.x = gauge.contains("x") ? get_json_double(gauge, "x", g.r) : g.r;
+            g.y = get_json_double(gauge, "y", 0.0);
+            g.is_3d = false;
+        } else if (has_xy) {
+            g.x = get_json_double(gauge, "x", 0.0);
+            g.y = get_json_double(gauge, "y", 0.0);
+            g.z = get_json_double(gauge, "z", 0.0);
+            g.r = std::hypot(g.x, g.y);
+            g.is_3d = true;
+        } else {
+            g.r = 0.0;
+            g.z = get_json_double(gauge, "z", 0.0);
+            g.x = 0.0;
+            g.y = 0.0;
+            g.is_3d = false;
+        }
+        parsed_gauges.push_back(g);
+    };
+
+    if (msg.contains("nodes") && msg["nodes"].is_array()) {
         for (const auto& node : msg["nodes"]) {
             std::string type = node.value("type", "");
             if (type == "VirtualGauges" || type == "VirtualGauges3D") {
@@ -298,8 +327,8 @@ void init_gauges(const nlohmann::json& msg) {
                     if (params.contains("external_file_format")) ext_format = params.value("external_file_format", ext_format);
                     if (params.contains("pinned_probe_ids") && params["pinned_probe_ids"].is_array()) {
                         for (const auto& pid : params["pinned_probe_ids"]) {
-                            if (pid.is_string()) global_pinned_gauge_ids.push_back(pid.get<std::string>());
-                            else if (pid.is_number()) global_pinned_gauge_ids.push_back(std::to_string(pid.get<int>()));
+                            if (pid.is_string()) parsed_pinned_ids.push_back(pid.get<std::string>());
+                            else if (pid.is_number()) parsed_pinned_ids.push_back(std::to_string(pid.get<int>()));
                         }
                     }
 
@@ -324,55 +353,36 @@ void init_gauges(const nlohmann::json& msg) {
                     global_gauge_config.qty_afterburn_rate = get_json_bool(params, "qty_afterburn_rate", true);
                     global_gauge_config.qty_fuel_density = get_json_bool(params, "qty_fuel_density", true);
                 }
-                
-                if (source_mode == "manual" && node.contains("parameters") && node["parameters"].contains("gauges")) {
+
+                if (source_mode == "manual" && node.contains("parameters") && node["parameters"].contains("gauges") && node["parameters"]["gauges"].is_array()) {
                     for (const auto& gauge : node["parameters"]["gauges"]) {
-                        GaugeDef g;
-                        if (gauge.contains("x") || gauge.contains("y") || gauge.contains("z")) {
-                            g.id = gauge.value("id", gauge.value("name", ""));
-                            if (g.id.empty()) g.id = "G" + std::to_string(global_gauges.size() + 1);
-                            g.x = gauge.value("x", 0.0);
-                            g.y = gauge.value("y", 0.0);
-                            g.z = gauge.value("z", 0.0);
-                            g.r = 0.0;
-                            g.is_3d = true;
-                        } else {
-                            g.id = gauge.value("id", gauge.value("name", ""));
-                            if (g.id.empty()) g.id = "G" + std::to_string(global_gauges.size() + 1);
-                            g.r = gauge.value("r", 0.0);
-                            g.z = gauge.value("z", 0.0);
-                            g.x = 0.0;
-                            g.y = 0.0;
-                            g.is_3d = false;
-                        }
-                        global_gauges.push_back(g);
+                        append_gauge_json(gauge);
                     }
                 }
             }
         }
     }
 
-    if (global_gauges.empty() && msg.contains("gauges") && msg["gauges"].is_array()) {
+    if (parsed_gauges.empty() && msg.contains("gauges") && msg["gauges"].is_array()) {
         for (const auto& gauge : msg["gauges"]) {
-            GaugeDef g;
-            if (gauge.contains("x") || gauge.contains("y") || gauge.contains("z")) {
-                g.id = gauge.value("id", gauge.value("name", ""));
-                if (g.id.empty()) g.id = "G" + std::to_string(global_gauges.size() + 1);
-                g.x = gauge.value("x", 0.0);
-                g.y = gauge.value("y", 0.0);
-                g.z = gauge.value("z", 0.0);
-                g.r = 0.0;
-                g.is_3d = true;
-            } else {
-                g.id = gauge.value("id", gauge.value("name", ""));
-                if (g.id.empty()) g.id = "G" + std::to_string(global_gauges.size() + 1);
-                g.r = gauge.value("r", 0.0);
-                g.z = gauge.value("z", 0.0);
-                g.x = 0.0;
-                g.y = 0.0;
-                g.is_3d = false;
+            append_gauge_json(gauge);
+        }
+    }
+
+    // Fallback: inspect domain mesh nodes when gauges are stored directly on the domain mesh (e.g. SparseDomainMesh2D / DomainMesh2D)
+    if (parsed_gauges.empty() && msg.contains("nodes") && msg["nodes"].is_array()) {
+        for (const auto& node : msg["nodes"]) {
+            std::string type = node.value("type", "");
+            if (type == "DomainMesh" || type == "DomainMesh2D" || type == "SparseDomainMesh2D" ||
+                type == "DomainMesh3D" || type == "SparseDomainMesh3D" || type == "MarineHarbourDomain" ||
+                type == "MPMDomain2D" || type == "MPMDomain3D") {
+                if (node.contains("parameters") && node["parameters"].contains("gauges") && node["parameters"]["gauges"].is_array()) {
+                    for (const auto& gauge : node["parameters"]["gauges"]) {
+                        append_gauge_json(gauge);
+                    }
+                    if (!parsed_gauges.empty()) break;
+                }
             }
-            global_gauges.push_back(g);
         }
     }
 
@@ -389,36 +399,70 @@ void init_gauges(const nlohmann::json& msg) {
     parse_vtk_config(msg);
 
     if (source_mode == "external_file" && !ext_file.empty()) {
+        global_gauges.clear();
         read_external_gauge_file(ext_file, ext_format);
+        parsed_gauges = global_gauges;
     }
 
-    global_pinned_gauge_indices.clear();
-    global_gauges_history.clear();
+    const bool msg_carries_gauge_schema =
+        (msg.contains("nodes") && msg["nodes"].is_array()) ||
+        (msg.contains("gauges") && msg["gauges"].is_array()) ||
+        (source_mode == "external_file" && !ext_file.empty());
 
-    if (global_gauges.size() <= 32) {
-        for (size_t i = 0; i < global_gauges.size(); ++i) {
-            global_pinned_gauge_indices.push_back(i);
-            GaugeHistory h;
-            h.id = global_gauges[i].id;
-            h.channel_values.resize(9);
-            global_gauges_history.push_back(h);
-        }
+    // Critical: STEP* and EXEC_ALL* payloads do not carry `nodes` or `gauges`.
+    // When `!reset_history` and no gauge schema was sent in `msg`, preserve the active gauges & history!
+    if (!reset_history && parsed_gauges.empty() && !msg_carries_gauge_schema && !prev_gauges.empty()) {
+        global_gauges = prev_gauges;
+        global_pinned_gauge_ids = parsed_pinned_ids.empty() ? prev_pinned_ids : parsed_pinned_ids;
     } else {
+        global_gauges = parsed_gauges;
+        global_pinned_gauge_ids = parsed_pinned_ids;
+    }
+
+    bool same_gauges = (!reset_history) && !global_gauges.empty() && (prev_gauges.size() == global_gauges.size()) && !global_gauges_history.empty();
+    if (same_gauges) {
         for (size_t i = 0; i < global_gauges.size(); ++i) {
-            bool is_pinned = false;
-            for (const auto& pid : global_pinned_gauge_ids) {
-                if (pid == global_gauges[i].id || pid == std::to_string(i)) {
-                    is_pinned = true;
-                    break;
-                }
+            if (prev_gauges[i].id != global_gauges[i].id ||
+                std::abs(prev_gauges[i].r - global_gauges[i].r) > 1e-9 ||
+                std::abs(prev_gauges[i].z - global_gauges[i].z) > 1e-9 ||
+                std::abs(prev_gauges[i].x - global_gauges[i].x) > 1e-9 ||
+                std::abs(prev_gauges[i].y - global_gauges[i].y) > 1e-9) {
+                same_gauges = false;
+                break;
             }
-            if (is_pinned || (global_pinned_gauge_ids.empty() && global_pinned_gauge_indices.size() < 16)) {
+        }
+    }
+
+    if (!same_gauges) {
+        global_gauge_times.clear();
+        global_pinned_gauge_indices.clear();
+        global_gauges_history.clear();
+
+        if (global_gauges.size() <= 64) {
+            for (size_t i = 0; i < global_gauges.size(); ++i) {
                 global_pinned_gauge_indices.push_back(i);
                 GaugeHistory h;
                 h.id = global_gauges[i].id;
                 h.channel_values.resize(9);
                 global_gauges_history.push_back(h);
-                if (global_pinned_gauge_indices.size() >= 16) break;
+            }
+        } else {
+            for (size_t i = 0; i < global_gauges.size(); ++i) {
+                bool is_pinned = false;
+                for (const auto& pid : global_pinned_gauge_ids) {
+                    if (pid == global_gauges[i].id || pid == std::to_string(i)) {
+                        is_pinned = true;
+                        break;
+                    }
+                }
+                if (is_pinned || (global_pinned_gauge_ids.empty() && global_pinned_gauge_indices.size() < 64)) {
+                    global_pinned_gauge_indices.push_back(i);
+                    GaugeHistory h;
+                    h.id = global_gauges[i].id;
+                    h.channel_values.resize(9);
+                    global_gauges_history.push_back(h);
+                    if (global_pinned_gauge_indices.size() >= 64) break;
+                }
             }
         }
     }
@@ -442,26 +486,28 @@ void init_gauges(const nlohmann::json& msg) {
         global_vtk_config.vtk_dir = default_dir;
     }
 
-    if (global_solver_3d) {
-        std::vector<Gauge3D> g3d;
-        for (const auto& g : global_gauges) {
-            if (g.is_3d) g3d.push_back({ g.id, g.x, g.y, g.z });
-            else g3d.push_back({ g.id, g.r, 0.0, g.z });
+    if (!same_gauges) {
+        if (global_solver_3d) {
+            std::vector<Gauge3D> g3d;
+            for (const auto& g : global_gauges) {
+                if (g.is_3d) g3d.push_back({ g.id, g.x, g.y, g.z });
+                else g3d.push_back({ g.id, g.r, 0.0, g.z });
+            }
+            global_solver_3d->setGauges(g3d);
         }
-        global_solver_3d->setGauges(g3d);
-    }
-    if (global_solver_2d_cuda) {
-        std::vector<Gauge2D> g2d;
-        for (const auto& g : global_gauges) {
-            g2d.push_back({ g.id, g.r, g.z });
+        if (global_solver_2d_cuda) {
+            std::vector<Gauge2D> g2d;
+            for (const auto& g : global_gauges) {
+                g2d.push_back({ g.id, g.r, g.z });
+            }
+            global_solver_2d_cuda->setGauges(g2d);
+        } else if (global_solver_2d) {
+            std::vector<Gauge2D> g2d;
+            for (const auto& g : global_gauges) {
+                g2d.push_back({ g.id, g.r, g.z });
+            }
+            global_solver_2d->setGauges(g2d);
         }
-        global_solver_2d_cuda->setGauges(g2d);
-    } else if (global_solver_2d) {
-        std::vector<Gauge2D> g2d;
-        for (const auto& g : global_gauges) {
-            g2d.push_back({ g.id, g.r, g.z });
-        }
-        global_solver_2d->setGauges(g2d);
     }
 
     bool has_vtk = false;
@@ -475,12 +521,12 @@ void init_gauges(const nlohmann::json& msg) {
     }
     if (!has_vtk && msg.contains("parameters")) {
         const auto& params = msg["parameters"];
-        if (params.contains("vtk_format") || params.contains("custom_filename") || params.contains("export_slices") || params.contains("export_fem") || params.contains("export_mpm") || params.contains("export_obstacles") || params.contains("export_stl_faces") || params.contains("export_cfd_2d") || params.contains("trigger_type")) {
+        if (params.contains("vtk_format") || params.contains("export_slices") || params.contains("export_fem") || params.contains("export_mpm") || params.contains("export_obstacles") || params.contains("export_stl_faces") || params.contains("export_cfd_2d")) {
             has_vtk = true;
         }
     }
     if (!has_vtk) {
-        if (msg.contains("export_cfd_2d") || msg.contains("export_obstacles") || msg.contains("export_stl_faces") || msg.contains("export_slices") || msg.contains("export_volumes") || msg.contains("vtk_dir") || msg.contains("custom_filename")) {
+        if (msg.contains("vtk_format") || msg.contains("export_cfd_2d") || msg.contains("export_obstacles") || msg.contains("export_stl_faces") || msg.contains("export_slices") || msg.contains("export_volumes") || msg.contains("vtk_dir")) {
             has_vtk = true;
         }
     }
@@ -512,29 +558,143 @@ void init_gauges(const nlohmann::json& msg) {
     }
 }
 
+void sync_gauges_after_remap(const nlohmann::json& remap_msg, double start_time) {
+    {
+        std::lock_guard<std::mutex> lock(global_gauges_mutex);
+        if (global_gauges.empty()) return;
+
+        // Re-bind gauges onto active 2D/3D solver (handles solver reallocation & resets async sample queues)
+        std::vector<double> dummy_times;
+        std::vector<float> dummy_vals;
+        if (global_solver_3d) {
+            std::vector<Gauge3D> g3d;
+            g3d.reserve(global_gauges.size());
+            for (const auto& g : global_gauges) {
+                if (g.is_3d) g3d.push_back({ g.id, g.x, g.y, g.z });
+                else g3d.push_back({ g.id, g.r, 0.0, g.z });
+            }
+            global_solver_3d->setGauges(g3d);
+            global_solver_3d->retrieveNewGaugeSamples(dummy_times, dummy_vals);
+        } else if (global_solver_2d_cuda) {
+            std::vector<Gauge2D> g2d;
+            g2d.reserve(global_gauges.size());
+            for (const auto& g : global_gauges) {
+                g2d.push_back({ g.id, g.r, g.z });
+            }
+            global_solver_2d_cuda->setGauges(g2d);
+            global_solver_2d_cuda->retrieveNewGaugeSamples(dummy_times, dummy_vals);
+        } else if (global_solver_2d) {
+            std::vector<Gauge2D> g2d;
+            g2d.reserve(global_gauges.size());
+            for (const auto& g : global_gauges) {
+                g2d.push_back({ g.id, g.r, g.z });
+            }
+            global_solver_2d->setGauges(g2d);
+            global_solver_2d->retrieveNewGaugeSamples(dummy_times, dummy_vals);
+        }
+
+        // Clear any unremapped t = 0.0 initial sample
+        global_gauge_times.clear();
+        for (auto& h : global_gauges_history) {
+            for (auto& ch : h.channel_values) {
+                ch.clear();
+            }
+            if (h.channel_values.size() < 9) h.channel_values.resize(9);
+        }
+
+        // Optionally seed pre-handoff [0, start_time) gauge history transferred from upstream Stage 1
+        if (remap_msg.contains("upstream_gauge_history") && remap_msg["upstream_gauge_history"].is_object()) {
+            const auto& ugh = remap_msg["upstream_gauge_history"];
+            if (ugh.contains("times") && ugh["times"].is_array() && ugh.contains("values") && ugh["values"].is_object()) {
+                const auto& u_times = ugh["times"];
+                const auto& u_vals = ugh["values"];
+
+                double p_atm = remap_msg.value("ambient_p", 101325.0);
+                double rho_amb = remap_msg.value("ambient_rho", 1.225);
+                if (global_solver_3d) {
+                    p_atm = global_solver_3d->getAmbientP();
+                    rho_amb = global_solver_3d->getAmbientRho();
+                } else if (global_solver_2d_cuda) {
+                    p_atm = global_solver_2d_cuda->getAmbientP();
+                } else if (global_solver_2d) {
+                    p_atm = global_solver_2d->getAmbientP();
+                }
+                double e_amb = p_atm / ((1.4 - 1.0) * std::max(rho_amb, 1e-6));
+
+                std::vector<size_t> valid_t_indices;
+                for (size_t ti = 0; ti < u_times.size(); ++ti) {
+                    if (u_times[ti].is_number()) {
+                        double tv = u_times[ti].get<double>();
+                        if (tv < start_time - 1e-12) {
+                            valid_t_indices.push_back(ti);
+                            global_gauge_times.push_back(tv);
+                        }
+                    }
+                }
+
+                if (!valid_t_indices.empty()) {
+                    for (auto& h : global_gauges_history) {
+                        bool matched = u_vals.contains(h.id) && u_vals[h.id].is_array() && u_vals[h.id].size() >= 9;
+                        for (size_t ch = 0; ch < 9; ++ch) {
+                            h.channel_values[ch].reserve(valid_t_indices.size() + 16);
+                            for (size_t idx : valid_t_indices) {
+                                if (matched && idx < u_vals[h.id][ch].size() && u_vals[h.id][ch][idx].is_number()) {
+                                    h.channel_values[ch].push_back(u_vals[h.id][ch][idx].get<float>());
+                                } else {
+                                    float def_v = 0.0f;
+                                    if (ch == 0) def_v = static_cast<float>(p_atm);
+                                    else if (ch == 1) def_v = static_cast<float>(rho_amb);
+                                    else if (ch == 3) def_v = static_cast<float>(e_amb);
+                                    else if (ch == 6) def_v = 1.0f;
+                                    h.channel_values[ch].push_back(def_v);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Record exact remapped state at t = start_time and flush immediately
+    if (global_solver_3d) {
+        record_gauges_3d(start_time);
+    } else if (global_solver_2d_cuda || global_solver_2d || global_solver_mpm_2d) {
+        record_gauges_2d(start_time);
+    }
+    flush_solver_gauges();
+}
+
 void record_gauges_1d(double t) {
     std::lock_guard<std::mutex> lock(global_gauges_mutex);
     if (global_gauges.empty() || !global_solver) return;
     int n_cells = global_solver->getNumCells();
+    if (n_cells <= 0) return;
     double radius = global_solver->getRadius();
     double dx = radius / n_cells;
     double p_atm = global_solver->getAmbientP();
     
     double dt = 0.0;
     if (!global_gauge_times.empty()) {
-        dt = t - global_gauge_times.back();
+        dt = std::max(0.0, t - global_gauge_times.back());
     }
     global_gauge_times.push_back(t);
     for (size_t h_idx = 0; h_idx < global_pinned_gauge_indices.size(); ++h_idx) {
         size_t g_idx = global_pinned_gauge_indices[h_idx];
         const auto& g = global_gauges[g_idx];
-        int i = std::clamp(static_cast<int>(g.r / dx), 0, n_cells - 1);
-        auto vals = global_solver->getCellValues(i);
+        double cell_pos = (g.r / dx) - 0.5;
+        int i0 = std::clamp(static_cast<int>(std::floor(cell_pos)), 0, n_cells - 1);
+        int i1 = std::clamp(i0 + 1, 0, n_cells - 1);
+        float frac = static_cast<float>(std::clamp(cell_pos - static_cast<double>(i0), 0.0, 1.0));
+        auto vals0 = global_solver->getCellValues(i0);
+        auto vals1 = (i1 != i0) ? global_solver->getCellValues(i1) : vals0;
+        float interp_p = vals0[0] + frac * (vals1[0] - vals0[0]);
         for (int ch = 0; ch < 7; ++ch) {
-            global_gauges_history[h_idx].channel_values[ch].push_back(vals[ch]);
+            float v = vals0[ch] + frac * (vals1[ch] - vals0[ch]);
+            global_gauges_history[h_idx].channel_values[ch].push_back(v);
         }
-        double overpressure = vals[0] - p_atm;
-        global_gauges_history[h_idx].channel_values[7].push_back(overpressure);
+        double overpressure = static_cast<double>(interp_p) - p_atm;
+        global_gauges_history[h_idx].channel_values[7].push_back(static_cast<float>(overpressure));
 
         double impulse = 0.0;
         if (!global_gauges_history[h_idx].channel_values[8].empty()) {
@@ -542,7 +702,7 @@ void record_gauges_1d(double t) {
             double prev_op = global_gauges_history[h_idx].channel_values[7][global_gauges_history[h_idx].channel_values[7].size() - 2];
             impulse = prev_imp + 0.5 * (prev_op + overpressure) * dt;
         }
-        global_gauges_history[h_idx].channel_values[8].push_back(impulse);
+        global_gauges_history[h_idx].channel_values[8].push_back(static_cast<float>(impulse));
     }
 }
 
@@ -553,6 +713,54 @@ void record_gauges_2d(double t) {
         global_solver_2d_cuda->recordGaugesAsync(t);
     } else if (global_solver_2d) {
         global_solver_2d->recordGaugesAsync(t);
+    } else if (global_solver_mpm_2d) {
+        int nx = global_solver_mpm_2d->getNx();
+        int ny = global_solver_mpm_2d->getNy();
+        float dx = global_solver_mpm_2d->getDx();
+        float dy = global_solver_mpm_2d->getDy();
+        if (nx <= 0 || ny <= 0 || dx <= 0.0f || dy <= 0.0f) return;
+
+        std::vector<float> press = global_solver_mpm_2d->getGridScalarField("pressure");
+        std::vector<float> rho = global_solver_mpm_2d->getGridScalarField("density");
+        std::vector<float> vel = global_solver_mpm_2d->getGridScalarField("velocity");
+        std::vector<float> vm = global_solver_mpm_2d->getGridScalarField("von_mises");
+        std::vector<float> ep = global_solver_mpm_2d->getGridScalarField("plastic_strain");
+
+        double dt = 0.0;
+        if (!global_gauge_times.empty()) {
+            dt = t - global_gauge_times.back();
+        }
+        global_gauge_times.push_back(t);
+
+        for (size_t h_idx = 0; h_idx < global_pinned_gauge_indices.size(); ++h_idx) {
+            size_t g_idx = global_pinned_gauge_indices[h_idx];
+            const auto& g = global_gauges[g_idx];
+            int i = std::clamp(static_cast<int>(g.r / dx), 0, nx - 1);
+            int j = std::clamp(static_cast<int>(g.z / dy), 0, ny - 1);
+            int idx = i * ny + j;
+            float p_val = (idx >= 0 && idx < (int)press.size()) ? press[idx] : 0.0f;
+            float r_val = (idx >= 0 && idx < (int)rho.size()) ? rho[idx] : 0.0f;
+            float v_val = (idx >= 0 && idx < (int)vel.size()) ? vel[idx] : 0.0f;
+            float vm_val = (idx >= 0 && idx < (int)vm.size()) ? vm[idx] : 0.0f;
+            float ep_val = (idx >= 0 && idx < (int)ep.size()) ? ep[idx] : 0.0f;
+
+            global_gauges_history[h_idx].channel_values[0].push_back(p_val);
+            global_gauges_history[h_idx].channel_values[1].push_back(r_val);
+            global_gauges_history[h_idx].channel_values[2].push_back(v_val);
+            global_gauges_history[h_idx].channel_values[3].push_back(vm_val);
+            global_gauges_history[h_idx].channel_values[4].push_back(ep_val);
+            global_gauges_history[h_idx].channel_values[5].push_back(0.0);
+            global_gauges_history[h_idx].channel_values[6].push_back(0.0);
+            global_gauges_history[h_idx].channel_values[7].push_back(p_val);
+
+            double impulse = 0.0;
+            if (!global_gauges_history[h_idx].channel_values[8].empty()) {
+                double prev_imp = global_gauges_history[h_idx].channel_values[8].back();
+                double prev_op = global_gauges_history[h_idx].channel_values[7][global_gauges_history[h_idx].channel_values[7].size() - 2];
+                impulse = prev_imp + 0.5 * (prev_op + static_cast<double>(p_val)) * dt;
+            }
+            global_gauges_history[h_idx].channel_values[8].push_back(impulse);
+        }
     }
 }
 

@@ -104,19 +104,30 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Structural finite element subdivisions along Z-axis / axial direction',
         detailedDesc: 'Specifies the number of finite element subdivisions along the local Z coordinate axis (or axial division Nz for cylindrical/beam geometries). Higher values resolve through-thickness spall, compressive shock waves, and axial flexure.'
     },
+    'domain_mesh': {
+        key: 'domain_mesh',
+        label: 'Target 1D Domain Mesh',
+        category: 'Domain & Discretization',
+        shortDesc: 'Connected 1D spherical radial computational grid',
+        detailedDesc: 'Selects the DomainMesh node defining radial outer extent (domain_radius), uniform radial cell size (dr), and outer boundary condition for the 1D spherical CFD solver.'
+    },
     'left_bc': {
         key: 'left_bc',
-        label: 'Left Boundary Condition',
+        label: 'Inner Origin Boundary (r = 0)',
         category: 'Domain & Discretization',
-        shortDesc: 'Boundary behavior at x_min / r_min',
-        detailedDesc: 'Reflecting (solid wall / symmetry axis where normal velocity u_n = 0), Transmitting (zero-gradient outflow / non-reflecting far-field), or Terminate (absorbing sponge layer).'
+        shortDesc: 'Spherical symmetry condition at radial origin r = 0',
+        detailedDesc: 'At the 1D spherical origin (r = 0), exact radial symmetry (Reflecting, u_r = 0) is strictly enforced across ghost cells so pressure, density, and energy remain finite and smooth at the blast core.',
+        allowedValues: ['Reflecting'],
+        defaultVal: 'Reflecting'
     },
     'right_bc': {
         key: 'right_bc',
-        label: 'Right Boundary Condition',
+        label: 'Outer Radial Boundary (r = R)',
         category: 'Domain & Discretization',
-        shortDesc: 'Boundary behavior at x_max / r_max',
-        detailedDesc: 'Outflow condition at outer boundary. Transmitting allows blast shock waves to exit the domain without spurious artificial wall reflections.'
+        shortDesc: 'Boundary behavior at outer domain radius r = domain_radius',
+        detailedDesc: 'Controls physical and solver behavior at r = domain_radius: Transmitting (non-reflecting zero-gradient outflow allowing shock waves to exit cleanly), Reflecting (rigid spherical containment wall where u_r = 0), or Terminate (automatically halts the 1D run cleanly the instant the leading shock reaches domain_radius, ideal for 1D-to-2D/3D remap staging).',
+        allowedValues: ['Transmitting', 'Reflecting', 'Terminate'],
+        defaultVal: 'Transmitting'
     },
     'x_min_bc': {
         key: 'x_min_bc',
@@ -422,16 +433,24 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'CFL Number (Courant Safety)',
         unit: 'dim',
         category: 'Solver Numerics',
-        shortDesc: 'Courant-Friedrichs-Lewy stability factor (Universal 0.60 default)',
-        detailedDesc: 'Governs adaptive timestep selection Δt = CFL · Δt_critical. Standardized to a universal default of 0.60 across all Eulerian CFD, Lagrangian MPM, and FEM solvers with internal multi-dimensional geometric corrections. In coupled FSI models, the Coupler node serves as the single source of truth for CFL.'
+        shortDesc: 'Courant-Friedrichs-Lewy stability factor (0.40–0.60 typical)',
+        detailedDesc: 'Governs adaptive timestep selection Δt = CFL · Δt_critical across Eulerian CFD, Lagrangian MPM, and FEM solvers with internal multi-dimensional geometric corrections. In coupled FSI models, the Coupler node serves as the single source of truth for CFL.'
+    },
+    'endtime': {
+        key: 'endtime',
+        label: 'Simulation End Time (t_end)',
+        unit: 's',
+        category: 'Solver Numerics',
+        shortDesc: 'Target physical termination time (or Stage 1 remap handoff time)',
+        detailedDesc: 'Physical simulation duration in seconds at which time integration completes. In multi-stage Remap pipelines (1D -> 2D or 1D -> 3D), the upstream Stage 1 solver endtime defines the exact physical handoff time t_remap prior to shock contact with solid obstacles or ground planes.'
     },
     'init_mode': {
         key: 'init_mode',
         label: 'Initialization Mode',
         category: 'Solver Numerics',
         shortDesc: 'Simulation starting condition source',
-        detailedDesc: 'Multi-Material JWL (full multi-component detonation products + unreacted high explosive + ambient air), Ideal Gas (hot compressed gas burst), From1D (remap converged 1D spherical blast wave onto 2D/3D mesh), From2D (revolve 2D axisymmetric blast onto 3D), or Hydrostatic_Stratified_3D (exact 3-zone closed-form hydrostatic air-water column and geostatic K0 sediment equilibrium).',
-        allowedValues: ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'],
+        detailedDesc: 'Multi-Material JWL (full multi-component detonation products + unreacted high explosive + ambient air), Ideal Gas (hot compressed gas burst), From1D (remap converged 1D spherical blast wave onto 2D/3D mesh), From2D (revolve 2D axisymmetric blast onto 3D), From3D (conservative 3D-to-3D remap onto a new 3D mesh/domain), or Hydrostatic_Stratified_3D (exact 3-zone closed-form hydrostatic air-water column and geostatic K0 sediment equilibrium).',
+        allowedValues: ['From1D', 'From2D', 'From3D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'],
         defaultVal: 'Multi-Material JWL'
     },
     'flux_scheme': {
@@ -456,10 +475,10 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         key: 'temporal_order',
         label: 'Time Integration Order',
         category: 'Solver Numerics',
-        shortDesc: 'Temporal integration scheme',
-        detailedDesc: '4 = Classical Runge-Kutta 4th-order (RK4), 5 = 2nd-Order ADER Cauchy-Kowalevski space-time predictor, 6 = 3rd-Order ADER-3 space-time predictor.',
-        allowedValues: ['2', '3', '4', '5', '6'],
-        defaultVal: 4
+        shortDesc: 'Order of temporal integration accuracy',
+        detailedDesc: 'Mathematical temporal accuracy order: 2 = 2nd-order (MUSCL-Hancock, ADER-2, or SSP-RK2), 3 = 3rd-order (ADER-3 or SSP-RK3). Use space_time_scheme to select the specific formulation.',
+        allowedValues: ['1', '2', '3'],
+        defaultVal: 2
     },
     'space_time_scheme': {
         key: 'space_time_scheme',
@@ -1012,26 +1031,20 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     },
     'remap_radius': {
         key: 'remap_radius',
-        label: 'Remap Radial Cutoff (R_cut)',
+        label: 'Remap Radial Cutoff (R_remap)',
         unit: 'm',
         category: 'Remapping Pipeline',
-        shortDesc: 'Maximum radius to interpolate from upstream run',
-        detailedDesc: 'Radial distance (m) from the remap origin to copy state variables. Cells outside this radius remain at ambient conditions (0 = remap entire upstream domain).'
+        shortDesc: 'Maximum spherical/radial cutoff distance to interpolate (0 = Full Upstream Domain)',
+        detailedDesc: 'Radial distance (m) from the burst origin within which conserved mass, momentum, energy, and multi-material phase fractions are mapped onto the receiving 2D/3D mesh via subgrid quadrature. Cells outside R_remap remain at exact quiescent ambient conditions. Set to 0.0 m to remap the entire upstream computational domain.'
     },
     'trigger_type': {
         key: 'trigger_type',
-        label: 'Remap / Output Trigger Type',
-        category: 'Remapping Pipeline',
-        shortDesc: 'Trigger condition for event',
-        detailedDesc: 'For Remap: "end" (triggers when upstream solver finishes), "time" (triggers at specific physical simulation time), or "step" (triggers at specific cycle count). For VTK: "Step Interval" or "Time Interval".'
-    },
-    'trigger_val': {
-        key: 'trigger_val',
-        label: 'Trigger Value Threshold',
-        unit: 's / steps',
-        category: 'Remapping Pipeline',
-        shortDesc: 'Numerical value for time/step trigger',
-        detailedDesc: 'Threshold physical simulation time (seconds) or iteration cycle count that fires the remapping event.'
+        label: 'VTK Snapshot Trigger Mode',
+        category: 'VTK Output',
+        shortDesc: 'Snapshot cadence mode: Step Interval or Time Interval',
+        detailedDesc: 'Selects whether disk VTK/HDF5 output snapshots are written at fixed hydrodynamic cycle intervals (Step Interval) or fixed physical simulation time intervals (Time Interval).',
+        allowedValues: ['Step Interval', 'Time Interval'],
+        defaultVal: 'Step Interval'
     },
 
     // --- CAD & Solid Boundary Obstacles ---
@@ -1508,7 +1521,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Energetic Material Architecture',
         shortDesc: 'Unreacted solid reactant equation of state formulation',
         detailedDesc: 'Thermodynamic equation of state governing unreacted solid explosive before initiation: Mie-Grüneisen Shock Reactant (Rankine-Hugoniot shock velocity Us = c0 + s*up with Grüneisen gamma) or Davis Solid Reactant (Davis-Fickett complete reactant EOS with temperature and specific heat).',
-        allowedValues: ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
+        allowedValues: ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant', 'Unreacted JWL (Lee-Tarver)'],
         defaultVal: 'Mie-Grüneisen Shock Reactant',
         solverScope: 'MPM+FV'
     },
@@ -1711,6 +1724,36 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Material Failure',
         shortDesc: 'Timestep reduction threshold factor (e.g. 0.10)',
         detailedDesc: 'Fraction of initial stable timestep (e.g. 0.10 = 10%) below which an element is eroded to avoid grinding solver progress to a halt.'
+    },
+    'enable_density_erosion': {
+        key: 'enable_density_erosion',
+        label: 'Low-Density Particle Erosion',
+        category: 'Material Failure',
+        shortDesc: 'Erode MPM particles expanding below critical density',
+        detailedDesc: 'Enables automatic particle erosion when an MPM particle expands to a sparse state where its physical density ρ = m_p / V_p drops below max(erosion_min_density, erosion_min_density_ratio × ρ_0). Ideal for expanding JWL/Davis detonation gas or cavitating fluids.'
+    },
+    'erosion_min_density': {
+        key: 'erosion_min_density',
+        label: 'Min Density Cutoff (ρ_min)',
+        unit: 'kg/m³',
+        category: 'Material Failure',
+        shortDesc: 'Absolute minimum physical density before particle erosion',
+        detailedDesc: 'Absolute physical density threshold ρ_min (kg/m³) below which an expanding MPM particle is eroded (or conservatively transferred into the Eulerian FV grid when coupled).'
+    },
+    'erosion_min_density_ratio': {
+        key: 'erosion_min_density_ratio',
+        label: 'Min Density Ratio (ρ / ρ₀)',
+        unit: 'dim',
+        category: 'Material Failure',
+        shortDesc: 'Relative density ratio cutoff (e.g. 0.05 = 5% of ρ₀, V/V₀ > 20)',
+        detailedDesc: 'Dimensionless ratio ρ / ρ_0 (equivalent to inverse relative volume V_0 / V = 1 / J) below which an expanding MPM particle is eroded. For example, 0.05 erodes particles once they expand beyond 20× their initial volume.'
+    },
+    'erode_to_fv_grid': {
+        key: 'erode_to_fv_grid',
+        label: 'Inject Eroded Mass into FV Grid',
+        category: 'Material Failure',
+        shortDesc: 'Conservatively transfer eroded fluid/explosive particles into Eulerian FV cells',
+        detailedDesc: 'When coupled to an Eulerian Finite-Volume CFD solver (FSICoupler2D / FSICoupler3D), eroded MPM fluid or detonation product particles are not discarded; instead, their mass, momentum, total energy, and JWL product species mass are conservatively injected into the overlapping FV cell (supporting dual-resolution Sparse MPM + Coarse Dense FV grids).'
     },
 
     // --- Johnson-Cook & Shock EOS ---
@@ -2508,7 +2551,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         unit: '1/s',
         category: 'Lee-Tarver Ignition & Growth Kinetics',
         shortDesc: 'Hot-spot formation rate constant for shock ignition',
-        detailedDesc: 'Frequency coefficient I (1/s) in the Lee-Tarver ignition term: dλ_ign/dt = I · (1 - λ)^b · (ρ / ρ₀ - 1 - a)^x for λ < F_ig_max. Governs rate of hot-spot creation under initial shock compression.'
+        detailedDesc: 'Frequency coefficient I (1/s) in the Lee-Tarver ignition term: dλ_ign/dt = I · (1 - λ)^b · (ρ / ρ₀ - 1 - a)^x for λ < F_ig_max. Governs rate of hot-spot creation under initial shock compression. STRICT SI: s⁻¹ (LLNL tables quote μs⁻¹; multiply by 1e6). PBX 9501: 1.4e17 s⁻¹ (= 1.4e11 μs⁻¹).'
     },
     'lt_a': {
         key: 'lt_a',
@@ -2537,10 +2580,10 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     'lt_G1': {
         key: 'lt_G1',
         label: 'Lee-Tarver Growth Rate Coefficient 1 (G₁)',
-        unit: '1/s',
+        unit: '1/(s·Pa^y)',
         category: 'Lee-Tarver Ignition & Growth Kinetics',
         shortDesc: 'Intermediate reaction growth rate coefficient',
-        detailedDesc: 'Reaction growth multiplier G₁ (1/s) governing laminar deflagration outward from ignited hot-spots: dλ_grow1/dt = G₁ · (1 - λ)^c · λ^d · p^y for λ < F_G1_max.'
+        detailedDesc: 'Reaction growth multiplier G₁ (1/s) governing laminar deflagration outward from ignited hot-spots: dλ_grow1/dt = G₁ · (1 - λ)^c · λ^d · p^y for λ < F_G1_max. STRICT SI: 1/(s·Pa^y), p in Pa. LLNL value G[μs⁻¹·Mbar⁻ʸ] converts as G·1e6·(1e-11)^y. PBX 9501 (y=2): 130 → 1.3e-14.'
     },
     'lt_c': {
         key: 'lt_c',
@@ -2569,10 +2612,10 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     'lt_G2': {
         key: 'lt_G2',
         label: 'Lee-Tarver Growth Rate Coefficient 2 (G₂)',
-        unit: '1/s',
+        unit: '1/(s·Pa^z)',
         category: 'Lee-Tarver Ignition & Growth Kinetics',
         shortDesc: 'Rapid high-pressure detonation completion rate coefficient',
-        detailedDesc: 'Completion rate multiplier G₂ (1/s) governing final high-pressure coalescence and transition to Chapman-Jouguet detonation: dλ_grow2/dt = G₂ · (1 - λ)^e · λ^g · p^z for λ > F_G2_min.'
+        detailedDesc: 'Completion rate multiplier G₂ (1/s) governing final high-pressure coalescence and transition to Chapman-Jouguet detonation: dλ_grow2/dt = G₂ · (1 - λ)^e · λ^g · p^z for λ > F_G2_min. STRICT SI: 1/(s·Pa^z), p in Pa. LLNL value converts as G·1e6·(1e-11)^z. PBX 9501 (z=2): 400 → 4.0e-14. Values implying unphysical rates are rejected at INIT.'
     },
     'lt_e': {
         key: 'lt_e',
@@ -2622,6 +2665,28 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Minimum progress onset threshold for rapid detonation completion',
         detailedDesc: 'Lower reaction progress threshold F_G2_min (typically 0.30 - 0.50) above which high-pressure completion regime 2 activates to rapidly consume remaining reactant.'
     },
+
+    // --- Unreacted JWL reactant EOS (Lee-Tarver solid pillar) and phase mixture rule ---
+    'jwlr_A': { key: 'jwlr_A', label: 'Unreacted JWL Coefficient A', unit: 'Pa', category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Repulsive JWL coefficient of the unreacted explosive',
+        detailedDesc: 'Temperature-form JWL for the solid reactant: p = A·exp(-R1·V) + B·exp(-R2·V) + ω·Cv·T/V, V = ρ0/ρ. Calibrated to shock Hugoniot data. LLNL Mbar values convert by ×1e11. PBX 9501: 7.32e14 Pa.' },
+    'jwlr_B': { key: 'jwlr_B', label: 'Unreacted JWL Coefficient B', unit: 'Pa', category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Attractive JWL coefficient of the unreacted explosive',
+        detailedDesc: 'Second JWL coefficient of the reactant EOS (negative for the published sets). Together with A it must give p(V=1, T0) ≈ 0; published rounding leaves a small residual (about -2e4 Pa for PBX 9501 against a 5.5e8 Pa scale). PBX 9501: -5.2654e9 Pa.' },
+    'jwlr_R1': { key: 'jwlr_R1', label: 'Unreacted JWL R1', unit: 'dim', category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'First JWL exponent of the unreacted explosive', detailedDesc: 'Dimensionless exponent R1 of the A term. Must be > 0. PBX 9501: 14.1.' },
+    'jwlr_R2': { key: 'jwlr_R2', label: 'Unreacted JWL R2', unit: 'dim', category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Second JWL exponent of the unreacted explosive', detailedDesc: 'Dimensionless exponent R2 of the B term. Must be > 0. PBX 9501: 1.41.' },
+    'jwlr_omega': { key: 'jwlr_omega', label: 'Unreacted JWL Grüneisen ω', unit: 'dim', category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Grüneisen coefficient of the unreacted explosive', detailedDesc: 'Thermal-pressure coefficient ω (constant Γ). PBX 9501: 0.8867.' },
+    'jwlr_Cv': { key: 'jwlr_Cv', label: 'Unreacted Heat Capacity (per initial volume)', unit: 'Pa/K', category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Volumetric heat capacity of the reactant', detailedDesc: 'Cv per unit INITIAL volume (= ρ0·cv). LLNL Mbar/K converts by ×1e11 (PBX 9501: 2.7806e6 Pa/K). Sets the temperature from the thermal energy; must be > 0.' },
+    'jwlr_T0': { key: 'jwlr_T0', label: 'Unreacted Reference Temperature', unit: 'K', category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'Initial temperature of the reactant', detailedDesc: 'Reference temperature T0 at V=1 (PBX 9501: 298 K). Must be > 0.' },
+    'mixture_rule': { key: 'mixture_rule', label: 'Reactant/Product Mixture Rule', unit: 'model', category: 'Lee-Tarver Ignition & Growth Kinetics',
+        shortDesc: 'How unreacted and product pressures are combined',
+        detailedDesc: 'Pressure Equilibrium (Volume Additive): V = (1-λ)·Vs + λ·Vp with ps(Vs, Ts) = pp(Vp) solved per point (bounded Illinois root-find, ≤24 iterations, tolerance 1e-6). Linear Blend: p = (1-λ)·ps(V) + λ·pp(V). Equilibrium is the Lee-Tarver standard; blend is kept for comparison.',
+        allowedValues: ['Pressure Equilibrium (Volume Additive)', 'Linear Blend'], defaultVal: 'Pressure Equilibrium (Volume Additive)', solverScope: 'MPM+FV' },
 
     // --- Concrete Models (RHT, K&C, CSCM) ---
     'fc': {
@@ -3153,8 +3218,50 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         key: 'femSmoothContours',
         label: 'FEM Smooth Contours',
         category: 'Telemetry & Diagnostics',
-        shortDesc: 'Enable smooth continuous gradient interpolation for FEM mesh contours',
-        detailedDesc: 'When enabled, overrides discrete banding to render continuous smooth scalar field gradients across FEM facets.',
+        shortDesc: 'Enable continuous color gradient for FEM mesh contours (0 = Continuous, >1 = Banded)',
+        detailedDesc: 'When enabled, renders continuous scalar field color gradients across FEM facets instead of discrete isocontour bands.',
+        defaultVal: true
+    },
+    'femInterpolate': {
+        key: 'femInterpolate',
+        label: 'FEM Smooth (Nodal) Interpolation',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Interpolate element scalar values to shared mesh nodes (Smooth) vs flat per-element colors (Cell)',
+        detailedDesc: 'When enabled (default), element scalar quantities are averaged to shared mesh nodes and smoothly interpolated across element faces. When disabled, each element is shaded with its uniform cell-averaged scalar value.',
+        defaultVal: true
+    },
+    'stl_contour_levels': {
+        key: 'stl_contour_levels',
+        label: 'STL Contour Levels / Bands',
+        unit: 'bands',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Number of discrete isocontour color bands on STL CAD surfaces (0 = Continuous gradient)',
+        detailedDesc: 'Controls discretization of CFD scalar fields sampled onto STL CAD surface triangles into discrete isocontour bands (e.g. 5, 8, 10, 12, 16, 20, 24, 32) or continuous gradient (0).',
+        defaultVal: 0
+    },
+    'stl_smooth_contours': {
+        key: 'stl_smooth_contours',
+        label: 'STL Continuous Contours',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Enable continuous color gradient on STL CAD surfaces instead of discrete bands',
+        detailedDesc: 'When enabled, renders continuous colormap gradients across STL CAD surfaces; when disabled, quantizes colors into stl_contour_levels discrete bands.',
+        defaultVal: true
+    },
+    'obstacles_contour_levels': {
+        key: 'obstacles_contour_levels',
+        label: 'Obstacles Contour Levels / Bands',
+        unit: 'bands',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Number of discrete isocontour color bands on rigid obstacle surfaces (0 = Continuous gradient)',
+        detailedDesc: 'Controls discretization of CFD scalar fields sampled onto rigid obstacle surfaces into discrete isocontour bands or continuous gradient (0).',
+        defaultVal: 0
+    },
+    'obstacles_smooth_contours': {
+        key: 'obstacles_smooth_contours',
+        label: 'Obstacles Continuous Contours',
+        category: 'Telemetry & Diagnostics',
+        shortDesc: 'Enable continuous color gradient on rigid obstacle surfaces instead of discrete bands',
+        detailedDesc: 'When enabled, renders continuous colormap gradients across obstacle surfaces; when disabled, quantizes colors into obstacles_contour_levels discrete bands.',
         defaultVal: true
     },
     'sliceContourLevels': {
@@ -3706,12 +3813,57 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Total number of probes in the external dataset',
         detailedDesc: 'Read-only cached counter of discrete probe coordinates discovered and mapped from the external file.'
     },
-    'storage_backend': {
-        key: 'storage_backend',
-        label: 'Storage Backend',
+    'export_ascii': {
+        key: 'export_ascii',
+        label: 'Export ASCII CSV/TSV',
         category: 'Virtual Gauges & Probes',
-        shortDesc: 'Persistence target: HDF5 chunked stream or live WebSocket telemetry',
-        detailedDesc: 'Directs whether probe time histories stream directly to disk via asynchronous chunked HDF5 or stream over WebSockets for lightweight setups (< 50 probes).'
+        shortDesc: 'Write human-readable ASCII gauge waveform tables to disk',
+        detailedDesc: 'Streams synchronized multi-probe time-history columns to disk in ASCII tabular format (.csv / .txt) for immediate inspection in Python, MATLAB, or spreadsheets.'
+    },
+    'export_binary': {
+        key: 'export_binary',
+        label: 'Export Raw Binary (.bin)',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Write compact IEEE-754 binary probe waveform streams to disk',
+        detailedDesc: 'Writes zero-overhead contiguous binary floating-point probe arrays for high-frequency multi-thousand-sensor instrumentation arrays.'
+    },
+    'export_hdf5': {
+        key: 'export_hdf5',
+        label: 'Export Chunked HDF5 (.h5)',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Write compressed HDF5 time-history datasets to disk',
+        detailedDesc: 'Streams probe histories into self-describing, chunked HDF5 datasets with embedded probe coordinate metadata, channel units, and DEFLATE compression.'
+    },
+    'ascii_delimiter': {
+        key: 'ascii_delimiter',
+        label: 'ASCII Column Delimiter',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Field separator for ASCII gauge exports',
+        detailedDesc: 'Selects Comma (,), Tab (\\t), or Space column separation when writing ASCII gauge waveform files.',
+        allowedValues: ['Comma', 'Tab', 'Space'],
+        defaultVal: 'Comma'
+    },
+    'ascii_precision': {
+        key: 'ascii_precision',
+        label: 'ASCII Significant Digits',
+        unit: 'digits',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Floating-point decimal precision in ASCII exports (1–16)',
+        detailedDesc: 'Number of significant decimal digits written per physical sample in ASCII gauge tables (default 6; increase to 12–15 for double-precision acoustic impulse integration).'
+    },
+    'include_header': {
+        key: 'include_header',
+        label: 'Include Metadata Header',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Write column names, physical units, and probe coordinates header',
+        detailedDesc: 'Prepends commented probe coordinate metadata and explicit channel header names to exported ASCII gauge files.'
+    },
+    'output_dir': {
+        key: 'output_dir',
+        label: 'Gauge Output Directory',
+        category: 'Virtual Gauges & Probes',
+        shortDesc: 'Host directory path for exported gauge time-history files',
+        detailedDesc: 'Target filesystem folder where ASCII, Binary, and HDF5 virtual gauge waveform files are saved during simulation execution.'
     },
     'sampling_stride_steps': {
         key: 'sampling_stride_steps',
@@ -4290,31 +4442,36 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
 export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
     'DomainMesh': {
         type: 'DomainMesh',
-        title: '1D Domain Mesh',
+        title: '1D Spherical Radial Domain Mesh',
         category: '1D CFD Gas Dynamics',
-        shortDesc: 'Structured 1D spatial grid defining boundary conditions and uniform cell discretization.',
+        shortDesc: 'Structured 1D spherical radial finite-volume grid defining outer radius, cell size dr, and boundary conditions.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>1D Domain Mesh</strong> node discretizes a one-dimensional spatial line or spherical radial line into uniform finite-volume cells. It establishes the computational bounds, cell widths (<code>cell_size</code>), and boundary conditions (Reflecting, Transmitting, or Terminate) for 1D high-explosive detonation and shock wave propagation.</p>
+                <p>The <strong>1D Spherical Radial Domain Mesh</strong> discretizes a spherical radial line <code>r ∈ [0, domain_radius]</code> into <code>N = round(domain_radius / cell_size)</code> uniform finite-volume shells. It establishes sub-millimeter resolution for early-time Chapman-Jouguet detonation wave propagation and spherical blast expansion prior to optional 2D or 3D multi-stage remapping.</p>
             </div>
             <div class="node-doc-section">
                 <div class="node-doc-heading">Governing Physics & Formulations</div>
-                <p>Governed by the 1D compressible Euler equations with geometric source terms for spherical or planar symmetry:</p>
-                <div class="node-doc-code">∂U/∂t + ∂F(U)/∂r = -α/r · S(U)</div>
-                <p>where <em>α = 2</em> for spherical symmetry and <em>α = 0</em> for planar 1D shock tubes. Boundary conditions enforce zero normal velocity (<em>u = 0</em>) at reflecting walls or non-reflecting ghost extrapolation at transmitting far-fields.</p>
+                <p>Governed by the 1D spherically symmetric compressible Euler equations with exact geometric volume and area metrics:</p>
+                <div class="node-doc-code">∂U/∂t + (1 / r²) · ∂(r² · F(U))/∂r = [0, 2p / r, 0, ...]ᵀ</div>
+                <p>Exact spherical reflection (<code>u_r = 0</code>) is enforced at the origin <code>r = 0</code>, while <code>right_bc</code> at <code>r = domain_radius</code> supports non-reflecting outflow (<code>Transmitting</code>), rigid containment (<code>Reflecting</code>), or automatic shock-arrival cutoff (<code>Terminate</code>).</p>
             </div>
             <div class="node-doc-section">
                 <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <p>Standalone spatial discretization root node; requires no upstream inputs.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
                 <ul>
-                    <li>Feeds directly into <strong>ThePainter</strong> to establish the initial physical field values.</li>
+                    <li><strong>Grid (mesh):</strong> Connects directly to <code>CFDSolver</code> (and optionally <code>Charge1D</code> / <code>VirtualGauges</code>) to supply radial cell centers <code>r_i = (i + 0.5) · dr</code> and boundary flags.</li>
                 </ul>
             </div>
             <div class="node-doc-section">
-                <div class="node-doc-heading">Key Parameters & Tuning Guide</div>
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
                 <ul>
-                    <li><code>domain_radius</code>: Ensure domain radius is large enough to capture the full blast profile before shock reflection.</li>
-                    <li><code>cell_size</code>: Recommended 0.0005–0.001 m (0.5–1 mm) for high-fidelity Chapman-Jouguet spike resolution.</li>
+                    <li><code>domain_radius</code>: Set slightly smaller than the shortest distance from the burst center to the nearest ground plane or 2D/3D obstacle when used as a Stage 1 remap source.</li>
+                    <li><code>cell_size</code>: Recommended <code>0.00025–0.001 m</code> (<code>0.25–1.0 mm</code>) to resolve the Von Neumann / Chapman-Jouguet detonation spike with minimal numerical diffusion.</li>
+                    <li><code>right_bc</code>: Set to <code>Transmitting</code> for open-air waveform recording, <code>Reflecting</code> for spherical blast chambers, or <code>Terminate</code> to stop automatically right before shock exit.</li>
                 </ul>
             </div>
         `
@@ -4355,19 +4512,37 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
 
     'Charge1D': {
         type: 'Charge1D',
-        title: '1D Explosive Charge',
+        title: '1D Spherical Explosive Charge',
         category: '1D CFD Gas Dynamics',
-        shortDesc: '1D High-explosive spherical charge mass and radius geometry.',
+        shortDesc: '1D spherical high-explosive charge coupling mass, radius, and energetic JWL/Ideal-Gas EOS.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>Charge1D</strong> node specifies the physical mass (kg) and radius (m) of a spherical high-explosive charge in 1D space. It automatically couples with the connected <strong>Material</strong> density to ensure mass conservation.</p>
+                <p>The <strong>Charge1D</strong> node defines a concentric spherical high-explosive charge centered at <code>r = 0</code> in a 1D radial domain. It bi-directionally synchronizes explosive mass <code>M</code> and outer charge radius <code>R_c</code> with the connected energetic <strong>Material</strong> reference density <code>ρ₀</code>.</p>
             </div>
             <div class="node-doc-section">
-                <div class="node-doc-heading">Key Parameters</div>
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Enforces exact spherical mass-volume consistency across radial shells <code>r ≤ R_c</code>:</p>
+                <div class="node-doc-code">M = (4/3) · π · R_c³ · ρ₀   ⇔   R_c = (3M / (4π · ρ₀))^(1/3)</div>
+                <p>Cells inside <code>R_c</code> are initialized with unreacted explosive / detonation product state and chemical detonation energy <code>e₀</code>.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
                 <ul>
-                    <li><code>charge_mass</code>: Explosive mass in kg (e.g. 1.0 kg TNT equivalent).</li>
-                    <li><code>charge_radius</code>: Computed automatically via <em>R = (3M / (4πρ₀))^(1/3)</em> or manually overridden.</li>
+                    <li><strong>Material (material):</strong> Connects to a <code>Material</code> node configured with <code>JWL Detonation Gas</code> or <code>Ideal Gas Charge</code>.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>Charge Spec (charge):</strong> Connects to <code>CFDSolver</code> to seed initial high-explosive mass, radius, and JWL thermodynamic parameters, and renders the red core zone on the <code>1D_CHART</code> schematic.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>charge_mass</code>: Total spherical explosive mass in kg (editing automatically updates <code>charge_radius</code> from <code>ρ₀</code>).</li>
+                    <li><code>charge_radius</code>: Outer spherical radius in meters (must satisfy <code>0 &lt; charge_radius &lt; domain_radius</code> and span at least 10–20 radial cells for accurate detonation build-up).</li>
                 </ul>
             </div>
         `
@@ -4431,19 +4606,42 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
 
     'CFDSolver': {
         type: 'CFDSolver',
-        title: '1D Compressible CFD Solver',
+        title: '1D Spherical Compressible CFD Solver',
         category: '1D CFD Gas Dynamics',
-        shortDesc: 'High-order 1D compressible Euler solver with multi-material JWL and shock-capturing schemes.',
+        shortDesc: 'High-order 1D spherical multi-material Euler solver with JWL programmed burn and lossless 9-channel remap export.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>CFDSolver</strong> node executes the 1D high-order compressible Euler equations. It resolves Chapman-Jouguet detonation wave propagation, unreacted explosive consumption, contact discontinuities, and expanding blast shock waves with extreme efficiency.</p>
+                <p>The <strong>CFDSolver</strong> node integrates the 1D spherically symmetric multi-material compressible Euler equations on CPU SIMD threads. It resolves central Chapman-Jouguet detonation, JWL product gas expansion, secondary shocks, and free-air blast propagation in milliseconds, serving both as a standalone 1D analyzer and as Stage 1 for <code>1D → 2D</code> and <code>1D → 3D</code> remap pipelines.</p>
             </div>
             <div class="node-doc-section">
-                <div class="node-doc-heading">Governing Physics</div>
-                <p>Solves the multi-material compressible Euler conservation laws:</p>
-                <div class="node-doc-code">∂/∂t [ρ, ρu, ρE, ρY₁, ρY₂]ᵀ + ∂/∂r [ρu, ρu² + p, u(ρE + p), ρuY₁, ρuY₂]ᵀ = S_geom + S_det</div>
-                <p>Features 2nd-order MUSCL-Hancock and ADER space-time predictor schemes with AUSM+ flux splitting.</p>
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Integrates the conservative multi-phase Kapila/Allaire-style Euler system in spherical coordinates:</p>
+                <div class="node-doc-code">∂/∂t [ρ, ρu_r, ρE, α₁ρ₁, α₂ρ₂, α₁, α₂]ᵀ + (1/r²)·∂/∂r (r²·F) = S_sph + S_burn</div>
+                <p>Defaults to 2nd-order spatial reconstruction with Minmod/MUSCL slope limiting, SSP-RK2 / RK3 / RK4 temporal integration, and AUSM+ or Rusanov shock-capturing fluxes.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li><strong>DomainMesh (mesh):</strong> Supplies radial domain extent <code>domain_radius</code>, cell spacing <code>dr</code>, and outer boundary condition.</li>
+                    <li><strong>Air Material (air):</strong> Supplies ambient Ideal Gas thermodynamic baseline (<code>ρ_air, p_atm, γ</code>).</li>
+                    <li><strong>Charge1D (charge):</strong> Supplies spherical high-explosive mass, radius, and JWL / Ideal Gas EOS parameters.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>9-Channel Binary Radial Frames (<code>BIN_FRAME</code>):</strong> Streams <code>[p, ρ, u_r, e, α₁, α₂, α_air, α₁ρ₁, α₂ρ₂]</code> for interactive <code>1D_CHART</code> interrogation, history scrubbing, and exact mass/energy-conserving 2D/3D remapping.</li>
+                    <li><strong>Virtual Gauges:</strong> Linearly interpolates radial overpressure and impulse waveforms at probe standoffs (including mirrored Stage 2 remap probes).</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>endtime</code>: Physical stop time (s). In a Remap pipeline, set <code>endtime</code> so the shock front <code>R_shock</code> stays comfortably inside <code>domain_radius</code> and before the nearest 2D/3D obstacle standoff.</li>
+                    <li><code>cfl</code>: Courant stability factor (<code>0.40</code> recommended for strong CJ detonation transients).</li>
+                    <li><code>precision</code>: Defaults to <code>double</code> (FP64) for machine-precision spherical mass and energy conservation at minimal 1D RAM cost.</li>
+                </ul>
             </div>
         `
     },
@@ -4516,6 +4714,40 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         `
     },
 
+    'SparseDomainMesh2D': {
+        type: 'SparseDomainMesh2D',
+        title: '2D Sparse Tile Block Mesh',
+        category: '2D Axisymmetric CFD & MPM',
+        shortDesc: '2D Sparse 8×8 tile-block background grid sharing 100% of DomainMesh2D capabilities while allocating memory only for active particle tiles.',
+        fullDescHtml: `
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Overview & Role</div>
+                <p>The <strong>SparseDomainMesh2D</strong> node provides a sparse 8×8 tile-block background grid for 2D Material Point Method (MPM) and coupled FSI models. It shares 100% of the parameters, boundary conditions, and topological connections of <code>DomainMesh2D</code>, and can be toggled in-place with a single click between Dense and Sparse storage modes.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Partitions the logical <code>(nx + 1) × (ny + 1)</code> nodal grid into <code>8 × 8</code> tile blocks (<code>64 nodes/tile</code>). A lightweight dense tile directory maps logical tile coordinates <code>(bx, by) = (i >> 3, j >> 3)</code> in O(1) time to a compact pool of active tiles touched by MPM particles (plus a 2-node B-spline stencil halo). Unoccupied vacuum regions consume zero nodal state memory while preserving exact mathematical equivalence with dense B-spline P2G/G2P transfers.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <p>Standalone spatial domain definition node; requires no upstream connections.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>Grid (mesh):</strong> Connects to <code>MPMDomain2D</code> or <code>CFDSolver2D</code> to supply domain bounds, cell size, boundary conditions, and sparse tile activation.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><strong>cell_size:</strong> Controls background grid spacing <code>dx</code>; smaller values increase spatial resolution while sparse tiling keeps RAM proportional only to occupied particle volume.</li>
+                    <li><strong>Boundary Conditions (bc_x_min..bc_y_max):</strong> Enforces Slip, No-Slip, Outflow, or Symmetry conditions identically on active boundary tiles.</li>
+                </ul>
+            </div>
+        `
+    },
+
     'DetonatorLocation': {
         type: 'DetonatorLocation',
         title: '2D Detonation Point Location',
@@ -4561,11 +4793,34 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'RemapNode',
         title: 'Solution Remapper (1D → 2D)',
         category: 'Remap & State Interpolation',
-        shortDesc: 'Integrates and maps converged 1D spherical blast states onto the 2D axisymmetric grid.',
+        shortDesc: 'Maps converged 1D spherical blast profiles onto a 2D axisymmetric (r-z) computational mesh.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>RemapNode</strong> (1D → 2D) reads the highly resolved 1D spherical blast solution and maps its conserved density, momentum, energy, and species fractions onto the 2D axisymmetric mesh. Enables high-speed multi-stage simulation workflows where 1D runs handle charge detonation and 2D handles ground reflection.</p>
+                <p>The <strong>RemapNode</strong> (1D → 2D) transfers a high-resolution 1D spherical blast wave profile onto a 2D axisymmetric <code>(r, z)</code> domain around burst origin <code>(explosive_r, explosive_z)</code>. Early detonation physics execute at sub-millimeter 1D resolution before 2D ground Mach reflection or structural FSI begins.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Evaluates radial distance <code>R = √((r - r₀)² + (z - z₀)²)</code> for each 2D cell inside <code>R_remap</code>, linearly interpolating conserved density, radial velocity vector projection <code>(u_r, u_z) = u_1D(R) · [(r - r₀)/R, (z - z₀)/R]</code>, multi-material phase densities <code>(α₁ρ₁, α₂ρ₂)</code>, and exact JWL / Ideal Gas mixture total energy.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li><strong>Upstream 1D Model (<code>source_model_id</code>):</strong> References a workspace 1D spherical <code>CFDSolver</code> model whose <code>endtime</code> defines the physical remap handoff time <code>t_remap</code>.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>Remap Port (<code>remap</code>):</strong> Connects to <code>CFDSolver2D</code> (automatically setting <code>init_mode = From1D</code>) and seamlessly stitches early-time <code>[0, t_remap)</code> virtual gauge histories onto Stage 2 probes.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>explosive_r</code>, <code>explosive_z</code>: Keep <code>explosive_r = 0.0 m</code> on the symmetry axis for true axisymmetric height-of-burst (<code>explosive_z = HOB</code>).</li>
+                    <li><code>remap_radius</code>: Set to <code>0.0 m</code> to remap the entire 1D domain, or specify a positive cutoff <code>R_remap</code> smaller than the nearest 2D wall/ground standoff.</li>
+                </ul>
             </div>
         `
     },
@@ -4574,11 +4829,34 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'Remap1DTo2DNode',
         title: 'Remapper (1D → 2D)',
         category: 'Remap & State Interpolation',
-        shortDesc: 'Maps converged 1D spherical blast solution onto 2D r-z mesh at specified origin.',
+        shortDesc: 'Maps converged 1D spherical blast solution onto 2D axisymmetric (r-z) mesh at specified burst origin.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>Identical to RemapNode; transfers high-resolution 1D spherical blast wave fields into a 2D axisymmetric computational domain centered at explosive coordinates (r, z).</p>
+                <p>The <strong>Remap1DTo2DNode</strong> links an upstream Stage 1 1D spherical blast model to a Stage 2 2D axisymmetric <code>CFDSolver2D</code> (or <code>FSICoupler2D</code>) domain. Running Stage 2 automatically executes Stage 1 if unrun, maps the 9-channel radial blast state at <code>t = endtime_1D</code>, and continues 2D time integration seamlessly.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Projects spherical 1D states onto 2D cylindrical coordinates via radial distance <code>R = √((r - r₀)² + (z - z₀)²)</code> with strict thermodynamic JWL/Ideal-Gas mixture energy reconstruction and exact ambient preservation outside <code>R_remap</code>.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li><strong>Upstream 1D Model (<code>source_model_id</code>):</strong> Workspace 1D spherical CFD model providing the radial shock state and material EOS definitions.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>Target 2D Solver (<code>target_solver</code>):</strong> Connects to <code>CFDSolver2D</code>, rendering burst-origin and <code>R_remap</code> clearance overlays in <code>2D_CONTOUR</code> and unifying Stage 1 + Stage 2 gauge histories.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>explosive_r</code>, <code>explosive_z</code>: Burst coordinates in meters (typically <code>explosive_r = 0.0</code>, <code>explosive_z = height_of_burst</code>).</li>
+                    <li><code>remap_radius</code>: Radial cutoff in meters (<code>0.0</code> = full 1D domain radius). Ensure shock front <code>R_shock &lt; remap_radius</code> before ground or obstacle contact.</li>
+                </ul>
             </div>
         `
     },
@@ -4587,11 +4865,36 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'Remap1DTo3DNode',
         title: 'Remapper (1D → 3D)',
         category: 'Remap & State Interpolation',
-        shortDesc: 'Spherical radial mapping of 1D blast solution onto 3D Cartesian domain.',
+        shortDesc: '27-point subgrid quadrature spherical mapping of 1D blast solution onto 3D Cartesian CFD/FSI domains.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>Remap1DTo3DNode</strong> reads a 1D spherical shock solution and performs radial 3D interpolation onto a 3D Cartesian grid around a specified origin (x, y, z). Saves orders of magnitude in compute time compared to running 3D detonation from scratch.</p>
+                <p>The <strong>Remap1DTo3DNode</strong> maps a high-resolution 1D spherical detonation and airblast profile onto a 3D Cartesian mesh around burst center <code>(explosive_x, explosive_y, explosive_z)</code>. Eliminates 3D ignition grid-orientation artifacts and accelerates early detonation computation by 3–4 orders of magnitude.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Performs conservative <code>3 × 3 × 3</code> (27-point) Gauss-Legendre / sub-cell volumetric quadrature over every 3D finite-volume cell intersecting the spherical blast wave:</p>
+                <div class="node-doc-code">U_ijk = (1 / ΔV) · ∑_q w_q · U_1D( ‖x_q - x_0‖ )</div>
+                <p>Preserves total mass, radial momentum projection, total energy, and multi-material JWL phase densities while respecting solid IBM obstacle masks and strict radial cutoff <code>R_remap</code>.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li><strong>Upstream 1D Model (<code>source_model_id</code>):</strong> Workspace 1D spherical CFD model supplying the radial blast profile and explosive/air EOS parameters.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>Target 3D Solver (<code>target_solver</code>):</strong> Connects to <code>CFDSolver3D</code> (standalone or coupled with <code>FSICoupler3D</code> / <code>FEMFSICoupler3D</code>), rendering 3D charge core + wireframe <code>R_remap</code> spheres and stitching <code>[0, t_remap)</code> gauge histories.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>explosive_x</code>, <code>explosive_y</code>, <code>explosive_z</code>: 3D Cartesian coordinates (m) of the spherical burst center inside <code>DomainMesh3D</code>.</li>
+                    <li><code>remap_radius</code>: Spherical mapping cutoff (<code>0.0 m</code> = full 1D domain). Keep the remapped shock front clear of 3D walls, ground planes, and structural FSI surfaces at handoff time.</li>
+                </ul>
             </div>
         `
     },
@@ -4600,11 +4903,71 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'Remap2DTo3DNode',
         title: 'Remapper (2D → 3D)',
         category: 'Remap & State Interpolation',
-        shortDesc: 'Revolves 2D axisymmetric blast state into 3D Cartesian volume around vertical axis.',
+        shortDesc: 'Cylindrical revolution mapping of 2D axisymmetric blast fields into 3D Cartesian CFD/FSI domains.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>Remap2DTo3DNode</strong> revolves a converged 2D axisymmetric blast field (e.g. after ground Mach stem formation) into full 3D Cartesian space around a specified origin for subsequent 3D obstacle interaction or structural loading.</p>
+                <p>The <strong>Remap2DTo3DNode</strong> revolves a converged 2D axisymmetric <code>(r, z)</code> blast field (including ground reflection and Mach stem formation) around vertical axis <code>(x = explosive_x, y = explosive_y)</code> with axial datum offset <code>explosive_z</code> into a full 3D Cartesian domain.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Maps 3D sub-cell quadrature points <code>(x, y, z)</code> to axisymmetric coordinates <code>r_cyl = √((x - x₀)² + (y - y₀)²)</code> and <code>z_2D = z - z₀</code> via bilinear <code>(r, z)</code> interpolation, rotating 2D radial momentum <code>ρu_r</code> into horizontal Cartesian components <code>(ρu_x, ρu_y)</code> and preserving vertical momentum <code>ρu_z</code>.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li><strong>Upstream 2D Model (<code>source_model_id</code>):</strong> Workspace 2D axisymmetric CFD model (standalone or Stage 2 of a <code>1D → 2D → 3D</code> cascade).</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>Target 3D Solver (<code>target_solver</code>):</strong> Connects to <code>CFDSolver3D</code> (automatically setting <code>init_mode = From2D</code>) and carries upstream gauge histories into Stage 3.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>explosive_x</code>, <code>explosive_y</code>: Horizontal 3D coordinates (m) of the 2D symmetry axis <code>r = 0</code>.</li>
+                    <li><code>explosive_z</code>: Vertical 3D Z coordinate corresponding to <code>z_2D = 0</code> (typically <code>0.0 m</code> when matching ground planes).</li>
+                    <li><code>remap_radius</code>: Cylindrical radial cutoff (<code>0.0 m</code> = full 2D radial extent <code>max_r</code>).</li>
+                </ul>
+            </div>
+        `
+    },
+
+    'Remap3DTo3DNode': {
+        type: 'Remap3DTo3DNode',
+        title: 'Remapper (3D → 3D)',
+        category: 'Remap & State Interpolation',
+        shortDesc: 'Conservative 3D-to-3D state transfer onto a new 3D mesh resolution, domain extent, or FSI configuration.',
+        fullDescHtml: `
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Overview & Role</div>
+                <p>The <strong>Remap3DTo3DNode</strong> maps a converged 3D Cartesian blast field (pressure, density, momentum, total energy, and species volume fractions) from an upstream 3D stage onto a new 3D target mesh with different resolution, domain bounds, or structural/FSI obstacles.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Uses 27-point (3×3×3) conservative sub-cell Gauss quadrature with trilinear interpolation from the upstream <code>CFDBulkSnapshot3D</code> buffer, translating coordinates by <code>Δ = (x_expl - x_src, y_expl - y_src, z_expl - z_src)</code>. Charge EOS and afterburn parameters are automatically inherited from the upstream pipeline, and ambient air is inherited unless locally overridden.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <ul>
+                    <li><strong>Upstream 3D Model (<code>source_model_id</code>):</strong> Workspace 3D CFD/FSI model whose bulk snapshot is exported via <code>EXPORT_REMAP_3D</code>.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>Target 3D Solver (<code>target_solver</code>):</strong> Connects to <code>CFDSolver3D</code> (automatically setting <code>init_mode = From3D</code>) and carries upstream gauge histories into the target stage.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><code>explosive_x</code>, <code>explosive_y</code>, <code>explosive_z</code>: Target 3D coordinates (m) aligned with the upstream burst origin.</li>
+                    <li><code>remap_radius</code>: Spherical radial cutoff around the target burst center (<code>0.0 m</code> = full upstream 3D bounding box).</li>
+                </ul>
             </div>
         `
     },
@@ -4683,6 +5046,40 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
                 <p>The <strong>DomainMesh3D</strong> node defines a 3D uniform structured Cartesian grid with bounds (xmin..xmax, ymin..ymax, zmin..zmax) and uniform cell size (<code>cell_size</code>). Sets independent boundary conditions on all six domain faces (X-min, X-max, Y-min, Y-max, Z-min, Z-max).</p>
+            </div>
+        `
+    },
+
+    'SparseDomainMesh3D': {
+        type: 'SparseDomainMesh3D',
+        title: '3D Sparse Tile Block Mesh',
+        category: '3D Multi-Material CFD & MPM',
+        shortDesc: '3D Sparse 8×8×8 tile-block background grid sharing 100% of DomainMesh3D capabilities while reducing MPM grid RAM/VRAM by 85%–95%.',
+        fullDescHtml: `
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Overview & Role</div>
+                <p>The <strong>SparseDomainMesh3D</strong> node defines a 3D sparse <code>8 × 8 × 8</code> tile-block Cartesian background grid for 3D MPM (CPU OpenMP and CUDA GPU), coupled Fluid-Structure Interaction (<code>FSICoupler3D</code>, <code>MarineHarbourDomain</code>), and MPM-FEM tied contact. It shares 100% of the parameters, 6-face boundary conditions, Lysmer-Kuhlemeyer absorbing dashpots, and orthogonal slice planes of <code>DomainMesh3D</code>, and can be toggled in-place with a single click between Dense and Sparse modes.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Governing Physics & Formulations</div>
+                <p>Decomposes the logical <code>(nx + 1) × (ny + 1) × (nz + 1)</code> nodal lattice into <code>8 × 8 × 8</code> tile blocks (<code>512 nodes/tile</code>). A lock-free dense tile directory maps logical block coordinates <code>(bx, by, bz) = (i >> 3, j >> 3, k >> 3)</code> in O(1) time via bit-shifts to a compact active tile pool. Before each P2G transfer, tiles touched by particles (including the 2-node quadratic B-spline halo) are activated and zeroed on only the active tile pool, achieving 85%–95% RAM/VRAM reduction and eliminating whole-domain grid-reset bottlenecks while preserving exact bit-level stencil parity with dense grids.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Inputs & Upstream Connections</div>
+                <p>Standalone 3D spatial domain node; requires no upstream connections.</p>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Outputs & Telemetry</div>
+                <ul>
+                    <li><strong>Grid (mesh):</strong> Connects to <code>MPMDomain3D</code>, <code>CFDSolver3D</code>, <code>FEMDomain3D</code>, or <code>MarineHarbourDomain</code> to supply domain bounds, cell resolution, boundary conditions, and sparse MPM tile allocation.</li>
+                </ul>
+            </div>
+            <div class="node-doc-section">
+                <div class="node-doc-heading">Key Parameter Tuning Guide</div>
+                <ul>
+                    <li><strong>cell_size &amp; xmin..zmax:</strong> Define the logical bounding box and uniform grid spacing <code>dx</code>. Sparse tile blocks automatically track moving particles and expanding debris clouds inside these bounds.</li>
+                    <li><strong>Boundary Conditions (bc_x_min..bc_z_max):</strong> Supports Slip, No-Slip, Outflow, Symmetry, and Lysmer-Kuhlemeyer Non-Reflecting Dashpots identically to <code>DomainMesh3D</code>.</li>
+                </ul>
             </div>
         `
     },
@@ -5154,7 +5551,7 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
         return 'MPM';
     }
     if (nodeType === 'CFDSolver' || nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver3D' || 
-        nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || nodeType === 'DomainMesh3D' || 
+        nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || nodeType === 'SparseDomainMesh2D' || nodeType === 'DomainMesh3D' || nodeType === 'SparseDomainMesh3D' || 
         nodeType === 'Charge1D' || nodeType === 'Charge2D' || nodeType === 'Charge3D' || 
         nodeType === 'DetonatorLocation' || nodeType === 'DetonatorLocation3D' ||
         nodeType === 'TriggerLocation' || nodeType === 'TriggerLocation3D') {
@@ -5200,7 +5597,8 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
         'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13',
         'burn_zone_cells', 'tau_burn_min',
         'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_G2', 'lt_e', 'lt_g', 'lt_z',
-        'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min'
+        'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
+        'jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0'
     ];
     if (mpmFvKeys.includes(key)) return 'MPM+FV';
 
@@ -5523,6 +5921,8 @@ export function getParamKeysForNode(
             keys.push('density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'initial_temperature');
             if (solidModel.includes('Davis')) {
                 keys.push('davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0');
+            } else if (solidModel.includes('JWL')) {
+                keys.push('jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0', 'mixture_rule');
             } else {
                 keys.push('mg_c0', 'mg_s', 'mg_gamma0');
             }
@@ -5657,12 +6057,13 @@ export function getParamKeysForNode(
             ];
         }
     } else if (nodeType === 'DomainMesh') {
-        keys = ['dimension', 'domain_radius', 'cell_size', 'left_bc', 'right_bc'];
-    } else if (nodeType === 'DomainMesh2D') {
+        keys = ['domain_radius', 'cell_size', 'left_bc', 'right_bc'];
+    } else if (nodeType === 'DomainMesh2D' || nodeType === 'SparseDomainMesh2D') {
         const isAxisym = parameters['coordinate_system'] === 'Axisymmetric';
         keys = isAxisym
             ? ['coordinate_system', 'min_r', 'max_r', 'min_z', 'max_z', 'cell_size', 'nx', 'ny', 'bc_r_min', 'bc_r_max', 'bc_y_min', 'bc_y_max']
             : ['coordinate_system', 'xmin', 'xmax', 'ymin', 'ymax', 'cell_size', 'nx', 'ny', 'bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max'];
+    } else if (nodeType === 'DomainMesh3D' || nodeType === 'SparseDomainMesh3D') {
         keys = ['xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax', 'cell_size', 'nx', 'ny', 'nz', 'bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max', 'bc_z_min', 'bc_z_max'];
         const hasLysmer = ['bc_x_min', 'bc_x_max', 'bc_y_min', 'bc_y_max', 'bc_z_min', 'bc_z_max'].some(k => parameters[k] === 'Lysmer' || parameters[k] === 'LysmerDashpot');
         if (hasLysmer) {
@@ -5683,8 +6084,10 @@ export function getParamKeysForNode(
         if (parameters['init_mode'] === 'Hydrostatic_Stratified_3D') {
             keys.push('water_surface_z', 'seabed_surface_z', 'k0_earth_pressure');
         }
-    } else if (nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver') {
-        keys = ['ambient_air_material', 'explosive_charge', 'connected_detonators', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'plot_stride', 'refresh_rate'];
+    } else if (nodeType === 'CFDSolver') {
+        keys = ['domain_mesh', 'ambient_air_material', 'explosive_charge', 'precision', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime'];
+    } else if (nodeType === 'CFDSolver2D') {
+        keys = ['ambient_air_material', 'explosive_charge', 'device', 'precision', 'connected_detonators', 'init_mode', 'space_time_scheme', 'flux_scheme', 'cfl', 'endtime', 'mesh_type', 'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio'];
     } else if (nodeType === 'MPMDomain3D') {
         keys = ['device', 'precision', 'transfer_scheme', 'connected_detonators', 'particle_distribution', 'boundary_filling', 'ppc', 'velocity_scheme', 'flip_blend', 'space_time_scheme', 'smooth_plastic_strain', 'contact_method', 'bardenhagen_grouping_policy', 'bardenhagen_initial_tie', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode', 'dem_velocity_threshold', 'dem_friction', 'dem_restitution', 'dem_contact_scale', 'cfl', 'endtime'];
     } else if (nodeType === 'MPMDomain2D') {
@@ -5762,11 +6165,19 @@ export function getParamKeysForNode(
     } else if (nodeType === 'LSDynaImporter3D') {
         keys = ['k_file', 'scale_factor', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z'];
     } else if (nodeType === 'RemapNode' || nodeType === 'Remap1DTo2DNode') {
-        keys = ['source_model_id', 'target_solver', 'explosive_r', 'explosive_z', 'remap_radius', 'trigger_type', 'trigger_val'];
-    } else if (nodeType === 'Remap1DTo3DNode' || nodeType === 'Remap2DTo3DNode') {
-        keys = ['source_model_id', 'target_solver', 'explosive_x', 'explosive_y', 'explosive_z', 'remap_radius', 'trigger_type', 'trigger_val'];
+        keys = ['source_model_id', 'target_solver', 'explosive_r', 'explosive_z', 'remap_radius'];
+    } else if (nodeType === 'Remap1DTo3DNode' || nodeType === 'Remap2DTo3DNode' || nodeType === 'Remap3DTo3DNode') {
+        keys = ['source_model_id', 'target_solver', 'explosive_x', 'explosive_y', 'explosive_z', 'remap_radius'];
     } else if (nodeType === 'VirtualGauges') {
-        keys = ['enable_gauges', 'telemetry_mode', 'refresh_rate'];
+        keys = [
+            'enable_gauges', 'sampling_stride_steps',
+            'export_ascii', 'export_binary', 'export_hdf5',
+            'ascii_delimiter', 'ascii_precision', 'include_header',
+            'output_dir', 'custom_filename',
+            'qty_pressure', 'qty_overpressure', 'qty_impulse',
+            'qty_density', 'qty_velocity', 'qty_energy',
+            'qty_reacted', 'qty_unreacted', 'qty_air'
+        ];
     } else if (nodeType === 'TelemetryText') {
         keys = [
             'stream_layout', 'filter_level', 'timestamp_mode',
@@ -5881,7 +6292,7 @@ export function resolveModelContext(
     );
 
     const is3D = nodes.some(n => 
-        n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || 
+        n.type === 'DomainMesh3D' || n.type === 'SparseDomainMesh3D' || n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || 
         n.type === 'MarineHarbourDomain' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D' || n.type === 'Telemetry3DViewport'
     ) || Boolean(fallbackIs3D);
 
@@ -5914,7 +6325,7 @@ export function shouldSkipNodeParameter(
     context?: any
 ): boolean {
     if (key === 'gauges' || key === 'slices' || key === 'primitives' || key === 'nr' || key === 'n_cells' || key === 'nz') {
-        if (nodeType !== 'DomainMesh3D' && nodeType !== 'FEMObject3D') {
+        if (nodeType !== 'DomainMesh3D' && nodeType !== 'SparseDomainMesh3D' && nodeType !== 'FEMObject3D') {
             return true;
         }
     }
@@ -5965,7 +6376,8 @@ export function shouldSkipNodeParameter(
 
         if (matModel === 'Tait Water') {
             if (!ctx.hasMPM && (key === 'bulk_viscosity_b1' || key === 'bulk_viscosity_b2')) return true;
-            if (['material_model', 'preset', 'transfer_scheme', 'density', 'initial_temperature', 'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str', 'bulk_viscosity_b1', 'bulk_viscosity_b2'].includes(key)) {
+            if ((key === 'erosion_min_density' || key === 'erosion_min_density_ratio' || key === 'erode_to_fv_grid') && !parameters['enable_density_erosion']) return true;
+            if (['material_model', 'preset', 'transfer_scheme', 'density', 'initial_temperature', 'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio', 'erode_to_fv_grid'].includes(key)) {
                 return false;
             }
             return true;
@@ -6007,12 +6419,14 @@ export function shouldSkipNodeParameter(
                 'directional_crack_band', 'nonlocal_radius',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor'
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
             ];
             if (!dpAllowed.includes(key)) return true;
             if (key === 'erosion_strain' && !parameters['enable_strain_erosion']) return true;
             if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
             if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
+            if ((key === 'erosion_min_density' || key === 'erosion_min_density_ratio') && !parameters['enable_density_erosion']) return true;
             if (key === 'nonlocal_radius' && !parameters['directional_crack_band']) return true;
             return false;
         }
@@ -6024,7 +6438,9 @@ export function shouldSkipNodeParameter(
 
             // Skip non-active pillar parameters
             if (['davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0'].includes(key) && !solidModel.includes('Davis')) return true;
-            if (['mg_c0', 'mg_s', 'mg_gamma0'].includes(key) && solidModel.includes('Davis')) return true;
+            if (['mg_c0', 'mg_s', 'mg_gamma0'].includes(key) && (solidModel.includes('Davis') || solidModel.includes('JWL'))) return true;
+            if (['jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0', 'mixture_rule'].includes(key) && !solidModel.includes('JWL')) return true;
+            if (key === 'mixture_rule' && !burnModel.includes('Lee-Tarver')) return true;
 
             if (['lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min'].includes(key) && !burnModel.includes('Lee-Tarver')) return true;
             if (['crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13'].includes(key) && !burnModel.includes('CREST')) return true;
@@ -6033,7 +6449,7 @@ export function shouldSkipNodeParameter(
             if (['davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det'].includes(key) && !prodModel.includes('Davis')) return true;
             if (['jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].includes(key) && prodModel.includes('Davis')) return true;
 
-            // Energetic models do not expose strain hardening / failure / erosion / heterogeneity / anisotropy
+            // Energetic models do not expose strain hardening / failure / solid strain erosion / heterogeneity / anisotropy
             if (['hardening_modulus', 'failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius'].includes(key)) return true;
             if (['fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension'].includes(key)) return true;
             if (['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp'].includes(key)) return true;
@@ -6046,8 +6462,9 @@ export function shouldSkipNodeParameter(
         } else {
             // Non-energetic models do not expose pillar selector dropdowns or reaction kinetics
             if (['solid_model', 'burn_model', 'product_model'].includes(key)) return true;
-            if (['burn_zone_cells', 'tau_burn_min', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min', 'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13'].includes(key)) return true;
+            if (['burn_zone_cells', 'tau_burn_min', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min', 'jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0', 'mixture_rule', 'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13'].includes(key)) return true;
             if (['davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0', 'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det'].includes(key)) return true;
+            if (key === 'erode_to_fv_grid') return true;
         }
 
         if (['afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio', 'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion', 'afterburn_ambient_o2_fraction'].includes(key) && !parameters['afterburn_enabled']) return true;
@@ -6055,11 +6472,14 @@ export function shouldSkipNodeParameter(
         if (key === 'erosion_strain' && !parameters['enable_strain_erosion']) return true;
         if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
         if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
+        if ((key === 'erosion_min_density' || key === 'erosion_min_density_ratio' || key === 'erode_to_fv_grid') && !parameters['enable_density_erosion']) return true;
         if (key === 'nonlocal_radius' && !parameters['directional_crack_band']) return true;
         if ((key === 'weibull_modulus' || key === 'weibull_scale' || key === 'weibull_ref_volume') && !parameters['enable_heterogeneity']) return true;
         if ((key === 'anisotropy_ratio' || key === 'anisotropy_axis' || key === 'anisotropy_dir_x' || key === 'anisotropy_dir_y' || key === 'anisotropy_dir_z') && !parameters['enable_anisotropy']) return true;
         if ((key === 'anisotropy_dir_x' || key === 'anisotropy_dir_y' || key === 'anisotropy_dir_z') && parameters['anisotropy_axis'] !== 'Custom') return true;
         if (['kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'].includes(key) && parameters['kc_auto_generate'] !== false) return true;
+    } else if (nodeType === 'FSICoupler2D' || nodeType === 'FSICoupler3D') {
+        if ((key === 'erosion_min_density' || key === 'erosion_min_density_ratio' || key === 'erode_to_fv_grid') && !parameters['enable_density_erosion']) return true;
     } else if (nodeType === 'Charge2D' || nodeType === 'Charge1D') {
         const shape = parameters['charge_shape'] || 'Sphere';
         if ((key === 'charge_height' || key === 'charge_aspect_ratio') && shape !== 'Cylinder') return true;
@@ -6184,13 +6604,21 @@ export function shouldSkipNodeParameter(
         if (!ctx.hasCFD && ['representation_mode', 'colormap', 'opacity'].includes(key)) return true;
     } else if (nodeType === 'CFDSolver3D') {
         if (parameters['init_mode'] !== 'Hydrostatic_Stratified_3D' && ['water_surface_z', 'seabed_surface_z', 'k0_earth_pressure'].includes(key)) return true;
+    } else if (nodeType === 'CFDSolver2D') {
+        if (parameters['mesh_type'] !== 'amr' && ['amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio'].includes(key)) return true;
     } else if (nodeType === 'DomainMesh') {
-        const dim = parameters['dimension'] || '1D';
-        if ((key === 'y_min_bc' || key === 'y_max_bc' || key === 'z_min_bc' || key === 'z_max_bc') && dim === '1D') return true;
-    } else if (nodeType === 'DomainMesh2D') {
+        if (['dimension', 'x_min_bc', 'x_max_bc', 'y_min_bc', 'y_max_bc', 'z_min_bc', 'z_max_bc'].includes(key)) return true;
+    } else if (nodeType === 'DomainMesh2D' || nodeType === 'SparseDomainMesh2D') {
         const isAxisym = parameters['coordinate_system'] === 'Axisymmetric';
         if (isAxisym && ['xmin', 'xmax', 'ymin', 'ymax', 'bc_x_min', 'bc_x_max'].includes(key)) return true;
         if (!isAxisym && ['min_r', 'max_r', 'min_z', 'max_z', 'bc_r_min', 'bc_r_max'].includes(key)) return true;
+    } else if (nodeType === 'VirtualGauges') {
+        if (key === 'storage_backend') return true;
+        if (parameters['export_ascii'] === false && ['ascii_delimiter', 'ascii_precision', 'include_header'].includes(key)) return true;
+        if (parameters['export_ascii'] === false && !parameters['export_binary'] && !parameters['export_hdf5'] && ['output_dir', 'custom_filename'].includes(key)) return true;
+        if (!ctx.hasEnergetic && (key === 'qty_reacted' || key === 'qty_unreacted')) return true;
+    } else if (['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(nodeType)) {
+        if (['trigger_type', 'trigger_val', 'remap_time', 'target_cell_size', 'interpolation_method', 'center_x', 'center_y', 'center_z', 'z_offset'].includes(key)) return true;
     }
 
     return false;
@@ -6212,6 +6640,7 @@ export function getNodeSectionInfo(
             if (key === 'burn_model') return { title: 'PILLAR 2: REACTION KINETICS [MPM · FV]', color: '#fb923c', defaultCollapsed: false };
             if (key === 'product_model') return { title: 'PILLAR 3: DETONATION PRODUCTS EOS [MPM · FV]', color: '#ef4444', defaultCollapsed: false };
             if (key === 'afterburn_enabled') return { title: 'AFTERBURN & AEROBIC COMBUSTION [FV ONLY]', color: '#f59e0b', defaultCollapsed: false };
+            if (key === 'enable_density_erosion') return { title: 'LOW-DENSITY PARTICLE EROSION & FV HANDOFF [MPM · FV]', color: '#10b981', defaultCollapsed: false };
             return null;
         }
 
@@ -6249,22 +6678,27 @@ export function getNodeSectionInfo(
         if (key === 'rht_A') return { title: 'RHT ENVELOPES & POROUS EOS [MPM · FEM]', color: '#60a5fa', defaultCollapsed: true };
         if (key === 'kc_auto_generate' || key === 'kc_a0') return { title: 'K&C DAMAGE PLASTICITY [MPM · FEM]', color: '#60a5fa', defaultCollapsed: true };
         if (key === 'cscm_alpha') return { title: 'CSCM SMOOTH CAP & DAMAGE [MPM · FEM]', color: '#60a5fa', defaultCollapsed: true };
-        if (key === 'enable_strain_erosion') return { title: 'ELEMENT & PARTICLE EROSION [FEM · MPM]', color: '#f59e0b', defaultCollapsed: true };
+        if (key === 'enable_strain_erosion' || (key === 'enable_density_erosion' && matModel === 'Tait Water')) return { title: 'ELEMENT & PARTICLE EROSION [FEM · MPM · FV]', color: '#f59e0b', defaultCollapsed: true };
         if (key === 'enable_heterogeneity') return { title: 'WEIBULL HETEROGENEITY [MPM · FEM]', color: '#c084fc', defaultCollapsed: true };
         if (key === 'enable_anisotropy') return { title: 'DIRECTIONAL ANISOTROPY [MPM · FEM]', color: '#38bdf8', defaultCollapsed: true };
-    } else if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || nodeType === 'DomainMesh3D') {
+    } else if (nodeType === 'FSICoupler2D' || nodeType === 'FSICoupler3D') {
+        if (key === 'enable_density_erosion') return { title: 'MPM-TO-FV PARTICLE EROSION HANDOFF', color: '#10b981', defaultCollapsed: false };
+    } else if (nodeType === 'DomainMesh' || nodeType === 'DomainMesh2D' || nodeType === 'SparseDomainMesh2D' || nodeType === 'DomainMesh3D' || nodeType === 'SparseDomainMesh3D') {
         if (key === 'cell_size' || key === 'nx') return { title: 'GRID RESOLUTION', color: '#569cd6', defaultCollapsed: false };
         if (key === 'left_bc' || key === 'bc_x_min' || key === 'bc_r_min' || key === 'x_min_bc') return { title: 'BOUNDARY CONDITIONS', color: '#569cd6', defaultCollapsed: false };
         if (key.startsWith('lysmer_')) return { title: 'LYSMER-KUHLEMEYER ABSORBING DASHPOTS', color: '#10b981', defaultCollapsed: false };
     } else if (nodeType === 'Charge1D' || nodeType === 'Charge2D' || nodeType === 'Charge3D') {
         if (key === 'ppc') return { title: 'PARTICLE DISCRETIZATION', color: '#c084fc', defaultCollapsed: false };
         if (key === 'charge_r' || key === 'charge_x' || key === 'charge_radius') return { title: 'GEOMETRY & POSITIONING', color: '#fbbf24', defaultCollapsed: false };
-    } else if (['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(nodeType)) {
+    } else if (['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(nodeType)) {
         if (key === 'source_model_id' || key === 'target_solver') return { title: 'PIPELINE SOURCE & TARGET COUPLING', color: '#38bdf8', defaultCollapsed: false };
-        if (key === 'explosive_r' || key === 'explosive_x' || key === 'remap_radius') return { title: 'SPATIAL POSITION & RADIUS', color: '#fbbf24', defaultCollapsed: false };
-        if (key === 'trigger_type' || key === 'trigger_val') return { title: 'REMAPPING NUMERICS & TRIGGER', color: '#a855f7', defaultCollapsed: false };
+        if (key === 'explosive_r' || key === 'explosive_x' || key === 'remap_radius') return { title: 'SPATIAL BURST ORIGIN & CUTOFF RADIUS', color: '#fbbf24', defaultCollapsed: false };
+    } else if (nodeType === 'VirtualGauges') {
+        if (key === 'export_ascii') return { title: 'DISK EXPORT & ARCHIVAL', color: '#38bdf8', defaultCollapsed: false };
+        if (key === 'qty_pressure') return { title: 'RECORDED PHYSICAL CHANNELS', color: '#f59e0b', defaultCollapsed: true };
     } else if (nodeType === 'CFDSolver' || nodeType === 'CFDSolver2D' || nodeType === 'CFDSolver3D') {
         if (key === 'space_time_scheme') return { title: 'NUMERICAL INTEGRATION', color: '#569cd6', defaultCollapsed: false };
+        if (key === 'mesh_type') return { title: 'ADAPTIVE MESH REFINEMENT (AMR)', color: '#c084fc', defaultCollapsed: false };
         if (key === 'plot_stride') return { title: 'TELEMETRY & REFRESH', color: '#569cd6', defaultCollapsed: true };
     } else if (nodeType === 'MPMDomain2D' || nodeType === 'MPMDomain3D') {
         if (key === 'particle_distribution') return { title: 'PARTICLE DISCRETIZATION', color: '#c084fc', defaultCollapsed: false };

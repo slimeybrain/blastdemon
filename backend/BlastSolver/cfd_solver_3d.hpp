@@ -147,6 +147,12 @@ struct CFDBulkSnapshot3D {
     }
 };
 
+enum class SpaceTimeScheme3D {
+    MUSCL_HANCOCK = 0, // 2nd-order space, 2nd-order time
+    ADER_2        = 1, // 2nd-order space, 2nd-order time (Cauchy-Kowalevski)
+    ADER_3        = 2  // 3rd-order space, 3rd-order time
+};
+
 class CFDSolver3D {
 public:
     virtual ~CFDSolver3D() = default;
@@ -160,6 +166,8 @@ public:
     virtual void setDetonatorLocation(double x, double y, double z, double start_time = 0.0) = 0;
     virtual void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) = 0;
     virtual void setFluxScheme(const std::string& scheme_name) = 0;
+    virtual void setSpaceTimeScheme(SpaceTimeScheme3D scheme) = 0;
+    virtual SpaceTimeScheme3D getSpaceTimeScheme() const = 0;
     virtual void setSpatialOrder(int order) = 0;
     virtual void setTemporalOrder(int order) = 0;
     virtual void setCancelFlag(std::atomic<bool>* flag) = 0;
@@ -239,6 +247,7 @@ public:
     // Bulk pressure extraction for FSI coupling — one cudaMemcpy for the whole field, not per-cell
     virtual std::vector<float> extractPressureField() const { return {}; }
     virtual void coupleFSIWithMPMGPU(void* /*mpm_solver_cuda*/) {}
+    virtual int erodeMPMParticlesToCFDGPU(void* /*mpm_solver_cuda*/) { return 0; }
     virtual void coupleZonalHandoffWithMPMGPU(void* /*mpm_solver_cuda*/) {}
     virtual void synchronizeFluidSleeveWithMPMGPU(void* /*mpm_solver_cuda*/) {}
     virtual void setZonalHandoffParams(const Blast::ZonalHandoff3DParams& /*params*/) {}
@@ -251,6 +260,7 @@ public:
 
     virtual void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) = 0;
     virtual void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z = 0.0) = 0;
+    virtual void initializeFrom3D(const CFDBulkSnapshot3D& src, double x_expl, double y_expl, double z_expl, double R_remap, double src_x_expl, double src_y_expl, double src_z_expl) = 0;
 
     virtual void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) = 0;
     virtual void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) = 0;
@@ -329,11 +339,23 @@ protected:
     bool terminated = false;
 
     std::string currentFluxScheme = "Rusanov";
+    SpaceTimeScheme3D spaceTimeScheme = SpaceTimeScheme3D::MUSCL_HANCOCK;
     int spatialOrder = 2;
     int temporalOrder = 2;
     MultiMat::MaterialSet currentMaterials = MultiMat::TNT;
 
 public:
+    void setSpaceTimeScheme(SpaceTimeScheme3D scheme) override {
+        spaceTimeScheme = scheme;
+        if (scheme == SpaceTimeScheme3D::ADER_3) {
+            spatialOrder = 3;
+            temporalOrder = 3;
+        } else {
+            spatialOrder = 2;
+            temporalOrder = 2;
+        }
+    }
+    SpaceTimeScheme3D getSpaceTimeScheme() const override { return spaceTimeScheme; }
     bool isIdealGas() const override { return is_ideal_gas_val; }
     const MultiMat::MaterialSet& getMaterialParameters() const override { return currentMaterials; }
     double getAmbientP() const override { return ambient_p; }
@@ -505,6 +527,7 @@ public:
 
     void initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) override;
     void initializeFrom2D(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z = 0.0) override;
+    void initializeFrom3D(const CFDBulkSnapshot3D& src, double x_expl, double y_expl, double z_expl, double R_remap, double src_x_expl, double src_y_expl, double src_z_expl) override;
 
     void setCellStateMulti(int i, int j, int k, const CellState3D<true>& s) override;
     void setCellStateIdeal(int i, int j, int k, const CellState3D<false>& s) override;

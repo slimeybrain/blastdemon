@@ -202,9 +202,10 @@ public:
         int num_nodes_x, int num_nodes_y, int num_nodes_z
     ) {
         const auto& fem_nodes = fem.getNodes();
-        auto& grid = mpm.getGrid();
+        int mpm_nx = mpm.getNx();
         int mpm_ny = mpm.getNy();
         int mpm_nz = mpm.getNz();
+        if (grid_i_interface < 0 || grid_i_interface >= mpm_nx) return;
 
         for (int k = 0; k < num_nodes_z; ++k) {
             for (int j = 0; j < num_nodes_y; ++j) {
@@ -213,7 +214,7 @@ public:
                 int grid_k = k_start + k;
                 if (grid_j >= 0 && grid_j < mpm_ny && grid_k >= 0 && grid_k < mpm_nz) {
                     size_t grid_idx = (static_cast<size_t>(grid_i_interface) * mpm_ny + grid_j) * mpm_nz + grid_k;
-                    if (grid_idx < grid.size() && fem_nid < static_cast<int>(fem_nodes.size())) {
+                    if (fem_nid < static_cast<int>(fem_nodes.size())) {
                         float v_fem = static_cast<float>(fem_nodes[fem_nid].v[0]);
                         mpm.setGridNodeVelocity(grid_idx, v_fem, 0.0f, 0.0f);
                     }

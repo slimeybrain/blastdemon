@@ -3,8 +3,24 @@
 #include "ImmersedBoundary.hpp"
 #include "materials/ConstitutiveSolids.hpp"
 #include "materials/ConstitutiveGeomaterials.hpp"
+#include <fstream>
 
 namespace Blast {
+
+static inline size_t query_available_host_ram_bytes_3d() {
+    std::ifstream meminfo("/proc/meminfo");
+    if (!meminfo.is_open()) return 0;
+    std::string key;
+    size_t val_kb = 0;
+    std::string unit;
+    while (meminfo >> key >> val_kb) {
+        std::getline(meminfo, unit);
+        if (key == "MemAvailable:") {
+            return val_kb * 1024ULL;
+        }
+    }
+    return 0;
+}
 
 static inline uint32_t floatToBits(float f) {
     uint32_t u;
@@ -68,23 +84,8 @@ inline bool resolve_ghost_node_3d(
 MPMSolver3D::MPMSolver3D() {
 }
 
-void MPMSolver3D::initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin, float ymin, float zmin) {
-    m_nx = nx;
-    m_ny = ny;
-    m_nz = nz;
-    m_dx = dx;
-    m_dy = dy;
-    m_dz = dz;
-    m_xmin = xmin;
-    m_ymin = ymin;
-    m_zmin = zmin;
-
-    m_grid.resize(static_cast<size_t>(m_nx) * m_ny * m_nz);
-    m_particles.clear();
-    m_terminated = false;
-
-    if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
-        size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+void MPMSolver3D::syncMaterialFieldAllocation(size_t num_nodes) {
+    if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && num_nodes > 0) {
         m_mat_fields.resize(m_num_materials);
         for (int m = 0; m < m_num_materials; ++m) {
             m_mat_fields[m].m.assign(num_nodes, 0.0f);
@@ -100,25 +101,67 @@ void MPMSolver3D::initializeGrid(int nx, int ny, int nz, float dx, float dy, flo
     }
 }
 
+void MPMSolver3D::initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin, float ymin, float zmin) {
+    m_nx = nx;
+    m_ny = ny;
+    m_nz = nz;
+    m_ntx = (m_nx + MPMGridView3D::TILE_DIM - 1) >> MPMGridView3D::TILE_SHIFT;
+    m_nty = (m_ny + MPMGridView3D::TILE_DIM - 1) >> MPMGridView3D::TILE_SHIFT;
+    m_ntz = (m_nz + MPMGridView3D::TILE_DIM - 1) >> MPMGridView3D::TILE_SHIFT;
+    m_dx = dx;
+    m_dy = dy;
+    m_dz = dz;
+    m_xmin = xmin;
+    m_ymin = ymin;
+    m_zmin = zmin;
+
+    if (m_sparse_grid_mode) {
+        const size_t total_logical_tiles = static_cast<size_t>(m_ntx) * m_nty * m_ntz;
+        m_tile_table.assign(total_logical_tiles, -1);
+        m_active_tiles.clear();
+        m_tile_capacity = std::min(total_logical_tiles, std::max<size_t>(64, total_logical_tiles / 16));
+        m_grid.assign(m_tile_capacity * MPMGridView3D::TILE_NODES, MPMGridNode3D{});
+    } else {
+        m_tile_table.clear();
+        m_active_tiles.clear();
+        m_tile_capacity = 0;
+        m_grid.assign(static_cast<size_t>(m_nx) * m_ny * m_nz, MPMGridNode3D{});
+    }
+    m_particles.clear();
+    m_terminated = false;
+
+    syncMaterialFieldAllocation(m_grid.size());
+}
+
+void MPMSolver3D::setSparseGridMode(bool enable) {
+    if (m_sparse_grid_mode == enable && !m_grid.empty()) return;
+    m_sparse_grid_mode = enable;
+    m_ntx = (m_nx + MPMGridView3D::TILE_DIM - 1) >> MPMGridView3D::TILE_SHIFT;
+    m_nty = (m_ny + MPMGridView3D::TILE_DIM - 1) >> MPMGridView3D::TILE_SHIFT;
+    m_ntz = (m_nz + MPMGridView3D::TILE_DIM - 1) >> MPMGridView3D::TILE_SHIFT;
+    if (m_nx > 0 && m_ny > 0 && m_nz > 0) {
+        if (m_sparse_grid_mode) {
+            const size_t total_logical_tiles = static_cast<size_t>(m_ntx) * m_nty * m_ntz;
+            m_tile_table.assign(total_logical_tiles, -1);
+            m_active_tiles.clear();
+            m_tile_capacity = std::min(total_logical_tiles, std::max<size_t>(64, total_logical_tiles / 16));
+            m_grid.clear();
+            m_grid.shrink_to_fit();
+            m_grid.assign(m_tile_capacity * MPMGridView3D::TILE_NODES, MPMGridNode3D{});
+        } else {
+            m_tile_table.clear();
+            m_tile_table.shrink_to_fit();
+            m_active_tiles.clear();
+            m_tile_capacity = 0;
+            m_grid.assign(static_cast<size_t>(m_nx) * m_ny * m_nz, MPMGridNode3D{});
+        }
+        syncMaterialFieldAllocation(m_grid.size());
+    }
+}
+
 void MPMSolver3D::setContactMethod(MPMContactMethod method) {
     m_contact_method = method;
-    if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
-        size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
-        if (num_nodes > 0) {
-            m_mat_fields.resize(m_num_materials);
-            for (int m = 0; m < m_num_materials; ++m) {
-                m_mat_fields[m].m.assign(num_nodes, 0.0f);
-                for (int c = 0; c < 3; ++c) {
-                    m_mat_fields[m].p[c].assign(num_nodes, 0.0f);
-                    m_mat_fields[m].f_int[c].assign(num_nodes, 0.0f);
-                    m_mat_fields[m].v[c].assign(num_nodes, 0.0f);
-                    m_mat_fields[m].dv[c].assign(num_nodes, 0.0f);
-                }
-            }
-        }
-    } else {
-        m_mat_fields.clear();
-    }
+    syncMaterialFieldAllocation(m_grid.size());
 }
 
 void MPMSolver3D::setObjectMaterialMapping(const std::vector<int>& obj_to_mat, int num_materials) {
@@ -146,21 +189,7 @@ void MPMSolver3D::setObjectMaterialMapping(const std::vector<int>& obj_to_mat, i
         }
     }
 
-    if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
-        size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
-        m_mat_fields.resize(m_num_materials);
-        for (int m = 0; m < m_num_materials; ++m) {
-            m_mat_fields[m].m.assign(num_nodes, 0.0f);
-            for (int c = 0; c < 3; ++c) {
-                m_mat_fields[m].p[c].assign(num_nodes, 0.0f);
-                m_mat_fields[m].f_int[c].assign(num_nodes, 0.0f);
-                m_mat_fields[m].v[c].assign(num_nodes, 0.0f);
-                m_mat_fields[m].dv[c].assign(num_nodes, 0.0f);
-            }
-        }
-    } else {
-        m_mat_fields.clear();
-    }
+    syncMaterialFieldAllocation(m_grid.size());
 
     m_tie_mask.assign(static_cast<size_t>(std::max(1, m_num_materials)), 0u);
     m_num_tied_pairs = 0;
@@ -179,6 +208,9 @@ void MPMSolver3D::setDomainGeometry(float dx, float dy, float dz, float xmin, fl
     m_nx = nx;
     m_ny = ny;
     m_nz = nz;
+    m_ntx = (m_nx + MPMGridView3D::TILE_DIM - 1) >> MPMGridView3D::TILE_SHIFT;
+    m_nty = (m_ny + MPMGridView3D::TILE_DIM - 1) >> MPMGridView3D::TILE_SHIFT;
+    m_ntz = (m_nz + MPMGridView3D::TILE_DIM - 1) >> MPMGridView3D::TILE_SHIFT;
     m_particles.clear();
 }
 
@@ -1318,8 +1350,96 @@ void MPMSolver3D::addSTLObject(int obj_id, const std::string& stl_filepath,
 }
 
 void MPMSolver3D::particleToGrid() {
-    // Reset 3D grid
-    for (auto& node : m_grid) {
+    if (m_sparse_grid_mode) {
+        const size_t total_logical_tiles = static_cast<size_t>(m_ntx) * m_nty * m_ntz;
+        if (m_tile_table.size() != total_logical_tiles) {
+            m_tile_table.assign(total_logical_tiles, -1);
+            m_active_tiles.clear();
+        }
+        // Recycle active tiles when starting a new step (when FSI force cache is empty).
+        // If m_f_ext_fsi is currently active (e.g. RK2 corrector stage), preserve existing
+        // tile slot indices so restoreFSIForces() maps to identical physical slots.
+        if (m_f_ext_fsi.empty()) {
+            for (int t_idx : m_active_tiles) {
+                if (t_idx >= 0 && static_cast<size_t>(t_idx) < m_tile_table.size()) {
+                    m_tile_table[t_idx] = -1;
+                }
+            }
+            m_active_tiles.clear();
+        }
+
+        // Pass 0: Activate 8x8x8 tiles within [-3, +3] cell reach of each particle
+        // (covers [-2, +2] stencil reach plus +-1 neighbor halo for Bardenhagen normals & thermal conduction,
+        // as well as Method-of-Images reflected ghost cells near domain boundaries).
+        if (m_nx > 0 && m_ny > 0 && m_nz > 0) {
+            for (const auto& p : m_particles) {
+                if (p.state == 2 || p.m <= 0.0f) continue;
+                const int base_i = static_cast<int>(std::floor((p.x[0] - m_xmin) / m_dx));
+                const int base_j = static_cast<int>(std::floor((p.x[1] - m_ymin) / m_dy));
+                const int base_k = static_cast<int>(std::floor((p.x[2] - m_zmin) / m_dz));
+
+                const int tx_lo = std::clamp(base_i - 3, 0, m_nx - 1) >> MPMGridView3D::TILE_SHIFT;
+                const int tx_hi = std::clamp(base_i + 3, 0, m_nx - 1) >> MPMGridView3D::TILE_SHIFT;
+                const int ty_lo = std::clamp(base_j - 3, 0, m_ny - 1) >> MPMGridView3D::TILE_SHIFT;
+                const int ty_hi = std::clamp(base_j + 3, 0, m_ny - 1) >> MPMGridView3D::TILE_SHIFT;
+                const int tz_lo = std::clamp(base_k - 3, 0, m_nz - 1) >> MPMGridView3D::TILE_SHIFT;
+                const int tz_hi = std::clamp(base_k + 3, 0, m_nz - 1) >> MPMGridView3D::TILE_SHIFT;
+
+                for (int tx = tx_lo; tx <= tx_hi; ++tx) {
+                    for (int ty = ty_lo; ty <= ty_hi; ++ty) {
+                        for (int tz = tz_lo; tz <= tz_hi; ++tz) {
+                            const int t_idx = (tx * m_nty + ty) * m_ntz + tz;
+                            if (m_tile_table[t_idx] < 0) {
+                                const int slot = static_cast<int>(m_active_tiles.size());
+                                m_tile_table[t_idx] = slot;
+                                m_active_tiles.push_back(t_idx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const size_t needed_tiles = std::max<size_t>(1, m_active_tiles.size());
+        if (needed_tiles > m_tile_capacity || m_grid.size() < needed_tiles * MPMGridView3D::TILE_NODES) {
+            size_t new_cap = std::max(needed_tiles + (needed_tiles >> 1), std::max<size_t>(64, m_tile_capacity * 2));
+            new_cap = std::min(total_logical_tiles, std::max(needed_tiles, new_cap));
+
+            const size_t bytes_per_node = sizeof(MPMGridNode3D) +
+                ((m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) ? (static_cast<size_t>(m_num_materials) * 13 * sizeof(float)) : 0ULL);
+            const size_t bytes_per_tile = static_cast<size_t>(MPMGridView3D::TILE_NODES) * bytes_per_node;
+            const size_t avail_ram = query_available_host_ram_bytes_3d();
+            const size_t current_pool_bytes = m_grid.capacity() * bytes_per_node;
+            const size_t safety_reserve = 1024ULL * 1024ULL * 1024ULL; // 1 GiB host RAM reserve
+            if (avail_ram > 0 && (avail_ram + current_pool_bytes) > safety_reserve) {
+                const size_t max_safe_tiles = (avail_ram + current_pool_bytes - safety_reserve) / std::max<size_t>(1, bytes_per_tile);
+                if (needed_tiles > max_safe_tiles) {
+                    throw std::runtime_error(
+                        "[OOM Guard] 3D Sparse MPM Grid requires " + std::to_string(needed_tiles) +
+                        " active tiles (" + std::to_string((needed_tiles * bytes_per_tile) / (1024 * 1024)) +
+                        " MB), exceeding safe available Host RAM budget.");
+                }
+                new_cap = std::min(new_cap, std::max(needed_tiles, max_safe_tiles));
+            }
+
+            m_tile_capacity = new_cap;
+            // Free-Before-Reallocate: release old pool before allocating larger pool so peak RAM never spikes
+            m_grid.clear();
+            m_grid.shrink_to_fit();
+            m_mat_fields.clear();
+            m_mat_fields.shrink_to_fit();
+            m_grid.resize(m_tile_capacity * MPMGridView3D::TILE_NODES);
+            syncMaterialFieldAllocation(m_grid.size());
+        }
+    }
+
+    const size_t active_limit = m_sparse_grid_mode
+        ? (m_active_tiles.size() * static_cast<size_t>(MPMGridView3D::TILE_NODES))
+        : m_grid.size();
+
+    // Reset active 3D grid nodes
+    for (size_t idx = 0; idx < active_limit; ++idx) {
+        auto& node = m_grid[idx];
         node.m = 0.0f;
         node.m_solid = 0.0f;
         node.m_energetic = 0.0f;
@@ -1342,28 +1462,21 @@ void MPMSolver3D::particleToGrid() {
         size_t num_nodes = m_grid.size();
         if (m_mat_fields.size() != static_cast<size_t>(m_num_materials) ||
             (!m_mat_fields.empty() && m_mat_fields[0].m.size() != num_nodes)) {
-            m_mat_fields.resize(m_num_materials);
-            for (int m = 0; m < m_num_materials; ++m) {
-                m_mat_fields[m].m.assign(num_nodes, 0.0f);
-                for (int c = 0; c < 3; ++c) {
-                    m_mat_fields[m].p[c].assign(num_nodes, 0.0f);
-                    m_mat_fields[m].f_int[c].assign(num_nodes, 0.0f);
-                    m_mat_fields[m].v[c].assign(num_nodes, 0.0f);
-                    m_mat_fields[m].dv[c].assign(num_nodes, 0.0f);
-                }
-            }
+            syncMaterialFieldAllocation(num_nodes);
         } else {
             for (int m = 0; m < m_num_materials; ++m) {
-                std::fill(m_mat_fields[m].m.begin(), m_mat_fields[m].m.end(), 0.0f);
+                std::fill_n(m_mat_fields[m].m.begin(), active_limit, 0.0f);
                 for (int c = 0; c < 3; ++c) {
-                    std::fill(m_mat_fields[m].p[c].begin(), m_mat_fields[m].p[c].end(), 0.0f);
-                    std::fill(m_mat_fields[m].f_int[c].begin(), m_mat_fields[m].f_int[c].end(), 0.0f);
-                    std::fill(m_mat_fields[m].v[c].begin(), m_mat_fields[m].v[c].end(), 0.0f);
-                    std::fill(m_mat_fields[m].dv[c].begin(), m_mat_fields[m].dv[c].end(), 0.0f);
+                    std::fill_n(m_mat_fields[m].p[c].begin(), active_limit, 0.0f);
+                    std::fill_n(m_mat_fields[m].f_int[c].begin(), active_limit, 0.0f);
+                    std::fill_n(m_mat_fields[m].v[c].begin(), active_limit, 0.0f);
+                    std::fill_n(m_mat_fields[m].dv[c].begin(), active_limit, 0.0f);
                 }
             }
         }
     }
+
+    const MPMGridView3D gv = getGridView();
 
     // P2G Scatter in 3D
     for (const auto& p : m_particles) {
@@ -1404,6 +1517,7 @@ void MPMSolver3D::particleToGrid() {
         float diff_zx = s_zz - s_xx;
         float vm_stress = std::sqrt(0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) +
                                     3.0f * (s_xy * s_xy + s_yz * s_yz + s_zx * s_zx));
+        (void)dev_xx; (void)dev_yy; (void)dev_zz; (void)vm_stress;
 
         int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme : static_cast<int>(m_transfer_scheme);
 
@@ -1544,7 +1658,9 @@ void MPMSolver3D::particleToGrid() {
 
                         float weight = w * inv_w_sum;
 
-                        size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                        const long long slot = gv.slotIndex(i, j, k);
+                        if (slot < 0) continue;
+                        const size_t node_idx = static_cast<size_t>(slot);
                         auto& node = m_grid[node_idx];
 
                         node.m += p.m * weight;
@@ -1662,7 +1778,9 @@ void MPMSolver3D::particleToGrid() {
                         float dN_dy = Sx * dSy * Sz;
                         float dN_dz = Sx * Sy * dSz;
 
-                        size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                        const long long slot = gv.slotIndex(i, j, k);
+                        if (slot < 0) continue;
+                        const size_t node_idx = static_cast<size_t>(slot);
                         auto& node = m_grid[node_idx];
 
                         // Mass scatter
@@ -1817,7 +1935,9 @@ void MPMSolver3D::particleToGrid() {
                         float dN_dy = Sx * dSy * Sz;
                         float dN_dz = Sx * Sy * dSz;
 
-                        size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                        const long long slot = gv.slotIndex(i, j, k);
+                        if (slot < 0) continue;
+                        const size_t node_idx = static_cast<size_t>(slot);
                         auto& node = m_grid[node_idx];
 
                         // Mass scatter
@@ -1882,8 +2002,9 @@ void MPMSolver3D::particleToGrid() {
         }
     }
 
-    // Normalize telemetry scalars
-    for (auto& node : m_grid) {
+    // Normalize telemetry scalars over active range
+    for (size_t idx = 0; idx < active_limit; ++idx) {
+        auto& node = m_grid[idx];
         if (node.m > MPMGridNode3D::MIN_MASS) {
             node.plastic_strain = (node.m_solid > MPMGridNode3D::MIN_MASS) ? (node.plastic_strain / node.m_solid) : 0.0f;
             node.t_star = (node.m_solid > MPMGridNode3D::MIN_MASS) ? (node.t_star / node.m_solid) : 0.0f;
@@ -1899,34 +2020,68 @@ void MPMSolver3D::particleToGrid() {
 void MPMSolver3D::applyGridThermalConduction([[maybe_unused]] float dt) {
     if (!m_enable_thermal_conduction) return;
     constexpr float Fo_step = 0.05f; // Stable 3D 6-neighbor Fourier diffusion factor (<= 1/6)
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int i = 0; i < m_nx; ++i) {
-        for (int j = 0; j < m_ny; ++j) {
-            for (int k = 0; k < m_nz; ++k) {
-                size_t idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
-                auto& node = m_grid[idx];
-                node.dT_cond = 0.0f;
-                if (node.m <= MPMGridNode3D::MIN_MASS) continue;
-                const float T_i = node.temperature;
-                const float m_i = node.m;
-                float flux_sum = 0.0f;
-                const int di[6] = {-1, 1, 0, 0, 0, 0};
-                const int dj[6] = {0, 0, -1, 1, 0, 0};
-                const int dk[6] = {0, 0, 0, 0, -1, 1};
-                for (int d = 0; d < 6; ++d) {
-                    int ni = i + di[d];
-                    int nj = j + dj[d];
-                    int nk = k + dk[d];
-                    if (ni >= 0 && ni < m_nx && nj >= 0 && nj < m_ny && nk >= 0 && nk < m_nz) {
-                        size_t n_idx = (static_cast<size_t>(ni) * m_ny + nj) * m_nz + nk;
-                        const auto& nb = m_grid[n_idx];
-                        if (nb.m > MPMGridNode3D::MIN_MASS) {
-                            float m_harm = (2.0f * m_i * nb.m) / (m_i + nb.m);
-                            flux_sum += m_harm * (nb.temperature - T_i);
-                        }
+    const MPMGridView3D gv = getGridView();
+
+    auto processNode = [&](int i, int j, int k, size_t idx) {
+        auto& node = m_grid[idx];
+        node.dT_cond = 0.0f;
+        if (node.m <= MPMGridNode3D::MIN_MASS) return;
+        const float T_i = node.temperature;
+        const float m_i = node.m;
+        float flux_sum = 0.0f;
+        const int di[6] = {-1, 1, 0, 0, 0, 0};
+        const int dj[6] = {0, 0, -1, 1, 0, 0};
+        const int dk[6] = {0, 0, 0, 0, -1, 1};
+        for (int d = 0; d < 6; ++d) {
+            const int ni = i + di[d];
+            const int nj = j + dj[d];
+            const int nk = k + dk[d];
+            const long long n_slot = gv.slotIndex(ni, nj, nk);
+            if (n_slot >= 0) {
+                const auto& nb = m_grid[static_cast<size_t>(n_slot)];
+                if (nb.m > MPMGridNode3D::MIN_MASS) {
+                    const float m_harm = (2.0f * m_i * nb.m) / (m_i + nb.m);
+                    flux_sum += m_harm * (nb.temperature - T_i);
+                }
+            }
+        }
+        node.dT_cond = (Fo_step / m_i) * flux_sum;
+    };
+
+    if (m_sparse_grid_mode) {
+        const size_t num_active = m_active_tiles.size();
+        #pragma omp parallel for schedule(static)
+        for (size_t t_slot = 0; t_slot < num_active; ++t_slot) {
+            const int t_idx = m_active_tiles[t_slot];
+            const int tz = t_idx % m_ntz;
+            const int ty = (t_idx / m_ntz) % m_nty;
+            const int tx = t_idx / (m_ntz * m_nty);
+            const int base_i = tx << MPMGridView3D::TILE_SHIFT;
+            const int base_j = ty << MPMGridView3D::TILE_SHIFT;
+            const int base_k = tz << MPMGridView3D::TILE_SHIFT;
+            for (int lx = 0; lx < MPMGridView3D::TILE_DIM; ++lx) {
+                const int i = base_i + lx;
+                if (i >= m_nx) continue;
+                for (int ly = 0; ly < MPMGridView3D::TILE_DIM; ++ly) {
+                    const int j = base_j + ly;
+                    if (j >= m_ny) continue;
+                    for (int lz = 0; lz < MPMGridView3D::TILE_DIM; ++lz) {
+                        const int k = base_k + lz;
+                        if (k >= m_nz) continue;
+                        const size_t idx = (t_slot << 9) | (static_cast<size_t>(lx) << 6) | (static_cast<size_t>(ly) << 3) | static_cast<size_t>(lz);
+                        processNode(i, j, k, idx);
                     }
                 }
-                node.dT_cond = (Fo_step / m_i) * flux_sum;
+            }
+        }
+    } else {
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int i = 0; i < m_nx; ++i) {
+            for (int j = 0; j < m_ny; ++j) {
+                for (int k = 0; k < m_nz; ++k) {
+                    const size_t idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                    processNode(i, j, k, idx);
+                }
             }
         }
     }
@@ -1936,61 +2091,91 @@ void MPMSolver3D::updateGridKinematics(float dt) {
     float avg_p_mass = 0.001f;
     if (!m_particles.empty()) avg_p_mass = m_particles[0].m;
 
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int i = 0; i < m_nx; ++i) {
-        for (int j = 0; j < m_ny; ++j) {
-            for (int k = 0; k < m_nz; ++k) {
-                size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
-                auto& node = m_grid[node_idx];
+    auto processNode = [&](int i, int j, int k, size_t node_idx) {
+        auto& node = m_grid[node_idx];
+        if (node.m > MPMGridNode3D::MIN_MASS) {
+            float m_ref = (node.w_sum > 1.0e-20f) ? (node.m / node.w_sum) : std::max(avg_p_mass, 1.0e-12f);
+            float m_tol = 1.0e-8f * m_ref;
+            float reg = (node.m * node.m) / (node.m * node.m + m_tol * m_tol);
+            node.p[0] += dt * (node.f_ext[0] + reg * node.f_int[0]);
+            node.p[1] += dt * (node.f_ext[1] + reg * node.f_int[1]);
+            node.p[2] += dt * (node.f_ext[2] + reg * node.f_int[2]);
 
-                if (node.m > MPMGridNode3D::MIN_MASS) {
-                    float m_ref = (node.w_sum > 1.0e-20f) ? (node.m / node.w_sum) : std::max(avg_p_mass, 1.0e-12f);
-                    float m_tol = 1.0e-8f * m_ref;
-                    float reg = (node.m * node.m) / (node.m * node.m + m_tol * m_tol);
-                    node.p[0] += dt * (node.f_ext[0] + reg * node.f_int[0]);
-                    node.p[1] += dt * (node.f_ext[1] + reg * node.f_int[1]);
-                    node.p[2] += dt * (node.f_ext[2] + reg * node.f_int[2]);
+            // Apply 3D Boundary Conditions (x, y, z min/max across physical boundary faces)
+            if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::Sticky) ||
+                (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::Sticky)) {
+                node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
+            } else if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::LysmerDashpot) ||
+                       (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::LysmerDashpot)) {
+                float A_trib = m_dy * m_dz;
+                float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
+                float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
+                node.p[0] *= std::exp(- (C_n / node.m) * dt);
+                node.p[1] *= std::exp(- (C_s / node.m) * dt);
+                node.p[2] *= std::exp(- (C_s / node.m) * dt);
+            }
 
-                    // Apply 3D Boundary Conditions (x, y, z min/max across physical boundary faces)
-                    if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::Sticky) ||
-                        (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::Sticky)) {
-                        node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
-                    } else if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::LysmerDashpot) ||
-                               (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::LysmerDashpot)) {
-                        float A_trib = m_dy * m_dz;
-                        float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
-                        float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
-                        node.p[0] *= std::exp(- (C_n / node.m) * dt);
-                        node.p[1] *= std::exp(- (C_s / node.m) * dt);
-                        node.p[2] *= std::exp(- (C_s / node.m) * dt);
+            if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::Sticky) ||
+                (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::Sticky)) {
+                node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
+            } else if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::LysmerDashpot) ||
+                       (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::LysmerDashpot)) {
+                float A_trib = m_dx * m_dz;
+                float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
+                float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
+                node.p[1] *= std::exp(- (C_n / node.m) * dt);
+                node.p[0] *= std::exp(- (C_s / node.m) * dt);
+                node.p[2] *= std::exp(- (C_s / node.m) * dt);
+            }
+
+            if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::Sticky) ||
+                (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::Sticky)) {
+                node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
+            } else if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::LysmerDashpot) ||
+                       (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::LysmerDashpot)) {
+                float A_trib = m_dx * m_dy;
+                float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
+                float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
+                node.p[2] *= std::exp(- (C_n / node.m) * dt);
+                node.p[0] *= std::exp(- (C_s / node.m) * dt);
+                node.p[1] *= std::exp(- (C_s / node.m) * dt);
+            }
+        }
+    };
+
+    if (m_sparse_grid_mode) {
+        const size_t num_active = m_active_tiles.size();
+        #pragma omp parallel for schedule(static)
+        for (size_t t_slot = 0; t_slot < num_active; ++t_slot) {
+            const int t_idx = m_active_tiles[t_slot];
+            const int tz = t_idx % m_ntz;
+            const int ty = (t_idx / m_ntz) % m_nty;
+            const int tx = t_idx / (m_ntz * m_nty);
+            const int base_i = tx << MPMGridView3D::TILE_SHIFT;
+            const int base_j = ty << MPMGridView3D::TILE_SHIFT;
+            const int base_k = tz << MPMGridView3D::TILE_SHIFT;
+            for (int lx = 0; lx < MPMGridView3D::TILE_DIM; ++lx) {
+                const int i = base_i + lx;
+                if (i >= m_nx) continue;
+                for (int ly = 0; ly < MPMGridView3D::TILE_DIM; ++ly) {
+                    const int j = base_j + ly;
+                    if (j >= m_ny) continue;
+                    for (int lz = 0; lz < MPMGridView3D::TILE_DIM; ++lz) {
+                        const int k = base_k + lz;
+                        if (k >= m_nz) continue;
+                        const size_t node_idx = (t_slot << 9) | (static_cast<size_t>(lx) << 6) | (static_cast<size_t>(ly) << 3) | static_cast<size_t>(lz);
+                        processNode(i, j, k, node_idx);
                     }
-
-                    if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::Sticky) ||
-                        (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::Sticky)) {
-                        node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
-                    } else if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::LysmerDashpot) ||
-                               (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::LysmerDashpot)) {
-                        float A_trib = m_dx * m_dz;
-                        float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
-                        float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
-                        node.p[1] *= std::exp(- (C_n / node.m) * dt);
-                        node.p[0] *= std::exp(- (C_s / node.m) * dt);
-                        node.p[2] *= std::exp(- (C_s / node.m) * dt);
-                    }
-
-                    if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::Sticky) ||
-                        (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::Sticky)) {
-                        node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
-                    } else if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::LysmerDashpot) ||
-                               (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::LysmerDashpot)) {
-                        float A_trib = m_dx * m_dy;
-                        float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
-                        float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
-                        node.p[2] *= std::exp(- (C_n / node.m) * dt);
-                        node.p[0] *= std::exp(- (C_s / node.m) * dt);
-                        node.p[1] *= std::exp(- (C_s / node.m) * dt);
-                    }
-
+                }
+            }
+        }
+    } else {
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int i = 0; i < m_nx; ++i) {
+            for (int j = 0; j < m_ny; ++j) {
+                for (int k = 0; k < m_nz; ++k) {
+                    const size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                    processNode(i, j, k, node_idx);
                 }
             }
         }
@@ -2005,549 +2190,578 @@ void MPMSolver3D::updateGridKinematicsBardenhagen(float dt) {
 
     float avg_p_mass = 0.001f;
     if (!m_particles.empty()) avg_p_mass = m_particles[0].m;
+    const MPMGridView3D gv = getGridView();
 
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int i = 0; i < m_nx; ++i) {
-        for (int j = 0; j < m_ny; ++j) {
-            for (int k = 0; k < m_nz; ++k) {
-                size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
-                auto& node = m_grid[node_idx];
+    auto processNode = [&](int i, int j, int k, size_t node_idx) {
+        auto& node = m_grid[node_idx];
 
-                // 1. Unconstrained acceleration for each material field
-                float m_cm = 0.0f;
-                float p_cm[3] = {0.0f, 0.0f, 0.0f};
-                int active_count = 0;
-                float m_ref = (node.w_sum > 1.0e-20f) ? (node.m / node.w_sum) : std::max(avg_p_mass, 1.0e-12f);
-                float m_tol = 1.0e-8f * m_ref;
-                for (int m = 0; m < m_num_materials; ++m) {
-                    auto& mf = m_mat_fields[m];
-                    float mat_mass = mf.m[node_idx];
-                    if (mat_mass > MPMGridNode3D::MIN_MASS) {
-                        active_count++;
-                        m_cm += mat_mass;
+        // 1. Unconstrained acceleration for each material field
+        float m_cm = 0.0f;
+        float p_cm[3] = {0.0f, 0.0f, 0.0f};
+        int active_count = 0;
+        float m_ref = (node.w_sum > 1.0e-20f) ? (node.m / node.w_sum) : std::max(avg_p_mass, 1.0e-12f);
+        float m_tol = 1.0e-8f * m_ref;
+        for (int m = 0; m < m_num_materials; ++m) {
+            auto& mf = m_mat_fields[m];
+            float mat_mass = mf.m[node_idx];
+            if (mat_mass > MPMGridNode3D::MIN_MASS) {
+                active_count++;
+                m_cm += mat_mass;
 
-                        // Cache pre-update velocity v_old in dv
-                        float inv_m = 1.0f / mat_mass;
-                        mf.dv[0][node_idx] = mf.p[0][node_idx] * inv_m;
-                        mf.dv[1][node_idx] = mf.p[1][node_idx] * inv_m;
-                        mf.dv[2][node_idx] = mf.p[2][node_idx] * inv_m;
+                // Cache pre-update velocity v_old in dv
+                float inv_m = 1.0f / mat_mass;
+                mf.dv[0][node_idx] = mf.p[0][node_idx] * inv_m;
+                mf.dv[1][node_idx] = mf.p[1][node_idx] * inv_m;
+                mf.dv[2][node_idx] = mf.p[2][node_idx] * inv_m;
 
-                        float reg = (mat_mass * mat_mass) / (mat_mass * mat_mass + m_tol * m_tol);
+                float reg = (mat_mass * mat_mass) / (mat_mass * mat_mass + m_tol * m_tol);
 
-                        // Include external force apportioned by mass
-                        float f_ext_x = (node.m > MPMGridNode3D::MIN_MASS) ? (node.f_ext[0] * (mat_mass / node.m)) : 0.0f;
-                        float f_ext_y = (node.m > MPMGridNode3D::MIN_MASS) ? (node.f_ext[1] * (mat_mass / node.m)) : 0.0f;
-                        float f_ext_z = (node.m > MPMGridNode3D::MIN_MASS) ? (node.f_ext[2] * (mat_mass / node.m)) : 0.0f;
+                // Include external force apportioned by mass
+                float f_ext_x = (node.m > MPMGridNode3D::MIN_MASS) ? (node.f_ext[0] * (mat_mass / node.m)) : 0.0f;
+                float f_ext_y = (node.m > MPMGridNode3D::MIN_MASS) ? (node.f_ext[1] * (mat_mass / node.m)) : 0.0f;
+                float f_ext_z = (node.m > MPMGridNode3D::MIN_MASS) ? (node.f_ext[2] * (mat_mass / node.m)) : 0.0f;
 
-                        mf.p[0][node_idx] += dt * (reg * mf.f_int[0][node_idx] + f_ext_x);
-                        mf.p[1][node_idx] += dt * (reg * mf.f_int[1][node_idx] + f_ext_y);
-                        mf.p[2][node_idx] += dt * (reg * mf.f_int[2][node_idx] + f_ext_z);
+                mf.p[0][node_idx] += dt * (reg * mf.f_int[0][node_idx] + f_ext_x);
+                mf.p[1][node_idx] += dt * (reg * mf.f_int[1][node_idx] + f_ext_y);
+                mf.p[2][node_idx] += dt * (reg * mf.f_int[2][node_idx] + f_ext_z);
 
-                        p_cm[0] += mf.p[0][node_idx];
-                        p_cm[1] += mf.p[1][node_idx];
-                        p_cm[2] += mf.p[2][node_idx];
-                    }
+                p_cm[0] += mf.p[0][node_idx];
+                p_cm[1] += mf.p[1][node_idx];
+                p_cm[2] += mf.p[2][node_idx];
+            }
+        }
+
+        if (active_count == 0 || m_cm <= MPMGridNode3D::MIN_MASS) {
+            node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
+            return;
+        }
+
+        float inv_m_cm = 1.0f / m_cm;
+        float v_cm[3] = {p_cm[0] * inv_m_cm, p_cm[1] * inv_m_cm, p_cm[2] * inv_m_cm};
+
+        // Helper to apply boundary conditions
+        auto applyBC = [&](float& vx, float& vy, float& vz, float mass = 0.0f) {
+            if (mass <= 1.0e-12f) mass = (m_cm > 1.0e-12f ? m_cm : 1.0f);
+            if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::Sticky) ||
+                (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::Sticky)) {
+                vx = 0.0f; vy = 0.0f; vz = 0.0f;
+            } else if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::LysmerDashpot) ||
+                       (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::LysmerDashpot)) {
+                float A_trib = m_dy * m_dz;
+                float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
+                float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
+                vx *= std::exp(- (C_n / mass) * dt);
+                vy *= std::exp(- (C_s / mass) * dt);
+                vz *= std::exp(- (C_s / mass) * dt);
+            }
+
+            if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::Sticky) ||
+                (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::Sticky)) {
+                vx = 0.0f; vy = 0.0f; vz = 0.0f;
+            } else if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::LysmerDashpot) ||
+                       (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::LysmerDashpot)) {
+                float A_trib = m_dx * m_dz;
+                float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
+                float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
+                vy *= std::exp(- (C_n / mass) * dt);
+                vx *= std::exp(- (C_s / mass) * dt);
+                vz *= std::exp(- (C_s / mass) * dt);
+            }
+
+            if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::Sticky) ||
+                (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::Sticky)) {
+                vx = 0.0f; vy = 0.0f; vz = 0.0f;
+            } else if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::LysmerDashpot) ||
+                       (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::LysmerDashpot)) {
+                float A_trib = m_dx * m_dy;
+                float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
+                float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
+                vz *= std::exp(- (C_n / mass) * dt);
+                vx *= std::exp(- (C_s / mass) * dt);
+                vy *= std::exp(- (C_s / mass) * dt);
+            }
+        };
+
+        // Identify materials with physical mass presence on this node
+        int sig_count = 0;
+        float sig_threshold = MPMGridNode3D::MIN_MASS;
+        float cell_vol = m_dx * m_dy * m_dz;
+        float phi_max1 = 0.0f;
+        float phi_max2 = 0.0f;
+
+        for (int m = 0; m < m_num_materials; ++m) {
+            auto& mf = m_mat_fields[m];
+            float mat_mass = mf.m[node_idx];
+            if (mat_mass > sig_threshold) {
+                sig_count++;
+                int obj_id = (m < static_cast<int>(m_mat_to_obj.size())) ? m_mat_to_obj[m] : (m + 1);
+                float rho_m = (obj_id < static_cast<int>(m_material_tables.size()) && m_material_tables[obj_id].density > 1.0f)
+                    ? m_material_tables[obj_id].density : 1000.0f;
+                float phi_m = mat_mass / std::max(rho_m * cell_vol, 1.0e-20f);
+                if (phi_m > phi_max1) {
+                    phi_max2 = phi_max1;
+                    phi_max1 = phi_m;
+                } else if (phi_m > phi_max2) {
+                    phi_max2 = phi_m;
                 }
+            }
+        }
 
-                if (active_count == 0 || m_cm <= MPMGridNode3D::MIN_MASS) {
-                    node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
-                    continue;
-                }
+        // Scale-isolated Bardenhagen vacuum-gap contact engagement factor
+        float phi_total = phi_max1 + phi_max2;
+        float beta_fringe = std::clamp((phi_max2 - 0.05f) / 0.05f, 0.0f, 1.0f);
+        float beta_core   = std::clamp((phi_total - 0.40f) / 0.15f, 0.0f, 1.0f) *
+                            std::clamp((phi_max2 - 1.0e-3f) / 4.0e-3f, 0.0f, 1.0f);
+        float beta_contact = std::max(beta_fringe, beta_core);
 
-                float inv_m_cm = 1.0f / m_cm;
-                float v_cm[3] = {p_cm[0] * inv_m_cm, p_cm[1] * inv_m_cm, p_cm[2] * inv_m_cm};
-
-                // Helper to apply boundary conditions
-                auto applyBC = [&](float& vx, float& vy, float& vz, float mass = 0.0f) {
-                    if (mass <= 1.0e-12f) mass = (m_cm > 1.0e-12f ? m_cm : 1.0f);
-                    if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::Sticky) ||
-                        (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::Sticky)) {
-                        vx = 0.0f; vy = 0.0f; vz = 0.0f;
-                    } else if ((i == 0 && m_bc_x_min == MPMBoundaryCondition3D::LysmerDashpot) ||
-                               (i == m_nx - 1 && m_bc_x_max == MPMBoundaryCondition3D::LysmerDashpot)) {
-                        float A_trib = m_dy * m_dz;
-                        float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
-                        float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
-                        vx *= std::exp(- (C_n / mass) * dt);
-                        vy *= std::exp(- (C_s / mass) * dt);
-                        vz *= std::exp(- (C_s / mass) * dt);
-                    }
-
-                    if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::Sticky) ||
-                        (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::Sticky)) {
-                        vx = 0.0f; vy = 0.0f; vz = 0.0f;
-                    } else if ((j == 0 && m_bc_y_min == MPMBoundaryCondition3D::LysmerDashpot) ||
-                               (j == m_ny - 1 && m_bc_y_max == MPMBoundaryCondition3D::LysmerDashpot)) {
-                        float A_trib = m_dx * m_dz;
-                        float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
-                        float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
-                        vy *= std::exp(- (C_n / mass) * dt);
-                        vx *= std::exp(- (C_s / mass) * dt);
-                        vz *= std::exp(- (C_s / mass) * dt);
-                    }
-
-                    if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::Sticky) ||
-                        (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::Sticky)) {
-                        vx = 0.0f; vy = 0.0f; vz = 0.0f;
-                    } else if ((k == 0 && m_bc_z_min == MPMBoundaryCondition3D::LysmerDashpot) ||
-                               (k == m_nz - 1 && m_bc_z_max == MPMBoundaryCondition3D::LysmerDashpot)) {
-                        float A_trib = m_dx * m_dy;
-                        float C_n = A_trib * m_lysmer_params.rho * m_lysmer_params.c_p * m_lysmer_params.normal_relaxation;
-                        float C_s = A_trib * m_lysmer_params.rho * m_lysmer_params.c_s * m_lysmer_params.shear_relaxation;
-                        vz *= std::exp(- (C_n / mass) * dt);
-                        vx *= std::exp(- (C_s / mass) * dt);
-                        vy *= std::exp(- (C_s / mass) * dt);
-                    }
-                };
-
-                // Identify materials with physical mass presence on this node
-                int sig_count = 0;
-                float sig_threshold = MPMGridNode3D::MIN_MASS;
-                float cell_vol = m_dx * m_dy * m_dz;
-                float phi_max1 = 0.0f;
-                float phi_max2 = 0.0f;
-
-                for (int m = 0; m < m_num_materials; ++m) {
-                    auto& mf = m_mat_fields[m];
-                    float mat_mass = mf.m[node_idx];
-                    if (mat_mass > sig_threshold) {
-                        sig_count++;
-                        int obj_id = (m < static_cast<int>(m_mat_to_obj.size())) ? m_mat_to_obj[m] : (m + 1);
-                        float rho_m = (obj_id < static_cast<int>(m_material_tables.size()) && m_material_tables[obj_id].density > 1.0f)
-                            ? m_material_tables[obj_id].density : 1000.0f;
-                        float phi_m = mat_mass / std::max(rho_m * cell_vol, 1.0e-20f);
-                        if (phi_m > phi_max1) {
-                            phi_max2 = phi_max1;
-                            phi_max1 = phi_m;
-                        } else if (phi_m > phi_max2) {
-                            phi_max2 = phi_m;
-                        }
-                    }
-                }
-
-                // Scale-isolated Bardenhagen vacuum-gap contact engagement factor:
-                // Suppresses premature contact across empty vacuum gaps where NEITHER material occupies the cell core
-                // (both materials only touch the node via outer B-spline fringe tails: phi_max1 + phi_max2 < 0.25 and phi_max2 < 0.05).
-                // When at least one material occupies the cell core (phi_total >= 0.25), any minority spline tail of a
-                // second body reaching into that occupied cell receives full Bardenhagen contact velocity (beta_contact = 1),
-                // preserving a monotonic contact velocity profile across the stencil and full impact strain rate L_new in G2P.
-                float phi_total = phi_max1 + phi_max2;
-                float beta_fringe = std::clamp((phi_max2 - 0.05f) / 0.05f, 0.0f, 1.0f);
-                float beta_core   = std::clamp((phi_total - 0.40f) / 0.15f, 0.0f, 1.0f) *
-                                    std::clamp((phi_max2 - 1.0e-3f) / 4.0e-3f, 0.0f, 1.0f);
-                float beta_contact = std::max(beta_fringe, beta_core);
-
-                // A node carrying two or more tied (initially touching, co-moving) fields must take the cluster path
-                // below even when the Bardenhagen blend is inactive, so tied bodies share one velocity.
-                bool tie_node = false;
-                if (m_num_tied_pairs > 0 && m_num_materials <= 16) {
-                    unsigned int present_t = 0u;
-                    for (int m = 0; m < m_num_materials; ++m) if (m_mat_fields[m].m[node_idx] > MPMGridNode3D::MIN_MASS) present_t |= (1u << m);
-                    for (int m = 0; m < m_num_materials && !tie_node; ++m)
-                        if ((present_t >> m) & 1u) tie_node = ((m_tie_mask[m] & present_t & ~(1u << m)) != 0u);
-                }
-                if ((sig_count <= 1 || beta_contact <= 0.0f) && !tie_node) {
-                    for (int m = 0; m < m_num_materials; ++m) {
-                        auto& mf = m_mat_fields[m];
-                        float mat_mass = mf.m[node_idx];
-                        if (mat_mass > MPMGridNode3D::MIN_MASS) {
-                            float inv_m = 1.0f / mat_mass;
-                            float vx = mf.p[0][node_idx] * inv_m;
-                            float vy = mf.p[1][node_idx] * inv_m;
-                            float vz = mf.p[2][node_idx] * inv_m;
-                            applyBC(vx, vy, vz);
-                            mf.v[0][node_idx] = vx;
-                            mf.v[1][node_idx] = vy;
-                            mf.v[2][node_idx] = vz;
-                            mf.dv[0][node_idx] = vx - mf.dv[0][node_idx];
-                            mf.dv[1][node_idx] = vy - mf.dv[1][node_idx];
-                            mf.dv[2][node_idx] = vz - mf.dv[2][node_idx];
-                        } else {
-                            mf.v[0][node_idx] = 0.0f;
-                            mf.v[1][node_idx] = 0.0f;
-                            mf.v[2][node_idx] = 0.0f;
-                            mf.dv[0][node_idx] = 0.0f;
-                            mf.dv[1][node_idx] = 0.0f;
-                            mf.dv[2][node_idx] = 0.0f;
-                        }
-                    }
-                    float p0 = p_cm[0], p1 = p_cm[1], p2 = p_cm[2];
-                    applyBC(p0, p1, p2);
-                    node.p[0] = p0; node.p[1] = p1; node.p[2] = p2;
-                    continue;
-                }
-
-                // On-the-fly 2nd-order finite difference normals (evaluated strictly on multi-material interface cells)
-                float inv_2dx = 0.5f / m_dx;
-                float inv_2dy = 0.5f / m_dy;
-                float inv_2dz = 0.5f / m_dz;
-                float G_weighted_total[3] = {0.0f, 0.0f, 0.0f};
-                float G_unit_sum[3] = {0.0f, 0.0f, 0.0f};
-
-                size_t idx_ip = (i + 1 < m_nx) ? ((static_cast<size_t>(i + 1) * m_ny + j) * m_nz + k) : node_idx;
-                size_t idx_im = (i > 0)        ? ((static_cast<size_t>(i - 1) * m_ny + j) * m_nz + k) : node_idx;
-                size_t idx_jp = (j + 1 < m_ny) ? ((static_cast<size_t>(i) * m_ny + (j + 1)) * m_nz + k) : node_idx;
-                size_t idx_jm = (j > 0)        ? ((static_cast<size_t>(i) * m_ny + (j - 1)) * m_nz + k) : node_idx;
-                size_t idx_kp = (k + 1 < m_nz) ? ((static_cast<size_t>(i) * m_ny + j) * m_nz + (k + 1)) : node_idx;
-                size_t idx_km = (k > 0)        ? ((static_cast<size_t>(i) * m_ny + j) * m_nz + (k - 1)) : node_idx;
-
-                for (int m = 0; m < m_num_materials; ++m) {
-                    auto& mf = m_mat_fields[m];
-                    float mat_mass = mf.m[node_idx];
-                    if (mat_mass > sig_threshold) {
-                        float gm_x = (mf.m[idx_im] - mf.m[idx_ip]) * inv_2dx;
-                        float gm_y = (mf.m[idx_jm] - mf.m[idx_jp]) * inv_2dy;
-                        float gm_z = (mf.m[idx_km] - mf.m[idx_kp]) * inv_2dz;
-
-                        float gm_len = std::sqrt(gm_x * gm_x + gm_y * gm_y + gm_z * gm_z);
-                        if (gm_len > 1.0e-20f) {
-                            float inv_gm = 1.0f / gm_len;
-                            float gh_x = gm_x * inv_gm;
-                            float gh_y = gm_y * inv_gm;
-                            float gh_z = gm_z * inv_gm;
-                            G_weighted_total[0] += mat_mass * gh_x;
-                            G_weighted_total[1] += mat_mass * gh_y;
-                            G_weighted_total[2] += mat_mass * gh_z;
-                            G_unit_sum[0] += gh_x;
-                            G_unit_sum[1] += gh_y;
-                            G_unit_sum[2] += gh_z;
-                        }
-                    }
-                }
-
-                float mu = m_dem_friction;
-                float rest = std::clamp(m_dem_restitution, 0.0f, 1.0f);
-                float grad_thresh = 1.0e-4f;
-                bool any_fluid_node = (node.m_energetic > 0.05f * m_cm) || (node.m_solid < 0.5f * m_cm);
-                float alpha_weld = 0.0f;
-                if (m_enable_impact_welding && !any_fluid_node &&
-                    (node.pressure > 0.0f || (node.t_star > 0.35f && node.plastic_strain > 0.15f))) {
-                    float E_rel_avail = 0.0f;
-                    for (int m = 0; m < m_num_materials; ++m) {
-                        float mat_mass = m_mat_fields[m].m[node_idx];
-                        if (mat_mass > MPMGridNode3D::MIN_MASS) {
-                            float inv_m = 1.0f / mat_mass;
-                            float dvx = m_mat_fields[m].p[0][node_idx] * inv_m - v_cm[0];
-                            float dvy = m_mat_fields[m].p[1][node_idx] * inv_m - v_cm[1];
-                            float dvz = m_mat_fields[m].p[2][node_idx] * inv_m - v_cm[2];
-                            E_rel_avail += 0.5f * mat_mass * (dvx * dvx + dvy * dvy + dvz * dvz);
-                        }
-                    }
-                    float t_star_flash = (m_cm > MPMGridNode3D::MIN_MASS && (node.t_star > 0.02f || node.plastic_strain > 0.01f))
-                        ? ((E_rel_avail / m_cm) / (400.0f * 1000.0f))
-                        : 0.0f;
-                    float t_star_eff = node.t_star + t_star_flash;
-                    float w_thermal = std::clamp((t_star_eff - 0.05f) / 0.35f, 0.0f, 1.0f);
-                    float w_plastic = std::clamp((node.plastic_strain - 0.005f) / 0.05f, 0.0f, 1.0f);
-                    float weld_fill = std::clamp((phi_max1 - 0.05f) / 0.10f, 0.0f, 1.0f);
-                    alpha_weld = beta_contact * w_thermal * w_plastic * weld_fill;
-                }
-                if (tie_node) {
-                    // Initial-contact tie (mirror of the CUDA path): tied, non-separating pairs are merged into one contact
-                    // body; member velocities are replaced by cluster momentum / mass (exact momentum conservation) and
-                    // Bardenhagen contact then acts between clusters. Release uses a relative round-off bound on the
-                    // separation rate along n_ab = unit(g_a - g_b).
-                    const float tie_eps = 1.0e5f * 1.1920929e-7f;
-                    const float eff_rest_tie = rest * (1.0f - alpha_weld);
-                    unsigned int present = 0u;
-                    float f_mass[16], f_v[16][3], f_gm[16][3], f_gh[16][3];
-                    for (int m = 0; m < m_num_materials; ++m) {
-                        auto& mf = m_mat_fields[m];
-                        f_mass[m] = 0.0f;
-                        for (int d = 0; d < 3; ++d) { f_v[m][d] = 0.0f; f_gm[m][d] = 0.0f; f_gh[m][d] = 0.0f; }
-                        if (!(mf.m[node_idx] > MPMGridNode3D::MIN_MASS)) continue;
-                        present |= (1u << m);
-                        f_mass[m] = mf.m[node_idx];
-                        const float inv_mm = 1.0f / f_mass[m];
-                        for (int d = 0; d < 3; ++d) f_v[m][d] = mf.p[d][node_idx] * inv_mm;
-                        f_gm[m][0] = (mf.m[idx_im] - mf.m[idx_ip]) * inv_2dx;
-                        f_gm[m][1] = (mf.m[idx_jm] - mf.m[idx_jp]) * inv_2dy;
-                        f_gm[m][2] = (mf.m[idx_km] - mf.m[idx_kp]) * inv_2dz;
-                        const float gl = std::sqrt(f_gm[m][0] * f_gm[m][0] + f_gm[m][1] * f_gm[m][1] + f_gm[m][2] * f_gm[m][2]);
-                        if (gl > 1.0e-20f) for (int d = 0; d < 3; ++d) f_gh[m][d] = f_gm[m][d] / gl;
-                    }
-                    int parent[16];
-                    for (int m = 0; m < 16; ++m) parent[m] = m;
-                    auto find_root = [&](int a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
-                    for (int a = 0; a < m_num_materials; ++a) {
-                        if (!((present >> a) & 1u)) continue;
-                        for (int b = a + 1; b < m_num_materials; ++b) {
-                            if (!((present >> b) & 1u)) continue;
-                            if (!((m_tie_mask[a] >> b) & 1u)) continue;
-                            const float nx_ = f_gh[a][0] - f_gh[b][0], ny_ = f_gh[a][1] - f_gh[b][1], nz_ = f_gh[a][2] - f_gh[b][2];
-                            const float nl = std::sqrt(nx_ * nx_ + ny_ * ny_ + nz_ * nz_);
-                            bool active = true;
-                            if (nl > 1.0e-4f) {
-                                const float sep_rate = ((f_v[a][0] - f_v[b][0]) * nx_ + (f_v[a][1] - f_v[b][1]) * ny_ + (f_v[a][2] - f_v[b][2]) * nz_) / nl;
-                                const float va_mag = std::sqrt(f_v[a][0] * f_v[a][0] + f_v[a][1] * f_v[a][1] + f_v[a][2] * f_v[a][2]);
-                                const float vb_mag = std::sqrt(f_v[b][0] * f_v[b][0] + f_v[b][1] * f_v[b][1] + f_v[b][2] * f_v[b][2]);
-                                active = (sep_rate >= -tie_eps * std::max(va_mag, vb_mag));
-                            }
-                            if (active) {
-                                const int ra = find_root(a), rb = find_root(b);
-                                if (ra != rb) { if (ra < rb) parent[rb] = ra; else parent[ra] = rb; }
-                            }
-                        }
-                    }
-                    float c_mass[16], c_p[16][3], c_gm[16][3], c_v[16][3], c_gh[16][3];
-                    for (int r = 0; r < 16; ++r) {
-                        c_mass[r] = 0.0f;
-                        for (int d = 0; d < 3; ++d) { c_p[r][d] = 0.0f; c_gm[r][d] = 0.0f; c_v[r][d] = 0.0f; c_gh[r][d] = 0.0f; }
-                    }
-                    for (int m = 0; m < m_num_materials; ++m) {
-                        if (!((present >> m) & 1u)) continue;
-                        const int r = find_root(m);
-                        c_mass[r] += f_mass[m];
-                        for (int d = 0; d < 3; ++d) { c_p[r][d] += f_mass[m] * f_v[m][d]; c_gm[r][d] += f_gm[m][d]; }
-                    }
-                    int n_cl = 0;
-                    float Gw_tot[3] = {0.0f, 0.0f, 0.0f}, G_unit[3] = {0.0f, 0.0f, 0.0f};
-                    for (int r = 0; r < m_num_materials; ++r) {
-                        if (c_mass[r] <= 1.0e-20f) continue;
-                        n_cl++;
-                        const float inv_c = 1.0f / c_mass[r];
-                        for (int d = 0; d < 3; ++d) c_v[r][d] = c_p[r][d] * inv_c;
-                        const float gl = std::sqrt(c_gm[r][0] * c_gm[r][0] + c_gm[r][1] * c_gm[r][1] + c_gm[r][2] * c_gm[r][2]);
-                        if (gl > 1.0e-20f) {
-                            for (int d = 0; d < 3; ++d) { c_gh[r][d] = c_gm[r][d] / gl; Gw_tot[d] += c_mass[r] * c_gh[r][d]; G_unit[d] += c_gh[r][d]; }
-                        }
-                    }
-                    float c_corr[16][3];
-                    for (int r = 0; r < m_num_materials; ++r) {
-                        for (int d = 0; d < 3; ++d) c_corr[r][d] = c_v[r][d];
-                        if (c_mass[r] <= 1.0e-20f || n_cl <= 1) continue;
-                        const float eff_fr = any_fluid_node ? 0.0f : mu;
-                        const float m_other_c = m_cm - c_mass[r];
-                        float G_c[3];
-                        if (m_other_c > 1.0e-20f) {
-                            const float inv_o = 1.0f / m_other_c;
-                            for (int d = 0; d < 3; ++d) G_c[d] = c_gh[r][d] - (Gw_tot[d] - c_mass[r] * c_gh[r][d]) * inv_o;
-                        } else {
-                            const float inv_other = 1.0f / static_cast<float>(n_cl - 1);
-                            const float factor_self = static_cast<float>(n_cl) * inv_other;
-                            for (int d = 0; d < 3; ++d) G_c[d] = factor_self * c_gh[r][d] - inv_other * G_unit[d];
-                        }
-                        const float glen = std::sqrt(G_c[0] * G_c[0] + G_c[1] * G_c[1] + G_c[2] * G_c[2]);
-                        if (glen > grad_thresh) {
-                            const float inv_g = 1.0f / glen;
-                            const float n[3] = {G_c[0] * inv_g, G_c[1] * inv_g, G_c[2] * inv_g};
-                            const float v_rel[3] = {c_v[r][0] - v_cm[0], c_v[r][1] - v_cm[1], c_v[r][2] - v_cm[2]};
-                            const float v_approach = v_rel[0] * n[0] + v_rel[1] * n[1] + v_rel[2] * n[2];
-                            if (v_approach > 0.0f && beta_contact > 0.0f) {
-                                const float v_cm_n = v_cm[0] * n[0] + v_cm[1] * n[1] + v_cm[2] * n[2];
-                                const float v_norm = v_cm_n - eff_rest_tie * v_approach;
-                                const float v_star_n = c_v[r][0] * n[0] + c_v[r][1] * n[1] + c_v[r][2] * n[2];
-                                float v_tang[3], v_cm_tang[3], v_slip[3];
-                                for (int d = 0; d < 3; ++d) { v_tang[d] = c_v[r][d] - v_star_n * n[d]; v_cm_tang[d] = v_cm[d] - v_cm_n * n[d]; v_slip[d] = v_tang[d] - v_cm_tang[d]; }
-                                const float slip_speed = std::sqrt(v_slip[0] * v_slip[0] + v_slip[1] * v_slip[1] + v_slip[2] * v_slip[2]);
-                                const float max_friction_dv = eff_fr * v_approach;
-                                float v_tang_corr[3];
-                                if (slip_speed <= max_friction_dv || slip_speed < 1.0e-7f) {
-                                    for (int d = 0; d < 3; ++d) v_tang_corr[d] = v_cm_tang[d];
-                                } else {
-                                    const float factor = (eff_fr > 0.0f) ? (1.0f - max_friction_dv / slip_speed) : 1.0f;
-                                    for (int d = 0; d < 3; ++d) v_tang_corr[d] = v_cm_tang[d] + factor * v_slip[d];
-                                }
-                                if (alpha_weld > 0.0f)
-                                    for (int d = 0; d < 3; ++d) v_tang_corr[d] = (1.0f - alpha_weld) * v_tang_corr[d] + alpha_weld * v_cm_tang[d];
-                                for (int d = 0; d < 3; ++d) {
-                                    const float v_bard = v_norm * n[d] + v_tang_corr[d];
-                                    c_corr[r][d] = c_v[r][d] + beta_contact * (v_bard - c_v[r][d]);
-                                }
-                            }
-                            if (alpha_weld > 0.0f)
-                                for (int d = 0; d < 3; ++d) c_corr[r][d] += alpha_weld * (v_cm[d] - c_corr[r][d]);
-                        } else if (beta_contact > 0.0f) {
-                            for (int d = 0; d < 3; ++d) c_corr[r][d] = c_v[r][d] + beta_contact * (v_cm[d] - c_v[r][d]);
-                            if (alpha_weld > 0.0f)
-                                for (int d = 0; d < 3; ++d) c_corr[r][d] += alpha_weld * (v_cm[d] - c_corr[r][d]);
-                        }
-                    }
-                    float E_fric_tie = 0.0f;
-                    for (int m = 0; m < m_num_materials; ++m) {
-                        auto& mf = m_mat_fields[m];
-                        if (!((present >> m) & 1u)) {
-                            for (int d = 0; d < 3; ++d) { mf.v[d][node_idx] = 0.0f; mf.dv[d][node_idx] = 0.0f; }
-                            continue;
-                        }
-                        const int r = find_root(m);
-                        float vc[3] = {c_corr[r][0], c_corr[r][1], c_corr[r][2]};
-                        if (m_enable_frictional_heating && n_cl > 1) {
-                            float b = 0.0f, a_ = 0.0f;
-                            for (int d = 0; d < 3; ++d) { b += (f_v[m][d] - v_cm[d]) * (f_v[m][d] - v_cm[d]); a_ += (vc[d] - v_cm[d]) * (vc[d] - v_cm[d]); }
-                            if (b > a_) E_fric_tie += 0.5f * f_mass[m] * (b - a_);
-                        }
-                        applyBC(vc[0], vc[1], vc[2]);
-                        for (int d = 0; d < 3; ++d) { mf.v[d][node_idx] = vc[d]; mf.dv[d][node_idx] = vc[d] - mf.dv[d][node_idx]; }
-                    }
-                    if (m_enable_frictional_heating && E_fric_tie > 0.0f && node.m > MPMGridNode3D::MIN_MASS) node.q_fric = E_fric_tie / node.m;
-                    float tp0 = p_cm[0], tp1 = p_cm[1], tp2 = p_cm[2];
-                    applyBC(tp0, tp1, tp2);
-                    node.p[0] = tp0; node.p[1] = tp1; node.p[2] = tp2;
-                    continue;
-                }
-                float eff_rest = rest * (1.0f - alpha_weld);
-                float E_fric_node = 0.0f;
-
-                for (int m = 0; m < m_num_materials; ++m) {
-                    auto& mf = m_mat_fields[m];
-                    float mat_mass = mf.m[node_idx];
-                    if (mat_mass <= MPMGridNode3D::MIN_MASS) {
-                        mf.v[0][node_idx] = 0.0f;
-                        mf.v[1][node_idx] = 0.0f;
-                        mf.v[2][node_idx] = 0.0f;
-                        mf.dv[0][node_idx] = 0.0f;
-                        mf.dv[1][node_idx] = 0.0f;
-                        mf.dv[2][node_idx] = 0.0f;
-                        continue;
-                    }
-
-                    // Fluid/gas materials experience zero Coulomb friction along boundaries
-                    float eff_friction = mu;
-                    int obj_id = (m < static_cast<int>(m_mat_to_obj.size())) ? m_mat_to_obj[m] : (m + 1);
-                    if (obj_id < static_cast<int>(m_material_tables.size())) {
-                        auto m_model = m_material_tables[obj_id].material_model;
-                        if (m_model == MPMMaterialModel::CRESTReactiveBurn ||
-                            m_model == MPMMaterialModel::JWLProgrammedBurn ||
-                            m_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
-                            eff_friction = 0.0f;
-                        }
-                    }
-
+        bool tie_node = false;
+        if (m_num_tied_pairs > 0 && m_num_materials <= 16) {
+            unsigned int present_t = 0u;
+            for (int m = 0; m < m_num_materials; ++m) if (m_mat_fields[m].m[node_idx] > MPMGridNode3D::MIN_MASS) present_t |= (1u << m);
+            for (int m = 0; m < m_num_materials && !tie_node; ++m)
+                if ((present_t >> m) & 1u) tie_node = ((m_tie_mask[m] & present_t & ~(1u << m)) != 0u);
+        }
+        if ((sig_count <= 1 || beta_contact <= 0.0f) && !tie_node) {
+            for (int m = 0; m < m_num_materials; ++m) {
+                auto& mf = m_mat_fields[m];
+                float mat_mass = mf.m[node_idx];
+                if (mat_mass > MPMGridNode3D::MIN_MASS) {
                     float inv_m = 1.0f / mat_mass;
-                    float v_star[3] = {mf.p[0][node_idx] * inv_m,
-                                       mf.p[1][node_idx] * inv_m,
-                                       mf.p[2][node_idx] * inv_m};
+                    float vx = mf.p[0][node_idx] * inv_m;
+                    float vy = mf.p[1][node_idx] * inv_m;
+                    float vz = mf.p[2][node_idx] * inv_m;
+                    applyBC(vx, vy, vz);
+                    mf.v[0][node_idx] = vx;
+                    mf.v[1][node_idx] = vy;
+                    mf.v[2][node_idx] = vz;
+                    mf.dv[0][node_idx] = vx - mf.dv[0][node_idx];
+                    mf.dv[1][node_idx] = vy - mf.dv[1][node_idx];
+                    mf.dv[2][node_idx] = vz - mf.dv[2][node_idx];
+                } else {
+                    mf.v[0][node_idx] = 0.0f;
+                    mf.v[1][node_idx] = 0.0f;
+                    mf.v[2][node_idx] = 0.0f;
+                    mf.dv[0][node_idx] = 0.0f;
+                    mf.dv[1][node_idx] = 0.0f;
+                    mf.dv[2][node_idx] = 0.0f;
+                }
+            }
+            float p0 = p_cm[0], p1 = p_cm[1], p2 = p_cm[2];
+            applyBC(p0, p1, p2);
+            node.p[0] = p0; node.p[1] = p1; node.p[2] = p2;
+            return;
+        }
 
-                    float v_corr[3] = {v_star[0], v_star[1], v_star[2]};
+        // On-the-fly 2nd-order finite difference normals (evaluated strictly on multi-material interface cells)
+        float inv_2dx = 0.5f / m_dx;
+        float inv_2dy = 0.5f / m_dy;
+        float inv_2dz = 0.5f / m_dz;
+        float G_weighted_total[3] = {0.0f, 0.0f, 0.0f};
+        float G_unit_sum[3] = {0.0f, 0.0f, 0.0f};
 
-                    if (mat_mass >= sig_threshold) {
-                        float gm_x = (mf.m[idx_im] - mf.m[idx_ip]) * inv_2dx;
-                        float gm_y = (mf.m[idx_jm] - mf.m[idx_jp]) * inv_2dy;
-                        float gm_z = (mf.m[idx_km] - mf.m[idx_kp]) * inv_2dz;
+        const long long s_ip = (i + 1 < m_nx) ? gv.slotIndex(i + 1, j, k) : -1;
+        const long long s_im = (i > 0)        ? gv.slotIndex(i - 1, j, k) : -1;
+        const long long s_jp = (j + 1 < m_ny) ? gv.slotIndex(i, j + 1, k) : -1;
+        const long long s_jm = (j > 0)        ? gv.slotIndex(i, j - 1, k) : -1;
+        const long long s_kp = (k + 1 < m_nz) ? gv.slotIndex(i, j, k + 1) : -1;
+        const long long s_km = (k > 0)        ? gv.slotIndex(i, j, k - 1) : -1;
 
-                        float gm_len = std::sqrt(gm_x * gm_x + gm_y * gm_y + gm_z * gm_z);
-                        float inv_gm = (gm_len > 1.0e-20f) ? (1.0f / gm_len) : 0.0f;
-                        float g_hat[3] = {
-                            gm_x * inv_gm,
-                            gm_y * inv_gm,
-                            gm_z * inv_gm
-                        };
-                        float m_other = m_cm - mat_mass;
-                        float G_m[3];
-                        if (m_other > 1.0e-20f) {
-                            float inv_m_other = 1.0f / m_other;
-                            G_m[0] = g_hat[0] - (G_weighted_total[0] - mat_mass * g_hat[0]) * inv_m_other;
-                            G_m[1] = g_hat[1] - (G_weighted_total[1] - mat_mass * g_hat[1]) * inv_m_other;
-                            G_m[2] = g_hat[2] - (G_weighted_total[2] - mat_mass * g_hat[2]) * inv_m_other;
+        size_t idx_ip = (s_ip >= 0) ? static_cast<size_t>(s_ip) : node_idx;
+        size_t idx_im = (s_im >= 0) ? static_cast<size_t>(s_im) : node_idx;
+        size_t idx_jp = (s_jp >= 0) ? static_cast<size_t>(s_jp) : node_idx;
+        size_t idx_jm = (s_jm >= 0) ? static_cast<size_t>(s_jm) : node_idx;
+        size_t idx_kp = (s_kp >= 0) ? static_cast<size_t>(s_kp) : node_idx;
+        size_t idx_km = (s_km >= 0) ? static_cast<size_t>(s_km) : node_idx;
+
+        for (int m = 0; m < m_num_materials; ++m) {
+            auto& mf = m_mat_fields[m];
+            float mat_mass = mf.m[node_idx];
+            if (mat_mass > sig_threshold) {
+                float gm_x = (mf.m[idx_im] - mf.m[idx_ip]) * inv_2dx;
+                float gm_y = (mf.m[idx_jm] - mf.m[idx_jp]) * inv_2dy;
+                float gm_z = (mf.m[idx_km] - mf.m[idx_kp]) * inv_2dz;
+
+                float gm_len = std::sqrt(gm_x * gm_x + gm_y * gm_y + gm_z * gm_z);
+                if (gm_len > 1.0e-20f) {
+                    float inv_gm = 1.0f / gm_len;
+                    float gh_x = gm_x * inv_gm;
+                    float gh_y = gm_y * inv_gm;
+                    float gh_z = gm_z * inv_gm;
+                    G_weighted_total[0] += mat_mass * gh_x;
+                    G_weighted_total[1] += mat_mass * gh_y;
+                    G_weighted_total[2] += mat_mass * gh_z;
+                    G_unit_sum[0] += gh_x;
+                    G_unit_sum[1] += gh_y;
+                    G_unit_sum[2] += gh_z;
+                }
+            }
+        }
+
+        float mu = m_dem_friction;
+        float rest = std::clamp(m_dem_restitution, 0.0f, 1.0f);
+        float grad_thresh = 1.0e-4f;
+        bool any_fluid_node = (node.m_energetic > 0.05f * m_cm) || (node.m_solid < 0.5f * m_cm);
+        float alpha_weld = 0.0f;
+        if (m_enable_impact_welding && !any_fluid_node &&
+            (node.pressure > 0.0f || (node.t_star > 0.35f && node.plastic_strain > 0.15f))) {
+            float E_rel_avail = 0.0f;
+            for (int m = 0; m < m_num_materials; ++m) {
+                float mat_mass = m_mat_fields[m].m[node_idx];
+                if (mat_mass > MPMGridNode3D::MIN_MASS) {
+                    float inv_m = 1.0f / mat_mass;
+                    float dvx = m_mat_fields[m].p[0][node_idx] * inv_m - v_cm[0];
+                    float dvy = m_mat_fields[m].p[1][node_idx] * inv_m - v_cm[1];
+                    float dvz = m_mat_fields[m].p[2][node_idx] * inv_m - v_cm[2];
+                    E_rel_avail += 0.5f * mat_mass * (dvx * dvx + dvy * dvy + dvz * dvz);
+                }
+            }
+            float t_star_flash = (m_cm > MPMGridNode3D::MIN_MASS && (node.t_star > 0.02f || node.plastic_strain > 0.01f))
+                ? ((E_rel_avail / m_cm) / (400.0f * 1000.0f))
+                : 0.0f;
+            float t_star_eff = node.t_star + t_star_flash;
+            float w_thermal = std::clamp((t_star_eff - 0.05f) / 0.35f, 0.0f, 1.0f);
+            float w_plastic = std::clamp((node.plastic_strain - 0.005f) / 0.05f, 0.0f, 1.0f);
+            float weld_fill = std::clamp((phi_max1 - 0.05f) / 0.10f, 0.0f, 1.0f);
+            alpha_weld = beta_contact * w_thermal * w_plastic * weld_fill;
+        }
+        if (tie_node) {
+            const float tie_eps = 1.0e5f * 1.1920929e-7f;
+            const float eff_rest_tie = rest * (1.0f - alpha_weld);
+            unsigned int present = 0u;
+            float f_mass[16], f_v[16][3], f_gm[16][3], f_gh[16][3];
+            for (int m = 0; m < m_num_materials; ++m) {
+                auto& mf = m_mat_fields[m];
+                f_mass[m] = 0.0f;
+                for (int d = 0; d < 3; ++d) { f_v[m][d] = 0.0f; f_gm[m][d] = 0.0f; f_gh[m][d] = 0.0f; }
+                if (!(mf.m[node_idx] > MPMGridNode3D::MIN_MASS)) continue;
+                present |= (1u << m);
+                f_mass[m] = mf.m[node_idx];
+                const float inv_mm = 1.0f / f_mass[m];
+                for (int d = 0; d < 3; ++d) f_v[m][d] = mf.p[d][node_idx] * inv_mm;
+                f_gm[m][0] = (mf.m[idx_im] - mf.m[idx_ip]) * inv_2dx;
+                f_gm[m][1] = (mf.m[idx_jm] - mf.m[idx_jp]) * inv_2dy;
+                f_gm[m][2] = (mf.m[idx_km] - mf.m[idx_kp]) * inv_2dz;
+                const float gl = std::sqrt(f_gm[m][0] * f_gm[m][0] + f_gm[m][1] * f_gm[m][1] + f_gm[m][2] * f_gm[m][2]);
+                if (gl > 1.0e-20f) for (int d = 0; d < 3; ++d) f_gh[m][d] = f_gm[m][d] / gl;
+            }
+            int parent[16];
+            for (int m = 0; m < 16; ++m) parent[m] = m;
+            auto find_root = [&](int a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+            for (int a = 0; a < m_num_materials; ++a) {
+                if (!((present >> a) & 1u)) continue;
+                for (int b = a + 1; b < m_num_materials; ++b) {
+                    if (!((present >> b) & 1u)) continue;
+                    if (!((m_tie_mask[a] >> b) & 1u)) continue;
+                    const float nx_ = f_gh[a][0] - f_gh[b][0], ny_ = f_gh[a][1] - f_gh[b][1], nz_ = f_gh[a][2] - f_gh[b][2];
+                    const float nl = std::sqrt(nx_ * nx_ + ny_ * ny_ + nz_ * nz_);
+                    bool active = true;
+                    if (nl > 1.0e-4f) {
+                        const float sep_rate = ((f_v[a][0] - f_v[b][0]) * nx_ + (f_v[a][1] - f_v[b][1]) * ny_ + (f_v[a][2] - f_v[b][2]) * nz_) / nl;
+                        const float va_mag = std::sqrt(f_v[a][0] * f_v[a][0] + f_v[a][1] * f_v[a][1] + f_v[a][2] * f_v[a][2]);
+                        const float vb_mag = std::sqrt(f_v[b][0] * f_v[b][0] + f_v[b][1] * f_v[b][1] + f_v[b][2] * f_v[b][2]);
+                        active = (sep_rate >= -tie_eps * std::max(va_mag, vb_mag));
+                    }
+                    if (active) {
+                        const int ra = find_root(a), rb = find_root(b);
+                        if (ra != rb) { if (ra < rb) parent[rb] = ra; else parent[ra] = rb; }
+                    }
+                }
+            }
+            float c_mass[16], c_p[16][3], c_gm[16][3], c_v[16][3], c_gh[16][3];
+            for (int r = 0; r < 16; ++r) {
+                c_mass[r] = 0.0f;
+                for (int d = 0; d < 3; ++d) { c_p[r][d] = 0.0f; c_gm[r][d] = 0.0f; c_v[r][d] = 0.0f; c_gh[r][d] = 0.0f; }
+            }
+            for (int m = 0; m < m_num_materials; ++m) {
+                if (!((present >> m) & 1u)) continue;
+                const int r = find_root(m);
+                c_mass[r] += f_mass[m];
+                for (int d = 0; d < 3; ++d) { c_p[r][d] += f_mass[m] * f_v[m][d]; c_gm[r][d] += f_gm[m][d]; }
+            }
+            int n_cl = 0;
+            float Gw_tot[3] = {0.0f, 0.0f, 0.0f}, G_unit[3] = {0.0f, 0.0f, 0.0f};
+            for (int r = 0; r < m_num_materials; ++r) {
+                if (c_mass[r] <= 1.0e-20f) continue;
+                n_cl++;
+                const float inv_c = 1.0f / c_mass[r];
+                for (int d = 0; d < 3; ++d) c_v[r][d] = c_p[r][d] * inv_c;
+                const float gl = std::sqrt(c_gm[r][0] * c_gm[r][0] + c_gm[r][1] * c_gm[r][1] + c_gm[r][2] * c_gm[r][2]);
+                if (gl > 1.0e-20f) {
+                    for (int d = 0; d < 3; ++d) { c_gh[r][d] = c_gm[r][d] / gl; Gw_tot[d] += c_mass[r] * c_gh[r][d]; G_unit[d] += c_gh[r][d]; }
+                }
+            }
+            float c_corr[16][3];
+            for (int r = 0; r < m_num_materials; ++r) {
+                for (int d = 0; d < 3; ++d) c_corr[r][d] = c_v[r][d];
+                if (c_mass[r] <= 1.0e-20f || n_cl <= 1) continue;
+                const float eff_fr = any_fluid_node ? 0.0f : mu;
+                const float m_other_c = m_cm - c_mass[r];
+                float G_c[3];
+                if (m_other_c > 1.0e-20f) {
+                    const float inv_o = 1.0f / m_other_c;
+                    for (int d = 0; d < 3; ++d) G_c[d] = c_gh[r][d] - (Gw_tot[d] - c_mass[r] * c_gh[r][d]) * inv_o;
+                } else {
+                    const float inv_other = 1.0f / static_cast<float>(n_cl - 1);
+                    const float factor_self = static_cast<float>(n_cl) * inv_other;
+                    for (int d = 0; d < 3; ++d) G_c[d] = factor_self * c_gh[r][d] - inv_other * G_unit[d];
+                }
+                const float glen = std::sqrt(G_c[0] * G_c[0] + G_c[1] * G_c[1] + G_c[2] * G_c[2]);
+                if (glen > grad_thresh) {
+                    const float inv_g = 1.0f / glen;
+                    const float n[3] = {G_c[0] * inv_g, G_c[1] * inv_g, G_c[2] * inv_g};
+                    const float v_rel[3] = {c_v[r][0] - v_cm[0], c_v[r][1] - v_cm[1], c_v[r][2] - v_cm[2]};
+                    const float v_approach = v_rel[0] * n[0] + v_rel[1] * n[1] + v_rel[2] * n[2];
+                    if (v_approach > 0.0f && beta_contact > 0.0f) {
+                        const float v_cm_n = v_cm[0] * n[0] + v_cm[1] * n[1] + v_cm[2] * n[2];
+                        const float v_norm = v_cm_n - eff_rest_tie * v_approach;
+                        const float v_star_n = c_v[r][0] * n[0] + c_v[r][1] * n[1] + c_v[r][2] * n[2];
+                        float v_tang[3], v_cm_tang[3], v_slip[3];
+                        for (int d = 0; d < 3; ++d) { v_tang[d] = c_v[r][d] - v_star_n * n[d]; v_cm_tang[d] = v_cm[d] - v_cm_n * n[d]; v_slip[d] = v_tang[d] - v_cm_tang[d]; }
+                        const float slip_speed = std::sqrt(v_slip[0] * v_slip[0] + v_slip[1] * v_slip[1] + v_slip[2] * v_slip[2]);
+                        const float max_friction_dv = eff_fr * v_approach;
+                        float v_tang_corr[3];
+                        if (slip_speed <= max_friction_dv || slip_speed < 1.0e-7f) {
+                            for (int d = 0; d < 3; ++d) v_tang_corr[d] = v_cm_tang[d];
                         } else {
-                            float inv_other = 1.0f / static_cast<float>(sig_count - 1);
-                            float factor_self = static_cast<float>(sig_count) * inv_other;
-                            G_m[0] = factor_self * g_hat[0] - inv_other * G_unit_sum[0];
-                            G_m[1] = factor_self * g_hat[1] - inv_other * G_unit_sum[1];
-                            G_m[2] = factor_self * g_hat[2] - inv_other * G_unit_sum[2];
+                            const float factor = (eff_fr > 0.0f) ? (1.0f - max_friction_dv / slip_speed) : 1.0f;
+                            for (int d = 0; d < 3; ++d) v_tang_corr[d] = v_cm_tang[d] + factor * v_slip[d];
                         }
-                        float g_len = std::sqrt(G_m[0] * G_m[0] + G_m[1] * G_m[1] + G_m[2] * G_m[2]);
+                        if (alpha_weld > 0.0f)
+                            for (int d = 0; d < 3; ++d) v_tang_corr[d] = (1.0f - alpha_weld) * v_tang_corr[d] + alpha_weld * v_cm_tang[d];
+                        for (int d = 0; d < 3; ++d) {
+                            const float v_bard = v_norm * n[d] + v_tang_corr[d];
+                            c_corr[r][d] = c_v[r][d] + beta_contact * (v_bard - c_v[r][d]);
+                        }
+                    }
+                    if (alpha_weld > 0.0f)
+                        for (int d = 0; d < 3; ++d) c_corr[r][d] += alpha_weld * (v_cm[d] - c_corr[r][d]);
+                } else if (beta_contact > 0.0f) {
+                    for (int d = 0; d < 3; ++d) c_corr[r][d] = c_v[r][d] + beta_contact * (v_cm[d] - c_v[r][d]);
+                    if (alpha_weld > 0.0f)
+                        for (int d = 0; d < 3; ++d) c_corr[r][d] += alpha_weld * (v_cm[d] - c_corr[r][d]);
+                }
+            }
+            float E_fric_tie = 0.0f;
+            for (int m = 0; m < m_num_materials; ++m) {
+                auto& mf = m_mat_fields[m];
+                if (!((present >> m) & 1u)) {
+                    for (int d = 0; d < 3; ++d) { mf.v[d][node_idx] = 0.0f; mf.dv[d][node_idx] = 0.0f; }
+                    continue;
+                }
+                const int r = find_root(m);
+                float vc[3] = {c_corr[r][0], c_corr[r][1], c_corr[r][2]};
+                if (m_enable_frictional_heating && n_cl > 1) {
+                    float b = 0.0f, a_ = 0.0f;
+                    for (int d = 0; d < 3; ++d) { b += (f_v[m][d] - v_cm[d]) * (f_v[m][d] - v_cm[d]); a_ += (vc[d] - v_cm[d]) * (vc[d] - v_cm[d]); }
+                    if (b > a_) E_fric_tie += 0.5f * f_mass[m] * (b - a_);
+                }
+                applyBC(vc[0], vc[1], vc[2]);
+                for (int d = 0; d < 3; ++d) { mf.v[d][node_idx] = vc[d]; mf.dv[d][node_idx] = vc[d] - mf.dv[d][node_idx]; }
+            }
+            if (m_enable_frictional_heating && E_fric_tie > 0.0f && node.m > MPMGridNode3D::MIN_MASS) node.q_fric = E_fric_tie / node.m;
+            float tp0 = p_cm[0], tp1 = p_cm[1], tp2 = p_cm[2];
+            applyBC(tp0, tp1, tp2);
+            node.p[0] = tp0; node.p[1] = tp1; node.p[2] = tp2;
+            return;
+        }
+        float eff_rest = rest * (1.0f - alpha_weld);
+        float E_fric_node = 0.0f;
 
-                        if (g_len > grad_thresh) {
-                            float inv_g = 1.0f / g_len;
-                            float n[3] = {G_m[0] * inv_g, G_m[1] * inv_g, G_m[2] * inv_g};
+        for (int m = 0; m < m_num_materials; ++m) {
+            auto& mf = m_mat_fields[m];
+            float mat_mass = mf.m[node_idx];
+            if (mat_mass <= MPMGridNode3D::MIN_MASS) {
+                mf.v[0][node_idx] = 0.0f;
+                mf.v[1][node_idx] = 0.0f;
+                mf.v[2][node_idx] = 0.0f;
+                mf.dv[0][node_idx] = 0.0f;
+                mf.dv[1][node_idx] = 0.0f;
+                mf.dv[2][node_idx] = 0.0f;
+                continue;
+            }
 
-                            float v_rel[3] = {v_star[0] - v_cm[0],
-                                              v_star[1] - v_cm[1],
-                                              v_star[2] - v_cm[2]};
-                            float v_approach = v_rel[0] * n[0] + v_rel[1] * n[1] + v_rel[2] * n[2];
+            // Fluid/gas materials experience zero Coulomb friction along boundaries
+            float eff_friction = mu;
+            int obj_id = (m < static_cast<int>(m_mat_to_obj.size())) ? m_mat_to_obj[m] : (m + 1);
+            if (obj_id < static_cast<int>(m_material_tables.size())) {
+                auto m_model = m_material_tables[obj_id].material_model;
+                if (m_model == MPMMaterialModel::CRESTReactiveBurn ||
+                    m_model == MPMMaterialModel::JWLProgrammedBurn ||
+                    m_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
+                    eff_friction = 0.0f;
+                }
+            }
 
-                            if (v_approach > 0.0f) {
-                                float v_cm_n = v_cm[0] * n[0] + v_cm[1] * n[1] + v_cm[2] * n[2];
-                                float v_norm = v_cm_n - eff_rest * v_approach;
+            float inv_m = 1.0f / mat_mass;
+            float v_star[3] = {mf.p[0][node_idx] * inv_m,
+                               mf.p[1][node_idx] * inv_m,
+                               mf.p[2][node_idx] * inv_m};
 
-                                float v_star_n = v_star[0] * n[0] + v_star[1] * n[1] + v_star[2] * n[2];
-                                float v_tang[3] = {v_star[0] - v_star_n * n[0],
-                                                   v_star[1] - v_star_n * n[1],
-                                                   v_star[2] - v_star_n * n[2]};
-                                float v_cm_tang[3] = {v_cm[0] - v_cm_n * n[0],
-                                                      v_cm[1] - v_cm_n * n[1],
-                                                      v_cm[2] - v_cm_n * n[2]};
+            float v_corr[3] = {v_star[0], v_star[1], v_star[2]};
 
-                                float v_slip[3] = {v_tang[0] - v_cm_tang[0],
-                                                   v_tang[1] - v_cm_tang[1],
-                                                   v_tang[2] - v_cm_tang[2]};
-                                float slip_speed = std::sqrt(v_slip[0] * v_slip[0] + v_slip[1] * v_slip[1] + v_slip[2] * v_slip[2]);
+            if (mat_mass >= sig_threshold) {
+                float gm_x = (mf.m[idx_im] - mf.m[idx_ip]) * inv_2dx;
+                float gm_y = (mf.m[idx_jm] - mf.m[idx_jp]) * inv_2dy;
+                float gm_z = (mf.m[idx_km] - mf.m[idx_kp]) * inv_2dz;
 
-                                float max_friction_dv = eff_friction * v_approach;
-                                float v_tang_corr[3];
-                                float slip_speed_post = 0.0f;
-                                if (slip_speed <= max_friction_dv || slip_speed < 1.0e-7f) {
-                                    v_tang_corr[0] = v_cm_tang[0];
-                                    v_tang_corr[1] = v_cm_tang[1];
-                                    v_tang_corr[2] = v_cm_tang[2];
-                                    slip_speed_post = 0.0f;
-                                } else {
-                                    float factor = (eff_friction > 0.0f) ? (1.0f - max_friction_dv / slip_speed) : 1.0f;
-                                    v_tang_corr[0] = v_cm_tang[0] + factor * v_slip[0];
-                                    v_tang_corr[1] = v_cm_tang[1] + factor * v_slip[1];
-                                    v_tang_corr[2] = v_cm_tang[2] + factor * v_slip[2];
-                                    slip_speed_post = factor * slip_speed;
-                                }
+                float gm_len = std::sqrt(gm_x * gm_x + gm_y * gm_y + gm_z * gm_z);
+                float inv_gm = (gm_len > 1.0e-20f) ? (1.0f / gm_len) : 0.0f;
+                float g_hat[3] = {
+                    gm_x * inv_gm,
+                    gm_y * inv_gm,
+                    gm_z * inv_gm
+                };
+                float m_other = m_cm - mat_mass;
+                float G_m[3];
+                if (m_other > 1.0e-20f) {
+                    float inv_m_other = 1.0f / m_other;
+                    G_m[0] = g_hat[0] - (G_weighted_total[0] - mat_mass * g_hat[0]) * inv_m_other;
+                    G_m[1] = g_hat[1] - (G_weighted_total[1] - mat_mass * g_hat[1]) * inv_m_other;
+                    G_m[2] = g_hat[2] - (G_weighted_total[2] - mat_mass * g_hat[2]) * inv_m_other;
+                } else {
+                    float inv_other = 1.0f / static_cast<float>(sig_count - 1);
+                    float factor_self = static_cast<float>(sig_count) * inv_other;
+                    G_m[0] = factor_self * g_hat[0] - inv_other * G_unit_sum[0];
+                    G_m[1] = factor_self * g_hat[1] - inv_other * G_unit_sum[1];
+                    G_m[2] = factor_self * g_hat[2] - inv_other * G_unit_sum[2];
+                }
+                float g_len = std::sqrt(G_m[0] * G_m[0] + G_m[1] * G_m[1] + G_m[2] * G_m[2]);
 
-                                float v_col[3] = {
-                                    v_norm * n[0] + v_tang_corr[0],
-                                    v_norm * n[1] + v_tang_corr[1],
-                                    v_norm * n[2] + v_tang_corr[2]
-                                };
-                                v_corr[0] = v_star[0] + beta_contact * (v_col[0] - v_star[0]);
-                                v_corr[1] = v_star[1] + beta_contact * (v_col[1] - v_star[1]);
-                                v_corr[2] = v_star[2] + beta_contact * (v_col[2] - v_star[2]);
+                if (g_len > grad_thresh) {
+                    float inv_g = 1.0f / g_len;
+                    float n[3] = {G_m[0] * inv_g, G_m[1] * inv_g, G_m[2] * inv_g};
 
-                                if (m_enable_frictional_heating) {
-                                    float eff_slip_post = (1.0f - beta_contact) * slip_speed + beta_contact * slip_speed_post;
-                                    float dE_tang = 0.5f * mat_mass * std::max(0.0f, slip_speed * slip_speed - eff_slip_post * eff_slip_post);
-                                    float eff_rest_b = (1.0f - beta_contact) + beta_contact * eff_rest;
-                                    float dE_norm = 0.5f * mat_mass * (1.0f - eff_rest_b * eff_rest_b) * (v_approach * v_approach);
-                                    E_fric_node += dE_tang + dE_norm;
-                                }
-                            }
+                    float v_rel[3] = {v_star[0] - v_cm[0],
+                                      v_star[1] - v_cm[1],
+                                      v_star[2] - v_cm[2]};
+                    float v_approach = v_rel[0] * n[0] + v_rel[1] * n[1] + v_rel[2] * n[2];
 
-                            if (alpha_weld > 0.0f) {
-                                if (m_enable_frictional_heating) {
-                                    float dvx = v_corr[0] - v_cm[0];
-                                    float dvy = v_corr[1] - v_cm[1];
-                                    float dvz = v_corr[2] - v_cm[2];
-                                    float dv2 = dvx * dvx + dvy * dvy + dvz * dvz;
-                                    float one_m_a = 1.0f - alpha_weld;
-                                    E_fric_node += 0.5f * mat_mass * (1.0f - one_m_a * one_m_a) * dv2;
-                                }
-                                v_corr[0] += alpha_weld * (v_cm[0] - v_corr[0]);
-                                v_corr[1] += alpha_weld * (v_cm[1] - v_corr[1]);
-                                v_corr[2] += alpha_weld * (v_cm[2] - v_corr[2]);
-                            }
+                    if (v_approach > 0.0f) {
+                        float v_cm_n = v_cm[0] * n[0] + v_cm[1] * n[1] + v_cm[2] * n[2];
+                        float v_norm = v_cm_n - eff_rest * v_approach;
+
+                        float v_star_n = v_star[0] * n[0] + v_star[1] * n[1] + v_star[2] * n[2];
+                        float v_tang[3] = {v_star[0] - v_star_n * n[0],
+                                           v_star[1] - v_star_n * n[1],
+                                           v_star[2] - v_star_n * n[2]};
+                        float v_cm_tang[3] = {v_cm[0] - v_cm_n * n[0],
+                                              v_cm[1] - v_cm_n * n[1],
+                                              v_cm[2] - v_cm_n * n[2]};
+
+                        float v_slip[3] = {v_tang[0] - v_cm_tang[0],
+                                           v_tang[1] - v_cm_tang[1],
+                                           v_tang[2] - v_cm_tang[2]};
+                        float slip_speed = std::sqrt(v_slip[0] * v_slip[0] + v_slip[1] * v_slip[1] + v_slip[2] * v_slip[2]);
+
+                        float max_friction_dv = eff_friction * v_approach;
+                        float v_tang_corr[3];
+                        float slip_speed_post = 0.0f;
+                        if (slip_speed <= max_friction_dv || slip_speed < 1.0e-7f) {
+                            v_tang_corr[0] = v_cm_tang[0];
+                            v_tang_corr[1] = v_cm_tang[1];
+                            v_tang_corr[2] = v_cm_tang[2];
+                            slip_speed_post = 0.0f;
                         } else {
-                            v_corr[0] = v_star[0] + beta_contact * (v_cm[0] - v_star[0]);
-                            v_corr[1] = v_star[1] + beta_contact * (v_cm[1] - v_star[1]);
-                            v_corr[2] = v_star[2] + beta_contact * (v_cm[2] - v_star[2]);
+                            float factor = (eff_friction > 0.0f) ? (1.0f - max_friction_dv / slip_speed) : 1.0f;
+                            v_tang_corr[0] = v_cm_tang[0] + factor * v_slip[0];
+                            v_tang_corr[1] = v_cm_tang[1] + factor * v_slip[1];
+                            v_tang_corr[2] = v_cm_tang[2] + factor * v_slip[2];
+                            slip_speed_post = factor * slip_speed;
+                        }
+
+                        float v_col[3] = {
+                            v_norm * n[0] + v_tang_corr[0],
+                            v_norm * n[1] + v_tang_corr[1],
+                            v_norm * n[2] + v_tang_corr[2]
+                        };
+                        v_corr[0] = v_star[0] + beta_contact * (v_col[0] - v_star[0]);
+                        v_corr[1] = v_star[1] + beta_contact * (v_col[1] - v_star[1]);
+                        v_corr[2] = v_star[2] + beta_contact * (v_col[2] - v_star[2]);
+
+                        if (m_enable_frictional_heating) {
+                            float eff_slip_post = (1.0f - beta_contact) * slip_speed + beta_contact * slip_speed_post;
+                            float dE_tang = 0.5f * mat_mass * std::max(0.0f, slip_speed * slip_speed - eff_slip_post * eff_slip_post);
+                            float eff_rest_b = (1.0f - beta_contact) + beta_contact * eff_rest;
+                            float dE_norm = 0.5f * mat_mass * (1.0f - eff_rest_b * eff_rest_b) * (v_approach * v_approach);
+                            E_fric_node += dE_tang + dE_norm;
                         }
                     }
 
-                    applyBC(v_corr[0], v_corr[1], v_corr[2]);
-
-                    mf.v[0][node_idx] = v_corr[0];
-                    mf.v[1][node_idx] = v_corr[1];
-                    mf.v[2][node_idx] = v_corr[2];
-                    mf.dv[0][node_idx] = v_corr[0] - mf.dv[0][node_idx];
-                    mf.dv[1][node_idx] = v_corr[1] - mf.dv[1][node_idx];
-                    mf.dv[2][node_idx] = v_corr[2] - mf.dv[2][node_idx];
+                    if (alpha_weld > 0.0f) {
+                        if (m_enable_frictional_heating) {
+                            float dvx = v_corr[0] - v_cm[0];
+                            float dvy = v_corr[1] - v_cm[1];
+                            float dvz = v_corr[2] - v_cm[2];
+                            float dv2 = dvx * dvx + dvy * dvy + dvz * dvz;
+                            float one_m_a = 1.0f - alpha_weld;
+                            E_fric_node += 0.5f * mat_mass * (1.0f - one_m_a * one_m_a) * dv2;
+                        }
+                        v_corr[0] += alpha_weld * (v_cm[0] - v_corr[0]);
+                        v_corr[1] += alpha_weld * (v_cm[1] - v_corr[1]);
+                        v_corr[2] += alpha_weld * (v_cm[2] - v_corr[2]);
+                    }
+                } else {
+                    v_corr[0] = v_star[0] + beta_contact * (v_cm[0] - v_star[0]);
+                    v_corr[1] = v_star[1] + beta_contact * (v_cm[1] - v_star[1]);
+                    v_corr[2] = v_star[2] + beta_contact * (v_cm[2] - v_star[2]);
                 }
+            }
 
-                if (m_enable_frictional_heating && node.m > MPMGridNode3D::MIN_MASS && E_fric_node > 0.0f) {
-                    node.q_fric = E_fric_node / node.m;
+            applyBC(v_corr[0], v_corr[1], v_corr[2]);
+
+            mf.v[0][node_idx] = v_corr[0];
+            mf.v[1][node_idx] = v_corr[1];
+            mf.v[2][node_idx] = v_corr[2];
+            mf.dv[0][node_idx] = v_corr[0] - mf.dv[0][node_idx];
+            mf.dv[1][node_idx] = v_corr[1] - mf.dv[1][node_idx];
+            mf.dv[2][node_idx] = v_corr[2] - mf.dv[2][node_idx];
+        }
+
+        if (m_enable_frictional_heating && node.m > MPMGridNode3D::MIN_MASS && E_fric_node > 0.0f) {
+            node.q_fric = E_fric_node / node.m;
+        }
+
+        float p0 = p_cm[0], p1 = p_cm[1], p2 = p_cm[2];
+        applyBC(p0, p1, p2);
+        node.p[0] = p0;
+        node.p[1] = p1;
+        node.p[2] = p2;
+    };
+
+    if (m_sparse_grid_mode) {
+        const size_t num_active = m_active_tiles.size();
+        #pragma omp parallel for schedule(static)
+        for (size_t t_slot = 0; t_slot < num_active; ++t_slot) {
+            const int t_idx = m_active_tiles[t_slot];
+            const int tz = t_idx % m_ntz;
+            const int ty = (t_idx / m_ntz) % m_nty;
+            const int tx = t_idx / (m_ntz * m_nty);
+            const int base_i = tx << MPMGridView3D::TILE_SHIFT;
+            const int base_j = ty << MPMGridView3D::TILE_SHIFT;
+            const int base_k = tz << MPMGridView3D::TILE_SHIFT;
+            for (int lx = 0; lx < MPMGridView3D::TILE_DIM; ++lx) {
+                const int i = base_i + lx;
+                if (i >= m_nx) continue;
+                for (int ly = 0; ly < MPMGridView3D::TILE_DIM; ++ly) {
+                    const int j = base_j + ly;
+                    if (j >= m_ny) continue;
+                    for (int lz = 0; lz < MPMGridView3D::TILE_DIM; ++lz) {
+                        const int k = base_k + lz;
+                        if (k >= m_nz) continue;
+                        const size_t node_idx = (t_slot << 9) | (static_cast<size_t>(lx) << 6) | (static_cast<size_t>(ly) << 3) | static_cast<size_t>(lz);
+                        processNode(i, j, k, node_idx);
+                    }
                 }
-
-                float p0 = p_cm[0], p1 = p_cm[1], p2 = p_cm[2];
-                applyBC(p0, p1, p2);
-                node.p[0] = p0;
-                node.p[1] = p1;
-                node.p[2] = p2;
+            }
+        }
+    } else {
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int i = 0; i < m_nx; ++i) {
+            for (int j = 0; j < m_ny; ++j) {
+                for (int k = 0; k < m_nz; ++k) {
+                    const size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                    processNode(i, j, k, node_idx);
+                }
             }
         }
     }
@@ -2583,6 +2797,7 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
     bool truncated_open_bc = false;
     float w_min_stencil = 1.0f;
 
+    const MPMGridView3D gv = getGridView();
     int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme : static_cast<int>(m_transfer_scheme);
     if (eff_scheme == static_cast<int>(MPMTransferScheme::RadialMLS)) {
         float R_supp = 2.0f * std::max({m_dx, m_dy, m_dz});
@@ -2709,7 +2924,9 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
                         if (w < 1.0e-7f) continue;
                         float weight = w * inv_w_sum;
 
-                        size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                        const long long slot = gv.slotIndex(i, j, k);
+                        if (slot < 0) continue;
+                        size_t node_idx = static_cast<size_t>(slot);
                         const auto& node = m_grid[node_idx];
 
                         float n_vx = 0.0f, n_vy = 0.0f, n_vz = 0.0f;
@@ -2957,7 +3174,12 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
                     float dN_dy = Sx * dSy * Sz;
                     float dN_dz = Sx * Sy * dSz;
 
-                    size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                    const long long slot = gv.slotIndex(i, j, k);
+                    if (slot < 0) {
+                        any_missing_node = true;
+                        continue;
+                    }
+                    size_t node_idx = static_cast<size_t>(slot);
                     const auto& node = m_grid[node_idx];
 
                     float n_vx = 0.0f, n_vy = 0.0f, n_vz = 0.0f;
@@ -3681,6 +3903,30 @@ void MPMSolver3D::gridToParticleInternal(float dt) {
         if constexpr (FUSE_STRESS) {
             updateParticleStress(p, dt, p.L_grad, mat, kin.ep_smoothed);
         }
+
+        // Density-Based Particle Erosion (Standalone MPM or when not deferred to FV Coupler)
+        if (mat.enable_density_erosion && p.state != 2 && p.m > 0.0f) {
+            const bool is_fluid_or_energetic = (mat.material_model == MPMMaterialModel::TaitWater) || is_energetic_model;
+            const bool defer_to_fv = m_defer_fv_erosion_to_coupler && mat.erode_to_fv_grid && is_fluid_or_energetic;
+            if (!defer_to_fv) {
+                const float rho_p = p.m / std::max(p.V, 1.0e-30f);
+                const float rho0 = (mat.material_model == MPMMaterialModel::TaitWater && mat.tait_rho0 > 0.0f) ? mat.tait_rho0 : mat.density;
+                const float rho_thresh = std::max(mat.erosion_min_density, mat.erosion_min_density_ratio * rho0);
+                const bool burn_ready = !is_energetic_model || (p.lambda >= 0.5f || p.V > 1.05f * p.V0);
+                if (rho_thresh > 0.0f && burn_ready && rho_p < rho_thresh) {
+                    p.state = 2;
+                    p.m = 0.0f;
+                    p.v[0] = 0.0f; p.v[1] = 0.0f; p.v[2] = 0.0f;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            p.B[r][c] = 0.0f;
+                            p.L_grad[r][c] = 0.0f;
+                            p.sigma[r][c] = 0.0f;
+                        }
+                    }
+                }
+            }
+        }
     }
     m_last_v_max = v_max_global;
 
@@ -4154,22 +4400,38 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             float e_prod = e_th + q_heat;
 
             // Pillar 1: Solid Reactant EOS
-            float p_solid = awe
-                ? static_cast<float>(CrestDavis::computeCRESTSolidPressure(v_rel, std::max(0.0f, e_th), awe_q))
-                : use_davis_solid
-                ? CrestDavis::computeDavisReactantPressure(v_rel, e_th, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0)
-                : JWL::computeSolidReactantPressure(v_rel, e_th, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density);
+            const bool use_jwl_reactant = (mat.solid_model == SolidReactantEOS::JWLReactant);
+            auto solid_pressure_at = [&](float v) -> float {
+                return awe
+                    ? static_cast<float>(CrestDavis::computeCRESTSolidPressure(v, std::max(0.0f, e_th), awe_q))
+                    : use_jwl_reactant
+                    ? JWL::computeJWLReactantPressure(v, e_th, mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_omega, mat.jwlr_Cv, mat.jwlr_T0, mat.density)
+                    : use_davis_solid
+                    ? CrestDavis::computeDavisReactantPressure(v, e_th, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0)
+                    : JWL::computeSolidReactantPressure(v, e_th, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density);
+            };
 
             // Pillar 3: Detonation Products EOS
-            float p_prod = awe
-                ? JWL::computeJWLProductPressure(v_rel * awe_vtmd, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, static_cast<float>(awe_q.rho0s))
-                : use_davis_prod
-                ? CrestDavis::computeDavisProductPressure(v_rel, e_prod, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0)
-                : JWL::computeJWLProductPressure(v_rel, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.density);
+            auto product_pressure_at = [&](float v) -> float {
+                return awe
+                    ? JWL::computeJWLProductPressure(v * awe_vtmd, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, static_cast<float>(awe_q.rho0s))
+                    : use_davis_prod
+                    ? CrestDavis::computeDavisProductPressure(v, e_prod, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0)
+                    : JWL::computeJWLProductPressure(v, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.density);
+            };
 
-            // Two-phase pressure blend
-            float p_mix = (1.0f - lam_new) * p_solid + lam_new * p_prod;
+            // Two-phase mixture. Lee-Tarver kinetics use the selectable mixture rule (default: pressure
+            // equilibrium with volume additivity); all other reactive models keep the linear blend.
+            const Mixture::Rule mix_rule = is_lt_kinetics
+                ? static_cast<Mixture::Rule>(mat.mixture_rule) : Mixture::Rule::LinearBlend;
+            const Mixture::Result mix = Mixture::mixturePressure(mix_rule, static_cast<double>(v_rel), static_cast<double>(lam_new),
+                [&](double v) { return static_cast<double>(solid_pressure_at(static_cast<float>(v))); },
+                [&](double v) { return static_cast<double>(product_pressure_at(static_cast<float>(v))); });
+            float p_mix = static_cast<float>(mix.p);
             if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+            // Phase pressures at the phase volumes chosen by the mixture rule (used by sound-speed/CFL closures)
+            [[maybe_unused]] const float p_solid = solid_pressure_at(static_cast<float>(mix.v_s));
+            [[maybe_unused]] const float p_prod = product_pressure_at(static_cast<float>(mix.v_p));
 
             // Energy conservation: compression work & chemical heat release
             float rho_eff = (mat.density > 10.0f) ? mat.density : (use_davis_solid ? mat.davis_rho0 : 1630.0f);
@@ -4691,6 +4953,11 @@ float MPMSolver3D::computeStepSize(float cfl) const {
                    mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
                    mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
             float C0 = (mat.solid_model == SolidReactantEOS::DavisSolid) ? mat.davis_c0 : (mat.mg_c0 > 100.0f ? mat.mg_c0 : 2500.0f);
+            if (mat.solid_model == SolidReactantEOS::JWLReactant) {
+                const float v_rel_c = std::max(p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f), 0.02f);
+                const float e_th_c = p.e_int - p.lambda * mat.detonation_energy;
+                C0 = JWL::computeJWLReactantSoundSpeed(v_rel_c, e_th_c, mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_omega, mat.jwlr_Cv, mat.jwlr_T0, mat.density);
+            }
             float c_det = (mat.product_model == DetonationProductEOS::DavisProduct) ? ((mat.davis_pc > 1.0e6f) ? 7500.0f : 6000.0f) : (mat.det_vel > 1000.0f ? mat.det_vel : 6930.0f);
             float lam = p.lambda;
             if (lam >= 1.0f) {
@@ -4738,11 +5005,11 @@ float MPMSolver3D::computeStepSize(float cfl) const {
 }
 
 void MPMSolver3D::storeFSIForces() {
-    size_t num_nodes = m_grid.size();
-    if (m_f_ext_fsi.size() != num_nodes * 3) {
-        m_f_ext_fsi.resize(num_nodes * 3, 0.0f);
-    }
-    for (size_t i = 0; i < num_nodes; ++i) {
+    const size_t active_limit = m_sparse_grid_mode
+        ? std::min(m_grid.size(), m_active_tiles.size() * static_cast<size_t>(MPMGridView3D::TILE_NODES))
+        : m_grid.size();
+    m_f_ext_fsi.resize(active_limit * 3, 0.0f);
+    for (size_t i = 0; i < active_limit; ++i) {
         m_f_ext_fsi[i * 3 + 0] = m_grid[i].f_ext[0];
         m_f_ext_fsi[i * 3 + 1] = m_grid[i].f_ext[1];
         m_f_ext_fsi[i * 3 + 2] = m_grid[i].f_ext[2];
@@ -4750,9 +5017,8 @@ void MPMSolver3D::storeFSIForces() {
 }
 
 void MPMSolver3D::restoreFSIForces() {
-    size_t num_nodes = m_grid.size();
-    if (m_f_ext_fsi.size() != num_nodes * 3) return;
-    for (size_t i = 0; i < num_nodes; ++i) {
+    const size_t n_restore = std::min(m_grid.size(), m_f_ext_fsi.size() / 3);
+    for (size_t i = 0; i < n_restore; ++i) {
         m_grid[i].f_ext[0] = m_f_ext_fsi[i * 3 + 0];
         m_grid[i].f_ext[1] = m_f_ext_fsi[i * 3 + 1];
         m_grid[i].f_ext[2] = m_f_ext_fsi[i * 3 + 2];
@@ -4760,7 +5026,7 @@ void MPMSolver3D::restoreFSIForces() {
 }
 
 void MPMSolver3D::clearFSIForces() {
-    std::fill(m_f_ext_fsi.begin(), m_f_ext_fsi.end(), 0.0f);
+    m_f_ext_fsi.clear();
 }
 
 void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
@@ -4786,7 +5052,11 @@ void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
 
     auto applyGravityToGrid = [this]() {
         if (m_has_gravity) {
-            for (auto& node : m_grid) {
+            const size_t active_limit = m_sparse_grid_mode
+                ? std::min(m_grid.size(), m_active_tiles.size() * static_cast<size_t>(MPMGridView3D::TILE_NODES))
+                : m_grid.size();
+            for (size_t idx = 0; idx < active_limit; ++idx) {
+                auto& node = m_grid[idx];
                 if (node.m > MPMGridNode3D::MIN_MASS) {
                     node.f_ext[0] += node.m * m_gravity[0];
                     node.f_ext[1] += node.m * m_gravity[1];
@@ -4800,8 +5070,12 @@ void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
         // --- 2nd-Order Midpoint RK2 Scheme ---
         // 1. Predictor Stage (Half-step dt/2)
         if (run_p2g) {
-            for (auto& node : m_grid) {
-                node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f; node.f_ext[2] = 0.0f;
+            m_f_ext_fsi.clear();
+            const size_t active_limit = m_sparse_grid_mode
+                ? std::min(m_grid.size(), m_active_tiles.size() * static_cast<size_t>(MPMGridView3D::TILE_NODES))
+                : m_grid.size();
+            for (size_t idx = 0; idx < active_limit; ++idx) {
+                m_grid[idx].f_ext[0] = 0.0f; m_grid[idx].f_ext[1] = 0.0f; m_grid[idx].f_ext[2] = 0.0f;
             }
             particleToGrid();
         }
@@ -4818,6 +5092,7 @@ void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
         particleToGrid();
         if (!m_f_ext_fsi.empty()) {
             restoreFSIForces();
+            m_f_ext_fsi.clear();
         }
         applyGravityToGrid();
         doGridKinematics(dt);
@@ -4826,13 +5101,18 @@ void MPMSolver3D::stepWithDt(float dt, bool run_p2g) {
     } else {
         // --- 2nd-Order Symplectic Staggered Leapfrog / USL (Single-pass) ---
         if (run_p2g) {
-            for (auto& node : m_grid) {
-                node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f; node.f_ext[2] = 0.0f;
+            m_f_ext_fsi.clear();
+            const size_t active_limit = m_sparse_grid_mode
+                ? std::min(m_grid.size(), m_active_tiles.size() * static_cast<size_t>(MPMGridView3D::TILE_NODES))
+                : m_grid.size();
+            for (size_t idx = 0; idx < active_limit; ++idx) {
+                m_grid[idx].f_ext[0] = 0.0f; m_grid[idx].f_ext[1] = 0.0f; m_grid[idx].f_ext[2] = 0.0f;
             }
             particleToGrid();
         }
         if (!m_f_ext_fsi.empty()) {
             restoreFSIForces();
+            m_f_ext_fsi.clear();
         }
         applyGravityToGrid();
         
@@ -5224,10 +5504,51 @@ MPMVTKSnapshot3D MPMSolver3D::extractVTKSnapshot(bool has_vel, bool has_stress, 
     if (has_material_id) snap.material_id.resize(count);
     if (has_particle_density) snap.particle_density.resize(count);
 
+    if (has_particle_density && m_sparse_grid_mode && m_active_tiles.empty() &&
+        m_nx > 0 && m_ny > 0 && m_nz > 0 && m_dx > 0.0f && m_dy > 0.0f && m_dz > 0.0f) {
+        const size_t total_logical_tiles = static_cast<size_t>(m_ntx) * m_nty * m_ntz;
+        if (m_tile_table.size() != total_logical_tiles) {
+            m_tile_table.assign(total_logical_tiles, -1);
+        }
+        for (const auto& p : m_particles) {
+            if (p.state == 2 || p.m <= 0.0f) continue;
+            const int cx = std::clamp(static_cast<int>(std::floor((p.x[0] - m_xmin) / m_dx)), 0, m_nx - 1);
+            const int cy = std::clamp(static_cast<int>(std::floor((p.x[1] - m_ymin) / m_dy)), 0, m_ny - 1);
+            const int cz = std::clamp(static_cast<int>(std::floor((p.x[2] - m_zmin) / m_dz)), 0, m_nz - 1);
+            const int tx_lo = std::max(0, cx - 1) >> MPMGridView3D::TILE_SHIFT;
+            const int tx_hi = std::min(m_nx - 1, cx + 1) >> MPMGridView3D::TILE_SHIFT;
+            const int ty_lo = std::max(0, cy - 1) >> MPMGridView3D::TILE_SHIFT;
+            const int ty_hi = std::min(m_ny - 1, cy + 1) >> MPMGridView3D::TILE_SHIFT;
+            const int tz_lo = std::max(0, cz - 1) >> MPMGridView3D::TILE_SHIFT;
+            const int tz_hi = std::min(m_nz - 1, cz + 1) >> MPMGridView3D::TILE_SHIFT;
+            for (int tx = tx_lo; tx <= tx_hi; ++tx) {
+                for (int ty = ty_lo; ty <= ty_hi; ++ty) {
+                    for (int tz = tz_lo; tz <= tz_hi; ++tz) {
+                        const int t_idx = (tx * m_nty + ty) * m_ntz + tz;
+                        if (m_tile_table[t_idx] < 0) {
+                            m_tile_table[t_idx] = static_cast<int>(m_active_tiles.size());
+                            m_active_tiles.push_back(t_idx);
+                        }
+                    }
+                }
+            }
+        }
+        const size_t needed_nodes = std::max<size_t>(1, m_active_tiles.size()) * MPMGridView3D::TILE_NODES;
+        if (m_grid.size() < needed_nodes) {
+            m_tile_capacity = std::max(m_tile_capacity, m_active_tiles.size());
+            m_grid.resize(m_tile_capacity * MPMGridView3D::TILE_NODES);
+        }
+    }
+
+    const MPMGridView3D gv = getGridView();
+    const size_t active_grid_nodes = m_sparse_grid_mode
+        ? (m_active_tiles.size() * static_cast<size_t>(MPMGridView3D::TILE_NODES))
+        : (static_cast<size_t>(m_nx) * m_ny * m_nz);
     const bool can_count_grid = has_particle_density && !m_grid.empty() &&
                                 m_nx > 0 && m_ny > 0 && m_nz > 0 &&
                                 m_dx > 0.0f && m_dy > 0.0f && m_dz > 0.0f &&
-                                m_grid.size() >= static_cast<size_t>(m_nx) * m_ny * m_nz;
+                                active_grid_nodes > 0 &&
+                                m_grid.size() >= active_grid_nodes;
     const float inv_dx = can_count_grid ? (1.0f / m_dx) : 0.0f;
     const float inv_dy = can_count_grid ? (1.0f / m_dy) : 0.0f;
     const float inv_dz = can_count_grid ? (1.0f / m_dz) : 0.0f;
@@ -5258,9 +5579,8 @@ MPMVTKSnapshot3D MPMSolver3D::extractVTKSnapshot(bool has_vel, bool has_stress, 
     };
 
     if (can_count_grid) {
-        const size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
         #pragma omp parallel for schedule(static)
-        for (size_t n = 0; n < num_nodes; ++n) {
+        for (size_t n = 0; n < active_grid_nodes; ++n) {
             for (int s = 0; s < 8; ++s) {
                 *cell_slot_ptr(m_grid[n], s) = -1;
             }
@@ -5271,8 +5591,9 @@ MPMVTKSnapshot3D MPMSolver3D::extractVTKSnapshot(bool has_vel, bool has_stress, 
             int cx = std::clamp(static_cast<int>(std::floor((p.x[0] - m_xmin) * inv_dx)), 0, m_nx - 1);
             int cy = std::clamp(static_cast<int>(std::floor((p.x[1] - m_ymin) * inv_dy)), 0, m_ny - 1);
             int cz = std::clamp(static_cast<int>(std::floor((p.x[2] - m_zmin) * inv_dz)), 0, m_nz - 1);
-            size_t c_idx = (static_cast<size_t>(cx) * m_ny + cy) * m_nz + cz;
-            MPMGridNode3D& cell = m_grid[c_idx];
+            const long long c_slot = gv.slotIndex(cx, cy, cz);
+            if (c_slot < 0) continue;
+            MPMGridNode3D& cell = m_grid[static_cast<size_t>(c_slot)];
             for (int s = 0; s < 8; ++s) {
                 int* slot_ptr = cell_slot_ptr(cell, s);
                 int expected = -1;
@@ -5333,9 +5654,10 @@ MPMVTKSnapshot3D MPMSolver3D::extractVTKSnapshot(bool has_vel, bool has_stress, 
                 int neighbor_count = 1; // Always count self
                 for (int ix = ix_lo; ix <= ix_hi; ++ix) {
                     for (int iy = iy_lo; iy <= iy_hi; ++iy) {
-                        size_t row_base = (static_cast<size_t>(ix) * m_ny + iy) * m_nz;
                         for (int iz = iz_lo; iz <= iz_hi; ++iz) {
-                            const MPMGridNode3D& cell = m_grid[row_base + iz];
+                            const long long c_slot = gv.slotIndex(ix, iy, iz);
+                            if (c_slot < 0) continue;
+                            const MPMGridNode3D& cell = m_grid[static_cast<size_t>(c_slot)];
                             for (int s = 0; s < 8; ++s) {
                                 int q = cell_slot_read(cell, s);
                                 if (q < 0) break;
@@ -5365,9 +5687,8 @@ MPMVTKSnapshot3D MPMSolver3D::extractVTKSnapshot(bool has_vel, bool has_stress, 
     }
 
     if (can_count_grid) {
-        const size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
         #pragma omp parallel for schedule(static)
-        for (size_t n = 0; n < num_nodes; ++n) {
+        for (size_t n = 0; n < active_grid_nodes; ++n) {
             MPMGridNode3D& g = m_grid[n];
             g.dT_cond = 0.0f;
             g.q_fric = 0.0f;
@@ -5550,6 +5871,7 @@ void MPMSolver3D::addDetonator(float x, float y, float z, float radius, float ti
 bool MPMSolver3D::interpolateGridVelocity(float x, float y, float z, float& vx, float& vy, float& vz, int target_object_id) const {
     vx = 0.0f; vy = 0.0f; vz = 0.0f;
     if (m_grid.empty()) return false;
+    const MPMGridView3D gv = getGridView();
 
     float px = x - m_xmin;
     float py = y - m_ymin;
@@ -5613,7 +5935,9 @@ bool MPMSolver3D::interpolateGridVelocity(float x, float y, float z, float& vx, 
                     float weight = evalWendland_C2(r, R_supp);
                     if (weight < 1.0e-7f) continue;
 
-                    size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                    const long long slot = gv.slotIndex(i, j, k);
+                    if (slot < 0) continue;
+                    size_t node_idx = static_cast<size_t>(slot);
                     float n_vx = 0.0f, n_vy = 0.0f, n_vz = 0.0f;
                     bool node_valid = false;
 
@@ -5721,7 +6045,9 @@ bool MPMSolver3D::interpolateGridVelocity(float x, float y, float z, float& vx, 
 
                     float weight = Sx * Sy * Sz;
                     if (weight < 1.0e-7f) continue;
-                    size_t node_idx = (static_cast<size_t>(i) * m_ny + j) * m_nz + k;
+                    const long long slot = gv.slotIndex(i, j, k);
+                    if (slot < 0) continue;
+                    size_t node_idx = static_cast<size_t>(slot);
                     float n_vx = 0.0f, n_vy = 0.0f, n_vz = 0.0f;
                     bool node_valid = false;
 

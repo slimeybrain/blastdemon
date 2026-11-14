@@ -203,9 +203,13 @@ public:
         if (result == pid) {
             // Child has actually exited — confirmed.
             if (WIFEXITED(status)) {
-                std::cout << "[DEBUG] Child process " << pid << " exited with status " << WEXITSTATUS(status) << std::endl;
+                last_exit_code = WEXITSTATUS(status);
+                last_signal = 0;
+                std::cout << "[DEBUG] Child process " << pid << " exited with status " << last_exit_code << std::endl;
             } else if (WIFSIGNALED(status)) {
-                std::cout << "[DEBUG] Child process " << pid << " terminated by signal " << WTERMSIG(status) << std::endl;
+                last_exit_code = -1;
+                last_signal = WTERMSIG(status);
+                std::cout << "[DEBUG] Child process " << pid << " terminated by signal " << last_signal << std::endl;
             }
             pid = -1;
             return false;
@@ -216,7 +220,12 @@ public:
 #endif
     }
 
+    int getLastExitCode() const { return last_exit_code; }
+    int getLastSignal() const { return last_signal; }
+
 private:
+    int last_exit_code = -1;
+    int last_signal = 0;
 #ifdef _WIN32
     HANDLE hProcess;
     HANDLE hThread;

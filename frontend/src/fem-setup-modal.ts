@@ -6,7 +6,7 @@
 // ============================================================================
 
 import { Node, Model } from './types.js';
-import { StateManager, getLSDynaDeckMeta, KNOWN_KEYWORD_DECKS } from './state-manager.js';
+import { StateManager, getLSDynaDeckMeta, KNOWN_KEYWORD_DECKS, resolveResourcePath } from './state-manager.js';
 import {
     FEMSetupConfig,
     FEMPartConfig,
@@ -21,6 +21,8 @@ import {
     syncModelFEMSetup
 } from './fem-setup-types.js';
 import { FEMDeckParser, ParsedFEMPreview } from './fem-deck-parser.js';
+import { HostFileBrowserModal, readHostFile, writeHostFile, showRecentFoldersQuickMenu, recordRecentFolder } from './host-file-browser.js';
+import { CustomDialog } from './custom-dialog.js';
 
 type SetupTab = 'parts' | 'sets' | 'materials' | 'bcs' | 'contacts';
 
@@ -30,6 +32,7 @@ export class FEMSetupModal {
     private femNode: Node;
     private model: Model;
     private onCloseCallback?: () => void;
+    private _loadingHostDeckPath: string | null = null;
 
     // Core Data State
     private config: FEMSetupConfig;
@@ -483,16 +486,23 @@ export class FEMSetupModal {
             }
         }
 
-        // Priority 3: Check if node or any part has a known LS-DYNA keyword deck or k_file
-        const kFile = p.k_file || p.filename || p.file_path || (this.femNode.type === 'LSDynaImporter3D' ? 'concrete_cubicle_30mm.k' : null);
-        if (kFile && (p.shape_type === 'LS-DYNA File' || this.femNode.type === 'LSDynaImporter3D')) {
+        // Priority 3: Check if node or any part has a known LS-DYNA keyword deck or host k_file
+        const partWithK = this.config.parts.find(pt => pt.k_file && pt.k_file !== 'None specified');
+        const kFile = p.k_file || p.filename || p.file_path || partWithK?.k_file || (this.femNode.type === 'LSDynaImporter3D' ? 'concrete_cubicle_30mm.k' : null);
+        if (kFile && kFile !== 'None specified' && (p.shape_type === 'LS-DYNA File' || p.mesh_source === 'LS-DYNA Keyword File' || this.femNode.type === 'LSDynaImporter3D' || !!partWithK)) {
             const meta = getLSDynaDeckMeta(kFile);
             if (meta) {
                 this.preview = FEMDeckParser.generateKnownDeckPreview(meta, this.femNode.parameters?.name || this.model.name);
                 this.mergeParsedWithExistingConfig();
                 this.calculateModelBounds();
-                return;
+            } else {
+                this.rebuildPreview();
             }
+            const net = (window as any).networkManager;
+            if (net && net.isConnected() && (!meta || kFile.includes('/') || kFile.includes('\\'))) {
+                void this.loadHostKeywordDeckForPreview(String(kFile));
+            }
+            return;
         }
 
         // Priority 4: Rebuild preview from assembly parts
@@ -717,16 +727,48 @@ export class FEMSetupModal {
         const importBtn = document.createElement('button');
         importBtn.className = 'fem-btn fem-btn-secondary';
         importBtn.innerHTML = '<span>📥</span> <span>Import Keyword Deck (*.k)...</span>';
-        importBtn.title = 'Import an LS-DYNA Keyword Deck (.k, .key, .dyn) from your computer';
-        importBtn.onclick = () => this.triggerFileImport();
+        importBtn.title = 'Import an LS-DYNA Keyword Deck (.k, .key, .dyn) from host filesystem (Shift+Click for local browser file upload)';
+        importBtn.onclick = (e) => {
+            if (e.shiftKey) {
+                this.triggerLocalFileImport();
+            } else {
+                this.triggerFileImport();
+            }
+        };
         headerActions.appendChild(importBtn);
+
+        // Recent Folders quick-pick for .k Deck import
+        const recentBtn = document.createElement('button');
+        recentBtn.className = 'fem-btn fem-btn-secondary';
+        recentBtn.innerHTML = '<span>🕒</span>';
+        recentBtn.title = 'Import Keyword Deck from a Recent Folder';
+        recentBtn.style.padding = '5px 8px';
+        recentBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            showRecentFoldersQuickMenu(
+                recentBtn,
+                (folderPath) => this.triggerFileImport(folderPath),
+                {
+                    title: 'Import Deck from Recent Folder',
+                    onBrowseOther: () => this.triggerFileImport()
+                }
+            );
+        };
+        headerActions.appendChild(recentBtn);
 
         // Export Deck Config
         const exportBtn = document.createElement('button');
         exportBtn.className = 'fem-btn fem-btn-secondary';
-        exportBtn.innerHTML = '<span>📤</span> <span>Export JSON</span>';
-        exportBtn.title = 'Export the full FEM assembly configuration to JSON';
-        exportBtn.onclick = () => this.exportSetupJSON();
+        exportBtn.innerHTML = '<span>📤</span> <span>Export JSON...</span>';
+        exportBtn.title = 'Save FEM assembly configuration JSON to host filesystem (Shift+Click for local browser download)';
+        exportBtn.onclick = (e) => {
+            if (e.shiftKey) {
+                this.downloadSetupJSONLocally();
+            } else {
+                this.exportSetupJSON();
+            }
+        };
         headerActions.appendChild(exportBtn);
 
         // Close button
@@ -890,8 +932,13 @@ export class FEMSetupModal {
         revertBtn.className = 'fem-btn fem-btn-secondary';
         revertBtn.textContent = 'Reset to Deck Defaults';
         revertBtn.title = 'Discard component modifications and re-parse original deck';
-        revertBtn.onclick = () => {
-            if (confirm('Discard all part and boundary condition modifications and reload the original deck?')) {
+        revertBtn.onclick = async () => {
+            const ok = await CustomDialog.confirm(
+                'Discard all part and boundary condition modifications and reload the original deck?',
+                'Reset to Deck Defaults',
+                { confirmText: 'Reset', danger: true }
+            );
+            if (ok) {
                 this.config = createDefaultFEMSetupConfig();
                 this.initPreview();
                 this.isDirty = true;
@@ -1214,9 +1261,10 @@ export class FEMSetupModal {
             delBtn.className = 'fem-icon-btn danger';
             delBtn.innerHTML = '🗑️';
             delBtn.title = 'Delete Set';
-            delBtn.onclick = (e) => {
+            delBtn.onclick = async (e) => {
                 e.stopPropagation();
-                if (confirm(`Delete set "${set.name}"?`)) {
+                const ok = await CustomDialog.confirm(`Delete set "${set.name}"?`, 'Delete Entity Set', { confirmText: 'Delete', danger: true });
+                if (ok) {
                     this.config.sets = this.config.sets.filter(s => s.set_id !== set.set_id);
                     if (this.selectedSetId === set.set_id) this.selectedSetId = null;
                     this.isDirty = true;
@@ -1430,9 +1478,10 @@ export class FEMSetupModal {
             delBtn.className = 'fem-icon-btn danger';
             delBtn.innerHTML = '🗑️';
             delBtn.title = 'Delete Boundary Condition';
-            delBtn.onclick = (e) => {
+            delBtn.onclick = async (e) => {
                 e.stopPropagation();
-                if (confirm(`Delete boundary condition "${bc.name}"?`)) {
+                const ok = await CustomDialog.confirm(`Delete boundary condition "${bc.name}"?`, 'Delete Boundary Condition', { confirmText: 'Delete', danger: true });
+                if (ok) {
                     this.config.boundary_conditions = this.config.boundary_conditions.filter(b => b.id !== bc.id);
                     if (this.selectedBCId === bc.id) this.selectedBCId = null;
                     this.isDirty = true;
@@ -1709,11 +1758,39 @@ export class FEMSetupModal {
             actRow.style.gap = '6px';
             actRow.style.marginTop = '6px';
 
+            const browseDeckBtn = document.createElement('button');
+            browseDeckBtn.className = 'fem-mini-btn';
+            browseDeckBtn.style.flex = '1';
+            browseDeckBtn.innerHTML = '<span>📂</span> <span>Browse Deck...</span>';
+            browseDeckBtn.title = 'Browse host filesystem for an LS-DYNA Keyword Deck (*.k, *.key)';
+            browseDeckBtn.onclick = () => this.triggerFileImport();
+            actRow.appendChild(browseDeckBtn);
+
+            const recentDeckBtn = document.createElement('button');
+            recentDeckBtn.className = 'fem-mini-btn';
+            recentDeckBtn.innerHTML = '<span>🕒</span>';
+            recentDeckBtn.title = 'Browse Keyword Deck from a Recent Folder';
+            recentDeckBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                showRecentFoldersQuickMenu(
+                    recentDeckBtn,
+                    (folderPath) => this.triggerFileImport(folderPath),
+                    {
+                        title: 'Browse Deck in Recent Folder',
+                        onBrowseOther: () => this.triggerFileImport()
+                    }
+                );
+            };
+            actRow.appendChild(recentDeckBtn);
+
             const refreshBtn = document.createElement('button');
             refreshBtn.className = 'fem-mini-btn';
             refreshBtn.style.flex = '1';
-            refreshBtn.innerHTML = '<span>🔄</span> <span>Refresh from Solver</span>';
+            refreshBtn.innerHTML = '<span>🔄</span> <span>Refresh</span>';
+            refreshBtn.title = 'Reload mesh from active solver telemetry or host keyword deck';
             refreshBtn.onclick = () => {
+                this._loadingHostDeckPath = null;
                 this.initPreview();
                 this.renderInspector();
                 this.renderTabsAndList();
@@ -3773,9 +3850,129 @@ export class FEMSetupModal {
     }
 
     // ========================================================================
-    // File Import / Export
+    // File Import / Export (Host Filesystem + Recent Folders + Local Fallback)
     // ========================================================================
-    private triggerFileImport(): void {
+    private async loadHostKeywordDeckForPreview(kFilePath: string): Promise<void> {
+        const net = (window as any).networkManager;
+        if (!net || !net.isConnected()) return;
+
+        const resolvedPath = resolveResourcePath(kFilePath, this.model?.filename);
+        if (!resolvedPath || this._loadingHostDeckPath === resolvedPath) return;
+        this._loadingHostDeckPath = resolvedPath;
+
+        try {
+            const res = await readHostFile(net, resolvedPath);
+            if (!this.overlay) return;
+            if (!res.content || res.content.length === 0) {
+                return;
+            }
+            const parsed = FEMDeckParser.parse(res.content);
+            if (!parsed || parsed.elements.length === 0) return;
+
+            for (const pt of parsed.config.parts) {
+                pt.k_file = kFilePath;
+                pt.shape_type = 'LS-DYNA File';
+            }
+            this.preview = parsed;
+            if (resolvedPath.startsWith('/') || resolvedPath.startsWith('~') || /^[A-Za-z]:[\\/]/.test(resolvedPath)) {
+                recordRecentFolder(resolvedPath, false);
+            }
+            this.mergeParsedWithExistingConfig();
+            this.calculateModelBounds();
+            this.renderTabsAndList();
+            this.renderInspector();
+            this.requestRender();
+        } catch (err) {
+            console.warn('[FEMSetupModal] Failed to parse host keyword deck for preview:', err);
+        } finally {
+            if (this._loadingHostDeckPath === resolvedPath) {
+                this._loadingHostDeckPath = null;
+            }
+        }
+    }
+
+    private applyImportedDeckText(text: string, kFileRef: string): void {
+        const parsed = FEMDeckParser.parse(text);
+        this.preview = parsed;
+
+        // Only embed raw deck_content on node parameters if < 2MB; for >= 2MB host decks,
+        // k_file retains the full host path so both BlastSolver and FEMSetupModal load directly from disk.
+        if (text.length < 2 * 1024 * 1024) {
+            this.femNode.parameters.deck_content = text;
+        } else {
+            delete this.femNode.parameters.deck_content;
+        }
+        this.femNode.parameters.k_file = kFileRef;
+        this.femNode.parameters.geometry_hash = 'k_' + Math.floor(Math.random() * 1000000).toString(36);
+
+        const preservedNodeId = this.config.parts[0]?.node_id ||
+            (['FEMObject3D', 'LSDynaImporter3D', 'FEMBeam3D', 'FEMRebar3D'].includes(this.femNode.type) ? this.femNode.id : undefined);
+
+        this.config = JSON.parse(JSON.stringify(parsed.config));
+        for (let i = 0; i < this.config.parts.length; i++) {
+            this.config.parts[i].k_file = kFileRef;
+            this.config.parts[i].shape_type = 'LS-DYNA File';
+            if (i === 0 && preservedNodeId && !this.config.parts[i].node_id) {
+                this.config.parts[i].node_id = preservedNodeId;
+            }
+        }
+
+        if (kFileRef.startsWith('/') || kFileRef.startsWith('~') || /^[A-Za-z]:[\\/]/.test(kFileRef)) {
+            recordRecentFolder(kFileRef, false);
+        }
+
+        this.selectedPartId = this.config.parts.length > 0 ? this.config.parts[0].part_id : null;
+        this.calculateModelBounds();
+        this.isDirty = true;
+
+        this.renderTabsAndList();
+        this.renderInspector();
+        this.requestRender();
+
+        const displayName = kFileRef.split(/[\\/]/).pop() || kFileRef;
+        void CustomDialog.alert(
+            `Successfully parsed LS-DYNA Keyword Deck "${displayName}":\n` +
+            `• ${this.config.parts.length} Parts\n` +
+            `• ${this.config.sets.length} Sets\n` +
+            `• ${parsed.elements.length.toLocaleString()} Solid/Shell/Beam Elements\n` +
+            `• ${parsed.nodeIndexToId.length.toLocaleString()} Nodes`,
+            'Keyword Deck Imported'
+        );
+    }
+
+    private triggerFileImport(initialFolderOverride?: string): void {
+        const net = (window as any).networkManager;
+        if (net && net.isConnected()) {
+            const rawK = String(this.femNode.parameters?.k_file || '');
+            const startPath = initialFolderOverride !== undefined
+                ? initialFolderOverride
+                : (rawK && rawK !== 'None specified' ? resolveResourcePath(rawK, this.model?.filename) : '');
+
+            const browser = new HostFileBrowserModal(net, {
+                title: 'Import LS-DYNA Keyword Deck (*.k, *.key, *.dyn)',
+                mode: 'open',
+                filters: [
+                    { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
+                    { label: 'Text Decks (*.txt, *.inp)', extensions: ['.txt', '.inp'] },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ],
+                onSelect: async (selectedPath: string) => {
+                    try {
+                        const res = await readHostFile(net, selectedPath);
+                        this.applyImportedDeckText(res.content, selectedPath);
+                    } catch (err: any) {
+                        await CustomDialog.alert(`Failed to import keyword deck:\n${err?.message || err}`, 'Deck Import Error');
+                    }
+                }
+            });
+            browser.open(startPath);
+            return;
+        }
+
+        this.triggerLocalFileImport();
+    }
+
+    private triggerLocalFileImport(): void {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = '.k,.key,.dyn,.txt';
@@ -3785,39 +3982,45 @@ export class FEMSetupModal {
 
             try {
                 const text = await file.text();
-                this.preview = FEMDeckParser.parse(text);
-
-                // Only store deck content on node parameters if small (< 2MB) to prevent freezing stateManager & localStorage
-                if (text.length < 2 * 1024 * 1024) {
-                    this.femNode.parameters.deck_content = text;
-                } else {
-                    delete this.femNode.parameters.deck_content;
-                }
-                this.femNode.parameters.k_file = file.name;
-
-                // Sync config
-                this.config = JSON.parse(JSON.stringify(this.preview.config));
-                this.selectedPartId = this.config.parts.length > 0 ? this.config.parts[0].part_id : null;
-                this.calculateModelBounds();
-                this.isDirty = true;
-
-                this.renderTabsAndList();
-                this.renderInspector();
-                this.requestRender();
-
-                alert(`Successfully parsed LS-DYNA Keyword Deck "${file.name}":\n` +
-                      `• ${this.config.parts.length} Parts\n` +
-                      `• ${this.config.sets.length} Sets\n` +
-                      `• ${this.preview.elements.length.toLocaleString()} Solid/Shell/Beam Elements\n` +
-                      `• ${this.preview.nodeIndexToId.length.toLocaleString()} Nodes`);
+                this.applyImportedDeckText(text, file.name);
             } catch (err: any) {
-                alert(`Failed to parse keyword deck: ${err.message}`);
+                await CustomDialog.alert(`Failed to parse keyword deck:\n${err?.message || err}`, 'Deck Parse Error');
             }
         };
         input.click();
     }
 
     private exportSetupJSON(): void {
+        const net = (window as any).networkManager;
+        const defaultName = `${this.femNode.parameters.name || 'fem_assembly'}_setup.json`;
+        if (net && net.isConnected()) {
+            const jsonStr = JSON.stringify(this.config, null, 2);
+            const browser = new HostFileBrowserModal(net, {
+                title: 'Export FEM Assembly Setup JSON (Host)',
+                mode: 'save',
+                defaultFilename: defaultName,
+                filters: [
+                    { label: 'JSON Configuration (*.json)', extensions: ['.json'] },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ],
+                onSelect: async (savePath: string) => {
+                    const finalPath = /\.json$/i.test(savePath) ? savePath : `${savePath}.json`;
+                    try {
+                        await writeHostFile(net, finalPath, jsonStr, 'utf8');
+                        await CustomDialog.alert(`Saved FEM assembly setup to:\n${finalPath}`, 'Export Complete');
+                    } catch (err: any) {
+                        await CustomDialog.alert(err?.message || `Failed to write "${finalPath}".`, 'Export Error');
+                    }
+                }
+            });
+            browser.open('');
+            return;
+        }
+
+        this.downloadSetupJSONLocally();
+    }
+
+    private downloadSetupJSONLocally(): void {
         const jsonStr = JSON.stringify(this.config, null, 2);
         const blob = new Blob([jsonStr], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
@@ -3825,7 +4028,7 @@ export class FEMSetupModal {
         a.href = url;
         a.download = `${this.femNode.parameters.name || 'fem_assembly'}_setup.json`;
         a.click();
-        URL.revokeObjectURL(url);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
     // ========================================================================

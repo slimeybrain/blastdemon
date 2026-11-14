@@ -62,7 +62,8 @@ enum class MPMMaterialModel {
 
 enum class SolidReactantEOS : int {
     MieGruneisen = 0,
-    DavisSolid = 1
+    DavisSolid = 1,
+    JWLReactant = 2   // Unreacted-explosive JWL (temperature form), required for published Lee-Tarver calibrations
 };
 
 enum class ReactionKinetics : int {
@@ -247,24 +248,50 @@ struct MPMParticle2D {
     int   burn_zone_cells{4};            // Smeared burn zone cell width N_cells
     float tau_burn_min{1.0e-7f};         // Minimum burn duration limiter (s)
 
-    // Lee-Tarver Ignition & Growth Parameters
-    float lt_I{4.0e6f};                  // Ignition rate coefficient (1/s)
-    float lt_a{0.24f};                   // Ignition compression threshold
+    // Lee-Tarver Ignition & Growth Parameters  (STRICT SI; default = LLNL PBX 9501, UCRL-JC-141967 Table 1,
+    // converted with Blast::LeeTarver::fromLLNL_*; I[1/s], G1[1/(s Pa^y)], G2[1/(s Pa^z)])
+    float lt_I{1.4e17f};                 // Ignition rate coefficient I (1/s)
+    float lt_a{0.0f};                    // Ignition compression threshold a
     float lt_b{0.667f};                  // Ignition depletion exponent
-    float lt_x{7.0f};                    // Ignition compression exponent
-    float lt_G1{130.0e-6f};              // Growth rate coefficient (1/(s Pa^y))
+    float lt_x{20.0f};                   // Ignition compression exponent
+    float lt_G1{1.3e-14f};               // Growth rate coefficient G1 (1/(s Pa^y))
     float lt_c{0.667f};                  // Growth depletion exponent
-    float lt_d{0.333f};                  // Growth reaction progress exponent
+    float lt_d{0.277f};                  // Growth reaction progress exponent
     float lt_y{2.0f};                    // Growth pressure exponent
-    float lt_G2{400.0e-6f};              // Completion rate coefficient (1/(s Pa^z))
+    float lt_G2{4.0e-14f};               // Completion rate coefficient G2 (1/(s Pa^z))
     float lt_e{0.333f};                  // Completion depletion exponent
-    float lt_g{0.667f};                  // Completion reaction progress exponent
-    float lt_z{3.0f};                    // Completion pressure exponent
-    float lt_ig_max{0.02f};              // Maximum ignition fraction
-    float lt_growth_max{0.50f};          // Maximum growth fraction
-    float lt_comp_min{0.50f};            // Minimum completion threshold
+    float lt_g{1.0f};                    // Completion reaction progress exponent
+    float lt_z{2.0f};                    // Completion pressure exponent
+    float lt_ig_max{0.3f};               // Maximum ignition fraction F_ig_max
+    float lt_growth_max{0.50f};          // Maximum growth fraction F_G1_max
+    float lt_comp_min{0.50f};            // Minimum completion threshold F_G2_min
+
+    // Unreacted-explosive JWL EOS (SolidReactantEOS::JWLReactant), strict SI.
+    // p = A e^(-R1 V) + B e^(-R2 V) + omega Cv T / V ;  default = LLNL PBX 9501 unreacted JWL at T0 = 298 K
+    float jwlr_A{7.32e14f};              // A (Pa)
+    float jwlr_B{-5.2654e9f};            // B (Pa), calibrated so p(V=1, T0) = 0
+    float jwlr_R1{14.1f};                // R1
+    float jwlr_R2{1.41f};                // R2
+    float jwlr_omega{0.8867f};           // Gruneisen omega
+    float jwlr_Cv{2.7806e6f};            // Cv (Pa/K, per initial volume)
+    float jwlr_T0{298.0f};               // Reference temperature (K)
+    int   mixture_rule{1};               // 0 = linear blend, 1 = pressure equilibrium (volume additive)
+
+    // Tait Water / Compressible Fluid Parameters (2D)
+    float tait_rho0{1000.0f};             // Reference density (kg/m^3)
+    float tait_B{3.0e8f};                 // Tait bulk modulus constant B (Pa)
+    float tait_gamma{7.0f};               // Tait exponent gamma
+    float tait_p0{101325.0f};             // Reference pressure (Pa)
+    float mu_visc{1.0e-3f};               // Dynamic viscosity (Pa s)
+
+    // Density-Based Particle Erosion & FV Grid Handoff
+    bool enable_density_erosion{false};
+    float erosion_min_density{0.0f};      // Minimum physical density threshold (kg/m^3)
+    float erosion_min_density_ratio{0.0f};// Minimum relative density ratio rho / rho0
+    bool erode_to_fv_grid{true};          // Inject eroded fluid/explosive particle into FV grid when coupled
 
     bool has_failed{false};      // Total failure status flag
+    int state{0};                // 0 = active, 2 = terminated/eroded
     int object_id{0};
     int transfer_scheme{-1};    // -1 = Inherit domain default, otherwise MPMTransferScheme cast
 };
@@ -283,6 +310,42 @@ struct MPMGridNode2D {
     float density;
     float pressure;
     float damage;
+};
+
+struct MPMGridView2D {
+    MPMGridNode2D* nodes{nullptr};
+    const int* tile_table{nullptr}; // nullptr in Dense mode; size ntx * nty in Sparse mode
+    int nx{0};
+    int ny{0};
+    int ntx{0};
+    int nty{0};
+
+    inline bool isValidCoords(int i, int j) const {
+        return (i >= 0 && i < nx && j >= 0 && j < ny);
+    }
+
+    // Converts logical (i, j) -> physical slot index in `nodes` (or -1 if unallocated tile)
+    inline long long slotIndex(int i, int j) const {
+        if (i < 0 || i >= nx || j < 0 || j >= ny) return -1;
+        if (!tile_table) {
+            return static_cast<long long>(i) * ny + j;
+        }
+        int tx = i >> 3;
+        int ty = j >> 3;
+        int t_slot = tile_table[tx * nty + ty];
+        if (t_slot < 0) return -1;
+        int lx = i & 7;
+        int ly = j & 7;
+        return (static_cast<long long>(t_slot) << 6) | (lx << 3) | ly;
+    }
+
+    inline long long slotIndexFromLogical(long long logical_idx) const {
+        if (!tile_table) return logical_idx;
+        if (logical_idx < 0 || ny <= 0) return -1;
+        int j = static_cast<int>(logical_idx % ny);
+        int i = static_cast<int>(logical_idx / ny);
+        return slotIndex(i, j);
+    }
 };
 
 enum class MPMTransferScheme {
@@ -332,6 +395,22 @@ public:
 
     // Initialization & Grid Setup
     void initializeGrid(int nx, int ny, float dx, float dy);
+    void setSparseGridMode(bool sparse) { m_sparse_grid_mode = sparse; }
+    bool isSparseGridMode() const { return m_sparse_grid_mode; }
+    MPMGridView2D getGridView() const {
+        return MPMGridView2D{
+            const_cast<MPMGridNode2D*>(m_grid.data()),
+            m_sparse_grid_mode && !m_tile_table.empty() ? m_tile_table.data() : nullptr,
+            m_nx, m_ny, m_ntx, m_nty
+        };
+    }
+    MPMGridView2D getHostGridView() const { return getGridView(); }
+    size_t getNumActiveTiles() const { return m_sparse_grid_mode ? m_active_tiles.size() : static_cast<size_t>(m_ntx) * m_nty; }
+    size_t getTileCapacity() const { return m_sparse_grid_mode ? m_tile_capacity : static_cast<size_t>(m_ntx) * m_nty; }
+    size_t getTotalLogicalTiles() const { return static_cast<size_t>(m_ntx) * m_nty; }
+    int getSparseActiveTileCount() const { return static_cast<int>(getNumActiveTiles()); }
+    int getSparseMaxActiveTiles() const { return static_cast<int>(getTileCapacity()); }
+
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
     void setTimeScheme(MPMTimeIntegrationScheme scheme) { m_time_scheme = scheme; }
@@ -385,6 +464,9 @@ public:
     // Export interpolated scalar grid for 2D contour telemetry
     std::vector<float> getGridScalarField(const std::string& quantity) const;
 
+    void setDeferFVErosionToCoupler(bool defer) { m_defer_fv_erosion_to_coupler = defer; }
+    bool getDeferFVErosionToCoupler() const { return m_defer_fv_erosion_to_coupler; }
+
     void particleToGrid();
 
 private:
@@ -410,8 +492,15 @@ private:
 
     int m_nx{64};
     int m_ny{64};
+    int m_ntx{8};
+    int m_nty{8};
     float m_dx{0.01f};
     float m_dy{0.01f};
+    bool m_sparse_grid_mode{false};
+    bool m_defer_fv_erosion_to_coupler{false};
+    size_t m_tile_capacity{0};
+    std::vector<int> m_tile_table;
+    std::vector<int> m_active_tiles;
 
     MPMTransferScheme m_transfer_scheme{MPMTransferScheme::GIMP};
     MPMVelocityScheme m_velocity_scheme{MPMVelocityScheme::APIC};

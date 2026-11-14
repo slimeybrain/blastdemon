@@ -39,7 +39,7 @@ struct MemoryEstimate {
 
 MemoryEstimate estimateCFD3DMemory(int nx, int ny, int nz, bool is_cuda, bool is_double, bool is_multimat);
 MemoryEstimate estimateCFD2DMemory(int nr, int nz, bool is_cuda, bool is_double, bool is_multimat);
-MemoryEstimate estimateMPM3DMemory(int nx, int ny, int nz, size_t particle_count, bool is_cuda);
+MemoryEstimate estimateMPM3DMemory(int nx, int ny, int nz, size_t particle_count, bool is_cuda, bool is_sparse = false);
 MemoryEstimate estimateFEM3DMemory(size_t element_count, size_t node_count, bool is_cuda);
 
 /**

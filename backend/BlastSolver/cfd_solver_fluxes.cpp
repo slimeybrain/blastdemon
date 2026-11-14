@@ -232,11 +232,20 @@ void CFDSolverImpl<RealType, IsMultiMaterial>::reconstruct(const std::vector<Pri
 
     auto get_state = [&](int idx) {
         if (idx < 0) {
-            PrimitiveState s = states_current[-idx]; // Fix ghost cell reflecting index
+            int mirror_idx = std::min(n_cells - 1, -1 - idx);
+            PrimitiveState s = states_current[mirror_idx];
             s.u = -s.u;
             return s;
         }
-        if (idx >= n_cells) return states_current[n_cells - 1];
+        if (idx >= n_cells) {
+            if (bcRight == REFLECTIVE) {
+                int mirror_idx = std::max(0, 2 * n_cells - 1 - idx);
+                PrimitiveState s = states_current[mirror_idx];
+                s.u = -s.u;
+                return s;
+            }
+            return states_current[n_cells - 1];
+        }
         return states_current[idx];
     };
 

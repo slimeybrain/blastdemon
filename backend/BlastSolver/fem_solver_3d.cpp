@@ -3236,9 +3236,12 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     mat.crest_b2, mat.crest_c2, mat.crest_c3, mat.crest_m2,
                     mat.crest_s0, mat.crest_s_threshold);
             } else if (is_lt_kinetics) {
-                float p_react_trial = use_davis_solid
-                    ? CrestDavis::computeDavisReactantPressure(v_rel_f, static_cast<float>(elem.e_int), mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0)
-                    : JWL::computeSolidReactantPressure(v_rel_f, static_cast<float>(elem.e_int), mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density);
+                const float e_th_lt = static_cast<float>(elem.e_int) - lam_curr * mat.detonation_energy;
+                float p_react_trial = (mat.solid_model == SolidReactantEOS::JWLReactant)
+                    ? JWL::computeJWLReactantPressure(v_rel_f, e_th_lt, mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_omega, mat.jwlr_Cv, mat.jwlr_T0, mat.density)
+                    : use_davis_solid
+                    ? CrestDavis::computeDavisReactantPressure(v_rel_f, e_th_lt, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0)
+                    : JWL::computeSolidReactantPressure(v_rel_f, e_th_lt, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density);
                 float p_lt = std::max(p_curr_comp, p_react_trial + static_cast<float>(q_visc));
                 lam_new = LeeTarver::advanceLeeTarver(
                     static_cast<float>(dt), lam_curr, v_rel_f, p_lt,
@@ -3262,20 +3265,36 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             float e_prod = e_th + q_heat;
 
             float p_ambient = 101325.0f;
-            float p_solid = awe
-                ? (p_ambient + static_cast<float>(CrestDavis::computeCRESTSolidPressure(v_rel_f, std::max(0.0f, e_th), awe_q)))
-                : use_davis_solid
-                ? (p_ambient + CrestDavis::computeDavisReactantPressure(v_rel_f, e_th, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0))
-                : (p_ambient + JWL::computeSolidReactantPressure(v_rel_f, e_th, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density));
+            const bool use_jwl_reactant = (mat.solid_model == SolidReactantEOS::JWLReactant);
+            auto solid_pressure_at = [&](float v) -> float {
+                return awe
+                    ? (p_ambient + static_cast<float>(CrestDavis::computeCRESTSolidPressure(v, std::max(0.0f, e_th), awe_q)))
+                    : use_jwl_reactant
+                    ? (p_ambient + JWL::computeJWLReactantPressure(v, e_th, mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_omega, mat.jwlr_Cv, mat.jwlr_T0, mat.density))
+                    : use_davis_solid
+                    ? (p_ambient + CrestDavis::computeDavisReactantPressure(v, e_th, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0))
+                    : (p_ambient + JWL::computeSolidReactantPressure(v, e_th, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density));
+            };
+            auto product_pressure_at = [&](float v) -> float {
+                return awe
+                    ? JWL::computeJWLProductPressure(v * awe_vtmd, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, static_cast<float>(awe_q.rho0s))
+                    : use_davis_prod
+                    ? CrestDavis::computeDavisProductPressure(v, e_prod, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0)
+                    : JWL::computeJWLProductPressure(v, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.density);
+            };
 
-            float p_prod = awe
-                ? JWL::computeJWLProductPressure(v_rel_f * awe_vtmd, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, static_cast<float>(awe_q.rho0s))
-                : use_davis_prod
-                ? CrestDavis::computeDavisProductPressure(v_rel_f, e_prod, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0)
-                : JWL::computeJWLProductPressure(v_rel_f, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.density);
-
-            float p_mix = (1.0f - lam_new) * p_solid + lam_new * p_prod;
+            // Lee-Tarver kinetics use the selectable mixture rule (default: pressure equilibrium, volume additive);
+            // all other reactive models keep the linear blend.
+            const Mixture::Rule mix_rule = is_lt_kinetics
+                ? static_cast<Mixture::Rule>(mat.mixture_rule) : Mixture::Rule::LinearBlend;
+            const Mixture::Result mix = Mixture::mixturePressure(mix_rule, static_cast<double>(v_rel_f), static_cast<double>(lam_new),
+                [&](double v) { return static_cast<double>(solid_pressure_at(static_cast<float>(v))); },
+                [&](double v) { return static_cast<double>(product_pressure_at(static_cast<float>(v))); });
+            float p_mix = static_cast<float>(mix.p);
             if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+            // Phase pressures at the phase volumes chosen by the mixture rule (used by sound-speed/CFL closures)
+            [[maybe_unused]] const float p_solid = solid_pressure_at(static_cast<float>(mix.v_s));
+            [[maybe_unused]] const float p_prod = product_pressure_at(static_cast<float>(mix.v_p));
 
             float rho_eff = (mat.density > 10.0f) ? mat.density : (use_davis_solid ? mat.davis_rho0 : 1630.0f);
             float tr_deps = static_cast<float>(div_v * dt);

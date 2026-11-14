@@ -50,7 +50,8 @@ extern std::vector<size_t> global_pinned_gauge_indices;
 extern std::mutex global_gauges_mutex;
 extern GaugeOutputConfig global_gauge_config;
 
-void init_gauges(const nlohmann::json& msg);
+void init_gauges(const nlohmann::json& msg, bool reset_history = true);
+void sync_gauges_after_remap(const nlohmann::json& remap_msg, double start_time);
 void record_gauges_1d(double t);
 void record_gauges_2d(double t);
 void record_gauges_3d(double t);

@@ -1,6 +1,7 @@
 #include "mpm_solver_2d.hpp"
 #include "constitutive_jwl.hpp"
 #include "constitutive_lee_tarver.hpp"
+#include "constitutive_mixture.hpp"
 #include "constitutive_crest_davis.hpp"
 #include <cstring>
 
@@ -12,10 +13,25 @@ MPMSolver2D::MPMSolver2D() {
 void MPMSolver2D::initializeGrid(int nx, int ny, float dx, float dy) {
     m_nx = nx;
     m_ny = ny;
+    m_ntx = (m_nx + 7) >> 3;
+    m_nty = (m_ny + 7) >> 3;
     m_dx = dx;
     m_dy = dy;
 
-    m_grid.resize(m_nx * m_ny);
+    if (m_sparse_grid_mode) {
+        size_t total_tiles = static_cast<size_t>(m_ntx) * m_nty;
+        m_tile_table.assign(total_tiles, -1);
+        m_active_tiles.clear();
+        m_tile_capacity = std::min<size_t>(total_tiles, 64);
+        m_grid.clear();
+        m_grid.shrink_to_fit();
+        m_grid.assign(m_tile_capacity * 64, MPMGridNode2D{});
+    } else {
+        m_tile_table.clear();
+        m_active_tiles.clear();
+        m_tile_capacity = 0;
+        m_grid.resize(static_cast<size_t>(m_nx) * m_ny);
+    }
     m_particles.clear();
     m_terminated = false;
 }
@@ -280,19 +296,79 @@ void MPMSolver2D::addCircleObject(int obj_id, float pos_x, float pos_y, float ra
 }
 
 void MPMSolver2D::particleToGrid() {
-    // Clear background grid
-    for (auto& node : m_grid) {
-        node.m = 0.0f;
-        node.p[0] = 0.0f; node.p[1] = 0.0f;
-        node.v[0] = 0.0f; node.v[1] = 0.0f;
-        node.f_int[0] = 0.0f; node.f_int[1] = 0.0f;
-        node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f;
-        node.von_mises = 0.0f;
-        node.plastic_strain = 0.0f;
-        node.density = 0.0f;
-        node.pressure = 0.0f;
-        node.damage = 0.0f;
+    if (m_sparse_grid_mode) {
+        size_t active_node_limit = m_active_tiles.size() * 64;
+        for (size_t idx = 0; idx < active_node_limit && idx < m_grid.size(); ++idx) {
+            auto& node = m_grid[idx];
+            node.m = 0.0f;
+            node.p[0] = 0.0f; node.p[1] = 0.0f;
+            node.v[0] = 0.0f; node.v[1] = 0.0f;
+            node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
+            node.f_int[0] = 0.0f; node.f_int[1] = 0.0f;
+            node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f;
+            node.von_mises = 0.0f;
+            node.plastic_strain = 0.0f;
+            node.density = 0.0f;
+            node.pressure = 0.0f;
+            node.damage = 0.0f;
+        }
+        for (int t_id : m_active_tiles) {
+            if (t_id >= 0 && static_cast<size_t>(t_id) < m_tile_table.size()) {
+                m_tile_table[t_id] = -1;
+            }
+        }
+        m_active_tiles.clear();
+
+        // Activate 8x8 tiles within [-3, +3] cell halo around each particle
+        for (const auto& p : m_particles) {
+            if (p.m <= 0.0f) continue;
+            int base_i = static_cast<int>(std::floor(p.x[0] / m_dx));
+            int base_j = static_cast<int>(std::floor(p.x[1] / m_dy));
+            int i0 = std::max(0, base_i - 3);
+            int i1 = std::min(m_nx - 1, base_i + 3);
+            int j0 = std::max(0, base_j - 3);
+            int j1 = std::min(m_ny - 1, base_j + 3);
+            if (i0 > i1 || j0 > j1) continue;
+            for (int tx = (i0 >> 3); tx <= (i1 >> 3); ++tx) {
+                for (int ty = (j0 >> 3); ty <= (j1 >> 3); ++ty) {
+                    int t_id = tx * m_nty + ty;
+                    if (m_tile_table[t_id] < 0) {
+                        int slot = static_cast<int>(m_active_tiles.size());
+                        m_tile_table[t_id] = slot;
+                        m_active_tiles.push_back(t_id);
+                    }
+                }
+            }
+        }
+
+        if (m_active_tiles.size() > m_tile_capacity) {
+            size_t total_tiles = static_cast<size_t>(m_ntx) * m_nty;
+            m_tile_capacity = std::min<size_t>(
+                total_tiles,
+                std::max(m_active_tiles.size() + 16, m_tile_capacity + (m_tile_capacity >> 1))
+            );
+            // Free-before-reallocate to avoid transient double-allocation spike
+            m_grid.clear();
+            m_grid.shrink_to_fit();
+            m_grid.assign(m_tile_capacity * 64, MPMGridNode2D{});
+        }
+    } else {
+        // Clear dense background grid
+        for (auto& node : m_grid) {
+            node.m = 0.0f;
+            node.p[0] = 0.0f; node.p[1] = 0.0f;
+            node.v[0] = 0.0f; node.v[1] = 0.0f;
+            node.f_int[0] = 0.0f; node.f_int[1] = 0.0f;
+            node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f;
+            node.von_mises = 0.0f;
+            node.plastic_strain = 0.0f;
+            node.density = 0.0f;
+            node.pressure = 0.0f;
+            node.damage = 0.0f;
+        }
     }
+
+    const MPMGridView2D gv = getGridView();
 
     // P2G Scatter
     for (const auto& p : m_particles) {
@@ -401,7 +477,8 @@ void MPMSolver2D::particleToGrid() {
                     if (w < 1.0e-7f) continue;
 
                     float weight = w * inv_w_sum;
-                    int node_idx = i * m_ny + j;
+                    long long node_idx = gv.slotIndex(i, j);
+                    if (node_idx < 0) continue;
                     auto& node = m_grid[node_idx];
 
                     node.m += p.m * weight;
@@ -497,7 +574,8 @@ void MPMSolver2D::particleToGrid() {
                     float dN_dx = dSx * Sy;
                     float dN_dy = Sx * dSy;
 
-                    int node_idx = i * m_ny + j;
+                    long long node_idx = gv.slotIndex(i, j);
+                    if (node_idx < 0) continue;
                     auto& node = m_grid[node_idx];
 
                     // Mass scatter
@@ -529,7 +607,9 @@ void MPMSolver2D::particleToGrid() {
     }
 
     // Normalize Telemetry Scalars on Grid Nodes
-    for (auto& node : m_grid) {
+    size_t active_limit = m_sparse_grid_mode ? std::min(m_grid.size(), m_active_tiles.size() * 64) : m_grid.size();
+    for (size_t idx = 0; idx < active_limit; ++idx) {
+        auto& node = m_grid[idx];
         if (node.m > 1.0e-14f) {
             node.von_mises /= node.m;
             node.plastic_strain /= node.m;
@@ -540,31 +620,51 @@ void MPMSolver2D::particleToGrid() {
     }
 
     if (m_smooth_plastic_strain) {
-        std::vector<float> smoothed_ep(m_grid.size(), 0.0f);
-        for (int i = 0; i < m_nx; ++i) {
-            for (int j = 0; j < m_ny; ++j) {
-                int idx = i * m_ny + j;
-                if (m_grid[idx].m <= 1.0e-14f) continue;
-                float sum_ep = 2.0f * m_grid[idx].plastic_strain;
-                float weight_sum = 2.0f;
-                for (int di = -1; di <= 1; ++di) {
-                    for (int dj = -1; dj <= 1; ++dj) {
-                        if (di == 0 && dj == 0) continue;
-                        int ni = i + di; int nj = j + dj;
-                        if (ni >= 0 && ni < m_nx && nj >= 0 && nj < m_ny) {
-                            int n_idx = ni * m_ny + nj;
-                            if (m_grid[n_idx].m > 1.0e-14f) {
-                                float w = 1.0f / static_cast<float>(std::abs(di) + std::abs(dj));
-                                sum_ep += w * m_grid[n_idx].plastic_strain;
-                                weight_sum += w;
-                            }
-                        }
+        std::vector<float> smoothed_ep(active_limit, 0.0f);
+        auto smooth_node = [&](int i, int j, long long idx) {
+            if (idx < 0 || static_cast<size_t>(idx) >= active_limit) return;
+            if (m_grid[idx].m <= 1.0e-14f) return;
+            float sum_ep = 2.0f * m_grid[idx].plastic_strain;
+            float weight_sum = 2.0f;
+            for (int di = -1; di <= 1; ++di) {
+                for (int dj = -1; dj <= 1; ++dj) {
+                    if (di == 0 && dj == 0) continue;
+                    int ni = i + di; int nj = j + dj;
+                    long long n_idx = gv.slotIndex(ni, nj);
+                    if (n_idx >= 0 && static_cast<size_t>(n_idx) < active_limit && m_grid[n_idx].m > 1.0e-14f) {
+                        float w = 1.0f / static_cast<float>(std::abs(di) + std::abs(dj));
+                        sum_ep += w * m_grid[n_idx].plastic_strain;
+                        weight_sum += w;
                     }
                 }
-                smoothed_ep[idx] = sum_ep / weight_sum;
+            }
+            smoothed_ep[idx] = sum_ep / weight_sum;
+        };
+
+        if (m_sparse_grid_mode) {
+            for (size_t t_slot = 0; t_slot < m_active_tiles.size(); ++t_slot) {
+                int t_id = m_active_tiles[t_slot];
+                int tx = t_id / m_nty;
+                int ty = t_id % m_nty;
+                for (int lx = 0; lx < 8; ++lx) {
+                    int i = (tx << 3) | lx;
+                    if (i >= m_nx) continue;
+                    for (int ly = 0; ly < 8; ++ly) {
+                        int j = (ty << 3) | ly;
+                        if (j >= m_ny) continue;
+                        long long idx = (static_cast<long long>(t_slot) << 6) | (lx << 3) | ly;
+                        smooth_node(i, j, idx);
+                    }
+                }
+            }
+        } else {
+            for (int i = 0; i < m_nx; ++i) {
+                for (int j = 0; j < m_ny; ++j) {
+                    smooth_node(i, j, static_cast<long long>(i) * m_ny + j);
+                }
             }
         }
-        for (size_t idx = 0; idx < m_grid.size(); ++idx) {
+        for (size_t idx = 0; idx < active_limit; ++idx) {
             if (m_grid[idx].m > 1.0e-14f) {
                 m_grid[idx].plastic_strain = smoothed_ep[idx];
             }
@@ -578,68 +678,90 @@ void MPMSolver2D::updateGridKinematics(float dt) {
         avg_p_mass = m_particles[0].m;
     }
 
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int i = 0; i < m_nx; ++i) {
-        for (int j = 0; j < m_ny; ++j) {
-            int idx = i * m_ny + j;
-            auto& node = m_grid[idx];
+    auto update_single_node = [&](int i, int j, MPMGridNode2D& node) {
+        if (node.m <= 1.0e-14f) {
+            node.v[0] = 0.0f;
+            node.v[1] = 0.0f;
+            node.v_old[0] = 0.0f;
+            node.v_old[1] = 0.0f;
+            return;
+        }
 
-            if (node.m <= 1.0e-14f) {
-                node.v[0] = 0.0f;
-                node.v[1] = 0.0f;
-                node.v_old[0] = 0.0f;
-                node.v_old[1] = 0.0f;
-                continue;
+        node.v_old[0] = node.p[0] / node.m;
+        node.v_old[1] = node.p[1] / node.m;
+
+        float m_eff = std::max(node.m, 0.25f * avg_p_mass);
+        float total_fx = -node.f_int[0] + node.f_ext[0];
+        float total_fy = -node.f_int[1] + node.f_ext[1];
+
+        node.v[0] = node.v_old[0] + dt * (total_fx / m_eff);
+        node.v[1] = node.v_old[1] + dt * (total_fy / m_eff);
+
+        // Domain Boundary Conditions
+        if (i == 0) {
+            if (m_bc_x_min == MPMBoundaryCondition2D::Sticky) {
+                node.v[0] = 0.0f; node.v[1] = 0.0f;
+                node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
+            } else if (m_bc_x_min == MPMBoundaryCondition2D::FreeSlip ||
+                       m_bc_x_min == MPMBoundaryCondition2D::Reflecting) {
+                if (node.v[0] < 0.0f) node.v[0] = 0.0f;
+                if (node.v_old[0] < 0.0f) node.v_old[0] = 0.0f;
             }
+        } else if (i == m_nx - 1) {
+            if (m_bc_x_max == MPMBoundaryCondition2D::Sticky) {
+                node.v[0] = 0.0f; node.v[1] = 0.0f;
+                node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
+            } else if (m_bc_x_max == MPMBoundaryCondition2D::FreeSlip ||
+                       m_bc_x_max == MPMBoundaryCondition2D::Reflecting) {
+                if (node.v[0] > 0.0f) node.v[0] = 0.0f;
+                if (node.v_old[0] > 0.0f) node.v_old[0] = 0.0f;
+            }
+        }
+        if (j == 0) {
+            if (m_bc_y_min == MPMBoundaryCondition2D::Sticky) {
+                node.v[0] = 0.0f; node.v[1] = 0.0f;
+                node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
+            } else if (m_bc_y_min == MPMBoundaryCondition2D::FreeSlip ||
+                       m_bc_y_min == MPMBoundaryCondition2D::Reflecting) {
+                if (node.v[1] < 0.0f) node.v[1] = 0.0f;
+                if (node.v_old[1] < 0.0f) node.v_old[1] = 0.0f;
+            }
+        } else if (j == m_ny - 1) {
+            if (m_bc_y_max == MPMBoundaryCondition2D::Sticky) {
+                node.v[0] = 0.0f; node.v[1] = 0.0f;
+                node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
+            } else if (m_bc_y_max == MPMBoundaryCondition2D::FreeSlip ||
+                       m_bc_y_max == MPMBoundaryCondition2D::Reflecting) {
+                if (node.v[1] > 0.0f) node.v[1] = 0.0f;
+                if (node.v_old[1] > 0.0f) node.v_old[1] = 0.0f;
+            }
+        }
+    };
 
-            node.v_old[0] = node.p[0] / node.m;
-            node.v_old[1] = node.p[1] / node.m;
-
-            float m_eff = std::max(node.m, 0.25f * avg_p_mass);
-            float total_fx = -node.f_int[0] + node.f_ext[0];
-            float total_fy = -node.f_int[1] + node.f_ext[1];
-
-            node.v[0] = node.v_old[0] + dt * (total_fx / m_eff);
-            node.v[1] = node.v_old[1] + dt * (total_fy / m_eff);
-
-            // Domain Boundary Conditions
-            if (i == 0) {
-                if (m_bc_x_min == MPMBoundaryCondition2D::Sticky) {
-                    node.v[0] = 0.0f; node.v[1] = 0.0f;
-                    node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
-                } else if (m_bc_x_min == MPMBoundaryCondition2D::FreeSlip ||
-                           m_bc_x_min == MPMBoundaryCondition2D::Reflecting) {
-                    if (node.v[0] < 0.0f) node.v[0] = 0.0f;
-                    if (node.v_old[0] < 0.0f) node.v_old[0] = 0.0f;
-                }
-            } else if (i == m_nx - 1) {
-                if (m_bc_x_max == MPMBoundaryCondition2D::Sticky) {
-                    node.v[0] = 0.0f; node.v[1] = 0.0f;
-                    node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
-                } else if (m_bc_x_max == MPMBoundaryCondition2D::FreeSlip ||
-                           m_bc_x_max == MPMBoundaryCondition2D::Reflecting) {
-                    if (node.v[0] > 0.0f) node.v[0] = 0.0f;
-                    if (node.v_old[0] > 0.0f) node.v_old[0] = 0.0f;
+    if (m_sparse_grid_mode) {
+        const size_t num_active_tiles = m_active_tiles.size();
+        #pragma omp parallel for schedule(static)
+        for (size_t t_slot = 0; t_slot < num_active_tiles; ++t_slot) {
+            int t_id = m_active_tiles[t_slot];
+            int tx = t_id / m_nty;
+            int ty = t_id % m_nty;
+            for (int lx = 0; lx < 8; ++lx) {
+                int i = (tx << 3) | lx;
+                if (i >= m_nx) continue;
+                for (int ly = 0; ly < 8; ++ly) {
+                    int j = (ty << 3) | ly;
+                    if (j >= m_ny) continue;
+                    size_t slot = (t_slot << 6) | (lx << 3) | ly;
+                    update_single_node(i, j, m_grid[slot]);
                 }
             }
-            if (j == 0) {
-                if (m_bc_y_min == MPMBoundaryCondition2D::Sticky) {
-                    node.v[0] = 0.0f; node.v[1] = 0.0f;
-                    node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
-                } else if (m_bc_y_min == MPMBoundaryCondition2D::FreeSlip ||
-                           m_bc_y_min == MPMBoundaryCondition2D::Reflecting) {
-                    if (node.v[1] < 0.0f) node.v[1] = 0.0f;
-                    if (node.v_old[1] < 0.0f) node.v_old[1] = 0.0f;
-                }
-            } else if (j == m_ny - 1) {
-                if (m_bc_y_max == MPMBoundaryCondition2D::Sticky) {
-                    node.v[0] = 0.0f; node.v[1] = 0.0f;
-                    node.v_old[0] = 0.0f; node.v_old[1] = 0.0f;
-                } else if (m_bc_y_max == MPMBoundaryCondition2D::FreeSlip ||
-                           m_bc_y_max == MPMBoundaryCondition2D::Reflecting) {
-                    if (node.v[1] > 0.0f) node.v[1] = 0.0f;
-                    if (node.v_old[1] > 0.0f) node.v_old[1] = 0.0f;
-                }
+        }
+    } else {
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int i = 0; i < m_nx; ++i) {
+            for (int j = 0; j < m_ny; ++j) {
+                int idx = i * m_ny + j;
+                update_single_node(i, j, m_grid[idx]);
             }
         }
     }
@@ -649,6 +771,7 @@ template <bool FUSE_STRESS>
 void MPMSolver2D::gridToParticleInternal(float dt) {
     float max_B = 25000.0f / std::min(m_dx, m_dy);
     const size_t num_particles = m_particles.size();
+    const MPMGridView2D gv = getGridView();
 
     #pragma omp parallel for schedule(dynamic, 64)
     for (size_t p_idx = 0; p_idx < num_particles; ++p_idx) {
@@ -752,7 +875,8 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                         if (w < 1.0e-7f) continue;
 
                         float weight = w * inv_w_sum;
-                        int node_idx = i * m_ny + j;
+                        long long node_idx = gv.slotIndex(i, j);
+                        if (node_idx < 0) continue;
                         const auto& node = m_grid[node_idx];
 
                         if (node.m > 1.0e-14f) {
@@ -856,7 +980,8 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                     float dN_dx = dSx * Sy;
                     float dN_dy = Sx * dSy;
 
-                    int node_idx = i * m_ny + j;
+                    long long node_idx = gv.slotIndex(i, j);
+                    if (node_idx < 0) continue;
                     const auto& node = m_grid[node_idx];
 
                     if (node.m > 1.0e-14f) {
@@ -1041,11 +1166,34 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
         if constexpr (FUSE_STRESS) {
             updateParticleStress(p, dt, p.L_grad);
         }
+
+        // Density-Based Particle Erosion (2D)
+        if (p.enable_density_erosion && p.state != 2 && p.m > 0.0f) {
+            const bool is_energetic_p = (p.material_model == MPMMaterialModel::CRESTReactiveBurn) ||
+                                        (p.material_model == MPMMaterialModel::JWLProgrammedBurn) ||
+                                        (p.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth);
+            const bool is_fluid_or_energetic = (p.material_model == MPMMaterialModel::TaitWater) || is_energetic_p;
+            const bool defer_to_fv = m_defer_fv_erosion_to_coupler && p.erode_to_fv_grid && is_fluid_or_energetic;
+            if (!defer_to_fv) {
+                const float rho_p = p.m / std::max(p.V, 1.0e-30f);
+                const float rho0 = (p.material_model == MPMMaterialModel::TaitWater && p.tait_rho0 > 0.0f) ? p.tait_rho0 : p.density;
+                const float rho_thresh = std::max(p.erosion_min_density, p.erosion_min_density_ratio * rho0);
+                const bool burn_ready = !is_energetic_p || (p.lambda >= 0.5f || p.V > 1.05f * p.V0);
+                if (rho_thresh > 0.0f && burn_ready && rho_p < rho_thresh) {
+                    p.state = 2;
+                    p.m = 0.0f;
+                    p.v[0] = 0.0f; p.v[1] = 0.0f;
+                    p.B[0][0] = 0.0f; p.B[0][1] = 0.0f; p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
+                    p.L_grad[0][0] = 0.0f; p.L_grad[0][1] = 0.0f; p.L_grad[1][0] = 0.0f; p.L_grad[1][1] = 0.0f;
+                    p.sigma.setIsotropic(0.0f);
+                }
+            }
+        }
     }
 
     // In-place zero-allocation compaction of terminated particles
     auto it = std::remove_if(m_particles.begin(), m_particles.end(), [](const MPMParticle2D& pt) {
-        return pt.m <= 0.0f;
+        return pt.state == 2 || pt.m <= 0.0f;
     });
     if (it != m_particles.end()) {
         m_particles.erase(it, m_particles.end());
@@ -1344,28 +1492,35 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             float e_prod = e_th + q_heat;
 
             // Pillar 1: Solid Reactant EOS
-            float p_solid = 0.0f;
-            if (awe) {
-                p_solid = static_cast<float>(CrestDavis::computeCRESTSolidPressure(v_rel, std::max(0.0f, e_th), awe_q));
-            } else if (p.solid_model == SolidReactantEOS::DavisSolid) {
-                p_solid = CrestDavis::computeDavisReactantPressure(v_rel, e_th, p.davis_c0, p.davis_s1, p.davis_gamma0, p.davis_cv, p.davis_t0, p.davis_rho0);
-            } else {
-                p_solid = JWL::computeSolidReactantPressure(v_rel, e_th, p.mg_c0, p.mg_s, p.mg_gamma0, p.density);
-            }
+            auto solid_pressure_at = [&](float v) -> float {
+                if (awe) return static_cast<float>(CrestDavis::computeCRESTSolidPressure(v, std::max(0.0f, e_th), awe_q));
+                if (p.solid_model == SolidReactantEOS::JWLReactant)
+                    return JWL::computeJWLReactantPressure(v, e_th, p.jwlr_A, p.jwlr_B, p.jwlr_R1, p.jwlr_R2, p.jwlr_omega, p.jwlr_Cv, p.jwlr_T0, p.density);
+                if (p.solid_model == SolidReactantEOS::DavisSolid)
+                    return CrestDavis::computeDavisReactantPressure(v, e_th, p.davis_c0, p.davis_s1, p.davis_gamma0, p.davis_cv, p.davis_t0, p.davis_rho0);
+                return JWL::computeSolidReactantPressure(v, e_th, p.mg_c0, p.mg_s, p.mg_gamma0, p.density);
+            };
 
             // Pillar 3: Detonation Products EOS
-            float p_prod = 0.0f;
-            if (awe) {
-                p_prod = JWL::computeJWLProductPressure(v_rel * awe_vtmd, e_prod, p.jwl_A, p.jwl_B, p.jwl_R1, p.jwl_R2, p.jwl_omega, static_cast<float>(awe_q.rho0s));
-            } else if (p.product_model == DetonationProductEOS::DavisProduct) {
-                p_prod = CrestDavis::computeDavisProductPressure(v_rel, e_prod, p.davis_a, p.davis_b, p.davis_k, p.davis_vc, p.davis_pc, p.davis_q_det, p.davis_rho0);
-            } else {
-                p_prod = JWL::computeJWLProductPressure(v_rel, e_prod, p.jwl_A, p.jwl_B, p.jwl_R1, p.jwl_R2, p.jwl_omega, p.density);
-            }
+            auto product_pressure_at = [&](float v) -> float {
+                if (awe) return JWL::computeJWLProductPressure(v * awe_vtmd, e_prod, p.jwl_A, p.jwl_B, p.jwl_R1, p.jwl_R2, p.jwl_omega, static_cast<float>(awe_q.rho0s));
+                if (p.product_model == DetonationProductEOS::DavisProduct)
+                    return CrestDavis::computeDavisProductPressure(v, e_prod, p.davis_a, p.davis_b, p.davis_k, p.davis_vc, p.davis_pc, p.davis_q_det, p.davis_rho0);
+                return JWL::computeJWLProductPressure(v, e_prod, p.jwl_A, p.jwl_B, p.jwl_R1, p.jwl_R2, p.jwl_omega, p.density);
+            };
 
-            // Two-phase pressure blend
-            float p_mix = (1.0f - lam_new) * p_solid + lam_new * p_prod;
+            // Lee-Tarver kinetics use the selectable mixture rule (default: pressure equilibrium, volume
+            // additive); all other reactive models keep the linear blend.
+            const Mixture::Rule mix_rule = (p.burn_model == ReactionKinetics::LeeTarverODE)
+                ? static_cast<Mixture::Rule>(p.mixture_rule) : Mixture::Rule::LinearBlend;
+            const Mixture::Result mix = Mixture::mixturePressure(mix_rule, static_cast<double>(v_rel), static_cast<double>(lam_new),
+                [&](double v) { return static_cast<double>(solid_pressure_at(static_cast<float>(v))); },
+                [&](double v) { return static_cast<double>(product_pressure_at(static_cast<float>(v))); });
+            float p_mix = static_cast<float>(mix.p);
             if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+            // Phase pressures at the phase volumes chosen by the mixture rule (used by sound-speed/CFL closures)
+            [[maybe_unused]] const float p_solid = solid_pressure_at(static_cast<float>(mix.v_s));
+            [[maybe_unused]] const float p_prod = product_pressure_at(static_cast<float>(mix.v_p));
 
             // Energy conservation: compression work & chemical heat release
             float rho_eff = (p.density > 10.0f) ? p.density : ((p.solid_model == SolidReactantEOS::DavisSolid) ? p.davis_rho0 : 1630.0f);
@@ -1623,22 +1778,29 @@ void MPMSolver2D::step(float cfl) {
 }
 
 std::vector<float> MPMSolver2D::getGridScalarField(const std::string& quantity) const {
-    std::vector<float> field(m_nx * m_ny, 0.0f);
-    for (size_t i = 0; i < m_grid.size(); ++i) {
-        if (quantity == "von_mises") {
-            field[i] = m_grid[i].von_mises;
-        } else if (quantity == "plastic_strain") {
-            field[i] = m_grid[i].plastic_strain;
-        } else if (quantity == "density") {
-            field[i] = m_grid[i].density;
-        } else if (quantity == "pressure") {
-            field[i] = m_grid[i].pressure;
-        } else if (quantity == "damage") {
-            field[i] = m_grid[i].damage;
-        } else if (quantity == "velocity") {
-            float vx = m_grid[i].v[0];
-            float vy = m_grid[i].v[1];
-            field[i] = std::sqrt(vx * vx + vy * vy);
+    std::vector<float> field(static_cast<size_t>(m_nx) * m_ny, 0.0f);
+    const MPMGridView2D gv = getGridView();
+    for (int i = 0; i < m_nx; ++i) {
+        for (int j = 0; j < m_ny; ++j) {
+            long long slot = gv.slotIndex(i, j);
+            if (slot < 0 || static_cast<size_t>(slot) >= m_grid.size()) continue;
+            size_t out_idx = static_cast<size_t>(i) * m_ny + j;
+            const auto& node = m_grid[slot];
+            if (quantity == "von_mises") {
+                field[out_idx] = node.von_mises;
+            } else if (quantity == "plastic_strain") {
+                field[out_idx] = node.plastic_strain;
+            } else if (quantity == "density") {
+                field[out_idx] = node.density;
+            } else if (quantity == "pressure") {
+                field[out_idx] = node.pressure;
+            } else if (quantity == "damage") {
+                field[out_idx] = node.damage;
+            } else if (quantity == "velocity") {
+                float vx = node.v[0];
+                float vy = node.v[1];
+                field[out_idx] = std::sqrt(vx * vx + vy * vy);
+            }
         }
     }
     return field;

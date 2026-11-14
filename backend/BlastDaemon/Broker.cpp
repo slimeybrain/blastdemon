@@ -160,6 +160,43 @@ std::string base64_encode(const std::vector<uint8_t>& input) {
     return output;
 }
 
+std::vector<uint8_t> base64_decode(const std::string& input) {
+    static const int8_t T[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
+    std::vector<uint8_t> out;
+    out.reserve((input.size() * 3) / 4);
+    uint32_t val = 0;
+    int valb = -8;
+    for (unsigned char c : input) {
+        if (c == '=') break;
+        int8_t d = T[c];
+        if (d == -1) continue;
+        val = (val << 6) + static_cast<uint32_t>(d);
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back(static_cast<uint8_t>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
 #include <mutex>
 
 // --- Client Connection Context for thread safety ---
@@ -294,15 +331,22 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         return;
     }
 
-    if (command == "SAVE_MODEL_FILE") {
+    if (command == "SAVE_MODEL_FILE" || command == "WRITE_HOST_FILE") {
         std::string filePath = payload.value("filePath", "");
         std::string fileContent = payload.value("fileContent", "");
+        std::string encoding = payload.value("encoding", "utf8");
         nlohmann::json resp;
         resp["type"] = "save_model_response";
         resp["modelId"] = modelId;
         resp["filePath"] = filePath;
 
         std::error_code ec;
+        std::filesystem::path cwd_path = std::filesystem::current_path(ec);
+        std::filesystem::path default_root("/home/chris/antigrav/blastdemon");
+        if (!std::filesystem::exists(default_root, ec)) {
+            default_root = cwd_path;
+        }
+
         std::filesystem::path model_p(filePath);
         if (model_p.has_parent_path()) {
             std::filesystem::create_directories(model_p.parent_path(), ec);
@@ -322,13 +366,12 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
 
                 std::error_code src_ec, dst_ec, copy_ec;
                 if (!std::filesystem::exists(src_p, src_ec)) {
-                    std::filesystem::path root_p = std::filesystem::path("/home/chris/antigrav/blastdemon") / src;
+                    std::filesystem::path root_p = default_root / src;
                     if (std::filesystem::exists(root_p, src_ec)) {
                         src_p = root_p;
                     } else {
-                        // Strip leading ./ if present
                         std::string clean_src = (src.rfind("./", 0) == 0) ? src.substr(2) : src;
-                        std::filesystem::path clean_root_p = std::filesystem::path("/home/chris/antigrav/blastdemon") / clean_src;
+                        std::filesystem::path clean_root_p = default_root / clean_src;
                         if (std::filesystem::exists(clean_root_p, src_ec)) {
                             src_p = clean_root_p;
                         } else {
@@ -367,20 +410,32 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             resp["resourceErrors"] = resource_errors;
         }
 
-        std::ofstream out(filePath);
+        std::ofstream out(filePath, std::ios::binary);
         if (out.is_open()) {
-            out << fileContent;
+            if (encoding == "base64") {
+                std::vector<uint8_t> decoded = base64_decode(fileContent);
+                if (!decoded.empty()) {
+                    out.write(reinterpret_cast<const char*>(decoded.data()), static_cast<std::streamsize>(decoded.size()));
+                }
+            } else {
+                out.write(fileContent.data(), static_cast<std::streamsize>(fileContent.size()));
+            }
             out.close();
-            resp["status"] = "success";
-            std::cout << "[Broker] Saved model " << modelId << " to local path: " << filePath << " (" << resourcesCopied << " resources bundled)" << std::endl;
+            if (!out.fail()) {
+                resp["status"] = "success";
+                std::cout << "[Broker] Saved file (" << modelId << ") to path: " << filePath << " (" << resourcesCopied << " resources bundled)" << std::endl;
+            } else {
+                resp["status"] = "error";
+                resp["error"] = "I/O error while writing to: " + filePath;
+            }
         } else {
             resp["status"] = "error";
             resp["error"] = "Failed to open file for writing at: " + filePath;
-            std::cerr << "[Broker] [ERROR] Failed to save model to path: " << filePath << std::endl;
+            std::cerr << "[Broker] [ERROR] Failed to save file to path: " << filePath << std::endl;
         }
 
         if (client) {
-            send_websocket_text(client, resp.dump());
+            send_websocket_text(client, resp.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
         }
         return;
     }
@@ -391,14 +446,18 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         resp["type"] = "list_dir_response";
         resp["modelId"] = modelId;
 
+        std::error_code ec;
         const char* home_env = std::getenv("HOME");
         std::string home_dir = home_env ? home_env : "/home/chris";
         std::string project_dir = "/home/chris/antigrav/blastdemon";
+        if (!std::filesystem::exists(project_dir, ec)) {
+            project_dir = std::filesystem::current_path(ec).string();
+        }
         resp["homePath"] = home_dir;
         resp["projectPath"] = project_dir;
 
-        std::error_code ec;
         std::filesystem::path p;
+        bool fallback_used = false;
 
         if (path_str.empty() || path_str == "select_file" || path_str == "select_dir" || path_str == ".") {
             std::filesystem::path proj_path(project_dir);
@@ -420,6 +479,8 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             }
             // If still not a valid directory, fallback to project root or cwd
             if (!std::filesystem::exists(p, ec) || !std::filesystem::is_directory(p, ec)) {
+                fallback_used = true;
+                resp["requestedPath"] = path_str;
                 std::filesystem::path proj_path(project_dir);
                 if (std::filesystem::exists(proj_path, ec) && std::filesystem::is_directory(proj_path, ec)) {
                     p = proj_path;
@@ -428,6 +489,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                 }
             }
         }
+        resp["fallbackUsed"] = fallback_used;
 
         p = std::filesystem::absolute(p, ec).lexically_normal();
         std::string current_path_str = p.string();
@@ -472,14 +534,22 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                     type_desc = "Folder";
                 } else if (ext_lower == ".json") {
                     type_desc = "JSON Model";
+                } else if (ext_lower == ".blst" || ext_lower == ".bin" || ext_lower == ".model") {
+                    type_desc = "Binary Model";
                 } else if (ext_lower == ".k" || ext_lower == ".key" || ext_lower == ".dyn") {
                     type_desc = "LS-DYNA Keyword";
+                } else if (ext_lower == ".inp") {
+                    type_desc = "Abaqus / FEA Deck";
                 } else if (ext_lower == ".stl") {
                     type_desc = "STL 3D Geometry";
+                } else if (ext_lower == ".obj") {
+                    type_desc = "OBJ 3D Mesh";
                 } else if (ext_lower == ".h5" || ext_lower == ".hdf5") {
                     type_desc = "HDF5 Simulation Data";
                 } else if (ext_lower == ".xdmf" || ext_lower == ".xmf") {
                     type_desc = "XDMF Heavy Grid";
+                } else if (ext_lower == ".vtk" || ext_lower == ".vtu" || ext_lower == ".pvd") {
+                    type_desc = "VTK / ParaView";
                 } else if (ext_lower == ".cpp" || ext_lower == ".cxx" || ext_lower == ".cc" || ext_lower == ".c") {
                     type_desc = "C/C++ Source";
                 } else if (ext_lower == ".cu" || ext_lower == ".cuh") {
@@ -530,29 +600,36 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         return;
     }
 
-    if (command == "LOAD_MODEL_FILE") {
+    if (command == "LOAD_MODEL_FILE" || command == "READ_HOST_FILE") {
         std::string filePath = payload.value("filePath", "");
+        std::string reqEncoding = payload.value("encoding", "utf8");
         nlohmann::json resp;
         resp["type"] = "load_model_response";
         resp["modelId"] = modelId;
         resp["filePath"] = filePath;
 
-        std::ifstream in(filePath);
+        std::ifstream in(filePath, std::ios::binary);
         if (in.is_open()) {
-            std::stringstream ss;
-            ss << in.rdbuf();
+            std::vector<uint8_t> buf((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
             in.close();
+            bool is_blst_binary = (buf.size() >= 4 && buf[0] == 'B' && buf[1] == 'L' && buf[2] == 'S' && buf[3] == 'T');
             resp["status"] = "success";
-            resp["fileContent"] = ss.str();
-            std::cout << "[Broker] Loaded model from local path: " << filePath << std::endl;
+            if (reqEncoding == "base64" || is_blst_binary) {
+                resp["encoding"] = "base64";
+                resp["fileContent"] = base64_encode(buf);
+            } else {
+                resp["encoding"] = "utf8";
+                resp["fileContent"] = std::string(reinterpret_cast<const char*>(buf.data()), buf.size());
+            }
+            std::cout << "[Broker] Loaded file (" << modelId << ") from local path: " << filePath << std::endl;
         } else {
             resp["status"] = "error";
             resp["error"] = "Failed to open file for reading at: " + filePath;
-            std::cerr << "[Broker] [ERROR] Failed to load model from path: " << filePath << std::endl;
+            std::cerr << "[Broker] [ERROR] Failed to load file from path: " << filePath << std::endl;
         }
 
         if (client) {
-            send_websocket_text(client, resp.dump());
+            send_websocket_text(client, resp.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
         }
         return;
     }
@@ -775,13 +852,44 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
     if (command == "STOP") {
         std::cout << "--- STOP COMMAND RECEIVED for modelId " << modelId << " ---" << std::endl;
         if (active_processes.count(modelId) && active_processes[modelId]) {
-            if (expected_terminations.count(modelId) && expected_terminations[modelId]) {
-                expected_terminations[modelId]->store(true);
+            auto target_proc = active_processes[modelId];
+            std::vector<std::string> to_erase;
+            for (auto const& [id, proc_val] : active_processes) {
+                if (proc_val == target_proc) {
+                    to_erase.push_back(id);
+                    if (expected_terminations.count(id) && expected_terminations[id]) {
+                        expected_terminations[id]->store(true);
+                    }
+                }
             }
-            active_processes[modelId]->terminate();
-            active_processes.erase(modelId);
-            expected_terminations.erase(modelId);
+            target_proc->terminate();
+            for (const auto& id : to_erase) {
+                active_processes.erase(id);
+                expected_terminations.erase(id);
+                if (client) {
+                    nlohmann::json status_envelope;
+                    status_envelope["type"] = "status";
+                    status_envelope["status"] = "TERMINATED";
+                    status_envelope["modelId"] = id;
+                    send_websocket_text(client, status_envelope.dump());
+
+                    nlohmann::json log_envelope;
+                    log_envelope["type"] = "log";
+                    log_envelope["level"] = "INFO";
+                    log_envelope["modelId"] = id;
+                    log_envelope["message"] = "Process stopped by user. Memory released.";
+                    send_websocket_text(client, log_envelope.dump());
+                }
+            }
             std::cout << "Process for modelId " << modelId << " terminated by user." << std::endl;
+        } else {
+            if (client) {
+                nlohmann::json status_envelope;
+                status_envelope["type"] = "status";
+                status_envelope["status"] = "TERMINATED";
+                status_envelope["modelId"] = modelId;
+                send_websocket_text(client, status_envelope.dump());
+            }
         }
         return;
     }
@@ -802,7 +910,16 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         // ────────────────────────────────────────────────────────────────────────
 
         std::string init_mode_val = payload.value("init_mode", "");
-        bool is_remap = (command == "INIT_2D" && init_mode_val == "From1D");
+        bool has_intra_1d_solver = false;
+        if (payload.contains("nodes") && payload["nodes"].is_array()) {
+            for (const auto& n : payload["nodes"]) {
+                if (n.is_object() && n.value("type", "") == "CFDSolver") {
+                    has_intra_1d_solver = true;
+                    break;
+                }
+            }
+        }
+        bool is_remap = (command == "INIT_2D" && init_mode_val == "From1D" && has_intra_1d_solver);
 
         if (active_processes.count(modelId) && active_processes[modelId]) {
             if (is_remap) {
@@ -887,12 +1004,17 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             std::thread([client, proc = active_process, modelId, expected_term]() {
                 std::vector<uint8_t> buffer(8192);
                 std::vector<uint8_t> accumulator;
+                bool solver_emitted_error = false;
+                std::string last_non_json_line;
                 while (true) {
+                    if (expected_term && expected_term->load()) break;
                     int n = proc->readStdout(reinterpret_cast<char*>(buffer.data()), buffer.size());
                     if (n <= 0) break;
+                    if (expected_term && expected_term->load()) break;
                     accumulator.insert(accumulator.end(), buffer.begin(), buffer.begin() + n);
 
                     while (!accumulator.empty()) {
+                        if (expected_term && expected_term->load()) break;
                         // Check for BIN_FRAME or BIN2D_FRAME marker
                         std::string marker = "";
                         bool maybe_marker = false;
@@ -971,9 +1093,13 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                                 } else {
                                     try {
                                         nlohmann::json log_json = nlohmann::json::parse(line);
+                                        if (log_json.value("level", "") == "ERROR" || log_json.value("type", "") == "error") {
+                                            solver_emitted_error = true;
+                                        }
                                         log_json["modelId"] = modelId;
                                         send_websocket_text(client, log_json.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                                     } catch (...) {
+                                        last_non_json_line = line.size() > 512 ? line.substr(0, 512) : line;
                                         nlohmann::json log_envelope;
                                         log_envelope["type"] = "log";
                                         log_envelope["modelId"] = modelId;
@@ -988,34 +1114,120 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                 }
                 std::cout << "Telemetry relay thread finished for modelId " << modelId << std::endl;
 
-                if (expected_term && !expected_term->load()) {
-                    nlohmann::json log_envelope;
-                    log_envelope["type"] = "log";
-                    log_envelope["level"] = "ERROR";
-                    log_envelope["modelId"] = modelId;
-                    log_envelope["message"] = "BlastSolver process terminated or crashed unexpectedly.";
-                    send_websocket_text(client, log_envelope.dump());
+                // Ensure child exit status / signal is reaped if not already collected
+                proc->isRunning();
+                const int exit_code = proc->getLastExitCode();
+                const int exit_signal = proc->getLastSignal();
 
-                    nlohmann::json status_envelope;
-                    status_envelope["type"] = "status";
-                    status_envelope["status"] = "TERMINATED";
-                    status_envelope["modelId"] = modelId;
-                    send_websocket_text(client, status_envelope.dump());
+                // Only emit exit diagnostics/status when termination was NOT initiated by
+                // STOP, TERMINATE*, or INIT* process replacement (which handle status synchronously).
+                const bool was_expected = (expected_term && expected_term->load());
+                if (client && !was_expected) {
+                    if (solver_emitted_error) {
+                        nlohmann::json info_envelope;
+                        info_envelope["type"] = "log";
+                        info_envelope["level"] = "INFO";
+                        info_envelope["modelId"] = modelId;
+                        if (exit_code >= 0) info_envelope["exit_code"] = exit_code;
+                        if (exit_signal > 0) info_envelope["signal"] = exit_signal;
+                        info_envelope["message"] = (exit_signal > 0)
+                            ? ("Worker process terminated by signal " + std::to_string(exit_signal) + " after reporting error.")
+                            : ("Worker process exited with code " + std::to_string(exit_code) + " after reporting error.");
+                        send_websocket_text(client, info_envelope.dump());
+                    } else {
+                        nlohmann::json status_envelope;
+                        status_envelope["type"] = "status";
+                        status_envelope["status"] = "ERROR";
+                        status_envelope["modelId"] = modelId;
+                        send_websocket_text(client, status_envelope.dump());
+
+                        nlohmann::json log_envelope;
+                        log_envelope["type"] = "log";
+                        log_envelope["level"] = "ERROR";
+                        log_envelope["modelId"] = modelId;
+                        log_envelope["error_code"] = "ERR_WORKER_CRASH";
+                        if (exit_code >= 0) log_envelope["exit_code"] = exit_code;
+                        if (exit_signal > 0) log_envelope["signal"] = exit_signal;
+                        std::string exit_desc = (exit_signal > 0)
+                            ? ("terminated by signal " + std::to_string(exit_signal))
+                            : (exit_code >= 0 ? ("exited with code " + std::to_string(exit_code)) : "terminated unexpectedly");
+                        log_envelope["summary"] = "BlastSolver worker " + exit_desc + " without emitting a structured error.";
+                        std::string details = "What happened:\nThe BlastSolver worker process " + exit_desc +
+                            " before a structured error payload could be flushed.";
+                        if (!last_non_json_line.empty()) {
+                            details += "\n\nLast solver output:\n" + last_non_json_line;
+                        }
+                        details += "\n\nHow to fix your model:\n1. Check available GPU VRAM / system RAM if killed by SIGKILL (signal 9) or SIGABRT (signal 6).\n2. Try switching Device to CPU or reducing mesh resolution to isolate hardware/memory faults.";
+                        log_envelope["details"] = details;
+                        log_envelope["message"] = "BlastSolver worker " + exit_desc + (last_non_json_line.empty() ? "." : (": " + last_non_json_line));
+                        send_websocket_text(client, log_envelope.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+                    }
                 }
             }).detach();
         } else {
             std::cerr << "Failed to start BlastSolver for modelId " << modelId << std::endl;
         }
     } else if (command == "STEP" || command == "TERMINATE" || command == "EXEC_ALL" || command == "EXEC_END" || command == "PAUSE" || command == "RESUME" ||
-               command == "SET_DEVICE" || command == "REMAP" || command == "REMAP_2D" || command == "STEP_2D" || command == "EXEC_ALL_2D" || command == "PAUSE_2D" || command == "RESUME_2D" || command == "TERMINATE_2D" || command == "WRITE_VTK" || command == "CONTOUR_CONFIG" ||
-               command == "STEP_3D" || command == "EXEC_ALL_3D" || command == "PAUSE_3D" || command == "TERMINATE_3D" || command == "VIEW3D_CONFIG" || command == "STEP_MPM" || command == "STEP_3D_MPM" || command == "STEP_MPM_3D" || command == "EXEC_ALL_MPM" || command == "EXEC_ALL_3D_MPM" || command == "EXEC_ALL_MPM_3D" || command == "PAUSE_MPM" || command == "PAUSE_3D_MPM" || command == "PAUSE_MPM_3D" || command == "RESUME_MPM" || command == "RESUME_3D_MPM" || command == "RESUME_MPM_3D" || command == "TERMINATE_MPM" || command == "TERMINATE_3D_MPM" || command == "TERMINATE_MPM_3D" ||
-               command == "STEP_FSI_2D" || command == "STEP_FSI_3D" || command == "STEP_FSI" || command == "EXEC_ALL_FSI_2D" || command == "EXEC_ALL_FSI_3D" || command == "EXEC_ALL_FSI" || command == "PAUSE_FSI_2D" || command == "PAUSE_FSI_3D" || command == "PAUSE_FSI" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI_3D" || command == "TERMINATE_FSI" ||
-               command == "STEP_FEM_3D" || command == "EXEC_ALL_FEM_3D" || command == "PAUSE_FEM_3D" || command == "TERMINATE_FEM_3D" || command == "STEP_FEM_FSI_3D" || command == "EXEC_ALL_FEM_FSI_3D" || command == "PAUSE_FEM_FSI_3D" || command == "TERMINATE_FEM_FSI_3D" ||
+               command == "SET_DEVICE" || command == "REMAP" || command == "REMAP_2D" || command == "REMAP_3D" || command == "EXPORT_REMAP_3D" || command == "STEP_2D" || command == "EXEC_ALL_2D" || command == "PAUSE_2D" || command == "RESUME_2D" || command == "TERMINATE_2D" || command == "WRITE_VTK" || command == "CONTOUR_CONFIG" || command == "TELEMETRY_CONFIG" ||
+               command == "STEP_3D" || command == "EXEC_ALL_3D" || command == "PAUSE_3D" || command == "RESUME_3D" || command == "TERMINATE_3D" || command == "VIEW3D_CONFIG" || command == "STEP_MPM" || command == "STEP_3D_MPM" || command == "STEP_MPM_3D" || command == "EXEC_ALL_MPM" || command == "EXEC_ALL_3D_MPM" || command == "EXEC_ALL_MPM_3D" || command == "PAUSE_MPM" || command == "PAUSE_3D_MPM" || command == "PAUSE_MPM_3D" || command == "RESUME_MPM" || command == "RESUME_3D_MPM" || command == "RESUME_MPM_3D" || command == "TERMINATE_MPM" || command == "TERMINATE_3D_MPM" || command == "TERMINATE_MPM_3D" ||
+               command == "STEP_FSI_2D" || command == "STEP_FSI_3D" || command == "STEP_FSI" || command == "EXEC_ALL_FSI_2D" || command == "EXEC_ALL_FSI_3D" || command == "EXEC_ALL_FSI" || command == "PAUSE_FSI_2D" || command == "PAUSE_FSI_3D" || command == "PAUSE_FSI" || command == "RESUME_FSI_2D" || command == "RESUME_FSI_3D" || command == "RESUME_FSI" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI_3D" || command == "TERMINATE_FSI" ||
+               command == "STEP_FEM_3D" || command == "EXEC_ALL_FEM_3D" || command == "PAUSE_FEM_3D" || command == "RESUME_FEM_3D" || command == "TERMINATE_FEM_3D" || command == "TERMINATE_3D_FEM" || command == "STEP_FEM_FSI_3D" || command == "EXEC_ALL_FEM_FSI_3D" || command == "PAUSE_FEM_FSI_3D" || command == "RESUME_FEM_FSI_3D" || command == "TERMINATE_FEM_FSI_3D" ||
                command == "UPDATE_ENDTIME" || command == "UPDATE_CFL" ||
                command == "REFRESH_STATE" || command == "REFRESH" || command == "POLL_STATE") {
         if (command == "PAUSE" || command == "PAUSE_2D" || command == "PAUSE_3D" || command == "PAUSE_MPM" || command == "PAUSE_3D_MPM" || command == "PAUSE_MPM_3D" || command == "PAUSE_FSI_2D" || command == "PAUSE_FSI_3D" || command == "PAUSE_FSI" || command == "PAUSE_FEM_3D" || command == "PAUSE_FEM_FSI_3D") std::cout << "[DEBUG] PAUSE COMMAND RECEIVED for modelId " << modelId << "\n";
-        if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D" || command == "TERMINATE_MPM" || command == "TERMINATE_3D_MPM" || command == "TERMINATE_MPM_3D" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI_3D" || command == "TERMINATE_FSI" || command == "TERMINATE_FEM_3D" || command == "TERMINATE_FEM_FSI_3D") std::cout << "[DEBUG] TERMINATE COMMAND RECEIVED for modelId " << modelId << "\n";
-        
+
+        bool is_terminate = (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D" ||
+                             command == "TERMINATE_MPM" || command == "TERMINATE_3D_MPM" || command == "TERMINATE_MPM_3D" ||
+                             command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI_3D" || command == "TERMINATE_FSI" ||
+                             command == "TERMINATE_FEM_3D" || command == "TERMINATE_FEM_FSI_3D" || command == "TERMINATE_3D_FEM");
+
+        if (is_terminate) {
+            std::cout << "[INFO] TERMINATE COMMAND RECEIVED for modelId " << modelId << ". Terminating solver process and reclaiming memory..." << std::endl;
+            if (active_processes.count(modelId) && active_processes[modelId]) {
+                auto target_proc = active_processes[modelId];
+                if (target_proc->isRunning()) {
+                    target_proc->writeStdin(json_str + "\n\n");
+                }
+                std::vector<std::string> to_erase;
+                for (auto const& [id, proc_val] : active_processes) {
+                    if (proc_val == target_proc) {
+                        to_erase.push_back(id);
+                        if (expected_terminations.count(id) && expected_terminations[id]) {
+                            expected_terminations[id]->store(true);
+                        }
+                    }
+                }
+                target_proc->terminate();
+                for (const auto& id : to_erase) {
+                    active_processes.erase(id);
+                    expected_terminations.erase(id);
+                    if (client) {
+                        nlohmann::json status_envelope;
+                        status_envelope["type"] = "status";
+                        status_envelope["status"] = "TERMINATED";
+                        status_envelope["modelId"] = id;
+                        send_websocket_text(client, status_envelope.dump());
+
+                        nlohmann::json log_envelope;
+                        log_envelope["type"] = "log";
+                        log_envelope["level"] = "INFO";
+                        log_envelope["modelId"] = id;
+                        log_envelope["message"] = "Process terminated by user. Memory released.";
+                        send_websocket_text(client, log_envelope.dump());
+                    }
+                }
+            } else {
+                if (client) {
+                    nlohmann::json status_envelope;
+                    status_envelope["type"] = "status";
+                    status_envelope["status"] = "TERMINATED";
+                    status_envelope["modelId"] = modelId;
+                    send_websocket_text(client, status_envelope.dump());
+                }
+            }
+            return;
+        }
+
         if (active_processes.count(modelId) && active_processes[modelId]) {
             auto& proc = active_processes[modelId];
             bool routed = false;
@@ -1029,31 +1241,20 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
 
-            if (routed) {
-                if (command == "TERMINATE" || command == "TERMINATE_2D" || command == "TERMINATE_3D" || command == "TERMINATE_MPM" || command == "TERMINATE_3D_MPM" || command == "TERMINATE_MPM_3D" || command == "TERMINATE_FSI_2D" || command == "TERMINATE_FSI_3D" || command == "TERMINATE_FSI" || command == "TERMINATE_FEM_3D" || command == "TERMINATE_FEM_FSI_3D" || command == "TERMINATE_3D_FEM") {
-                    // Erase ALL entries pointing to the same process (shared 1D/2D process).
-                    auto target_proc = active_processes[modelId];
-                    std::vector<std::string> to_erase;
-                    for (auto const& [id, proc_val] : active_processes) {
-                        if (proc_val == target_proc) {
-                            to_erase.push_back(id);
-                            if (expected_terminations.count(id) && expected_terminations[id]) {
-                                expected_terminations[id]->store(true);
-                            }
-                        }
-                    }
-                    for (const auto& id : to_erase) {
-                        active_processes.erase(id);
-                        expected_terminations.erase(id);
-                    }
-                }
-            } else {
+            if (!routed) {
                 std::cerr << "Command " << command << " ignored: Solver not responsive or running for modelId " << modelId << std::endl;
                 nlohmann::json err_env;
                 err_env["type"] = "log";
                 err_env["modelId"] = modelId;
                 err_env["message"] = "[WARNING] Command ignored: Solver process is not running or responsive.";
                 send_websocket_text(client, err_env.dump());
+
+                nlohmann::json rej_env;
+                rej_env["type"] = "command_rejected";
+                rej_env["command"] = command;
+                rej_env["reason"] = "solver_unresponsive";
+                rej_env["modelId"] = modelId;
+                send_websocket_text(client, rej_env.dump());
             }
         } else {
             std::cerr << "Command " << command << " ignored: Solver not running for modelId " << modelId << std::endl;
@@ -1062,6 +1263,13 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             err_env["modelId"] = modelId;
             err_env["message"] = "[WARNING] Command ignored: Solver process is not running. Please click 'Initialize' first.";
             send_websocket_text(client, err_env.dump());
+
+            nlohmann::json rej_env;
+            rej_env["type"] = "command_rejected";
+            rej_env["command"] = command;
+            rej_env["reason"] = "no_solver_process";
+            rej_env["modelId"] = modelId;
+            send_websocket_text(client, rej_env.dump());
         }
     }
 }

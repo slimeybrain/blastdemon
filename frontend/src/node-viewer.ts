@@ -1,7 +1,7 @@
 import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, syncMPMMaterialParameters, getCompatibleMaterialsForNode, resolveResourcePath, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS } from './state-manager.js';
-import { Node, NodeType } from './types.js';
+import { Node, NodeType, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { PropertyEditor } from './property-editor.js';
-import { HostFileBrowserModal, FileFilterPreset } from './host-file-browser.js';
+import { HostFileBrowserModal, FileFilterPreset, showRecentFoldersQuickMenu, recordRecentFolder } from './host-file-browser.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getCategorizedPresetsForModel, getDefaultPresetForModel } from './mpm-presets.js';
 import { EXPLOSIVE_PRESETS } from './property-grid.js';
@@ -17,6 +17,11 @@ export class NodeViewer {
     private propertyEditor: PropertyEditor | null = null;
     private chartWorker: Worker | null = null;
     private chartCanvas: HTMLCanvasElement | null = null;
+    private graphResizeObserver: ResizeObserver | null = null;
+    private contourWorker: Worker | null = null;
+    private contourCanvas: HTMLCanvasElement | null = null;
+    private contourResizeObserver: ResizeObserver | null = null;
+    private gaugesWorker: Worker | null = null;
     private viewport3D: Telemetry3DViewport | null = null;
 
     private lastType: NodeType | null = null;
@@ -28,21 +33,26 @@ export class NodeViewer {
     private gaugesChannel: number = 0;
     private gaugesCanvas: HTMLCanvasElement | null = null;
     private gaugesResizeObserver: ResizeObserver | null = null;
-    private gaugesPanelOpen: boolean = true;
+    private gaugesPanelOpen: boolean = false;
     private gaugesPanelWidth: number = 320;
     private gaugesActiveTab: 'list' | 'settings' = 'list';
-    private gaugesZoomedOrPanned: boolean = false;
-    private gaugesZoomMinX: number = 0;
-    private gaugesZoomMaxX: number = 1.0;
-    private gaugesZoomMinY: number = 0.0;
-    private gaugesZoomMaxY: number = 1.0;
-    private gaugesIsDragging: boolean = false;
-    private gaugesDragStartX: number = 0;
-    private gaugesDragStartY: number = 0;
-    private gaugesDragStartMinX: number = 0;
-    private gaugesDragStartMaxX: number = 1.0;
-    private gaugesDragStartMinY: number = 0.0;
-    private gaugesDragStartMaxY: number = 1.0;
+    private gaugesAutoScale: boolean = true;
+    private gaugesLogScale: boolean = false;
+    private gaugesShowPeaks: boolean = true;
+    private gaugesBoxMode: boolean = false;
+    private gaugesManualMin: number = 0;
+    private gaugesManualMax: number = 1e6;
+
+    private graphAutoScale: boolean = true;
+    private graphLogScale: boolean = false;
+    private graphShowPeaks: boolean = true;
+    private graphBoxMode: boolean = false;
+
+    private contourFillMode: 'fill' | 'aspect' = 'aspect';
+    private contourShowExtrema: boolean = true;
+    private contourBoxMode: boolean = false;
+    private contourShowGridlines: boolean = false;
+    private contourIsAxisymmetric: boolean = false;
 
     private telemetryBuffer: any = null;
     private renderRequestId: number | null = null;
@@ -85,6 +95,21 @@ export class NodeViewer {
         this.telemetryListener = (nodeId, data) => {
             if (nodeId === this.currentNodeId) {
                 this.handleTelemetry(nodeId, data);
+                return;
+            }
+            if (this.currentNodeId) {
+                const activeModel = this.stateManager.getActiveModel();
+                const curNode = activeModel?.nodes.find(n => n.id === this.currentNodeId);
+                if (!activeModel || !curNode) return;
+                if (nodeId === `${activeModel.id}-gauges` && (curNode.type === 'VirtualGauges' || curNode.type === 'VirtualGauges3D')) {
+                    this.handleTelemetry(this.currentNodeId, data);
+                    return;
+                }
+                if (data instanceof ArrayBuffer && activeModel.nodes.some(n => n.id === nodeId)) {
+                    if (curNode.type === 'TelemetryContour' || curNode.type === 'TelemetryGraph') {
+                        this.handleTelemetry(this.currentNodeId, data);
+                    }
+                }
             }
         };
 
@@ -92,6 +117,36 @@ export class NodeViewer {
         this.stateManager.onTelemetryUpdate(this.telemetryListener);
 
         this.render();
+    }
+
+    private cleanupWorkers(): void {
+        if (this.chartWorker) {
+            this.chartWorker.terminate();
+            this.chartWorker = null;
+        }
+        this.chartCanvas = null;
+        if (this.graphResizeObserver) {
+            this.graphResizeObserver.disconnect();
+            this.graphResizeObserver = null;
+        }
+        if (this.contourWorker) {
+            this.contourWorker.terminate();
+            this.contourWorker = null;
+        }
+        this.contourCanvas = null;
+        if (this.contourResizeObserver) {
+            this.contourResizeObserver.disconnect();
+            this.contourResizeObserver = null;
+        }
+        if (this.gaugesWorker) {
+            this.gaugesWorker.terminate();
+            this.gaugesWorker = null;
+        }
+        this.gaugesCanvas = null;
+        if (this.gaugesResizeObserver) {
+            this.gaugesResizeObserver.disconnect();
+            this.gaugesResizeObserver = null;
+        }
     }
 
     public destroy(): void {
@@ -104,9 +159,9 @@ export class NodeViewer {
             this.viewport3D.destroy();
             this.viewport3D = null;
         }
+        this.cleanupWorkers();
         this.stateManager.offStateChange(this.stateListener);
         this.stateManager.offTelemetryUpdate(this.telemetryListener);
-        if (this.chartWorker) this.chartWorker.terminate();
         this.container.remove();
     }
 
@@ -117,6 +172,7 @@ export class NodeViewer {
             this.viewport3D.destroy();
             this.viewport3D = null;
         }
+        this.cleanupWorkers();
         this.currentNodeId = nodeId;
         this.render();
     }
@@ -142,6 +198,7 @@ export class NodeViewer {
                     this.viewport3D.destroy();
                     this.viewport3D = null;
                 }
+                this.cleanupWorkers();
                 this.currentNodeId = fallbackNode.id;
                 this.lastId = null;
                 this.lastType = null;
@@ -160,12 +217,36 @@ export class NodeViewer {
         }
 
         if (this.lastId === node.id && this.lastType === node.type) {
-            if (node.type !== 'TelemetryText' && node.type !== 'TelemetryGraph' && node.type !== 'VirtualGauges' && node.type !== 'VirtualGauges3D' && node.type !== 'Telemetry3DViewport') {
+            if (
+                node.type !== 'TelemetryText' &&
+                node.type !== 'TelemetryGraph' &&
+                node.type !== 'TelemetryContour' &&
+                node.type !== 'VirtualGauges' &&
+                node.type !== 'VirtualGauges3D' &&
+                node.type !== 'Telemetry3DViewport'
+            ) {
                 this.renderStandardNode(node);
+            } else if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
+                this.syncGaugesChartWorker(node);
+                const probeBtn = this.container.querySelector('.gauges-drawer-toggle-btn') as HTMLButtonElement | null;
+                if (probeBtn) {
+                    const gLen = Array.isArray(node.parameters?.gauges) ? node.parameters.gauges.length : 0;
+                    probeBtn.textContent = `📋 Probes (${gLen})`;
+                }
+                if (this.gaugesPanelOpen && this.gaugesActiveTab === 'list') {
+                    const activeEl = document.activeElement;
+                    const tableCont = this.container.querySelector('.gauges-table-container');
+                    if (!tableCont || !activeEl || !tableCont.contains(activeEl)) {
+                        const has2D = activeModel?.nodes.some(n => isDomainMesh2DNode(n.type) || n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D') || false;
+                        this.syncVirtualGauges(node, has2D);
+                    }
+                }
+            } else if (node.type === 'TelemetryContour') {
+                this.syncContourWorkerConfig(node);
             } else if (node.type === 'TelemetryGraph') {
                 // Sync settings from the node parameters (e.g. after model load)
                 const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
-                const meshNode = activeModel?.nodes.find(n => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D');
+                const meshNode = activeModel?.nodes.find(n => n.type === 'DomainMesh' || isDomainMesh2DNode(n.type) || isDomainMesh3DNode(n.type));
                 const is1D = (meshNode?.parameters?.dimension ?? '1D') === '1D';
                 const xAxisMode = is1D ? (node.parameters?.x_axis_mode ?? 'radius') : 'cell_id';
                 const domainRadius = Number(meshNode?.parameters?.domain_radius ?? 1.0);
@@ -193,19 +274,23 @@ export class NodeViewer {
                     this.lastMinY = minVal;
                     const minInput = this.container.querySelector(`#viewer-min-y-${node.id}`) as HTMLInputElement;
                     if (minInput) minInput.value = String(minVal);
-                    this.chartWorker?.postMessage({ type: 'setConfig', min: minVal });
+                    if (!this.graphAutoScale) {
+                        this.chartWorker?.postMessage({ type: 'setConfig', min: minVal });
+                    }
                 }
 
                 if (this.lastMaxY !== maxVal) {
                     this.lastMaxY = maxVal;
                     const maxInput = this.container.querySelector(`#viewer-max-y-${node.id}`) as HTMLInputElement;
                     if (maxInput) maxInput.value = String(maxVal);
-                    this.chartWorker?.postMessage({ type: 'setConfig', max: maxVal });
+                    if (!this.graphAutoScale) {
+                        this.chartWorker?.postMessage({ type: 'setConfig', max: maxVal });
+                    }
                 }
 
                 if (this.lastShowGridVal !== showGridVal) {
                     this.lastShowGridVal = showGridVal;
-                    const gridCheckbox = this.container.querySelector('.viewer-header input[type="checkbox"]') as HTMLInputElement;
+                    const gridCheckbox = this.container.querySelector('.viewer-grid-checkbox') as HTMLInputElement;
                     if (gridCheckbox) gridCheckbox.checked = showGridVal;
                     this.chartWorker?.postMessage({ type: 'setConfig', showGrid: showGridVal });
                 }
@@ -273,6 +358,8 @@ export class NodeViewer {
             this.renderExpandedText(node);
         } else if (node.type === 'TelemetryGraph') {
             this.renderExpandedGraph(node);
+        } else if (node.type === 'TelemetryContour') {
+            this.renderExpandedContour(node);
         } else if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
             this.renderVirtualGauges(node, oldScrollTop);
         } else if (node.type === 'Telemetry3DViewport') {
@@ -284,10 +371,7 @@ export class NodeViewer {
 
     private renderExpandedText(node: Node): void {
         this.stopRenderLoop();
-        if (this.chartWorker) {
-            this.chartWorker.terminate();
-            this.chartWorker = null;
-        }
+        this.cleanupWorkers();
 
         this.container.innerHTML = '';
         this.container.style.position = 'relative';
@@ -703,10 +787,7 @@ export class NodeViewer {
     
     private renderExpanded3DViewport(node: Node): void {
         this.stopRenderLoop();
-        if (this.chartWorker) {
-            this.chartWorker.terminate();
-            this.chartWorker = null;
-        }
+        this.cleanupWorkers();
         if (this.viewport3D) {
             this.viewport3D.destroy();
             this.viewport3D = null;
@@ -737,12 +818,29 @@ export class NodeViewer {
         if (this.viewport3D) {
             this.viewport3D.pushFrame(buffer, modelId);
         }
+        if (this.contourWorker && buffer instanceof ArrayBuffer) {
+            const copy = buffer.slice(0);
+            this.contourWorker.postMessage(copy, [copy]);
+        }
+        if (this.chartWorker && buffer instanceof ArrayBuffer && this.lastType === 'TelemetryGraph') {
+            this.telemetryBuffer = buffer.slice(0);
+        }
     }
 
     public updateTelemetry(data: any, modelId?: string): void {
         if (modelId && this.getCurrentModelId() !== modelId) return;
         if (this.viewport3D) {
             this.viewport3D.updateTelemetry(data, modelId);
+        }
+        if (this.contourWorker && data && !(data instanceof ArrayBuffer)) {
+            if (typeof data.step === 'number' || typeof data.time === 'number') {
+                this.contourWorker.postMessage({
+                    type: 'setConfig',
+                    step: typeof data.step === 'number' ? data.step : undefined,
+                    time: typeof data.time === 'number' ? data.time : undefined,
+                    dt: typeof data.dt === 'number' ? data.dt : undefined
+                });
+            }
         }
         if (this.currentNodeId && data && !(data instanceof ArrayBuffer) && data.gauges_history) {
             const activeModel = this.stateManager.getActiveModel();
@@ -772,29 +870,418 @@ export class NodeViewer {
         if (this.viewport3D) {
             this.viewport3D.resetSimulationData?.(modelId);
         }
+        this.contourWorker?.postMessage({ type: 'clearData' });
+        this.chartWorker?.postMessage({ type: 'clearData' });
+        this.gaugesWorker?.postMessage({ type: 'clearData' });
+    }
+
+    private buildNodeContourConfig(node: Node): Record<string, any> {
+        const activeModel = this.stateManager.getActiveModel();
+        const wsMgr = (window as any).workspaceManager;
+        const baseCfg = wsMgr && typeof wsMgr.buildContourConfig === 'function'
+            ? wsMgr.buildContourConfig(activeModel, {})
+            : (() => {
+                const solverNode = activeModel?.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D');
+                const meshNode = activeModel?.nodes.find(n => isDomainMesh2DNode(n.type) || n.type === 'MPMDomain2D' || n.type === 'DomainMesh');
+                const gaugesNode = activeModel?.nodes.find(n => n.type === 'VirtualGauges' || n.type === 'VirtualGauges3D');
+                const max_r = Number(meshNode?.parameters?.max_r ?? meshNode?.parameters?.domain_radius ?? 1.0) || 1.0;
+                const max_z = Number(meshNode?.parameters?.max_z ?? max_r) || max_r;
+                const cellSize = Number(meshNode?.parameters?.cell_size) || 0.05;
+                const nr = Math.max(8, Math.round(max_r / cellSize) || 128);
+                const nz = Math.max(8, Math.round(max_z / cellSize) || 128);
+                return {
+                    meshType: String(solverNode?.parameters?.mesh_type || 'regular'),
+                    amrMaxLevels: Number(solverNode?.parameters?.amr_max_levels ?? 3),
+                    baseNr: nr,
+                    baseNz: nz,
+                    max_r,
+                    max_z,
+                    gauges: Array.isArray(gaugesNode?.parameters?.gauges) ? gaugesNode.parameters.gauges : []
+                };
+            })();
+
+        const channel = Number(node.parameters?.telemetry_channel ?? 0);
+        const autoScale = node.parameters?.auto_scale !== false;
+        const logScale = !!node.parameters?.log_scale;
+        const colormap = String(node.parameters?.colormap || 'turbo');
+        const minVal = Number(node.parameters?.min_y ?? 0);
+        const maxVal = Number(node.parameters?.max_y ?? 1e6);
+        const stride = Math.max(1, Number(node.parameters?.downsample_stride ?? 1));
+        const interpolate = node.parameters?.interpolate !== false;
+
+        return {
+            ...baseCfg,
+            type: 'setConfig',
+            channel,
+            autoScale,
+            logScale,
+            colormap,
+            min: minVal,
+            max: maxVal,
+            stride,
+            refreshRate: 0,
+            interpolate,
+            fillMode: this.contourFillMode,
+            showExtrema: this.contourShowExtrema,
+            showGridlines: this.contourShowGridlines,
+            isAxisymmetric: this.contourIsAxisymmetric,
+            showColorbar: true,
+            showGauges: true,
+            showCharge: true,
+            showDetonator: true,
+            showObstacles: true,
+            showMPMParticles: true
+        };
+    }
+
+    private syncContourWorkerConfig(node: Node): void {
+        if (!this.contourWorker) return;
+        this.contourWorker.postMessage(this.buildNodeContourConfig(node));
+    }
+
+    private renderExpandedContour(node: Node): void {
+        this.stopRenderLoop();
+        this.telemetryBuffer = null;
+        this.cleanupWorkers();
+
+        this.container.style.position = 'relative';
+        this.container.style.overflow = 'hidden';
+        this.container.style.padding = '0';
+
+        const activeModel = this.stateManager.getActiveModel();
+        const hasMPM = Boolean(activeModel?.nodes.some(n => n.type === 'MPMDomain2D' || n.type === 'MPMObject2D' || n.type === 'FSICoupler2D'));
+        const hasCFD = Boolean(activeModel?.nodes.some(n => n.type === 'CFDSolver2D' || n.type === 'FSICoupler2D')) || !hasMPM;
+        const CONTOUR_CHANNELS: { id: number; label: string }[] = [];
+        if (hasCFD) {
+            CONTOUR_CHANNELS.push(
+                { id: 0, label: 'Pressure P (Pa)' },
+                { id: 10, label: 'Overpressure ΔP (Pa)' },
+                { id: 1, label: 'Density ρ (kg/m³)' },
+                { id: 9, label: 'Velocity |u| (m/s)' },
+                { id: 2, label: 'Radial Vel u_r (m/s)' },
+                { id: 3, label: 'Axial Vel u_z (m/s)' },
+                { id: 4, label: 'Int. Energy e (J/kg)' },
+                { id: 5, label: 'Reacted α₁ (-)' },
+                { id: 6, label: 'Unreacted α₂ (-)' }
+            );
+        }
+        if (hasMPM) {
+            CONTOUR_CHANNELS.push(
+                { id: 7, label: 'MPM σ_vm (Pa)' },
+                { id: 8, label: 'MPM ε_p (-)' }
+            );
+        }
+        const COLORMAPS = ['rainbow', 'turbo', 'viridis', 'plasma', 'inferno', 'magma', 'jet', 'cividis', 'coolwarm', 'grayscale'];
+
+        const header = document.createElement('div');
+        header.className = 'viewer-header';
+        header.style.cssText = 'display:flex; flex-wrap:wrap; gap:6px; padding:6px 10px; border-bottom:1px solid rgba(56,189,248,0.18); align-items:center; background:#0f1420; flex-shrink:0;';
+
+        const title = document.createElement('span');
+        title.textContent = `2D CONTOUR: ${node.id}`;
+        title.style.cssText = 'font-weight:700; font-size:11px; color:#e2e8f0; letter-spacing:0.4px; margin-right:4px;';
+        header.appendChild(title);
+
+        const mkSelect = (opts: { val: string; label: string }[], cur: string, onChange: (v: string) => void): HTMLSelectElement => {
+            const s = document.createElement('select');
+            s.style.cssText = 'font-size:10.5px; background:#161d2e; color:#e2e8f0; border:1px solid rgba(148,163,184,0.28); padding:2px 6px; border-radius:4px; cursor:pointer;';
+            opts.forEach(o => {
+                const el = document.createElement('option');
+                el.value = o.val;
+                el.textContent = o.label;
+                if (o.val === cur) el.selected = true;
+                s.appendChild(el);
+            });
+            s.onchange = () => onChange(s.value);
+            return s;
+        };
+
+        const defaultCh = CONTOUR_CHANNELS[0]?.id ?? 0;
+        const rawCh = Number(node.parameters?.telemetry_channel ?? defaultCh);
+        const curCh = String(CONTOUR_CHANNELS.some(c => c.id === rawCh) ? rawCh : defaultCh);
+        const chSel = mkSelect(CONTOUR_CHANNELS.map(c => ({ val: String(c.id), label: c.label })), curCh, (v) => {
+            this.stateManager.updateNodeParametersInPlace(node.id, { telemetry_channel: Number(v) });
+            this.syncContourWorkerConfig(node);
+        });
+        header.appendChild(chSel);
+
+        const curCmap = String(node.parameters?.colormap || 'rainbow');
+        const cmapSel = mkSelect(COLORMAPS.map(c => ({ val: c, label: c.toUpperCase() })), curCmap, (v) => {
+            this.stateManager.updateNodeParametersInPlace(node.id, { colormap: v });
+            this.syncContourWorkerConfig(node);
+        });
+        header.appendChild(cmapSel);
+
+        const mkToggleBtn = (label: string, titleTxt: string, isActive: () => boolean, onClick: (btn: HTMLButtonElement) => void): HTMLButtonElement => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = label;
+            b.title = titleTxt;
+            const applyStyle = () => {
+                const act = isActive();
+                b.style.cssText = `background:${act ? 'rgba(56,189,248,0.2)' : '#161d2e'}; color:${act ? '#38bdf8' : '#cbd5e1'}; border:1px solid ${act ? 'rgba(56,189,248,0.55)' : 'rgba(148,163,184,0.25)'}; border-radius:4px; font-size:10px; font-weight:600; padding:2px 7px; cursor:pointer;`;
+            };
+            applyStyle();
+            b.onclick = () => {
+                onClick(b);
+                applyStyle();
+            };
+            return b;
+        };
+
+        const rangeWrap = document.createElement('div');
+        rangeWrap.style.cssText = `display:${node.parameters?.auto_scale === false ? 'flex' : 'none'}; align-items:center; gap:4px;`;
+        const mkBoundIn = (val: number, key: 'min_y' | 'max_y') => {
+            const inp = document.createElement('input');
+            inp.type = 'number';
+            inp.step = 'any';
+            inp.value = String(val);
+            inp.style.cssText = 'width:64px; font-size:10px; background:#0b0f19; color:#e2e8f0; border:1px solid rgba(148,163,184,0.3); border-radius:3px; padding:2px 4px;';
+            inp.onchange = () => {
+                const num = Number(inp.value);
+                if (isFinite(num)) {
+                    this.stateManager.updateNodeParametersInPlace(node.id, { [key]: num });
+                    this.syncContourWorkerConfig(node);
+                }
+            };
+            return inp;
+        };
+        const minIn = mkBoundIn(Number(node.parameters?.min_y ?? 0), 'min_y');
+        const maxIn = mkBoundIn(Number(node.parameters?.max_y ?? 1e6), 'max_y');
+        rangeWrap.appendChild(minIn);
+        rangeWrap.appendChild(maxIn);
+
+        const autoBtn = mkToggleBtn(node.parameters?.auto_scale !== false ? 'AUTO' : 'MAN', 'Toggle Auto-Scale vs Manual Range', () => node.parameters?.auto_scale !== false, (b) => {
+            const next = !(node.parameters?.auto_scale !== false);
+            this.stateManager.updateNodeParametersInPlace(node.id, { auto_scale: next });
+            b.textContent = next ? 'AUTO' : 'MAN';
+            rangeWrap.style.display = next ? 'none' : 'flex';
+            this.syncContourWorkerConfig(node);
+        });
+        header.appendChild(autoBtn);
+        header.appendChild(rangeWrap);
+
+        const logBtn = mkToggleBtn(node.parameters?.log_scale ? 'LOG' : 'LIN', 'Toggle Logarithmic vs Linear Color Scale', () => !!node.parameters?.log_scale, (b) => {
+            const next = !node.parameters?.log_scale;
+            this.stateManager.updateNodeParametersInPlace(node.id, { log_scale: next });
+            b.textContent = next ? 'LOG' : 'LIN';
+            this.syncContourWorkerConfig(node);
+        });
+        header.appendChild(logBtn);
+
+        const smoothBtn = mkToggleBtn('Smooth', 'Toggle Bilinear Interpolation vs Crisp 1:1 Computational Cells', () => node.parameters?.interpolate !== false, () => {
+            const next = !(node.parameters?.interpolate !== false);
+            this.stateManager.updateNodeParametersInPlace(node.id, { interpolate: next });
+            this.syncContourWorkerConfig(node);
+        });
+        header.appendChild(smoothBtn);
+
+        const navGroup = document.createElement('div');
+        navGroup.style.cssText = 'display:flex; align-items:center; gap:4px; margin-left:auto; flex-wrap:wrap;';
+
+        navGroup.appendChild(mkToggleBtn('⇄ Mirror', 'Mirror Axisymmetric Domain Across r = 0', () => this.contourIsAxisymmetric, () => {
+            this.contourIsAxisymmetric = !this.contourIsAxisymmetric;
+            this.syncContourWorkerConfig(node);
+        }));
+
+        navGroup.appendChild(mkToggleBtn('# Grid', 'Show Mesh / AMR Tile Overlay', () => this.contourShowGridlines, () => {
+            this.contourShowGridlines = !this.contourShowGridlines;
+            this.syncContourWorkerConfig(node);
+        }));
+
+        navGroup.appendChild(mkToggleBtn('▲▼ Peaks', 'Show Domain Peak & Trough Markers', () => this.contourShowExtrema, () => {
+            this.contourShowExtrema = !this.contourShowExtrema;
+            this.syncContourWorkerConfig(node);
+        }));
+
+        const boxBtn = mkToggleBtn('⬚ Box', 'Rubberband Box-Zoom Mode (or Shift+Drag / Right-Drag)', () => this.contourBoxMode, () => {
+            this.contourBoxMode = !this.contourBoxMode;
+            if (this.contourCanvas) {
+                this.contourCanvas.style.cursor = this.contourBoxMode ? 'crosshair' : 'grab';
+            }
+        });
+        navGroup.appendChild(boxBtn);
+
+        navGroup.appendChild(mkToggleBtn('＋', 'Zoom In', () => false, () => this.contourWorker?.postMessage({ type: 'zoom', factor: 1.25 })));
+        navGroup.appendChild(mkToggleBtn('－', 'Zoom Out', () => false, () => this.contourWorker?.postMessage({ type: 'zoom', factor: 0.8 })));
+        navGroup.appendChild(mkToggleBtn('🏠 Fit', 'Reset Pan & Zoom (or Double-Click)', () => false, () => this.contourWorker?.postMessage({ type: 'resetView' })));
+        navGroup.appendChild(mkToggleBtn('🎯 Stage', 'Open 2D Contour in Stage Viewport', () => true, () => {
+            (window as any).workspaceManager?.switchActivePaneType?.('2D_CONTOUR');
+        }));
+
+        header.appendChild(navGroup);
+        this.container.appendChild(header);
+
+        const canvasCont = document.createElement('div');
+        canvasCont.style.cssText = 'flex:1; min-width:0; min-height:0; position:relative; overflow:hidden; background:#0b0f19;';
+        this.container.appendChild(canvasCont);
+
+        const canvas = document.createElement('canvas');
+        canvas.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:grab;';
+        canvasCont.appendChild(canvas);
+        this.contourCanvas = canvas;
+
+        let isDragging = false;
+        let dragMode: 'pan' | 'boxZoom' = 'pan';
+        let startX = 0;
+        let startY = 0;
+        let lastX = 0;
+        let lastY = 0;
+        let movedSignificantly = false;
+        let suppressContextMenu = false;
+
+        canvas.addEventListener('contextmenu', (e) => {
+            if (suppressContextMenu || this.contourBoxMode) {
+                e.preventDefault();
+                suppressContextMenu = false;
+            }
+        });
+
+        canvas.addEventListener('pointerdown', (e) => {
+            try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+            isDragging = true;
+            movedSignificantly = false;
+            startX = lastX = e.offsetX;
+            startY = lastY = e.offsetY;
+            if (this.contourBoxMode || e.shiftKey || e.button === 1 || e.button === 2) {
+                dragMode = 'boxZoom';
+                if (e.button === 2) suppressContextMenu = true;
+                canvas.style.cursor = 'crosshair';
+            } else {
+                dragMode = 'pan';
+                canvas.style.cursor = 'grabbing';
+            }
+            e.preventDefault();
+        });
+
+        canvas.addEventListener('pointermove', (e) => {
+            const mx = e.offsetX;
+            const my = e.offsetY;
+            this.contourWorker?.postMessage({ type: 'hover', mx, my });
+            if (!isDragging) return;
+            const dx = mx - lastX;
+            const dy = my - lastY;
+            lastX = mx;
+            lastY = my;
+            if (Math.hypot(mx - startX, my - startY) > 4) movedSignificantly = true;
+            if (dragMode === 'boxZoom') {
+                this.contourWorker?.postMessage({ type: 'boxZoomMove', x0: startX, y0: startY, x1: mx, y1: my });
+            } else {
+                this.contourWorker?.postMessage({ type: 'pan', dx, dy });
+            }
+        });
+
+        const endContourDrag = (e: PointerEvent) => {
+            if (!isDragging) return;
+            try { if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+            isDragging = false;
+            canvas.style.cursor = this.contourBoxMode ? 'crosshair' : 'grab';
+            if (dragMode === 'boxZoom') {
+                if (movedSignificantly) {
+                    this.contourWorker?.postMessage({ type: 'boxZoomCommit', x0: startX, y0: startY, x1: e.offsetX, y1: e.offsetY });
+                } else {
+                    this.contourWorker?.postMessage({ type: 'boxZoomCancel' });
+                }
+            } else if (!movedSignificantly && e.button === 0) {
+                this.contourWorker?.postMessage({ type: 'click', mx: e.offsetX, my: e.offsetY });
+            }
+        };
+
+        canvas.addEventListener('pointerup', endContourDrag);
+        canvas.addEventListener('pointercancel', endContourDrag);
+        canvas.addEventListener('pointerleave', () => {
+            if (!isDragging) {
+                this.contourWorker?.postMessage({ type: 'hover', mx: null, my: null });
+            }
+        });
+
+        canvas.addEventListener('wheel', (e) => {
+            this.contourWorker?.postMessage({
+                type: 'zoom',
+                mx: e.offsetX,
+                my: e.offsetY,
+                deltaY: e.deltaY
+            });
+            e.preventDefault();
+        }, { passive: false });
+
+        canvas.addEventListener('dblclick', (e) => {
+            this.contourWorker?.postMessage({ type: 'resetView' });
+            e.preventDefault();
+        });
+
+        this.contourWorker = new Worker(new URL('./ContourWorker.ts', import.meta.url), { type: 'module' });
+        this.contourWorker.onmessage = (e) => {
+            const msg = e.data;
+            if (!msg) return;
+            if (msg.type === 'probeHover' && this.contourCanvas && !isDragging) {
+                this.contourCanvas.style.cursor = msg.probeIndex >= 0 ? 'pointer' : (this.contourBoxMode ? 'crosshair' : 'grab');
+            }
+        };
+
+        const initRect = canvasCont.getBoundingClientRect();
+        const cssW = Math.max(200, Math.round(initRect.width) || 800);
+        const cssH = Math.max(160, Math.round(initRect.height) || 500);
+        const offscreen = (canvas as any).transferControlToOffscreen();
+        this.contourWorker.postMessage(
+            { type: 'init', canvas: offscreen, width: cssW, height: cssH, dpr: window.devicePixelRatio || 1 },
+            [offscreen] as any
+        );
+        this.syncContourWorkerConfig(node);
+
+        requestAnimationFrame(() => {
+            if (!this.contourWorker || !canvasCont.isConnected) return;
+            const r = canvasCont.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) {
+                this.contourWorker.postMessage({ type: 'resize', width: Math.round(r.width), height: Math.round(r.height) });
+            }
+        });
+
+        this.contourResizeObserver = new ResizeObserver(entries => {
+            for (const entry of entries) {
+                const { width, height } = entry.contentRect;
+                if (width > 0 && height > 0) {
+                    this.contourWorker?.postMessage({ type: 'resize', width: Math.round(width), height: Math.round(height) });
+                }
+            }
+        });
+        this.contourResizeObserver.observe(canvasCont);
+
+        // Seed with latest 2D binary frame from node, solver, or model store
+        const solver2D = activeModel?.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D' || n.type === 'FSICoupler2D');
+        const initialBuf =
+            this.stateManager.getTelemetry(node.id) ||
+            (activeModel ? this.stateManager.getTelemetry(`${activeModel.id}-binary`) : null) ||
+            (solver2D ? this.stateManager.getTelemetry(`${solver2D.id}-binary`) : null);
+        if (initialBuf instanceof ArrayBuffer) {
+            const copy = initialBuf.slice(0);
+            this.contourWorker.postMessage(copy, [copy]);
+        }
     }
 
     private renderExpandedGraph(node: Node): void {
         this.stopRenderLoop();
         this.telemetryBuffer = null;
-        if (this.chartWorker) {
-            this.chartWorker.terminate();
-            this.chartWorker = null;
-        }
+        this.cleanupWorkers();
 
-        const CHANNELS: { label: string; color: string }[] = [
-            { label: 'Pressure',        color: '#00f0ff' },
-            { label: 'Density',         color: '#f0a000' },
-            { label: 'Velocity',        color: '#a0f000' },
-            { label: 'Int. Energy',     color: '#f000a0' },
-            { label: 'Mass Fraction',   color: '#a000f0' },
+        const CHANNELS: { id: number; label: string; color: string }[] = [
+            { id: 0, label: 'Pressure P (Pa)',           color: '#00f0ff' },
+            { id: 8, label: 'Overpressure ΔP (Pa)',      color: '#a855f7' },
+            { id: 1, label: 'Density ρ (kg/m³)',         color: '#38bdf8' },
+            { id: 2, label: 'Radial Vel u_r (m/s)',      color: '#10b981' },
+            { id: 3, label: 'Int. Energy e (J/kg)',      color: '#f59e0b' },
+            { id: 4, label: 'All Species (α₁, α₂, Air)', color: '#f43f5e' },
+            { id: 5, label: 'Reacted Products α₁',       color: '#f43f5e' },
+            { id: 6, label: 'Unreacted Solid α₂',        color: '#f59e0b' },
+            { id: 7, label: 'Ambient Air Fraction',      color: '#38bdf8' }
         ];
         const currentChannel = Number(node.parameters?.telemetry_channel ?? 0);
-        const initialColor = node.parameters?.color ?? CHANNELS[currentChannel]?.color ?? '#00f0ff';
+        const foundCh = CHANNELS.find(c => c.id === currentChannel);
+        const initialColor = node.parameters?.color ?? foundCh?.color ?? '#00f0ff';
         const initialMinY = node.parameters?.min_y !== undefined ? Number(node.parameters.min_y) : 0;
         const initialMaxY = node.parameters?.max_y !== undefined ? Number(node.parameters.max_y) : 1000000;
         const showGridVal = node.parameters?.show_grid !== false;
- 
+
         this.lastColor = null;
         this.lastMinY = null;
         this.lastMaxY = null;
@@ -804,257 +1291,264 @@ export class NodeViewer {
         this.lastStride = null;
         this.graphFrameCount = 0;
 
+        this.container.style.position = 'relative';
+        this.container.style.overflow = 'hidden';
+        this.container.style.padding = '0';
+
         const activeModel = this.stateManager.getActiveModel();
-        const meshNode = activeModel?.nodes.find(n => n.type === 'DomainMesh' || n.type === 'DomainMesh2D' || n.type === 'DomainMesh3D');
+        const meshNode = activeModel?.nodes.find(n => n.type === 'DomainMesh' || isDomainMesh2DNode(n.type) || isDomainMesh3DNode(n.type));
         const is1D = (meshNode?.parameters?.dimension ?? '1D') === '1D';
         const domainRadius = Number(meshNode?.parameters?.domain_radius ?? 1.0);
         const xAxisMode = is1D ? (node.parameters?.x_axis_mode ?? 'radius') : 'cell_id';
 
         const header = document.createElement('div');
         header.className = 'viewer-header';
-        header.style.display = 'flex';
-        header.style.gap = '10px';
-        header.style.padding = '8px';
-        header.style.borderBottom = '1px solid #333';
-        header.style.alignItems = 'center';
-        header.style.background = '#252526';
+        header.style.cssText = 'display:flex; flex-wrap:wrap; gap:6px; padding:6px 10px; border-bottom:1px solid rgba(56,189,248,0.18); align-items:center; background:#0f1420; flex-shrink:0;';
 
         const title = document.createElement('span');
-        title.textContent = `CHART: ${node.id}`;
-        title.style.fontWeight = 'bold';
+        title.textContent = `1D PROFILE: ${node.id}`;
+        title.style.cssText = 'font-weight:700; font-size:11px; color:#e2e8f0; letter-spacing:0.4px; margin-right:4px;';
         header.appendChild(title);
 
-        const createControl = (label: string, type: string, value: string, callback: (val: string) => void) => {
-            const div = document.createElement('div');
-            div.style.display = 'flex';
-            div.style.alignItems = 'center';
-            div.style.gap = '4px';
-            const lb = document.createElement('label');
-            lb.textContent = label;
-            lb.style.fontSize = 'var(--font-xs)';
-            const input = document.createElement('input');
-            input.type = type;
-            input.value = value;
-            input.style.width = type === 'number' ? '60px' : '30px';
-            input.style.fontSize = 'var(--font-xs)';
-            input.style.background = '#333';
-            input.style.color = '#ccc';
-            input.style.border = '1px solid #444';
-            input.onchange = () => callback(input.value);
-            div.appendChild(lb);
-            div.appendChild(input);
-            return div;
-        };
-
-        const minControl = createControl('Min Y:', 'number', String(initialMinY), (v) => this.stateManager.updateNodeParameters(node.id, { min_y: Number(v) }));
-        const minIn = minControl.querySelector('input')!;
-        minIn.id = `viewer-min-y-${node.id}`;
-        header.appendChild(minControl);
-
-        const maxControl = createControl('Max Y:', 'number', String(initialMaxY), (v) => this.stateManager.updateNodeParameters(node.id, { max_y: Number(v) }));
-        const maxIn = maxControl.querySelector('input')!;
-        maxIn.id = `viewer-max-y-${node.id}`;
-        header.appendChild(maxControl);
-
-        const colorControl = createControl('Color:', 'color', initialColor, (v) => this.stateManager.updateNodeParameters(node.id, { color: v }));
-        const colorIn = colorControl.querySelector('input')!;
-        header.appendChild(colorControl);
-
-        const gridLabel = document.createElement('label');
-        gridLabel.style.fontSize = 'var(--font-xs)';
-        gridLabel.innerHTML = `<input type="checkbox" ${showGridVal ? 'checked' : ''}> Grid`;
-        gridLabel.querySelector('input')!.onchange = (e) => {
-            this.stateManager.updateNodeParameters(node.id, { show_grid: (e.target as HTMLInputElement).checked });
-        };
-        header.appendChild(gridLabel);
-
-        // Add Channel control
         const channelSelect = document.createElement('select');
         channelSelect.className = 'viewer-channel-select';
-        channelSelect.style.fontSize = 'var(--font-xs)';
-        channelSelect.style.background = '#333';
-        channelSelect.style.color = '#ccc';
-        channelSelect.style.border = '1px solid #444';
-        channelSelect.style.padding = '2px 4px';
-        channelSelect.style.borderRadius = '3px';
-
-        CHANNELS.forEach((ch, idx) => {
+        channelSelect.style.cssText = 'font-size:10.5px; background:#161d2e; color:#e2e8f0; border:1px solid rgba(148,163,184,0.28); padding:2px 6px; border-radius:4px; cursor:pointer;';
+        CHANNELS.forEach((ch) => {
             const opt = document.createElement('option');
-            opt.value = String(idx);
+            opt.value = String(ch.id);
             opt.textContent = ch.label;
-            if (idx === currentChannel) opt.selected = true;
+            if (ch.id === currentChannel) opt.selected = true;
             channelSelect.appendChild(opt);
         });
 
-        channelSelect.onchange = () => {
-            const chIdx = Number(channelSelect.value);
-            const newColor = CHANNELS[chIdx]?.color ?? '#00f0ff';
-            colorIn.value = newColor;
-            this.stateManager.updateNodeParameters(node.id, {
-                telemetry_channel: chIdx,
-                color: newColor
-            });
+        const colorIn = document.createElement('input');
+        colorIn.type = 'color';
+        colorIn.value = initialColor;
+        colorIn.title = 'Curve Color';
+        colorIn.style.cssText = 'width:24px; height:20px; padding:0; background:#161d2e; border:1px solid rgba(148,163,184,0.28); border-radius:4px; cursor:pointer;';
+        colorIn.onchange = () => {
+            this.stateManager.updateNodeParametersInPlace(node.id, { color: colorIn.value });
+            this.chartWorker?.postMessage({ type: 'setConfig', color: colorIn.value });
         };
 
-        const channelControl = document.createElement('div');
-        channelControl.style.display = 'flex';
-        channelControl.style.alignItems = 'center';
-        channelControl.style.gap = '4px';
-        const channelLabel = document.createElement('label');
-        channelLabel.textContent = 'Channel:';
-        channelLabel.style.fontSize = 'var(--font-xs)';
-        channelControl.appendChild(channelLabel);
-        channelControl.appendChild(channelSelect);
-        header.appendChild(channelControl);
+        channelSelect.onchange = () => {
+            const chId = Number(channelSelect.value);
+            const chObj = CHANNELS.find(c => c.id === chId);
+            const newColor = chObj?.color ?? '#00f0ff';
+            colorIn.value = newColor;
+            this.stateManager.updateNodeParametersInPlace(node.id, {
+                telemetry_channel: chId,
+                color: newColor
+            });
+            this.chartWorker?.postMessage({ type: 'setConfig', channel: chId, color: newColor });
+        };
+        header.appendChild(channelSelect);
+        header.appendChild(colorIn);
 
-        // Add Plot Rate (stride) control
+        const mkPillBtn = (label: string, titleTxt: string, isActive: () => boolean, onClick: (b: HTMLButtonElement) => void): HTMLButtonElement => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = label;
+            b.title = titleTxt;
+            const syncStyle = () => {
+                const act = isActive();
+                b.style.cssText = `background:${act ? 'rgba(56,189,248,0.2)' : '#161d2e'}; color:${act ? '#38bdf8' : '#cbd5e1'}; border:1px solid ${act ? 'rgba(56,189,248,0.55)' : 'rgba(148,163,184,0.25)'}; border-radius:4px; font-size:10px; font-weight:600; padding:2px 7px; cursor:pointer;`;
+            };
+            syncStyle();
+            b.onclick = () => {
+                onClick(b);
+                syncStyle();
+            };
+            return b;
+        };
+
+        const manualRangeWrap = document.createElement('div');
+        manualRangeWrap.style.cssText = `display:${this.graphAutoScale ? 'none' : 'flex'}; align-items:center; gap:4px;`;
+        const mkYInput = (id: string, val: number, key: 'min_y' | 'max_y') => {
+            const inp = document.createElement('input');
+            inp.type = 'number';
+            inp.step = 'any';
+            inp.id = id;
+            inp.value = String(val);
+            inp.style.cssText = 'width:64px; font-size:10px; background:#0b0f19; color:#e2e8f0; border:1px solid rgba(148,163,184,0.3); border-radius:3px; padding:2px 4px;';
+            inp.onchange = () => {
+                const num = Number(inp.value);
+                if (isFinite(num)) {
+                    this.stateManager.updateNodeParametersInPlace(node.id, { [key]: num });
+                    if (!this.graphAutoScale) {
+                        this.chartWorker?.postMessage({ type: 'setConfig', [key === 'min_y' ? 'min' : 'max']: num });
+                    }
+                }
+            };
+            return inp;
+        };
+        manualRangeWrap.appendChild(mkYInput(`viewer-min-y-${node.id}`, initialMinY, 'min_y'));
+        manualRangeWrap.appendChild(mkYInput(`viewer-max-y-${node.id}`, initialMaxY, 'max_y'));
+
+        header.appendChild(mkPillBtn(this.graphAutoScale ? 'AUTO' : 'MAN', 'Toggle Auto-Scale vs Manual Y Bounds', () => this.graphAutoScale, (b) => {
+            this.graphAutoScale = !this.graphAutoScale;
+            b.textContent = this.graphAutoScale ? 'AUTO' : 'MAN';
+            manualRangeWrap.style.display = this.graphAutoScale ? 'none' : 'flex';
+            this.chartWorker?.postMessage({
+                type: 'setConfig',
+                autoScale: this.graphAutoScale,
+                min: Number(node.parameters?.min_y ?? 0),
+                max: Number(node.parameters?.max_y ?? 1e6)
+            });
+        }));
+        header.appendChild(manualRangeWrap);
+
+        header.appendChild(mkPillBtn(this.graphLogScale ? 'LOG' : 'LIN', 'Toggle Logarithmic vs Linear Y Scale', () => this.graphLogScale, (b) => {
+            this.graphLogScale = !this.graphLogScale;
+            b.textContent = this.graphLogScale ? 'LOG' : 'LIN';
+            this.chartWorker?.postMessage({ type: 'setConfig', logScale: this.graphLogScale });
+        }));
+
+        const gridLabel = document.createElement('label');
+        gridLabel.style.cssText = 'display:flex; align-items:center; gap:3px; font-size:10px; color:#cbd5e1; cursor:pointer;';
+        gridLabel.innerHTML = `<input type="checkbox" class="viewer-grid-checkbox" ${showGridVal ? 'checked' : ''}> Grid`;
+        gridLabel.querySelector('input')!.onchange = (e) => {
+            const checked = (e.target as HTMLInputElement).checked;
+            this.stateManager.updateNodeParametersInPlace(node.id, { show_grid: checked });
+            this.chartWorker?.postMessage({ type: 'setConfig', showGrid: checked });
+        };
+        header.appendChild(gridLabel);
+
         const strideSelect = document.createElement('select');
         strideSelect.className = 'viewer-stride-select';
-        strideSelect.style.fontSize = 'var(--font-xs)';
-        strideSelect.style.background = '#333';
-        strideSelect.style.color = '#ccc';
-        strideSelect.style.border = '1px solid #444';
-        strideSelect.style.padding = '2px 4px';
-        strideSelect.style.borderRadius = '3px';
-
+        strideSelect.style.cssText = 'font-size:10px; background:#161d2e; color:#cbd5e1; border:1px solid rgba(148,163,184,0.28); padding:2px 5px; border-radius:4px;';
         const STRIDES = [
-            { label: 'Every frame', value: 1 },
-            { label: 'Every 2 frames', value: 2 },
-            { label: 'Every 5 frames', value: 5 },
-            { label: 'Every 10 frames', value: 10 },
-            { label: 'Every 20 frames', value: 20 },
-            { label: 'Every 50 frames', value: 50 },
-            { label: 'Every 100 frames', value: 100 }
+            { label: '1x', value: 1 },
+            { label: '2x', value: 2 },
+            { label: '5x', value: 5 },
+            { label: '10x', value: 10 },
+            { label: '20x', value: 20 },
+            { label: '50x', value: 50 }
         ];
-
         const currentStride = Number(node.parameters?.plot_stride ?? 1);
-
         STRIDES.forEach(st => {
             const opt = document.createElement('option');
             opt.value = String(st.value);
-            opt.textContent = st.label;
+            opt.textContent = `Rate ${st.label}`;
             if (st.value === currentStride) opt.selected = true;
             strideSelect.appendChild(opt);
         });
-
         strideSelect.onchange = () => {
-            const newStride = Number(strideSelect.value);
-            this.stateManager.updateNodeParameters(node.id, { plot_stride: newStride });
+            this.stateManager.updateNodeParametersInPlace(node.id, { plot_stride: Number(strideSelect.value) });
         };
+        header.appendChild(strideSelect);
 
-        const strideControl = document.createElement('div');
-        strideControl.style.display = 'flex';
-        strideControl.style.alignItems = 'center';
-        strideControl.style.gap = '4px';
-        const strideLabel = document.createElement('label');
-        strideLabel.textContent = 'Rate:';
-        strideLabel.style.fontSize = 'var(--font-xs)';
-        strideControl.appendChild(strideLabel);
-        strideControl.appendChild(strideSelect);
-        header.appendChild(strideControl);
-
-        // Add X-Axis selector control if 1D model
         if (is1D) {
             const xSelect = document.createElement('select');
             xSelect.className = 'viewer-x-axis-select';
-            xSelect.style.fontSize = 'var(--font-xs)';
-            xSelect.style.background = '#333';
-            xSelect.style.color = '#ccc';
-            xSelect.style.border = '1px solid #444';
-            xSelect.style.padding = '2px 4px';
-            xSelect.style.borderRadius = '3px';
-
-            const optRadius = document.createElement('option');
-            optRadius.value = 'radius';
-            optRadius.textContent = 'Radius';
-            if (xAxisMode === 'radius') optRadius.selected = true;
-            xSelect.appendChild(optRadius);
-
-            const optCell = document.createElement('option');
-            optCell.value = 'cell_id';
-            optCell.textContent = 'Cell ID';
-            if (xAxisMode === 'cell_id') optCell.selected = true;
-            xSelect.appendChild(optCell);
-
+            xSelect.style.cssText = 'font-size:10px; background:#161d2e; color:#cbd5e1; border:1px solid rgba(148,163,184,0.28); padding:2px 5px; border-radius:4px;';
+            [
+                { v: 'radius', l: 'X: Radius (m)' },
+                { v: 'cell_id', l: 'X: Cell ID' }
+            ].forEach(item => {
+                const opt = document.createElement('option');
+                opt.value = item.v;
+                opt.textContent = item.l;
+                if (xAxisMode === item.v) opt.selected = true;
+                xSelect.appendChild(opt);
+            });
             xSelect.onchange = () => {
                 const newMode = xSelect.value;
-                this.stateManager.updateNodeParameters(node.id, { x_axis_mode: newMode });
-                this.chartWorker?.postMessage({
-                    type: 'setConfig',
-                    xAxisMode: newMode
-                });
+                this.stateManager.updateNodeParametersInPlace(node.id, { x_axis_mode: newMode });
+                this.chartWorker?.postMessage({ type: 'setConfig', xAxisMode: newMode, domainRadius });
             };
-
-            const xControl = document.createElement('div');
-            xControl.style.display = 'flex';
-            xControl.style.alignItems = 'center';
-            xControl.style.gap = '4px';
-            const xLabel = document.createElement('label');
-            xLabel.textContent = 'X-Axis:';
-            xLabel.style.fontSize = 'var(--font-xs)';
-            xControl.appendChild(xLabel);
-            xControl.appendChild(xSelect);
-            header.appendChild(xControl);
+            header.appendChild(xSelect);
         }
+
+        const navCtrl = document.createElement('div');
+        navCtrl.style.cssText = 'display:flex; align-items:center; gap:4px; margin-left:auto; flex-wrap:wrap;';
+        navCtrl.appendChild(mkPillBtn('▲▼ Peaks', 'Show Automatic Peak & Trough Callouts', () => this.graphShowPeaks, () => {
+            this.graphShowPeaks = !this.graphShowPeaks;
+            this.chartWorker?.postMessage({ type: 'setConfig', showPeaks: this.graphShowPeaks });
+        }));
+        navCtrl.appendChild(mkPillBtn('⬚ Box', 'Rubberband Box-Zoom Mode (or Shift+Drag / Right-Drag)', () => this.graphBoxMode, () => {
+            this.graphBoxMode = !this.graphBoxMode;
+            this.chartWorker?.postMessage({ type: 'setConfig', interactionMode: this.graphBoxMode ? 'boxZoom' : 'pan' });
+            if (this.chartCanvas) this.chartCanvas.style.cursor = this.graphBoxMode ? 'crosshair' : 'crosshair';
+        }));
+        navCtrl.appendChild(mkPillBtn('＋', 'Zoom In', () => false, () => this.chartWorker?.postMessage({ type: 'zoom', factor: 1.25 })));
+        navCtrl.appendChild(mkPillBtn('－', 'Zoom Out', () => false, () => this.chartWorker?.postMessage({ type: 'zoom', factor: 0.8 })));
+        navCtrl.appendChild(mkPillBtn('🏠 Fit', 'Reset Zoom & Pan (or Double-Click Chart)', () => false, () => this.chartWorker?.postMessage({ type: 'resetView' })));
+        navCtrl.appendChild(mkPillBtn('🎯 Stage', 'Open Chart in Stage Viewport', () => true, () => {
+            (window as any).workspaceManager?.switchActivePaneType?.('1D_CHART');
+        }));
+        header.appendChild(navCtrl);
 
         this.container.appendChild(header);
 
         const canvasCont = document.createElement('div');
         canvasCont.className = 'expanded-graph-container';
-        canvasCont.style.flex = "1";
-        canvasCont.style.position = "relative";
-        canvasCont.style.overflow = "hidden";
+        canvasCont.style.cssText = 'flex:1; min-width:0; min-height:0; position:relative; overflow:hidden; background:#0b0f19;';
         this.container.appendChild(canvasCont);
 
         const wrapper = document.createElement('div');
-        wrapper.style.position = "absolute";
-        wrapper.style.inset = "0";
+        wrapper.style.cssText = 'position:absolute; inset:0; width:100%; height:100%;';
         canvasCont.appendChild(wrapper);
 
         this.chartCanvas = document.createElement('canvas');
-        this.chartCanvas.style.width = "100%";
-        this.chartCanvas.style.height = "100%";
-        this.chartCanvas.style.display = "block";
-        this.chartCanvas.style.touchAction = "none"; // Prevent default touch panning/scrolling
+        this.chartCanvas.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:crosshair;';
         wrapper.appendChild(this.chartCanvas);
 
-        // Pointer event listeners for pan and zoom interactions using setPointerCapture
+        let suppressCtxMenu = false;
+        this.chartCanvas.addEventListener('contextmenu', (e) => {
+            if (suppressCtxMenu || this.graphBoxMode) {
+                e.preventDefault();
+                suppressCtxMenu = false;
+            }
+        });
+
         this.chartCanvas.addEventListener('pointerdown', (e) => {
-            this.chartCanvas?.setPointerCapture(e.pointerId);
+            if (e.button === 2) suppressCtxMenu = true;
+            try { this.chartCanvas?.setPointerCapture(e.pointerId); } catch (_) {}
             this.chartWorker?.postMessage({
                 type: 'mouseEvent',
                 event: 'mousedown',
                 offsetX: e.offsetX,
                 offsetY: e.offsetY,
-                shiftKey: e.shiftKey
+                shiftKey: e.shiftKey,
+                ctrlKey: e.ctrlKey,
+                altKey: e.altKey,
+                button: e.button
             });
             e.preventDefault();
         });
 
         this.chartCanvas.addEventListener('pointermove', (e) => {
-            if (this.chartCanvas && this.chartCanvas.hasPointerCapture(e.pointerId)) {
-                this.chartWorker?.postMessage({
-                    type: 'mouseEvent',
-                    event: 'mousemove',
-                    offsetX: e.offsetX,
-                    offsetY: e.offsetY,
-                    shiftKey: e.shiftKey
-                });
-            }
+            this.chartWorker?.postMessage({
+                type: 'mouseEvent',
+                event: 'mousemove',
+                offsetX: e.offsetX,
+                offsetY: e.offsetY,
+                shiftKey: e.shiftKey,
+                ctrlKey: e.ctrlKey,
+                altKey: e.altKey
+            });
         });
 
         const releaseCapture = (e: PointerEvent) => {
             if (this.chartCanvas && this.chartCanvas.hasPointerCapture(e.pointerId)) {
-                this.chartCanvas.releasePointerCapture(e.pointerId);
+                try { this.chartCanvas.releasePointerCapture(e.pointerId); } catch (_) {}
                 this.chartWorker?.postMessage({
                     type: 'mouseEvent',
-                    event: 'mouseup'
+                    event: 'mouseup',
+                    shiftKey: e.shiftKey,
+                    ctrlKey: e.ctrlKey,
+                    altKey: e.altKey,
+                    button: e.button
                 });
             }
         };
 
         this.chartCanvas.addEventListener('pointerup', releaseCapture);
         this.chartCanvas.addEventListener('pointercancel', releaseCapture);
+        this.chartCanvas.addEventListener('pointerleave', () => {
+            this.chartWorker?.postMessage({ type: 'mouseEvent', event: 'mouseleave' });
+        });
 
         this.chartCanvas.addEventListener('wheel', (e) => {
             this.chartWorker?.postMessage({
@@ -1063,7 +1557,9 @@ export class NodeViewer {
                 offsetX: e.offsetX,
                 offsetY: e.offsetY,
                 deltaY: e.deltaY,
-                shiftKey: e.shiftKey
+                shiftKey: e.shiftKey,
+                ctrlKey: e.ctrlKey,
+                altKey: e.altKey
             });
             e.preventDefault();
         }, { passive: false });
@@ -1094,42 +1590,54 @@ export class NodeViewer {
             }
         };
 
-        setTimeout(() => {
-            if (!this.chartCanvas || !this.chartWorker) return;
-            const rect = canvasCont.getBoundingClientRect();
-            // Set canvas to logical (CSS) pixel size — the worker scales for DPR
-            const cssW = Math.round(rect.width)  || 800;
-            const cssH = Math.round(rect.height) || 600;
-            this.chartCanvas.width  = cssW;
-            this.chartCanvas.height = cssH;
-            const offscreen = (this.chartCanvas as any).transferControlToOffscreen();
-            this.chartWorker.postMessage(
-                { type: 'init', canvas: offscreen, dpr: window.devicePixelRatio || 1 },
-                [offscreen] as any
-            );
-            this.chartWorker.postMessage({
-                type: 'setConfig',
-                channel: currentChannel,
-                color: initialColor,
-                min: initialMinY,
-                max: initialMaxY,
-                showGrid: showGridVal,
-                showAxes: true,
-                xAxisMode: xAxisMode,
-                domainRadius: domainRadius
-            });
-        }, 0);
+        const rect = canvasCont.getBoundingClientRect();
+        const cssW = Math.max(200, Math.round(rect.width) || 800);
+        const cssH = Math.max(160, Math.round(rect.height) || 500);
+        const offscreen = (this.chartCanvas as any).transferControlToOffscreen();
+        this.chartWorker.postMessage(
+            { type: 'init', canvas: offscreen, width: cssW, height: cssH, dpr: window.devicePixelRatio || 1 },
+            [offscreen] as any
+        );
+        this.chartWorker.postMessage({
+            type: 'setConfig',
+            chartMode: 'spatial',
+            channel: currentChannel,
+            color: initialColor,
+            autoScale: this.graphAutoScale,
+            logScale: this.graphLogScale,
+            min: initialMinY,
+            max: initialMaxY,
+            showGrid: showGridVal,
+            showAxes: true,
+            showPeaks: this.graphShowPeaks,
+            interactionMode: this.graphBoxMode ? 'boxZoom' : 'pan',
+            xAxisMode: xAxisMode,
+            domainRadius: domainRadius
+        });
 
-        const ro = new ResizeObserver(entries => {
-            for (const entry of entries) {
-                // Send logical CSS dimensions; worker knows dpr and resizes internally
-                const { width, height } = entry.contentRect;
-                this.chartWorker?.postMessage({ type: 'resize', width: Math.round(width), height: Math.round(height) });
+        requestAnimationFrame(() => {
+            if (!this.chartWorker || !canvasCont.isConnected) return;
+            const r = canvasCont.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) {
+                this.chartWorker.postMessage({ type: 'resize', width: Math.round(r.width), height: Math.round(r.height) });
             }
         });
-        ro.observe(canvasCont);
 
-        const initialData = this.stateManager.getTelemetry(node.id);
+        this.graphResizeObserver = new ResizeObserver(entries => {
+            for (const entry of entries) {
+                const { width, height } = entry.contentRect;
+                if (width > 0 && height > 0) {
+                    this.chartWorker?.postMessage({ type: 'resize', width: Math.round(width), height: Math.round(height) });
+                }
+            }
+        });
+        this.graphResizeObserver.observe(canvasCont);
+
+        const solver1D = activeModel?.nodes.find(n => n.type === 'CFDSolver');
+        const initialData =
+            this.stateManager.getTelemetry(node.id) ||
+            (activeModel ? this.stateManager.getTelemetry(`${activeModel.id}-binary`) : null) ||
+            (solver1D ? this.stateManager.getTelemetry(`${solver1D.id}-binary`) : null);
         if (initialData) this.handleTelemetry(node.id, initialData);
 
         this.startRenderLoop();
@@ -1185,7 +1693,7 @@ export class NodeViewer {
         const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
         const is3D = sourceNode 
             ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'MarineHarbourDomain' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D') 
-            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
+            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || isDomainMesh3DNode(n.type) || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
 
         let isCoupledModel = false;
         const allModels = this.stateManager.getAllModels();
@@ -1240,9 +1748,9 @@ export class NodeViewer {
                     value = node.parameters['space_time_scheme'];
                     if (!value) {
                         const so = Number(node.parameters['spatial_order'] ?? 2);
-                        const to = Number(node.parameters['temporal_order'] ?? 4);
-                        if (so === 2 && (to === 5 || to === 2)) value = 'ADER-2 (2nd-Order Space/Time)';
-                        else if (so === 3 && (to === 6 || to === 3)) value = 'ADER-3 (3rd-Order Space/Time)';
+                        const to = Number(node.parameters['temporal_order'] ?? 2);
+                        if (so === 3 || to === 6 || to === 3) value = 'ADER-3 (3rd-Order Space/Time)';
+                        else if (to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
                         else value = 'MUSCL-Hancock (2nd-Order Space/Time)';
                     }
                 }
@@ -1318,7 +1826,7 @@ export class NodeViewer {
 
         const activeModel = this.stateManager.getActiveModel();
         const simState = activeModel ? this.stateManager.getSimulationState(activeModel.id) : null;
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D' || node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') {
+        if (node.type === 'DomainMesh' || isDomainMesh2DNode(node.type) || isDomainMesh3DNode(node.type) || node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') {
             const meshInfoDiv = document.createElement('div');
             meshInfoDiv.style.marginTop = '15px';
             meshInfoDiv.style.fontSize = 'var(--font-sm)';
@@ -1365,17 +1873,122 @@ export class NodeViewer {
         }
     }
 
+    private getGaugesHistoryForNode(node: Node): any {
+        const direct = this.stateManager.getTelemetry(node.id);
+        if (direct && (direct.times?.length || direct.gauges_history || (Array.isArray(direct) && direct.length > 0))) {
+            return direct;
+        }
+        const activeModel = this.stateManager.getActiveModel();
+        if (activeModel) {
+            const modelHist = this.stateManager.getTelemetry(`${activeModel.id}-gauges`);
+            if (modelHist) return modelHist;
+        }
+        return direct || null;
+    }
+
+    private syncGaugesChartWorker(node: Node, incomingData?: any): void {
+        if (!this.gaugesWorker) return;
+        const rawGauges: any[] = Array.isArray(node.parameters?.gauges) ? node.parameters.gauges : [];
+        const hiddenProbes: number[] = [];
+        rawGauges.forEach((g: any, idx: number) => {
+            if (g.plot === false || g.active === false) {
+                hiddenProbes.push(idx);
+            }
+        });
+
+        this.gaugesWorker.postMessage({
+            type: 'setConfig',
+            chartMode: 'gauges',
+            channel: this.gaugesChannel,
+            autoScale: this.gaugesAutoScale,
+            logScale: this.gaugesLogScale,
+            min: this.gaugesManualMin,
+            max: this.gaugesManualMax,
+            showAxes: true,
+            showGrid: true,
+            showPeaks: this.gaugesShowPeaks,
+            showCanvasLegend: true,
+            interactionMode: this.gaugesBoxMode ? 'boxZoom' : 'pan',
+            gauges: rawGauges,
+            hiddenProbes,
+            selectedProbe: -1
+        });
+
+        let rawHist = incomingData ?? this.getGaugesHistoryForNode(node);
+        if (!rawHist) return;
+        if ((rawHist.gauges_history || Array.isArray(rawHist)) && (!rawHist.times || !rawHist.values)) {
+            rawHist = this.stateManager.normalizeGaugesTelemetry(rawHist);
+        }
+        if (!rawHist || !Array.isArray(rawHist.times) || rawHist.times.length === 0) return;
+
+        const times: number[] = rawHist.times;
+        let effectiveGauges: any[] = rawGauges.length > 0 ? [...rawGauges] : [];
+        let orderedValues: number[][][] = [];
+        const hasChannelSamples = (arr: any): boolean =>
+            Array.isArray(arr) && arr.length > 0 && arr.some((ch: any) => Array.isArray(ch) && ch.length > 0);
+
+        if (Array.isArray(rawHist.values) && rawHist.values.some(hasChannelSamples)) {
+            orderedValues = rawHist.values;
+            if (effectiveGauges.length === 0) {
+                effectiveGauges = orderedValues.map((_, idx) => ({ id: `G${idx + 1}`, name: `G${idx + 1}` }));
+            }
+        } else if (Array.isArray(rawHist.gauges_history) && rawHist.gauges_history.length > 0) {
+            if (effectiveGauges.length === 0) {
+                effectiveGauges = rawHist.gauges_history.map((h: any, idx: number) => ({
+                    id: String(h.id || `G${idx + 1}`),
+                    name: String(h.id || `G${idx + 1}`)
+                }));
+            }
+            orderedValues = effectiveGauges.map((g: any, idx: number) => {
+                const gid = String(g.id || g.name || `G${idx + 1}`);
+                const gUpper = gid.toUpperCase();
+                const match = rawHist.gauges_history.find((h: any) => String(h.id || '').toUpperCase() === gUpper) || rawHist.gauges_history[idx];
+                return Array.isArray(match?.channel_values) ? match.channel_values : [];
+            });
+            if (!orderedValues.some(hasChannelSamples)) {
+                effectiveGauges = rawHist.gauges_history.map((h: any, idx: number) => ({
+                    id: String(h.id || `G${idx + 1}`),
+                    name: String(h.id || `G${idx + 1}`)
+                }));
+                orderedValues = rawHist.gauges_history.map((h: any) => Array.isArray(h?.channel_values) ? h.channel_values : []);
+            }
+        } else if (rawHist.values && typeof rawHist.values === 'object') {
+            const valObj = rawHist.values as Record<string, number[][]>;
+            const uniqueNamedKeys = Object.keys(valObj).filter(k => isNaN(Number(k)));
+            if (effectiveGauges.length === 0) {
+                effectiveGauges = uniqueNamedKeys.map(k => ({ id: k, name: k }));
+            }
+            orderedValues = effectiveGauges.map((g: any, idx: number) => {
+                const gid = String(g.id || g.name || `G${idx + 1}`);
+                return valObj[gid]
+                    || valObj[gid.toUpperCase()]
+                    || valObj[gid.toLowerCase()]
+                    || valObj[String(idx)]
+                    || valObj[`G${idx + 1}`]
+                    || [];
+            });
+            if (!orderedValues.some(hasChannelSamples) && uniqueNamedKeys.length > 0) {
+                effectiveGauges = uniqueNamedKeys.map(k => ({ id: k, name: k }));
+                orderedValues = uniqueNamedKeys.map(k => valObj[k] || []);
+            }
+        }
+
+        if (orderedValues.some(hasChannelSamples)) {
+            this.gaugesWorker.postMessage({
+                type: 'setGaugeData',
+                times,
+                values: orderedValues,
+                gauges: effectiveGauges
+            });
+        }
+    }
+
     private handleTelemetry(nodeId: string, data: any): void {
         if (nodeId !== this.currentNodeId) return;
         const activeModel = this.stateManager.getActiveModel();
         const node = activeModel?.nodes.find(n => n.id === nodeId);
         if (node && (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D')) {
-            if (this.gaugesCanvas) {
-                const gauges = node.parameters?.gauges || [];
-                const has2D = activeModel?.nodes.some(n => n.type === 'DomainMesh2D' || n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D') || false;
-                const history = data || this.stateManager.getTelemetry(nodeId);
-                this.drawGaugesChart(this.gaugesCanvas, history, gauges, this.gaugesChannel, has2D);
-            }
+            this.syncGaugesChartWorker(node, data);
             return;
         }
         if (data instanceof ArrayBuffer) {
@@ -1389,295 +2002,278 @@ export class NodeViewer {
     private renderVirtualGauges(node: Node, oldScrollTop: number = 0): void {
         this.stopRenderLoop();
         this.telemetryBuffer = null;
-        if (this.chartWorker) {
-            this.chartWorker.terminate();
-            this.chartWorker = null;
-        }
-        if (this.gaugesResizeObserver) {
-            this.gaugesResizeObserver.disconnect();
-            this.gaugesResizeObserver = null;
-        }
-        this.gaugesZoomedOrPanned = false;
+        this.cleanupWorkers();
 
         const activeModel = this.stateManager.getActiveModel();
-        const has2D = activeModel?.nodes.some(n => n.type === 'DomainMesh2D' || n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D') || false;
-        const is3D = activeModel?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') || false;
+        const has2D = activeModel?.nodes.some(n => isDomainMesh2DNode(n.type) || n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D') || false;
+        const is3D = activeModel?.nodes.some(n => isDomainMesh3DNode(n.type) || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') || false;
 
         const ALL_CHANNELS = [
-            { id: 0, param: 'qty_pressure',    label: 'Pressure',          color: '#00f0ff' },
-            { id: 1, param: 'qty_density',     label: 'Density',           color: '#ff00f0' },
-            { id: 2, param: 'qty_velocity',    label: 'Velocity',          color: '#a0f000' },
-            { id: 3, param: 'qty_energy',      label: 'Int. Energy',       color: '#f000a0' },
-            { id: 4, param: 'qty_reacted',     label: 'Reacted (Alpha1)',  color: '#f43f5e' },
-            { id: 5, param: 'qty_unreacted',   label: 'Unreacted (Alpha2)',color: '#3b82f6' },
-            { id: 6, param: 'qty_air',         label: 'Air',               color: '#eab308' },
-            { id: 7, param: 'qty_overpressure',label: 'Overpressure',      color: '#38bdf8' },
-            { id: 8, param: 'qty_impulse',     label: 'Impulse',           color: '#a78bfa' }
+            { id: 0, param: 'qty_pressure',     label: 'Pressure P(t) [Pa]' },
+            { id: 7, param: 'qty_overpressure', label: 'Overpressure ΔP(t) [Pa]' },
+            { id: 8, param: 'qty_impulse',      label: 'Impulse I(t) [Pa·s]' },
+            { id: 1, param: 'qty_density',      label: 'Density ρ(t) [kg/m³]' },
+            { id: 2, param: 'qty_velocity',     label: 'Velocity |u|(t) [m/s]' },
+            { id: 3, param: 'qty_energy',       label: 'Int. Energy e(t) [J/kg]' },
+            { id: 4, param: 'qty_reacted',      label: 'Reacted α₁(t) [-]' },
+            { id: 5, param: 'qty_unreacted',    label: 'Unreacted α₂(t) [-]' },
+            { id: 6, param: 'qty_air',          label: 'Ambient Air(t) [-]' }
         ];
-
-        const plottableChannels = ALL_CHANNELS.filter(ch => !!node.parameters?.[ch.param]);
-        if (plottableChannels.length > 0 && !plottableChannels.some(ch => ch.id === this.gaugesChannel)) {
-            this.gaugesChannel = plottableChannels[0].id;
+        if (node.parameters?.telemetry_channel !== undefined && isFinite(Number(node.parameters.telemetry_channel))) {
+            this.gaugesChannel = Number(node.parameters.telemetry_channel);
         }
 
         this.container.style.position = 'relative';
         this.container.style.overflow = 'hidden';
+        this.container.style.padding = '0';
 
         const panel = document.createElement('div');
         panel.className = 'gauges-manager-panel';
+        panel.style.cssText = 'display:flex; width:100%; height:100%; min-width:0; min-height:0; overflow:hidden;';
 
-        // 1. LEFT PANEL: Chart Container
+        // 1. LEFT PANEL: Full-Bleed Chart Container
         const chartContainer = document.createElement('div');
         chartContainer.className = 'gauges-chart-container';
+        chartContainer.style.cssText = 'display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; overflow:hidden;';
         panel.appendChild(chartContainer);
 
-        // Header for Left Panel
+        // Unified Dark Slate/Cyan Header
         const chartHeader = document.createElement('div');
         chartHeader.className = 'gauges-chart-header';
-        
+        chartHeader.style.cssText = 'display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:6px 10px; height:auto; min-height:38px; background:#0f1420; border-bottom:1px solid rgba(56,189,248,0.18); flex-shrink:0;';
+
         const titleSpan = document.createElement('span');
         titleSpan.className = 'title';
-        titleSpan.textContent = `GAUGES: ${node.id}`;
+        titleSpan.style.cssText = 'font-weight:700; font-size:11px; color:#e2e8f0; letter-spacing:0.4px; margin-right:4px;';
+        titleSpan.textContent = `GAUGE WAVEFORMS: ${node.id}`;
         chartHeader.appendChild(titleSpan);
 
-        // Channel Select control
-        const channelControl = document.createElement('div');
-        channelControl.style.display = 'flex';
-        channelControl.style.alignItems = 'center';
-        channelControl.style.gap = '4px';
-        
-        const channelLabel = document.createElement('label');
-        channelLabel.textContent = 'Channel:';
-        channelLabel.style.fontSize = 'var(--font-xs)';
-        channelLabel.style.color = '#ccc';
-        channelControl.appendChild(channelLabel);
-
         const channelSelect = document.createElement('select');
-        channelSelect.style.fontSize = 'var(--font-xs)';
-        channelSelect.style.background = '#333';
-        channelSelect.style.color = '#ccc';
-        channelSelect.style.border = '1px solid #444';
-        channelSelect.style.padding = '2px 4px';
-        channelSelect.style.borderRadius = '3px';
-
-        plottableChannels.forEach((ch) => {
-            const opt = document.createElement('option');
-            opt.value = String(ch.id);
-            opt.textContent = ch.label;
-            if (ch.id === this.gaugesChannel) opt.selected = true;
-            channelSelect.appendChild(opt);
-        });
-
+        channelSelect.style.cssText = 'font-size:10.5px; background:#161d2e; color:#e2e8f0; border:1px solid rgba(148,163,184,0.28); padding:2px 6px; border-radius:4px; cursor:pointer;';
+        const populateChannelOptions = () => {
+            const enabled = ALL_CHANNELS.filter(ch => node.parameters?.[ch.param] !== false);
+            const activeList = enabled.length > 0 ? enabled : ALL_CHANNELS;
+            if (!activeList.some(ch => ch.id === this.gaugesChannel)) {
+                this.gaugesChannel = activeList[0].id;
+            }
+            channelSelect.innerHTML = '';
+            activeList.forEach((ch) => {
+                const opt = document.createElement('option');
+                opt.value = String(ch.id);
+                opt.textContent = ch.label;
+                if (ch.id === this.gaugesChannel) opt.selected = true;
+                channelSelect.appendChild(opt);
+            });
+        };
+        populateChannelOptions();
         channelSelect.onchange = () => {
             this.gaugesChannel = Number(channelSelect.value);
-            this.gaugesZoomedOrPanned = false;
-            const history = this.stateManager.getTelemetry(node.id);
-            if (this.gaugesCanvas) {
-                this.drawGaugesChart(this.gaugesCanvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
+            this.stateManager.updateNodeParametersInPlace(node.id, { telemetry_channel: this.gaugesChannel });
+            this.syncGaugesChartWorker(node);
+        };
+        chartHeader.appendChild(channelSelect);
+
+        const mkHdrBtn = (label: string, title: string, isActive: () => boolean, onClick: (b: HTMLButtonElement) => void): HTMLButtonElement => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = label;
+            b.title = title;
+            const sync = () => {
+                const act = isActive();
+                b.style.cssText = `background:${act ? 'rgba(56,189,248,0.2)' : '#161d2e'}; color:${act ? '#38bdf8' : '#cbd5e1'}; border:1px solid ${act ? 'rgba(56,189,248,0.55)' : 'rgba(148,163,184,0.25)'}; border-radius:4px; font-size:10px; font-weight:600; padding:2px 7px; cursor:pointer;`;
+            };
+            sync();
+            b.onclick = () => {
+                onClick(b);
+                sync();
+            };
+            return b;
+        };
+
+        const manualYWrap = document.createElement('div');
+        manualYWrap.style.cssText = `display:${this.gaugesAutoScale ? 'none' : 'flex'}; align-items:center; gap:4px;`;
+        const mkManualIn = (val: number, onSet: (v: number) => void) => {
+            const inp = document.createElement('input');
+            inp.type = 'number';
+            inp.step = 'any';
+            inp.value = String(val);
+            inp.style.cssText = 'width:62px; font-size:10px; background:#0b0f19; color:#e2e8f0; border:1px solid rgba(148,163,184,0.3); border-radius:3px; padding:2px 4px;';
+            inp.onchange = () => {
+                const num = Number(inp.value);
+                if (isFinite(num)) {
+                    onSet(num);
+                    this.syncGaugesChartWorker(node);
+                }
+            };
+            return inp;
+        };
+        const gMinIn = mkManualIn(this.gaugesManualMin, (v) => { this.gaugesManualMin = v; });
+        const gMaxIn = mkManualIn(this.gaugesManualMax, (v) => { this.gaugesManualMax = v; });
+        manualYWrap.appendChild(gMinIn);
+        manualYWrap.appendChild(gMaxIn);
+
+        chartHeader.appendChild(mkHdrBtn(this.gaugesAutoScale ? 'AUTO' : 'MAN', 'Toggle Auto-Scale vs Manual Y Range', () => this.gaugesAutoScale, (b) => {
+            this.gaugesAutoScale = !this.gaugesAutoScale;
+            b.textContent = this.gaugesAutoScale ? 'AUTO' : 'MAN';
+            manualYWrap.style.display = this.gaugesAutoScale ? 'none' : 'flex';
+            this.syncGaugesChartWorker(node);
+        }));
+        chartHeader.appendChild(manualYWrap);
+
+        chartHeader.appendChild(mkHdrBtn(this.gaugesLogScale ? 'LOG' : 'LIN', 'Toggle Logarithmic vs Linear Y Scale', () => this.gaugesLogScale, (b) => {
+            this.gaugesLogScale = !this.gaugesLogScale;
+            b.textContent = this.gaugesLogScale ? 'LOG' : 'LIN';
+            this.syncGaugesChartWorker(node);
+        }));
+
+        const navGroup = document.createElement('div');
+        navGroup.style.cssText = 'display:flex; align-items:center; gap:4px; margin-left:auto; flex-wrap:wrap;';
+
+        navGroup.appendChild(mkHdrBtn('▲▼ Peaks', 'Show Automatic Peak & Trough Markers', () => this.gaugesShowPeaks, () => {
+            this.gaugesShowPeaks = !this.gaugesShowPeaks;
+            this.syncGaugesChartWorker(node);
+        }));
+
+        navGroup.appendChild(mkHdrBtn('⬚ Box', 'Rubberband Box-Zoom Mode (or Shift+Drag / Right-Drag)', () => this.gaugesBoxMode, () => {
+            this.gaugesBoxMode = !this.gaugesBoxMode;
+            this.syncGaugesChartWorker(node);
+        }));
+
+        navGroup.appendChild(mkHdrBtn('＋', 'Zoom In', () => false, () => this.gaugesWorker?.postMessage({ type: 'zoom', factor: 1.25 })));
+        navGroup.appendChild(mkHdrBtn('－', 'Zoom Out', () => false, () => this.gaugesWorker?.postMessage({ type: 'zoom', factor: 0.8 })));
+        navGroup.appendChild(mkHdrBtn('🏠 Fit', 'Reset Zoom & Pan (Double-Click Chart)', () => false, () => this.gaugesWorker?.postMessage({ type: 'resetView' })));
+
+        const initialGaugeCount = Array.isArray(node.parameters?.gauges) ? node.parameters.gauges.length : 0;
+        const toggleDrawer = () => {
+            this.gaugesPanelOpen = !this.gaugesPanelOpen;
+            const controlsPanelEl = panel.querySelector('.gauges-controls-panel') as HTMLElement | null;
+            const splitterEl = panel.querySelector('.gauges-panel-splitter') as HTMLElement | null;
+            if (controlsPanelEl) {
+                controlsPanelEl.style.display = this.gaugesPanelOpen ? 'flex' : 'none';
+                controlsPanelEl.style.width = `${this.gaugesPanelWidth}px`;
             }
+            if (splitterEl) splitterEl.style.display = this.gaugesPanelOpen ? 'block' : 'none';
+            floatBtn.style.display = this.gaugesPanelOpen ? 'none' : 'block';
+            drawerToggleBtn.style.background = this.gaugesPanelOpen ? 'rgba(56,189,248,0.2)' : '#161d2e';
+            drawerToggleBtn.style.color = this.gaugesPanelOpen ? '#38bdf8' : '#cbd5e1';
         };
 
-        channelControl.appendChild(channelSelect);
-        chartHeader.appendChild(channelControl);
-
-        // Stride control
-        const strideSelect = document.createElement('select');
-        strideSelect.style.fontSize = 'var(--font-xs)';
-        strideSelect.style.background = '#333';
-        strideSelect.style.color = '#ccc';
-        strideSelect.style.border = '1px solid #444';
-        strideSelect.style.padding = '2px 4px';
-        strideSelect.style.borderRadius = '3px';
-
-        const STRIDES = [
-            { label: 'Every frame', value: 1 },
-            { label: 'Every 2 frames', value: 2 },
-            { label: 'Every 5 frames', value: 5 },
-            { label: 'Every 10 frames', value: 10 },
-            { label: 'Every 20 frames', value: 20 },
-            { label: 'Every 50 frames', value: 50 },
-            { label: 'Every 100 frames', value: 100 }
-        ];
-
-        const currentStride = Number(node.parameters?.plot_stride ?? 1);
-        STRIDES.forEach(st => {
-            const opt = document.createElement('option');
-            opt.value = String(st.value);
-            opt.textContent = st.label;
-            if (st.value === currentStride) opt.selected = true;
-            strideSelect.appendChild(opt);
+        const drawerToggleBtn = mkHdrBtn(`📋 Probes (${initialGaugeCount})`, 'Toggle Probe Table & Export Settings Drawer', () => this.gaugesPanelOpen, () => {
+            toggleDrawer();
         });
-        strideSelect.onchange = () => {
-            const newStride = Number(strideSelect.value);
-            this.stateManager.updateNodeParameters(node.id, { plot_stride: newStride });
-        };
+        drawerToggleBtn.classList.add('gauges-drawer-toggle-btn');
+        navGroup.appendChild(drawerToggleBtn);
 
-        const strideControl = document.createElement('div');
-        strideControl.style.display = 'flex';
-        strideControl.style.alignItems = 'center';
-        strideControl.style.gap = '4px';
-        const strideLabel = document.createElement('label');
-        strideLabel.textContent = 'Rate:';
-        strideLabel.style.fontSize = 'var(--font-xs)';
-        strideLabel.style.color = '#ccc';
-        strideControl.appendChild(strideLabel);
-        strideControl.appendChild(strideSelect);
-        chartHeader.appendChild(strideControl);
-
+        navGroup.appendChild(mkHdrBtn('🎯 Stage View', 'Open Interactive Full-Featured Gauge Chart in Stage Viewport', () => true, () => {
+            (window as any).workspaceManager?.openGaugeWaveformView?.(activeModel?.id);
+        }));
+        chartHeader.appendChild(navGroup);
         chartContainer.appendChild(chartHeader);
 
-        // Chart Area
+        // Full-Bleed Chart Area backed by OffscreenCanvas ChartWorker
         const chartArea = document.createElement('div');
         chartArea.className = 'gauges-chart-area';
+        chartArea.style.cssText = 'flex:1; min-width:0; min-height:0; position:relative; overflow:hidden; background:#0b0f19;';
         chartContainer.appendChild(chartArea);
 
         const canvas = document.createElement('canvas');
         canvas.className = 'gauges-canvas';
+        canvas.style.cssText = 'position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:crosshair;';
         chartArea.appendChild(canvas);
         this.gaugesCanvas = canvas;
 
-        canvas.style.touchAction = 'none';
-
-        const getActiveGaugesBounds = () => {
-            const history = this.stateManager.getTelemetry(node.id);
-            const defaultMinX = 0;
-            const timesLength = history?.times?.length || 0;
-            const defaultMaxX = timesLength - 1 || 1;
-            
-            let activeMinX = defaultMinX;
-            let activeMaxX = defaultMaxX;
-            if (this.gaugesZoomedOrPanned) {
-                activeMinX = this.gaugesZoomMinX;
-                activeMaxX = this.gaugesZoomMaxX;
+        let suppressGaugesCtx = false;
+        canvas.addEventListener('contextmenu', (e) => {
+            if (suppressGaugesCtx || this.gaugesBoxMode) {
+                e.preventDefault();
+                suppressGaugesCtx = false;
             }
-            
-            const { minVal, maxVal } = this.getGaugesBounds(
-                node,
-                this.gaugesChannel,
-                history,
-                this.gaugesZoomedOrPanned ? activeMinX : undefined,
-                this.gaugesZoomedOrPanned ? activeMaxX : undefined
-            );
-            
-            return {
-                minX: activeMinX,
-                maxX: activeMaxX,
-                minY: minVal,
-                maxY: maxVal
-            };
-        };
+        });
 
         canvas.addEventListener('pointerdown', (e) => {
-            canvas.setPointerCapture(e.pointerId);
-            const rect = canvas.getBoundingClientRect();
-            this.gaugesIsDragging = true;
-            this.gaugesDragStartX = e.clientX - rect.left;
-
-            const active = getActiveGaugesBounds();
-            this.gaugesDragStartMinX = active.minX;
-            this.gaugesDragStartMaxX = active.maxX;
-            
+            if (e.button === 2) suppressGaugesCtx = true;
+            try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+            this.gaugesWorker?.postMessage({
+                type: 'mouseEvent',
+                event: 'mousedown',
+                offsetX: e.offsetX,
+                offsetY: e.offsetY,
+                shiftKey: e.shiftKey,
+                ctrlKey: e.ctrlKey,
+                altKey: e.altKey,
+                button: e.button
+            });
             e.preventDefault();
         });
 
         canvas.addEventListener('pointermove', (e) => {
-            if (this.gaugesIsDragging && canvas.hasPointerCapture(e.pointerId)) {
-                const rect = canvas.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left;
-
-                const dxScreen = mouseX - this.gaugesDragStartX;
-
-                const padLeft = 60;
-                const padRight = 30;
-                const plotWidth = rect.width - padLeft - padRight;
-
-                if (plotWidth > 0) {
-                    const rangeX = this.gaugesDragStartMaxX - this.gaugesDragStartMinX;
-                    const dx = (dxScreen / plotWidth) * rangeX;
-
-                    this.gaugesZoomMinX = this.gaugesDragStartMinX - dx;
-                    this.gaugesZoomMaxX = this.gaugesDragStartMaxX - dx;
-
-                    this.gaugesZoomedOrPanned = true;
-
-                    const history = this.stateManager.getTelemetry(node.id);
-                    this.drawGaugesChart(canvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
-                }
-            }
+            this.gaugesWorker?.postMessage({
+                type: 'mouseEvent',
+                event: 'mousemove',
+                offsetX: e.offsetX,
+                offsetY: e.offsetY,
+                shiftKey: e.shiftKey,
+                ctrlKey: e.ctrlKey,
+                altKey: e.altKey
+            });
         });
 
         const releaseGaugesCapture = (e: PointerEvent) => {
             if (canvas.hasPointerCapture(e.pointerId)) {
-                canvas.releasePointerCapture(e.pointerId);
-                this.gaugesIsDragging = false;
+                try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+                this.gaugesWorker?.postMessage({
+                    type: 'mouseEvent',
+                    event: 'mouseup',
+                    shiftKey: e.shiftKey,
+                    ctrlKey: e.ctrlKey,
+                    altKey: e.altKey,
+                    button: e.button
+                });
             }
         };
 
         canvas.addEventListener('pointerup', releaseGaugesCapture);
         canvas.addEventListener('pointercancel', releaseGaugesCapture);
+        canvas.addEventListener('pointerleave', () => {
+            this.gaugesWorker?.postMessage({ type: 'mouseEvent', event: 'mouseleave' });
+        });
 
         canvas.addEventListener('wheel', (e) => {
-            const rect = canvas.getBoundingClientRect();
-            const mouseX = e.clientX - rect.left;
-
-            const padLeft = 60;
-            const padRight = 30;
-            const plotWidth = rect.width - padLeft - padRight;
-
-            if (plotWidth <= 0) return;
-
-            const active = getActiveGaugesBounds();
-
-            const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
-
-            const pctX = (mouseX - padLeft) / plotWidth;
-            const targetX = active.minX + pctX * (active.maxX - active.minX);
-            const newRangeX = (active.maxX - active.minX) * zoomFactor;
-
-            this.gaugesZoomMinX = targetX - pctX * newRangeX;
-            this.gaugesZoomMaxX = this.gaugesZoomMinX + newRangeX;
-
-            this.gaugesZoomedOrPanned = true;
-
-            const history = this.stateManager.getTelemetry(node.id);
-            this.drawGaugesChart(canvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
+            this.gaugesWorker?.postMessage({
+                type: 'mouseEvent',
+                event: 'wheel',
+                offsetX: e.offsetX,
+                offsetY: e.offsetY,
+                deltaY: e.deltaY,
+                shiftKey: e.shiftKey,
+                ctrlKey: e.ctrlKey,
+                altKey: e.altKey
+            });
             e.preventDefault();
         }, { passive: false });
 
         canvas.addEventListener('dblclick', (e) => {
-            this.gaugesZoomedOrPanned = false;
-            const history = this.stateManager.getTelemetry(node.id);
-            this.drawGaugesChart(canvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
+            this.gaugesWorker?.postMessage({
+                type: 'mouseEvent',
+                event: 'dblclick',
+                offsetX: e.offsetX,
+                offsetY: e.offsetY,
+                shiftKey: e.shiftKey
+            });
             e.preventDefault();
         });
 
-        // Floating gear button to show panel
+        // Floating gear button to show panel when collapsed
         const floatBtn = document.createElement('button');
         floatBtn.className = 'gauges-float-btn';
         floatBtn.innerHTML = '⚙️ Gauges & Settings';
         floatBtn.style.display = this.gaugesPanelOpen ? 'none' : 'block';
         floatBtn.onclick = () => {
-            this.gaugesPanelOpen = true;
-            floatBtn.style.display = 'none';
-            const controlsPanel = panel.querySelector('.gauges-controls-panel') as HTMLElement;
-            if (controlsPanel) {
-                controlsPanel.style.display = 'flex';
-                controlsPanel.style.width = `${this.gaugesPanelWidth}px`;
-            }
-            const splitter = panel.querySelector('.gauges-panel-splitter') as HTMLElement;
-            if (splitter) splitter.style.display = 'block';
-            // Force redraw/resize of canvas since layout changed
-            if (this.gaugesCanvas) {
-                this.gaugesCanvas.width = this.gaugesCanvas.clientWidth;
-                this.gaugesCanvas.height = this.gaugesCanvas.clientHeight;
-                const history = this.stateManager.getTelemetry(node.id);
-                this.drawGaugesChart(this.gaugesCanvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
-            }
+            if (!this.gaugesPanelOpen) toggleDrawer();
         };
         chartArea.appendChild(floatBtn);
 
-
-        // 2. RIGHT PANEL: Controls Panel (Hidable)
+        // 2. RIGHT PANEL: Controls Panel (Collapsed by default so chart is 100% full-bleed)
         const controlsPanel = document.createElement('div');
         controlsPanel.className = 'gauges-controls-panel';
         controlsPanel.style.display = this.gaugesPanelOpen ? 'flex' : 'none';
@@ -1704,31 +2300,14 @@ export class NodeViewer {
                 splitter.setPointerCapture(e.pointerId);
             } catch (_) {}
 
-            let rafId: number | null = null;
-
             const onMove = (me: PointerEvent) => {
                 const dx = me.clientX - startX;
-                const newW = Math.max(160, Math.min(600, startW - dx));
+                const newW = Math.max(180, Math.min(600, startW - dx));
                 controlsPanel.style.width = `${newW}px`;
                 this.gaugesPanelWidth = newW;
-
-                if (rafId !== null) cancelAnimationFrame(rafId);
-                rafId = requestAnimationFrame(() => {
-                    if (this.gaugesCanvas) {
-                        this.gaugesCanvas.width = this.gaugesCanvas.clientWidth;
-                        this.gaugesCanvas.height = this.gaugesCanvas.clientHeight;
-                        const history = this.stateManager.getTelemetry(node.id);
-                        this.drawGaugesChart(this.gaugesCanvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
-                    }
-                    rafId = null;
-                });
             };
 
             const onUp = (ue: PointerEvent) => {
-                if (rafId !== null) {
-                    cancelAnimationFrame(rafId);
-                    rafId = null;
-                }
                 controlsPanel.style.transition = 'width 0.15s, padding 0.15s, border-left 0.15s';
                 splitter.classList.remove('resizing');
                 document.body.classList.remove('is-resizing', 'resizing-col');
@@ -1741,13 +2320,6 @@ export class NodeViewer {
                 splitter.removeEventListener('pointerup', onUp);
                 splitter.removeEventListener('pointercancel', onUp);
                 splitter.removeEventListener('lostpointercapture', onUp);
-
-                if (this.gaugesCanvas) {
-                    this.gaugesCanvas.width = this.gaugesCanvas.clientWidth;
-                    this.gaugesCanvas.height = this.gaugesCanvas.clientHeight;
-                    const history = this.stateManager.getTelemetry(node.id);
-                    this.drawGaugesChart(this.gaugesCanvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
-                }
             };
 
             splitter.addEventListener('pointermove', onMove);
@@ -1759,7 +2331,7 @@ export class NodeViewer {
         // Controls Panel Header
         const controlsHeader = document.createElement('div');
         controlsHeader.className = 'gauges-controls-header';
-        
+
         const controlsTitle = document.createElement('span');
         controlsTitle.textContent = '⚙️ GAUGE CONTROLS';
         controlsHeader.appendChild(controlsTitle);
@@ -1769,18 +2341,7 @@ export class NodeViewer {
         closeBtn.innerHTML = '▶';
         closeBtn.title = 'Collapse Panel';
         closeBtn.onclick = () => {
-            this.gaugesPanelOpen = false;
-            controlsPanel.style.display = 'none';
-            floatBtn.style.display = 'block';
-            const splitter = panel.querySelector('.gauges-panel-splitter') as HTMLElement;
-            if (splitter) splitter.style.display = 'none';
-            // Force redraw/resize of canvas since layout changed
-            if (this.gaugesCanvas) {
-                this.gaugesCanvas.width = this.gaugesCanvas.clientWidth;
-                this.gaugesCanvas.height = this.gaugesCanvas.clientHeight;
-                const history = this.stateManager.getTelemetry(node.id);
-                this.drawGaugesChart(this.gaugesCanvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
-            }
+            if (this.gaugesPanelOpen) toggleDrawer();
         };
         controlsHeader.appendChild(closeBtn);
         controlsPanel.appendChild(controlsHeader);
@@ -1985,7 +2546,7 @@ export class NodeViewer {
             formatsGrid.style.gridTemplateColumns = 'repeat(3, 1fr)';
             formatsGrid.style.gap = '8px';
 
-            const createCheckbox = (key: string, labelText: string) => {
+            const createCheckbox = (key: string, labelText: string, defaultChecked: boolean = false) => {
                 const wrap = document.createElement('label');
                 wrap.style.display = 'flex';
                 wrap.style.alignItems = 'center';
@@ -1996,9 +2557,13 @@ export class NodeViewer {
 
                 const cb = document.createElement('input');
                 cb.type = 'checkbox';
-                cb.checked = !!node.parameters[key];
+                cb.checked = defaultChecked ? (node.parameters[key] !== false) : !!node.parameters[key];
                 cb.onchange = () => {
                     this.updateParameter(node, key, cb.checked);
+                    if (key.startsWith('qty_')) {
+                        populateChannelOptions();
+                        this.syncGaugesChartWorker(node);
+                    }
                 };
                 wrap.appendChild(cb);
                 wrap.appendChild(document.createTextNode(labelText));
@@ -2037,41 +2602,7 @@ export class NodeViewer {
                 lbl.style.color = '#aaa';
                 wrap.appendChild(lbl);
 
-                if (key === 'output_dir' || key === 'vtk_dir') {
-                    const browseWrap = document.createElement('div');
-                    browseWrap.style.display = 'flex';
-                    browseWrap.style.gap = '6px';
-                    browseWrap.style.alignItems = 'center';
-
-                    inputEl.style.flex = '1';
-                    browseWrap.appendChild(inputEl);
-
-                    const browseBtn = document.createElement('button');
-                    browseBtn.type = 'button';
-                    browseBtn.textContent = 'Browse';
-                    browseBtn.style.padding = '3px 6px';
-                    browseBtn.style.fontSize = '10px';
-                    browseBtn.style.background = '#333';
-                    browseBtn.style.color = '#fff';
-                    browseBtn.style.border = '1px solid #555';
-                    browseBtn.style.cursor = 'pointer';
-                    browseBtn.onclick = () => {
-                        const startPath = node.parameters[key] || '';
-                        const browser = new HostFileBrowserModal((window as any).networkManager, {
-                            title: 'Select Output Directory (Host)',
-                            mode: 'save',
-                            selectFolderOnly: true,
-                            onSelect: (dirPath) => {
-                                this.updateParameter(node, key, dirPath);
-                            }
-                        });
-                        browser.open(startPath);
-                    };
-                    browseWrap.appendChild(browseBtn);
-                    wrap.appendChild(browseWrap);
-                } else {
-                    wrap.appendChild(inputEl);
-                }
+                wrap.appendChild(inputEl);
                 return wrap;
             };
 
@@ -2091,7 +2622,7 @@ export class NodeViewer {
             dirInput.style.width = '100%';
             configSection.appendChild(createField('output_dir', 'Output Directory', dirInput));
 
-            const headerLabel = createCheckbox('include_header', 'Include Header Row');
+            const headerLabel = createCheckbox('include_header', 'Include Header Row', true);
             configSection.appendChild(headerLabel);
 
             tabContent.appendChild(configSection);
@@ -2115,15 +2646,15 @@ export class NodeViewer {
             qtyGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
             qtyGrid.style.gap = '8px';
 
-            qtyGrid.appendChild(createCheckbox('qty_pressure', 'Pressure'));
-            qtyGrid.appendChild(createCheckbox('qty_density', 'Density'));
-            qtyGrid.appendChild(createCheckbox('qty_velocity', 'Velocity'));
-            qtyGrid.appendChild(createCheckbox('qty_energy', 'Internal Energy'));
-            qtyGrid.appendChild(createCheckbox('qty_reacted', 'Reacted'));
-            qtyGrid.appendChild(createCheckbox('qty_unreacted', 'Unreacted'));
-            qtyGrid.appendChild(createCheckbox('qty_air', 'Air'));
-            qtyGrid.appendChild(createCheckbox('qty_overpressure', 'Overpressure'));
-            qtyGrid.appendChild(createCheckbox('qty_impulse', 'Impulse'));
+            qtyGrid.appendChild(createCheckbox('qty_pressure', 'Pressure', true));
+            qtyGrid.appendChild(createCheckbox('qty_density', 'Density', true));
+            qtyGrid.appendChild(createCheckbox('qty_velocity', 'Velocity', true));
+            qtyGrid.appendChild(createCheckbox('qty_energy', 'Internal Energy', true));
+            qtyGrid.appendChild(createCheckbox('qty_reacted', 'Reacted', true));
+            qtyGrid.appendChild(createCheckbox('qty_unreacted', 'Unreacted', true));
+            qtyGrid.appendChild(createCheckbox('qty_air', 'Air', true));
+            qtyGrid.appendChild(createCheckbox('qty_overpressure', 'Overpressure', true));
+            qtyGrid.appendChild(createCheckbox('qty_impulse', 'Impulse', true));
 
             qtySection.appendChild(qtyGrid);
             tabContent.appendChild(qtySection);
@@ -2131,17 +2662,43 @@ export class NodeViewer {
 
         this.container.appendChild(panel);
 
-        this.gaugesResizeObserver = new ResizeObserver(() => {
-            canvas.width = canvas.clientWidth;
-            canvas.height = canvas.clientHeight;
-            const history = this.stateManager.getTelemetry(node.id);
-            this.drawGaugesChart(canvas, history, node.parameters?.gauges || [], this.gaugesChannel, has2D);
+        this.gaugesWorker = new Worker(new URL('./ChartWorker.ts', import.meta.url), { type: 'module' });
+        this.gaugesWorker.onmessage = (e) => {
+            if (e.data?.type === 'bounds') {
+                this.gaugesManualMin = Number(e.data.minY ?? this.gaugesManualMin);
+                this.gaugesManualMax = Number(e.data.maxY ?? this.gaugesManualMax);
+                if (document.activeElement !== gMinIn) gMinIn.value = this.gaugesManualMin.toExponential(2);
+                if (document.activeElement !== gMaxIn) gMaxIn.value = this.gaugesManualMax.toExponential(2);
+            }
+        };
+
+        const gRect = chartArea.getBoundingClientRect();
+        const gW = Math.max(200, Math.round(gRect.width) || 800);
+        const gH = Math.max(160, Math.round(gRect.height) || 500);
+        const offscreenGauges = (canvas as any).transferControlToOffscreen();
+        this.gaugesWorker.postMessage(
+            { type: 'init', canvas: offscreenGauges, width: gW, height: gH, dpr: window.devicePixelRatio || 1 },
+            [offscreenGauges] as any
+        );
+        this.syncGaugesChartWorker(node);
+
+        requestAnimationFrame(() => {
+            if (!this.gaugesWorker || !chartArea.isConnected) return;
+            const r = chartArea.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) {
+                this.gaugesWorker.postMessage({ type: 'resize', width: Math.round(r.width), height: Math.round(r.height) });
+            }
         });
-        this.gaugesResizeObserver.observe(canvas);
-        canvas.width = canvas.clientWidth || 600;
-        canvas.height = canvas.clientHeight || 400;
-        const initialHistory = this.stateManager.getTelemetry(node.id);
-        this.drawGaugesChart(canvas, initialHistory, node.parameters?.gauges || [], this.gaugesChannel, has2D);
+
+        this.gaugesResizeObserver = new ResizeObserver(entries => {
+            for (const entry of entries) {
+                const { width, height } = entry.contentRect;
+                if (width > 0 && height > 0) {
+                    this.gaugesWorker?.postMessage({ type: 'resize', width: Math.round(width), height: Math.round(height) });
+                }
+            }
+        });
+        this.gaugesResizeObserver.observe(chartArea);
 
         // Restore focus if we tabbed or pressed enter
         if (this.gaugesActiveTab === 'list') {
@@ -2182,7 +2739,7 @@ export class NodeViewer {
 
         const activeModel = this.stateManager.getActiveModel();
         const gauges = node.parameters?.gauges || [];
-        const is3D = activeModel?.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') || false;
+        const is3D = activeModel?.nodes.some(n => isDomainMesh3DNode(n.type) || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') || false;
 
         if (node.parameters?.source_mode === 'external_file') {
             tableContainer.innerHTML = '';
@@ -2197,7 +2754,7 @@ export class NodeViewer {
             banner.innerHTML = `
                 <div style="font-weight: bold; font-size: 13px; margin-bottom: 8px;">📁 Streaming External Probe Dataset</div>
                 <div style="font-size: 11px; color: #a1a1aa; margin-bottom: 6px;">File: <code>${node.parameters.external_file_path || 'No file selected'}</code></div>
-                <div style="font-size: 11px; color: #a1a1aa; margin-bottom: 10px;">Format: ${node.parameters.external_file_format || 'Auto'} · Storage: ${node.parameters.storage_backend || 'HDF5 Stream'} · Stride: ${node.parameters.sampling_stride_steps || 1}</div>
+                <div style="font-size: 11px; color: #a1a1aa; margin-bottom: 10px;">Format: ${node.parameters.external_file_format || 'Auto'} · Stride: ${node.parameters.sampling_stride_steps || 1} step(s)</div>
                 <div style="font-size: 10px; color: #38bdf8; line-height: 1.4;">Probes are read and indexed directly in solver VRAM and streamed to HDF5. Live telemetry tracks up to 16 pinned watch probes and global extrema envelopes. Use the Pipeline Browser to inspect or search specific probes.</div>
             `;
             tableContainer.appendChild(banner);
@@ -2262,12 +2819,16 @@ export class NodeViewer {
         thSel.style.textAlign = 'center';
         const masterCheck = document.createElement('input');
         masterCheck.type = 'checkbox';
-        masterCheck.checked = pagedGauges.length > 0 && pagedGauges.every((g: any) => g.plot !== false);
+        const checkedCount = pagedGauges.filter((g: any) => g.plot !== false).length;
+        masterCheck.checked = pagedGauges.length > 0 && checkedCount === pagedGauges.length;
+        masterCheck.indeterminate = checkedCount > 0 && checkedCount < pagedGauges.length;
         masterCheck.onchange = () => {
             const checked = masterCheck.checked;
             pagedGauges.forEach((g: any) => { g.plot = checked; });
-            this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
-            this.render();
+            if (node.parameters) node.parameters.gauges = gauges;
+            this.stateManager.updateNodeParametersInPlace(node.id, { gauges: [...gauges] });
+            this.syncVirtualGauges(node, has2D);
+            this.syncGaugesChartWorker(node);
         };
         thSel.appendChild(masterCheck);
         headerTr.appendChild(thSel);
@@ -2304,8 +2865,12 @@ export class NodeViewer {
             check.checked = g.plot !== false;
             check.onchange = () => {
                 g.plot = check.checked;
-                this.stateManager.updateNodeParameters(node.id, { gauges: gauges });
-                this.render();
+                if (node.parameters) node.parameters.gauges = gauges;
+                this.stateManager.updateNodeParametersInPlace(node.id, { gauges: [...gauges] });
+                const newCheckedCount = pagedGauges.filter((pg: any) => pg.plot !== false).length;
+                masterCheck.checked = pagedGauges.length > 0 && newCheckedCount === pagedGauges.length;
+                masterCheck.indeterminate = newCheckedCount > 0 && newCheckedCount < pagedGauges.length;
+                this.syncGaugesChartWorker(node);
             };
             tdSel.appendChild(check);
             tr.appendChild(tdSel);
@@ -2456,229 +3021,6 @@ export class NodeViewer {
         tableContainer.appendChild(table);
     }
 
-    private getGaugesBounds(
-        node: Node,
-        channel: number,
-        history: any,
-        activeMinX?: number,
-        activeMaxX?: number
-    ): { minVal: number; maxVal: number; timesLength: number } {
-        const gauges = node.parameters?.gauges || [];
-        let minVal = 0;
-        let maxVal = 1;
-        let hasData = false;
-        
-        if (history && (history.gauges_history || Array.isArray(history)) && (!history.times || !history.values)) {
-            history = this.stateManager.normalizeGaugesTelemetry(history);
-        }
-
-        if (history && history.times && history.times.length > 0 && history.values) {
-            let minV = Infinity;
-            let maxV = -Infinity;
-            const startIdx = activeMinX !== undefined ? Math.max(0, Math.floor(activeMinX)) : 0;
-            const endIdx = activeMaxX !== undefined ? Math.min(history.times.length - 1, Math.ceil(activeMaxX)) : history.times.length - 1;
-
-            gauges.filter((g: any) => g.plot !== false).forEach((g: any, gIdx: number) => {
-                const gData = history.values[g.id] || history.values[g.name] || (g.id ? history.values[g.id.toUpperCase()] : undefined) || (g.id ? history.values[g.id.toLowerCase()] : undefined) || history.values[gIdx] || history.values[String(gIdx)] || history.values['G' + (gIdx + 1)] || history.values['g' + (gIdx + 1)];
-                if (gData && gData[channel]) {
-                    const arr = gData[channel];
-                    const limit = Math.min(arr.length - 1, endIdx);
-                    for (let i = startIdx; i <= limit; i++) {
-                        const v = arr[i];
-                        if (isFinite(v)) {
-                            if (v < minV) minV = v;
-                            if (v > maxV) maxV = v;
-                            hasData = true;
-                        }
-                    }
-                }
-            });
-            if (hasData) {
-                minVal = minV;
-                maxVal = maxV;
-            }
-        }
-        return { minVal, maxVal, timesLength: history?.times?.length || 0 };
-    }
-
-    private drawGaugesChart(canvas: HTMLCanvasElement, history: any, gauges: any[], channel: number, has2D: boolean): void {
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        if (canvas.width <= 0 || canvas.height <= 0) {
-            canvas.width = canvas.clientWidth || 600;
-            canvas.height = canvas.clientHeight || 400;
-        }
-
-        const width = canvas.width;
-        const height = canvas.height;
-
-        ctx.clearRect(0, 0, width, height);
-
-        if (history && (history.gauges_history || Array.isArray(history)) && (!history.times || !history.values)) {
-            history = this.stateManager.normalizeGaugesTelemetry(history);
-        }
-
-        if (!history || !history.times || history.times.length === 0 || gauges.length === 0) {
-            ctx.fillStyle = '#666';
-            ctx.font = '10px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText('Waiting for telemetry...', width / 2, height / 2);
-            return;
-        }
-
-        const activeModel = this.stateManager.getActiveModel();
-        const node = activeModel?.nodes.find(n => n.id === this.currentNodeId);
-        if (!node) return;
-
-        const times = history.times;
-        const values = history.values;
-
-        const defaultMinX = 0;
-        const timesLength = history?.times?.length || 0;
-        const defaultMaxX = timesLength - 1 || 1;
-
-        let activeMinX = defaultMinX;
-        let activeMaxX = defaultMaxX;
-
-        if (this.gaugesZoomedOrPanned) {
-            activeMinX = this.gaugesZoomMinX;
-            activeMaxX = this.gaugesZoomMaxX;
-        } else {
-            this.gaugesZoomMinX = defaultMinX;
-            this.gaugesZoomMaxX = defaultMaxX;
-        }
-
-        const { minVal, maxVal } = this.getGaugesBounds(
-            node,
-            channel,
-            history,
-            this.gaugesZoomedOrPanned ? activeMinX : undefined,
-            this.gaugesZoomedOrPanned ? activeMaxX : undefined
-        );
-
-        const padLeft = 60;
-        const padRight = 30;
-        const padTop = 20;
-        const padBottom = 40;
-        const plotWidth = width - padLeft - padRight;
-        const plotHeight = height - padTop - padBottom;
-
-        let activeMinY = minVal;
-        let activeMaxY = maxVal;
-        if (activeMinY === activeMaxY) {
-            activeMinY -= 1.0;
-            activeMaxY += 1.0;
-        } else {
-            const yRange = activeMaxY - activeMinY;
-            activeMinY -= yRange * 0.05;
-            activeMaxY += yRange * 0.05;
-        }
-
-        ctx.strokeStyle = '#475569';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(padLeft, padTop);
-        ctx.lineTo(padLeft, height - padBottom);
-        ctx.lineTo(width - padRight, height - padBottom);
-        ctx.stroke();
-
-        ctx.fillStyle = '#888';
-        ctx.font = '9px monospace';
-        ctx.textAlign = 'right';
-        ctx.textBaseline = 'middle';
-
-        const numTicksY = 5;
-        const activeRangeY = activeMaxY - activeMinY || 1;
-        for (let i = 0; i < numTicksY; i++) {
-            const pct = i / (numTicksY - 1);
-            const val = activeMinY + pct * activeRangeY;
-            const y = height - padBottom - pct * plotHeight;
-            
-            ctx.strokeStyle = '#475569';
-            ctx.beginPath();
-            ctx.moveTo(padLeft - 4, y);
-            ctx.lineTo(padLeft, y);
-            ctx.stroke();
-            
-            ctx.fillText(val.toExponential(2), padLeft - 6, y);
-        }
-
-        const getTimeAtIndex = (idx: number) => {
-            if (!times || times.length === 0) return 0;
-            const low = Math.max(0, Math.min(times.length - 1, Math.floor(idx)));
-            const high = Math.max(0, Math.min(times.length - 1, Math.ceil(idx)));
-            if (low === high) return times[low];
-            const frac = idx - low;
-            return times[low] * (1 - frac) + times[high] * frac;
-        };
-
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        const numTicksX = 5;
-        const activeRangeX = activeMaxX - activeMinX || 1;
-        for (let i = 0; i < numTicksX; i++) {
-            const pct = i / (numTicksX - 1);
-            const idx = activeMinX + pct * activeRangeX;
-            const tVal = getTimeAtIndex(idx);
-            const x = padLeft + pct * plotWidth;
-            
-            ctx.strokeStyle = '#475569';
-            ctx.beginPath();
-            ctx.moveTo(x, height - padBottom);
-            ctx.lineTo(x, height - padBottom + 4);
-            ctx.stroke();
-            
-            ctx.fillText(`${tVal.toFixed(5)}s`, x, height - padBottom + 6);
-        }
-
-        const colors = ['#38bdf8', '#fb7185', '#34d399', '#fbbf24', '#a78bfa', '#2dd4bf'];
-        
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(padLeft, padTop, plotWidth, plotHeight);
-        ctx.clip();
-
-        gauges.filter(g => g.plot !== false).forEach((g, gIdx) => {
-            const gData = values[g.id] || values[g.name] || (g.id ? values[g.id.toUpperCase()] : undefined) || (g.id ? values[g.id.toLowerCase()] : undefined) || values[gIdx] || values[String(gIdx)] || values['G' + (gIdx + 1)] || values['g' + (gIdx + 1)];
-            if (gData && gData[channel]) {
-                const arr = gData[channel];
-                ctx.strokeStyle = colors[gIdx % colors.length];
-                ctx.lineWidth = 1.5;
-                ctx.beginPath();
-
-                let first = true;
-                arr.forEach((v: number, i: number) => {
-                    if (i >= times.length) return;
-                    const x = padLeft + ((i - activeMinX) / (activeMaxX - activeMinX || 1)) * plotWidth;
-                    const y = height - padBottom - ((v - activeMinY) / (activeRangeY)) * plotHeight;
-                    if (first) {
-                        ctx.moveTo(x, y);
-                        first = false;
-                    } else {
-                        ctx.lineTo(x, y);
-                    }
-                });
-                ctx.stroke();
-
-                if (arr.length > 0 && times.length > 0) {
-                    const lastIdx = Math.min(arr.length - 1, times.length - 1);
-                    const lastVal = arr[lastIdx];
-                    const labelIdx = Math.max(0, Math.min(lastIdx, Math.round(activeMaxX)));
-                    const labelVal = arr[labelIdx] !== undefined ? arr[labelIdx] : lastVal;
-                    const x = padLeft + ((labelIdx - activeMinX) / (activeMaxX - activeMinX || 1)) * plotWidth;
-                    const y = height - padBottom - ((labelVal - activeMinY) / (activeRangeY)) * plotHeight;
-                    ctx.fillStyle = colors[gIdx % colors.length];
-                    ctx.font = 'bold 8px monospace';
-                    ctx.textAlign = 'left';
-                    ctx.fillText(` ${g.id || g.name}`, x, y);
-                }
-            }
-        });
-        ctx.restore();
-    }
-
     private startRenderLoop(): void {
         if (this.renderRequestId !== null) return;
         const loop = () => {
@@ -2824,6 +3166,17 @@ export class NodeViewer {
             if (terminal && Array.isArray(data)) {
                 this.syncTerminal(terminal, data);
             }
+        } else if (node.type === 'TelemetryContour') {
+            if (data instanceof ArrayBuffer) {
+                this.contourWorker?.postMessage(data, [data]);
+            } else if (data && typeof data === 'object') {
+                this.contourWorker?.postMessage({
+                    type: 'setConfig',
+                    step: typeof data.step === 'number' ? data.step : undefined,
+                    time: typeof data.time === 'number' ? data.time : undefined,
+                    dt: typeof data.dt === 'number' ? data.dt : undefined
+                });
+            }
         } else if (node.type === 'TelemetryGraph' || node.type === 'Telemetry3DViewport') {
             this.telemetryBuffer = data;
         }
@@ -2838,7 +3191,7 @@ export class NodeViewer {
             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride', 'tessellation_max_edge',
             'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
             // 2D CFD keys
-            'nr', 'nz', 'min_r', 'min_z', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
+            'nr', 'nz', 'min_r', 'min_z', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
             'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
@@ -2862,7 +3215,8 @@ export class NodeViewer {
             'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
-            'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
+            'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress', 'erosion_min_density', 'erosion_min_density_ratio',
+            'mpm_cell_size', 'mpm_xmin', 'mpm_xmax', 'mpm_ymin', 'mpm_ymax', 'mpm_zmin', 'mpm_zmax',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
             'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
             'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
@@ -2899,7 +3253,7 @@ export class NodeViewer {
             'lt_I', 'lt_a', 'lt_b', 'lt_x',
             'lt_G1', 'lt_c', 'lt_d', 'lt_y',
             'lt_G2', 'lt_e', 'lt_g', 'lt_z',
-            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
+            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min', 'jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0',
             // Afterburn & Aerobic Combustion
             'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
             'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
@@ -2951,10 +3305,11 @@ export class NodeViewer {
             'timestamp_mode': ['None', 'Relative', 'Clock'],
             'source_mode': ['manual', 'external_file'],
             'external_file_format': ['Auto', 'CSV', 'Binary Float32', 'HDF5'],
-            'storage_backend': ['HDF5 Stream', 'Live Telemetry'],
+            'ascii_delimiter': ['Comma', 'Tab', 'Space'],
             'material_model': getConstitutiveModels(),
             'preset': dynamicPresets,
-            'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
+            'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant', 'Unreacted JWL (Lee-Tarver)'],
+            'mixture_rule': ['Pressure Equilibrium (Volume Additive)', 'Linear Blend'],
             'burn_model': ['Programmed Wavefront Burn', 'Lee-Tarver 3-Stage ODE', 'CREST Shock Entropy Kinetics'],
             'product_model': ['JWL Product Gas', 'Davis Detonation Product'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
@@ -2974,8 +3329,8 @@ export class NodeViewer {
             'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
             'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
             'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
-            'left_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
-            'right_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+            'left_bc': ['Reflecting'],
+            'right_bc': ['Transmitting', 'Reflecting', 'Terminate'],
             'bc_x_min': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
             'bc_x_max': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
             'bc_y_min': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
@@ -2992,7 +3347,7 @@ export class NodeViewer {
             'contact_search_method': ['Hierarchical Octave Hash Grid', 'Linear BVH (Morton Code)'],
             'mesh_source': ['Box Generator', 'Cylinder Generator', 'Plate Generator', 'STL File', 'LS-DYNA Keyword File'],
             'element_topology': ['Hex8', 'Tet4_ANP'],
-            'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
+            'trigger_type': ['Step Interval', 'Time Interval'],
             'vtk_format': ['Binary', 'XDMF + HDF5', 'ASCII'],
             'compression_level': ['1', '3', '6', '9'],
             'float_precision': ['12-bit Mantissa (~4 sig. digits)', '16-bit Mantissa (~5 sig. digits)', 'Full 23-bit Float32 (Lossless)'],
@@ -3001,7 +3356,7 @@ export class NodeViewer {
             'undex_coupling_method': ['LocalCurvedDAA', 'HighFidelityCFD', 'ZonalHybrid_MPM_FV_FEM'],
             'seabed_mesh_type': ['Pure_FV', 'Hybrid_MPM_Crater_FEM_FarField', 'Full_Domain_MPM', 'Local_Crater_MPM', 'Pure_Hex8_FEM', 'Pure_MPM'],
             'water_discretization_mode': ['Pure_FV', 'LPTP_Phase_Tracking_Sleeve', 'Full_Column_LPTP_Cylinder'],
-            'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
+            'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'From3D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : (node.type === 'CFDSolver' ? ['Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas']),
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3'],
             'temporal_order': ['1', '2', '3'],
@@ -3700,7 +4055,7 @@ export class NodeViewer {
             return select;
         }
 
-        if (key === 'source_model_id' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(node.type)) {
+        if (key === 'source_model_id' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(node.type)) {
             const select = document.createElement('select');
             select.style.width = '100%';
             select.style.background = '#252526';
@@ -3716,11 +4071,12 @@ export class NodeViewer {
 
             const allModels = this.stateManager.getAllModels();
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+            const is3Dto3D = node.type === 'Remap3DTo3DNode';
             const is2Dto3D = node.type === 'Remap2DTo3DNode';
-            const sourceDim = is2Dto3D ? '2D' : '1D';
+            const sourceDim = is3Dto3D ? '3D' : (is2Dto3D ? '2D' : '1D');
 
             const candidateModels = allModels.filter(m => {
-                return m.nodes.some(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
+                return m.nodes.some(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
             });
 
             const currentModelId = node.parameters?.source_model_id || '';
@@ -3753,7 +4109,7 @@ export class NodeViewer {
                     ws.connections = ws.connections.filter(c => c.toNode !== node.id);
                     if (newModelId) {
                         const srcM = allModels.find(m => m.id === newModelId);
-                        const srcSolver = srcM?.nodes.find(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
+                        const srcSolver = srcM?.nodes.find(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
                         if (srcSolver) {
                             ws.connections.push({
                                 fromNode: srcSolver.id,
@@ -3762,6 +4118,14 @@ export class NodeViewer {
                                 toPort: 'in'
                             });
                         }
+                    }
+                }
+                if (newModelId && owningModel) {
+                    const remapOutConn = owningModel.connections.find(c => c.fromNode === node.id && (c.toPort === 'remap' || c.toPort === 'in'));
+                    const tSolverId = node.parameters?.target_solver || remapOutConn?.toNode;
+                    const tSolver = tSolverId ? owningModel.nodes.find(n => n.id === tSolverId) : owningModel.nodes.find(n => n.type === 'CFDSolver2D' || n.type === 'CFDSolver3D');
+                    if (tSolver && tSolver.parameters && (tSolver.type === 'CFDSolver2D' || tSolver.type === 'CFDSolver3D')) {
+                        tSolver.parameters['init_mode'] = is3Dto3D ? 'From3D' : (is2Dto3D ? 'From2D' : 'From1D');
                     }
                 }
                 if (owningModel) {
@@ -3773,11 +4137,10 @@ export class NodeViewer {
                 }
                 this.stateManager.notifyChange();
             });
-
             return select;
         }
 
-        if (key === 'target_solver' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(node.type)) {
+        if (key === 'target_solver' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(node.type)) {
             const select = document.createElement('select');
             select.style.width = '100%';
             select.style.background = '#252526';
@@ -3794,7 +4157,7 @@ export class NodeViewer {
             const state = this.stateManager.getCurrentState();
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
             const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
-            const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode';
+            const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode';
             const targetSolvers = candidateNodes.filter(n => is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (n.type === 'CFDSolver2D' || n.type === 'FSICoupler2D' || n.type === 'MPMDomain2D'));
 
             let currentSolverId = node.parameters?.target_solver || '';
@@ -3835,6 +4198,10 @@ export class NodeViewer {
                             toNode: newSolverId,
                             toPort: 'remap'
                         });
+                        const tSolver = candidateNodes.find(s => s.id === newSolverId);
+                        if (tSolver && tSolver.parameters && (tSolver.type === 'CFDSolver2D' || tSolver.type === 'CFDSolver3D')) {
+                            tSolver.parameters['init_mode'] = node.type === 'Remap3DTo3DNode' ? 'From3D' : (node.type === 'Remap2DTo3DNode' ? 'From2D' : 'From1D');
+                        }
                     }
                     if (owningModel) {
                         this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
@@ -3941,16 +4308,13 @@ export class NodeViewer {
                         this.updateParameter(node, key, val);
                     } else {
                         let s_order = 2;
-                        let t_order = 4;
-                        if (val === 'ADER-2 (2nd-Order Space/Time)') {
-                            s_order = 2;
-                            t_order = (node.type === 'CFDSolver3D') ? 5 : 2;
-                        } else if (val === 'ADER-3 (3rd-Order Space/Time)') {
+                        let t_order = 2;
+                        if (val === 'ADER-3 (3rd-Order Space/Time)') {
                             s_order = 3;
-                            t_order = (node.type === 'CFDSolver3D') ? 6 : 3;
+                            t_order = 3;
                         } else {
                             s_order = 2;
-                            t_order = 4;
+                            t_order = 2;
                         }
                         
                         this.stateManager.updateNodeParameters(node.id, {
@@ -4035,24 +4399,13 @@ export class NodeViewer {
         const isDir = key === 'output_dir' || key === 'vtk_dir';
         const isExternal = key === 'external_file_path' || key === 'file_path';
 
-        const browseBtn = document.createElement('button');
-        browseBtn.type = 'button';
-        browseBtn.textContent = 'Browse';
-        browseBtn.style.padding = '4px 8px';
-        browseBtn.style.fontSize = '11px';
-        browseBtn.style.background = '#333';
-        browseBtn.style.color = '#38bdf8';
-        browseBtn.style.border = '1px solid #555';
-        browseBtn.style.borderRadius = '3px';
-        browseBtn.style.cursor = 'pointer';
-        browseBtn.style.whiteSpace = 'nowrap';
-        browseBtn.style.flexShrink = '0';
+        const openBrowserAt = (initialOverride?: string) => {
+            const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+            const rawCurrent = String(node.parameters[key] || '');
+            const startPath = initialOverride !== undefined
+                ? initialOverride
+                : (rawCurrent ? resolveResourcePath(rawCurrent, owningModel?.filename) : '');
 
-        browseBtn.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-
-            const startPath = String(node.parameters[key] || '');
             let title = 'Select File (Host)';
             let mode: 'open' | 'save' = 'open';
             let selectFolderOnly = false;
@@ -4101,8 +4454,62 @@ export class NodeViewer {
             browser.open(startPath);
         };
 
+        const browseBtn = document.createElement('button');
+        browseBtn.type = 'button';
+        browseBtn.textContent = 'Browse';
+        browseBtn.title = isDir ? 'Browse host output directory' : 'Browse host filesystem';
+        browseBtn.style.padding = '4px 8px';
+        browseBtn.style.fontSize = '11px';
+        browseBtn.style.background = '#333';
+        browseBtn.style.color = '#38bdf8';
+        browseBtn.style.border = '1px solid #555';
+        browseBtn.style.borderRadius = '3px';
+        browseBtn.style.cursor = 'pointer';
+        browseBtn.style.whiteSpace = 'nowrap';
+        browseBtn.style.flexShrink = '0';
+
+        browseBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openBrowserAt();
+        };
+
+        const recentBtn = document.createElement('button');
+        recentBtn.type = 'button';
+        recentBtn.textContent = '🕒';
+        recentBtn.title = isDir ? 'Pick from Recent Folders' : 'Browse from a Recent Folder';
+        recentBtn.style.padding = '4px 6px';
+        recentBtn.style.fontSize = '11px';
+        recentBtn.style.background = '#2a2d2e';
+        recentBtn.style.color = '#ccc';
+        recentBtn.style.border = '1px solid #555';
+        recentBtn.style.borderRadius = '3px';
+        recentBtn.style.cursor = 'pointer';
+        recentBtn.style.flexShrink = '0';
+
+        recentBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            showRecentFoldersQuickMenu(
+                recentBtn,
+                (folderPath) => {
+                    if (isDir) {
+                        textInput.value = folderPath;
+                        this.updateParameter(node, key, folderPath);
+                    } else {
+                        openBrowserAt(folderPath);
+                    }
+                },
+                {
+                    title: isDir ? 'Set Output Folder' : 'Browse Recent Folder',
+                    onBrowseOther: () => openBrowserAt()
+                }
+            );
+        };
+
         wrapper.appendChild(textInput);
         wrapper.appendChild(browseBtn);
+        wrapper.appendChild(recentBtn);
         return wrapper;
     }
 
@@ -4252,18 +4659,31 @@ export class NodeViewer {
             }
         } else if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus'].includes(key)) {
             updates['preset'] = 'Custom';
-        } else if (key === 'stl_file') {
-            updates['geometry_hash'] = 'stl_' + Math.floor(Math.random() * 1000000).toString(36);
-            const net = (window as any).networkManager;
-            if (net && net.isConnected()) {
-                const activeWs = this.stateManager.getActiveWorkspace();
-                const modelId = activeWs?.activeModelId || 'default';
-                const activeModel = this.stateManager.getAllModels().find(m => m.id === modelId);
-                const resolvedPath = resolveResourcePath(String(value || ''), activeModel?.filename);
-                net.send({ command: "LOAD_STL_GEOMETRY", filePath: resolvedPath, modelId });
+        } else if (key === 'stl_file' || key === 'k_file' || key === 'output_dir' || key === 'vtk_dir' || key === 'external_file_path' || key === 'file_path') {
+            const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+            const rawStr = String(value || '').trim();
+            if (rawStr) {
+                const isDirKey = key === 'output_dir' || key === 'vtk_dir';
+                const resolvedPath = resolveResourcePath(rawStr, owningModel?.filename);
+                if (resolvedPath.startsWith('/') || resolvedPath.startsWith('~') || /^[A-Za-z]:[\\/]/.test(resolvedPath)) {
+                    recordRecentFolder(resolvedPath, isDirKey);
+                }
+                if (key === 'stl_file') {
+                    updates['geometry_hash'] = 'stl_' + Math.floor(Math.random() * 1000000).toString(36);
+                    (this.stateManager as any).invalidateSTLGeometry?.(node.id);
+                    const net = (window as any).networkManager;
+                    if (net && net.isConnected()) {
+                        net.send({ command: 'LOAD_STL_GEOMETRY', filePath: resolvedPath, modelId: owningModel?.id || 'default' });
+                    }
+                } else if (key === 'k_file') {
+                    updates['geometry_hash'] = 'k_' + Math.floor(Math.random() * 1000000).toString(36);
+                }
+            } else if (key === 'stl_file') {
+                updates['geometry_hash'] = 'stl_' + Math.floor(Math.random() * 1000000).toString(36);
+                (this.stateManager as any).invalidateSTLGeometry?.(node.id);
+            } else if (key === 'k_file') {
+                updates['geometry_hash'] = 'k_' + Math.floor(Math.random() * 1000000).toString(36);
             }
-        } else if (key === 'k_file') {
-            updates['geometry_hash'] = 'k_' + Math.floor(Math.random() * 1000000).toString(36);
         }
 
         if (key === 'water_discretization_mode') {

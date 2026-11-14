@@ -135,9 +135,19 @@ MemoryEstimate estimateCFD2DMemory(int nr, int nz, bool is_cuda, bool is_double,
     return {host_bytes, gpu_bytes};
 }
 
-MemoryEstimate estimateMPM3DMemory(int nx, int ny, int nz, size_t particle_count, bool is_cuda) {
+MemoryEstimate estimateMPM3DMemory(int nx, int ny, int nz, size_t particle_count, bool is_cuda, bool is_sparse) {
     if (nx <= 0 || ny <= 0 || nz <= 0) return {0, 0};
     size_t grid_nodes = static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz);
+    size_t directory_bytes = 0;
+    if (is_sparse) {
+        size_t ntx = static_cast<size_t>((nx + 3) / 4);
+        size_t nty = static_cast<size_t>((ny + 3) / 4);
+        size_t ntz = static_cast<size_t>((nz + 3) / 4);
+        size_t total_tiles = ntx * nty * ntz;
+        directory_bytes = total_tiles * sizeof(int);
+        size_t est_active_tiles = std::min<size_t>(total_tiles, std::max<size_t>(4096ULL, (particle_count / 32ULL) * 3ULL + 4096ULL));
+        grid_nodes = est_active_tiles * 64ULL;
+    }
     
     if (is_cuda) {
         // CUDA MPM Solver accurate VRAM breakdown:
@@ -148,15 +158,15 @@ MemoryEstimate estimateMPM3DMemory(int nx, int ny, int nz, size_t particle_count
         //   d_soa_buffer     = 34 floats + 4 ints     = 152B  }
         //   d_compaction_indices = 2 ints              = 8B    } per particle = 160B
         //   Base buffers & scratch overhead = 64 MB
-        size_t gpu_bytes = (grid_nodes * 72ULL) + (particle_count * 160ULL) + (64ULL * 1024ULL * 1024ULL);
+        size_t gpu_bytes = directory_bytes + (grid_nodes * 72ULL) + (particle_count * 160ULL) + (64ULL * 1024ULL * 1024ULL);
         // Host RAM: Particle staging buffer during init + solver base overhead (~64 MB)
         // Note: m_host_grid is lazy and not allocated during simulation execution.
-        size_t host_bytes = (particle_count * 256ULL) + (64ULL * 1024ULL * 1024ULL);
+        size_t host_bytes = directory_bytes + (particle_count * 256ULL) + (64ULL * 1024ULL * 1024ULL);
         return {host_bytes, gpu_bytes};
     } else {
         // CPU MPM Solver:
         // Host RAM: grid nodes (128B) + particle list with dynamic growth headroom (256B * 2)
-        size_t host_bytes = (grid_nodes * 128ULL) + (particle_count * 256ULL * 2);
+        size_t host_bytes = directory_bytes + (grid_nodes * 128ULL) + (particle_count * 256ULL * 2);
         return {host_bytes, 0};
     }
 }

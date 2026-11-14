@@ -4,6 +4,7 @@
 #include "constitutive_crest_davis.hpp"
 #include "constitutive_jwl.hpp"
 #include "constitutive_lee_tarver.hpp"
+#include "constitutive_mixture.hpp"
 #include "materials/ConstitutiveSolids.hpp"
 #include "materials/ConstitutiveGeomaterials.hpp"
 #include <cuda_runtime.h>
@@ -205,11 +206,13 @@ __device__ __forceinline__ void store_particle_stress_isotropic(MPMParticle3DSoA
 }
 
 // Clear previously active grid nodes kernel
-__global__ void kernel_clear_active_nodes_3d(MPMGridNode3D* grid, const int* active_nodes, int num_active) {
+__global__ void kernel_clear_active_nodes_3d(MPMGridNode3D* grid, const int* active_nodes, int num_active, MPMGridView3D gv = {}) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_active) return;
-    int node_idx = active_nodes[idx];
-    MPMGridNode3D& node = grid[node_idx];
+    int logical_idx = active_nodes[idx];
+    const long long s = (gv.nx > 0) ? gv.slotIndexFromLogical(logical_idx) : static_cast<long long>(logical_idx);
+    if (s < 0) return;
+    MPMGridNode3D& node = grid[s];
     node.m = 0.0f;
     node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f;
     node.f_ext[0] = 0.0f; node.f_ext[1] = 0.0f; node.f_ext[2] = 0.0f;
@@ -233,11 +236,15 @@ __global__ void kernel_clear_active_mat_nodes_3d(
     float* d_mat_m, float* d_mat_p, float* d_mat_f,
     float* d_mat_dv,
     const int* active_nodes, int num_active,
-    size_t num_nodes, int num_materials)
+    size_t num_nodes, int num_materials,
+    MPMGridView3D gv = {})
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_active) return;
-    int node_idx = active_nodes[idx];
+    int logical_idx = active_nodes[idx];
+    const long long s = (gv.nx > 0) ? gv.slotIndexFromLogical(logical_idx) : static_cast<long long>(logical_idx);
+    if (s < 0) return;
+    size_t node_idx = static_cast<size_t>(s);
 
     for (int m = 0; m < num_materials; ++m) {
         size_t mn_idx = static_cast<size_t>(m) * num_nodes + node_idx;
@@ -252,6 +259,63 @@ __global__ void kernel_clear_active_mat_nodes_3d(
             d_mat_dv[mn_idx * 3 + 0] = 0.0f;
             d_mat_dv[mn_idx * 3 + 1] = 0.0f;
             d_mat_dv[mn_idx * 3 + 2] = 0.0f;
+        }
+    }
+}
+
+// Block-Sparse Tile Table Reset & Activation Kernels (8x8x8 = 512-node tiles)
+__global__ void kernel_reset_active_tiles_3d(int* d_tile_table, const int* d_active_tiles, int num_active_tiles) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_active_tiles) return;
+    int t_idx = d_active_tiles[idx];
+    if (t_idx >= 0) {
+        d_tile_table[t_idx] = -1;
+    }
+}
+
+__global__ void kernel_activate_sparse_tiles_3d(
+    MPMParticle3DSoA soa, int num_particles,
+    int nx, int ny, int nz,
+    float dx, float dy, float dz,
+    float xmin, float ymin, float zmin,
+    int stencil_pad, int* d_tile_table, int ntx, int nty, int ntz,
+    int* d_active_tiles, int* d_num_active_tiles, int tile_capacity)
+{
+    (void)nx; (void)ny; (void)nz;
+    int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p_idx >= num_particles || (soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
+
+    float px = soa.x[0][p_idx] - xmin;
+    float py = soa.x[1][p_idx] - ymin;
+    float pz = soa.x[2][p_idx] - zmin;
+    int base_i = static_cast<int>(floorf(px / dx));
+    int base_j = static_cast<int>(floorf(py / dy));
+    int base_k = static_cast<int>(floorf(pz / dz));
+
+    int tx0 = max(0, (base_i - stencil_pad) >> 3);
+    int tx1 = min(ntx - 1, (base_i + stencil_pad) >> 3);
+    int ty0 = max(0, (base_j - stencil_pad) >> 3);
+    int ty1 = min(nty - 1, (base_j + stencil_pad) >> 3);
+    int tz0 = max(0, (base_k - stencil_pad) >> 3);
+    int tz1 = min(ntz - 1, (base_k + stencil_pad) >> 3);
+
+    for (int tx = tx0; tx <= tx1; ++tx) {
+        for (int ty = ty0; ty <= ty1; ++ty) {
+            for (int tz = tz0; tz <= tz1; ++tz) {
+                int t_idx = (tx * nty + ty) * ntz + tz;
+                if (d_tile_table[t_idx] == -1) {
+                    int old = atomicCAS(&d_tile_table[t_idx], -1, -2);
+                    if (old == -1) {
+                        int slot = atomicAdd(d_num_active_tiles, 1);
+                        if (slot < tile_capacity) {
+                            d_tile_table[t_idx] = slot;
+                            d_active_tiles[slot] = t_idx;
+                        }
+                        // If slot >= tile_capacity, keep d_tile_table[t_idx] == -2 so this tile
+                        // is counted once; host will grow pool, memset d_tile_table to -1, and retry.
+                    }
+                }
+            }
         }
     }
 }
@@ -358,10 +422,14 @@ __device__ __forceinline__ float mpm_mat_node_kinematics(
 // Assigns a compact slot to every multi-material node in the active list.
 // counters[0] = slots handed out; on overflow the tag stays MULTI and the host regrows.
 __global__ void kernel_assign_mat_slots_3d(int* d_mat_tag, const int* active_nodes, int num_active,
-                                           int num_materials, int* counters, int slot_capacity) {
+                                           int num_materials, int* counters, int slot_capacity,
+                                           MPMGridView3D gv = {}) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_active) return;
-    int node_idx = active_nodes[idx];
+    int logical_idx = active_nodes[idx];
+    const long long s_slot = (gv.nx > 0) ? gv.slotIndexFromLogical(logical_idx) : static_cast<long long>(logical_idx);
+    if (s_slot < 0) return;
+    int node_idx = static_cast<int>(s_slot);
     int t = d_mat_tag[node_idx];
     if (t == MPM_MAT_TAG_MULTI || t >= num_materials) {
         int s = atomicAdd(&counters[0], 1);
@@ -370,10 +438,14 @@ __global__ void kernel_assign_mat_slots_3d(int* d_mat_tag, const int* active_nod
 }
 
 // Resets tags of previously active nodes to EMPTY.
-__global__ void kernel_reset_mat_tags_3d(int* d_mat_tag, const int* active_nodes, int num_active) {
+__global__ void kernel_reset_mat_tags_3d(int* d_mat_tag, const int* active_nodes, int num_active,
+                                         MPMGridView3D gv = {}) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_active) return;
-    d_mat_tag[active_nodes[idx]] = MPM_MAT_TAG_EMPTY;
+    int logical_idx = active_nodes[idx];
+    const long long s_slot = (gv.nx > 0) ? gv.slotIndexFromLogical(logical_idx) : static_cast<long long>(logical_idx);
+    if (s_slot < 0) return;
+    d_mat_tag[s_slot] = MPM_MAT_TAG_EMPTY;
 }
 
 // SoA Pack/Unpack Kernels
@@ -530,7 +602,8 @@ __global__ void kernel_count_particles_per_cell_3d(
     MPMParticle3DSoA soa, int num_particles,
     MPMGridNode3D* grid, int nx, int ny, int nz,
     float inv_dx, float inv_dy, float inv_dz,
-    float xmin, float ymin, float zmin)
+    float xmin, float ymin, float zmin,
+    MPMGridView3D gv = {})
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_particles) return;
@@ -542,7 +615,8 @@ __global__ void kernel_count_particles_per_cell_3d(
     cy = cy < 0 ? 0 : (cy >= ny ? ny - 1 : cy);
     cz = cz < 0 ? 0 : (cz >= nz ? nz - 1 : cz);
 
-    size_t c_idx = (static_cast<size_t>(cx) * ny + cy) * nz + cz;
+    const long long c_idx = (gv.nx > 0) ? gv.slotIndex(cx, cy, cz) : static_cast<long long>((static_cast<size_t>(cx) * ny + cy) * nz + cz);
+    if (c_idx < 0) return;
     MPMGridNode3D& cell = grid[c_idx];
     for (int s = 0; s < 8; ++s) {
         int* slot_ptr = mpm_cell_slot_ptr(cell, s);
@@ -565,7 +639,8 @@ __global__ void kernel_extract_mpm_vtk_snapshot_3d(
     float inv_dx, float inv_dy, float inv_dz,
     float xmin, float ymin, float zmin,
     bool has_vel, bool has_stress, bool has_strain, bool has_damage, bool has_temp,
-    bool has_pressure, bool has_material_id, bool has_object_id, bool has_particle_density)
+    bool has_pressure, bool has_material_id, bool has_object_id, bool has_particle_density,
+    MPMGridView3D gv = {})
 {
     int local_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (local_idx >= chunk_particles) return;
@@ -638,9 +713,10 @@ __global__ void kernel_extract_mpm_vtk_snapshot_3d(
             int neighbor_count = 1; // Always count self
             for (int ix = ix_lo; ix <= ix_hi; ++ix) {
                 for (int iy = iy_lo; iy <= iy_hi; ++iy) {
-                    size_t row_base = (static_cast<size_t>(ix) * ny + iy) * nz;
                     for (int iz = iz_lo; iz <= iz_hi; ++iz) {
-                        const MPMGridNode3D& cell = grid[row_base + iz];
+                        const long long c_idx = (gv.nx > 0) ? gv.slotIndex(ix, iy, iz) : static_cast<long long>((static_cast<size_t>(ix) * ny + iy) * nz + iz);
+                        if (c_idx < 0) continue;
+                        const MPMGridNode3D& cell = grid[c_idx];
                         for (int s = 0; s < 8; ++s) {
                             int q = mpm_cell_slot_read(cell, s);
                             if (q < 0) break;
@@ -698,13 +774,14 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                               int bc_x_min = 1, int bc_x_max = 1,
                               int bc_y_min = 1, int bc_y_max = 1,
                               int bc_z_min = 1, int bc_z_max = 1,
-                              int* d_mat_tag = nullptr, int* d_mat_counters = nullptr) {
+                              int* d_mat_tag = nullptr, int* d_mat_counters = nullptr,
+                              MPMGridView3D gv = {}, size_t num_pool_nodes = 0) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (p_idx >= num_particles || (soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
 
     int p_mat_id = (soa.material_id ? soa.material_id[p_idx] : 0);
     if (p_mat_id < 0 || p_mat_id >= num_materials) p_mat_id = 0;
-    size_t num_nodes_total = static_cast<size_t>(nx) * ny * nz;
+    size_t num_nodes_total = (num_pool_nodes > 0) ? num_pool_nodes : (static_cast<size_t>(nx) * ny * nz);
     constexpr float s_cutoff = (P2G_MODE == MPM_P2G_TAG) ? MPM_P2G_TAG_CUTOFF : MPM_P2G_SCATTER_CUTOFF;
 
     int obj_id = soa.object_id[p_idx];
@@ -888,11 +965,14 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
 
                         float weight = w * inv_w_sum;
 
-                        size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                        size_t logical_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                        const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k) : static_cast<long long>(logical_idx);
+                        if (slot_ll < 0) continue;
+                        size_t node_idx = static_cast<size_t>(slot_ll);
                         if constexpr (P2G_MODE == MPM_P2G_TAG) {
                             if (mpm_tag_node_material(d_mat_tag, node_idx, p_mat_id) && d_active_nodes && d_num_active_nodes) {
                                 int pos = atomicAdd(d_num_active_nodes, 1);
-                                d_active_nodes[pos] = static_cast<int>(node_idx);
+                                d_active_nodes[pos] = static_cast<int>(logical_idx);
                             }
                             continue;
                         }
@@ -909,7 +989,7 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                         }
                         if (old_m == 0.0f && d_active_nodes && d_num_active_nodes) {
                             int pos = atomicAdd(d_num_active_nodes, 1);
-                            d_active_nodes[pos] = static_cast<int>(node_idx);
+                            d_active_nodes[pos] = static_cast<int>(logical_idx);
                         }
 
                         float dc_x = node_x - xc;
@@ -1020,11 +1100,14 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                     float dN_dy = Sx * dSy * Sz;
                     float dN_dz = Sx * Sy * dSz;
 
-                    size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                    size_t logical_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                    const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k) : static_cast<long long>(logical_idx);
+                    if (slot_ll < 0) continue;
+                    size_t node_idx = static_cast<size_t>(slot_ll);
                     if constexpr (P2G_MODE == MPM_P2G_TAG) {
                         if (mpm_tag_node_material(d_mat_tag, node_idx, p_mat_id) && d_active_nodes && d_num_active_nodes) {
                             int pos = atomicAdd(d_num_active_nodes, 1);
-                            d_active_nodes[pos] = static_cast<int>(node_idx);
+                            d_active_nodes[pos] = static_cast<int>(logical_idx);
                         }
                         continue;
                     }
@@ -1051,7 +1134,7 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                     }
                     if (old_m == 0.0f && d_active_nodes && d_num_active_nodes) {
                         int pos = atomicAdd(d_num_active_nodes, 1);
-                        d_active_nodes[pos] = static_cast<int>(node_idx);
+                        d_active_nodes[pos] = static_cast<int>(logical_idx);
                     }
 
                     float dist_x = node_x - px;
@@ -1187,16 +1270,19 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                     float node_z = (static_cast<float>(raw_k) + 0.5f) * dz;
 
                     float weight = Sx * Sy * Sz;
-                    size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
                     if (!is_standard_p2g && weight < s_cutoff) continue;
                     if (is_standard_p2g && weight <= 0.0f) continue;
+                    size_t logical_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                    const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k) : static_cast<long long>(logical_idx);
+                    if (slot_ll < 0) continue;
+                    size_t node_idx = static_cast<size_t>(slot_ll);
                     float dN_dx = dSx * Sy * Sz;
                     float dN_dy = Sx * dSy * Sz;
                     float dN_dz = Sx * Sy * dSz;
                     if constexpr (P2G_MODE == MPM_P2G_TAG) {
                         if (mpm_tag_node_material(d_mat_tag, node_idx, p_mat_id) && d_active_nodes && d_num_active_nodes) {
                             int pos = atomicAdd(d_num_active_nodes, 1);
-                            d_active_nodes[pos] = static_cast<int>(node_idx);
+                            d_active_nodes[pos] = static_cast<int>(logical_idx);
                         }
                         continue;
                     }
@@ -1224,7 +1310,7 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                     }
                     if (old_m == 0.0f && d_active_nodes && d_num_active_nodes) {
                         int pos = atomicAdd(d_num_active_nodes, 1);
-                        d_active_nodes[pos] = static_cast<int>(node_idx);
+                        d_active_nodes[pos] = static_cast<int>(logical_idx);
                     }
 
                     float dist_x = node_x - px;
@@ -1282,18 +1368,23 @@ __global__ void kernel_grid_update_3d(MPMGridNode3D* grid, int num_nodes, int nx
                                      const int* active_nodes, int num_active,
                                      float dx = 0.0f, float dy = 0.0f, float dz = 0.0f,
                                      float lysmer_rho = 2000.0f, float lysmer_cp = 2000.0f, float lysmer_cs = 1000.0f,
-                                     float lysmer_n_rel = 1.0f, float lysmer_s_rel = 1.0f) {
-    int idx;
+                                     float lysmer_n_rel = 1.0f, float lysmer_s_rel = 1.0f,
+                                     MPMGridView3D gv = {}) {
+    int logical_idx;
     if (active_nodes && num_active > 0) {
         int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (t_idx >= num_active) return;
-        idx = active_nodes[t_idx];
+        logical_idx = active_nodes[t_idx];
     } else {
-        idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= num_nodes) return;
+        logical_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        int total_logical = (gv.nx > 0) ? (gv.nx * gv.ny * gv.nz) : num_nodes;
+        if (logical_idx >= total_logical) return;
     }
 
-    MPMGridNode3D& node = grid[idx];
+    const long long slot_ll = (gv.nx > 0) ? gv.slotIndexFromLogical(logical_idx) : static_cast<long long>(logical_idx);
+    if (slot_ll < 0) return;
+
+    MPMGridNode3D& node = grid[slot_ll];
     if (node.m <= 1.0e-20f) return;
 
     node.plastic_strain = (node.m_solid > 1.0e-20f) ? (node.plastic_strain / node.m_solid) : 0.0f;
@@ -1314,10 +1405,10 @@ __global__ void kernel_grid_update_3d(MPMGridNode3D* grid, int num_nodes, int nx
     node.p[1] += dt * (node.f_ext[1] + reg * node.f_int[1]);
     node.p[2] += dt * (node.f_ext[2] + reg * node.f_int[2]);
 
-    // Unpack 3D indices
-    int k = idx % nz;
-    int j = (idx / nz) % ny;
-    int i = idx / (ny * nz);
+    // Unpack 3D indices from logical index
+    int k = logical_idx % nz;
+    int j = (logical_idx / nz) % ny;
+    int i = logical_idx / (ny * nz);
 
     if ((i == 0 && bc_x_min == 0) || (i == nx - 1 && bc_x_max == 0)) { node.p[0] = 0.0f; node.p[1] = 0.0f; node.p[2] = 0.0f; }
     else if ((i == 0 && bc_x_min == 4) || (i == nx - 1 && bc_x_max == 4)) {
@@ -1377,17 +1468,23 @@ __global__ void kernel_bardenhagen_grid_update_3d(
     const int* d_mat_tag = nullptr,
     bool enable_impact_welding = false,
     bool enable_frictional_heating = false,
-    const unsigned int* d_tie_mask = nullptr)
+    const unsigned int* d_tie_mask = nullptr,
+    MPMGridView3D gv = {})
 {
-    int idx;
+    int logical_idx;
     if (active_nodes && num_active > 0) {
         int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (t_idx >= num_active) return;
-        idx = active_nodes[t_idx];
+        logical_idx = active_nodes[t_idx];
     } else {
-        idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= num_nodes) return;
+        logical_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        int total_logical = (gv.nx > 0) ? (gv.nx * gv.ny * gv.nz) : num_nodes;
+        if (logical_idx >= total_logical) return;
     }
+
+    const long long slot_ll = (gv.nx > 0) ? gv.slotIndexFromLogical(logical_idx) : static_cast<long long>(logical_idx);
+    if (slot_ll < 0) return;
+    const size_t idx = static_cast<size_t>(slot_ll);
 
     MPMGridNode3D& node = grid[idx];
     if (node.m <= 1.0e-20f) return;
@@ -1399,9 +1496,9 @@ __global__ void kernel_bardenhagen_grid_update_3d(
     node.dT_cond = 0.0f;
     node.q_fric = 0.0f;
 
-    int k = idx % nz;
-    int j = (idx / nz) % ny;
-    int i = idx / (ny * nz);
+    int k = logical_idx % nz;
+    int j = (logical_idx / nz) % ny;
+    int i = logical_idx / (ny * nz);
 
     float m_cm = 0.0f;
     float p_cm[3] = {0.0f, 0.0f, 0.0f};
@@ -1617,13 +1714,25 @@ __global__ void kernel_bardenhagen_grid_update_3d(
         return;
     }
 
-    // Face-neighbour node indices (clamped to self at domain boundaries)
-    const size_t n_ip = (i + 1 < nx) ? ((static_cast<size_t>(i + 1) * ny + j) * nz + k) : static_cast<size_t>(idx);
-    const size_t n_im = (i > 0)      ? ((static_cast<size_t>(i - 1) * ny + j) * nz + k) : static_cast<size_t>(idx);
-    const size_t n_jp = (j + 1 < ny) ? ((static_cast<size_t>(i) * ny + (j + 1)) * nz + k) : static_cast<size_t>(idx);
-    const size_t n_jm = (j > 0)      ? ((static_cast<size_t>(i) * ny + (j - 1)) * nz + k) : static_cast<size_t>(idx);
-    const size_t n_kp = (k + 1 < nz) ? ((static_cast<size_t>(i) * ny + j) * nz + (k + 1)) : static_cast<size_t>(idx);
-    const size_t n_km = (k > 0)      ? ((static_cast<size_t>(i) * ny + j) * nz + (k - 1)) : static_cast<size_t>(idx);
+    // Face-neighbour node physical slots (clamped to self at domain boundaries; -1 if unallocated interior tile)
+    auto resolve_nb = [&](int ni, int nj, int nk) -> long long {
+        if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) {
+            return static_cast<long long>(idx);
+        }
+        return (gv.nx > 0) ? gv.slotIndex(ni, nj, nk)
+                           : static_cast<long long>((static_cast<size_t>(ni) * ny + nj) * nz + nk);
+    };
+    const long long n_ip = resolve_nb(i + 1, j, k);
+    const long long n_im = resolve_nb(i - 1, j, k);
+    const long long n_jp = resolve_nb(i, j + 1, k);
+    const long long n_jm = resolve_nb(i, j - 1, k);
+    const long long n_kp = resolve_nb(i, j, k + 1);
+    const long long n_km = resolve_nb(i, j, k - 1);
+
+    auto mat_mass_nb = [&](int m, long long nb_slot) -> float {
+        return (nb_slot >= 0) ? mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, static_cast<size_t>(nb_slot))
+                              : 0.0f;
+    };
 
     // On-the-fly 2nd-order finite difference normals (evaluated strictly on multi-material interface cells)
     // Normalize each material's mass gradient to a unit vector g_hat_m and weight by nodal mass m_m
@@ -1634,12 +1743,9 @@ __global__ void kernel_bardenhagen_grid_update_3d(
     for (int m = 0; m < num_materials; ++m) {
         float mat_mass = d_mat_m[row(m)];
         if (mat_mass > 1.0e-20f) {
-            float gm_x = (mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_im) -
-                          mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_ip)) * inv_2dx;
-            float gm_y = (mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_jm) -
-                          mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_jp)) * inv_2dx;
-            float gm_z = (mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_km) -
-                          mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_kp)) * inv_2dx;
+            float gm_x = (mat_mass_nb(m, n_im) - mat_mass_nb(m, n_ip)) * inv_2dx;
+            float gm_y = (mat_mass_nb(m, n_jm) - mat_mass_nb(m, n_jp)) * inv_2dx;
+            float gm_z = (mat_mass_nb(m, n_km) - mat_mass_nb(m, n_kp)) * inv_2dx;
 
             float gm_len = sqrtf(gm_x * gm_x + gm_y * gm_y + gm_z * gm_z);
             if (gm_len > 1.0e-20f) {
@@ -1727,12 +1833,9 @@ __global__ void kernel_bardenhagen_grid_update_3d(
                 f_v[m][0] = d_mat_p[mn * 3 + 0] * inv_mm;
                 f_v[m][1] = d_mat_p[mn * 3 + 1] * inv_mm;
                 f_v[m][2] = d_mat_p[mn * 3 + 2] * inv_mm;
-                f_gm[m][0] = (mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_im) -
-                              mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_ip)) * inv_2dx;
-                f_gm[m][1] = (mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_jm) -
-                              mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_jp)) * inv_2dx;
-                f_gm[m][2] = (mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_km) -
-                              mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_kp)) * inv_2dx;
+                f_gm[m][0] = (mat_mass_nb(m, n_im) - mat_mass_nb(m, n_ip)) * inv_2dx;
+                f_gm[m][1] = (mat_mass_nb(m, n_jm) - mat_mass_nb(m, n_jp)) * inv_2dx;
+                f_gm[m][2] = (mat_mass_nb(m, n_km) - mat_mass_nb(m, n_kp)) * inv_2dx;
                 const float gl = sqrtf(f_gm[m][0] * f_gm[m][0] + f_gm[m][1] * f_gm[m][1] + f_gm[m][2] * f_gm[m][2]);
                 if (gl > 1.0e-20f) {
                     f_gh[m][0] = f_gm[m][0] / gl; f_gh[m][1] = f_gm[m][1] / gl; f_gh[m][2] = f_gm[m][2] / gl;
@@ -1924,12 +2027,9 @@ __global__ void kernel_bardenhagen_grid_update_3d(
 
         float v_corr[3] = {v_star[0], v_star[1], v_star[2]};
 
-        float gm_x = (mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_im) -
-                      mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_ip)) * inv_2dx;
-        float gm_y = (mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_jm) -
-                      mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_jp)) * inv_2dx;
-        float gm_z = (mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_km) -
-                      mpm_mat_mass_at(grid, d_mat_tag, d_mat_m, num_materials, N, m, n_kp)) * inv_2dx;
+        float gm_x = (mat_mass_nb(m, n_im) - mat_mass_nb(m, n_ip)) * inv_2dx;
+        float gm_y = (mat_mass_nb(m, n_jm) - mat_mass_nb(m, n_jp)) * inv_2dx;
+        float gm_z = (mat_mass_nb(m, n_km) - mat_mass_nb(m, n_kp)) * inv_2dx;
 
         float gm_len = sqrtf(gm_x * gm_x + gm_y * gm_y + gm_z * gm_z);
         float inv_gm = (gm_len > 1.0e-20f) ? (1.0f / gm_len) : 0.0f;
@@ -2060,25 +2160,28 @@ __global__ void kernel_bardenhagen_grid_update_3d(
     node.p[2] = p2;
 }
 
-__global__ void kernel_smooth_plastic_strain_3d(const MPMGridNode3D* grid_in, float* plastic_strain_out, int nx, int ny, int nz, const int* active_nodes, int num_active) {
-    int idx;
+__global__ void kernel_smooth_plastic_strain_3d(const MPMGridNode3D* grid_in, float* plastic_strain_out, int nx, int ny, int nz, const int* active_nodes, int num_active, MPMGridView3D gv = {}) {
+    int logical_idx;
     if (active_nodes && num_active > 0) {
         int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (t_idx >= num_active) return;
-        idx = active_nodes[t_idx];
+        logical_idx = active_nodes[t_idx];
     } else {
-        idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= nx * ny * nz) return;
+        logical_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (logical_idx >= nx * ny * nz) return;
     }
 
-    plastic_strain_out[idx] = grid_in[idx].plastic_strain;
-    if (grid_in[idx].m_solid <= 1.0e-20f || grid_in[idx].plastic_strain <= 0.0f) return;
+    const long long slot_ll = (gv.nx > 0) ? gv.slotIndexFromLogical(logical_idx) : static_cast<long long>(logical_idx);
+    if (slot_ll < 0) return;
 
-    int k = idx % nz;
-    int j = (idx / nz) % ny;
-    int i = idx / (ny * nz);
+    plastic_strain_out[slot_ll] = grid_in[slot_ll].plastic_strain;
+    if (grid_in[slot_ll].m_solid <= 1.0e-20f || grid_in[slot_ll].plastic_strain <= 0.0f) return;
 
-    float sum_ep = 2.0f * grid_in[idx].plastic_strain;
+    int k = logical_idx % nz;
+    int j = (logical_idx / nz) % ny;
+    int i = logical_idx / (ny * nz);
+
+    float sum_ep = 2.0f * grid_in[slot_ll].plastic_strain;
     float weight_sum = 2.0f;
 
     for (int di = -1; di <= 1; ++di) {
@@ -2087,53 +2190,60 @@ __global__ void kernel_smooth_plastic_strain_3d(const MPMGridNode3D* grid_in, fl
                 if (di == 0 && dj == 0 && dk == 0) continue;
                 int ni = i + di; int nj = j + dj; int nk = k + dk;
                 if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
-                    size_t n_idx = (static_cast<size_t>(ni) * ny + nj) * nz + nk;
-                    if (grid_in[n_idx].m_solid > 1.0e-20f) {
+                    const long long n_slot = (gv.nx > 0) ? gv.slotIndex(ni, nj, nk)
+                                                         : static_cast<long long>((static_cast<size_t>(ni) * ny + nj) * nz + nk);
+                    if (n_slot >= 0 && grid_in[n_slot].m_solid > 1.0e-20f) {
                         float w = 1.0f / static_cast<float>(abs(di) + abs(dj) + abs(dk));
-                        sum_ep += w * grid_in[n_idx].plastic_strain;
+                        sum_ep += w * grid_in[n_slot].plastic_strain;
                         weight_sum += w;
                     }
                 }
             }
         }
     }
-    plastic_strain_out[idx] = sum_ep / weight_sum;
+    plastic_strain_out[slot_ll] = sum_ep / weight_sum;
 }
 
-__global__ void kernel_copy_smoothed_plastic_strain_3d(MPMGridNode3D* grid_in, const float* plastic_strain_out, int num_nodes, const int* active_nodes, int num_active) {
-    int idx;
+__global__ void kernel_copy_smoothed_plastic_strain_3d(MPMGridNode3D* grid_in, const float* plastic_strain_out, int num_nodes, const int* active_nodes, int num_active, MPMGridView3D gv = {}) {
+    int logical_idx;
     if (active_nodes && num_active > 0) {
         int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (t_idx >= num_active) return;
-        idx = active_nodes[t_idx];
+        logical_idx = active_nodes[t_idx];
     } else {
-        idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= num_nodes) return;
+        logical_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        int total_logical = (gv.nx > 0) ? (gv.nx * gv.ny * gv.nz) : num_nodes;
+        if (logical_idx >= total_logical) return;
     }
-    if (grid_in[idx].m_solid > 1.0e-20f) {
-        grid_in[idx].plastic_strain = plastic_strain_out[idx];
+    const long long slot_ll = (gv.nx > 0) ? gv.slotIndexFromLogical(logical_idx) : static_cast<long long>(logical_idx);
+    if (slot_ll < 0) return;
+    if (grid_in[slot_ll].m_solid > 1.0e-20f) {
+        grid_in[slot_ll].plastic_strain = plastic_strain_out[slot_ll];
     }
 }
 
-__global__ void kernel_thermal_conduction_3d(MPMGridNode3D* grid, int nx, int ny, int nz, float dx, float dy, float dz, float dt, const int* active_nodes, int num_active) {
+__global__ void kernel_thermal_conduction_3d(MPMGridNode3D* grid, int nx, int ny, int nz, float dx, float dy, float dz, float dt, const int* active_nodes, int num_active, MPMGridView3D gv = {}) {
     (void)dx; (void)dy; (void)dz; (void)dt;
-    int idx;
+    int logical_idx;
     if (active_nodes && num_active > 0) {
         int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (t_idx >= num_active) return;
-        idx = active_nodes[t_idx];
+        logical_idx = active_nodes[t_idx];
     } else {
-        idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= nx * ny * nz) return;
+        logical_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (logical_idx >= nx * ny * nz) return;
     }
 
-    MPMGridNode3D& node = grid[idx];
+    const long long slot_ll = (gv.nx > 0) ? gv.slotIndexFromLogical(logical_idx) : static_cast<long long>(logical_idx);
+    if (slot_ll < 0) return;
+
+    MPMGridNode3D& node = grid[slot_ll];
     node.dT_cond = 0.0f;
     if (node.m <= 1.0e-20f) return;
 
-    int k = idx % nz;
-    int j = (idx / nz) % ny;
-    int i = idx / (ny * nz);
+    int k = logical_idx % nz;
+    int j = (logical_idx / nz) % ny;
+    int i = logical_idx / (ny * nz);
 
     constexpr float Fo_step = 0.05f;
     const float T_i = node.temperature;
@@ -2147,11 +2257,14 @@ __global__ void kernel_thermal_conduction_3d(MPMGridNode3D* grid, int nx, int ny
         int nj = j + dj[d];
         int nk = k + dk[d];
         if (ni >= 0 && ni < nx && nj >= 0 && nj < ny && nk >= 0 && nk < nz) {
-            size_t n_idx = (static_cast<size_t>(ni) * ny + nj) * nz + nk;
-            const MPMGridNode3D& nb = grid[n_idx];
-            if (nb.m > 1.0e-20f) {
-                float m_harm = (2.0f * m_i * nb.m) / (m_i + nb.m);
-                flux_sum += m_harm * (nb.temperature - T_i);
+            const long long n_slot = (gv.nx > 0) ? gv.slotIndex(ni, nj, nk)
+                                                 : static_cast<long long>((static_cast<size_t>(ni) * ny + nj) * nz + nk);
+            if (n_slot >= 0) {
+                const MPMGridNode3D& nb = grid[n_slot];
+                if (nb.m > 1.0e-20f) {
+                    float m_harm = (2.0f * m_i * nb.m) / (m_i + nb.m);
+                    flux_sum += m_harm * (nb.temperature - T_i);
+                }
             }
         }
     }
@@ -2341,13 +2454,16 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                                        const int* d_mat_tag = nullptr,
                                        bool enable_frictional_heating = false,
                                        bool enable_thermal_conduction = false,
-                                       bool enable_impact_welding = false) {
+                                       bool enable_impact_welding = false,
+                                       MPMGridView3D gv = {},
+                                       size_t num_pool_nodes = 0,
+                                       bool defer_fv_erosion_to_coupler = false) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (p_idx >= num_particles) return;
 
     if ((soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
 
-    size_t num_nodes_total = static_cast<size_t>(nx) * ny * nz;
+    size_t num_nodes_total = (num_pool_nodes > 0) ? num_pool_nodes : (static_cast<size_t>(nx) * ny * nz);
     int p_mat = (soa.material_id && num_materials > 0) ? min(max(soa.material_id[p_idx], 0), num_materials - 1) : 0;
     bool is_multi_mat = (d_mat_grid_m != nullptr && d_mat_grid_v != nullptr);
 
@@ -2548,7 +2664,10 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
 
                         float weight = w * inv_w_sum;
 
-                        size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                        const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k)
+                                                              : static_cast<long long>((static_cast<size_t>(i) * ny + j) * nz + k);
+                        if (slot_ll < 0) continue;
+                        size_t node_idx = static_cast<size_t>(slot_ll);
                         const MPMGridNode3D& node = grid[node_idx];
 
                         if (is_multi_mat) {
@@ -2821,7 +2940,10 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                     float dN_dy = Sx * dSy * Sz;
                     float dN_dz = Sx * Sy * dSz;
 
-                    size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                    const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k)
+                                                          : static_cast<long long>((static_cast<size_t>(i) * ny + j) * nz + k);
+                    if (slot_ll < 0) continue;
+                    size_t node_idx = static_cast<size_t>(slot_ll);
                     const MPMGridNode3D& node = grid[node_idx];
 
                     float n_vx = 0.0f, n_vy = 0.0f, n_vz = 0.0f;
@@ -3077,7 +3199,13 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                     float dN_dy = Sx * dSy * Sz;
                     float dN_dz = Sx * Sy * dSz;
 
-                    size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                    const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k)
+                                                          : static_cast<long long>((static_cast<size_t>(i) * ny + j) * nz + k);
+                    if (slot_ll < 0) {
+                        any_missing_node = true;
+                        continue;
+                    }
+                    size_t node_idx = static_cast<size_t>(slot_ll);
                     const MPMGridNode3D& node = grid[node_idx];
 
                     float n_vx = 0.0f, n_vy = 0.0f, n_vz = 0.0f;
@@ -3567,6 +3695,36 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
     if constexpr (FUSE_STRESS) {
         update_particle_stress_constitutive(p_idx, dt, L_eff, soa, mat, ep_smoothed, enable_impact_welding);
     }
+
+    // Density-Based Particle Erosion (Standalone MPM or when not deferred to FV Coupler)
+    if (mat.enable_density_erosion && (!soa.state || soa.state[p_idx] != 2) && soa.m[p_idx] > 0.0f) {
+        const bool is_fluid_or_energetic = is_fluid_water || is_energetic_p;
+        const bool defer_to_fv = defer_fv_erosion_to_coupler && mat.erode_to_fv_grid && is_fluid_or_energetic;
+        if (!defer_to_fv) {
+            const float m_p = soa.m[p_idx];
+            const float V_p = fmaxf(soa.V[p_idx], 1.0e-30f);
+            const float V0_p = fmaxf(soa.V0[p_idx], 1.0e-30f);
+            const float rho_p = m_p / V_p;
+            const float rho0 = (is_fluid_water && mat.tait_rho0 > 0.0f) ? mat.tait_rho0 : mat.density;
+            const float rho_thresh = fmaxf(mat.erosion_min_density, mat.erosion_min_density_ratio * rho0);
+            const float lam_p = soa.lambda ? soa.lambda[p_idx] : 0.0f;
+            const bool burn_ready = !is_energetic_p || (lam_p >= 0.5f || V_p > 1.05f * V0_p);
+            if (rho_thresh > 0.0f && burn_ready && rho_p < rho_thresh) {
+                if (soa.state) soa.state[p_idx] = 2;
+                soa.m[p_idx] = 0.0f;
+                soa.v[0][p_idx] = 0.0f; soa.v[1][p_idx] = 0.0f; soa.v[2][p_idx] = 0.0f;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        soa.B[r][c][p_idx] = 0.0f;
+                    }
+                }
+                store_particle_stress_isotropic(soa, p_idx, 0.0f);
+                if (d_boundary_flags) {
+                    d_boundary_flags[1] = 1;
+                }
+            }
+        }
+    }
 }
 
 // 3a. Standalone G2P Kernel
@@ -3588,12 +3746,16 @@ __global__ void kernel_g2p_3d(MPMParticle3DSoA soa, int num_particles,
                               const int* d_mat_tag = nullptr,
                               bool enable_frictional_heating = false,
                               bool enable_thermal_conduction = false,
-                              bool enable_impact_welding = false) {
+                              bool enable_impact_welding = false,
+                              MPMGridView3D gv = {},
+                              size_t num_pool_nodes = 0,
+                              bool defer_fv_erosion_to_coupler = false) {
     g2p_device_impl<false>(soa, num_particles, grid, nx, ny, nz, dx, dy, dz, dt, transfer_scheme,
                            velocity_scheme, flip_blend, xmin, ymin, zmin,
                            bc_x_min, bc_x_max, bc_y_min, bc_y_max, bc_z_min, bc_z_max, d_mat_tables,
                            d_mat_grid_m, d_mat_grid_v, d_mat_grid_dv, num_materials, zonal_params, d_boundary_flags, d_mat_tag,
-                           enable_frictional_heating, enable_thermal_conduction, enable_impact_welding);
+                           enable_frictional_heating, enable_thermal_conduction, enable_impact_welding,
+                           gv, num_pool_nodes, defer_fv_erosion_to_coupler);
 }
 
 // 3b. Fused G2P + Constitutive Stress Update Kernel (Single-Pass Leapfrog / Zero L_grad VRAM Traffic)
@@ -3615,12 +3777,16 @@ __global__ void kernel_g2p_stress_update_3d(MPMParticle3DSoA soa, int num_partic
                                             const int* d_mat_tag = nullptr,
                                             bool enable_frictional_heating = false,
                                             bool enable_thermal_conduction = false,
-                                            bool enable_impact_welding = false) {
+                                            bool enable_impact_welding = false,
+                                            MPMGridView3D gv = {},
+                                            size_t num_pool_nodes = 0,
+                                            bool defer_fv_erosion_to_coupler = false) {
     g2p_device_impl<true>(soa, num_particles, grid, nx, ny, nz, dx, dy, dz, dt, transfer_scheme,
                           velocity_scheme, flip_blend, xmin, ymin, zmin,
                           bc_x_min, bc_x_max, bc_y_min, bc_y_max, bc_z_min, bc_z_max, d_mat_tables,
                           d_mat_grid_m, d_mat_grid_v, d_mat_grid_dv, num_materials, zonal_params, d_boundary_flags, d_mat_tag,
-                          enable_frictional_heating, enable_thermal_conduction, enable_impact_welding);
+                          enable_frictional_heating, enable_thermal_conduction, enable_impact_welding,
+                          gv, num_pool_nodes, defer_fv_erosion_to_coupler);
 }
 
 // 4. Stress Update Constitutive Routine (Shared by Fused G2P-Stress and Standalone Stress Update)
@@ -4107,22 +4273,38 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         // Pillar 1: Solid Reactant EOS (Mie-Grüneisen / Davis). The ambient confining pressure is
         // carried by the reference compression set at initialisation (v_rel < 1), so the EOS is
         // evaluated directly from (v_rel, e_th) without any stress-history offset.
-        float p_solid = awe
-            ? static_cast<float>(CrestDavis::computeCRESTSolidPressure(v_rel, fmaxf(0.0f, e_th), awe_q))
-            : use_davis_solid
-            ? CrestDavis::computeDavisReactantPressure(v_rel, e_th, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0)
-            : JWL::computeSolidReactantPressure(v_rel, e_th, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density);
+        const bool use_jwl_reactant = (mat.solid_model == SolidReactantEOS::JWLReactant);
+        auto solid_pressure_at = [&](float v) -> float {
+            return awe
+                ? static_cast<float>(CrestDavis::computeCRESTSolidPressure(v, fmaxf(0.0f, e_th), awe_q))
+                : use_jwl_reactant
+                ? JWL::computeJWLReactantPressure(v, e_th, mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_omega, mat.jwlr_Cv, mat.jwlr_T0, mat.density)
+                : use_davis_solid
+                ? CrestDavis::computeDavisReactantPressure(v, e_th, mat.davis_c0, mat.davis_s1, mat.davis_gamma0, mat.davis_cv, mat.davis_t0, mat.davis_rho0)
+                : JWL::computeSolidReactantPressure(v, e_th, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mat.density);
+        };
 
         // Pillar 3: Detonation Products EOS
-        float p_prod = awe
-            ? JWL::computeJWLProductPressure(v_rel * awe_vtmd, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, static_cast<float>(awe_q.rho0s))
-            : use_davis_prod
-            ? CrestDavis::computeDavisProductPressure(v_rel, e_prod, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0)
-            : JWL::computeJWLProductPressure(v_rel, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.density);
+        auto product_pressure_at = [&](float v) -> float {
+            return awe
+                ? JWL::computeJWLProductPressure(v * awe_vtmd, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, static_cast<float>(awe_q.rho0s))
+                : use_davis_prod
+                ? CrestDavis::computeDavisProductPressure(v, e_prod, mat.davis_a, mat.davis_b, mat.davis_k, mat.davis_vc, mat.davis_pc, mat.davis_q_det, mat.davis_rho0)
+                : JWL::computeJWLProductPressure(v, e_prod, mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.density);
+        };
 
-        // Two-phase pressure blend
-        float p_mix = (1.0f - lam_new) * p_solid + lam_new * p_prod;
+        // Two-phase mixture. Lee-Tarver kinetics use the selectable mixture rule (default: pressure
+        // equilibrium with volume additivity); all other reactive models keep the linear blend.
+        const Mixture::Rule mix_rule = is_lt_kinetics
+            ? static_cast<Mixture::Rule>(mat.mixture_rule) : Mixture::Rule::LinearBlend;
+        const Mixture::Result mix = Mixture::mixturePressure(mix_rule, static_cast<double>(v_rel), static_cast<double>(lam_new),
+            [&](double v) { return static_cast<double>(solid_pressure_at(static_cast<float>(v))); },
+            [&](double v) { return static_cast<double>(product_pressure_at(static_cast<float>(v))); });
+        float p_mix = static_cast<float>(mix.p);
         if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+        // Phase pressures at the phase volumes chosen by the mixture rule (used by sound-speed/CFL closures)
+        [[maybe_unused]] const float p_solid = solid_pressure_at(static_cast<float>(mix.v_s));
+        [[maybe_unused]] const float p_prod = product_pressure_at(static_cast<float>(mix.v_p));
 
         float rho_ref = (mat.density > 10.0f) ? mat.density : (use_davis_solid ? mat.davis_rho0 : 1630.0f);
         float rho_cur = rho_ref / v_rel;
@@ -4857,7 +5039,8 @@ __global__ void kernel_sample_grid_velocity_single(
     const float* d_mat_grid_dv,
     int num_materials,
     size_t num_nodes_total,
-    float* out_vel_and_flag // float4: vx, vy, vz, flag (1.0 = success, 0.0 = out of bounds / empty)
+    float* out_vel_and_flag, // float4: vx, vy, vz, flag (1.0 = success, 0.0 = out of bounds / empty)
+    MPMGridView3D gv = {}
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     out_vel_and_flag[0] = 0.0f;
@@ -4913,7 +5096,10 @@ __global__ void kernel_sample_grid_velocity_single(
                     float weight = evalWendland_C2_dev(r, R_supp);
                     if (weight < 1.0e-7f) continue;
 
-                    size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                    const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k)
+                                                          : static_cast<long long>((static_cast<size_t>(i) * ny + j) * nz + k);
+                    if (slot_ll < 0) continue;
+                    size_t node_idx = static_cast<size_t>(slot_ll);
                     float n_vx = 0.0f, n_vy = 0.0f, n_vz = 0.0f;
                     bool node_valid = false;
 
@@ -5020,7 +5206,10 @@ __global__ void kernel_sample_grid_velocity_single(
 
                     float weight = Sx * Sy * Sz;
                     if (weight < 1.0e-7f) continue;
-                    size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                    const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k)
+                                                          : static_cast<long long>((static_cast<size_t>(i) * ny + j) * nz + k);
+                    if (slot_ll < 0) continue;
+                    size_t node_idx = static_cast<size_t>(slot_ll);
                     float n_vx = 0.0f, n_vy = 0.0f, n_vz = 0.0f;
                     bool node_valid = false;
 
@@ -5165,6 +5354,18 @@ MPMSolver3DCUDA::MPMSolver3DCUDA() {}
 
 MPMSolver3DCUDA::~MPMSolver3DCUDA() {
     freeDeviceMemory();
+}
+
+void MPMSolver3DCUDA::setSparseGridMode(bool sparse) {
+    if (m_sparse_grid_mode != sparse) {
+        m_sparse_grid_mode = sparse;
+        if (d_grid) {
+            freeDeviceMemory();
+            m_device_dirty = true;
+        } else if (d_mat_tag || d_mat_grid_buffer) {
+            freeMatGridBuffers();
+        }
+    }
 }
 
 void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
@@ -5354,15 +5555,65 @@ void MPMSolver3DCUDA::downloadSoA2AoS() {
 }
 
 void MPMSolver3DCUDA::allocateDeviceMemory() {
-    size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
     size_t num_particles = m_host_particles.size();
     size_t num_materials = m_material_tables.size();
 
+    size_t num_grid_nodes = 0;
+    if (m_sparse_grid_mode && m_nx > 0 && m_ny > 0 && m_nz > 0) {
+        m_ntx = (m_nx + 7) >> 3;
+        m_nty = (m_ny + 7) >> 3;
+        m_ntz = (m_nz + 7) >> 3;
+        size_t total_tiles = static_cast<size_t>(m_ntx) * m_nty * m_ntz;
+        if (total_tiles > m_allocated_tile_table || !d_tile_table) {
+            if (d_tile_table) { cudaFree(d_tile_table); d_tile_table = nullptr; }
+            CUDA_CHECK_ALLOC(cudaMalloc(&d_tile_table, total_tiles * sizeof(int)),
+                             "Allocating d_tile_table (" + std::to_string(total_tiles) + " ints)");
+            cudaMemset(d_tile_table, 0xFF, total_tiles * sizeof(int));
+            m_allocated_tile_table = total_tiles;
+            m_host_tile_table.assign(total_tiles, -1);
+            m_num_active_tiles = 0;
+        }
+        if (!d_num_active_tiles) {
+            CUDA_CHECK_ALLOC(cudaMalloc(&d_num_active_tiles, sizeof(int)), "Allocating d_num_active_tiles");
+            cudaMemset(d_num_active_tiles, 0, sizeof(int));
+        }
+        if (m_tile_capacity == 0 || m_num_active_tiles == 0) {
+            size_t est_tiles = std::max<size_t>(64, (num_particles / 2048) + 64);
+            m_tile_capacity = std::max(m_tile_capacity, std::min(total_tiles, est_tiles));
+        }
+        if (m_tile_capacity > m_allocated_active_tiles || !d_active_tiles) {
+            if (d_active_tiles) { cudaFree(d_active_tiles); d_active_tiles = nullptr; }
+            CUDA_CHECK_ALLOC(cudaMalloc(&d_active_tiles, m_tile_capacity * sizeof(int)),
+                             "Allocating d_active_tiles (" + std::to_string(m_tile_capacity) + " ints)");
+            m_allocated_active_tiles = m_tile_capacity;
+        }
+        num_grid_nodes = m_tile_capacity * 512;
+    } else {
+        num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+    }
+
     if (num_grid_nodes > m_allocated_grid_nodes) {
-        if (d_grid) cudaFree(d_grid);
-        if (d_grid_n) cudaFree(d_grid_n);
+        // Free-Before-Reallocate to avoid double-allocation VRAM spike
+        if (d_grid) { cudaFree(d_grid); d_grid = nullptr; }
+        if (d_grid_n) { cudaFree(d_grid_n); d_grid_n = nullptr; }
+        m_allocated_grid_nodes = 0;
+
+        size_t req_bytes = num_grid_nodes * (sizeof(MPMGridNode3D) + sizeof(float));
+        size_t free_vram = 0, total_vram = 0;
+        if (cudaMemGetInfo(&free_vram, &total_vram) == cudaSuccess) {
+            constexpr size_t kHeadroomBytes = 512ULL * 1024ULL * 1024ULL;
+            if (req_bytes + kHeadroomBytes > free_vram) {
+                throw std::runtime_error(
+                    "[MPMSolver3DCUDA] VRAM budget guard: allocating " +
+                    std::to_string(req_bytes / (1024 * 1024)) + " MiB for MPM grid pool (" +
+                    std::to_string(num_grid_nodes) + " nodes) would exceed safe VRAM limit (" +
+                    std::to_string(free_vram / (1024 * 1024)) + " MiB free of " +
+                    std::to_string(total_vram / (1024 * 1024)) + " MiB total, 512 MiB headroom required).");
+            }
+        }
         CUDA_CHECK_ALLOC(cudaMalloc(&d_grid, num_grid_nodes * sizeof(MPMGridNode3D)), "Allocating d_grid (" + std::to_string(num_grid_nodes) + " nodes)");
         CUDA_CHECK_ALLOC(cudaMalloc(&d_grid_n, num_grid_nodes * sizeof(float)), "Allocating d_grid_n (" + std::to_string(num_grid_nodes) + " floats)");
+        cudaMemset(d_grid, 0, num_grid_nodes * sizeof(MPMGridNode3D));
         m_allocated_grid_nodes = num_grid_nodes;
     }
 
@@ -5394,7 +5645,7 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
     }
 
     if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
-        allocateMatGridBuffers(num_grid_nodes, m_num_materials);
+        allocateMatGridBuffers(m_allocated_grid_nodes, m_num_materials);
     }
 
     if (!d_max_v_buf) {
@@ -5407,6 +5658,103 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
     }
     if (!d_det_vel_buffer) {
         CUDA_CHECK_ALLOC(cudaMalloc(&d_det_vel_buffer, 4 * sizeof(float)), "Allocating d_det_vel_buffer");
+    }
+}
+
+void MPMSolver3DCUDA::activateSparseTilesDevice(int num_particles, bool preserve_existing_tiles) {
+    if (!m_sparse_grid_mode || num_particles <= 0 || m_nx <= 0 || m_ny <= 0 || m_nz <= 0) return;
+    if (!d_tile_table || !d_active_tiles || !d_num_active_tiles) {
+        allocateDeviceMemory();
+    }
+
+    const int threads = 256;
+    const int blocks_p = (num_particles + threads - 1) / threads;
+    const int stencil_pad = (m_transfer_scheme == MPMTransferScheme::RadialMLS ||
+                             m_transfer_scheme == MPMTransferScheme::CubicBSpline) ? 3 : 2;
+    const size_t total_tiles = static_cast<size_t>(m_ntx) * m_nty * m_ntz;
+
+    if (!preserve_existing_tiles) {
+        if (m_num_active_tiles > 0 && static_cast<size_t>(m_num_active_tiles) <= m_tile_capacity) {
+            int blocks_t = (m_num_active_tiles + threads - 1) / threads;
+            kernel_reset_active_tiles_3d<<<blocks_t, threads>>>(d_tile_table, d_active_tiles, m_num_active_tiles);
+        } else {
+            cudaMemsetAsync(d_tile_table, 0xFF, total_tiles * sizeof(int));
+        }
+        cudaMemsetAsync(d_num_active_tiles, 0, sizeof(int));
+        m_num_active_tiles = 0;
+    }
+
+    for (;;) {
+        kernel_activate_sparse_tiles_3d<<<blocks_p, threads>>>(
+            d_soa, num_particles, m_nx, m_ny, m_nz,
+            m_dx, m_dy, m_dz, m_xmin, m_ymin, m_zmin,
+            stencil_pad, d_tile_table, m_ntx, m_nty, m_ntz,
+            d_active_tiles, d_num_active_tiles, static_cast<int>(m_tile_capacity));
+
+        int needed_tiles = 0;
+        cudaMemcpy(&needed_tiles, d_num_active_tiles, sizeof(int), cudaMemcpyDeviceToHost);
+        if (needed_tiles < 0) {
+            throw std::runtime_error("[MPMSolver3DCUDA] Sparse tile counter overflow");
+        }
+        if (static_cast<size_t>(needed_tiles) <= m_tile_capacity) {
+            m_num_active_tiles = needed_tiles;
+            break;
+        }
+
+        // Grow sparse tile pool using Free-Before-Reallocate + live cudaMemGetInfo guard
+        size_t needed_sz = static_cast<size_t>(needed_tiles);
+        size_t new_cap = std::max(needed_sz + needed_sz / 2, m_tile_capacity + m_tile_capacity / 2);
+        new_cap = std::max(std::min(new_cap, total_tiles), needed_sz);
+        size_t new_nodes = new_cap * 512;
+
+        std::cerr << "[MPM3D-CUDA] Growing sparse 8x8x8 tile pool: "
+                  << m_tile_capacity << " -> " << new_cap << " tiles ("
+                  << needed_tiles << " active tiles, "
+                  << (new_nodes * sizeof(MPMGridNode3D)) / (1024.0 * 1024.0)
+                  << " MiB d_grid)" << std::endl;
+
+        if (d_grid) { cudaFree(d_grid); d_grid = nullptr; }
+        if (d_grid_n) { cudaFree(d_grid_n); d_grid_n = nullptr; }
+        if (d_active_nodes) { cudaFree(d_active_nodes); d_active_nodes = nullptr; m_allocated_active_nodes = 0; }
+        if (d_active_tiles) { cudaFree(d_active_tiles); d_active_tiles = nullptr; m_allocated_active_tiles = 0; }
+        if (d_f_ext_fsi) { cudaFree(d_f_ext_fsi); d_f_ext_fsi = nullptr; m_allocated_f_ext_fsi = 0; m_fsi_forces_active = false; }
+        if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
+            if (d_mat_tag) { cudaFree(d_mat_tag); d_mat_tag = nullptr; m_allocated_mat_tag_bytes = 0; }
+            if (!m_mat_grid_compact_layout && d_mat_grid_buffer) {
+                cudaFree(d_mat_grid_buffer);
+                d_mat_grid_buffer = nullptr;
+                m_allocated_mat_grid_bytes = 0;
+            }
+        }
+
+        size_t req_bytes = new_nodes * (sizeof(MPMGridNode3D) + sizeof(float) + sizeof(int)) + new_cap * sizeof(int);
+        size_t free_vram = 0, total_vram = 0;
+        if (cudaMemGetInfo(&free_vram, &total_vram) == cudaSuccess) {
+            constexpr size_t kHeadroomBytes = 512ULL * 1024ULL * 1024ULL;
+            if (req_bytes + kHeadroomBytes > free_vram) {
+                throw std::runtime_error(
+                    "[MPMSolver3DCUDA] VRAM budget guard: growing sparse tile pool to " +
+                    std::to_string(new_cap) + " tiles (" + std::to_string(req_bytes / (1024 * 1024)) +
+                    " MiB) would exceed safe VRAM limit (" + std::to_string(free_vram / (1024 * 1024)) +
+                    " MiB free of " + std::to_string(total_vram / (1024 * 1024)) + " MiB total, 512 MiB headroom required).");
+            }
+        }
+
+        m_tile_capacity = new_cap;
+        m_allocated_grid_nodes = new_nodes;
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_grid, new_nodes * sizeof(MPMGridNode3D)), "Reallocating sparse d_grid");
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_grid_n, new_nodes * sizeof(float)), "Reallocating sparse d_grid_n");
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_active_tiles, new_cap * sizeof(int)), "Reallocating d_active_tiles");
+        m_allocated_active_tiles = new_cap;
+        cudaMemset(d_grid, 0, new_nodes * sizeof(MPMGridNode3D));
+        allocateActiveNodeBuffers();
+        if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
+            allocateMatGridBuffers(m_allocated_grid_nodes, m_num_materials);
+        }
+
+        cudaMemset(d_tile_table, 0xFF, total_tiles * sizeof(int));
+        cudaMemset(d_num_active_tiles, 0, sizeof(int));
+        m_num_active_tiles = 0;
     }
 }
 
@@ -5432,6 +5780,9 @@ size_t MPMSolver3DCUDA::getAllocatedVRAM() const {
     total += m_allocated_slice_buf;                             // d_telemetry_slice_buf
     total += m_allocated_mat_grid_bytes;                        // d_mat_grid_buffer (dense fields or compact slots)
     total += m_allocated_mat_tag_bytes;                         // d_mat_tag (compact Bardenhagen layout)
+    total += m_allocated_tile_table * sizeof(int);              // d_tile_table (sparse mode)
+    total += m_allocated_active_tiles * sizeof(int);            // d_active_tiles (sparse mode)
+    if (d_num_active_tiles) total += sizeof(int);
     if (d_mat_slot_counters) total += 2 * sizeof(int);
     if (d_compaction_counters) total += 2 * sizeof(int);
     if (d_active_count) total += sizeof(int);
@@ -5442,7 +5793,9 @@ size_t MPMSolver3DCUDA::getAllocatedVRAM() const {
 }
 
 void MPMSolver3DCUDA::allocateActiveNodeBuffers() {
-    size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+    size_t num_grid_nodes = (m_allocated_grid_nodes > 0)
+        ? m_allocated_grid_nodes
+        : (m_sparse_grid_mode ? std::max<size_t>(64, m_tile_capacity) * 512 : static_cast<size_t>(m_nx) * m_ny * m_nz);
 
     if (num_grid_nodes > m_allocated_active_nodes) {
         if (d_active_nodes) cudaFree(d_active_nodes);
@@ -5465,6 +5818,15 @@ void MPMSolver3DCUDA::freeActiveNodeBuffers() {
 void MPMSolver3DCUDA::freeDeviceMemory() {
     if (d_grid) { cudaFree(d_grid); d_grid = nullptr; }
     if (d_grid_n) { cudaFree(d_grid_n); d_grid_n = nullptr; }
+    if (d_tile_table) { cudaFree(d_tile_table); d_tile_table = nullptr; }
+    if (d_active_tiles) { cudaFree(d_active_tiles); d_active_tiles = nullptr; }
+    if (d_num_active_tiles) { cudaFree(d_num_active_tiles); d_num_active_tiles = nullptr; }
+    m_allocated_tile_table = 0;
+    m_allocated_active_tiles = 0;
+    m_tile_capacity = 0;
+    m_num_active_tiles = 0;
+    m_host_tile_table.clear();
+    m_host_active_tiles.clear();
     if (d_particles) { cudaFree(d_particles); d_particles = nullptr; }
     if (d_temp_aos_particles) { cudaFree(d_temp_aos_particles); d_temp_aos_particles = nullptr; }
     m_allocated_temp_aos_particles = 0;
@@ -5478,7 +5840,7 @@ void MPMSolver3DCUDA::freeDeviceMemory() {
     if (d_max_v_buf) { cudaFree(d_max_v_buf); d_max_v_buf = nullptr; }
     if (d_max_v_pinned) { cudaFreeHost(d_max_v_pinned); d_max_v_pinned = nullptr; }
     if (d_telemetry_slice_buf) { cudaFree(d_telemetry_slice_buf); d_telemetry_slice_buf = nullptr; m_allocated_slice_buf = 0; }
-    if (d_f_ext_fsi) { cudaFree(d_f_ext_fsi); d_f_ext_fsi = nullptr; }
+    if (d_f_ext_fsi) { cudaFree(d_f_ext_fsi); d_f_ext_fsi = nullptr; m_allocated_f_ext_fsi = 0; m_fsi_forces_active = false; }
     if (d_zonal_ghost_p) { cudaFree(d_zonal_ghost_p); d_zonal_ghost_p = nullptr; m_allocated_zonal_ghost_p = 0; }
     if (d_dem_cell_head) { cudaFree(d_dem_cell_head); d_dem_cell_head = nullptr; }
     if (d_dem_particle_next) { cudaFree(d_dem_particle_next); d_dem_particle_next = nullptr; }
@@ -5497,10 +5859,14 @@ void MPMSolver3DCUDA::initializeGrid(int nx, int ny, int nz, float dx, float dy,
     m_nx = nx; m_ny = ny; m_nz = nz;
     m_dx = dx; m_dy = dy; m_dz = dz;
     m_xmin = xmin; m_ymin = ymin; m_zmin = zmin;
+    m_ntx = (nx + 7) >> 3;
+    m_nty = (ny + 7) >> 3;
+    m_ntz = (nz + 7) >> 3;
 
     m_host_grid.clear(); // Lazy host grid allocation: only allocate when syncGridToHost or CPU FSI is called
     m_host_particles.clear();
     m_num_active_particles = 0;
+    m_num_active_tiles = 0;
     m_terminated = false;
     allocateDeviceMemory();
     if (d_boundary_flags) {
@@ -5518,7 +5884,8 @@ void MPMSolver3DCUDA::setCompactMultiMaterialStorage(bool enable) {
     m_compact_mat_storage = enable;
     if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer &&
         m_mat_grid_compact_layout != isCompactMultiMaterialStorageActive()) {
-        allocateMatGridBuffers(static_cast<size_t>(m_nx) * m_ny * m_nz, m_num_materials);
+        size_t num_nodes = (m_allocated_grid_nodes > 0) ? m_allocated_grid_nodes : (static_cast<size_t>(m_nx) * m_ny * m_nz);
+        allocateMatGridBuffers(num_nodes, m_num_materials);
     }
 }
 
@@ -5528,7 +5895,8 @@ void MPMSolver3DCUDA::setInitialMultiMaterialSlotCapacity(size_t slots) {
         m_mat_slot_capacity = 0; // allow the shrink; allocateMatGridBuffers resets tags and slots
     }
     if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer) {
-        allocateMatGridBuffers(static_cast<size_t>(m_nx) * m_ny * m_nz, m_num_materials);
+        size_t num_nodes = (m_allocated_grid_nodes > 0) ? m_allocated_grid_nodes : (static_cast<size_t>(m_nx) * m_ny * m_nz);
+        allocateMatGridBuffers(num_nodes, m_num_materials);
     }
 }
 
@@ -5659,8 +6027,7 @@ void MPMSolver3DCUDA::freeMatGridBuffers() {
 void MPMSolver3DCUDA::setContactMethod(MPMContactMethod method) {
     m_contact_method = method;
     if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
-        size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
-        allocateMatGridBuffers(num_nodes, m_num_materials);
+        allocateMatGridBuffers(m_allocated_grid_nodes, m_num_materials);
     } else {
         freeMatGridBuffers();
     }
@@ -5701,8 +6068,7 @@ void MPMSolver3DCUDA::setObjectMaterialMapping(const std::vector<int>& obj_to_ma
     computeInitialContactTies();
 
     if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) {
-        size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
-        allocateMatGridBuffers(num_nodes, m_num_materials);
+        allocateMatGridBuffers(m_allocated_grid_nodes, m_num_materials);
     } else {
         freeMatGridBuffers();
     }
@@ -5849,8 +6215,12 @@ void MPMSolver3DCUDA::syncToDevice() {
     if (!m_host_particles.empty()) {
         uploadAoS2SoA();
     }
-    size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
-    cudaMemset(d_grid, 0, num_grid_nodes * sizeof(MPMGridNode3D));
+    if (m_sparse_grid_mode && m_num_active_particles > 0) {
+        activateSparseTilesDevice(static_cast<int>(m_num_active_particles), false);
+    }
+    if (d_grid && m_allocated_grid_nodes > 0) {
+        cudaMemset(d_grid, 0, m_allocated_grid_nodes * sizeof(MPMGridNode3D));
+    }
     m_device_dirty = false;
 }
 
@@ -5858,9 +6228,7 @@ void MPMSolver3DCUDA::syncToHost() {
     if (!m_host_particles.empty()) {
         downloadSoA2AoS();
     }
-    size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
-    m_host_grid.resize(num_grid_nodes);
-    cudaMemcpy(m_host_grid.data(), d_grid, num_grid_nodes * sizeof(MPMGridNode3D), cudaMemcpyDeviceToHost);
+    syncGridToHost();
 }
 
 void MPMSolver3DCUDA::syncParticlesToHost() {
@@ -5904,6 +6272,9 @@ MPMVTKSnapshot3D MPMSolver3DCUDA::extractVTKSnapshot(bool has_vel, bool has_stre
     const float inv_dz = (m_dz > 0.0f) ? (1.0f / m_dz) : 0.0f;
 
     if (d_soa_buffer) {
+        if (m_sparse_grid_mode && has_particle_density) {
+            activateSparseTilesDevice(static_cast<int>(count), true);
+        }
         constexpr size_t MAX_VTK_CHUNK_SIZE = 262144;
         size_t chunk_cap = std::min(count, MAX_VTK_CHUNK_SIZE);
 
@@ -5923,7 +6294,8 @@ MPMVTKSnapshot3D MPMSolver3DCUDA::extractVTKSnapshot(bool has_vel, bool has_stre
         if (has_particle_density) CUDA_CHECK_ALLOC(cudaMalloc(&d_pd, chunk_cap * sizeof(uint8_t)), "Allocating d_pd for VTK snapshot");
 
         int threads = 256;
-        const size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+        const size_t num_grid_nodes = m_allocated_grid_nodes;
+        const MPMGridView3D gv = getDeviceGridView();
         const bool can_count_grid = has_particle_density && d_grid && num_grid_nodes > 0 &&
                                     m_dx > 0.0f && m_dy > 0.0f && m_dz > 0.0f;
 
@@ -5935,7 +6307,8 @@ MPMVTKSnapshot3D MPMSolver3DCUDA::extractVTKSnapshot(bool has_vel, bool has_stre
                 d_soa, static_cast<int>(count),
                 d_grid, m_nx, m_ny, m_nz,
                 inv_dx, inv_dy, inv_dz,
-                m_xmin, m_ymin, m_zmin
+                m_xmin, m_ymin, m_zmin,
+                gv
             );
         }
 
@@ -5949,7 +6322,8 @@ MPMVTKSnapshot3D MPMSolver3DCUDA::extractVTKSnapshot(bool has_vel, bool has_stre
                 inv_dx, inv_dy, inv_dz,
                 m_xmin, m_ymin, m_zmin,
                 has_vel, has_stress, has_strain, has_damage, has_temp,
-                has_pressure, has_material_id, has_object_id, has_particle_density
+                has_pressure, has_material_id, has_object_id, has_particle_density,
+                gv
             );
             cudaDeviceSynchronize();
 
@@ -5981,8 +6355,8 @@ MPMVTKSnapshot3D MPMSolver3DCUDA::extractVTKSnapshot(bool has_vel, bool has_stre
         if (d_mat) cudaFree(d_mat);
         if (d_pd) cudaFree(d_pd);
     } else {
-        const size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
-        const bool can_count_host = has_particle_density && m_nx > 0 && m_ny > 0 && m_nz > 0 &&
+        const size_t num_grid_nodes = m_sparse_grid_mode ? m_host_grid.size() : (static_cast<size_t>(m_nx) * m_ny * m_nz);
+        const bool can_count_host = has_particle_density && !m_sparse_grid_mode && m_nx > 0 && m_ny > 0 && m_nz > 0 &&
                                     m_dx > 0.0f && m_dy > 0.0f && m_dz > 0.0f;
         if (can_count_host) {
             if (m_host_grid.size() < num_grid_nodes) {
@@ -6112,16 +6486,26 @@ MPMVTKSnapshot3D MPMSolver3DCUDA::extractVTKSnapshot(bool has_vel, bool has_stre
 }
 
 void MPMSolver3DCUDA::syncGridToHost() {
-    if (d_grid) {
-        size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
-        m_host_grid.resize(num_grid_nodes);
-        cudaMemcpy(m_host_grid.data(), d_grid, num_grid_nodes * sizeof(MPMGridNode3D), cudaMemcpyDeviceToHost);
+    if (d_grid && m_allocated_grid_nodes > 0) {
+        m_host_grid.resize(m_allocated_grid_nodes);
+        cudaMemcpy(m_host_grid.data(), d_grid, m_allocated_grid_nodes * sizeof(MPMGridNode3D), cudaMemcpyDeviceToHost);
+        if (m_sparse_grid_mode && d_tile_table) {
+            size_t total_tiles = static_cast<size_t>(m_ntx) * m_nty * m_ntz;
+            m_host_tile_table.resize(total_tiles);
+            cudaMemcpy(m_host_tile_table.data(), d_tile_table, total_tiles * sizeof(int), cudaMemcpyDeviceToHost);
+            if (m_num_active_tiles > 0 && d_active_tiles) {
+                m_host_active_tiles.resize(m_num_active_tiles);
+                cudaMemcpy(m_host_active_tiles.data(), d_active_tiles, m_num_active_tiles * sizeof(int), cudaMemcpyDeviceToHost);
+            } else {
+                m_host_active_tiles.clear();
+            }
+        }
     }
 }
 
 void MPMSolver3DCUDA::uploadGridToDevice() {
     if (d_grid && !m_host_grid.empty()) {
-        size_t num_grid_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+        size_t num_grid_nodes = std::min(m_allocated_grid_nodes, m_host_grid.size());
         cudaMemcpy(d_grid, m_host_grid.data(), num_grid_nodes * sizeof(MPMGridNode3D), cudaMemcpyHostToDevice);
         storeFSIForces();
     }
@@ -6133,16 +6517,18 @@ void MPMSolver3DCUDA::clearGridDevice() {
 
     const bool bardenhagen = (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer);
     const bool compact = bardenhagen && m_mat_grid_compact_layout;
+    const MPMGridView3D gv = getDeviceGridView();
+    const size_t num_nodes = m_allocated_grid_nodes;
 
     if (m_num_active_nodes > 0 && d_active_nodes) {
         int threads = 256;
         int blocks = (m_num_active_nodes + threads - 1) / threads;
-        kernel_clear_active_nodes_3d<<<blocks, threads>>>(d_grid, d_active_nodes, m_num_active_nodes);
+        kernel_clear_active_nodes_3d<<<blocks, threads>>>(d_grid, d_active_nodes, m_num_active_nodes, gv);
         if (compact) {
             // Every tagged node was appended to the active list on first touch, so resetting the
             // list restores all tags to EMPTY. Only the used slot prefix needs zeroing.
             if (d_mat_tag) {
-                kernel_reset_mat_tags_3d<<<blocks, threads>>>(d_mat_tag, d_active_nodes, m_num_active_nodes);
+                kernel_reset_mat_tags_3d<<<blocks, threads>>>(d_mat_tag, d_active_nodes, m_num_active_nodes, gv);
             }
             if (m_num_mat_slots > 0) {
                 const size_t mat_nodes = m_mat_slot_capacity * static_cast<size_t>(m_mat_slot_materials);
@@ -6154,15 +6540,13 @@ void MPMSolver3DCUDA::clearGridDevice() {
                 cudaMemsetAsync(base + 7 * mat_nodes, 0, used_rows * 3 * sizeof(float)); // dv
             }
         } else if (bardenhagen) {
-            size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
             kernel_clear_active_mat_nodes_3d<<<blocks, threads>>>(
                 d_mat_grid_m, d_mat_grid_p, d_mat_grid_f,
                 d_mat_grid_dv,
                 d_active_nodes, m_num_active_nodes,
-                num_nodes, m_num_materials);
+                num_nodes, m_num_materials, gv);
         }
     } else {
-        size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
         cudaMemsetAsync(d_grid, 0, num_nodes * sizeof(MPMGridNode3D));
         if (bardenhagen) {
             cudaMemsetAsync(d_mat_grid_buffer, 0, m_allocated_mat_grid_bytes);
@@ -6180,12 +6564,18 @@ void MPMSolver3DCUDA::clearGridDevice() {
 
 void MPMSolver3DCUDA::launchParticleToGrid(int num_particles, bool use_bardenhagen) {
     if (num_particles <= 0) return;
+
+    if (m_sparse_grid_mode) {
+        activateSparseTilesDevice(num_particles, m_fsi_forces_active);
+    }
+
     const int threads_per_block = 256;
     const int blocks_particles = (num_particles + threads_per_block - 1) / threads_per_block;
     const int bxl = static_cast<int>(m_bc_x_min), bxh = static_cast<int>(m_bc_x_max);
     const int byl = static_cast<int>(m_bc_y_min), byh = static_cast<int>(m_bc_y_max);
     const int bzl = static_cast<int>(m_bc_z_min), bzh = static_cast<int>(m_bc_z_max);
-    const size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+    const size_t num_nodes = m_allocated_grid_nodes;
+    const MPMGridView3D gv = getDeviceGridView();
 
     // Layout safety net: the setters keep the layout in sync, but never scatter with a stale one.
     if (use_bardenhagen && m_mat_grid_compact_layout != isCompactMultiMaterialStorageActive()) {
@@ -6205,7 +6595,9 @@ void MPMSolver3DCUDA::launchParticleToGrid(int num_particles, bool use_bardenhag
             use_bardenhagen ? d_mat_grid_p : nullptr,
             use_bardenhagen ? d_mat_grid_f : nullptr,
             m_num_materials,
-            bxl, bxh, byl, byh, bzl, bzh);
+            bxl, bxh, byl, byh, bzl, bzh,
+            nullptr, nullptr,
+            gv, num_nodes);
         if (d_num_active_nodes) {
             cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
         }
@@ -6223,7 +6615,8 @@ void MPMSolver3DCUDA::launchParticleToGrid(int num_particles, bool use_bardenhag
         d_mat_grid_m, d_mat_grid_p, d_mat_grid_f,
         m_num_materials,
         bxl, bxh, byl, byh, bzl, bzh,
-        d_mat_tag, d_mat_slot_counters);
+        d_mat_tag, d_mat_slot_counters,
+        gv, num_nodes);
     if (d_num_active_nodes) {
         cudaMemcpy(&m_num_active_nodes, d_num_active_nodes, sizeof(int), cudaMemcpyDeviceToHost);
     }
@@ -6236,7 +6629,7 @@ void MPMSolver3DCUDA::launchParticleToGrid(int num_particles, bool use_bardenhag
             int blocks_active = (m_num_active_nodes + threads_per_block - 1) / threads_per_block;
             kernel_assign_mat_slots_3d<<<blocks_active, threads_per_block>>>(
                 d_mat_tag, d_active_nodes, m_num_active_nodes, m_num_materials,
-                d_mat_slot_counters, static_cast<int>(m_mat_slot_capacity));
+                d_mat_slot_counters, static_cast<int>(m_mat_slot_capacity), gv);
         }
         cudaMemcpy(h_counters, d_mat_slot_counters, 2 * sizeof(int), cudaMemcpyDeviceToHost);
         if (h_counters[0] < 0) {
@@ -6268,7 +6661,8 @@ void MPMSolver3DCUDA::launchParticleToGrid(int num_particles, bool use_bardenhag
         d_mat_grid_m, d_mat_grid_p, d_mat_grid_f,
         m_num_materials,
         bxl, bxh, byl, byh, bzl, bzh,
-        d_mat_tag, d_mat_slot_counters);
+        d_mat_tag, d_mat_slot_counters,
+        gv, num_nodes);
 
     // Fail loudly if the tag and scatter passes disagreed (would otherwise lose material mass).
     cudaMemcpy(h_counters, d_mat_slot_counters, 2 * sizeof(int), cudaMemcpyDeviceToHost);
@@ -6287,19 +6681,17 @@ void MPMSolver3DCUDA::particleToGridOnly() {
 
     size_t num_particles = (m_num_active_particles > 0) ? m_num_active_particles : m_host_particles.size();
     if (num_particles == 0) return;
-    size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
 
     // Zero the active grid neighborhoods
     clearGridDevice();
 
     bool use_bardenhagen = (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer != nullptr);
 
-    // Run P2G only (also refreshes m_num_active_nodes)
+    // Run P2G only (also refreshes m_num_active_nodes and active sparse tiles)
     launchParticleToGrid(static_cast<int>(num_particles), use_bardenhagen);
 
     // Download grid to host so FSI forces can be injected into m_host_grid
-    m_host_grid.resize(num_nodes);
-    cudaMemcpy(m_host_grid.data(), d_grid, num_nodes * sizeof(MPMGridNode3D), cudaMemcpyDeviceToHost);
+    syncGridToHost();
 }
 
 void MPMSolver3DCUDA::particleToGridDeviceOnly() {
@@ -6409,7 +6801,7 @@ __global__ void kernel_store_fsi_forces(const MPMGridNode3D* grid, float* d_f_ex
 
 void MPMSolver3DCUDA::storeFSIForces() {
     if (!d_grid) return;
-    size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+    size_t num_nodes = (m_allocated_grid_nodes > 0) ? m_allocated_grid_nodes : (static_cast<size_t>(m_nx) * m_ny * m_nz);
     size_t buf_size = num_nodes * 3;
     if (!d_f_ext_fsi || m_allocated_f_ext_fsi < buf_size) {
         if (d_f_ext_fsi) cudaFree(d_f_ext_fsi);
@@ -6419,12 +6811,14 @@ void MPMSolver3DCUDA::storeFSIForces() {
     int threads = 256;
     int blocks = (static_cast<int>(num_nodes) + threads - 1) / threads;
     kernel_store_fsi_forces<<<blocks, threads>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
+    m_fsi_forces_active = true;
 }
 
 void MPMSolver3DCUDA::clearFSIForces() {
     if (d_f_ext_fsi && m_allocated_f_ext_fsi > 0) {
         cudaMemset(d_f_ext_fsi, 0, m_allocated_f_ext_fsi * sizeof(float));
     }
+    m_fsi_forces_active = false;
 }
 
 // =============================================================================
@@ -6456,7 +6850,8 @@ void MPMSolver3DCUDA::clearFSIForces() {
 __device__ inline void zonal_ghost_scatter_force(
     MPMGridNode3D* grid, int nx, int ny, int nz, float dx, float dy, float dz,
     int scheme, float px, float py, float pz,
-    float Vg, float pg, float rhog, float ugx, float ugy, float ugz)
+    float Vg, float pg, float rhog, float ugx, float ugy, float ugz,
+    MPMGridView3D gv = {})
 {
     // Ghost material point: volume Vg, pressure pg, density rhog, velocity ug (from FV)
     const float Vp_times_p = Vg * pg;
@@ -6522,7 +6917,11 @@ __device__ inline void zonal_ghost_scatter_force(
                     if (r >= R_supp) continue;
                     float w = evalWendland_C2_dev(r, R_supp);
                     if (w < 1.0e-7f) continue;
-                    size_t n_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                    const long long slot_ll = (gv.nx > 0)
+                        ? gv.slotIndex(i, j, k)
+                        : static_cast<long long>((static_cast<size_t>(i) * ny + j) * nz + k);
+                    if (slot_ll < 0) continue;
+                    size_t n_idx = static_cast<size_t>(slot_ll);
                     MPMGridNode3D* node = &grid[n_idx];
                     if (node->m <= MPMGridNode3D::MIN_MASS) continue;
                     const float m_ref = rhog * dx * dy * dz;
@@ -6583,7 +6982,11 @@ __device__ inline void zonal_ghost_scatter_force(
             for (int ok = o_lo; ok <= o_hi; ++ok) {
                 int k = base_k + ok; if (k < 0 || k >= nz) continue;
                 int ak = ok - o_lo; if (fabsf(Sz[ak]) < 1.0e-7f) continue;
-                size_t n_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+                const long long slot_ll = (gv.nx > 0)
+                    ? gv.slotIndex(i, j, k)
+                    : static_cast<long long>((static_cast<size_t>(i) * ny + j) * nz + k);
+                if (slot_ll < 0) continue;
+                size_t n_idx = static_cast<size_t>(slot_ll);
                 MPMGridNode3D* node = &grid[n_idx];
                 if (node->m <= MPMGridNode3D::MIN_MASS) continue;
                 const float m_ref = rhog * dx * dy * dz;
@@ -6610,7 +7013,7 @@ __device__ inline void zonal_ghost_scatter_force(
 __global__ void kernel_zonal_ghost_pressure_traction_3d(
     MPMGridNode3D* grid, const float* ghost_p, int nx, int ny, int nz,
     float dx, float dy, float dz, float xmin, float ymin, float zmin,
-    int scheme, Blast::ZonalHandoff3DParams zp)
+    int scheme, Blast::ZonalHandoff3DParams zp, MPMGridView3D gv = {})
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int num_nodes = nx * ny * nz;
@@ -6644,7 +7047,7 @@ __global__ void kernel_zonal_ghost_pressure_traction_3d(
                 float r = zp.is_cylinder ? sqrtf(rx * rx + ry * ry) : sqrtf(rx * rx + ry * ry + rz * rz);
                 bool outside_sleeve = (r >= R_outer) || (zabs > czmax);
                 if (!outside_sleeve) continue;
-                zonal_ghost_scatter_force(grid, nx, ny, nz, dx, dy, dz, scheme, px, py, pz, V_sub, pg, rhog, ugx, ugy, ugz);
+                zonal_ghost_scatter_force(grid, nx, ny, nz, dx, dy, dz, scheme, px, py, pz, V_sub, pg, rhog, ugx, ugy, ugz, gv);
             }
         }
     }
@@ -6659,7 +7062,8 @@ void MPMSolver3DCUDA::setZonalHandoffParams(const Blast::ZonalHandoff3DParams& p
     // unavailable while zonal coupling is on: switch the material-field layout if required.
     if (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer &&
         m_mat_grid_compact_layout != isCompactMultiMaterialStorageActive()) {
-        allocateMatGridBuffers(static_cast<size_t>(m_nx) * m_ny * m_nz, m_num_materials);
+        size_t num_pool_nodes = (m_allocated_grid_nodes > 0) ? m_allocated_grid_nodes : (static_cast<size_t>(m_nx) * m_ny * m_nz);
+        allocateMatGridBuffers(num_pool_nodes, m_num_materials);
     }
 }
 
@@ -6689,7 +7093,7 @@ void MPMSolver3DCUDA::applyZonalGhostPressureTraction() {
     int blocks = (num_nodes + threads - 1) / threads;
     kernel_zonal_ghost_pressure_traction_3d<<<blocks, threads>>>(
         d_grid, d_zonal_ghost_p, m_nx, m_ny, m_nz, m_dx, m_dy, m_dz,
-        m_xmin, m_ymin, m_zmin, scheme, m_zonal_params);
+        m_xmin, m_ymin, m_zmin, scheme, m_zonal_params, getDeviceGridView());
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("[MPMSolver3DCUDA] kernel_zonal_ghost_pressure_traction_3d launch failed: ") + cudaGetErrorString(err));
@@ -6708,7 +7112,7 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
 
     size_t num_particles = (m_num_active_particles > 0) ? m_num_active_particles : m_host_particles.size();
     if (num_particles == 0) return;
-    size_t num_nodes = static_cast<size_t>(m_nx) * m_ny * m_nz;
+    size_t num_nodes = (m_allocated_grid_nodes > 0) ? m_allocated_grid_nodes : (static_cast<size_t>(m_nx) * m_ny * m_nz);
 
     int threads_per_block = 256;
     int blocks_particles = (static_cast<int>(num_particles) + threads_per_block - 1) / threads_per_block;
@@ -6728,12 +7132,20 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
     }
 
     bool use_bardenhagen = (m_contact_method == MPMContactMethod::MultiVelocityBardenhagen && d_mat_grid_buffer != nullptr);
-    // Material-field pointers are resolved at launch time: the compact slot buffer may be
-    // regrown (and its pointers change) inside launchParticleToGrid().
+    // Material-field pointers and grid view are resolved at launch time: the compact slot buffer
+    // or sparse tile pool may be regrown inside launchParticleToGrid().
     auto matM   = [&]() -> const float* { return use_bardenhagen ? d_mat_grid_m : nullptr; };
     auto matV   = [&]() -> const float* { return use_bardenhagen ? d_mat_grid_v : nullptr; };
     auto matDV  = [&]() -> const float* { return use_bardenhagen ? d_mat_grid_dv : nullptr; };
     auto matTag = [&]() -> const int*   { return (use_bardenhagen && m_mat_grid_compact_layout) ? d_mat_tag : nullptr; };
+
+    auto refreshPoolCounts = [&]() {
+        num_nodes = (m_allocated_grid_nodes > 0) ? m_allocated_grid_nodes : (static_cast<size_t>(m_nx) * m_ny * m_nz);
+        blocks_nodes = (static_cast<int>(num_nodes) + threads_per_block - 1) / threads_per_block;
+        blocks_active = (m_num_active_nodes > 0 && d_active_nodes)
+                      ? (m_num_active_nodes + threads_per_block - 1) / threads_per_block
+                      : blocks_nodes;
+    };
 
     if (m_time_scheme == MPMTimeIntegrationScheme::RK2) {
         // --- 2nd-Order Midpoint RK2 ---
@@ -6741,13 +7153,13 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
         if (run_p2g) {
             clearGridDevice();
             launchParticleToGrid(static_cast<int>(num_particles), use_bardenhagen);
-            if (d_num_active_nodes) {
-                blocks_active = (m_num_active_nodes > 0 && d_active_nodes)
-                              ? (m_num_active_nodes + threads_per_block - 1) / threads_per_block
-                              : blocks_nodes;
-            }
-            if (d_f_ext_fsi) {
-                kernel_restore_fsi_forces<<<blocks_nodes, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
+            refreshPoolCounts();
+            if (d_f_ext_fsi && m_allocated_f_ext_fsi > 0) {
+                size_t fsi_nodes = std::min(num_nodes, m_allocated_f_ext_fsi / 3);
+                int blocks_fsi = (static_cast<int>(fsi_nodes) + threads_per_block - 1) / threads_per_block;
+                if (blocks_fsi > 0) {
+                    kernel_restore_fsi_forces<<<blocks_fsi, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(fsi_nodes));
+                }
             } else if (m_zonal_params.enabled && d_zonal_ghost_p) {
                 applyZonalGhostPressureTraction();
             }
@@ -6774,7 +7186,7 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                 m_lysmer_params.normal_relaxation, m_lysmer_params.shear_relaxation,
                 matTag(),
                 m_enable_impact_welding, m_enable_frictional_heating,
-                d_tie_mask);
+                d_tie_mask, getDeviceGridView());
         } else {
             kernel_grid_update_3d<<<blocks_active, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
                                                                        0.5f * dt, avg_p_mass,
@@ -6784,11 +7196,12 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                        d_active_nodes, m_num_active_nodes,
                                                                        m_dx, m_dy, m_dz,
                                                                        m_lysmer_params.rho, m_lysmer_params.c_p, m_lysmer_params.c_s,
-                                                                       m_lysmer_params.normal_relaxation, m_lysmer_params.shear_relaxation);
+                                                                       m_lysmer_params.normal_relaxation, m_lysmer_params.shear_relaxation,
+                                                                       getDeviceGridView());
         }
 
         if (m_enable_thermal_conduction) {
-            kernel_thermal_conduction_3d<<<blocks_active, threads_per_block>>>(d_grid, m_nx, m_ny, m_nz, m_dx, m_dy, m_dz, 0.5f * dt, d_active_nodes, m_num_active_nodes);
+            kernel_thermal_conduction_3d<<<blocks_active, threads_per_block>>>(d_grid, m_nx, m_ny, m_nz, m_dx, m_dy, m_dz, 0.5f * dt, d_active_nodes, m_num_active_nodes, getDeviceGridView());
         }
 
         updateDetonators(0.5f * dt);
@@ -6804,18 +7217,19 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                              d_material_tables,
                                                                              matM(), matV(), matDV(), m_num_materials,
                                                                              m_zonal_params, d_boundary_flags, matTag(),
-                                                                             m_enable_frictional_heating, m_enable_thermal_conduction, m_enable_impact_welding);
+                                                                             m_enable_frictional_heating, m_enable_thermal_conduction, m_enable_impact_welding,
+                                                                             getDeviceGridView(), num_nodes, m_defer_fv_erosion_to_coupler);
 
         // 2. Corrector Stage — P2G from predictor midpoint state
         clearGridDevice();
         launchParticleToGrid(static_cast<int>(num_particles), use_bardenhagen);
-        if (d_num_active_nodes) {
-            blocks_active = (m_num_active_nodes > 0 && d_active_nodes)
-                          ? (m_num_active_nodes + threads_per_block - 1) / threads_per_block
-                          : blocks_nodes;
-        }
-        if (d_f_ext_fsi) {
-            kernel_restore_fsi_forces<<<blocks_nodes, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
+        refreshPoolCounts();
+        if (d_f_ext_fsi && m_allocated_f_ext_fsi > 0) {
+            size_t fsi_nodes = std::min(num_nodes, m_allocated_f_ext_fsi / 3);
+            int blocks_fsi = (static_cast<int>(fsi_nodes) + threads_per_block - 1) / threads_per_block;
+            if (blocks_fsi > 0) {
+                kernel_restore_fsi_forces<<<blocks_fsi, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(fsi_nodes));
+            }
         } else if (m_zonal_params.enabled && d_zonal_ghost_p) {
             applyZonalGhostPressureTraction();
         }
@@ -6841,7 +7255,7 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                 m_lysmer_params.normal_relaxation, m_lysmer_params.shear_relaxation,
                 matTag(),
                 m_enable_impact_welding, m_enable_frictional_heating,
-                d_tie_mask);
+                d_tie_mask, getDeviceGridView());
         } else {
             kernel_grid_update_3d<<<blocks_active, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
                                                                        dt, avg_p_mass,
@@ -6851,11 +7265,12 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                        d_active_nodes, m_num_active_nodes,
                                                                        m_dx, m_dy, m_dz,
                                                                        m_lysmer_params.rho, m_lysmer_params.c_p, m_lysmer_params.c_s,
-                                                                       m_lysmer_params.normal_relaxation, m_lysmer_params.shear_relaxation);
+                                                                       m_lysmer_params.normal_relaxation, m_lysmer_params.shear_relaxation,
+                                                                       getDeviceGridView());
         }
 
         if (m_enable_thermal_conduction) {
-            kernel_thermal_conduction_3d<<<blocks_active, threads_per_block>>>(d_grid, m_nx, m_ny, m_nz, m_dx, m_dy, m_dz, 0.5f * dt, d_active_nodes, m_num_active_nodes);
+            kernel_thermal_conduction_3d<<<blocks_active, threads_per_block>>>(d_grid, m_nx, m_ny, m_nz, m_dx, m_dy, m_dz, 0.5f * dt, d_active_nodes, m_num_active_nodes, getDeviceGridView());
         }
 
         updateDetonators(0.5f * dt);
@@ -6871,19 +7286,20 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                              d_material_tables,
                                                                              matM(), matV(), matDV(), m_num_materials,
                                                                              m_zonal_params, d_boundary_flags, matTag(),
-                                                                             m_enable_frictional_heating, m_enable_thermal_conduction, m_enable_impact_welding);
+                                                                             m_enable_frictional_heating, m_enable_thermal_conduction, m_enable_impact_welding,
+                                                                             getDeviceGridView(), num_nodes, m_defer_fv_erosion_to_coupler);
     } else {
         // --- 1st-Order USL / USF ---
         if (run_p2g) {
             clearGridDevice();
             launchParticleToGrid(static_cast<int>(num_particles), use_bardenhagen);
-            if (d_num_active_nodes) {
-                blocks_active = (m_num_active_nodes > 0 && d_active_nodes)
-                              ? (m_num_active_nodes + threads_per_block - 1) / threads_per_block
-                              : blocks_nodes;
-            }
-            if (d_f_ext_fsi) {
-                kernel_restore_fsi_forces<<<blocks_nodes, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(num_nodes));
+            refreshPoolCounts();
+            if (d_f_ext_fsi && m_allocated_f_ext_fsi > 0) {
+                size_t fsi_nodes = std::min(num_nodes, m_allocated_f_ext_fsi / 3);
+                int blocks_fsi = (static_cast<int>(fsi_nodes) + threads_per_block - 1) / threads_per_block;
+                if (blocks_fsi > 0) {
+                    kernel_restore_fsi_forces<<<blocks_fsi, threads_per_block>>>(d_grid, d_f_ext_fsi, static_cast<int>(fsi_nodes));
+                }
             } else if (m_zonal_params.enabled && d_zonal_ghost_p) {
                 applyZonalGhostPressureTraction();
             }
@@ -6910,7 +7326,7 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                 m_lysmer_params.normal_relaxation, m_lysmer_params.shear_relaxation,
                 matTag(),
                 m_enable_impact_welding, m_enable_frictional_heating,
-                d_tie_mask);
+                d_tie_mask, getDeviceGridView());
         } else {
             kernel_grid_update_3d<<<blocks_active, threads_per_block>>>(d_grid, static_cast<int>(num_nodes), m_nx, m_ny, m_nz,
                                                                        dt, avg_p_mass,
@@ -6920,11 +7336,12 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                        d_active_nodes, m_num_active_nodes,
                                                                        m_dx, m_dy, m_dz,
                                                                        m_lysmer_params.rho, m_lysmer_params.c_p, m_lysmer_params.c_s,
-                                                                       m_lysmer_params.normal_relaxation, m_lysmer_params.shear_relaxation);
+                                                                       m_lysmer_params.normal_relaxation, m_lysmer_params.shear_relaxation,
+                                                                       getDeviceGridView());
         }
 
         if (m_enable_thermal_conduction) {
-            kernel_thermal_conduction_3d<<<blocks_active, threads_per_block>>>(d_grid, m_nx, m_ny, m_nz, m_dx, m_dy, m_dz, dt, d_active_nodes, m_num_active_nodes);
+            kernel_thermal_conduction_3d<<<blocks_active, threads_per_block>>>(d_grid, m_nx, m_ny, m_nz, m_dx, m_dy, m_dz, dt, d_active_nodes, m_num_active_nodes, getDeviceGridView());
         }
 
         updateDetonators(dt);
@@ -6940,7 +7357,8 @@ void MPMSolver3DCUDA::stepWithDt(float dt, bool run_p2g) {
                                                                              d_material_tables,
                                                                              matM(), matV(), matDV(), m_num_materials,
                                                                              m_zonal_params, d_boundary_flags, matTag(),
-                                                                             m_enable_frictional_heating, m_enable_thermal_conduction, m_enable_impact_welding);
+                                                                             m_enable_frictional_heating, m_enable_thermal_conduction, m_enable_impact_welding,
+                                                                             getDeviceGridView(), num_nodes, m_defer_fv_erosion_to_coupler);
     }
 
     // Resolve Discrete Element (DEM) Contact & Collisions on GPU
@@ -7244,26 +7662,29 @@ void MPMSolver3DCUDA::evaluateDEMContactDevice(float dt) {
         cell_dx, dt);
 }
 
-__global__ void kernel_extract_slice_3d(const MPMGridNode3D* grid, float* slice_out, int nx, int ny, int nz, int axis_code, int offset_idx, int req_qty_code) {
+__global__ void kernel_extract_slice_3d(const MPMGridNode3D* grid, float* slice_out, int nx, int ny, int nz, int axis_code, int offset_idx, int req_qty_code, MPMGridView3D gv = {}) {
     int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (axis_code == 0) { // xy slice (w=nx, h=ny, at k=offset_idx)
         if (t_idx >= nx * ny) return;
         int i = t_idx % nx;
         int j = t_idx / nx;
         int k = offset_idx;
-        size_t idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+        const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k) : static_cast<long long>((static_cast<size_t>(i) * ny + j) * nz + k);
         float val = 0.0f;
-        if (grid[idx].m > 1.0e-11f) {
-            if (req_qty_code == 1) { // velocity
-                float inv_m = 1.0f / grid[idx].m;
-                float vx = grid[idx].p[0] * inv_m;
-                float vy = grid[idx].p[1] * inv_m;
-                float vz = grid[idx].p[2] * inv_m;
-                val = sqrtf(vx*vx + vy*vy + vz*vz);
-            } else if (req_qty_code == 2) { // pressure
-                val = grid[idx].pressure;
-            } else { // plastic_strain
-                val = grid[idx].plastic_strain;
+        if (slot_ll >= 0) {
+            size_t idx = static_cast<size_t>(slot_ll);
+            if (grid[idx].m > 1.0e-11f) {
+                if (req_qty_code == 1) { // velocity
+                    float inv_m = 1.0f / grid[idx].m;
+                    float vx = grid[idx].p[0] * inv_m;
+                    float vy = grid[idx].p[1] * inv_m;
+                    float vz = grid[idx].p[2] * inv_m;
+                    val = sqrtf(vx*vx + vy*vy + vz*vz);
+                } else if (req_qty_code == 2) { // pressure
+                    val = grid[idx].pressure;
+                } else { // plastic_strain
+                    val = grid[idx].plastic_strain;
+                }
             }
         }
         slice_out[t_idx] = val;
@@ -7272,19 +7693,22 @@ __global__ void kernel_extract_slice_3d(const MPMGridNode3D* grid, float* slice_
         int i = t_idx % nx;
         int k = t_idx / nx;
         int j = offset_idx;
-        size_t idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+        const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k) : static_cast<long long>((static_cast<size_t>(i) * ny + j) * nz + k);
         float val = 0.0f;
-        if (grid[idx].m > 1.0e-11f) {
-            if (req_qty_code == 1) {
-                float inv_m = 1.0f / grid[idx].m;
-                float vx = grid[idx].p[0] * inv_m;
-                float vy = grid[idx].p[1] * inv_m;
-                float vz = grid[idx].p[2] * inv_m;
-                val = sqrtf(vx*vx + vy*vy + vz*vz);
-            } else if (req_qty_code == 2) {
-                val = grid[idx].pressure;
-            } else {
-                val = grid[idx].plastic_strain;
+        if (slot_ll >= 0) {
+            size_t idx = static_cast<size_t>(slot_ll);
+            if (grid[idx].m > 1.0e-11f) {
+                if (req_qty_code == 1) {
+                    float inv_m = 1.0f / grid[idx].m;
+                    float vx = grid[idx].p[0] * inv_m;
+                    float vy = grid[idx].p[1] * inv_m;
+                    float vz = grid[idx].p[2] * inv_m;
+                    val = sqrtf(vx*vx + vy*vy + vz*vz);
+                } else if (req_qty_code == 2) {
+                    val = grid[idx].pressure;
+                } else {
+                    val = grid[idx].plastic_strain;
+                }
             }
         }
         slice_out[t_idx] = val;
@@ -7293,19 +7717,22 @@ __global__ void kernel_extract_slice_3d(const MPMGridNode3D* grid, float* slice_
         int j = t_idx % ny;
         int k = t_idx / ny;
         int i = offset_idx;
-        size_t idx = (static_cast<size_t>(i) * ny + j) * nz + k;
+        const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k) : static_cast<long long>((static_cast<size_t>(i) * ny + j) * nz + k);
         float val = 0.0f;
-        if (grid[idx].m > 1.0e-11f) {
-            if (req_qty_code == 1) {
-                float inv_m = 1.0f / grid[idx].m;
-                float vx = grid[idx].p[0] * inv_m;
-                float vy = grid[idx].p[1] * inv_m;
-                float vz = grid[idx].p[2] * inv_m;
-                val = sqrtf(vx*vx + vy*vy + vz*vz);
-            } else if (req_qty_code == 2) {
-                val = grid[idx].pressure;
-            } else {
-                val = grid[idx].plastic_strain;
+        if (slot_ll >= 0) {
+            size_t idx = static_cast<size_t>(slot_ll);
+            if (grid[idx].m > 1.0e-11f) {
+                if (req_qty_code == 1) {
+                    float inv_m = 1.0f / grid[idx].m;
+                    float vx = grid[idx].p[0] * inv_m;
+                    float vy = grid[idx].p[1] * inv_m;
+                    float vz = grid[idx].p[2] * inv_m;
+                    val = sqrtf(vx*vx + vy*vy + vz*vz);
+                } else if (req_qty_code == 2) {
+                    val = grid[idx].pressure;
+                } else {
+                    val = grid[idx].plastic_strain;
+                }
             }
         }
         slice_out[t_idx] = val;
@@ -7340,7 +7767,7 @@ void MPMSolver3DCUDA::extractSliceToHost(std::vector<float>& out_slice, const st
 
     int threads = 256;
     int blocks = (static_cast<int>(slice_elements) + threads - 1) / threads;
-    kernel_extract_slice_3d<<<blocks, threads>>>(d_grid, d_telemetry_slice_buf, m_nx, m_ny, m_nz, axis_code, offset_idx, req_qty_code);
+    kernel_extract_slice_3d<<<blocks, threads>>>(d_grid, d_telemetry_slice_buf, m_nx, m_ny, m_nz, axis_code, offset_idx, req_qty_code, getDeviceGridView());
 
     out_slice.resize(slice_elements);
     cudaMemcpy(out_slice.data(), d_telemetry_slice_buf, slice_elements * sizeof(float), cudaMemcpyDeviceToHost);
@@ -7540,7 +7967,7 @@ bool MPMSolver3DCUDA::interpolateGridVelocityDevice(float x, float y, float z, f
         }
     }
 
-    size_t num_nodes_total = static_cast<size_t>(m_nx) * m_ny * m_nz;
+    size_t num_nodes_total = (m_allocated_grid_nodes > 0) ? m_allocated_grid_nodes : (static_cast<size_t>(m_nx) * m_ny * m_nz);
     const int* eff_mat_tag = (use_bardenhagen && m_mat_grid_compact_layout) ? d_mat_tag : nullptr;
     const float* eff_mat_m = use_bardenhagen ? d_mat_grid_m : nullptr;
     const float* eff_mat_v = use_bardenhagen ? d_mat_grid_v : nullptr;
@@ -7561,7 +7988,8 @@ bool MPMSolver3DCUDA::interpolateGridVelocityDevice(float x, float y, float z, f
         eff_mat_dv,
         m_num_materials,
         num_nodes_total,
-        d_det_vel_buffer
+        d_det_vel_buffer,
+        getDeviceGridView()
     );
 
     float h_res[4] = {0.0f, 0.0f, 0.0f, 0.0f};

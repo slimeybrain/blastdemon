@@ -33,11 +33,12 @@ void FSICoupler3D::applyFluidPressureToSolid(float dt) {
     float cell_area_zx = dz * dx;
 
     auto& grid = m_mpm_solver->getGrid();
+    const auto gv = m_mpm_solver->getHostGridView();
 
     auto is_fluid = [&](int xi, int yi, int zi) -> bool {
         if (xi < 0 || xi >= nx || yi < 0 || yi >= ny || zi < 0 || zi >= nz) return false;
-        size_t idx = (static_cast<size_t>(xi) * ny + yi) * nz + zi;
-        return grid[idx].m <= 1.0e-8f;
+        const long long slot = gv.slotIndex(xi, yi, zi);
+        return (slot < 0) ? true : (grid[slot].m <= 1.0e-8f);
     };
 
     auto get_cell_p = [&](int xi, int yi, int zi) -> float {
@@ -50,8 +51,9 @@ void FSICoupler3D::applyFluidPressureToSolid(float dt) {
     for (int i = 0; i < nx; ++i) {
         for (int j = 0; j < ny; ++j) {
             for (int k = 0; k < nz; ++k) {
-                size_t node_idx = (static_cast<size_t>(i) * ny + j) * nz + k;
-                auto& node = grid[node_idx];
+                const long long slot = gv.slotIndex(i, j, k);
+                if (slot < 0) continue;
+                auto& node = grid[slot];
 
                 if (node.m > 1.0e-8f) {
                     float f_x = 0.0f, f_y = 0.0f, f_z = 0.0f;

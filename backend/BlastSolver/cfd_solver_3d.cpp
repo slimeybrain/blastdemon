@@ -1718,7 +1718,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
     int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
     if (states_pred.size() != (size_t)total_tiles) states_pred.resize(total_tiles);
     if (dW_dt_pool.size() != (size_t)total_tiles) dW_dt_pool.resize(total_tiles);
-    if (temporalOrder == 6 && states_int.size() != (size_t)total_tiles) states_int.resize(total_tiles);
+    if (spaceTimeScheme == SpaceTimeScheme3D::ADER_3 && states_int.size() != (size_t)total_tiles) states_int.resize(total_tiles);
 
     auto copy_primitive_to_U = [&]() {
         int n_active = (int)active_tile_indices.size();
@@ -1754,7 +1754,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
 
     copy_primitive_to_U();
 
-    if (temporalOrder == 4 || temporalOrder <= 3) { // MUSCL-Hancock (2nd order default)
+    if (spaceTimeScheme == SpaceTimeScheme3D::MUSCL_HANCOCK) {
         int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
         #pragma omp parallel for schedule(static)
         for (int t = 0; t < total_tiles; ++t) {
@@ -2006,7 +2006,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
         computeFluxes(dt, U_pool);
         std::swap(states_pool, states_pred);
 
-    } else if (temporalOrder == 5 || temporalOrder == 6) { // ADER-2 (5) and ADER-3 (6)
+    } else if (spaceTimeScheme == SpaceTimeScheme3D::ADER_2 || spaceTimeScheme == SpaceTimeScheme3D::ADER_3) {
         int total_tiles = n_tiles_x * n_tiles_y * n_tiles_z;
         if (states_pred.size() != (size_t)total_tiles) states_pred.resize(total_tiles);
         if (dW_dt_pool.size() != (size_t)total_tiles) dW_dt_pool.resize(total_tiles);
@@ -2191,7 +2191,7 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::step(double dt) {
             }
         }
         
-        if (temporalOrder == 6) { // ADER-3
+        if (spaceTimeScheme == SpaceTimeScheme3D::ADER_3) {
             // Temporarily swap states_pool and states_pred so that we sample from W^{n+1/2}
             std::swap(states_pool, states_pred);
             
@@ -3094,6 +3094,9 @@ extern void remap_1d_to_3d(const std::vector<double>& r_1d, const std::vector<Mu
                     CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap);
 extern void remap_2d_to_3d(int nr, int nz, double dr, double dz, const std::vector<State2D>& states_2d,
                     CFDSolver3D& solver_3d, double x_expl, double y_expl, double z_expl, double R_remap, double source_explosive_z = 0.0);
+extern void remap_3d_to_3d(const CFDBulkSnapshot3D& src, CFDSolver3D& solver_3d,
+                    double x_expl, double y_expl, double z_expl, double R_remap,
+                    double src_x_expl, double src_y_expl, double src_z_expl);
 
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom1D(const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double x_expl, double y_expl, double z_expl, double R_remap) {
@@ -3288,6 +3291,52 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom2D(int nr, int nz
     }
 }
 
+template <typename RealType, bool IsMultiMaterial>
+void CFDSolver3DImpl<RealType, IsMultiMaterial>::initializeFrom3D(const CFDBulkSnapshot3D& src, double x_expl, double y_expl, double z_expl, double R_remap, double src_x_expl, double src_y_expl, double src_z_expl) {
+    currentTime = 0.0;
+    if (src.p.empty() || src.rho.empty()) return;
+    double amb_rho = (this->ambient_rho > 0.0) ? this->ambient_rho : 1.225;
+    double amb_p = (this->ambient_p > 0.0) ? this->ambient_p : 101325.0;
+    ambient_rho = amb_rho;
+    ambient_p = amb_p;
+
+    #pragma omp parallel for
+    for (int t = 0; t < (int)states_pool.size(); ++t) {
+        auto& tile = states_pool[t];
+        auto& u_tile = U_pool[t];
+        for (int i = 0; i < TILE_CELLS_3D; ++i) {
+            tile.rho[i] = (RealType)amb_rho;
+            tile.ux[i] = 0.0; tile.uy[i] = 0.0; tile.uz[i] = 0.0;
+            tile.p[i] = (RealType)amb_p;
+            CellState3D<IsMultiMaterial> temp_s;
+            if constexpr (IsMultiMaterial) {
+                temp_s.alpha1 = 0.0; temp_s.alpha2 = 0.0;
+                temp_s.arho1 = 0.0; temp_s.arho2 = 0.0;
+                tile.alpha1[i] = 0.0; tile.alpha2[i] = 0.0;
+                tile.arho1[i] = 0.0; tile.arho2[i] = 0.0;
+            }
+            tile.floor_status[i] = 0;
+            tile.peak_overpressure[i] = 0.0;
+            tile.peak_impulse[i] = 0.0;
+
+            u_tile.rho[i] = (RealType)amb_rho;
+            u_tile.rhoux[i] = 0.0; u_tile.rhouy[i] = 0.0; u_tile.rhouz[i] = 0.0;
+            u_tile.E[i] = (RealType)getEnergy3D<IsMultiMaterial>(amb_p, amb_rho, temp_s, gamma, currentMaterials.products, currentMaterials.unreacted);
+            if constexpr (IsMultiMaterial) {
+                u_tile.alpha1[i] = 0.0; u_tile.alpha2[i] = 0.0;
+                u_tile.arho1[i] = 0.0; u_tile.arho2[i] = 0.0;
+            }
+        }
+    }
+    active_tiles.assign(states_pool.size(), 1);
+    remap_3d_to_3d(src, *this, x_expl, y_expl, z_expl, R_remap, src_x_expl, src_y_expl, src_z_expl);
+    commitStates();
+    active_tile_indices.clear();
+    for (int t = 0; t < (int)states_pool.size(); ++t) {
+        active_tile_indices.push_back(t);
+    }
+}
+
 
 template <typename RealType, bool IsMultiMaterial>
 void CFDSolver3DImpl<RealType, IsMultiMaterial>::setCellStateMulti(int gx, int gy, int gz, const CellState3D<true>& s) {
@@ -3361,7 +3410,18 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::commitStates() {
 
 template <typename RealType, bool IsMultiMaterial> void CFDSolver3DImpl<RealType, IsMultiMaterial>::setFluxScheme(const std::string& name) { currentFluxScheme = name; }
 template <typename RealType, bool IsMultiMaterial> void CFDSolver3DImpl<RealType, IsMultiMaterial>::setSpatialOrder(int order) { spatialOrder = order; }
-template <typename RealType, bool IsMultiMaterial> void CFDSolver3DImpl<RealType, IsMultiMaterial>::setTemporalOrder(int order) { temporalOrder = order; }
+template <typename RealType, bool IsMultiMaterial> void CFDSolver3DImpl<RealType, IsMultiMaterial>::setTemporalOrder(int order) {
+    if (order == 5) {
+        spaceTimeScheme = SpaceTimeScheme3D::ADER_2;
+        temporalOrder = 2;
+    } else if (order == 6) {
+        spaceTimeScheme = SpaceTimeScheme3D::ADER_3;
+        temporalOrder = 3;
+    } else {
+        spaceTimeScheme = SpaceTimeScheme3D::MUSCL_HANCOCK;
+        temporalOrder = (order == 1) ? 1 : 2;
+    }
+}
 template <typename RealType, bool IsMultiMaterial> bool CFDSolver3DImpl<RealType, IsMultiMaterial>::checkTermination() { return false; }
 
 template <typename RealType, bool IsMultiMaterial>

@@ -220,7 +220,7 @@ The Worker emits a hybrid stream on `stdout`:
 
 | Stream Header Marker | Payload Content & Memory Layout |
 |---|---|
-| `BIN_FRAME <size>\n` | 1D CFD: `uint32 n_cells` + `uint32 n_channels (7)` + `float32[n_cells * 7]` (`p, rho, u, E, alpha1, alpha2, alpha_air`). |
+| `BIN_FRAME <size>\n` | 1D CFD: `uint32 n_cells` + `uint32 n_channels (9)` + `float32[n_cells * 9]` (`p, rho, u, e_spec, alpha1, alpha2, alpha_air, arho1, arho2`). |
 | `BIN2D_FRAME <size>\n` | 2D CFD: `uint32 nr` + `uint32 nz` + `uint32 n_channels` + `float32[nr * nz * n_channels]` (`p, rho, ur, uz, E, alpha1, alpha2`). |
 | `BIN_FRAME_3D_SLICES <size>\n` | 3D CFD: Structured binary slice packets (orthogonal X-Normal, Y-Normal, Z-Normal cut-planes) extracted by `extractSlice()`. |
 | `BIN_FRAME_MPM <size>\n` | 2D/3D MPM: `uint32 n_particles` + `uint32 stride` + `float32` particle cloud (`x, y, z, vx, vy, vz, mass, volume, stress_tensor, damage, temperature`). |
@@ -542,6 +542,14 @@ All constitutive updates and Equations of State (EOS) are implemented as `__host
 | **CREST & Davis Reactive Burn** | MPM | Autonomous shock-to-detonation transition (SDT) for high explosives: Davis solid reactant EOS + Davis product gas EOS with shock entropy jump calculation `s_s = cv * ln(T_H / T0)` and stiff sub-cycled reaction rate kinetics. |
 
 ---
+
+### 10.3 Reactive Explosives: Lee-Tarver Ignition & Growth (strict SI)
+- **Headers:** `constitutive_lee_tarver.hpp` (rate + adaptive Heun advance, `fromLLNL_I/G` converters), `constitutive_jwl.hpp` (product JWL and `JWLReactant` temperature-form unreacted EOS), `constitutive_mixture.hpp` (reactant/product mixture rule). Shared JSON reader: `services/ReactiveMaterialJson.hpp` (`readLeeTarverParams`, used by all three `main.cpp` parse sites).
+- **Units:** SI only. `lt_I` [1/s], `lt_G1`/`lt_G2` [1/(s·Pa^n)], pressures in Pa, `jwlr_A/B/Cv` in Pa and Pa/K (Cv per initial volume). LLNL tables (Mbar, μs) are converted in ONE place per language: `Blast::LeeTarver::fromLLNL_*` (C++) and `llnlLeeTarverToSI` in `frontend/src/mpm-presets.ts`. INIT throws `std::invalid_argument` for rates that imply unconverted LLNL values.
+- **Solid pillar:** `SolidReactantEOS::JWLReactant` is the default for Lee-Tarver (calibrations are fitted on the unreacted JWL, not Mie-Grüneisen). Energy convention: `e_th = e_int − λ·q`, `e_prod = e_th + q`, `q = detonation_energy`.
+- **Mixture rule (`mixture_rule`):** 1 = pressure equilibrium with volume additivity (`V = (1−λ)Vs + λVp`, bounded Illinois root-find, ≤24 iterations, product bracket `Vp ≥ 0.2`); 0 = linear blend. Equilibrium applies to Lee-Tarver kinetics only. Call sites: `mpm_solver_3d.cpp`, `mpm_solver_3d_cuda.cu`, `mpm_solver_2d.cpp`, `fem_solver_3d.cpp`, `fem_solver_3d_cuda.cu`.
+- **Presets:** PBX 9501 and C-4 (LLNL), Composition B (PARTIAL: the paper's 70/30 RDX/TNT energy split cannot be represented by one λ). PBX 9501 low-pressure set is not shipped (no EOS table; ρ0 1.832 vs 1.838 calibration). ν = 0.25 is an assumption (not published).
+- **Unaudited:** Lee-Tarver references in `cfd_solver_3d_cuda_impl.cuh` and `TelemetryService.cpp`.
 
 ## 11. Disk I/O & Post-Processing Export
 

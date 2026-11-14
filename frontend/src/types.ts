@@ -1,4 +1,16 @@
-export type NodeType = 'DomainMesh' | 'Material' | 'Charge1D' | 'Charge2D' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph' | 'DomainMesh2D' | 'DetonatorLocation' | 'TriggerLocation' | 'RemapNode' | 'Remap1DTo2DNode' | 'Remap1DTo3DNode' | 'Remap2DTo3DNode' | 'CFDSolver2D' | 'TelemetryContour' | 'VTKOutput' | 'HardwareConfig' | 'VirtualGauges' | 'VirtualGauges3D' | 'DomainMesh3D' | 'Charge3D' | 'CFDSolver3D' | 'Telemetry3DViewport' | 'DetonatorLocation3D' | 'TriggerLocation3D' | 'STLGeometry' | 'PrimitiveGeometry3D' | 'Obstacle3D' | 'Obstacle' | 'MPMDomain2D' | 'MPMObject2D' | 'FSICoupler2D' | 'MPMDomain3D' | 'MPMObject3D' | 'MPMContactCoupler3D' | 'FSICoupler3D' | 'FEMDomain3D' | 'FEMObject3D' | 'FEMBeam3D' | 'FEMRebar3D' | 'LSDynaImporter3D' | 'FEMFSICoupler3D' | 'MarineHarbourDomain';
+export type NodeType = 'DomainMesh' | 'Material' | 'Charge1D' | 'Charge2D' | 'ThePainter' | 'CFDSolver' | 'TelemetryText' | 'TelemetryGraph' | 'DomainMesh2D' | 'SparseDomainMesh2D' | 'DetonatorLocation' | 'TriggerLocation' | 'RemapNode' | 'Remap1DTo2DNode' | 'Remap1DTo3DNode' | 'Remap2DTo3DNode' | 'Remap3DTo3DNode' | 'CFDSolver2D' | 'TelemetryContour' | 'VTKOutput' | 'HardwareConfig' | 'VirtualGauges' | 'VirtualGauges3D' | 'DomainMesh3D' | 'SparseDomainMesh3D' | 'Charge3D' | 'CFDSolver3D' | 'Telemetry3DViewport' | 'DetonatorLocation3D' | 'TriggerLocation3D' | 'STLGeometry' | 'PrimitiveGeometry3D' | 'Obstacle3D' | 'Obstacle' | 'MPMDomain2D' | 'MPMObject2D' | 'FSICoupler2D' | 'MPMDomain3D' | 'MPMObject3D' | 'MPMContactCoupler3D' | 'FSICoupler3D' | 'FEMDomain3D' | 'FEMObject3D' | 'FEMBeam3D' | 'FEMRebar3D' | 'LSDynaImporter3D' | 'FEMFSICoupler3D' | 'MarineHarbourDomain';
+
+export function isDomainMesh3DNode(type?: string | null): boolean {
+    return type === 'DomainMesh3D' || type === 'SparseDomainMesh3D';
+}
+
+export function isDomainMesh2DNode(type?: string | null): boolean {
+    return type === 'DomainMesh2D' || type === 'SparseDomainMesh2D';
+}
+
+export function isRemapNodeType(type?: string | null): boolean {
+    return type === 'RemapNode' || type === 'Remap1DTo2DNode' || type === 'Remap1DTo3DNode' || type === 'Remap2DTo3DNode' || type === 'Remap3DTo3DNode';
+}
 
 
 export interface Port {
@@ -55,6 +67,7 @@ export interface SimulationState {
     nodes: Node[];
     connections: Connection[];
     layout: LayoutNode;
+    refresh_rate?: number;
 }
 
 export interface ModelViewCamera {
@@ -99,9 +112,10 @@ export interface ModelViewConfig {
 
 export interface ViewportPaneOption {
     index: number;
-    viewType: '3D_VIEWPORT' | '2D_CONTOUR' | '1D_CHART' | 'RESOURCE_MONITOR';
+    viewType: '3D_VIEWPORT' | '2D_CONTOUR' | '1D_CHART' | 'GAUGE_CHART' | 'RESOURCE_MONITOR';
     modelId?: string | null;
     viewId?: string | null;
+    overrides?: Record<string, any>;
 }
 export type MultiViewStagePaneOption = ViewportPaneOption;
 
@@ -146,6 +160,8 @@ export interface ViewportOptions {
     panes?: ViewportPaneOption[];
     backgroundTheme?: StageThemeId;
     showStudioGrid?: boolean;
+    splitRatioX?: number;
+    splitRatioY?: number;
 }
 export type MultiViewStageOptions = ViewportOptions;
 

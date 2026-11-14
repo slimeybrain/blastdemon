@@ -1,9 +1,9 @@
 import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, resolveFEMCounts, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, getMaterialDisplayHTML, syncMPMMaterialParameters, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, isExplosiveMaterialNode, isWaterMaterialNode, isSeabedMaterialNode, isSolidMaterialNode, resolveResourcePath } from './state-manager.js';
 import { isAirMaterialNode } from './serialization.js';
 import { getMemoryDisplayHTML } from './memory-validator.js';
-import { Node, SimulationState } from './types.js';
+import { Node, SimulationState, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { validateSimulationState } from './validation.js';
-import { HostFileBrowserModal } from './host-file-browser.js';
+import { HostFileBrowserModal, FileFilterPreset, showRecentFoldersQuickMenu, recordRecentFolder } from './host-file-browser.js';
 import { GaugeManagerModal } from './gauge-manager-modal.js';
 import { FEMSetupModal } from './fem-setup-modal.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, MPM_MATERIAL_CATEGORIES, MPM_MATERIAL_PARAM_INFO, getConstitutiveModels, getPresetsForConstitutiveModel, getCategorizedPresetsForModel, getDefaultPresetForModel } from './mpm-presets.js';
@@ -21,6 +21,7 @@ export class PropertyEditor {
     private _lastVisibleKeysJson: string = '';
     private selectedPrimitiveIndex: number = 0;
     private _lastRenderedNodeId: string | null = null;
+    private _lastRenderedNodeType: string | null = null;
     private inPlaceListener: ((nodeId: string, parameters: Record<string, any>) => void) | null = null;
 
     private getVisibleKeysForNode(node: Node, state: any): string[] {
@@ -28,7 +29,7 @@ export class PropertyEditor {
         const sourceNode = conn ? state?.nodes?.find((n: any) => n.id === conn.fromNode) : null;
         const is3D = sourceNode 
             ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D' || sourceNode.type === 'MarineHarbourDomain') 
-            : (state?.nodes?.some((n: any) => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain') ?? false);
+            : (state?.nodes?.some((n: any) => n.type === 'CFDSolver3D' || isDomainMesh3DNode(n.type) || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain') ?? false);
 
         let isCoupledModel = false;
         const allModels = this.stateManager.getAllModels();
@@ -163,11 +164,12 @@ export class PropertyEditor {
 
         if (!node) {
             this._lastRenderedNodeId = null;
+            this._lastRenderedNodeType = null;
             this.container.innerHTML = '<div style="padding: 20px; color: #f44336;">Node not found</div>';
             return;
         }
 
-        if (!forceFull && this.container.querySelector('form')) {
+        if (!forceFull && this.container.querySelector('form') && this._lastRenderedNodeType === node.type) {
             for (const [key, value] of Object.entries(node.parameters)) {
                 const el = this.container.querySelector(`[data-key="${key}"]`) as HTMLInputElement | HTMLSelectElement;
                 if (el && document.activeElement !== el) {
@@ -224,9 +226,9 @@ export class PropertyEditor {
                     let currentVal = node.parameters['space_time_scheme'];
                     if (!currentVal) {
                         const so = Number(node.parameters['spatial_order'] ?? 2);
-                        const to = Number(node.parameters['temporal_order'] ?? 4);
-                        if (so === 2 && (to === 5 || to === 2)) currentVal = 'ADER-2 (2nd-Order Space/Time)';
-                        else if (so === 3 && (to === 6 || to === 3)) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                        const to = Number(node.parameters['temporal_order'] ?? 2);
+                        if (so === 3 || to === 6 || to === 3) currentVal = 'ADER-3 (3rd-Order Space/Time)';
+                        else if (to === 5) currentVal = 'ADER-2 (2nd-Order Space/Time)';
                         else currentVal = 'MUSCL-Hancock (2nd-Order Space/Time)';
                     }
                     stsEl.value = currentVal;
@@ -335,6 +337,7 @@ export class PropertyEditor {
             ? this.container.scrollTop
             : 0;
         this._lastRenderedNodeId = this.currentNodeId;
+        this._lastRenderedNodeType = node.type;
 
         this.container.innerHTML = '';
 
@@ -502,7 +505,7 @@ export class PropertyEditor {
         const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
         const is3D = sourceNode 
             ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D' || sourceNode.type === 'MarineHarbourDomain') 
-            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain') ?? false);
+            : (state?.nodes.some(n => n.type === 'CFDSolver3D' || isDomainMesh3DNode(n.type) || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain') ?? false);
 
         let isCoupledModel = false;
         const allModels = this.stateManager.getAllModels();
@@ -524,7 +527,7 @@ export class PropertyEditor {
 
         const nType: string = node.type;
         let gridInfoDiv: HTMLDivElement | null = null;
-        if (nType === 'DomainMesh' || nType === 'DomainMesh2D' || nType === 'DomainMesh3D' || nType === 'CFDSolver' || nType === 'CFDSolver2D' || nType === 'CFDSolver3D' || nType === 'MPMDomain3D' || nType === 'MPMDomain2D' || nType === 'MarineHarbourDomain') {
+        if (nType === 'DomainMesh' || isDomainMesh2DNode(nType) || isDomainMesh3DNode(nType) || nType === 'CFDSolver' || nType === 'CFDSolver2D' || nType === 'CFDSolver3D' || nType === 'MPMDomain3D' || nType === 'MPMDomain2D' || nType === 'MarineHarbourDomain') {
             const info = document.createElement('div');
             info.id = 'grid-info-display';
             info.style.fontSize = 'var(--font-sm)';
@@ -801,7 +804,7 @@ export class PropertyEditor {
         }
 
         // Target Solver/Domain Connection Selector for Domain Meshes
-        if (node.type === 'DomainMesh3D' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh') {
+        if (isDomainMesh3DNode(node.type) || isDomainMesh2DNode(node.type) || node.type === 'DomainMesh') {
             const targetRow = this.createMeshTargetConnectionRow(node, state);
             if (targetRow) form.appendChild(targetRow);
         }
@@ -847,9 +850,9 @@ export class PropertyEditor {
                     value = node.parameters['space_time_scheme'];
                     if (!value) {
                         const so = Number(node.parameters['spatial_order'] ?? 2);
-                        const to = Number(node.parameters['temporal_order'] ?? 4);
-                        if (so === 2 && (to === 5 || to === 2)) value = 'ADER-2 (2nd-Order Space/Time)';
-                        else if (so === 3 && (to === 6 || to === 3)) value = 'ADER-3 (3rd-Order Space/Time)';
+                        const to = Number(node.parameters['temporal_order'] ?? 2);
+                        if (so === 3 || to === 6 || to === 3) value = 'ADER-3 (3rd-Order Space/Time)';
+                        else if (to === 5) value = 'ADER-2 (2nd-Order Space/Time)';
                         else value = 'MUSCL-Hancock (2nd-Order Space/Time)';
                     }
                 }
@@ -889,7 +892,7 @@ export class PropertyEditor {
             
             const baseParamInfo = getParameterInfo(key, node.type);
             const paramInfo = { ...baseParamInfo };
-            if (node.type === 'DomainMesh3D') {
+            if (isDomainMesh3DNode(node.type)) {
                 const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
                 const isHarbourModel = owningModel?.nodes.some((n: any) => n.type === 'MarineHarbourDomain' || n.parameters?.init_mode === 'Hydrostatic_Stratified_3D');
                 if (isHarbourModel) {
@@ -940,64 +943,24 @@ export class PropertyEditor {
             }
             row.appendChild(label);
 
-            if (key === 'stl_file' || key === 'k_file') {
-                const wrapper = document.createElement('div');
-                wrapper.style.display = 'flex';
-                wrapper.style.gap = '8px';
-                wrapper.style.alignItems = 'center';
-
-                const input = this.createInputElement(node, key, value);
-                input.dataset.key = key;
-                input.style.flex = '1';
-                wrapper.appendChild(input);
-
-                const browseBtn = document.createElement('button');
-                browseBtn.type = 'button';
-                browseBtn.textContent = 'Browse';
-                browseBtn.style.padding = '4px 8px';
-                browseBtn.style.background = '#333';
-                browseBtn.style.color = '#fff';
-                browseBtn.style.border = '1px solid #555';
-                browseBtn.style.cursor = 'pointer';
-                browseBtn.onclick = () => {
-                    const startPath = node.parameters[key] || '';
-                    const isK = key === 'k_file';
-                    const isStl = key === 'stl_file';
-                    const browser = new HostFileBrowserModal((window as any).networkManager, {
-                        title: isK ? 'Select LS-DYNA Keyword File (*.k, *.key)' : (isStl ? 'Select STL 3D Geometry (*.stl)' : 'Select File (Host)'),
-                        mode: 'open',
-                        filters: isK ? [
-                            { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
-                            { label: 'All Files (*.*)', extensions: ['*'] }
-                        ] : (isStl ? [
-                            { label: 'STL 3D Geometry (*.stl)', extensions: ['.stl'] },
-                            { label: 'All Files (*.*)', extensions: ['*'] }
-                        ] : undefined),
-                        onSelect: (path: string) => {
-                            this.updateParameter(key, path);
-                            const rand = Math.floor(Math.random() * 1000000);
-                            const prefix = isK ? 'k_' : 'stl_';
-                            const simpleHash = prefix + rand.toString(36);
-                            this.updateParameter('geometry_hash', simpleHash);
-                            if (!isK) {
-                                const net = (window as any).networkManager;
-                                if (net && net.isConnected()) {
-                                    const activeWs = this.stateManager.getActiveWorkspace();
-                                    const modelId = activeWs?.activeModelId || 'default';
-                                    const activeModel = this.stateManager.getAllModels().find(m => m.id === modelId) || this.stateManager.getActiveModel();
-                                    const resolvedPath = resolveResourcePath(path, activeModel?.filename);
-                                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: resolvedPath, modelId });
-                                }
-                            }
-                        }
-                    });
-                    browser.open(startPath);
-                };
-                wrapper.appendChild(browseBtn);
-                row.appendChild(wrapper);
+            const input = this.createInputElement(node, key, value);
+            input.dataset.key = key;
+            if (this.isFileOrDirKey(key)) {
+                row.appendChild(this.wrapWithFileBrowserControls(node, key, input));
+                if (key === 'output_dir' || key === 'vtk_dir') {
+                    const model = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                    if (model && model.filename) {
+                        const lastSlash = model.filename.lastIndexOf('/');
+                        const projDir = lastSlash !== -1 ? model.filename.substring(0, lastSlash) : '.';
+                        const projInfo = document.createElement('div');
+                        projInfo.style.fontSize = 'var(--font-xs)';
+                        projInfo.style.color = '#569cd6';
+                        projInfo.style.marginTop = '4px';
+                        projInfo.textContent = `Project Folder: ${projDir}`;
+                        row.appendChild(projInfo);
+                    }
+                }
             } else {
-                const input = this.createInputElement(node, key, value);
-                input.dataset.key = key;
                 row.appendChild(input);
             }
             form.appendChild(row);
@@ -1284,102 +1247,21 @@ export class PropertyEditor {
 
             inputEl.dataset.key = key;
 
-            if (key === 'output_dir' || key === 'vtk_dir') {
-                const wrapper = document.createElement('div');
-                wrapper.style.display = 'flex';
-                wrapper.style.gap = '8px';
-                wrapper.style.alignItems = 'center';
-                
-                inputEl.style.flex = '1';
-                wrapper.appendChild(inputEl);
-                
-                const browseBtn = document.createElement('button');
-                browseBtn.type = 'button';
-                browseBtn.textContent = 'Browse';
-                browseBtn.style.padding = '4px 8px';
-                browseBtn.style.background = '#333';
-                browseBtn.style.color = '#fff';
-                browseBtn.style.border = '1px solid #555';
-                browseBtn.style.cursor = 'pointer';
-                browseBtn.onclick = () => {
-                    const startPath = node.parameters[key] || '';
-                    const browser = new HostFileBrowserModal((window as any).networkManager, {
-                        title: 'Select Output Directory (Host)',
-                        mode: 'save',
-                        selectFolderOnly: true,
-                        onSelect: (dirPath: string) => {
-                            this.updateParameter(key, dirPath);
-                        }
-                    });
-                    browser.open(startPath);
-                };
-                wrapper.appendChild(browseBtn);
-                row.appendChild(wrapper);
-
-                const activeWs = this.stateManager.getActiveWorkspace();
-                const model = this.stateManager.getAllModels().find(m => m.id === activeWs.activeModelId);
-                if (model && model.filename) {
-                    const lastSlash = model.filename.lastIndexOf('/');
-                    const projDir = lastSlash !== -1 ? model.filename.substring(0, lastSlash) : '.';
-                    const projInfo = document.createElement('div');
-                    projInfo.style.fontSize = 'var(--font-xs)';
-                    projInfo.style.color = '#569cd6';
-                    projInfo.style.marginTop = '4px';
-                    projInfo.textContent = `Project Folder: ${projDir}`;
-                    row.appendChild(projInfo);
+            if (this.isFileOrDirKey(key)) {
+                row.appendChild(this.wrapWithFileBrowserControls(node, key, inputEl));
+                if (key === 'output_dir' || key === 'vtk_dir') {
+                    const model = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                    if (model && model.filename) {
+                        const lastSlash = model.filename.lastIndexOf('/');
+                        const projDir = lastSlash !== -1 ? model.filename.substring(0, lastSlash) : '.';
+                        const projInfo = document.createElement('div');
+                        projInfo.style.fontSize = 'var(--font-xs)';
+                        projInfo.style.color = '#569cd6';
+                        projInfo.style.marginTop = '4px';
+                        projInfo.textContent = `Project Folder: ${projDir}`;
+                        row.appendChild(projInfo);
+                    }
                 }
-            } else if (key === 'stl_file' || key === 'k_file') {
-                const wrapper = document.createElement('div');
-                wrapper.style.display = 'flex';
-                wrapper.style.gap = '8px';
-                wrapper.style.alignItems = 'center';
-                
-                inputEl.style.flex = '1';
-                wrapper.appendChild(inputEl);
-                
-                const isK = key === 'k_file';
-                const browseBtn = document.createElement('button');
-                browseBtn.type = 'button';
-                browseBtn.textContent = 'Browse';
-                browseBtn.style.padding = '4px 8px';
-                browseBtn.style.background = '#333';
-                browseBtn.style.color = '#fff';
-                browseBtn.style.border = '1px solid #555';
-                browseBtn.style.cursor = 'pointer';
-                browseBtn.onclick = () => {
-                    const startPath = node.parameters[key] || '';
-                    const browser = new HostFileBrowserModal((window as any).networkManager, {
-                        title: isK ? 'Select LS-DYNA Keyword File (*.k, *.key)' : 'Select STL 3D Geometry (*.stl)',
-                        mode: 'open',
-                        filters: isK ? [
-                            { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
-                            { label: 'All Files (*.*)', extensions: ['*'] }
-                        ] : [
-                            { label: 'STL 3D Geometry (*.stl)', extensions: ['.stl'] },
-                            { label: 'All Files (*.*)', extensions: ['*'] }
-                        ],
-                        onSelect: (path: string) => {
-                            this.updateParameter(key, path);
-                            const rand = Math.floor(Math.random() * 1000000);
-                            const prefix = isK ? 'k_' : 'stl_';
-                            const simpleHash = prefix + rand.toString(36);
-                            this.updateParameter('geometry_hash', simpleHash);
-                            if (!isK) {
-                                const net = (window as any).networkManager;
-                                if (net && net.isConnected()) {
-                                    const activeWs = this.stateManager.getActiveWorkspace();
-                                    const modelId = activeWs?.activeModelId || 'default';
-                                    const activeModel = this.stateManager.getAllModels().find(m => m.id === modelId) || this.stateManager.getActiveModel();
-                                    const resolvedPath = resolveResourcePath(path, activeModel?.filename);
-                                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: resolvedPath, modelId });
-                                }
-                            }
-                        }
-                    });
-                    browser.open(startPath);
-                };
-                wrapper.appendChild(browseBtn);
-                row.appendChild(wrapper);
             } else {
                 row.appendChild(inputEl);
             }
@@ -1387,7 +1269,7 @@ export class PropertyEditor {
             panels[panelIdx].appendChild(row);
         };
 
-        if (node.type === 'VirtualGauges') {
+        if (node.type === 'VirtualGauges' || (node.type as string) === 'VirtualGauges3D') {
             const mgrBtnBox = document.createElement('div');
             mgrBtnBox.style.marginBottom = '12px';
             const openMgrBtn = document.createElement('button');
@@ -1420,6 +1302,30 @@ export class PropertyEditor {
             formatsGrid.appendChild(createCheckboxField('export_hdf5', !!node.parameters['export_hdf5'], 'HDF5'));
             panels[0].appendChild(formatsGrid);
 
+            const qtyHdr = document.createElement('div');
+            qtyHdr.textContent = 'RECORDED QUANTITIES';
+            qtyHdr.style.fontSize = '10px';
+            qtyHdr.style.fontWeight = '700';
+            qtyHdr.style.color = '#38bdf8';
+            qtyHdr.style.letterSpacing = '0.5px';
+            qtyHdr.style.margin = '8px 0 6px 0';
+            panels[0].appendChild(qtyHdr);
+
+            const qtyGrid = document.createElement('div');
+            qtyGrid.style.display = 'grid';
+            qtyGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
+            qtyGrid.style.gap = '6px';
+            qtyGrid.appendChild(createCheckboxField('qty_pressure', node.parameters['qty_pressure'] !== false, 'Pressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_overpressure', node.parameters['qty_overpressure'] !== false, 'Overpressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_impulse', node.parameters['qty_impulse'] !== false, 'Impulse'));
+            qtyGrid.appendChild(createCheckboxField('qty_density', node.parameters['qty_density'] !== false, 'Density'));
+            qtyGrid.appendChild(createCheckboxField('qty_velocity', node.parameters['qty_velocity'] !== false, 'Velocity'));
+            qtyGrid.appendChild(createCheckboxField('qty_energy', node.parameters['qty_energy'] !== false, 'Internal Energy'));
+            qtyGrid.appendChild(createCheckboxField('qty_reacted', node.parameters['qty_reacted'] !== false, 'Reacted α₁'));
+            qtyGrid.appendChild(createCheckboxField('qty_unreacted', node.parameters['qty_unreacted'] !== false, 'Unreacted α₂'));
+            qtyGrid.appendChild(createCheckboxField('qty_air', node.parameters['qty_air'] !== false, 'Ambient Air'));
+            panels[0].appendChild(qtyGrid);
+
             // FILES/CONFIG Tab: text/number/dropdown
             const sourceModeEl = this.createInputElement(node, 'source_mode', node.parameters['source_mode'] ?? 'manual');
             addRowToPanel('source_mode', 'SOURCE MODE', sourceModeEl, 1);
@@ -1430,13 +1336,20 @@ export class PropertyEditor {
 
                 const fmtEl = this.createInputElement(node, 'external_file_format', node.parameters['external_file_format'] ?? 'Auto');
                 addRowToPanel('external_file_format', 'FILE FORMAT', fmtEl, 1);
-
-                const storeEl = this.createInputElement(node, 'storage_backend', node.parameters['storage_backend'] ?? 'HDF5 Stream');
-                addRowToPanel('storage_backend', 'STORAGE BACKEND', storeEl, 1);
-
-                const strideEl = this.createInputElement(node, 'sampling_stride_steps', node.parameters['sampling_stride_steps'] ?? 1);
-                addRowToPanel('sampling_stride_steps', 'SAMPLING STRIDE (STEPS)', strideEl, 1);
             }
+
+            const strideEl = this.createInputElement(node, 'sampling_stride_steps', node.parameters['sampling_stride_steps'] ?? 1);
+            addRowToPanel('sampling_stride_steps', 'SAMPLING STRIDE (STEPS)', strideEl, 1);
+
+            const exportFmtGrid = document.createElement('div');
+            exportFmtGrid.style.display = 'grid';
+            exportFmtGrid.style.gridTemplateColumns = '1fr 1fr 1fr';
+            exportFmtGrid.style.gap = '6px';
+            exportFmtGrid.style.marginBottom = '6px';
+            exportFmtGrid.appendChild(createCheckboxField('export_ascii', node.parameters['export_ascii'] !== false, 'ASCII CSV'));
+            exportFmtGrid.appendChild(createCheckboxField('export_binary', Boolean(node.parameters['export_binary']), 'Binary .bin'));
+            exportFmtGrid.appendChild(createCheckboxField('export_hdf5', Boolean(node.parameters['export_hdf5']), 'HDF5 .h5'));
+            panels[1].appendChild(exportFmtGrid);
 
             const delimEl = this.createInputElement(node, 'ascii_delimiter', node.parameters['ascii_delimiter'] ?? 'Comma');
             addRowToPanel('ascii_delimiter', 'ASCII DELIMITER', delimEl, 1);
@@ -1447,10 +1360,10 @@ export class PropertyEditor {
             const fileEl = this.createInputElement(node, 'custom_filename', node.parameters['custom_filename'] ?? 'gauges');
             addRowToPanel('custom_filename', 'CUSTOM FILENAME', fileEl, 1);
 
-            const dirEl = this.createInputElement(node, 'output_dir', node.parameters['output_dir'] ?? '');
+            const dirEl = this.createInputElement(node, 'output_dir', node.parameters['output_dir'] ?? './gauge_output');
             addRowToPanel('output_dir', 'OUTPUT DIR', dirEl, 1);
 
-            panels[1].appendChild(createCheckboxField('include_header', !!node.parameters['include_header'], 'Include Header'));
+            panels[1].appendChild(createCheckboxField('include_header', node.parameters['include_header'] !== false, 'Include Header'));
 
         } else if (node.type === 'VTKOutput') {
             const state = this.stateManager.getCurrentState();
@@ -1458,7 +1371,7 @@ export class PropertyEditor {
             const sourceNode = conn ? state?.nodes.find(n => n.id === conn.fromNode) : null;
             const is3D = sourceNode 
                 ? (sourceNode.type === 'CFDSolver3D' || sourceNode.type === 'FEMDomain3D' || sourceNode.type === 'MPMDomain3D' || sourceNode.type === 'FSICoupler3D' || sourceNode.type === 'FEMFSICoupler3D') 
-                : (state?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
+                : (state?.nodes.some(n => n.type === 'CFDSolver3D' || isDomainMesh3DNode(n.type) || n.type === 'FEMDomain3D' || n.type === 'MPMDomain3D') ?? false);
 
             // ==========================================
             // TAB 0: FORMATS & FILES
@@ -1826,7 +1739,7 @@ export class PropertyEditor {
             const stlQtyEl = this.createInputElement(node, 'stl_quantity', node.parameters['stl_quantity'] ?? 'pressure');
             addRowToPanel('stl_quantity', 'STL RESULTS QTY', stlQtyEl, 0);
 
-            const stlSampleEl = this.createInputElement(node, 'stl_sampling_mode', node.parameters['stl_sampling_mode'] ?? 'nearest');
+            const stlSampleEl = this.createInputElement(node, 'stl_sampling_mode', node.parameters['stl_sampling_mode'] ?? 'linear');
             addRowToPanel('stl_sampling_mode', 'STL SAMPLING MODE', stlSampleEl, 0);
 
             const gaugeQtyEl = this.createInputElement(node, 'gauge_quantity', node.parameters['gauge_quantity'] ?? 'pressure');
@@ -2061,10 +1974,10 @@ export class PropertyEditor {
             cbGrid.style.gap = '8px';
             cbGrid.style.marginTop = '8px';
             cbGrid.appendChild(createCheckboxField('log_scale', !!node.parameters['log_scale'], 'Log Scale'));
-            cbGrid.appendChild(createCheckboxField('auto_scale', !!node.parameters['auto_scale'], 'Auto Scale'));
+            cbGrid.appendChild(createCheckboxField('auto_scale', node.parameters['auto_scale'] !== false, 'Auto Scale'));
             cbGrid.appendChild(createCheckboxField('show_grid', node.parameters['show_grid'] !== false, 'Show Grid'));
             cbGrid.appendChild(createCheckboxField('show_grid_box', node.parameters['show_grid_box'] !== false, 'Bounding Outline'));
-            cbGrid.appendChild(createCheckboxField('interpolate', !!node.parameters['interpolate'], 'Interpolate'));
+            cbGrid.appendChild(createCheckboxField('interpolate', node.parameters['interpolate'] !== false, 'Interpolate'));
             cbGrid.appendChild(createCheckboxField('lightingEnabled', node.parameters['lightingEnabled'] !== false, 'Enable Lighting'));
             cbGrid.appendChild(createCheckboxField('aoEnabled', node.parameters['aoEnabled'] !== false, 'Enable SSAO'));
             cbGrid.appendChild(createCheckboxField('aoSphereImpostor', node.parameters['aoSphereImpostor'] !== false, 'Sphere Impostor AO'));
@@ -2233,13 +2146,13 @@ export class PropertyEditor {
             cbGridObs.style.display = 'grid';
             cbGridObs.style.gridTemplateColumns = 'repeat(2, 1fr)';
             cbGridObs.style.gap = '8px';
-            cbGridObs.appendChild(createCheckboxField('show_obstacles', !!node.parameters['show_obstacles'], 'Show Obstacles'));
+            cbGridObs.appendChild(createCheckboxField('show_obstacles', node.parameters['show_obstacles'] !== false, 'Show Obstacles'));
             cbGridObs.appendChild(createCheckboxField('obstacles_gridlines', node.parameters['obstacles_gridlines'] !== false, 'Obstacles Grid'));
             cbGridObs.appendChild(createCheckboxField('obstacles_solid', node.parameters['obstacles_solid'] !== false, 'Obstacles Solid'));
             cbGridObs.appendChild(createCheckboxField('obstacles_lighting', node.parameters['obstacles_lighting'] !== false, 'Obstacles Lighting'));
             cbGridObs.appendChild(createCheckboxField('obstacles_auto_scale', node.parameters['obstacles_auto_scale'] !== false, 'Obstacles Auto Scale'));
             cbGridObs.appendChild(createCheckboxField('obstacles_log_scale', !!node.parameters['obstacles_log_scale'], 'Obstacles Log Scale'));
-            cbGridObs.appendChild(createCheckboxField('obstacles_interpolate', !!node.parameters['obstacles_interpolate'], 'Obstacles Interpolate'));
+            cbGridObs.appendChild(createCheckboxField('obstacles_interpolate', node.parameters['obstacles_interpolate'] !== false, 'Obstacles Interpolate'));
             panels[0].appendChild(cbGridObs);
 
             const obsQtyEl = this.createInputElement(node, 'obstacles_quantity', node.parameters['obstacles_quantity'] ?? 'pressure');
@@ -2311,15 +2224,15 @@ export class PropertyEditor {
             qtyGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
             qtyGrid.style.gap = '8px';
 
-            qtyGrid.appendChild(createCheckboxField('qty_pressure', !!node.parameters['qty_pressure'], 'Pressure'));
-            qtyGrid.appendChild(createCheckboxField('qty_density', !!node.parameters['qty_density'], 'Density'));
-            qtyGrid.appendChild(createCheckboxField('qty_velocity', !!node.parameters['qty_velocity'], 'Velocity'));
-            qtyGrid.appendChild(createCheckboxField('qty_energy', !!node.parameters['qty_energy'], 'Internal Energy'));
-            qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters['qty_reacted'], 'Reacted (Alpha1)'));
-            qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters['qty_unreacted'], 'Unreacted (Alpha2)'));
-            qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters['qty_air'], 'Air'));
-            qtyGrid.appendChild(createCheckboxField('qty_overpressure', !!node.parameters['qty_overpressure'], 'Overpressure'));
-            qtyGrid.appendChild(createCheckboxField('qty_impulse', !!node.parameters['qty_impulse'], 'Impulse'));
+            qtyGrid.appendChild(createCheckboxField('qty_pressure', node.parameters['qty_pressure'] !== false, 'Pressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_density', node.parameters['qty_density'] !== false, 'Density'));
+            qtyGrid.appendChild(createCheckboxField('qty_velocity', node.parameters['qty_velocity'] !== false, 'Velocity'));
+            qtyGrid.appendChild(createCheckboxField('qty_energy', node.parameters['qty_energy'] !== false, 'Internal Energy'));
+            qtyGrid.appendChild(createCheckboxField('qty_reacted', node.parameters['qty_reacted'] !== false, 'Reacted (Alpha1)'));
+            qtyGrid.appendChild(createCheckboxField('qty_unreacted', node.parameters['qty_unreacted'] !== false, 'Unreacted (Alpha2)'));
+            qtyGrid.appendChild(createCheckboxField('qty_air', node.parameters['qty_air'] !== false, 'Air'));
+            qtyGrid.appendChild(createCheckboxField('qty_overpressure', node.parameters['qty_overpressure'] !== false, 'Overpressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_impulse', node.parameters['qty_impulse'] !== false, 'Impulse'));
             panels[3].appendChild(qtyGrid);
         }
 
@@ -2330,16 +2243,16 @@ export class PropertyEditor {
             qtyGrid.style.gridTemplateColumns = 'repeat(2, 1fr)';
             qtyGrid.style.gap = '8px';
 
-            qtyGrid.appendChild(createCheckboxField('qty_pressure', !!node.parameters['qty_pressure'], 'Pressure'));
-            qtyGrid.appendChild(createCheckboxField('qty_density', !!node.parameters['qty_density'], 'Density'));
-            qtyGrid.appendChild(createCheckboxField('qty_velocity', !!node.parameters['qty_velocity'], 'Velocity'));
-            qtyGrid.appendChild(createCheckboxField('qty_energy', !!node.parameters['qty_energy'], 'Internal Energy'));
-            qtyGrid.appendChild(createCheckboxField('qty_reacted', !!node.parameters['qty_reacted'], 'Reacted (Alpha1)'));
-            qtyGrid.appendChild(createCheckboxField('qty_unreacted', !!node.parameters['qty_unreacted'], 'Unreacted (Alpha2)'));
-            qtyGrid.appendChild(createCheckboxField('qty_air', !!node.parameters['qty_air'], 'Air'));
+            qtyGrid.appendChild(createCheckboxField('qty_pressure', node.parameters['qty_pressure'] !== false, 'Pressure'));
+            qtyGrid.appendChild(createCheckboxField('qty_density', node.parameters['qty_density'] !== false, 'Density'));
+            qtyGrid.appendChild(createCheckboxField('qty_velocity', node.parameters['qty_velocity'] !== false, 'Velocity'));
+            qtyGrid.appendChild(createCheckboxField('qty_energy', node.parameters['qty_energy'] !== false, 'Internal Energy'));
+            qtyGrid.appendChild(createCheckboxField('qty_reacted', node.parameters['qty_reacted'] !== false, 'Reacted (Alpha1)'));
+            qtyGrid.appendChild(createCheckboxField('qty_unreacted', node.parameters['qty_unreacted'] !== false, 'Unreacted (Alpha2)'));
+            qtyGrid.appendChild(createCheckboxField('qty_air', node.parameters['qty_air'] !== false, 'Air'));
             if (node.type === 'VirtualGauges' || node.type === 'VTKOutput') {
-                qtyGrid.appendChild(createCheckboxField('qty_overpressure', !!node.parameters['qty_overpressure'], 'Overpressure'));
-                qtyGrid.appendChild(createCheckboxField('qty_impulse', !!node.parameters['qty_impulse'], 'Impulse'));
+                qtyGrid.appendChild(createCheckboxField('qty_overpressure', node.parameters['qty_overpressure'] !== false, 'Overpressure'));
+                qtyGrid.appendChild(createCheckboxField('qty_impulse', node.parameters['qty_impulse'] !== false, 'Impulse'));
             }
 
             panels[2].appendChild(qtyGrid);
@@ -2415,7 +2328,7 @@ export class PropertyEditor {
             'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride', 'tessellation_max_edge',
             'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
             // 2D CFD keys
-            'nr', 'nz', 'min_r', 'min_z', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
+            'nr', 'nz', 'min_r', 'min_z', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
             'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
             'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
@@ -2439,7 +2352,8 @@ export class PropertyEditor {
             'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
             'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
-            'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress',
+            'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress', 'erosion_min_density', 'erosion_min_density_ratio',
+            'mpm_cell_size', 'mpm_xmin', 'mpm_xmax', 'mpm_ymin', 'mpm_ymax', 'mpm_zmin', 'mpm_zmax',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
             'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
             'anisotropy_ratio', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
@@ -2476,7 +2390,7 @@ export class PropertyEditor {
             'lt_I', 'lt_a', 'lt_b', 'lt_x',
             'lt_G1', 'lt_c', 'lt_d', 'lt_y',
             'lt_G2', 'lt_e', 'lt_g', 'lt_z',
-            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min',
+            'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min', 'jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0',
             // Afterburn & Aerobic Combustion
             'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
             'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
@@ -2523,27 +2437,26 @@ export class PropertyEditor {
             'timestamp_mode': ['None', 'Relative', 'Clock'],
             'source_mode': ['manual', 'external_file'],
             'external_file_format': ['Auto', 'CSV', 'Binary Float32', 'HDF5'],
-            'storage_backend': ['HDF5 Stream', 'Live Telemetry'],
             'preset': dynamicPresets,
             'material_model': getConstitutiveModels(),
             'tait_variant_str': ['Isentropic', 'CaloricGruneisen', 'ShockHugoniot'],
             'tait_variant': ['0: Isentropic (Cole 1948)', '1: Caloric Grüneisen (Near-Field)', '2: Shock Hugoniot Reference'],
             'fsi_algorithm': ['CutCellPenalty', 'ImmersedBoundary', 'DirectMassCoupled'],
             'stl_outside_domain': ['nan', 'zero', 'omit'],
-            'auto_scale': ['true', 'false'],
-            'log_scale': ['true', 'false'],
-            'show_grid': ['true', 'false'],
-            'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
+            'x_axis_mode': ['radius', 'cell_id'],
+            'downsample_stride': ['1', '2', '3', '4', '5', '8'],
+            'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant', 'Unreacted JWL (Lee-Tarver)'],
+            'mixture_rule': ['Pressure Equilibrium (Volume Additive)', 'Linear Blend'],
             'burn_model': ['Programmed Wavefront Burn', 'Lee-Tarver 3-Stage ODE', 'CREST Shock Entropy Kinetics'],
             'product_model': ['JWL Product Gas', 'Davis Detonation Product'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
-            'beamColormap': ['rainbow', 'plasma', 'viridis', 'coolwarm', 'cividis', 'grayscale'],
+            'beamColormap': ['rainbow', 'turbo', 'plasma', 'viridis', 'inferno', 'magma', 'jet', 'coolwarm', 'cividis', 'grayscale'],
             'mpmParticleQuantity': ['vonMises', 'plastic_strain', 'damage', 'cluster_id', 'pressure', 'velocity', 'density', 'has_failed', 'object_id'],
-            'mpmParticleColormap': ['rainbow', 'plasma', 'viridis', 'coolwarm', 'cividis', 'grayscale'],
+            'mpmParticleColormap': ['rainbow', 'turbo', 'plasma', 'viridis', 'inferno', 'magma', 'jet', 'coolwarm', 'cividis', 'grayscale'],
             'femQuantity': ['vonMises', 'plasticStrain', 'pressure', 'velocity', 'damage'],
-            'femColormap': ['rainbow', 'plasma', 'viridis', 'coolwarm', 'cividis', 'grayscale'],
+            'femColormap': ['rainbow', 'turbo', 'plasma', 'viridis', 'inferno', 'magma', 'jet', 'coolwarm', 'cividis', 'grayscale'],
             'coupling_scheme': ['Two-Way Staggered', 'Sub-Cycling'],
             'pressure_integration': ['2x2 Gauss Quadrature', '1-Point Centroid'],
             'uncovering_method': ['Conservative IDW + Vacuum Cavity', 'Ghost-Fluid Standard'],
@@ -2560,8 +2473,8 @@ export class PropertyEditor {
             'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
             'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
             'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
-            'left_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
-            'right_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
+            'left_bc': ['Reflecting'],
+            'right_bc': ['Transmitting', 'Reflecting', 'Terminate'],
             'bc_x_min': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
             'bc_x_max': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
             'bc_y_min': ['Reflecting', 'Transmitting', 'Terminate', 'Sticky', 'FreeSlip', 'Lysmer'],
@@ -2578,20 +2491,20 @@ export class PropertyEditor {
             'contact_search_method': ['Hierarchical Octave Hash Grid', 'Linear BVH (Morton Code)'],
             'mesh_source': ['Box Generator', 'Cylinder Generator', 'Plate Generator', 'STL File', 'LS-DYNA Keyword File'],
             'element_topology': ['Hex8', 'Tet4_ANP'],
-            'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
+            'trigger_type': ['Step Interval', 'Time Interval'],
             'composition': [...Object.keys(EXPLOSIVE_PRESETS).sort(), 'Custom'],
-            'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
+            'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'From3D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : (node.type === 'CFDSolver' ? ['Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas']),
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3', '5'],
             'temporal_order': ['1', '2', '3', '4'],
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
             'charge_shape': node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'],
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
-            'colormap': ['rainbow', 'plasma', 'viridis', 'coolwarm', 'cividis', 'grayscale'],
-            'stl_colormap': ['rainbow', 'plasma', 'viridis', 'coolwarm', 'cividis', 'grayscale'],
+            'colormap': ['rainbow', 'turbo', 'plasma', 'viridis', 'inferno', 'magma', 'jet', 'coolwarm', 'cividis', 'grayscale'],
+            'stl_colormap': ['rainbow', 'turbo', 'plasma', 'viridis', 'inferno', 'magma', 'jet', 'coolwarm', 'cividis', 'grayscale'],
             'stl_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
             'stl_sampling_mode': ['nearest', 'linear'],
-            'obstacles_colormap': ['rainbow', 'plasma', 'viridis', 'coolwarm', 'cividis', 'grayscale'],
+            'obstacles_colormap': ['rainbow', 'turbo', 'plasma', 'viridis', 'inferno', 'magma', 'jet', 'coolwarm', 'cividis', 'grayscale'],
             'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
             'gauge_quantity': ['pressure', 'velocity', 'peak_overpressure', 'status'],
             'refresh_rate': ['0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0', '2.0', '5.0', '10.0', '20.0', '50.0', '100.0', '1000.0'],
@@ -2629,6 +2542,65 @@ export class PropertyEditor {
                 ['Leapfrog', 'RK2', 'USL', 'USF'] : 
                 ['MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)']
         };
+
+        if (key === 'telemetry_channel') {
+            const select = document.createElement('select');
+            select.style.width = '100%';
+            select.style.background = '#252526';
+            select.style.color = '#ccc';
+            select.style.border = '1px solid #444';
+            select.style.padding = '4px';
+
+            const opts = node.type === 'TelemetryContour'
+                ? [
+                    { v: 0, l: '0: Pressure P (Pa)' },
+                    { v: 10, l: '10: Overpressure ΔP (Pa)' },
+                    { v: 1, l: '1: Density ρ (kg/m³)' },
+                    { v: 9, l: '9: Velocity Mag |u| (m/s)' },
+                    { v: 2, l: '2: Radial Vel u_r (m/s)' },
+                    { v: 3, l: '3: Axial Vel u_z (m/s)' },
+                    { v: 4, l: '4: Specific Energy e (J/kg)' },
+                    { v: 5, l: '5: Reacted Products α₁' },
+                    { v: 6, l: '6: Unreacted Solid α₂' },
+                    { v: 7, l: '7: MPM von Mises (Pa)' },
+                    { v: 8, l: '8: MPM Plastic Strain ε_p' }
+                ]
+                : (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D')
+                ? [
+                    { v: 0, l: '0: Pressure P(t) [Pa]' },
+                    { v: 7, l: '7: Overpressure ΔP(t) [Pa]' },
+                    { v: 8, l: '8: Impulse I(t) [Pa·s]' },
+                    { v: 1, l: '1: Density ρ(t) [kg/m³]' },
+                    { v: 2, l: '2: Velocity |u|(t) [m/s]' },
+                    { v: 3, l: '3: Internal Energy e(t) [J/kg]' },
+                    { v: 4, l: '4: Reacted α₁(t)' },
+                    { v: 5, l: '5: Unreacted α₂(t)' },
+                    { v: 6, l: '6: Ambient Air(t)' }
+                ]
+                : [
+                    { v: 0, l: '0: Pressure P(r) [Pa]' },
+                    { v: 8, l: '8: Overpressure ΔP(r) [Pa]' },
+                    { v: 1, l: '1: Density ρ(r) [kg/m³]' },
+                    { v: 2, l: '2: Radial Velocity u_r(r) [m/s]' },
+                    { v: 3, l: '3: Internal Energy e(r) [J/kg]' },
+                    { v: 4, l: '4: All Species (α₁, α₂, Air)' },
+                    { v: 5, l: '5: Reacted α₁(r)' },
+                    { v: 6, l: '6: Unreacted α₂(r)' },
+                    { v: 7, l: '7: Ambient Air(r)' }
+                ];
+            const curNum = Number(value ?? 0);
+            opts.forEach(item => {
+                const o = document.createElement('option');
+                o.value = String(item.v);
+                o.textContent = item.l;
+                if (item.v === curNum) o.selected = true;
+                select.appendChild(o);
+            });
+            select.addEventListener('change', () => {
+                this.updateParameter(key, Number(select.value));
+            });
+            return select;
+        }
 
         if (key === 'material') {
             const select = document.createElement('select');
@@ -3343,7 +3315,7 @@ export class PropertyEditor {
             return select;
         }
 
-        if (key === 'source_model_id' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(node.type)) {
+        if (key === 'source_model_id' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(node.type)) {
             const select = document.createElement('select');
             select.style.width = '100%';
             select.style.background = '#252526';
@@ -3358,12 +3330,13 @@ export class PropertyEditor {
 
             const allModels = this.stateManager.getAllModels();
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+            const is3Dto3D = node.type === 'Remap3DTo3DNode';
             const is2Dto3D = node.type === 'Remap2DTo3DNode';
-            const sourceDim = is2Dto3D ? '2D' : '1D';
+            const sourceDim = is3Dto3D ? '3D' : (is2Dto3D ? '2D' : '1D');
 
             const candidateModels = allModels.filter(m => {
                 if (owningModel && m.id === owningModel.id) return false;
-                return m.nodes.some(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
+                return m.nodes.some(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
             });
 
             const currentModelId = node.parameters?.source_model_id || '';
@@ -3396,7 +3369,7 @@ export class PropertyEditor {
                     ws.connections = ws.connections.filter(c => c.toNode !== node.id);
                     if (newModelId) {
                         const srcM = allModels.find(m => m.id === newModelId);
-                        const srcSolver = srcM?.nodes.find(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
+                        const srcSolver = srcM?.nodes.find(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
                         if (srcSolver) {
                             ws.connections.push({
                                 fromNode: srcSolver.id,
@@ -3407,20 +3380,28 @@ export class PropertyEditor {
                         }
                     }
                 }
+                const state = this.stateManager.getCurrentState();
+                if (newModelId && owningModel) {
+                    const desiredInitMode = is3Dto3D ? 'From3D' : (is2Dto3D ? 'From2D' : 'From1D');
+                    const targetSolverId = node.parameters?.target_solver || state?.connections.find(c => c.fromNode === node.id && (c.toPort === 'remap' || c.toPort === 'in'))?.toNode;
+                    const tSolver = owningModel.nodes.find(n => n.id === targetSolverId) || owningModel.nodes.find(n => n.type === 'CFDSolver3D' || n.type === 'CFDSolver2D' || n.type === 'MarineHarbourDomain');
+                    if (tSolver && tSolver.parameters) {
+                        tSolver.parameters['init_mode'] = desiredInitMode;
+                        if (!node.parameters['target_solver']) node.parameters['target_solver'] = tSolver.id;
+                    }
+                }
                 if (owningModel) {
                     this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
                 }
-                const state = this.stateManager.getCurrentState();
                 if (state) {
                     this.stateManager.pushState(state);
                 }
                 this.stateManager.notifyChange();
             });
-
             return select;
         }
 
-        if (key === 'target_solver' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode'].includes(node.type)) {
+        if (key === 'target_solver' && ['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(node.type)) {
             const select = document.createElement('select');
             select.style.width = '100%';
             select.style.background = '#252526';
@@ -3436,7 +3417,7 @@ export class PropertyEditor {
             const state = this.stateManager.getCurrentState();
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
             const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
-            const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode';
+            const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode';
             const targetSolvers = candidateNodes.filter(n => is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D');
 
             let currentSolverId = node.parameters?.target_solver || '';
@@ -3477,6 +3458,10 @@ export class PropertyEditor {
                             toNode: newSolverId,
                             toPort: 'remap'
                         });
+                        const tSolver = (owningModel?.nodes || state.nodes).find(n => n.id === newSolverId);
+                        if (tSolver && tSolver.parameters) {
+                            tSolver.parameters['init_mode'] = node.type === 'Remap3DTo3DNode' ? 'From3D' : (node.type === 'Remap2DTo3DNode' ? 'From2D' : 'From1D');
+                        }
                     }
                     if (owningModel) {
                         this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
@@ -3602,16 +3587,13 @@ export class PropertyEditor {
                         this.updateParameter(key, val);
                     } else {
                         let s_order = 2;
-                        let t_order = 4;
-                        if (val === 'ADER-2 (2nd-Order Space/Time)') {
-                            s_order = 2;
-                            t_order = (node.type === 'CFDSolver3D') ? 5 : 2;
-                        } else if (val === 'ADER-3 (3rd-Order Space/Time)') {
+                        let t_order = 2;
+                        if (val === 'ADER-3 (3rd-Order Space/Time)') {
                             s_order = 3;
-                            t_order = (node.type === 'CFDSolver3D') ? 6 : 3;
+                            t_order = 3;
                         } else {
                             s_order = 2;
-                            t_order = 4;
+                            t_order = 2;
                         }
                         
                         if (this.currentNodeId) {
@@ -3698,6 +3680,25 @@ export class PropertyEditor {
 
             container.appendChild(chipRow);
             return container;
+        }
+
+        const booleanKeys = [
+            'auto_scale', 'log_scale', 'show_grid', 'show_gridlines',
+            'show_colorbar', 'interpolate', 'afterburn_enabled',
+            'track_mpm_velocity', 'include_header',
+            'export_ascii', 'export_binary', 'export_hdf5'
+        ];
+        if (typeof value === 'boolean' || booleanKeys.includes(key)) {
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            const defaultTrue = ['auto_scale', 'show_grid', 'show_gridlines', 'show_colorbar', 'include_header'].includes(key);
+            cb.checked = value === undefined ? defaultTrue : (value === true || value === 'true');
+            cb.style.margin = '4px 0';
+            cb.style.cursor = 'pointer';
+            cb.addEventListener('change', () => {
+                this.updateParameter(key, cb.checked);
+            });
+            return cb;
         }
 
         const input = document.createElement('input');
@@ -4392,7 +4393,7 @@ export class PropertyEditor {
             interpLbl.title = 'Bilinear cell texture interpolation';
             const interpCb = document.createElement('input');
             interpCb.type = 'checkbox';
-            interpCb.checked = slice.interpolate === true;
+            interpCb.checked = slice.interpolate !== false;
             interpCb.onchange = () => {
                 const updated = [...slices];
                 updated[idx] = { ...slice, interpolate: interpCb.checked };
@@ -4472,7 +4473,7 @@ export class PropertyEditor {
             if (node) {
                 const meshNode = this.findMeshNodeForViewport(state, node.id);
 
-                if (meshNode && meshNode.type === 'DomainMesh3D') {
+                if (meshNode && isDomainMesh3DNode(meshNode.type)) {
                     const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
                     const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
                     minVal = zmin;
@@ -4491,7 +4492,7 @@ export class PropertyEditor {
                 colormap: 'rainbow',
                 auto_scale: true,
                 log_scale: false,
-                interpolate: false,
+                interpolate: true,
                 min_val: 101325.0,
                 max_val: 101325.0 * 10.0,
                 enabled: true,
@@ -4516,7 +4517,7 @@ export class PropertyEditor {
         while (queue.length > 0) {
             const currId = queue.shift()!;
             const currNode = state.nodes.find((n: any) => n.id === currId);
-            if (currNode && (currNode.type === 'DomainMesh3D' || currNode.type === 'DomainMesh2D')) {
+            if (currNode && (isDomainMesh3DNode(currNode.type) || isDomainMesh2DNode(currNode.type))) {
                 return currNode;
             }
             
@@ -4530,8 +4531,7 @@ export class PropertyEditor {
         }
         
         const is3D = node.type.includes('3D') || node.type === 'Telemetry3DViewport';
-        const targetType = is3D ? 'DomainMesh3D' : 'DomainMesh2D';
-        return state.nodes.find((n: any) => n.type === targetType) || null;
+        return state.nodes.find((n: any) => is3D ? isDomainMesh3DNode(n.type) : isDomainMesh2DNode(n.type)) || null;
     }
 
     private sendView3DConfigForNode(nodeId: string, slices: any[]): void {
@@ -4613,6 +4613,133 @@ export class PropertyEditor {
         this.sendView3DConfigForNode(this.currentNodeId, slices);
     }
 
+    private isFileOrDirKey(key: string): boolean {
+        return key === 'stl_file' || key === 'k_file' || key === 'output_dir' || key === 'vtk_dir' || key === 'external_file_path' || key === 'file_path';
+    }
+
+    private wrapWithFileBrowserControls(node: Node, key: string, inputEl: HTMLElement): HTMLElement {
+        const wrapper = document.createElement('div');
+        wrapper.style.display = 'flex';
+        wrapper.style.gap = '6px';
+        wrapper.style.alignItems = 'center';
+        wrapper.style.width = '100%';
+
+        inputEl.style.flex = '1';
+        inputEl.style.minWidth = '0';
+        wrapper.appendChild(inputEl);
+
+        const isStl = key === 'stl_file';
+        const isK = key === 'k_file';
+        const isDir = key === 'output_dir' || key === 'vtk_dir';
+        const isExternal = key === 'external_file_path' || key === 'file_path';
+
+        const openBrowserAt = (initialOverride?: string) => {
+            const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+            const rawCurrent = String(node.parameters[key] || '');
+            const startPath = initialOverride !== undefined
+                ? initialOverride
+                : (rawCurrent ? resolveResourcePath(rawCurrent, owningModel?.filename) : '');
+
+            let title = 'Select File (Host)';
+            let mode: 'open' | 'save' = 'open';
+            let selectFolderOnly = false;
+            let filters: FileFilterPreset[] | undefined = undefined;
+
+            if (isStl) {
+                title = 'Select STL 3D Geometry (*.stl)';
+                filters = [
+                    { label: 'STL 3D Geometry (*.stl)', extensions: ['.stl'] },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ];
+            } else if (isK) {
+                title = 'Select LS-DYNA Keyword File (*.k, *.key)';
+                filters = [
+                    { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ];
+            } else if (isDir) {
+                title = 'Select Output Directory (Host)';
+                mode = 'save';
+                selectFolderOnly = true;
+            } else if (isExternal) {
+                title = 'Select Data / Sensor File (Host)';
+                filters = [
+                    { label: 'Data / CSV Files (*.dat, *.csv, *.txt)', extensions: ['.dat', '.csv', '.txt'] },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ];
+            }
+
+            const browser = new HostFileBrowserModal((window as any).networkManager, {
+                title,
+                mode,
+                selectFolderOnly,
+                filters,
+                onSelect: (selectedPath: string) => {
+                    if (inputEl instanceof HTMLInputElement) {
+                        inputEl.value = selectedPath;
+                    }
+                    this.updateParameter(key, selectedPath);
+                }
+            });
+            browser.open(startPath);
+        };
+
+        const browseBtn = document.createElement('button');
+        browseBtn.type = 'button';
+        browseBtn.textContent = 'Browse';
+        browseBtn.title = isDir ? 'Browse host output directory' : 'Browse host filesystem';
+        browseBtn.style.padding = '4px 8px';
+        browseBtn.style.background = '#333';
+        browseBtn.style.color = '#fff';
+        browseBtn.style.border = '1px solid #555';
+        browseBtn.style.borderRadius = '3px';
+        browseBtn.style.cursor = 'pointer';
+        browseBtn.style.whiteSpace = 'nowrap';
+        browseBtn.style.flexShrink = '0';
+        browseBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openBrowserAt();
+        };
+        wrapper.appendChild(browseBtn);
+
+        const recentBtn = document.createElement('button');
+        recentBtn.type = 'button';
+        recentBtn.textContent = '🕒';
+        recentBtn.title = isDir ? 'Pick from Recent Folders' : 'Browse from a Recent Folder';
+        recentBtn.style.padding = '4px 6px';
+        recentBtn.style.background = '#2a2d2e';
+        recentBtn.style.color = '#ccc';
+        recentBtn.style.border = '1px solid #555';
+        recentBtn.style.borderRadius = '3px';
+        recentBtn.style.cursor = 'pointer';
+        recentBtn.style.flexShrink = '0';
+        recentBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            showRecentFoldersQuickMenu(
+                recentBtn,
+                (folderPath) => {
+                    if (isDir) {
+                        if (inputEl instanceof HTMLInputElement) {
+                            inputEl.value = folderPath;
+                        }
+                        this.updateParameter(key, folderPath);
+                    } else {
+                        openBrowserAt(folderPath);
+                    }
+                },
+                {
+                    title: isDir ? 'Set Output Folder' : 'Browse Recent Folder',
+                    onBrowseOther: () => openBrowserAt()
+                }
+            );
+        };
+        wrapper.appendChild(recentBtn);
+
+        return wrapper;
+    }
+
     private updateParameter(key: string, value: any): void {
         if (!this.currentNodeId) return;
 
@@ -4621,6 +4748,29 @@ export class PropertyEditor {
         if (!node) return;
 
         const updates: Record<string, any> = { [key]: value };
+
+        if (this.isFileOrDirKey(key) && typeof value === 'string' && value.trim()) {
+            const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+            const isDirKey = key === 'output_dir' || key === 'vtk_dir';
+            const resolved = resolveResourcePath(value.trim(), owningModel?.filename);
+            if (resolved.startsWith('/') || resolved.startsWith('~') || /^[A-Za-z]:[\\/]/.test(resolved)) {
+                recordRecentFolder(resolved, isDirKey);
+            }
+            if (key === 'stl_file') {
+                updates['geometry_hash'] = 'stl_' + Math.floor(Math.random() * 1000000).toString(36);
+                (this.stateManager as any).invalidateSTLGeometry?.(node.id);
+                const net = (window as any).networkManager;
+                if (net && net.isConnected()) {
+                    net.send({
+                        command: 'LOAD_STL_GEOMETRY',
+                        filePath: resolved,
+                        modelId: owningModel?.id || 'default'
+                    });
+                }
+            } else if (key === 'k_file') {
+                updates['geometry_hash'] = 'k_' + Math.floor(Math.random() * 1000000).toString(36);
+            }
+        }
 
         if (node.type === 'STLGeometry' && key === 'voxelization_method') {
             const rand = Math.floor(Math.random() * 1000000);
@@ -4870,21 +5020,29 @@ export class PropertyEditor {
                     if (node.parameters['burn_zone_cells'] === undefined) updates['burn_zone_cells'] = 4;
                     if (node.parameters['tau_burn_min'] === undefined) updates['tau_burn_min'] = 1.0e-7;
                 } else if (value === 'Lee-Tarver 3-Stage ODE') {
-                    if (node.parameters['lt_I'] === undefined) updates['lt_I'] = 4.0e6;
-                    if (node.parameters['lt_a'] === undefined) updates['lt_a'] = 0.24;
+                    if (node.parameters['lt_I'] === undefined) updates['lt_I'] = 1.4e17;
+                    if (node.parameters['lt_a'] === undefined) updates['lt_a'] = 0.0;
                     if (node.parameters['lt_b'] === undefined) updates['lt_b'] = 0.667;
-                    if (node.parameters['lt_x'] === undefined) updates['lt_x'] = 7.0;
-                    if (node.parameters['lt_G1'] === undefined) updates['lt_G1'] = 130.0e-6;
+                    if (node.parameters['lt_x'] === undefined) updates['lt_x'] = 20.0;
+                    if (node.parameters['lt_G1'] === undefined) updates['lt_G1'] = 1.3e-14;
                     if (node.parameters['lt_c'] === undefined) updates['lt_c'] = 0.667;
-                    if (node.parameters['lt_d'] === undefined) updates['lt_d'] = 0.333;
+                    if (node.parameters['lt_d'] === undefined) updates['lt_d'] = 0.277;
                     if (node.parameters['lt_y'] === undefined) updates['lt_y'] = 2.0;
-                    if (node.parameters['lt_G2'] === undefined) updates['lt_G2'] = 400.0e-6;
+                    if (node.parameters['lt_G2'] === undefined) updates['lt_G2'] = 4.0e-14;
                     if (node.parameters['lt_e'] === undefined) updates['lt_e'] = 0.333;
-                    if (node.parameters['lt_g'] === undefined) updates['lt_g'] = 0.667;
-                    if (node.parameters['lt_z'] === undefined) updates['lt_z'] = 3.0;
-                    if (node.parameters['lt_F_ig_max'] === undefined) updates['lt_F_ig_max'] = 0.02;
-                    if (node.parameters['lt_F_G1_max'] === undefined) updates['lt_F_G1_max'] = 0.50;
-                    if (node.parameters['lt_F_G2_min'] === undefined) updates['lt_F_G2_min'] = 0.50;
+                    if (node.parameters['lt_g'] === undefined) updates['lt_g'] = 1.0;
+                    if (node.parameters['lt_z'] === undefined) updates['lt_z'] = 2.0;
+                    if (node.parameters['lt_F_ig_max'] === undefined) updates['lt_F_ig_max'] = 0.3;
+                    if (node.parameters['lt_F_G1_max'] === undefined) updates['lt_F_G1_max'] = 0.5;
+                    if (node.parameters['lt_F_G2_min'] === undefined) updates['lt_F_G2_min'] = 0.5;
+                    if (node.parameters['jwlr_A'] === undefined) updates['jwlr_A'] = 7.32e14;
+                    if (node.parameters['jwlr_B'] === undefined) updates['jwlr_B'] = -5.2654e9;
+                    if (node.parameters['jwlr_R1'] === undefined) updates['jwlr_R1'] = 14.1;
+                    if (node.parameters['jwlr_R2'] === undefined) updates['jwlr_R2'] = 1.41;
+                    if (node.parameters['jwlr_omega'] === undefined) updates['jwlr_omega'] = 0.8867;
+                    if (node.parameters['jwlr_Cv'] === undefined) updates['jwlr_Cv'] = 2.7806e6;
+                    if (node.parameters['jwlr_T0'] === undefined) updates['jwlr_T0'] = 298.0;
+                    if (node.parameters['mixture_rule'] === undefined) updates['mixture_rule'] = 'Pressure Equilibrium (Volume Additive)';
                 } else if (value === 'CREST Shock Entropy Kinetics') {
                     if (node.parameters['crest_b1'] === undefined) updates['crest_b1'] = 1.2e7;
                     if (node.parameters['crest_c1'] === undefined) updates['crest_c1'] = 0.67;
@@ -5144,16 +5302,16 @@ export class PropertyEditor {
             'mpmContourLevels', 'mpmSmoothContours',
             'femSolid', 'femWireframe', 'femResults', 'femQuantity', 'femColormap', 'femOpacity',
             'femLighting', 'femAutoScale', 'femLogScale', 'femShowColorbar', 'femMinVal', 'femMaxVal',
-            'femContourLevels', 'femSmoothContours',
+            'femContourLevels', 'femSmoothContours', 'femInterpolate',
             'beamSolid', 'beamWireframe', 'beamOpacity', 'beamRadius', 'rebarSolid', 'rebarWireframe',
             'rebarOpacity', 'rebarRadius', 'beamQuantity', 'beamColormap', 'beamAutoScale', 'beamLogScale',
             'beamMinVal', 'beamMaxVal', 'beamContourLevels', 'beamSmoothContours',
             'stl_solids', 'stl_wireframe', 'stl_lighting', 'stl_colormap', 'stl_opacity',
             'stl_show_results', 'stl_quantity', 'stl_auto_scale', 'stl_log_scale', 'stl_show_colorbar',
-            'stl_min_val', 'stl_max_val',
+            'stl_min_val', 'stl_max_val', 'stl_contour_levels', 'stl_smooth_contours', 'stl_sampling_mode',
             'obstacles_solid', 'obstacles_gridlines', 'obstacles_lighting', 'obstacles_colormap',
             'obstacles_opacity', 'obstacles_quantity', 'obstacles_auto_scale', 'obstacles_log_scale',
-            'obstacles_min_val', 'obstacles_max_val',
+            'obstacles_min_val', 'obstacles_max_val', 'obstacles_contour_levels', 'obstacles_smooth_contours', 'obstacles_interpolate',
             'charge_solid', 'charge_wireframe', 'charge_lighting', 'charge_opacity', 'charge_color', 'chargeColor',
             'detonatorSolid', 'detonatorWireframe', 'detonatorLighting', 'detonatorSize', 'detonatorOpacity',
             'triggerSolid', 'triggerWireframe', 'triggerLighting', 'triggerSize', 'triggerOpacity',
@@ -5277,7 +5435,7 @@ export class PropertyEditor {
                 if (showSTL && stlShowResults) {
                     let volStride = 1;
                     const targetModel = this.stateManager.getAppState().models[targetModelId];
-                    const meshNode = targetModel?.nodes.find(n => n.type === 'DomainMesh3D');
+                    const meshNode = targetModel?.nodes.find(n => isDomainMesh3DNode(n.type));
                     if (meshNode) {
                         const cellSize = Number(meshNode.parameters.cell_size ?? 0.05);
                         const xmin = Number(meshNode.parameters.xmin ?? 0.0);
@@ -5315,7 +5473,7 @@ export class PropertyEditor {
         const structuralKeys = [
             'material_type', 'composition', 'preset', 'material_model',
             'solid_model', 'burn_model', 'product_model',
-            'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion',
+            'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion', 'enable_density_erosion', 'erode_to_fv_grid',
             'enable_heterogeneity', 'enable_anisotropy', 'kc_auto_generate',
             'dimension', 'charge_shape', 'init_mode', 'velocity_scheme', 'trigger_type',
             'contact_method', 'bardenhagen_initial_tie', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode'
@@ -5775,7 +5933,7 @@ export class PropertyEditor {
         if (!curState) return 0.005;
         const owningModel = node ? (this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel()) : this.stateManager.getActiveModel();
         const nodes = owningModel ? owningModel.nodes : curState.nodes;
-        const mpmMesh = nodes.find((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
+        const mpmMesh = nodes.find((n: any) => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
         const mpmDomain = nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain');
         const xmin = Number(mpmMesh?.parameters['xmin'] ?? mpmMesh?.parameters['x_min'] ?? 0);
         const xmax = Number(mpmMesh?.parameters['xmax'] ?? mpmMesh?.parameters['x_max'] ?? 1);
@@ -5869,8 +6027,8 @@ export class PropertyEditor {
         const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
         const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
         
-        let targetMeshTypes: string[] = ['DomainMesh3D'];
-        if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') targetMeshTypes = ['DomainMesh2D'];
+        let targetMeshTypes: string[] = ['DomainMesh3D', 'SparseDomainMesh3D'];
+        if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') targetMeshTypes = ['DomainMesh2D', 'SparseDomainMesh2D'];
         else if (node.type === 'CFDSolver') targetMeshTypes = ['DomainMesh'];
 
         const meshNodes = candidateNodes.filter((n: Node) => targetMeshTypes.includes(n.type));
@@ -5889,14 +6047,16 @@ export class PropertyEditor {
             option.value = mesh.id;
             const p = mesh.parameters || {};
             let summary = '';
-            if (mesh.type === 'DomainMesh3D') {
+            if (isDomainMesh3DNode(mesh.type)) {
                 const cs = p.cell_size ?? 0.01;
                 const nx = p.nx ?? '?';
                 const ny = p.ny ?? '?';
                 const nz = p.nz ?? '?';
-                summary = `dx=${cs}m, ${nx}x${ny}x${nz}`;
-            } else if (mesh.type === 'DomainMesh2D') {
-                summary = `dr=dz=${p.cell_size ?? 0.01}m, ${p.nr ?? '?'}x${p.nz ?? '?'}`;
+                const modeTag = mesh.type === 'SparseDomainMesh3D' ? 'SPARSE 8×8×8, ' : '';
+                summary = `${modeTag}dx=${cs}m, ${nx}x${ny}x${nz}`;
+            } else if (isDomainMesh2DNode(mesh.type)) {
+                const modeTag = mesh.type === 'SparseDomainMesh2D' ? 'SPARSE 8×8, ' : '';
+                summary = `${modeTag}dr=dz=${p.cell_size ?? 0.01}m, ${p.nr ?? '?'}x${p.nz ?? '?'}`;
             } else {
                 summary = `dx=${p.cell_size ?? 0.01}m, r=${p.domain_radius ?? 1.0}m`;
             }
@@ -6010,6 +6170,49 @@ export class PropertyEditor {
         row.style.border = '1px solid rgba(56, 189, 248, 0.2)';
         row.style.borderRadius = '4px';
 
+        if (isDomainMesh3DNode(node.type) || isDomainMesh2DNode(node.type)) {
+            const isSparse = node.type === 'SparseDomainMesh3D' || node.type === 'SparseDomainMesh2D';
+            if (isSparse || this.stateManager.isMeshSparseSupported(node.id)) {
+                const modeBox = document.createElement('div');
+                modeBox.style.display = 'flex';
+                modeBox.style.justifyContent = 'space-between';
+                modeBox.style.alignItems = 'center';
+                modeBox.style.marginBottom = '8px';
+                modeBox.style.paddingBottom = '8px';
+                modeBox.style.borderBottom = '1px solid rgba(56, 189, 248, 0.15)';
+
+                const modeLabel = document.createElement('span');
+                modeLabel.style.fontSize = '11px';
+                modeLabel.style.fontWeight = 'bold';
+                modeLabel.style.color = isSparse ? '#34d399' : '#38bdf8';
+                modeLabel.textContent = isSparse
+                    ? (node.type === 'SparseDomainMesh3D' ? '⚡ Sparse 8×8×8 Tile Grid' : '⚡ Sparse 8×8 Tile Grid')
+                    : '📦 Dense Uniform Grid';
+
+                const toggleBtn = document.createElement('button');
+                toggleBtn.type = 'button';
+                toggleBtn.style.fontSize = '10px';
+                toggleBtn.style.fontWeight = 'bold';
+                toggleBtn.style.padding = '3px 8px';
+                toggleBtn.style.borderRadius = '4px';
+                toggleBtn.style.cursor = 'pointer';
+                toggleBtn.style.border = isSparse ? '1px solid rgba(16, 185, 129, 0.6)' : '1px solid rgba(56, 189, 248, 0.5)';
+                toggleBtn.style.background = isSparse ? 'rgba(16, 185, 129, 0.18)' : 'rgba(56, 189, 248, 0.12)';
+                toggleBtn.style.color = isSparse ? '#6ee7b7' : '#7dd3fc';
+                toggleBtn.textContent = isSparse ? 'Switch to Dense Grid ⇄' : 'Switch to Sparse Tile Grid ⇄';
+                toggleBtn.title = 'Toggle between Dense Uniform Grid and Sparse Tile-Hash MPM Background Grid (preserves all bounds, BCs, and connections)';
+                toggleBtn.onclick = (e) => {
+                    e.preventDefault();
+                    this.stateManager.toggleMeshSparsity(node.id);
+                    this.render(true);
+                };
+
+                modeBox.appendChild(modeLabel);
+                modeBox.appendChild(toggleBtn);
+                row.appendChild(modeBox);
+            }
+        }
+
         const label = document.createElement('label');
         label.style.display = 'block';
         label.style.fontSize = 'var(--font-sm)';
@@ -6034,9 +6237,9 @@ export class PropertyEditor {
         const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
         const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
         
-        const targetSolverTypes: string[] = node.type === 'DomainMesh3D'
+        const targetSolverTypes: string[] = isDomainMesh3DNode(node.type)
             ? ['MPMDomain3D', 'CFDSolver3D', 'MarineHarbourDomain']
-            : (node.type === 'DomainMesh2D' ? ['MPMDomain2D', 'CFDSolver2D'] : ['CFDSolver']);
+            : (isDomainMesh2DNode(node.type) ? ['MPMDomain2D', 'CFDSolver2D'] : ['CFDSolver']);
 
         const solverNodes = candidateNodes.filter((n: Node) => targetSolverTypes.includes(n.type));
 
@@ -6909,7 +7112,7 @@ export class PropertyEditor {
         const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
         const connections = owningModel?.connections || state?.connections || [];
         const meshConn = connections.find((c: any) => (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in')) || (c.fromNode === node.id && c.fromPort === 'mesh'));
-        const meshNode = meshConn ? candidateNodes.find((n: any) => n.id === (meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode)) : candidateNodes.find((n: any) => n.type === 'DomainMesh3D');
+        const meshNode = meshConn ? candidateNodes.find((n: any) => n.id === (meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode)) : candidateNodes.find((n: any) => isDomainMesh3DNode(n.type));
 
         const waterZ = node.parameters?.water_surface_z ?? 10.0;
         const seabedZ = node.parameters?.seabed_surface_z ?? 2.0;

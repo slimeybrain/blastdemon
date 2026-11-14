@@ -1,4 +1,4 @@
-import { SimulationState, Node, Connection } from './types.js';
+import { SimulationState, Node, Connection, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { estimateNodeMemory } from './memory-validator.js';
 
 export interface NodeStatus {
@@ -44,7 +44,7 @@ export function isParameterRelevant(node: Node, key: string): boolean {
     if (!node || !node.parameters) return true;
 
     // Parameters that are system paths/hashes/collections/internal properties which can be empty or managed separately
-    if (['output_dir', 'vtk_dir', 'gauges', 'slices', 'stl_file', 'geometry_hash', 'primitives', 'k_file', 'ambient_air_material', 'explosive_charge', 'target_domain', 'ambient_air_target', 'source_model_id', 'target_solver', 'remap', 'material', 'external_file_path', 'connected_detonators'].includes(key)) {
+    if (['output_dir', 'vtk_dir', 'gauges', 'slices', 'stl_file', 'geometry_hash', 'primitives', 'k_file', 'domain_mesh', 'ambient_air_material', 'explosive_charge', 'target_domain', 'ambient_air_target', 'source_model_id', 'target_solver', 'remap', 'material', 'external_file_path', 'connected_detonators'].includes(key)) {
         return false;
     }
 
@@ -124,10 +124,6 @@ export function isParameterRelevant(node: Node, key: string): boolean {
         } else if (matModel === 'CREST Reactive Burn') {
             if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key)) return false;
         }
-    } else if (node.type === 'DomainMesh') {
-        const dim = node.parameters['dimension'] || '1D';
-        if (dim === '1D' && ['y_min_bc', 'y_max_bc', 'z_min_bc', 'z_max_bc'].includes(key)) return false;
-        if (dim === '2D' && ['z_min_bc', 'z_max_bc'].includes(key)) return false;
     } else if (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') {
         if (['stl_file', 'geometry_hash', 'mesh_type', 'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size', 'ambient_air_material', 'explosive_charge', 'remap'].includes(key)) return false;
     }
@@ -162,10 +158,14 @@ export function validateSimulationState(state: SimulationState): ValidationResul
     // --- 1. CFD Solver 1D Validation ---
     const solvers1D = state.nodes.filter(n => n.type === 'CFDSolver');
     solvers1D.forEach(solver1D => {
-        // CFL validation
+        // CFL & End Time validation
         const cfl = Number(solver1D.parameters?.cfl ?? 0.4);
-        if (isNaN(cfl) || cfl <= 0 || cfl >= 1.0) {
-            addMessage(solver1D.id, 'error', "CFL parameter must be between 0.0 and 1.0 (exclusive).");
+        if (isNaN(cfl) || cfl <= 0 || cfl > 1.0) {
+            addMessage(solver1D.id, 'error', "CFL parameter must be in the range (0.0, 1.0].");
+        }
+        const endtime = Number(solver1D.parameters?.endtime ?? 0.001);
+        if (isNaN(endtime) || endtime <= 0) {
+            addMessage(solver1D.id, 'error', "Simulation End Time (endtime) must be greater than 0 s.");
         }
 
         const painterConn = state.connections.find(c => c.toNode === solver1D.id && c.toPort === 'in');
@@ -207,8 +207,17 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     addMessage(solver1D.id, 'error', "Only a Charge1D node can be connected to the 1D CFD Solver 'charge' port.");
                 } else {
                     const matConn = state.connections.find(c => (c.toNode === cNode.id && c.toPort === 'material') || (c.fromNode === cNode.id && c.fromPort === 'material'));
-                    if (!matConn) {
+                    const matNodeId = matConn ? (matConn.toNode === cNode.id ? matConn.fromNode : matConn.toNode) : cNode.parameters?.material;
+                    const matNode = matNodeId ? state.nodes.find(n => n.id === matNodeId) : undefined;
+                    if (!matNode) {
                         addMessage(cNode.id, 'error', "Charge1D has no explosive Material assigned. Connect a JWL or Ideal Gas Material.");
+                    } else {
+                        const initMode1D = solver1D.parameters?.init_mode || 'Multi-Material JWL';
+                        if (initMode1D === 'Ideal Gas' && isJWLMaterial(matNode)) {
+                            addMessage(solver1D.id, 'warning', "1D Solver Init Mode is 'Ideal Gas', while Charge1D uses a JWL Material. Switch Init Mode to 'Multi-Material JWL' or assign an Ideal Gas charge material.");
+                        } else if (initMode1D === 'Multi-Material JWL' && !isJWLMaterial(matNode) && isIdealGasChargeMaterial(matNode)) {
+                            addMessage(solver1D.id, 'warning', "1D Solver Init Mode is 'Multi-Material JWL', while Charge1D uses an Ideal Gas Material. Serialization will run Ideal Gas EOS.");
+                        }
                     }
                 }
             }
@@ -307,10 +316,10 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             addMessage(solver2D.id, 'error', "No Mesh node connected to CFD Solver 2D. A DomainMesh2D node is required.");
         } else {
             meshNode2D = state.nodes.find(n => n.id === meshConn2D.fromNode);
-            if (!meshNode2D || meshNode2D.type !== 'DomainMesh2D') {
+            if (!meshNode2D || !isDomainMesh2DNode(meshNode2D.type)) {
                 const connKey = `${meshConn2D.fromNode}:${meshConn2D.fromPort}->${meshConn2D.toNode}:${meshConn2D.toPort}`;
-                flawedConnections.set(connKey, "Only DomainMesh2D node can be connected to the Mesh input of CFD Solver 2D.");
-                addMessage(solver2D.id, 'error', "Only DomainMesh2D node can be connected to the Mesh input of CFD Solver 2D.");
+                flawedConnections.set(connKey, "Only DomainMesh2D or SparseDomainMesh2D node can be connected to the Mesh input of CFD Solver 2D.");
+                addMessage(solver2D.id, 'error', "Only DomainMesh2D or SparseDomainMesh2D node can be connected to the Mesh input of CFD Solver 2D.");
             }
         }
 
@@ -339,8 +348,8 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 }
             }
 
-            // Ignored inputs warning
-            const ignoredPorts = ['air', 'explosive', 'ideal_gas'];
+            // Ignored inputs warning (ambient 'air' is respected outside R_remap)
+            const ignoredPorts = ['charge', 'explosive', 'ideal_gas'];
             ignoredPorts.forEach(port => {
                 const conn = state.connections.find(c => c.toNode === solver2D.id && c.toPort === port);
                 if (conn) {
@@ -530,10 +539,10 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         } else {
             const otherId = meshConn3D.toNode === solver3D.id ? meshConn3D.fromNode : meshConn3D.toNode;
             const fromNode = state.nodes.find(n => n.id === otherId);
-            if (!fromNode || fromNode.type !== 'DomainMesh3D') {
+            if (!fromNode || !isDomainMesh3DNode(fromNode.type)) {
                 const connKey = `${meshConn3D.fromNode}:${meshConn3D.fromPort}->${meshConn3D.toNode}:${meshConn3D.toPort}`;
-                flawedConnections.set(connKey, "Only DomainMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
-                addMessage(solver3D.id, 'error', "Only DomainMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
+                flawedConnections.set(connKey, "Only DomainMesh3D or SparseDomainMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
+                addMessage(solver3D.id, 'error', "Only DomainMesh3D or SparseDomainMesh3D node can be connected to the Mesh input of CFD Solver 3D.");
             }
         }
 
@@ -604,14 +613,41 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
 
             // Ignored inputs warning
-            const ignoredPorts = ['charge', 'detonator'];
+            const ignoredPorts = ['charge', 'explosive', 'detonator'];
             ignoredPorts.forEach(port => {
                 const conn = state.connections.find(c => c.toNode === solver3D.id && c.toPort === port);
                 if (conn) {
-                    addMessage(solver3D.id, 'warning', `Input connected to '${port}' port is ignored when Init Mode is 'From2D'.`);
+                    addMessage(solver3D.id, 'warning', `Local '${port}' input is ignored when Init Mode is 'From2D' (Charge & EOS are inherited from upstream).`);
                     const connectedNode = state.nodes.find(n => n.id === conn.fromNode);
                     if (connectedNode) {
-                        addMessage(connectedNode.id, 'warning', `This node is ignored because the connected CFD Solver 3D Init Mode is 'From2D'.`);
+                        addMessage(connectedNode.id, 'warning', `This node is ignored because CFD Solver 3D Init Mode is 'From2D' (inherited from upstream).`);
+                    }
+                }
+            });
+
+        } else if (initMode3D === 'From3D') {
+            // Remap 3D->3D connection check
+            const remapConn3D = state.connections.find(c => c.toNode === solver3D.id && c.toPort === 'remap');
+            if (!remapConn3D) {
+                addMessage(solver3D.id, 'error', "No Remap node connected to CFD Solver 3D. A Remap3DTo3DNode is required for From3D mode.");
+            } else {
+                const remapNode3D = state.nodes.find(n => n.id === remapConn3D.fromNode);
+                if (!remapNode3D || remapNode3D.type !== 'Remap3DTo3DNode') {
+                    const connKey = `${remapConn3D.fromNode}:${remapConn3D.fromPort}->${remapConn3D.toNode}:${remapConn3D.toPort}`;
+                    flawedConnections.set(connKey, "Only Remap3DTo3DNode can be connected to the Remap input of CFD Solver 3D in From3D mode.");
+                    addMessage(solver3D.id, 'error', "Only Remap3DTo3DNode can be connected to the Remap input of CFD Solver 3D in From3D mode.");
+                }
+            }
+
+            // Ignored inputs warning
+            const ignoredPorts = ['charge', 'explosive', 'detonator'];
+            ignoredPorts.forEach(port => {
+                const conn = state.connections.find(c => c.toNode === solver3D.id && c.toPort === port);
+                if (conn) {
+                    addMessage(solver3D.id, 'warning', `Local '${port}' input is ignored when Init Mode is 'From3D' (Charge & EOS are inherited from upstream).`);
+                    const connectedNode = state.nodes.find(n => n.id === conn.fromNode);
+                    if (connectedNode) {
+                        addMessage(connectedNode.id, 'warning', `This node is ignored because CFD Solver 3D Init Mode is 'From3D' (inherited from upstream).`);
                     }
                 }
             });
@@ -798,6 +834,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         if (node.type === 'DomainMesh') {
             const cell_size = Number(node.parameters?.cell_size ?? 0.001);
             const domain_radius = Number(node.parameters?.domain_radius ?? 1.0);
+            const left_bc = node.parameters?.left_bc || 'Reflecting';
 
             if (isNaN(cell_size) || cell_size <= 0) {
                 addMessage(node.id, 'error', "Mesh Cell Size must be greater than 0.");
@@ -807,10 +844,15 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
             if (cell_size >= domain_radius) {
                 addMessage(node.id, 'error', "Mesh Cell Size must be smaller than Domain Radius.");
+            } else if (cell_size > 0 && domain_radius / cell_size < 10) {
+                addMessage(node.id, 'warning', `1D DomainMesh has fewer than 10 cells (${Math.round(domain_radius / cell_size)} cells). Refine cell_size for meaningful radial resolution.`);
+            }
+            if (left_bc !== 'Reflecting') {
+                addMessage(node.id, 'error', "1D Spherical origin (r = 0, left_bc) must be 'Reflecting'.");
             }
         }
 
-        if (node.type === 'DomainMesh2D') {
+        if (isDomainMesh2DNode(node.type)) {
             const cell_size = Number(node.parameters?.cell_size ?? 0.005);
             const max_r = Number(node.parameters?.max_r ?? 1.0);
             const max_z = Number(node.parameters?.max_z ?? 1.0);
@@ -838,12 +880,12 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 (c.fromNode === node.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
             );
             if (!meshConn) {
-                addMessage(node.id, 'error', "Incomplete Model: No background grid connected to MPM Domain 2D. A DomainMesh2D background grid must be defined and connected to the 'mesh' input port.");
+                addMessage(node.id, 'error', "Incomplete Model: No background grid connected to MPM Domain 2D. A DomainMesh2D or SparseDomainMesh2D background grid must be defined and connected to the 'mesh' input port.");
             } else {
                 const otherId = meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode;
                 const meshNode = state.nodes.find(n => n.id === otherId);
-                if (!meshNode || meshNode.type !== 'DomainMesh2D') {
-                    addMessage(node.id, 'error', "Connected background grid is not a valid DomainMesh2D node.");
+                if (!meshNode || !isDomainMesh2DNode(meshNode.type)) {
+                    addMessage(node.id, 'error', "Connected background grid is not a valid DomainMesh2D or SparseDomainMesh2D node.");
                 }
             }
             const objConn = state.connections.find(c => 
@@ -870,12 +912,12 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 (c.fromNode === node.id && (c.fromPort === 'mesh' || c.fromPort === 'grid'))
             );
             if (!meshConn) {
-                addMessage(node.id, 'error', "Incomplete Model: No background grid connected to MPM Domain 3D. A DomainMesh3D background grid must be defined and connected to the 'mesh' input port.");
+                addMessage(node.id, 'error', "Incomplete Model: No background grid connected to MPM Domain 3D. A DomainMesh3D or SparseDomainMesh3D background grid must be defined and connected to the 'mesh' input port.");
             } else {
                 const otherId = meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode;
                 const meshNode = state.nodes.find(n => n.id === otherId);
-                if (!meshNode || meshNode.type !== 'DomainMesh3D') {
-                    addMessage(node.id, 'error', "Connected background grid is not a valid DomainMesh3D node.");
+                if (!meshNode || !isDomainMesh3DNode(meshNode.type)) {
+                    addMessage(node.id, 'error', "Connected background grid is not a valid DomainMesh3D or SparseDomainMesh3D node.");
                 }
             }
             const objConn = state.connections.find(c => 
@@ -1037,12 +1079,12 @@ export function validateSimulationState(state: SimulationState): ValidationResul
 
             const meshConn = state.connections.find(c => (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in')) || (c.fromNode === node.id && c.fromPort === 'mesh'));
             if (!meshConn) {
-                addMessage(node.id, 'error', "No background grid connected to Marine Harbour Domain. A DomainMesh3D node is required.");
+                addMessage(node.id, 'error', "No background grid connected to Marine Harbour Domain. A DomainMesh3D or SparseDomainMesh3D node is required.");
             } else {
                 const otherId = meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode;
                 const meshNode = state.nodes.find(n => n.id === otherId);
-                if (!meshNode || meshNode.type !== 'DomainMesh3D') {
-                    addMessage(node.id, 'error', "Only DomainMesh3D node can be connected to the Mesh input of Marine Harbour Domain.");
+                if (!meshNode || !isDomainMesh3DNode(meshNode.type)) {
+                    addMessage(node.id, 'error', "Only DomainMesh3D or SparseDomainMesh3D node can be connected to the Mesh input of Marine Harbour Domain.");
                 } else {
                     const seabedMeshType = node.parameters?.seabed_mesh_type || 'Hybrid_MPM_Crater_FEM_FarField';
                     const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
@@ -1274,6 +1316,16 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             if (isNaN(charge_mass) || charge_mass <= 0) {
                 addMessage(node.id, 'error', "Charge mass must be greater than 0.");
             }
+            const mesh1D = state.nodes.find(n => n.type === 'DomainMesh');
+            if (mesh1D && charge_radius > 0) {
+                const domainRadius = Number(mesh1D.parameters?.domain_radius ?? 1.0);
+                const cellSize = Number(mesh1D.parameters?.cell_size ?? 0.001);
+                if (domainRadius > 0 && charge_radius >= domainRadius) {
+                    addMessage(node.id, 'error', `Charge radius (${charge_radius} m) must be smaller than the 1D Domain Radius (${domainRadius} m).`);
+                } else if (cellSize > 0 && (charge_radius / cellSize) < 3) {
+                    addMessage(node.id, 'warning', `Charge radius (${charge_radius} m) spans fewer than 3 cells (${(charge_radius / cellSize).toFixed(1)} cells at dx = ${cellSize} m). Refine cell_size for accurate detonation energy release.`);
+                }
+            }
         }
 
         if (node.type === 'DetonatorLocation') {
@@ -1303,7 +1355,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 );
                 const meshId = meshConn2D ? (meshConn2D.toNode === connectedSolver.id ? meshConn2D.fromNode : meshConn2D.toNode) : (connectedSolver.parameters?.mesh || '');
                 const meshNode = meshId ? state.nodes.find(n => n.id === meshId) : null;
-                if (meshNode && meshNode.type === 'DomainMesh2D') {
+                if (meshNode && isDomainMesh2DNode(meshNode.type)) {
                     const max_r = Number(meshNode.parameters?.max_r ?? 1.0);
                     const max_z = Number(meshNode.parameters?.max_z ?? 1.0);
 
@@ -1344,7 +1396,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 );
                 const meshId = meshConn3D ? (meshConn3D.toNode === connectedSolver.id ? meshConn3D.fromNode : meshConn3D.toNode) : (connectedSolver.parameters?.mesh || '');
                 const meshNode = meshId ? state.nodes.find(n => n.id === meshId) : null;
-                if (meshNode && meshNode.type === 'DomainMesh3D') {
+                if (meshNode && isDomainMesh3DNode(meshNode.type)) {
                     const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
                     const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
                     const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
@@ -1365,20 +1417,32 @@ export function validateSimulationState(state: SimulationState): ValidationResul
             }
         }
 
-        if (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode') {
-            const remap_radius = Number(node.parameters?.remap_radius ?? 0.5);
-            if (isNaN(remap_radius) || remap_radius <= 0) {
-                addMessage(node.id, 'error', "Remap radius must be greater than 0.");
+        if (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode') {
+            const is2DSource = node.type === 'Remap2DTo3DNode';
+            const is3DSource = node.type === 'Remap3DTo3DNode';
+            const is3DTarget = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode';
+            const remap_radius = Number(node.parameters?.remap_radius ?? 0.0);
+            if (isNaN(remap_radius) || remap_radius < 0) {
+                addMessage(node.id, 'error', "Remap radius must be >= 0 (0 = full upstream domain).");
             }
 
-            // Connection checks
             const globalSM = (typeof window !== 'undefined' && (window as any).stateManager) ? (window as any).stateManager : null;
+            const allModels: any[] = globalSM?.getAllModels?.() || [];
+            const owningModel = allModels.find((m: any) => Array.isArray(m.nodes) && m.nodes.some((n: any) => n.id === node.id));
+            const matchesUpstream = (n: any) => is3DSource ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2DSource ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
+
+            // Self-reference / cycle check
+            if (node.parameters?.source_model_id && owningModel && node.parameters.source_model_id === owningModel.id) {
+                addMessage(node.id, 'error', "Remap node cannot reference its own model as the upstream source.");
+            }
+
+            let upstreamModel: any = null;
             let hasValidUpstream = false;
 
             if (node.parameters?.source_model_id && globalSM) {
-                const allModels = globalSM.getAllModels?.() || [];
                 const src = allModels.find((m: any) => m.id === node.parameters.source_model_id);
-                if (src && src.nodes.some((n: any) => n.type === 'CFDSolver')) {
+                if (src && (!owningModel || src.id !== owningModel.id) && src.nodes.some(matchesUpstream)) {
+                    upstreamModel = src;
                     hasValidUpstream = true;
                 }
             }
@@ -1388,9 +1452,9 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 if (ws && ws.connections) {
                     const wsConn = ws.connections.find((c: any) => c.toNode === node.id);
                     if (wsConn) {
-                        const allModels = globalSM.getAllModels?.() || [];
                         const fromModel = allModels.find((m: any) => m.nodes.some((n: any) => n.id === wsConn.fromNode));
-                        if (fromModel && fromModel.nodes.some((n: any) => n.type === 'CFDSolver')) {
+                        if (fromModel && (!owningModel || fromModel.id !== owningModel.id) && fromModel.nodes.some(matchesUpstream)) {
+                            upstreamModel = fromModel;
                             hasValidUpstream = true;
                         }
                     }
@@ -1401,78 +1465,102 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 const inConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
                 if (inConn) {
                     const fromNode = state.nodes.find(n => n.id === inConn.fromNode);
-                    if (fromNode && fromNode.type === 'CFDSolver') {
+                    if (fromNode && matchesUpstream(fromNode)) {
                         hasValidUpstream = true;
                     }
                 }
             }
 
             if (!hasValidUpstream) {
-                addMessage(node.id, 'error', "Remap node has no upstream source specified. Select a Source Model in the Inspector or wire an upstream 1D CFD Solver.");
-            }
-        }
-
-        if (node.type === 'Remap2DTo3DNode') {
-            const remap_radius = Number(node.parameters?.remap_radius ?? 0.5);
-            if (isNaN(remap_radius) || remap_radius <= 0) {
-                addMessage(node.id, 'error', "Remap radius must be greater than 0.");
-            }
-
-            // Connection checks
-            const globalSM = (typeof window !== 'undefined' && (window as any).stateManager) ? (window as any).stateManager : null;
-            let hasValidUpstream = false;
-
-            if (node.parameters?.source_model_id && globalSM) {
-                const allModels = globalSM.getAllModels?.() || [];
-                const src = allModels.find((m: any) => m.id === node.parameters.source_model_id);
-                if (src && src.nodes.some((n: any) => n.type === 'CFDSolver2D')) {
-                    hasValidUpstream = true;
+                addMessage(node.id, 'error', is3DSource
+                    ? "Remap 3D->3D node has no upstream source specified. Select a 3D Source Model in the Inspector or Pipeline Browser."
+                    : (is2DSource
+                        ? "Remap 2D->3D node has no upstream source specified. Select a 2D Source Model in the Inspector or Pipeline Browser."
+                        : "Remap node has no upstream 1D source specified. Select a 1D Source Model in the Inspector or Pipeline Browser."));
+            } else if (!is2DSource && !is3DSource && upstreamModel) {
+                const upMesh = upstreamModel.nodes.find((n: any) => n.type === 'DomainMesh');
+                const upCharge = upstreamModel.nodes.find((n: any) => n.type === 'Charge1D');
+                const upRadius = Number(upMesh?.parameters?.domain_radius ?? 0);
+                const upChargeR = Number(upCharge?.parameters?.charge_radius ?? 0);
+                if (remap_radius > 0 && upRadius > 0 && remap_radius > upRadius) {
+                    addMessage(node.id, 'warning', `Remap radius (${remap_radius} m) exceeds upstream 1D Domain Radius (${upRadius} m); mapping will clamp to ${upRadius} m.`);
+                }
+                if (remap_radius > 0 && upChargeR > 0 && remap_radius <= upChargeR) {
+                    addMessage(node.id, 'warning', `Remap radius (${remap_radius} m) is <= upstream Charge1D radius (${upChargeR} m), clipping part of the explosive core.`);
                 }
             }
 
-            if (!hasValidUpstream && globalSM) {
-                const ws = globalSM.getActiveWorkspace?.();
-                if (ws && ws.connections) {
-                    const wsConn = ws.connections.find((c: any) => c.toNode === node.id);
-                    if (wsConn) {
-                        const allModels = globalSM.getAllModels?.() || [];
-                        const fromModel = allModels.find((m: any) => m.nodes.some((n: any) => n.id === wsConn.fromNode));
-                        if (fromModel && fromModel.nodes.some((n: any) => n.type === 'CFDSolver2D')) {
-                            hasValidUpstream = true;
-                        }
+            // Target solver & burst coordinate validation
+            const remapConn = state.connections.find(c =>
+                (c.fromNode === node.id && (c.toPort === 'remap' || c.fromPort === 'remap' || c.fromPort === 'remap_out' || c.fromPort === 'out')) ||
+                (c.toNode === node.id && c.fromPort === 'remap')
+            );
+            const targetSolverId = remapConn
+                ? (remapConn.fromNode === node.id ? remapConn.toNode : remapConn.fromNode)
+                : (node.parameters?.target_solver || '');
+            const connectedSolver = targetSolverId
+                ? state.nodes.find(n => n.id === targetSolverId)
+                : state.nodes.find(n => is3DTarget ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D');
+
+            if (!remapConn && !node.parameters?.target_solver) {
+                addMessage(node.id, 'warning', "Remap node is not explicitly wired to a target solver's 'remap' port.");
+            }
+
+            if (connectedSolver) {
+                const expectedMode = is3DSource ? 'From3D' : (is2DSource ? 'From2D' : 'From1D');
+                if ((connectedSolver.type === 'CFDSolver2D' || connectedSolver.type === 'CFDSolver3D') &&
+                    connectedSolver.parameters?.init_mode &&
+                    connectedSolver.parameters.init_mode !== expectedMode) {
+                    addMessage(node.id, 'warning', `Connected solver init_mode is '${connectedSolver.parameters.init_mode}'; serialization will override to '${expectedMode}'.`);
+                }
+
+                if (is3DTarget) {
+                    const bx = Number(node.parameters?.explosive_x ?? 0.5);
+                    const by = Number(node.parameters?.explosive_y ?? 0.5);
+                    const bz = Number(node.parameters?.explosive_z ?? 0.5);
+                    if (isNaN(bx) || isNaN(by) || isNaN(bz)) {
+                        addMessage(node.id, 'error', "Remap 3D burst coordinates (explosive_x, explosive_y, explosive_z) must be numeric.");
                     }
-                }
-            }
-
-            if (!hasValidUpstream) {
-                const inConn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
-                if (inConn) {
-                    const fromNode = state.nodes.find(n => n.id === inConn.fromNode);
-                    if (fromNode && fromNode.type === 'CFDSolver2D') {
-                        hasValidUpstream = true;
-                    }
-                }
-            }
-
-            if (!hasValidUpstream) {
-                addMessage(node.id, 'error', "Remap 2D->3D node has no upstream source specified. Select a Source Model in the Inspector or wire an upstream 2D CFD Solver.");
-            }
-
-            // Cross-validation with 2D / 3D mesh dimensions
-            const remapConn = state.connections.find(c => c.fromNode === node.id && (c.fromPort === 'remap' || c.fromPort === 'remap_out'));
-            if (remapConn) {
-                const connectedSolver = state.nodes.find(n => n.id === remapConn.toNode);
-                if (connectedSolver && (connectedSolver.type === 'CFDSolver3D' || connectedSolver.type === 'MarineHarbourDomain')) {
                     const meshConn3D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
-                    if (meshConn3D) {
-                        const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
-                        if (meshNode && meshNode.type === 'DomainMesh3D') {
-                            const spanX = Math.abs(Number(meshNode.parameters?.xmax ?? 1.0) - Number(meshNode.parameters?.xmin ?? 0.0));
-                            const spanY = Math.abs(Number(meshNode.parameters?.ymax ?? 1.0) - Number(meshNode.parameters?.ymin ?? 0.0));
-                            const maxHalfSpan = 0.5 * Math.max(spanX, spanY);
-                            if (remap_radius > maxHalfSpan * Math.SQRT2) {
-                                addMessage(node.id, 'warning', `Remap radius (${remap_radius}) exceeds 3D domain horizontal span (${maxHalfSpan.toFixed(3)} m).`);
+                    const meshNode = meshConn3D
+                        ? state.nodes.find(n => n.id === meshConn3D.fromNode)
+                        : state.nodes.find(n => isDomainMesh3DNode(n.type));
+                    if (meshNode && isDomainMesh3DNode(meshNode.type)) {
+                        const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                        const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                        const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                        const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                        const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                        const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+                        if (bx < xmin || bx > xmax || by < ymin || by > ymax || bz < zmin || bz > zmax) {
+                            addMessage(node.id, 'warning', `Burst origin (${bx}, ${by}, ${bz}) lies outside 3D mesh bounds [${xmin}..${xmax}] × [${ymin}..${ymax}] × [${zmin}..${zmax}].`);
+                        }
+                        if (remap_radius > 0) {
+                            const maxSpan = Math.max(Math.abs(xmax - xmin), Math.abs(ymax - ymin), Math.abs(zmax - zmin));
+                            if (remap_radius > maxSpan * Math.sqrt(3.0)) {
+                                addMessage(node.id, 'warning', `Remap radius (${remap_radius} m) exceeds full 3D domain diagonal.`);
                             }
+                        }
+                    }
+                } else {
+                    const br = Number(node.parameters?.explosive_r ?? 0.0);
+                    const bz = Number(node.parameters?.explosive_z ?? 0.1);
+                    if (isNaN(br) || isNaN(bz)) {
+                        addMessage(node.id, 'error', "Remap 2D burst coordinates (explosive_r, explosive_z) must be numeric.");
+                    } else if (br !== 0) {
+                        addMessage(node.id, 'warning', `explosive_r = ${br} m (> 0) places the burst off the r = 0 symmetry axis (toroidal ring source). Set explosive_r = 0 for a spherical point burst on-axis.`);
+                    }
+                    const meshConn2D = state.connections.find(c => c.toNode === connectedSolver.id && c.toPort === 'mesh');
+                    const meshNode = meshConn2D
+                        ? state.nodes.find(n => n.id === meshConn2D.fromNode)
+                        : state.nodes.find(n => isDomainMesh2DNode(n.type));
+                    if (meshNode && isDomainMesh2DNode(meshNode.type)) {
+                        const minR = Number(meshNode.parameters?.min_r ?? 0.0);
+                        const maxR = Number(meshNode.parameters?.max_r ?? 1.0);
+                        const minZ = Number(meshNode.parameters?.min_z ?? 0.0);
+                        const maxZ = Number(meshNode.parameters?.max_z ?? 1.0);
+                        if (br < minR || br > maxR || bz < minZ || bz > maxZ) {
+                            addMessage(node.id, 'warning', `Burst origin (r = ${br}, z = ${bz}) lies outside 2D mesh bounds [${minR}..${maxR}] × [${minZ}..${maxZ}].`);
                         }
                     }
                 }
@@ -1538,7 +1626,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     );
                     const meshId = meshConn3D ? (meshConn3D.toNode === connectedSolver.id ? meshConn3D.fromNode : meshConn3D.toNode) : (connectedSolver.parameters?.mesh || '');
                     const meshNode = meshId ? state.nodes.find(n => n.id === meshId) : null;
-                    if (meshNode && meshNode.type === 'DomainMesh3D') {
+                    if (meshNode && isDomainMesh3DNode(meshNode.type)) {
                         const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
                         const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
                         const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
@@ -1556,77 +1644,84 @@ export function validateSimulationState(state: SimulationState): ValidationResul
 
         if (node.type === 'VirtualGauges') {
             const gauges = node.parameters?.gauges || [];
-            
-            // Connection checks
-            const conn = state.connections.find(c => c.toNode === node.id && c.toPort === 'in');
-            if (conn) {
-                const fromNode = state.nodes.find(n => n.id === conn.fromNode);
-                if (fromNode) {
-                    if (fromNode.type === 'CFDSolver3D') {
-                        const meshConn3D = state.connections.find(c => c.toNode === fromNode.id && c.toPort === 'mesh');
-                        if (meshConn3D) {
-                            const meshNode = state.nodes.find(n => n.id === meshConn3D.fromNode);
-                            if (meshNode && meshNode.type === 'DomainMesh3D') {
-                                const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
-                                const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
-                                const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
-                                const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
-                                const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
-                                const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
 
-                                gauges.forEach((g: any) => {
-                                    const gx = Number(g.x ?? 0.5);
-                                    const gy = Number(g.y ?? 0.5);
-                                    const gz = Number(g.z ?? 0.5);
-                                    const name = g.name || g.id || "Unnamed";
+            // Resolve connected solver in either wire direction or via model fallback
+            const conn = state.connections.find(c => c.toNode === node.id || c.fromNode === node.id);
+            const otherId = conn ? (conn.toNode === node.id ? conn.fromNode : conn.toNode) : '';
+            const fromNode = otherId
+                ? state.nodes.find(n => n.id === otherId)
+                : state.nodes.find(n =>
+                    n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' ||
+                    n.type === 'CFDSolver2D' || n.type === 'CFDSolver'
+                );
 
-                                    if (gx < xmin || gx > xmax) {
-                                        addMessage(node.id, 'warning', `Gauge "${name}" position (x = ${gx}) is outside the mesh domain [${xmin}, ${xmax}].`);
-                                    }
-                                    if (gy < ymin || gy > ymax) {
-                                        addMessage(node.id, 'warning', `Gauge "${name}" position (y = ${gy}) is outside the mesh domain [${ymin}, ${ymax}].`);
-                                    }
-                                    if (gz < zmin || gz > zmax) {
-                                        addMessage(node.id, 'warning', `Gauge "${name}" position (z = ${gz}) is outside the mesh domain [${zmin}, ${zmax}].`);
-                                    }
-                                });
+            if (fromNode) {
+                if (fromNode.type === 'CFDSolver3D' || fromNode.type === 'MarineHarbourDomain' || fromNode.type === 'FSICoupler3D' || fromNode.type === 'FEMFSICoupler3D' || fromNode.type === 'MPMDomain3D') {
+                    const meshConn3D = state.connections.find(c => c.toNode === fromNode.id && c.toPort === 'mesh');
+                    const meshNode = meshConn3D
+                        ? state.nodes.find(n => n.id === meshConn3D.fromNode)
+                        : state.nodes.find(n => isDomainMesh3DNode(n.type));
+                    if (meshNode && isDomainMesh3DNode(meshNode.type)) {
+                        const xmin = Number(meshNode.parameters?.xmin ?? 0.0);
+                        const xmax = Number(meshNode.parameters?.xmax ?? 1.0);
+                        const ymin = Number(meshNode.parameters?.ymin ?? 0.0);
+                        const ymax = Number(meshNode.parameters?.ymax ?? 1.0);
+                        const zmin = Number(meshNode.parameters?.zmin ?? 0.0);
+                        const zmax = Number(meshNode.parameters?.zmax ?? 1.0);
+
+                        gauges.forEach((g: any) => {
+                            const gx = Number(g.x ?? 0.5);
+                            const gy = Number(g.y ?? 0.5);
+                            const gz = Number(g.z ?? 0.5);
+                            const name = g.name || g.id || "Unnamed";
+
+                            if (gx < xmin || gx > xmax) {
+                                addMessage(node.id, 'warning', `Gauge "${name}" position (x = ${gx}) is outside the mesh domain [${xmin}, ${xmax}].`);
                             }
-                        }
-                    } else if (fromNode.type === 'CFDSolver2D') {
-                        const meshConn2D = state.connections.find(c => c.toNode === fromNode.id && c.toPort === 'mesh');
-                        if (meshConn2D) {
-                            const meshNode = state.nodes.find(n => n.id === meshConn2D.fromNode);
-                            if (meshNode && meshNode.type === 'DomainMesh2D') {
-                                const maxR = Number(meshNode.parameters?.max_r ?? 1.0);
-                                const maxZ = Number(meshNode.parameters?.max_z ?? 1.0);
-
-                                gauges.forEach((g: any) => {
-                                    const gr = Number(g.r ?? 0.1);
-                                    const gz = Number(g.z ?? 0.0);
-                                    const name = g.name || g.id || "Unnamed";
-
-                                    if (gr < 0 || gr > maxR) {
-                                        addMessage(node.id, 'warning', `Gauge "${name}" position (r = ${gr}) is outside the mesh domain [0, ${maxR}].`);
-                                    }
-                                    if (gz < 0 || gz > maxZ) {
-                                        addMessage(node.id, 'warning', `Gauge "${name}" position (z = ${gz}) is outside the mesh domain [0, ${maxZ}].`);
-                                    }
-                                });
+                            if (gy < ymin || gy > ymax) {
+                                addMessage(node.id, 'warning', `Gauge "${name}" position (y = ${gy}) is outside the mesh domain [${ymin}, ${ymax}].`);
                             }
-                        }
-                    } else if (fromNode.type === 'CFDSolver') {
-                        const meshNode = state.nodes.find(n => n.type === 'DomainMesh');
-                        if (meshNode) {
-                            const radius = Number(meshNode.parameters?.domain_radius ?? 1.0);
-                            gauges.forEach((g: any) => {
-                                const gr = Number(g.r ?? 0.1);
-                                const name = g.name || g.id || "Unnamed";
+                            if (gz < zmin || gz > zmax) {
+                                addMessage(node.id, 'warning', `Gauge "${name}" position (z = ${gz}) is outside the mesh domain [${zmin}, ${zmax}].`);
+                            }
+                        });
+                    }
+                } else if (fromNode.type === 'CFDSolver2D' || fromNode.type === 'FSICoupler2D' || fromNode.type === 'MPMDomain2D') {
+                    const meshConn2D = state.connections.find(c => c.toNode === fromNode.id && c.toPort === 'mesh');
+                    const meshNode = meshConn2D
+                        ? state.nodes.find(n => n.id === meshConn2D.fromNode)
+                        : state.nodes.find(n => isDomainMesh2DNode(n.type));
+                    if (meshNode && isDomainMesh2DNode(meshNode.type)) {
+                        const minR = Number(meshNode.parameters?.min_r ?? 0.0);
+                        const maxR = Number(meshNode.parameters?.max_r ?? 1.0);
+                        const minZ = Number(meshNode.parameters?.min_z ?? 0.0);
+                        const maxZ = Number(meshNode.parameters?.max_z ?? 1.0);
 
-                                if (gr < 0 || gr > radius) {
-                                    addMessage(node.id, 'warning', `Gauge "${name}" position (r = ${gr}) is outside the mesh domain [0, ${radius}].`);
-                                }
-                            });
-                        }
+                        gauges.forEach((g: any) => {
+                            const gr = Number(g.r ?? g.x ?? 0.1);
+                            const gz = Number(g.z ?? g.y ?? 0.0);
+                            const name = g.name || g.id || "Unnamed";
+
+                            if (gr < minR || gr > maxR) {
+                                addMessage(node.id, 'warning', `Gauge "${name}" position (r = ${gr}) is outside the mesh domain [${minR}, ${maxR}].`);
+                            }
+                            if (gz < minZ || gz > maxZ) {
+                                addMessage(node.id, 'warning', `Gauge "${name}" position (z = ${gz}) is outside the mesh domain [${minZ}, ${maxZ}].`);
+                            }
+                        });
+                    }
+                } else if (fromNode.type === 'CFDSolver') {
+                    const meshNode = state.nodes.find(n => n.type === 'DomainMesh');
+                    if (meshNode) {
+                        const radius = Number(meshNode.parameters?.domain_radius ?? 1.0);
+                        gauges.forEach((g: any) => {
+                            const gr = Number(g.r ?? g.x ?? 0.1);
+                            const name = g.name || g.id || "Unnamed";
+
+                            if (gr < 0 || gr > radius) {
+                                addMessage(node.id, 'warning', `Gauge "${name}" position (r = ${gr}) is outside the 1D mesh domain [0, ${radius}].`);
+                            }
+                        });
                     }
                 }
             }
@@ -1690,8 +1785,8 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         }
     });
 
-    // DomainMesh3D validation
-    state.nodes.filter(n => n.type === 'DomainMesh3D').forEach(mesh3D => {
+    // DomainMesh3D / SparseDomainMesh3D validation
+    state.nodes.filter(n => isDomainMesh3DNode(n.type)).forEach(mesh3D => {
         const cellSize = Number(mesh3D.parameters?.cell_size || 0.01);
         const xmin = Number(mesh3D.parameters?.xmin ?? 0.0);
         const xmax = Number(mesh3D.parameters?.xmax ?? 1.0);
@@ -1741,7 +1836,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 }
             }
         }
-        const memEst = estimateNodeMemory(node);
+        const memEst = estimateNodeMemory(node, state);
         if (memEst.riskLevel === 'CRITICAL') {
             addMessage(node.id, 'warning', `Critical memory footprint (${memEst.summaryText}). Pre-flight validation will enforce safe allocation check.`);
         }

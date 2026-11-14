@@ -6,8 +6,8 @@
  */
 
 import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, resolveMeshCounts, resolveMPMCounts, resolveFEMCounts, resolveGeometryCounts, resolveCouplerCounts, resolveTelemetryCounts, syncMPMMaterialParameters, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, getSliceAxisLabel, resolveResourcePath, getLSDynaDeckMeta } from './state-manager.js';
-import { Node, NodeType, SimulationState } from './types.js';
-import { HostFileBrowserModal, FileFilterPreset } from './host-file-browser.js';
+import { Node, NodeType, SimulationState, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
+import { HostFileBrowserModal, FileFilterPreset, showRecentFoldersQuickMenu, recordRecentFolder } from './host-file-browser.js';
 import { GaugeManagerModal } from './gauge-manager-modal.js';
 import { FEMSetupModal } from './fem-setup-modal.js';
 import { syncModelFEMSetup, FEMSetupConfig, FEMSectionType } from './fem-setup-types.js';
@@ -25,11 +25,12 @@ const NUMERIC_KEYS = new Set([
     'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
     'afterburn_ambient_o2_fraction', 'ambient_o2_fraction',
     'spatial_order', 'temporal_order', 'gamma', 'plot_stride', 'refresh_rate',
-    'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride',
-    'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval',
-    'nr', 'nz', 'max_r', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r', 'trigger_val',
+    'ascii_precision', 'step_interval', 'time_interval', 'downsample_stride', 'sampling_stride_steps',
+    'external_probe_count', 'external_bounds_xmin', 'external_bounds_xmax', 'external_bounds_ymin', 'external_bounds_ymax', 'external_bounds_zmin', 'external_bounds_zmax',
+    'telemetry_channel', 'telemetry_interval_ms', 'vtk_step_interval', 'fps',
+    'nr', 'nz', 'min_r', 'max_r', 'min_z', 'max_z', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_radius', 'remap_radius', 'explosive_r',
     'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
-    'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y',
+    'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
     'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
     'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
     'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
@@ -87,11 +88,13 @@ export class PropertyGrid {
     private gaugeSelectionListener: (gaugeIdx: number | null) => void;
 
     private lastRenderedNodeId: string | null = null;
+    private lastRenderedNodeType: string | null = null;
     private lastRenderedSliceIdx: number | null = null;
     private lastRenderedGaugeIdx: number | null = null;
     private lastRenderedFEMEntityKey: string | null = null;
     private lastRenderedTab: 'parameters' | 'display' = 'parameters';
     private gaugeSearchQuery: string = '';
+    private selectedPrimitiveIndexMap: Map<string, number> = new Map();
     private renderRafId: number | null = null;
 
     constructor(container: HTMLElement | string, stateManager: StateManager) {
@@ -221,6 +224,7 @@ export class PropertyGrid {
 
         // Check if the focused item/slice/gauge/femEntity/tab is the same as the previous render
         const isSameEntity = (this.currentNodeId === this.lastRenderedNodeId) &&
+                             (node.type === this.lastRenderedNodeType) &&
                              (selectedSliceIdx === this.lastRenderedSliceIdx) &&
                              (selectedGaugeIdx === this.lastRenderedGaugeIdx) &&
                              (femEntityKey === this.lastRenderedFEMEntityKey) &&
@@ -241,6 +245,7 @@ export class PropertyGrid {
         }
 
         this.lastRenderedNodeId = this.currentNodeId;
+        this.lastRenderedNodeType = node.type;
         this.lastRenderedSliceIdx = selectedSliceIdx;
         this.lastRenderedGaugeIdx = selectedGaugeIdx;
         this.lastRenderedFEMEntityKey = femEntityKey;
@@ -279,6 +284,9 @@ export class PropertyGrid {
     }
 
     private getSlicesForNode(node?: Node | null): any[] {
+        if (node && node.type !== 'Telemetry3DViewport' && !isDomainMesh3DNode(node.type)) {
+            return [];
+        }
         if (node?.parameters?.slices && Array.isArray(node.parameters.slices) && node.parameters.slices.length > 0) {
             return node.parameters.slices;
         }
@@ -287,7 +295,7 @@ export class PropertyGrid {
         if (vpNode?.parameters?.slices && Array.isArray(vpNode.parameters.slices) && vpNode.parameters.slices.length > 0) {
             return vpNode.parameters.slices;
         }
-        const domainNode = activeModel?.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+        const domainNode = activeModel?.nodes.find(n => isDomainMesh3DNode(n.type));
         if (domainNode?.parameters?.slices && Array.isArray(domainNode.parameters.slices) && domainNode.parameters.slices.length > 0) {
             return domainNode.parameters.slices;
         }
@@ -297,7 +305,7 @@ export class PropertyGrid {
     private createEntityHeader(node: Node): HTMLElement {
         const selectedSliceIdx = this.stateManager.getSelectedSliceIndex();
         const slices = this.getSlicesForNode(node);
-        if (selectedSliceIdx !== null && (slices.length > 0 || node.parameters.slices || node.type === 'Telemetry3DViewport' || node.type === 'DomainMesh3D' || node.type === 'DomainMesh')) {
+        if (selectedSliceIdx !== null && (node.type === 'Telemetry3DViewport' || isDomainMesh3DNode(node.type)) && (slices.length > 0 || node.parameters.slices)) {
             const slice = slices[selectedSliceIdx] || { axis: 'xy', offset: 0.0, quantity: 'pressure' };
             const axisLabel = getSliceAxisLabel(slice.axis);
 
@@ -496,7 +504,7 @@ export class PropertyGrid {
     private renderParametersTab(container: HTMLElement, node: Node): void {
         const selectedSliceIdx = this.stateManager.getSelectedSliceIndex();
         const slices = this.getSlicesForNode(node);
-        if (selectedSliceIdx !== null && (slices.length > 0 || node.parameters.slices || node.type === 'Telemetry3DViewport' || node.type === 'DomainMesh3D' || node.type === 'DomainMesh')) {
+        if (selectedSliceIdx !== null && (node.type === 'Telemetry3DViewport' || isDomainMesh3DNode(node.type)) && (slices.length > 0 || node.parameters.slices)) {
             this.renderSingleSliceInspector(container, node, selectedSliceIdx);
             return;
         }
@@ -518,7 +526,7 @@ export class PropertyGrid {
             container.appendChild(statsBox);
         }
 
-        if (node.type === 'Telemetry3DViewport' || node.type === 'DomainMesh3D' || node.type === 'DomainMesh') {
+        if (node.type === 'Telemetry3DViewport' || isDomainMesh3DNode(node.type)) {
             if (node.parameters.slices && node.parameters.slices.length > 0) {
                 this.renderSlicesOverviewSection(container, node);
             }
@@ -526,6 +534,10 @@ export class PropertyGrid {
 
         if (node.type === 'VirtualGauges') {
             this.renderVirtualGaugesSection(container, node, selectedGaugeIdx);
+        }
+
+        if (node.type === 'PrimitiveGeometry3D') {
+            this.renderPrimitiveGeometrySection(container, node);
         }
 
         const connAccordion = this.createConnectionAccordion(node, state);
@@ -1055,7 +1067,7 @@ export class PropertyGrid {
             if (vpNode && vpNode.id !== node.id) {
                 this.stateManager.updateNodeParametersInPlace(vpNode.id, { slices: updatedSlices });
             }
-            const domainNode = activeModel?.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh');
+            const domainNode = activeModel?.nodes.find(n => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh');
             if (domainNode && domainNode.id !== node.id) {
                 this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: updatedSlices });
             }
@@ -1271,9 +1283,9 @@ export class PropertyGrid {
         let is3D = true;
         let is1D = false;
         if (targetModel) {
-            if (targetModel.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D')) {
+            if (targetModel.nodes.some(n => isDomainMesh3DNode(n.type) || n.type === 'CFDSolver3D')) {
                 is3D = true;
-            } else if (targetModel.nodes.some(n => n.type === 'DomainMesh2D' || n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D')) {
+            } else if (targetModel.nodes.some(n => isDomainMesh2DNode(n.type) || n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D')) {
                 is3D = false;
             } else if (targetModel.nodes.some(n => n.type === 'DomainMesh' || n.type === 'CFDSolver')) {
                 is3D = false;
@@ -1283,7 +1295,7 @@ export class PropertyGrid {
 
         let xMin = -1.0, xMax = 1.0, yMin = -1.0, yMax = 1.0, zMin = -1.0, zMax = 1.0;
         let rMin = 0.0, rMax = 1.0;
-        const meshNode3D = targetModel?.nodes.find(n => n.type === 'DomainMesh3D');
+        const meshNode3D = targetModel?.nodes.find(n => isDomainMesh3DNode(n.type));
         if (meshNode3D) {
             xMin = Number(meshNode3D.parameters.xmin ?? -1.0);
             xMax = Number(meshNode3D.parameters.xmax ?? 1.0);
@@ -1292,7 +1304,7 @@ export class PropertyGrid {
             zMin = Number(meshNode3D.parameters.zmin ?? -1.0);
             zMax = Number(meshNode3D.parameters.zmax ?? 1.0);
         }
-        const meshNode2D = targetModel?.nodes.find(n => n.type === 'DomainMesh2D');
+        const meshNode2D = targetModel?.nodes.find(n => isDomainMesh2DNode(n.type));
         if (meshNode2D) {
             rMin = Number(meshNode2D.parameters.min_r ?? meshNode2D.parameters.rmin ?? 0.0);
             rMax = Number(meshNode2D.parameters.max_r ?? meshNode2D.parameters.rmax ?? meshNode2D.parameters.r_max ?? 1.0);
@@ -1449,7 +1461,8 @@ export class PropertyGrid {
 
             const tbody = document.createElement('tbody');
 
-            const tData = this.stateManager.telemetryStore.get(node.id);
+            const tData = this.stateManager.telemetryStore.get(node.id)
+                || (targetModel ? this.stateManager.telemetryStore.get(`${targetModel.id}-gauges`) : undefined);
             const history = tData?.gauges_history || [];
 
             filtered.forEach(({ g, idx }) => {
@@ -1817,14 +1830,15 @@ export class PropertyGrid {
             let pMax = 0.0;
             let impMax = 0.0;
 
-            const tData = this.stateManager.telemetryStore.get(node.id);
+            const tData = this.stateManager.telemetryStore.get(node.id)
+                || (targetModel ? this.stateManager.telemetryStore.get(`${targetModel.id}-gauges`) : undefined);
             if (tData && tData.gauges_history) {
                 const gId = gauge.id || gauge.name || `G${gaugeIdx + 1}`;
                 const gh = tData.gauges_history.find((h: any) => h.id === gId || h.id === String(gaugeIdx));
                 if (gh && gh.channel_values) {
                     pressures = gh.channel_values[0] || [];
                     impulses = gh.channel_values[8] || [];
-                    times = tData.gauge_times || [];
+                    times = tData.times || tData.gauge_times || [];
                     for (const p of pressures) {
                         if (p > pMax) pMax = p;
                     }
@@ -2191,6 +2205,338 @@ export class PropertyGrid {
         container.appendChild(accordion);
     }
 
+    private renderPrimitiveGeometrySection(container: HTMLElement, node: Node): void {
+        const primitives: any[] = Array.isArray(node.parameters.primitives) ? node.parameters.primitives : [];
+        const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+
+        const commitPrimitives = (updated: any[], nextSelectedIdx?: number) => {
+            if (nextSelectedIdx !== undefined) {
+                this.selectedPrimitiveIndexMap.set(node.id, nextSelectedIdx);
+            }
+            this.stateManager.updateNodeParameters(node.id, { primitives: updated });
+            if (owningModel) {
+                this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+            }
+            this.render(true);
+        };
+
+        let selectedIdx = this.selectedPrimitiveIndexMap.get(node.id) ?? 0;
+        if (primitives.length === 0) {
+            selectedIdx = -1;
+        } else if (selectedIdx < 0 || selectedIdx >= primitives.length) {
+            selectedIdx = 0;
+        }
+        this.selectedPrimitiveIndexMap.set(node.id, selectedIdx);
+
+        const sectionBox = document.createElement('div');
+        sectionBox.className = 'property-gauge-array-card';
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'property-gauge-header';
+        const boxesCount = primitives.filter(p => p.type === 'box' || p.type === 'cuboid' || p.type === 'cube').length;
+        const cylCount = primitives.filter(p => p.type === 'cylinder').length;
+        const wedgeCount = primitives.filter(p => p.type === 'wedge').length;
+        const summaryParts: string[] = [];
+        if (boxesCount > 0) summaryParts.push(`${boxesCount} Boxes`);
+        if (cylCount > 0) summaryParts.push(`${cylCount} Cyl`);
+        if (wedgeCount > 0) summaryParts.push(`${wedgeCount} Wedges`);
+        header.innerHTML = `
+            <div class="property-gauge-header-title">
+                <span style="font-size: 14px;">🔷</span>
+                <strong>CSG Primitives Editor</strong>
+                <span class="property-gauge-badge">${primitives.length} shapes</span>
+                ${summaryParts.length > 0 ? `<span class="property-gauge-badge active">${summaryParts.join(' · ')}</span>` : ''}
+            </div>
+        `;
+        sectionBox.appendChild(header);
+
+        // Toolbar: Add Shape Buttons
+        const toolbar = document.createElement('div');
+        toolbar.className = 'property-gauge-toolbar';
+        toolbar.style.justifyContent = 'flex-start';
+
+        const btnGroup = document.createElement('div');
+        btnGroup.className = 'property-gauge-actions';
+        btnGroup.style.width = '100%';
+
+        const createAddBtn = (labelStr: string, shapeType: string, defaultParams: Record<string, any>) => {
+            const btn = document.createElement('button');
+            btn.className = 'property-action-btn primary';
+            btn.style.flex = '1';
+            btn.textContent = `+ ${labelStr}`;
+            btn.title = `Add a new ${labelStr} primitive`;
+            btn.onclick = (e) => {
+                e.preventDefault();
+                const displayType = shapeType === 'cuboid' ? 'Box' : (shapeType.charAt(0).toUpperCase() + shapeType.slice(1));
+                const nameStr = `${displayType} ${primitives.length + 1}`;
+                const updated = [...primitives, { type: shapeType, name: nameStr, subtractive: false, ...defaultParams }];
+                commitPrimitives(updated, updated.length - 1);
+            };
+            return btn;
+        };
+
+        btnGroup.appendChild(createAddBtn('Box / Cuboid', 'cuboid', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, voxelization_method: 'use_node_default' }));
+        btnGroup.appendChild(createAddBtn('Cylinder', 'cylinder', { x: 0.5, y: 0.5, z: 0.5, radius: 0.1, length: 0.2, orientation: 'Z', voxelization_method: 'use_node_default' }));
+        btnGroup.appendChild(createAddBtn('Wedge', 'wedge', { xmin: 0.0, xmax: 0.2, ymin: 0.0, ymax: 0.2, zmin: 0.0, zmax: 0.2, orientation: '+X', voxelization_method: 'use_node_default' }));
+        toolbar.appendChild(btnGroup);
+        sectionBox.appendChild(toolbar);
+
+        // Primitives List Table
+        const tableWrap = document.createElement('div');
+        tableWrap.className = 'property-gauge-table-wrap';
+
+        if (primitives.length === 0) {
+            const emptyNotice = document.createElement('div');
+            emptyNotice.className = 'property-gauge-empty';
+            emptyNotice.innerHTML = `<span>No CSG primitives defined. Add a Box, Cylinder, or Wedge above.</span>`;
+            tableWrap.appendChild(emptyNotice);
+        } else {
+            const table = document.createElement('table');
+            table.className = 'property-gauge-table';
+            const thead = document.createElement('thead');
+            thead.innerHTML = `
+                <tr>
+                    <th style="width: 28px;">#</th>
+                    <th>Name</th>
+                    <th style="width: 64px;">Type</th>
+                    <th style="width: 44px;">Op</th>
+                    <th style="width: 48px; text-align: center;">Order</th>
+                    <th style="width: 28px; text-align: right;">Del</th>
+                </tr>
+            `;
+            table.appendChild(thead);
+
+            const tbody = document.createElement('tbody');
+            primitives.forEach((prim: any, idx: number) => {
+                const tr = document.createElement('tr');
+                tr.className = `property-gauge-row ${idx === selectedIdx ? 'selected' : ''}`;
+                tr.style.cursor = 'pointer';
+                tr.onclick = () => {
+                    this.selectedPrimitiveIndexMap.set(node.id, idx);
+                    this.render(true);
+                };
+
+                const tdIdx = document.createElement('td');
+                tdIdx.className = 'mono';
+                tdIdx.textContent = `#${idx + 1}`;
+                tr.appendChild(tdIdx);
+
+                const tdName = document.createElement('td');
+                tdName.textContent = prim.name || `${String(prim.type || 'shape').toUpperCase()} ${idx + 1}`;
+                tdName.style.fontWeight = idx === selectedIdx ? '600' : '400';
+                tr.appendChild(tdName);
+
+                const tdType = document.createElement('td');
+                const pType = String(prim.type || 'cuboid');
+                const typeLabel = (pType === 'cuboid' || pType === 'box' || pType === 'cube') ? 'Box' : (pType.charAt(0).toUpperCase() + pType.slice(1));
+                tdType.innerHTML = `<span style="font-size: 10px; padding: 1px 5px; border-radius: 3px; background: rgba(56, 189, 248, 0.15); color: #38bdf8;">${typeLabel}</span>`;
+                tr.appendChild(tdType);
+
+                const tdOp = document.createElement('td');
+                const opBtn = document.createElement('button');
+                opBtn.className = 'property-action-btn';
+                opBtn.style.padding = '1px 5px';
+                opBtn.style.fontSize = '10px';
+                opBtn.textContent = prim.subtractive ? 'Sub' : 'Add';
+                opBtn.style.color = prim.subtractive ? '#f87171' : '#4ade80';
+                opBtn.title = prim.subtractive ? 'Subtractive (cutout). Click to toggle Additive.' : 'Additive solid. Click to toggle Subtractive.';
+                opBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const updated = [...primitives];
+                    updated[idx] = { ...prim, subtractive: !prim.subtractive };
+                    commitPrimitives(updated, idx);
+                };
+                tdOp.appendChild(opBtn);
+                tr.appendChild(tdOp);
+
+                const tdOrder = document.createElement('td');
+                tdOrder.style.textAlign = 'center';
+                tdOrder.style.whiteSpace = 'nowrap';
+                const upBtn = document.createElement('button');
+                upBtn.textContent = '▲';
+                upBtn.disabled = idx === 0;
+                upBtn.style.cssText = `background: transparent; border: none; color: ${idx > 0 ? '#ccc' : '#444'}; cursor: ${idx > 0 ? 'pointer' : 'default'}; font-size: 9px; padding: 0 3px;`;
+                upBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    if (idx === 0) return;
+                    const updated = [...primitives];
+                    const tmp = updated[idx - 1];
+                    updated[idx - 1] = updated[idx];
+                    updated[idx] = tmp;
+                    commitPrimitives(updated, idx - 1);
+                };
+                const downBtn = document.createElement('button');
+                downBtn.textContent = '▼';
+                downBtn.disabled = idx === primitives.length - 1;
+                downBtn.style.cssText = `background: transparent; border: none; color: ${idx < primitives.length - 1 ? '#ccc' : '#444'}; cursor: ${idx < primitives.length - 1 ? 'pointer' : 'default'}; font-size: 9px; padding: 0 3px;`;
+                downBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    if (idx >= primitives.length - 1) return;
+                    const updated = [...primitives];
+                    const tmp = updated[idx + 1];
+                    updated[idx + 1] = updated[idx];
+                    updated[idx] = tmp;
+                    commitPrimitives(updated, idx + 1);
+                };
+                tdOrder.appendChild(upBtn);
+                tdOrder.appendChild(downBtn);
+                tr.appendChild(tdOrder);
+
+                const tdDel = document.createElement('td');
+                tdDel.style.textAlign = 'right';
+                const delBtn = document.createElement('button');
+                delBtn.className = 'property-gauge-del-btn';
+                delBtn.textContent = '✕';
+                delBtn.title = 'Delete primitive';
+                delBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const updated = primitives.filter((_: any, i: number) => i !== idx);
+                    const nextIdx = updated.length === 0 ? -1 : Math.min(idx, updated.length - 1);
+                    commitPrimitives(updated, nextIdx);
+                };
+                tdDel.appendChild(delBtn);
+                tr.appendChild(tdDel);
+
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            tableWrap.appendChild(table);
+        }
+        sectionBox.appendChild(tableWrap);
+
+        // Selected Primitive Inspector
+        const activePrim = selectedIdx >= 0 ? primitives[selectedIdx] : null;
+        if (activePrim) {
+            const inspectorBox = document.createElement('div');
+            inspectorBox.className = 'property-inline-inspector';
+            inspectorBox.style.marginTop = '8px';
+            inspectorBox.style.padding = '8px';
+            inspectorBox.style.background = 'rgba(255, 255, 255, 0.02)';
+            inspectorBox.style.border = '1px solid #3c3c3c';
+            inspectorBox.style.borderRadius = '4px';
+
+            const pType = String(activePrim.type || 'cuboid');
+            const typeTitle = (pType === 'cuboid' || pType === 'box' || pType === 'cube') ? 'CUBOID / BOX' : pType.toUpperCase();
+            const inspHdr = document.createElement('div');
+            inspHdr.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px solid #2d2d2d;';
+            inspHdr.innerHTML = `<strong style="font-size: 11px; color: #facc15;">Shape #${selectedIdx + 1} (${typeTitle})</strong>`;
+
+            if (activePrim.xmin !== undefined && activePrim.xmax !== undefined && activePrim.ymin !== undefined && activePrim.ymax !== undefined && activePrim.zmin !== undefined && activePrim.zmax !== undefined) {
+                const dx = Math.abs(Number(activePrim.xmax) - Number(activePrim.xmin));
+                const dy = Math.abs(Number(activePrim.ymax) - Number(activePrim.ymin));
+                const dz = Math.abs(Number(activePrim.zmax) - Number(activePrim.zmin));
+                const dimSpan = document.createElement('span');
+                dimSpan.style.cssText = 'font-size: 10px; color: #94a3b8; font-family: monospace;';
+                dimSpan.textContent = `${dx.toFixed(3)} × ${dy.toFixed(3)} × ${dz.toFixed(3)} m`;
+                inspHdr.appendChild(dimSpan);
+            }
+            inspectorBox.appendChild(inspHdr);
+
+            const propTable = document.createElement('table');
+            propTable.className = 'property-table';
+
+            const updatePrimField = (key: string, val: any) => {
+                const updated = [...primitives];
+                updated[selectedIdx] = { ...activePrim, [key]: val };
+                commitPrimitives(updated, selectedIdx);
+            };
+
+            // Name
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.className = 'property-input';
+            nameInput.value = String(activePrim.name ?? `${typeTitle} ${selectedIdx + 1}`);
+            nameInput.onchange = () => updatePrimField('name', nameInput.value);
+            propTable.appendChild(this.createTableRow('Shape Name', nameInput));
+
+            // Subtractive
+            propTable.appendChild(this.createTableRow('Subtractive (Cutout)', this.createCheckbox(!!activePrim.subtractive, (val) => {
+                updatePrimField('subtractive', val);
+            })));
+
+            // Voxelization Method
+            const voxSelect = document.createElement('select');
+            voxSelect.className = 'property-select';
+            const voxOpts = [
+                { value: 'use_node_default', label: 'Use Node Default' },
+                { value: 'watertight_floodfill', label: 'Watertight Floodfill' },
+                { value: 'watertight_raycast', label: 'Watertight Raycast' },
+                { value: 'thin_shell', label: 'Thin Shell' },
+                { value: 'winding_number', label: 'Winding Number' }
+            ];
+            const curVox = String(activePrim.voxelization_method || 'use_node_default');
+            voxOpts.forEach(o => {
+                const opt = document.createElement('option');
+                opt.value = o.value;
+                opt.textContent = o.label;
+                if (o.value === curVox) opt.selected = true;
+                voxSelect.appendChild(opt);
+            });
+            voxSelect.onchange = () => updatePrimField('voxelization_method', voxSelect.value);
+            propTable.appendChild(this.createTableRow('Voxelization Override', voxSelect));
+
+            // Orientation (for cylinder / wedge)
+            if (pType === 'cylinder' || pType === 'wedge' || activePrim.orientation !== undefined) {
+                const orientSelect = document.createElement('select');
+                orientSelect.className = 'property-select';
+                const orientOpts = pType === 'cylinder' ? ['X', 'Y', 'Z'] : ['+X', '-X', '+Y', '-Y'];
+                const curOrient = String(activePrim.orientation || orientOpts[0]);
+                orientOpts.forEach(o => {
+                    const opt = document.createElement('option');
+                    opt.value = o;
+                    opt.textContent = o;
+                    if (o === curOrient) opt.selected = true;
+                    orientSelect.appendChild(opt);
+                });
+                if (!orientOpts.includes(curOrient)) {
+                    const customOpt = document.createElement('option');
+                    customOpt.value = curOrient;
+                    customOpt.textContent = curOrient;
+                    customOpt.selected = true;
+                    orientSelect.appendChild(customOpt);
+                }
+                orientSelect.onchange = () => updatePrimField('orientation', orientSelect.value);
+                propTable.appendChild(this.createTableRow('Orientation', orientSelect));
+            }
+
+            // Geometry Numeric Fields
+            const labelMap: Record<string, string> = {
+                xmin: 'X Min', xmax: 'X Max',
+                ymin: 'Y Min', ymax: 'Y Max',
+                zmin: 'Z Min', zmax: 'Z Max',
+                x: 'Center X', y: 'Center Y', z: 'Center Z',
+                radius: 'Radius', length: 'Length'
+            };
+            const orderedKeys = ['xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax', 'x', 'y', 'z', 'radius', 'length'];
+            const extraNumericKeys = Object.keys(activePrim).filter(k =>
+                !['type', 'name', 'subtractive', 'voxelization_method', 'orientation', ...orderedKeys].includes(k) &&
+                typeof activePrim[k] === 'number'
+            );
+
+            for (const k of [...orderedKeys, ...extraNumericKeys]) {
+                if (activePrim[k] === undefined) continue;
+                const numInput = document.createElement('input');
+                numInput.type = 'number';
+                numInput.step = 'any';
+                numInput.className = 'property-input';
+                numInput.value = String(activePrim[k]);
+                numInput.onchange = () => {
+                    const parsed = Number(numInput.value);
+                    if (!Number.isNaN(parsed)) {
+                        updatePrimField(k, parsed);
+                    }
+                };
+                propTable.appendChild(this.createTableRow(labelMap[k] || this.formatKeyToLabel(k), numInput, undefined, undefined, 'm'));
+            }
+
+            inspectorBox.appendChild(propTable);
+            sectionBox.appendChild(inspectorBox);
+        }
+
+        container.appendChild(sectionBox);
+    }
+
     private renderSlicesOverviewSection(container: HTMLElement, node: Node): void {
         const slices: any[] = this.getSlicesForNode(node);
 
@@ -2278,7 +2624,7 @@ export class PropertyGrid {
 
     private renderDisplayTab(container: HTMLElement, node: Node): void {
         const selectedSliceIdx = this.stateManager.getSelectedSliceIndex();
-        if (selectedSliceIdx !== null && (node.type === 'Telemetry3DViewport' || node.type === 'DomainMesh3D' || node.type === 'DomainMesh')) {
+        if (selectedSliceIdx !== null && (node.type === 'Telemetry3DViewport' || isDomainMesh3DNode(node.type))) {
             this.renderSingleSliceDisplay(container, node, selectedSliceIdx);
             return;
         }
@@ -2301,7 +2647,7 @@ export class PropertyGrid {
             this.renderChargeDisplay(container, node);
         } else if (['DetonatorLocation', 'DetonatorLocation3D', 'DetonationPoint', 'TriggerLocation', 'TriggerLocation3D'].includes(node.type)) {
             this.renderDetonatorDisplay(container, node);
-        } else if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
+        } else if (node.type === 'DomainMesh' || isDomainMesh2DNode(node.type) || isDomainMesh3DNode(node.type)) {
             this.renderDomainMeshDisplay(container, node);
         } else if (['VirtualGauges3D', 'VirtualGauge', 'VirtualGaugeArray'].includes(node.type)) {
             this.renderVirtualGaugesDisplay(container, node);
@@ -2436,7 +2782,7 @@ export class PropertyGrid {
         if (!state) return 0.005;
         const owningModel = node ? (this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel()) : this.stateManager.getActiveModel();
         const nodes = owningModel ? owningModel.nodes : state.nodes;
-        const mpmMesh = nodes.find((n: any) => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
+        const mpmMesh = nodes.find((n: any) => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
         const mpmDomain = nodes.find((n: any) => n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain');
         const xmin = Number(mpmMesh?.parameters['xmin'] ?? mpmMesh?.parameters['x_min'] ?? 0);
         const xmax = Number(mpmMesh?.parameters['xmax'] ?? mpmMesh?.parameters['x_max'] ?? 1);
@@ -3201,6 +3547,11 @@ export class PropertyGrid {
     private renderChargeDisplay(container: HTMLElement, node: Node): void {
         const vpNode = this.getActiveViewportNode(node);
         const p = { ...vpNode?.parameters, ...node.parameters };
+        const activeModel = this.stateManager.getActiveModel();
+        const modelHas3D = Boolean(activeModel?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'MarineHarbourDomain'));
+        const modelHas2D = Boolean(activeModel?.nodes.some(n => n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D'));
+        const is1D = node.type === 'Charge1D' || (!modelHas3D && !modelHas2D && Boolean(activeModel?.nodes.some(n => n.type === 'CFDSolver')));
+        const is3D = node.type === 'Charge3D' || modelHas3D;
 
         const { accordion: visAcc, content: visContent } = this.buildAccordion(`charge_vis_${node.id}`, 'Explosive Charge Representation');
         if (visContent) {
@@ -3208,27 +3559,33 @@ export class PropertyGrid {
             table.className = 'property-table';
 
             const isVisible = node.parameters.visible !== false && !node.parameters.hidden;
-            table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
+            table.appendChild(this.createTableRow(is1D ? 'Active in 1D Chart' : 'Active in Viewport', this.createCheckbox(isVisible, (val) => {
                 this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
             })));
 
-            const solid = p.charge_solid !== false && p.chargeSolid !== false;
-            table.appendChild(this.createTableRow('Solid Volume', this.createCheckbox(solid, (val) => {
-                this.updateDisplayParam(node, 'charge_solid', val);
-                this.updateDisplayParam(node, 'chargeSolid', val);
-            })));
+            if (is3D) {
+                const solid = p.charge_solid !== false && p.chargeSolid !== false;
+                table.appendChild(this.createTableRow('Solid Volume', this.createCheckbox(solid, (val) => {
+                    this.updateDisplayParam(node, 'charge_solid', val);
+                    this.updateDisplayParam(node, 'chargeSolid', val);
+                })));
+            }
 
-            const wireframe = p.charge_wireframe !== false && p.chargeWireframe !== false;
-            table.appendChild(this.createTableRow('Wireframe Outline', this.createCheckbox(wireframe, (val) => {
-                this.updateDisplayParam(node, 'charge_wireframe', val);
-                this.updateDisplayParam(node, 'chargeWireframe', val);
-            })));
+            if (!is1D) {
+                const wireframe = p.charge_wireframe !== false && p.chargeWireframe !== false;
+                table.appendChild(this.createTableRow('Wireframe Outline', this.createCheckbox(wireframe, (val) => {
+                    this.updateDisplayParam(node, 'charge_wireframe', val);
+                    this.updateDisplayParam(node, 'chargeWireframe', val);
+                })));
+            }
 
-            const lighting = p.charge_lighting !== false && p.chargeLighting !== false;
-            table.appendChild(this.createTableRow('Direct Surface Lighting', this.createCheckbox(lighting, (val) => {
-                this.updateDisplayParam(node, 'charge_lighting', val);
-                this.updateDisplayParam(node, 'chargeLighting', val);
-            })));
+            if (is3D) {
+                const lighting = p.charge_lighting !== false && p.chargeLighting !== false;
+                table.appendChild(this.createTableRow('Direct Surface Lighting', this.createCheckbox(lighting, (val) => {
+                    this.updateDisplayParam(node, 'charge_lighting', val);
+                    this.updateDisplayParam(node, 'chargeLighting', val);
+                })));
+            }
 
             const opacity = p.charge_opacity !== undefined ? Number(p.charge_opacity) : 0.65;
             table.appendChild(this.createTableRow('Charge Opacity', this.createSlider(0.0, 1.0, 0.05, opacity, (val) => {
@@ -3249,6 +3606,11 @@ export class PropertyGrid {
     private renderDetonatorDisplay(container: HTMLElement, node: Node): void {
         const vpNode = this.getActiveViewportNode(node);
         const p = { ...vpNode?.parameters, ...node.parameters };
+        const activeModel = this.stateManager.getActiveModel();
+        const modelHas3D = Boolean(activeModel?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'MarineHarbourDomain'));
+        const modelHas2D = Boolean(activeModel?.nodes.some(n => n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D'));
+        const is1D = !node.type.endsWith('3D') && !modelHas3D && !modelHas2D && Boolean(activeModel?.nodes.some(n => n.type === 'CFDSolver'));
+        const is3D = node.type.endsWith('3D') || modelHas3D;
 
         const { accordion: detAcc, content: detContent } = this.buildAccordion(`det_vis_${node.id}`, 'Detonator Representation');
         if (detContent) {
@@ -3256,23 +3618,25 @@ export class PropertyGrid {
             table.className = 'property-table';
 
             const isVisible = node.parameters.visible !== false && !node.parameters.hidden;
-            table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
+            table.appendChild(this.createTableRow(is1D ? 'Active in 1D Chart' : 'Active in Viewport', this.createCheckbox(isVisible, (val) => {
                 this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
             })));
 
-            const solid = p.detonators_solid !== false && p.detonator_solid !== false && p.detonatorSolid !== false;
-            table.appendChild(this.createTableRow('Solid Sphere Marker', this.createCheckbox(solid, (val) => {
-                this.updateDisplayParam(node, 'detonators_solid', val);
-                this.updateDisplayParam(node, 'detonator_solid', val);
-                this.updateDisplayParam(node, 'detonatorSolid', val);
-            })));
+            if (is3D) {
+                const solid = p.detonators_solid !== false && p.detonator_solid !== false && p.detonatorSolid !== false;
+                table.appendChild(this.createTableRow('Solid Sphere Marker', this.createCheckbox(solid, (val) => {
+                    this.updateDisplayParam(node, 'detonators_solid', val);
+                    this.updateDisplayParam(node, 'detonator_solid', val);
+                    this.updateDisplayParam(node, 'detonatorSolid', val);
+                })));
 
-            const wireframe = p.detonators_wireframe !== false && p.detonator_wireframe !== false && p.detonatorWireframe !== false;
-            table.appendChild(this.createTableRow('Wireframe Outline', this.createCheckbox(wireframe, (val) => {
-                this.updateDisplayParam(node, 'detonators_wireframe', val);
-                this.updateDisplayParam(node, 'detonator_wireframe', val);
-                this.updateDisplayParam(node, 'detonatorWireframe', val);
-            })));
+                const wireframe = p.detonators_wireframe !== false && p.detonator_wireframe !== false && p.detonatorWireframe !== false;
+                table.appendChild(this.createTableRow('Wireframe Outline', this.createCheckbox(wireframe, (val) => {
+                    this.updateDisplayParam(node, 'detonators_wireframe', val);
+                    this.updateDisplayParam(node, 'detonator_wireframe', val);
+                    this.updateDisplayParam(node, 'detonatorWireframe', val);
+                })));
+            }
 
             const sz = Number(p.detonators_size ?? p.detonator_size ?? p.detonatorSize ?? 1.0);
             table.appendChild(this.createTableRow('Marker Size Scale', this.createSlider(0.1, 5.0, 0.1, sz, (val) => {
@@ -3296,34 +3660,39 @@ export class PropertyGrid {
     private renderDomainMeshDisplay(container: HTMLElement, node: Node): void {
         const vpNode = this.getActiveViewportNode(node);
         const p = { ...vpNode?.parameters, ...node.parameters };
+        const is3D = isDomainMesh3DNode(node.type);
+        const is2D = isDomainMesh2DNode(node.type) || node.parameters?.dimension === '2D';
+        const is1D = !is3D && !is2D;
 
-        const { accordion: visAcc, content: visContent } = this.buildAccordion(`mesh_vis_${node.id}`, 'Computational Grid & Bounds');
+        const { accordion: visAcc, content: visContent } = this.buildAccordion(`mesh_vis_${node.id}`, is1D ? '1D Spatial Grid & Bounds' : 'Computational Grid & Bounds');
         if (visContent) {
             const table = document.createElement('table');
             table.className = 'property-table';
 
             const isGrid = p.show_grid !== false && p.showGrid !== false;
-            table.appendChild(this.createTableRow('Computational Gridlines', this.createCheckbox(isGrid, (val) => {
+            table.appendChild(this.createTableRow(is1D ? 'Show 1D Grid Markers' : 'Computational Gridlines', this.createCheckbox(isGrid, (val) => {
                 this.updateDisplayParam(node, 'show_grid', val);
                 this.updateDisplayParam(node, 'showGrid', val);
             })));
 
-            const isBox = p.show_grid_box !== false && p.showGridBox !== false;
-            table.appendChild(this.createTableRow('Domain Bounding Box', this.createCheckbox(isBox, (val) => {
-                this.updateDisplayParam(node, 'show_grid_box', val);
-                this.updateDisplayParam(node, 'showGridBox', val);
-            })));
+            if (!is1D) {
+                const isBox = p.show_grid_box !== false && p.showGridBox !== false;
+                table.appendChild(this.createTableRow('Domain Bounding Box', this.createCheckbox(isBox, (val) => {
+                    this.updateDisplayParam(node, 'show_grid_box', val);
+                    this.updateDisplayParam(node, 'showGridBox', val);
+                })));
 
-            const cellEdges = p.grid_meshlines === true || p.cell_edges === true;
-            table.appendChild(this.createTableRow('Grid Cell Edges', this.createCheckbox(cellEdges, (val) => {
-                this.updateDisplayParam(node, 'grid_meshlines', val);
-                this.updateDisplayParam(node, 'cell_edges', val);
-            })));
+                const cellEdges = p.grid_meshlines === true || p.cell_edges === true;
+                table.appendChild(this.createTableRow('Grid Cell Edges', this.createCheckbox(cellEdges, (val) => {
+                    this.updateDisplayParam(node, 'grid_meshlines', val);
+                    this.updateDisplayParam(node, 'cell_edges', val);
+                })));
 
-            const op = p.grid_opacity !== undefined ? Number(p.grid_opacity) : 1.0;
-            table.appendChild(this.createTableRow('Grid Opacity', this.createSlider(0.0, 1.0, 0.05, op, (val) => {
-                this.updateDisplayParam(node, 'grid_opacity', val);
-            })));
+                const op = p.grid_opacity !== undefined ? Number(p.grid_opacity) : 1.0;
+                table.appendChild(this.createTableRow('Grid Opacity', this.createSlider(0.0, 1.0, 0.05, op, (val) => {
+                    this.updateDisplayParam(node, 'grid_opacity', val);
+                })));
+            }
 
             const state = this.stateManager.getCurrentState();
             const meshCounts = resolveMeshCounts(node, state ?? undefined);
@@ -3333,7 +3702,7 @@ export class PropertyGrid {
         }
         container.appendChild(visAcc);
 
-        if (node.type === 'DomainMesh3D') {
+        if (isDomainMesh3DNode(node.type)) {
             this.renderSlicesOverviewSection(container, node);
         }
     }
@@ -3341,6 +3710,11 @@ export class PropertyGrid {
     private renderVirtualGaugesDisplay(container: HTMLElement, node: Node): void {
         const vpNode = this.getActiveViewportNode(node);
         const p = { ...vpNode?.parameters, ...node.parameters };
+        const activeModel = this.stateManager.getActiveModel();
+        const modelHas3D = Boolean(activeModel?.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'MarineHarbourDomain'));
+        const modelHas2D = Boolean(activeModel?.nodes.some(n => n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D'));
+        const is1D = node.type !== 'VirtualGauges3D' && !modelHas3D && !modelHas2D && Boolean(activeModel?.nodes.some(n => n.type === 'CFDSolver'));
+        const is3D = node.type === 'VirtualGauges3D' || modelHas3D;
 
         const { accordion: visAcc, content: visContent } = this.buildAccordion(`gauge_vis_${node.id}`, 'Virtual Gauges & Overlays');
         if (visContent) {
@@ -3348,15 +3722,17 @@ export class PropertyGrid {
             table.className = 'property-table';
 
             const isVisible = node.parameters.visible !== false && !node.parameters.hidden;
-            table.appendChild(this.createTableRow('Active in Viewport', this.createCheckbox(isVisible, (val) => {
+            table.appendChild(this.createTableRow(is1D ? 'Active in 1D Chart' : 'Active in Viewport', this.createCheckbox(isVisible, (val) => {
                 this.stateManager.updateNodeParametersInPlace(node.id, { visible: val, hidden: !val });
             })));
 
-            const solid = p.gauge_solid !== false && p.gaugeSolid !== false;
-            table.appendChild(this.createTableRow('Solid Sphere Markers', this.createCheckbox(solid, (val) => {
-                this.updateDisplayParam(node, 'gauge_solid', val);
-                this.updateDisplayParam(node, 'gaugeSolid', val);
-            })));
+            if (is3D) {
+                const solid = p.gauge_solid !== false && p.gaugeSolid !== false;
+                table.appendChild(this.createTableRow('Solid Sphere Markers', this.createCheckbox(solid, (val) => {
+                    this.updateDisplayParam(node, 'gauge_solid', val);
+                    this.updateDisplayParam(node, 'gaugeSolid', val);
+                })));
+            }
 
             const sz = Number(p.gauge_size ?? p.gaugeSize ?? 1.0);
             table.appendChild(this.createTableRow('Marker Size', this.createSlider(0.1, 5.0, 0.1, sz, (val) => {
@@ -3543,8 +3919,9 @@ export class PropertyGrid {
                 table.appendChild(this.createStatRow('Watertight Volume', `${((geomCounts.volume ?? 0.001) * 1e6).toFixed(2)} cm³`, '#facc15'));
             } else if (groupId === 'primitive_geom') {
                 const geomCounts = resolveGeometryCounts(node, state ?? undefined);
+                const wedgesPart = (geomCounts.wedges ?? 0) > 0 ? ` · ${geomCounts.wedges} Wedges` : '';
                 table.appendChild(this.createStatRow('Total Primitives', `${geomCounts.count} shapes`, '#facc15'));
-                table.appendChild(this.createStatRow('Shapes Breakdown', `${geomCounts.boxes ?? 0} Boxes · ${geomCounts.spheres ?? 0} Spheres · ${geomCounts.cylinders ?? 0} Cylinders`, '#cbd5e1'));
+                table.appendChild(this.createStatRow('Shapes Breakdown', `${geomCounts.boxes ?? 0} Boxes · ${geomCounts.spheres ?? 0} Spheres · ${geomCounts.cylinders ?? 0} Cylinders${wedgesPart}`, '#cbd5e1'));
             } else if (groupId === 'fsi_numerics' || groupId === 'fsi_structure') {
                 const cCounts = resolveCouplerCounts(node, state ?? undefined);
                 table.appendChild(this.createStatRow('Coupled Fluid Grid', `${cCounts.fluidCells.toLocaleString()} Eulerian cells`, '#38bdf8'));
@@ -3577,7 +3954,7 @@ export class PropertyGrid {
             }
 
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
-            const isHarbourModel = node.type === 'DomainMesh3D' && owningModel?.nodes.some((n: any) => n.type === 'MarineHarbourDomain' || n.parameters?.init_mode === 'Hydrostatic_Stratified_3D');
+            const isHarbourModel = isDomainMesh3DNode(node.type) && owningModel?.nodes.some((n: any) => n.type === 'MarineHarbourDomain' || n.parameters?.init_mode === 'Hydrostatic_Stratified_3D');
 
             for (const param of params) {
                 const widget = this.createWidgetForParam(node, param.key, param.value);
@@ -4021,23 +4398,32 @@ export class PropertyGrid {
             return select;
         }
 
-        if (key === 'source_model_id' && (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode')) {
+        if (key === 'source_model_id' && (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode')) {
             const select = document.createElement('select');
             select.className = 'property-select';
             select.id = `param-input-${node.id}-${key}`;
 
             const autoOption = document.createElement('option');
             autoOption.value = '';
-            autoOption.textContent = '⚡ Auto-Detect Upstream Run';
+            autoOption.textContent = '(None / Disconnected)';
             select.appendChild(autoOption);
 
             const allModels = this.stateManager.getAllModels();
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+            const is3Dto3D = node.type === 'Remap3DTo3DNode';
             const is2Dto3D = node.type === 'Remap2DTo3DNode';
-            const sourceDim = is2Dto3D ? '2D' : '1D';
+            const sourceDim = is3Dto3D ? '3D' : (is2Dto3D ? '2D' : '1D');
+
+            if (!is2Dto3D && !is3Dto3D && owningModel) {
+                const createOpt = document.createElement('option');
+                createOpt.value = '__create_new_1d_source__';
+                createOpt.textContent = '✨ + Create & Wire 1D Spherical Source Stage...';
+                select.appendChild(createOpt);
+            }
 
             const candidateModels = allModels.filter(m => {
-                return m.nodes.some(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
+                if (owningModel && m.id === owningModel.id) return false;
+                return m.nodes.some(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
             });
 
             const currentModelId = node.parameters?.source_model_id || '';
@@ -4045,14 +4431,20 @@ export class PropertyGrid {
             candidateModels.forEach(m => {
                 const opt = document.createElement('option');
                 opt.value = m.id;
-                const isSame = owningModel && m.id === owningModel.id;
-                opt.textContent = `[${sourceDim}] ${m.name || m.id}${isSame ? ' (This Model)' : ''}`;
+                opt.textContent = `[${sourceDim}] ${m.name || m.id}`;
                 if (m.id === currentModelId) opt.selected = true;
                 select.appendChild(opt);
             });
 
             select.addEventListener('change', () => {
                 const newModelId = select.value;
+                if (newModelId === '__create_new_1d_source__' && owningModel) {
+                    const created = this.stateManager.createAndWire1DSourceStageForRemap(owningModel.id, node.id);
+                    if (created) {
+                        this.render(true);
+                    }
+                    return;
+                }
                 node.parameters['source_model_id'] = newModelId;
                 this.stateManager.updateNodeParameters(node.id, { source_model_id: newModelId });
                 const ws = this.stateManager.getActiveWorkspace();
@@ -4065,23 +4457,26 @@ export class PropertyGrid {
                 }
                 if (newModelId) {
                     const srcM = allModels.find(m => m.id === newModelId);
-                    const srcSolver = srcM?.nodes.find(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
-                    if (srcSolver) {
-                        if (owningModel && newModelId === owningModel.id && state) {
-                            state.connections.push({
-                                fromNode: srcSolver.id,
-                                fromPort: 'telemetry',
-                                toNode: node.id,
-                                toPort: 'in'
-                            });
-                        } else if (ws) {
-                            if (!ws.connections) ws.connections = [];
-                            ws.connections.push({
-                                fromNode: srcSolver.id,
-                                fromPort: 'telemetry',
-                                toNode: node.id,
-                                toPort: 'in'
-                            });
+                    const srcSolver = srcM?.nodes.find(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
+                    if (srcSolver && ws) {
+                        if (!ws.connections) ws.connections = [];
+                        ws.connections.push({
+                            fromNode: srcSolver.id,
+                            fromPort: 'telemetry',
+                            toNode: node.id,
+                            toPort: 'in'
+                        });
+                    }
+                    // Auto-sync connected target solver init_mode to From1D / From2D / From3D
+                    if (owningModel) {
+                        const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode';
+                        const desiredInitMode = is3Dto3D ? 'From3D' : (is2Dto3D ? 'From2D' : 'From1D');
+                        const linkedSolver = owningModel.nodes.find(n =>
+                            n.id === node.parameters?.target_solver ||
+                            (is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D')
+                        );
+                        if (linkedSolver && (linkedSolver.type !== 'MarineHarbourDomain' || linkedSolver.parameters?.init_mode !== 'Hydrostatic_Stratified_3D')) {
+                            this.stateManager.updateNodeParameters(linkedSolver.id, { init_mode: desiredInitMode, remap: node.id });
                         }
                     }
                 }
@@ -4092,12 +4487,12 @@ export class PropertyGrid {
                     this.stateManager.pushState(state);
                 }
                 this.stateManager.notifyChange();
+                this.render();
             });
-
             return select;
         }
 
-        if (key === 'target_solver' && (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode')) {
+        if (key === 'target_solver' && (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode')) {
             const select = document.createElement('select');
             select.className = 'property-select';
             select.id = `param-input-${node.id}-${key}`;
@@ -4110,7 +4505,9 @@ export class PropertyGrid {
             const state = this.stateManager.getCurrentState();
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
             const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
-            const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode';
+            const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode';
+            const is2Dto3D = node.type === 'Remap2DTo3DNode';
+            const is3Dto3D = node.type === 'Remap3DTo3DNode';
             const targetSolvers = candidateNodes.filter(n => is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D');
 
             let currentSolverId = node.parameters?.target_solver || '';
@@ -4140,6 +4537,15 @@ export class PropertyGrid {
                             toNode: newSolverId,
                             toPort: 'remap'
                         });
+                        const solverObj = candidateNodes.find(n => n.id === newSolverId);
+                        if (solverObj) {
+                            const desiredInitMode = is3Dto3D ? 'From3D' : (is2Dto3D ? 'From2D' : 'From1D');
+                            const updates: Record<string, any> = { remap: node.id };
+                            if (solverObj.type !== 'MarineHarbourDomain' || solverObj.parameters?.init_mode !== 'Hydrostatic_Stratified_3D') {
+                                updates.init_mode = desiredInitMode;
+                            }
+                            this.stateManager.updateNodeParameters(solverObj.id, updates);
+                        }
                     }
                     if (owningModel) {
                         this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
@@ -4147,6 +4553,85 @@ export class PropertyGrid {
                     this.stateManager.pushState(state);
                 }
                 this.stateManager.notifyChange();
+            });
+
+            return select;
+        }
+
+        if (key === 'domain_mesh' && ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(node.type)) {
+            const select = document.createElement('select');
+            select.className = 'property-select';
+            select.id = `param-input-${node.id}-${key}`;
+
+            const defOption = document.createElement('option');
+            defOption.value = '';
+            defOption.textContent = '(None / Disconnected)';
+            select.appendChild(defOption);
+
+            const state = this.stateManager.getCurrentState();
+            const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+            const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
+            const meshNodes = candidateNodes.filter(n => {
+                if (node.type === 'CFDSolver') return n.type === 'DomainMesh';
+                if (node.type === 'CFDSolver2D') return isDomainMesh2DNode(n.type);
+                return isDomainMesh3DNode(n.type);
+            });
+
+            let currentMeshId = node.parameters['domain_mesh'] || '';
+            if (!currentMeshId && state) {
+                const conn = state.connections.find(c =>
+                    (c.toNode === node.id && c.toPort === 'mesh') ||
+                    (c.fromNode === node.id && c.fromPort === 'mesh')
+                );
+                if (conn) currentMeshId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
+            }
+
+            let found = false;
+            meshNodes.forEach(mNode => {
+                const opt = document.createElement('option');
+                opt.value = mNode.id;
+                const meshSummary = mNode.type === 'DomainMesh'
+                    ? `R=${mNode.parameters?.domain_radius ?? 1.0}m, dx=${mNode.parameters?.cell_size ?? 0.001}m`
+                    : `dx=${mNode.parameters?.cell_size ?? 0.01}m`;
+                opt.textContent = `${mNode.parameters?.name || mNode.type} [${mNode.id.substring(0, 8)}] (${meshSummary})`;
+                if (mNode.id === currentMeshId) {
+                    opt.selected = true;
+                    found = true;
+                }
+                select.appendChild(opt);
+            });
+
+            if (!found && currentMeshId) {
+                const opt = document.createElement('option');
+                opt.value = currentMeshId;
+                opt.textContent = `External Mesh [${currentMeshId.substring(0, 8)}]`;
+                opt.selected = true;
+                select.appendChild(opt);
+            }
+
+            select.addEventListener('change', () => {
+                const newMeshId = select.value;
+                this.updateNodeParam(node, 'domain_mesh', newMeshId);
+                if (state) {
+                    state.connections = state.connections.filter(c =>
+                        !(c.toNode === node.id && c.toPort === 'mesh') &&
+                        !(c.fromNode === node.id && c.fromPort === 'mesh')
+                    );
+                    if (newMeshId) {
+                        const meshObj = candidateNodes.find(n => n.id === newMeshId);
+                        const fromPort = meshObj?.type === 'DomainMesh' ? 'out' : 'mesh';
+                        state.connections.push({
+                            fromNode: newMeshId,
+                            fromPort,
+                            toNode: node.id,
+                            toPort: 'mesh'
+                        });
+                    }
+                    if (owningModel) {
+                        this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
+                    }
+                    this.stateManager.pushState(state);
+                }
             });
 
             return select;
@@ -4424,7 +4909,8 @@ export class PropertyGrid {
         const dropdowns: Record<string, string[]> = {
             'preset': dynamicPresets,
             'material_model': getConstitutiveModels(),
-            'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant'],
+            'solid_model': ['Mie-Grüneisen Shock Reactant', 'Davis Solid Reactant', 'Unreacted JWL (Lee-Tarver)'],
+            'mixture_rule': ['Pressure Equilibrium (Volume Additive)', 'Linear Blend'],
             'burn_model': ['Programmed Wavefront Burn', 'Lee-Tarver 3-Stage ODE', 'CREST Shock Entropy Kinetics'],
             'product_model': ['JWL Product Gas', 'Davis Detonation Product'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
@@ -4452,8 +4938,8 @@ export class PropertyGrid {
             'y_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Periodic', 'Inflow', 'Lysmer', 'Sticky', 'FreeSlip'],
             'z_min_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Periodic', 'Inflow', 'Lysmer', 'Sticky', 'FreeSlip'],
             'z_max_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Periodic', 'Inflow', 'Lysmer', 'Sticky', 'FreeSlip'],
-            'left_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Periodic', 'Inflow', 'Lysmer', 'Sticky', 'FreeSlip'],
-            'right_bc': ['Reflecting', 'Transmitting', 'Terminate', 'Periodic', 'Inflow', 'Lysmer', 'Sticky', 'FreeSlip'],
+            'left_bc': node.type === 'DomainMesh' ? ['Reflecting'] : ['Reflecting', 'Transmitting', 'Terminate', 'Periodic', 'Inflow', 'Lysmer', 'Sticky', 'FreeSlip'],
+            'right_bc': node.type === 'DomainMesh' ? ['Transmitting', 'Reflecting', 'Terminate'] : ['Reflecting', 'Transmitting', 'Terminate', 'Periodic', 'Inflow', 'Lysmer', 'Sticky', 'FreeSlip'],
             'bc_x_min': ['Reflecting', 'Transmitting', 'Terminate', 'Periodic', 'Inflow', 'Lysmer', 'Sticky', 'FreeSlip'],
             'bc_x_max': ['Reflecting', 'Transmitting', 'Terminate', 'Periodic', 'Inflow', 'Lysmer', 'Sticky', 'FreeSlip'],
             'bc_y_min': ['Reflecting', 'Transmitting', 'Terminate', 'Periodic', 'Inflow', 'Lysmer', 'Sticky', 'FreeSlip'],
@@ -4468,20 +4954,22 @@ export class PropertyGrid {
             'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
             'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
             'contact_search_method': ['Hierarchical Octave Hash Grid', 'Linear BVH (Morton Code)'],
-            'trigger_type': node.type === 'VTKOutput' ? ['Step Interval', 'Time Interval'] : ['end', 'time', 'step'],
+            'trigger_type': ['Step Interval', 'Time Interval'],
             'composition': [...Object.keys(EXPLOSIVE_PRESETS).sort(), 'Custom'],
-            'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas'],
+            'init_mode': node.type === 'CFDSolver'
+                ? ['Multi-Material JWL', 'Ideal Gas']
+                : ((node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'From3D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas']),
             'flux_scheme': ['AUSM+', 'Rusanov'],
             'spatial_order': ['1', '2', '3', '5'],
             'temporal_order': ['2', '3', '4'],
             'plot_stride': ['1', '2', '5', '10', '20', '50', '100'],
             'charge_shape': node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'],
             'material_type': ['Air', 'JWL Charge', 'Ideal Gas Charge'],
-            'colormap': ['rainbow', 'plasma', 'viridis', 'turbo', 'coolwarm', 'cividis', 'grayscale', 'inferno'],
-            'stl_colormap': ['rainbow', 'plasma', 'viridis', 'turbo', 'coolwarm', 'cividis', 'grayscale', 'inferno'],
+            'colormap': ['rainbow', 'turbo', 'plasma', 'viridis', 'inferno', 'magma', 'jet', 'coolwarm', 'cividis', 'grayscale'],
+            'stl_colormap': ['rainbow', 'turbo', 'plasma', 'viridis', 'inferno', 'magma', 'jet', 'coolwarm', 'cividis', 'grayscale'],
             'stl_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
             'stl_sampling_mode': ['nearest', 'linear'],
-            'obstacles_colormap': ['rainbow', 'plasma', 'viridis', 'turbo', 'coolwarm', 'cividis', 'grayscale', 'inferno'],
+            'obstacles_colormap': ['rainbow', 'turbo', 'plasma', 'viridis', 'inferno', 'magma', 'jet', 'coolwarm', 'cividis', 'grayscale'],
             'obstacles_quantity': ['pressure', 'density', 'velocity', 'energy', 'species1', 'species2', 'species3', 'peak_overpressure', 'peak_impulse'],
             'gauge_quantity': ['pressure', 'velocity', 'peak_overpressure', 'status'],
             'refresh_rate': ['0.016', '0.033', '0.05', '0.1', '0.2', '0.5', '1.0', '2.0', '5.0', '10.0', '20.0', '50.0', '100.0', '1000.0'],
@@ -4530,15 +5018,69 @@ export class PropertyGrid {
             'timestamp_mode': ['None', 'Relative', 'Clock'],
             'source_mode': ['manual', 'external_file'],
             'external_file_format': ['Auto', 'CSV', 'Binary Float32', 'HDF5'],
-            'storage_backend': ['HDF5 Stream', 'Live Telemetry'],
             'tait_variant_str': ['Isentropic', 'CaloricGruneisen', 'ShockHugoniot'],
             'tait_variant': ['0: Isentropic (Cole 1948)', '1: Caloric Grüneisen (Near-Field)', '2: Shock Hugoniot Reference'],
             'fsi_algorithm': ['CutCellPenalty', 'ImmersedBoundary', 'DirectMassCoupled'],
             'stl_outside_domain': ['nan', 'zero', 'omit'],
-            'auto_scale': ['true', 'false'],
-            'log_scale': ['true', 'false'],
-            'show_grid': ['true', 'false']
+            'x_axis_mode': ['radius', 'cell_id'],
+            'downsample_stride': ['1', '2', '3', '4', '5', '8']
         };
+
+        if (key === 'telemetry_channel') {
+            const select = document.createElement('select');
+            select.className = 'property-input';
+            select.dataset.paramKey = key;
+            select.id = `param-input-${node.id}-${key}`;
+            const opts = node.type === 'TelemetryContour'
+                ? [
+                    { v: 0, l: '0: Pressure P (Pa)' },
+                    { v: 10, l: '10: Overpressure ΔP (Pa)' },
+                    { v: 1, l: '1: Density ρ (kg/m³)' },
+                    { v: 9, l: '9: Velocity Mag |u| (m/s)' },
+                    { v: 2, l: '2: Radial Vel u_r (m/s)' },
+                    { v: 3, l: '3: Axial Vel u_z (m/s)' },
+                    { v: 4, l: '4: Specific Energy e (J/kg)' },
+                    { v: 5, l: '5: Reacted Products α₁' },
+                    { v: 6, l: '6: Unreacted Solid α₂' },
+                    { v: 7, l: '7: MPM von Mises (Pa)' },
+                    { v: 8, l: '8: MPM Plastic Strain ε_p' }
+                ]
+                : (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D')
+                ? [
+                    { v: 0, l: '0: Pressure P(t) [Pa]' },
+                    { v: 7, l: '7: Overpressure ΔP(t) [Pa]' },
+                    { v: 8, l: '8: Impulse I(t) [Pa·s]' },
+                    { v: 1, l: '1: Density ρ(t) [kg/m³]' },
+                    { v: 2, l: '2: Velocity |u|(t) [m/s]' },
+                    { v: 3, l: '3: Internal Energy e(t) [J/kg]' },
+                    { v: 4, l: '4: Reacted α₁(t)' },
+                    { v: 5, l: '5: Unreacted α₂(t)' },
+                    { v: 6, l: '6: Ambient Air(t)' }
+                ]
+                : [
+                    { v: 0, l: '0: Pressure P(r) [Pa]' },
+                    { v: 8, l: '8: Overpressure ΔP(r) [Pa]' },
+                    { v: 1, l: '1: Density ρ(r) [kg/m³]' },
+                    { v: 2, l: '2: Radial Velocity u_r(r) [m/s]' },
+                    { v: 3, l: '3: Internal Energy e(r) [J/kg]' },
+                    { v: 4, l: '4: All Species (α₁, α₂, Air)' },
+                    { v: 5, l: '5: Reacted α₁(r)' },
+                    { v: 6, l: '6: Unreacted α₂(r)' },
+                    { v: 7, l: '7: Ambient Air(r)' }
+                ];
+            const curNum = Number(value ?? 0);
+            opts.forEach(item => {
+                const o = document.createElement('option');
+                o.value = String(item.v);
+                o.textContent = item.l;
+                if (item.v === curNum) o.selected = true;
+                select.appendChild(o);
+            });
+            select.addEventListener('change', () => {
+                this.updateNodeParam(node, key, Number(select.value));
+            });
+            return select;
+        }
 
         if (key === 'preset' && node.type === 'Material') {
             const groups = getCategorizedPresetsForModel(currentMatModel);
@@ -4574,7 +5116,7 @@ export class PropertyGrid {
             });
         }
 
-        if (typeof value === 'boolean' || key === 'afterburn_enabled') {
+        if (typeof value === 'boolean' || ['auto_scale', 'log_scale', 'show_grid', 'show_gridlines', 'show_colorbar', 'interpolate', 'afterburn_enabled'].includes(key)) {
             return this.createCheckbox(Boolean(value), (v) => this.updateNodeParam(node, key, v));
         }
 
@@ -4697,10 +5239,14 @@ export class PropertyGrid {
         const commitText = () => {
             const val = textInput.value;
             this.updateNodeParam(node, key, val);
+            if (val && val.includes('/')) {
+                recordRecentFolder(val, isDir);
+            }
             if (isStl) {
                 const rand = Math.floor(Math.random() * 1000000);
                 const simpleHash = 'stl_' + rand.toString(36);
                 this.updateNodeParam(node, 'geometry_hash', simpleHash);
+                (this.stateManager as any).invalidateSTLGeometry?.(node.id);
                 const net = (window as any).networkManager;
                 if (net && net.isConnected()) {
                     const activeWs = this.stateManager.getActiveWorkspace();
@@ -4728,6 +5274,84 @@ export class PropertyGrid {
                 textInput.blur();
             }
         });
+
+        const applySelectedPath = (selectedPath: string) => {
+            recordRecentFolder(selectedPath, isDir);
+            textInput.value = selectedPath;
+            this.updateNodeParam(node, key, selectedPath);
+            if (isStl) {
+                const rand = Math.floor(Math.random() * 1000000);
+                const simpleHash = 'stl_' + rand.toString(36);
+                this.updateNodeParam(node, 'geometry_hash', simpleHash);
+                (this.stateManager as any).invalidateSTLGeometry?.(node.id);
+                const net = (window as any).networkManager;
+                if (net && net.isConnected()) {
+                    const activeWs = this.stateManager.getActiveWorkspace();
+                    const modelId = activeWs?.activeModelId || 'default';
+                    const activeModel = this.stateManager.getAllModels().find(m => m.id === modelId);
+                    const resolvedPath = resolveResourcePath(selectedPath, activeModel?.filename);
+                    net.send({ command: "LOAD_STL_GEOMETRY", filePath: resolvedPath, modelId });
+                }
+            } else if (isK) {
+                const rand = Math.floor(Math.random() * 1000000);
+                const simpleHash = 'k_' + rand.toString(36);
+                this.updateNodeParam(node, 'geometry_hash', simpleHash);
+            }
+            this.render(true);
+        };
+
+        const openBrowser = (initialFolderOverride?: string) => {
+            const activeWs = this.stateManager.getActiveWorkspace();
+            const activeModel = this.stateManager.getAllModels().find(m => m.id === activeWs?.activeModelId);
+            const rawVal = String(node.parameters[key] || '').trim();
+            const startPath = initialFolderOverride
+                || (rawVal && rawVal !== 'None specified' ? resolveResourcePath(rawVal, activeModel?.filename) : (activeModel?.filename || ''));
+
+            let title = 'Select File (Host)';
+            let mode: 'open' | 'save' = 'open';
+            let selectFolderOnly = false;
+            let filters: FileFilterPreset[] | undefined = undefined;
+
+            if (isStl) {
+                title = 'Select STL 3D Geometry (*.stl)';
+                mode = 'open';
+                filters = [
+                    { label: 'STL 3D Geometry (*.stl)', extensions: ['.stl'] },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ];
+            } else if (isK) {
+                title = 'Select LS-DYNA Keyword File (*.k, *.key)';
+                mode = 'open';
+                filters = [
+                    { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ];
+            } else if (isDir) {
+                title = 'Select Output Directory (Host)';
+                mode = 'save';
+                selectFolderOnly = true;
+            } else if (isExternal) {
+                title = 'Select Data/Sensor File (Host)';
+                mode = 'open';
+                filters = [
+                    { label: 'Data / CSV Files (*.dat, *.csv, *.txt, *.json)', extensions: ['.dat', '.csv', '.txt', '.json'] },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ];
+            }
+
+            const browser = new HostFileBrowserModal(
+                (window as any).networkManager,
+                {
+                    title,
+                    mode,
+                    selectFolderOnly,
+                    initialPath: startPath,
+                    filters,
+                    onSelect: applySelectedPath
+                }
+            );
+            browser.open(startPath);
+        };
 
         const browseBtn = document.createElement('button');
         browseBtn.type = 'button';
@@ -4760,77 +5384,46 @@ export class PropertyGrid {
         browseBtn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
+            openBrowser();
+        };
 
-            const startPath = String(node.parameters[key] || '');
-            let title = 'Select File (Host)';
-            let mode: 'open' | 'save' = 'open';
-            let selectFolderOnly = false;
-            let filters: FileFilterPreset[] | undefined = undefined;
-
-            if (isStl) {
-                title = 'Select STL 3D Geometry (*.stl)';
-                mode = 'open';
-                filters = [
-                    { label: 'STL 3D Geometry (*.stl)', extensions: ['.stl'] },
-                    { label: 'All Files (*.*)', extensions: ['*'] }
-                ];
-            } else if (isK) {
-                title = 'Select LS-DYNA Keyword File (*.k, *.key)';
-                mode = 'open';
-                filters = [
-                    { label: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)', extensions: ['.k', '.key', '.dyn'] },
-                    { label: 'All Files (*.*)', extensions: ['*'] }
-                ];
-            } else if (isDir) {
-                title = 'Select Output Directory (Host)';
-                mode = 'save';
-                selectFolderOnly = true;
-            } else if (isExternal) {
-                title = 'Select Data/Sensor File (Host)';
-                mode = 'open';
-                filters = [
-                    { label: 'Data / CSV Files (*.dat, *.csv, *.txt)', extensions: ['.dat', '.csv', '.txt'] },
-                    { label: 'All Files (*.*)', extensions: ['*'] }
-                ];
-            }
-
-            const browser = new HostFileBrowserModal(
-                (window as any).networkManager,
-                {
-                    title,
-                    mode,
-                    selectFolderOnly,
-                    filters,
-                    onSelect: (selectedPath: string) => {
-                        textInput.value = selectedPath;
-                        this.updateNodeParam(node, key, selectedPath);
-                        if (isStl) {
-                            const rand = Math.floor(Math.random() * 1000000);
-                            const simpleHash = 'stl_' + rand.toString(36);
-                            this.updateNodeParam(node, 'geometry_hash', simpleHash);
-                            (this.stateManager as any).invalidateSTLGeometry?.(node.id);
-                            const net = (window as any).networkManager;
-                            if (net && net.isConnected()) {
-                                const activeWs = this.stateManager.getActiveWorkspace();
-                                const modelId = activeWs?.activeModelId || 'default';
-                                const activeModel = this.stateManager.getAllModels().find(m => m.id === modelId);
-                                const resolvedPath = resolveResourcePath(selectedPath, activeModel?.filename);
-                                net.send({ command: "LOAD_STL_GEOMETRY", filePath: resolvedPath, modelId });
-                            }
-                        } else if (isK) {
-                            const rand = Math.floor(Math.random() * 1000000);
-                            const simpleHash = 'k_' + rand.toString(36);
-                            this.updateNodeParam(node, 'geometry_hash', simpleHash);
-                        }
-                        this.render(true);
+        const recentBtn = document.createElement('button');
+        recentBtn.type = 'button';
+        recentBtn.className = 'property-file-browse-btn';
+        recentBtn.title = isDir
+            ? 'Set directory from Recent Folders'
+            : 'Open file browser directly in a Recent Folder';
+        recentBtn.textContent = '🕒';
+        recentBtn.style.padding = '2px 5px';
+        recentBtn.style.fontSize = '10px';
+        recentBtn.style.background = '#272a34';
+        recentBtn.style.color = '#94a3b8';
+        recentBtn.style.border = '1px solid #3b4252';
+        recentBtn.style.borderRadius = '3px';
+        recentBtn.style.cursor = 'pointer';
+        recentBtn.style.flexShrink = '0';
+        recentBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            showRecentFoldersQuickMenu(
+                recentBtn,
+                (folderPath) => {
+                    if (isDir) {
+                        applySelectedPath(folderPath);
+                    } else {
+                        openBrowser(folderPath);
                     }
+                },
+                {
+                    title: isDir ? `Set ${key}` : `Browse ${key} from Recent Folder`,
+                    onBrowse: () => openBrowser()
                 }
             );
-            browser.open(startPath);
         };
 
         wrapper.appendChild(textInput);
         wrapper.appendChild(browseBtn);
+        wrapper.appendChild(recentBtn);
         return wrapper;
     }
 
@@ -5184,7 +5777,7 @@ export class PropertyGrid {
             let vp = owningModel.nodes.find((n: any) => n.type === 'Telemetry3DViewport');
             if (!vp) {
                 const has3D = owningModel.nodes.some((n: any) => 
-                    n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || 
+                    isDomainMesh3DNode(n.type) || n.type === 'CFDSolver3D' || 
                     n.type === 'MPMDomain3D' || n.type === 'MPMObject3D' || 
                     n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || 
                     n.type === 'STLGeometry'
@@ -5344,7 +5937,8 @@ export class PropertyGrid {
                     inst.setSlices(value);
                 }
                 if ((key === 'refresh_rate' || key === 'viewport_refresh_rate') && inst.setRefreshRate) {
-                    inst.setRefreshRate(Number(value));
+                    const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+                    inst.setRefreshRate(Number(value), owningModel?.id);
                 }
             });
         }
@@ -5446,11 +6040,11 @@ export class PropertyGrid {
             } else if (value === 'Lee-Tarver Ignition & Growth') {
                 updates['material_model'] = 'Lee-Tarver Ignition & Growth';
                 updates['material_type'] = 'JWL Charge';
-                const defPreset = 'Custom';
+                const defPreset = getDefaultPresetForModel(value) || 'PBX 9501 (LLNL Ignition & Growth)';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
                 if (presetData) Object.assign(updates, presetData);
-                updates['solid_model'] = presetData?.solid_model || 'Mie-Grüneisen Shock Reactant';
+                updates['solid_model'] = presetData?.solid_model || 'Unreacted JWL (Lee-Tarver)';
                 updates['burn_model'] = presetData?.burn_model || 'Lee-Tarver 3-Stage ODE';
                 updates['product_model'] = presetData?.product_model || 'JWL Product Gas';
             } else if (value === 'CREST Reactive Burn') {
@@ -5537,21 +6131,29 @@ export class PropertyGrid {
                     if (node.parameters['burn_zone_cells'] === undefined) updates['burn_zone_cells'] = 4;
                     if (node.parameters['tau_burn_min'] === undefined) updates['tau_burn_min'] = 1.0e-7;
                 } else if (value === 'Lee-Tarver 3-Stage ODE') {
-                    if (node.parameters['lt_I'] === undefined) updates['lt_I'] = 4.0e6;
-                    if (node.parameters['lt_a'] === undefined) updates['lt_a'] = 0.24;
+                    if (node.parameters['lt_I'] === undefined) updates['lt_I'] = 1.4e17;
+                    if (node.parameters['lt_a'] === undefined) updates['lt_a'] = 0.0;
                     if (node.parameters['lt_b'] === undefined) updates['lt_b'] = 0.667;
-                    if (node.parameters['lt_x'] === undefined) updates['lt_x'] = 7.0;
-                    if (node.parameters['lt_G1'] === undefined) updates['lt_G1'] = 130.0e-6;
+                    if (node.parameters['lt_x'] === undefined) updates['lt_x'] = 20.0;
+                    if (node.parameters['lt_G1'] === undefined) updates['lt_G1'] = 1.3e-14;
                     if (node.parameters['lt_c'] === undefined) updates['lt_c'] = 0.667;
-                    if (node.parameters['lt_d'] === undefined) updates['lt_d'] = 0.333;
+                    if (node.parameters['lt_d'] === undefined) updates['lt_d'] = 0.277;
                     if (node.parameters['lt_y'] === undefined) updates['lt_y'] = 2.0;
-                    if (node.parameters['lt_G2'] === undefined) updates['lt_G2'] = 400.0e-6;
+                    if (node.parameters['lt_G2'] === undefined) updates['lt_G2'] = 4.0e-14;
                     if (node.parameters['lt_e'] === undefined) updates['lt_e'] = 0.333;
-                    if (node.parameters['lt_g'] === undefined) updates['lt_g'] = 0.667;
-                    if (node.parameters['lt_z'] === undefined) updates['lt_z'] = 3.0;
-                    if (node.parameters['lt_F_ig_max'] === undefined) updates['lt_F_ig_max'] = 0.02;
-                    if (node.parameters['lt_F_G1_max'] === undefined) updates['lt_F_G1_max'] = 0.50;
-                    if (node.parameters['lt_F_G2_min'] === undefined) updates['lt_F_G2_min'] = 0.50;
+                    if (node.parameters['lt_g'] === undefined) updates['lt_g'] = 1.0;
+                    if (node.parameters['lt_z'] === undefined) updates['lt_z'] = 2.0;
+                    if (node.parameters['lt_F_ig_max'] === undefined) updates['lt_F_ig_max'] = 0.3;
+                    if (node.parameters['lt_F_G1_max'] === undefined) updates['lt_F_G1_max'] = 0.5;
+                    if (node.parameters['lt_F_G2_min'] === undefined) updates['lt_F_G2_min'] = 0.5;
+                    if (node.parameters['jwlr_A'] === undefined) updates['jwlr_A'] = 7.32e14;
+                    if (node.parameters['jwlr_B'] === undefined) updates['jwlr_B'] = -5.2654e9;
+                    if (node.parameters['jwlr_R1'] === undefined) updates['jwlr_R1'] = 14.1;
+                    if (node.parameters['jwlr_R2'] === undefined) updates['jwlr_R2'] = 1.41;
+                    if (node.parameters['jwlr_omega'] === undefined) updates['jwlr_omega'] = 0.8867;
+                    if (node.parameters['jwlr_Cv'] === undefined) updates['jwlr_Cv'] = 2.7806e6;
+                    if (node.parameters['jwlr_T0'] === undefined) updates['jwlr_T0'] = 298.0;
+                    if (node.parameters['mixture_rule'] === undefined) updates['mixture_rule'] = 'Pressure Equilibrium (Volume Additive)';
                 } else if (value === 'CREST Shock Entropy Kinetics') {
                     if (node.parameters['crest_b1'] === undefined) updates['crest_b1'] = 1.2e7;
                     if (node.parameters['crest_c1'] === undefined) updates['crest_c1'] = 0.67;
@@ -5686,7 +6288,7 @@ export class PropertyGrid {
             'shape_type', 'dimension', 'space_time_scheme', 'init_mode',
             'solid_model', 'burn_model', 'product_model', 'afterburn_enabled',
             'enable_heterogeneity', 'enable_anisotropy',
-            'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion',
+            'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion', 'enable_density_erosion', 'erode_to_fv_grid',
             'kc_auto_generate', 'directional_crack_band', 'enable_directional_crack_band',
             'contact_method', 'bardenhagen_initial_tie', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode',
             'export_fem', 'export_mpm', 'export_mpm_density_grid', 'export_stl_faces', 'tessellate_stl_faces',
@@ -5924,6 +6526,8 @@ export class PropertyGrid {
                 keys.push('density', 'youngs_modulus', 'poissons_ratio', 'yield_stress');
                 if (solidModel.includes('Davis')) {
                     keys.push('davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0');
+                } else if (solidModel.includes('JWL')) {
+                    keys.push('jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0', 'mixture_rule');
                 } else {
                     keys.push('mg_c0', 'mg_s', 'mg_gamma0');
                 }
@@ -5931,7 +6535,7 @@ export class PropertyGrid {
                 // Pillar 2: Reaction Kinetics
                 const burnModel = node.parameters['burn_model'] || (matModelResolved === 'Lee-Tarver Ignition & Growth' ? 'Lee-Tarver 3-Stage ODE' : (matModelResolved === 'CREST Reactive Burn' ? 'CREST Shock Entropy Kinetics' : 'Programmed Wavefront Burn'));
                 if (burnModel.includes('Lee-Tarver')) {
-                    keys.push('det_vel', 'detonation_energy', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min');
+                    keys.push('det_vel', 'detonation_energy', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min', 'jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0', 'mixture_rule');
                 } else if (burnModel.includes('CREST')) {
                     keys.push('crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13');
                 } else {
@@ -5948,23 +6552,35 @@ export class PropertyGrid {
                 keys.push(
                     'afterburn_enabled', 'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
                     'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
-                    'afterburn_ambient_o2_fraction'
+                    'afterburn_ambient_o2_fraction',
+                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio', 'erode_to_fv_grid'
                 );
 
                 return keys;
             }
 
+            if (matModelResolved === 'Tait Water') {
+                return [
+                    'material_model', 'preset', 'transfer_scheme', 'density', 'initial_temperature',
+                    'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str',
+                    'bulk_viscosity_b1', 'bulk_viscosity_b2',
+                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio', 'erode_to_fv_grid'
+                ];
+            }
+
             if (matModelResolved === 'Concrete Damage Plasticity (CDP)') {
                 return [
                     'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch',
-                    'enable_strain_erosion', 'erosion_strain'
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
                 ];
             }
 
             if (matModelResolved === 'Hill48 Orthotropic') {
                 return [
                     'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0',
-                    'enable_strain_erosion', 'erosion_strain'
+                    'enable_strain_erosion', 'erosion_strain',
+                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
                 ];
             }
 
@@ -5988,6 +6604,7 @@ export class PropertyGrid {
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
                     'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
@@ -6005,6 +6622,7 @@ export class PropertyGrid {
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
                     'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
@@ -6026,6 +6644,7 @@ export class PropertyGrid {
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
                     'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 );
@@ -6043,6 +6662,7 @@ export class PropertyGrid {
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_stress_erosion', 'erosion_stress',
                     'enable_timestep_erosion', 'timestep_erosion_factor',
+                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
                     'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                     'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
                 ];
@@ -6053,7 +6673,8 @@ export class PropertyGrid {
                     'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
                     'yield_stress', 'hardening_modulus',
-                    'failure_strain', 'tensile_failure_stress'
+                    'failure_strain', 'tensile_failure_stress',
+                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
                 ];
             }
 
@@ -6067,6 +6688,7 @@ export class PropertyGrid {
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
@@ -6188,13 +6810,14 @@ export class PropertyGrid {
             return [
                 'cfl', 'endtime', 'coupling_interval', 'coupling_scheme', 'interpolation_scheme', 'fsi_substeps',
                 'structure_motion_type', 'structure_mass', 'structure_stiffness', 'structure_damping',
-                'structure_init_pos', 'structure_init_vel'
-            ].filter(k => k in node.parameters);
+                'structure_init_pos', 'structure_init_vel',
+                'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio', 'erode_to_fv_grid'
+            ].filter(k => k in node.parameters || k === 'enable_density_erosion' || k === 'erosion_min_density' || k === 'erosion_min_density_ratio' || k === 'erode_to_fv_grid');
         }
 
         if (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D') {
             const keys = [
-                'ambient_air_material', 'explosive_charge',
+                'domain_mesh', 'ambient_air_material', 'explosive_charge',
                 'init_mode', 'device', 'precision', 'cfl', 'endtime',
                 'space_time_scheme', 'flux_scheme', 'slope_limiter', 'time_scheme',
                 'telemetry_mode', 'telemetry_interval_ms', 'enable_gauges', 'enable_vtk'
@@ -6206,7 +6829,14 @@ export class PropertyGrid {
                     keys.push('amr_max_levels', 'amr_tile_size', 'amr_threshold', 'amr_coarsen_ratio');
                 }
             }
-            return keys.filter(k => k in node.parameters || k === 'space_time_scheme' || k === 'ambient_air_material' || k === 'explosive_charge' || (node.type === 'CFDSolver2D' && k === 'mesh_type'));
+            return keys.filter(k =>
+                k in node.parameters ||
+                k === 'space_time_scheme' ||
+                k === 'domain_mesh' ||
+                k === 'ambient_air_material' ||
+                k === 'explosive_charge' ||
+                (node.type === 'CFDSolver2D' && k === 'mesh_type')
+            );
         }
 
         if (node.type === 'Obstacle') {
@@ -6226,11 +6856,11 @@ export class PropertyGrid {
             return keys.filter(k => k in node.parameters || k === 'target_domain' || k === 'detonator_radius' || k === 'time_delay' || k === 'track_mpm_velocity');
         }
 
-        if (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode') {
-            const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode';
+        if (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode') {
+            const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode';
             const keys = is3D
-                ? ['source_model_id', 'target_solver', 'explosive_x', 'explosive_y', 'explosive_z', 'center_x', 'center_y', 'center_z', 'z_offset', 'remap_radius', 'remap_time', 'target_cell_size', 'interpolation_method', 'trigger_type', 'trigger_val']
-                : ['source_model_id', 'target_solver', 'explosive_r', 'explosive_z', 'remap_radius', 'remap_time', 'target_cell_size', 'interpolation_method', 'trigger_type', 'trigger_val'];
+                ? ['source_model_id', 'target_solver', 'explosive_x', 'explosive_y', 'explosive_z', 'remap_radius']
+                : ['source_model_id', 'target_solver', 'explosive_r', 'explosive_z', 'remap_radius'];
             return keys.filter(k => k in node.parameters || k === 'source_model_id' || k === 'target_solver');
         }
 
@@ -6242,10 +6872,9 @@ export class PropertyGrid {
                 }
             }
             return [
-                'enable_gauges', 'source_mode', 'external_file_path', 'external_file_format', 'storage_backend', 'sampling_stride_steps',
+                'enable_gauges', 'source_mode', 'external_file_path', 'external_file_format', 'sampling_stride_steps',
                 'telemetry_channel', 'export_ascii', 'export_binary', 'export_hdf5',
                 'ascii_delimiter', 'ascii_precision', 'include_header', 'output_dir', 'custom_filename',
-                'sample_rate', 'channel', 'plot_stride', 'x_axis_mode',
                 'qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_overpressure', 'qty_impulse',
                 'qty_temperature', 'qty_afterburn_rate', 'qty_fuel_density'
             ].filter(k => k in node.parameters);
@@ -6263,7 +6892,7 @@ export class PropertyGrid {
                 }
             }
             const state = this.stateManager.getCurrentState();
-            const is3D = state ? state.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'Telemetry3DViewport' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'MarineHarbourDomain' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D') : true;
+            const is3D = state ? state.nodes.some(n => n.type === 'CFDSolver3D' || isDomainMesh3DNode(n.type) || n.type === 'Telemetry3DViewport' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'MarineHarbourDomain' || n.type === 'FSICoupler3D' || n.type === 'FEMFSICoupler3D') : true;
             const hasFem = state ? state.nodes.some(n =>
                 n.type === 'FEMDomain3D' || n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' ||
                 n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D' || n.type === 'FEMFSICoupler3D' ||
@@ -6344,10 +6973,10 @@ export class PropertyGrid {
             ].filter(k => k in node.parameters);
         }
 
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
-            const dim = node.parameters['dimension'] || (node.type === 'DomainMesh3D' ? '3D' : (node.type === 'DomainMesh2D' ? '2D' : '1D'));
+        if (node.type === 'DomainMesh' || isDomainMesh2DNode(node.type) || isDomainMesh3DNode(node.type)) {
+            const dim = node.parameters['dimension'] || (isDomainMesh3DNode(node.type) ? '3D' : (isDomainMesh2DNode(node.type) ? '2D' : '1D'));
             if (dim === '1D') {
-                return ['dimension', 'domain_radius', 'cell_size', 'left_bc', 'right_bc'].filter(k => k in node.parameters);
+                return ['domain_radius', 'cell_size', 'left_bc', 'right_bc'].filter(k => k in node.parameters);
             } else if (dim === '2D') {
                 return ['dimension', 'coordinate_system', 'nx', 'ny', 'min_r', 'max_r', 'min_z', 'max_z', 'cell_size', 'bc_r_min', 'bc_r_max', 'bc_z_min', 'bc_z_max', 'x_min_bc', 'x_max_bc', 'y_min_bc', 'y_max_bc'].filter(k => k in node.parameters);
             } else {
@@ -6397,7 +7026,7 @@ export class PropertyGrid {
 
     private groupParameters(node: Node): { id: string; title: string; params: { key: string; value: any }[] }[] {
         const state = this.stateManager.getCurrentState();
-        const is3D = state ? state.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'DomainMesh3D' || n.type === 'Telemetry3DViewport' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'MarineHarbourDomain') : true;
+        const is3D = state ? state.nodes.some(n => n.type === 'CFDSolver3D' || isDomainMesh3DNode(n.type) || n.type === 'Telemetry3DViewport' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D' || n.type === 'MarineHarbourDomain') : true;
 
         let isCoupledModel = false;
         const allModels = this.stateManager.getAllModels();
@@ -6486,6 +7115,7 @@ export class PropertyGrid {
                 addGroup('mat_solid', `Pillar 1: Solid Reactant EOS [${solidShort}]`, [
                     'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'initial_temperature',
                     'mg_c0', 'mg_s', 'mg_gamma0',
+                    'jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0', 'mixture_rule',
                     'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0'
                 ]);
 
@@ -6686,7 +7316,7 @@ export class PropertyGrid {
             return groups;
         }
 
-        if (node.type === 'DomainMesh' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh3D') {
+        if (node.type === 'DomainMesh' || isDomainMesh2DNode(node.type) || isDomainMesh3DNode(node.type)) {
             addGroup('mesh_geom', 'Domain Resolution & Grid Geometry', [
                 'dimension', 'coordinate_system', 'domain_radius',
                 'xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax',
@@ -6707,7 +7337,7 @@ export class PropertyGrid {
         }
 
         if (node.type === 'CFDSolver' || node.type === 'CFDSolver2D' || node.type === 'CFDSolver3D') {
-            addGroup('cfd_pipeline', 'Pipeline Connections & Ambient Air', ['ambient_air_material', 'explosive_charge']);
+            addGroup('cfd_pipeline', 'Pipeline Connections & Ambient Air', ['domain_mesh', 'ambient_air_material', 'explosive_charge']);
             addGroup('cfd_numerics', 'Numerics, Flux & Time Stepping', ['cfl', 'endtime', 'space_time_scheme', 'flux_scheme', 'slope_limiter', 'time_scheme']);
             if (node.type === 'CFDSolver2D') {
                 addGroup('cfd_amr', '2D Adaptive Mesh Refinement (AMR)', ['mesh_type', 'amr_max_levels', 'amr_tile_size', 'amr_threshold', 'amr_coarsen_ratio']);
@@ -6767,10 +7397,9 @@ export class PropertyGrid {
             return groups;
         }
 
-        if (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode') {
+        if (node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode' || node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode') {
             addGroup('remap_pipeline', 'Pipeline Source & Target Coupling', ['source_model_id', 'target_solver']);
-            addGroup('remap_numerics', 'Remapping Numerics & Grid', ['remap_time', 'target_cell_size', 'interpolation_method', 'trigger_type', 'trigger_val']);
-            addGroup('remap_geom', 'Spatial Position & Radius', ['center_x', 'center_y', 'center_z', 'z_offset', 'explosive_x', 'explosive_y', 'explosive_z', 'explosive_r', 'remap_radius']);
+            addGroup('remap_geom', 'Spatial Burst Origin & Remap Cutoff', ['explosive_x', 'explosive_y', 'explosive_z', 'explosive_r', 'remap_radius']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
             return groups;
@@ -6789,7 +7418,7 @@ export class PropertyGrid {
 
         if (node.type === 'VirtualGauges') {
             addGroup('gauges_format', 'Formats & Exporters', ['export_ascii', 'export_binary', 'export_hdf5']);
-            addGroup('gauges_config', 'File & Sampling Config', ['source_mode', 'external_file_path', 'external_file_format', 'storage_backend', 'sampling_stride_steps', 'ascii_delimiter', 'ascii_precision', 'custom_filename', 'output_dir', 'include_header', 'sample_rate', 'channel', 'plot_stride', 'x_axis_mode']);
+            addGroup('gauges_config', 'File & Sampling Config', ['source_mode', 'external_file_path', 'external_file_format', 'sampling_stride_steps', 'ascii_delimiter', 'ascii_precision', 'custom_filename', 'output_dir', 'include_header']);
             addGroup('gauges_quantities', 'Gauged Physical Fields', ['qty_pressure', 'qty_density', 'qty_velocity', 'qty_energy', 'qty_reacted', 'qty_unreacted', 'qty_air', 'qty_overpressure', 'qty_impulse', 'qty_temperature', 'qty_afterburn_rate', 'qty_fuel_density']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
@@ -6888,7 +7517,7 @@ export class PropertyGrid {
     private createConnectionAccordion(node: Node, state: SimulationState | null): HTMLElement | null {
         const isSolver = ['MPMDomain3D', 'MPMDomain2D', 'CFDSolver3D', 'CFDSolver2D', 'CFDSolver'].includes(node.type);
         const isFemDomain = node.type === 'FEMDomain3D';
-        const isMesh = ['DomainMesh3D', 'DomainMesh2D', 'DomainMesh'].includes(node.type);
+        const isMesh = isDomainMesh3DNode(node.type) || isDomainMesh2DNode(node.type) || node.type === 'DomainMesh';
         const isCharge = ['Charge3D', 'Charge2D', 'Charge1D'].includes(node.type);
         const isMaterial = node.type === 'Material' || (node.type as string).startsWith('MPMMaterial');
         const isMpmObject = node.type === 'MPMObject3D' || node.type === 'MPMObject2D';
@@ -6968,8 +7597,8 @@ export class PropertyGrid {
                 }
             }
 
-            let targetMeshTypes: string[] = ['DomainMesh3D'];
-            if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') targetMeshTypes = ['DomainMesh2D'];
+            let targetMeshTypes: string[] = ['DomainMesh3D', 'SparseDomainMesh3D'];
+            if (node.type === 'CFDSolver2D' || node.type === 'MPMDomain2D') targetMeshTypes = ['DomainMesh2D', 'SparseDomainMesh2D'];
             else if (node.type === 'CFDSolver') targetMeshTypes = ['DomainMesh'];
 
             const modelMeshNodes = candidateNodes.filter((n: Node) => targetMeshTypes.includes(n.type));
@@ -6992,9 +7621,9 @@ export class PropertyGrid {
                 const nr2d = p.nr ?? Math.max(1, Math.round((Number(p.max_r ?? 1.0) - Number(p.min_r ?? 0.0)) / cs));
                 const nz2d = p.nz ?? Math.max(1, Math.round((Number(p.max_z ?? 1.0) - Number(p.min_z ?? 0.0)) / cs));
                 const n1d = p.nx ?? Math.max(1, Math.round(Number(p.domain_radius ?? 1.0) / cs));
-                const summary = mesh.type === 'DomainMesh3D'
+                const summary = isDomainMesh3DNode(mesh.type)
                     ? `dx=${cs}m, ${p.nx ?? '?'}x${p.ny ?? '?'}x${p.nz ?? '?'}`
-                    : (mesh.type === 'DomainMesh2D' ? `dx=${cs}m, ${nr2d}x${nz2d}` : `dx=${cs}m, ${n1d} cells`);
+                    : (isDomainMesh2DNode(mesh.type) ? `dx=${cs}m, ${nr2d}x${nz2d}` : `dx=${cs}m, ${n1d} cells`);
                 opt.textContent = `${(mesh as any).name || mesh.parameters?.name || mesh.type} [${mesh.id.substring(0, 8)}] (${summary})`;
                 if (mesh.id === currentMeshId) opt.selected = true;
                 select.appendChild(opt);
@@ -7217,7 +7846,7 @@ export class PropertyGrid {
 
                     // Upstream Remap Source row (2D and 3D CFD Solvers)
                     const remapTypes = node.type === 'CFDSolver3D'
-                        ? ['Remap1DTo3DNode', 'Remap2DTo3DNode', 'RemapNode']
+                        ? ['Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode', 'RemapNode']
                         : ['Remap1DTo2DNode', 'RemapNode'];
                     let currentRemapId = '';
                     if (state) {
@@ -7388,7 +8017,7 @@ export class PropertyGrid {
                 }
             }
 
-            const targetMeshTypes = ['DomainMesh3D'];
+            const targetMeshTypes = ['DomainMesh3D', 'SparseDomainMesh3D'];
             const modelMeshNodes = candidateNodes.filter((n: Node) => targetMeshTypes.includes(n.type));
             const otherMeshNodes = allProjectNodes.filter((n: Node) => targetMeshTypes.includes(n.type) && !modelMeshNodes.some(m => m.id === n.id));
 
@@ -7707,6 +8336,23 @@ export class PropertyGrid {
 
             table.appendChild(this.createTableRow('Connected Detonator (detonator)', detSelect));
         } else if (isMesh) {
+            if (isDomainMesh3DNode(node.type) || isDomainMesh2DNode(node.type)) {
+                const isSparse = node.type === 'SparseDomainMesh3D' || node.type === 'SparseDomainMesh2D';
+                if (isSparse || this.stateManager.isMeshSparseSupported(node.id)) {
+                    const toggleBtn = document.createElement('button');
+                    toggleBtn.className = 'property-action-btn';
+                    toggleBtn.style.cssText = `width: 100%; padding: 5px 10px; border-radius: 4px; border: 1px solid ${isSparse ? '#0ea5e9' : '#475569'}; background: ${isSparse ? 'rgba(14, 165, 233, 0.16)' : 'rgba(30, 41, 59, 0.8)'}; color: ${isSparse ? '#38bdf8' : '#e2e8f0'}; cursor: pointer; font-size: 11px; font-weight: 600;`;
+                    toggleBtn.textContent = isSparse
+                        ? '⚡ Sparse Tile Block Grid (Click to Switch to Dense)'
+                        : '▦ Dense Uniform Grid (Click to Switch to Sparse)';
+                    toggleBtn.addEventListener('click', () => {
+                        this.stateManager.toggleMeshSparsity(node.id);
+                        this.render(true);
+                    });
+                    table.appendChild(this.createTableRow('Grid Storage Mode', toggleBtn));
+                }
+            }
+
             let currentSolverId = '';
             if (state) {
                 const conn = state.connections.find((c: any) =>
@@ -7718,9 +8364,10 @@ export class PropertyGrid {
                 }
             }
 
-            const targetSolverTypes: string[] = node.type === 'DomainMesh3D'
+            const is2D = isDomainMesh2DNode(node.type) || node.parameters?.dimension === '2D';
+            const targetSolverTypes: string[] = isDomainMesh3DNode(node.type)
                 ? ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MarineHarbourDomain']
-                : (node.type === 'DomainMesh2D' ? ['MPMDomain2D', 'CFDSolver2D'] : ['CFDSolver']);
+                : (is2D ? ['MPMDomain2D', 'CFDSolver2D'] : ['CFDSolver']);
 
             const modelSolverNodes = candidateNodes.filter((n: Node) => targetSolverTypes.includes(n.type));
             const otherSolverNodes = allProjectNodes.filter((n: Node) => targetSolverTypes.includes(n.type) && !modelSolverNodes.some(m => m.id === n.id));
@@ -7749,6 +8396,17 @@ export class PropertyGrid {
                 if (solver.id === currentSolverId) opt.selected = true;
                 select.appendChild(opt);
             });
+
+            if (currentSolverId && !modelSolverNodes.some(n => n.id === currentSolverId) && !otherSolverNodes.some(n => n.id === currentSolverId)) {
+                const wiredSolver = allProjectNodes.find((n: Node) => n.id === currentSolverId);
+                if (wiredSolver) {
+                    const opt = document.createElement('option');
+                    opt.value = wiredSolver.id;
+                    opt.textContent = `${(wiredSolver as any).name || wiredSolver.parameters?.name || wiredSolver.type} [${wiredSolver.id.substring(0, 8)}]`;
+                    opt.selected = true;
+                    select.appendChild(opt);
+                }
+            }
 
             select.addEventListener('change', () => {
                 this.syncMeshTargetConnection(node.id, select.value);
@@ -7847,7 +8505,7 @@ export class PropertyGrid {
                     const pSpacing = (cellSize / (node.type === 'MPMObject3D' ? Math.cbrt(effPpc) : Math.sqrt(effPpc))) * 1000;
                     table.appendChild(this.createStatRow('Particle Sampling Spacing', `~${pSpacing.toFixed(2)} mm (${effPpc} particles/cell ${isPerObj ? '[Per-Object Override]' : '[Domain Default]'})`, '#4ec9b0'));
 
-                    if (node.type === 'MPMObject3D' && domainMeshNode.type === 'DomainMesh3D') {
+                    if (node.type === 'MPMObject3D' && isDomainMesh3DNode(domainMeshNode.type)) {
                         const gxMin = Number(p.xmin ?? 0.0);
                         const gxMax = Number(p.xmax ?? 1.0);
                         const gyMin = Number(p.ymin ?? 0.0);

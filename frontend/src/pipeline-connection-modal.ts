@@ -1,4 +1,4 @@
-import { Node, Model, Connection } from './types.js';
+import { Node, Model, Connection, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { StateManager, isExplosiveMaterialNode, isWaterMaterialNode, isSeabedMaterialNode, isSolidMaterialNode } from './state-manager.js';
 import { isAirMaterialNode } from './serialization.js';
 
@@ -202,7 +202,7 @@ export class PipelineConnectionModal {
         }
 
         // 5. Background Grids
-        const meshes = modelNodes.filter(n => ['DomainMesh3D', 'DomainMesh2D', 'DomainMesh'].includes(n.type));
+        const meshes = modelNodes.filter(n => isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type) || n.type === 'DomainMesh');
         if (meshes.length > 0) {
             const sec = this.createSection('📐 Background Grids & Meshes', '#4fc3f7');
             for (const mesh of meshes) {
@@ -258,9 +258,9 @@ export class PipelineConnectionModal {
 
         // 1. Background Grid Connection
         const meshNodes = allNodes.filter(n => {
-            if (is3D) return n.type === 'DomainMesh3D';
-            if (solver.type === 'CFDSolver2D' || solver.type === 'MPMDomain2D') return n.type === 'DomainMesh2D';
-            return n.type === 'DomainMesh' || n.type === 'DomainMesh2D';
+            if (is3D) return isDomainMesh3DNode(n.type);
+            if (solver.type === 'CFDSolver2D' || solver.type === 'MPMDomain2D') return isDomainMesh2DNode(n.type);
+            return n.type === 'DomainMesh' || isDomainMesh2DNode(n.type);
         });
         const currentMeshConn = conns.find(c => c.toNode === solver.id && c.toPort === 'mesh');
         const meshRow = this.createConnectionSelectRow(
@@ -972,13 +972,42 @@ export class PipelineConnectionModal {
 
         const header = document.createElement('div');
         header.className = 'pcm-card-header';
-        const dims = mesh.parameters?.nx ? `${mesh.parameters.nx}x${mesh.parameters.ny || 100}x${mesh.parameters.nz || 100}` : 'Grid';
+        const dims = mesh.parameters?.nx ? `${mesh.parameters.nx}x${mesh.parameters.ny || 100}${isDomainMesh3DNode(mesh.type) ? `x${mesh.parameters.nz || 100}` : ''}` : 'Grid';
         header.innerHTML = `<strong>${mesh.parameters?.name || mesh.id}</strong> <span class="pcm-badge">${mesh.type}</span> <span class="pcm-meta">${dims}</span>`;
+
+        if (isDomainMesh3DNode(mesh.type) || isDomainMesh2DNode(mesh.type)) {
+            const isSparse = mesh.type === 'SparseDomainMesh3D' || mesh.type === 'SparseDomainMesh2D' || !!mesh.parameters?.use_sparse_grid;
+            if (isSparse || this.stateManager.isMeshSparseSupported(mesh.id, this.model.id)) {
+                const toggleBtn = document.createElement('button');
+                toggleBtn.className = 'pcm-btn pcm-btn-secondary';
+                toggleBtn.style.marginLeft = 'auto';
+                toggleBtn.style.padding = '2px 8px';
+                toggleBtn.style.fontSize = '11px';
+                toggleBtn.style.color = isSparse ? '#2dd4bf' : '#38bdf8';
+                toggleBtn.style.borderColor = isSparse ? '#2dd4bf' : '#38bdf8';
+                toggleBtn.textContent = isSparse ? '⚡ Sparse Mode (Click for Dense)' : '▦ Dense Mode (Click for Sparse)';
+                toggleBtn.onclick = () => {
+                    this.stateManager.toggleMeshSparsity(mesh.id, this.model.id);
+                    this.onUpdate?.();
+                    this.refreshBody();
+                };
+                header.appendChild(toggleBtn);
+            }
+        }
         card.appendChild(header);
 
+        const isSparseType = mesh.type === 'SparseDomainMesh3D' || mesh.type === 'SparseDomainMesh2D';
         const solverNodes = allNodes.filter(n => {
-            if (mesh.type === 'DomainMesh3D') return ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MarineHarbourDomain'].includes(n.type);
-            if (mesh.type === 'DomainMesh2D') return ['MPMDomain2D', 'CFDSolver2D'].includes(n.type);
+            if (isDomainMesh3DNode(mesh.type)) {
+                return isSparseType
+                    ? ['MPMDomain3D', 'FEMDomain3D'].includes(n.type)
+                    : ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MarineHarbourDomain'].includes(n.type);
+            }
+            if (isDomainMesh2DNode(mesh.type)) {
+                return isSparseType
+                    ? ['MPMDomain2D'].includes(n.type)
+                    : ['MPMDomain2D', 'CFDSolver2D'].includes(n.type);
+            }
             return ['CFDSolver', 'DomainMesh'].includes(n.type) || n.type === 'CFDSolver';
         });
 

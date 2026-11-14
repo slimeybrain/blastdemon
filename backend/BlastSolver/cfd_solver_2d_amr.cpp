@@ -1776,7 +1776,9 @@ template <typename RealType>
 void CFDSolver2DAMRImpl<RealType>::setInitialConditionFrom1D(double explosive_z, double remap_radius, const std::vector<double>& r_1d, const std::vector<MultiMaterialState>& states_1d, double ambient_rho, double ambient_p, double explosive_r) {
     ambient_rho_val = ambient_rho;
     ambient_p_val = ambient_p;
-    is_ideal_gas_val = false;
+
+    const double r_max_1d = r_1d.empty() ? 0.0 : r_1d.back();
+    const double cut_r = (remap_radius > 0.0) ? std::min(remap_radius, r_max_1d) : r_max_1d;
 
     for (int step = 0; step < amr_max_levels_val - 1; ++step) {
         bool changed = false;
@@ -1788,7 +1790,7 @@ void CFDSolver2DAMRImpl<RealType>::setInitialConditionFrom1D(double explosive_z,
                 double dist_r1 = std::max(node.r_min, std::min(explosive_r, node.r_max)) - explosive_r;
                 double dist = std::sqrt(dist_r1 * dist_r1 + dist_z1 * dist_z1);
 
-                if (dist <= remap_radius * 1.5 ||
+                if (dist <= cut_r * 1.5 ||
                     (detonator_r_coord >= node.r_min && detonator_r_coord <= node.r_max &&
                      detonator_z_coord >= node.z_min && detonator_z_coord <= node.z_max)) {
                     to_refine.push_back(n);
@@ -1802,7 +1804,7 @@ void CFDSolver2DAMRImpl<RealType>::setInitialConditionFrom1D(double explosive_z,
         if (changed) rebuildNeighborPointers();
     }
 
-    // Direct remap of 1D profile
+    // Direct remap of 1D profile with linear interpolation and JWL mixture EOS energy
     #pragma omp parallel for
     for (size_t n = 0; n < amr_nodes.size(); ++n) {
         const auto& node = amr_nodes[n];
@@ -1815,25 +1817,62 @@ void CFDSolver2DAMRImpl<RealType>::setInitialConditionFrom1D(double explosive_z,
             double cell_r = node.r_min + (i + 0.5) * dr_base * factor;
             for (int j = 0; j < 16; ++j) {
                 double cell_z = node.z_min + (j + 0.5) * dz_base * factor;
-
-                double r_dist = std::sqrt((cell_r - explosive_r) * (cell_r - explosive_r) + (cell_z - explosive_z) * (cell_z - explosive_z));
+                double dr_diff = cell_r - explosive_r;
+                double dz_diff = cell_z - explosive_z;
+                double r_dist = std::sqrt(dr_diff * dr_diff + dz_diff * dz_diff);
                 int k = (i + 2) * AMR_TILE_DIM + (j + 2);
 
-                // Interpolate from 1D states
-                auto it = std::lower_bound(r_1d.begin(), r_1d.end(), r_dist);
-                size_t idx = std::distance(r_1d.begin(), it);
-                if (idx >= r_1d.size()) idx = r_1d.size() - 1;
+                if (!r_1d.empty() && r_dist <= cut_r && r_dist <= r_max_1d) {
+                    double rho_v = ambient_rho, u_v = 0.0, p_v = ambient_p;
+                    double a1_v = 0.0, a2_v = 0.0, ar1_v = 0.0, ar2_v = 0.0;
 
-                const auto& state = states_1d[idx];
+                    if (r_dist <= r_1d.front()) {
+                        const auto& s0 = states_1d.front();
+                        rho_v = s0.rho; u_v = s0.u; p_v = s0.p;
+                        a1_v = s0.alpha1; a2_v = s0.alpha2; ar1_v = s0.arho1; ar2_v = s0.arho2;
+                    } else {
+                        auto it = std::lower_bound(r_1d.begin(), r_1d.end(), r_dist);
+                        size_t idx = std::distance(r_1d.begin(), it);
+                        if (idx == 0) idx = 1;
+                        if (idx >= r_1d.size()) idx = r_1d.size() - 1;
+                        double r0 = r_1d[idx - 1], r1 = r_1d[idx];
+                        double frac = (r1 > r0) ? ((r_dist - r0) / (r1 - r0)) : 0.0;
+                        const auto& s0 = states_1d[idx - 1];
+                        const auto& s1 = states_1d[idx];
+                        rho_v = s0.rho + frac * (s1.rho - s0.rho);
+                        u_v   = s0.u   + frac * (s1.u   - s0.u);
+                        p_v   = s0.p   + frac * (s1.p   - s0.p);
+                        a1_v  = s0.alpha1 + frac * (s1.alpha1 - s0.alpha1);
+                        a2_v  = s0.alpha2 + frac * (s1.alpha2 - s0.alpha2);
+                        ar1_v = s0.arho1  + frac * (s1.arho1  - s0.arho1);
+                        ar2_v = s0.arho2  + frac * (s1.arho2  - s0.arho2);
+                    }
 
-                U.rho[k] = (RealType)state.rho;
-                U.rhour[k] = (RealType)(state.rho * state.u * (cell_r - explosive_r) / (r_dist + 1e-12));
-                U.rhouz[k] = (RealType)(state.rho * state.u * (cell_z - explosive_z) / (r_dist + 1e-12));
-                U.E[k] = (RealType)(state.p / (gamma_val - 1.0) + 0.5 * state.rho * state.u * state.u);
-                U.alpha1[k] = (RealType)state.alpha1;
-                U.alpha2[k] = (RealType)state.alpha2;
-                U.arho1[k] = (RealType)state.arho1;
-                U.arho2[k] = (RealType)state.arho2;
+                    double ur = (r_dist > 1e-12) ? (u_v * (dr_diff / r_dist)) : 0.0;
+                    double uz = (r_dist > 1e-12) ? (u_v * (dz_diff / r_dist)) : 0.0;
+                    double ke = 0.5 * rho_v * (ur * ur + uz * uz);
+                    double E_v = is_ideal_gas_val
+                        ? (p_v / (gamma_val - 1.0) + ke)
+                        : (MultiMat::getMixtureEnergy(p_v, rho_v, a1_v, a2_v, ar1_v, ar2_v, gamma_val, materials_val.products, materials_val.unreacted) + ke);
+
+                    U.rho[k]    = (RealType)rho_v;
+                    U.rhour[k]  = (RealType)(rho_v * ur);
+                    U.rhouz[k]  = (RealType)(rho_v * uz);
+                    U.E[k]      = (RealType)E_v;
+                    U.alpha1[k] = (RealType)a1_v;
+                    U.alpha2[k] = (RealType)a2_v;
+                    U.arho1[k]  = (RealType)ar1_v;
+                    U.arho2[k]  = (RealType)ar2_v;
+                } else {
+                    U.rho[k]    = (RealType)ambient_rho;
+                    U.rhour[k]  = (RealType)0.0;
+                    U.rhouz[k]  = (RealType)0.0;
+                    U.E[k]      = (RealType)(ambient_p / (gamma_val - 1.0));
+                    U.alpha1[k] = (RealType)0.0;
+                    U.alpha2[k] = (RealType)0.0;
+                    U.arho1[k]  = (RealType)0.0;
+                    U.arho2[k]  = (RealType)0.0;
+                }
             }
         }
     }
@@ -2215,13 +2254,14 @@ void CFDSolver2DAMRImpl<RealType>::recordGaugesAsync(double t) {
     for (const auto& gauge : cpu_gauges) {
         int n_idx = findLeafNodeAtCoords(gauge.r, gauge.z);
         if (n_idx == -1) {
+            double e_amb = (ambient_rho_val > 0.0) ? (ambient_p_val / (ambient_rho_val * (gamma_val - 1.0))) : 0.0;
             cpu_gauge_values.push_back((float)ambient_p_val);
             cpu_gauge_values.push_back((float)ambient_rho_val);
             cpu_gauge_values.push_back(0.0f);
+            cpu_gauge_values.push_back((float)e_amb);
             cpu_gauge_values.push_back(0.0f);
-            cpu_gauge_values.push_back((float)(ambient_p_val / (gamma_val - 1.0)));
             cpu_gauge_values.push_back(0.0f);
-            cpu_gauge_values.push_back(0.0f);
+            cpu_gauge_values.push_back(1.0f);
         } else {
             const auto& node = amr_nodes[n_idx];
             const auto& S = states_pool[node.tile_id];
@@ -2232,13 +2272,22 @@ void CFDSolver2DAMRImpl<RealType>::recordGaugesAsync(double t) {
             local_j = std::max(0, std::min(15, local_j));
             int k = (local_i + 2) * AMR_TILE_DIM + (local_j + 2);
 
+            double ur = (double)S.ur[k];
+            double uz = (double)S.uz[k];
+            double u_mag = std::sqrt(ur * ur + uz * uz);
+            double rho_v = (double)S.rho[k];
+            double e_int = (rho_v > 0.0) ? ((double)S.E[k] / rho_v - 0.5 * u_mag * u_mag) : 0.0;
+            double a1 = std::clamp((double)S.alpha1[k], 0.0, 1.0);
+            double a2 = std::clamp((double)S.alpha2[k], 0.0, 1.0);
+            double air_frac = std::clamp(1.0 - a1 - a2, 0.0, 1.0);
+
             cpu_gauge_values.push_back((float)S.p[k]);
-            cpu_gauge_values.push_back((float)S.rho[k]);
-            cpu_gauge_values.push_back((float)S.ur[k]);
-            cpu_gauge_values.push_back((float)S.uz[k]);
-            cpu_gauge_values.push_back((float)S.E[k]);
-            cpu_gauge_values.push_back((float)S.alpha1[k]);
-            cpu_gauge_values.push_back((float)S.alpha2[k]);
+            cpu_gauge_values.push_back((float)rho_v);
+            cpu_gauge_values.push_back((float)u_mag);
+            cpu_gauge_values.push_back((float)e_int);
+            cpu_gauge_values.push_back((float)a1);
+            cpu_gauge_values.push_back((float)a2);
+            cpu_gauge_values.push_back((float)air_frac);
         }
     }
 }

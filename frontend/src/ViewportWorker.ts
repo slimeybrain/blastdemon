@@ -1,6 +1,20 @@
 // ViewportWorker.ts
 export {};
 import { getColormapIndex } from './viewport/ColormapUtils.js';
+import {
+    type QuantityContourStyle,
+    canonicalizeQuantity,
+    DEFAULT_QUANTITY_RANGES,
+    isValidQuantitySample,
+    getDefaultQuantityStyle,
+    normalizeColormapId,
+    normalizeScalarToT,
+    quantizeContourT,
+    evaluateColormapRGB,
+    buildColormapLUT,
+    GLSL_COLORMAP_FUNCTIONS,
+    WGSL_COLORMAP_FUNCTIONS
+} from './contour-style.js';
 import { rotateVectorAroundAxis, rotatePointEuler, invRotatePointEuler, multiplyMatrices, invertMatrix4 } from './viewport/ViewportMath.js';
 
 // --- WebGL Shader Sources ---
@@ -113,104 +127,7 @@ float computeSurfaceAO(vec3 viewPos, vec3 normal) {
     return clamp(combinedAO, 0.05, 1.0);
 }
 
-vec3 colormap_plasma(float t) {
-    return vec3(t * 1.5, t * t, 1.0 - t);
-}
-
-vec3 colormap_viridis(float t) {
-    return vec3(1.0 - t, t, 0.5 + 0.5 * t);
-}
-
-vec3 colormap_rainbow(float t) {
-    float r = 0.0, g = 0.0, b = 0.0;
-    if (t < 0.25) {
-        float localT = t / 0.25;
-        r = 0.0; g = localT; b = 1.0;
-    } else if (t < 0.5) {
-        float localT = (t - 0.25) / 0.25;
-        r = 0.0; g = 1.0; b = 1.0 - localT;
-    } else if (t < 0.75) {
-        float localT = (t - 0.5) / 0.25;
-        r = localT; g = 1.0; b = 0.0;
-    } else {
-        float localT = (t - 0.75) / 0.25;
-        r = 1.0; g = 1.0 - localT; b = 0.0;
-    }
-    return vec3(r, g, b);
-}
-
-vec3 colormap_coolwarm(float t) {
-    float r = 0.0, g = 0.0, b = 0.0;
-    if (t < 0.5) {
-        float localT = t / 0.5;
-        r = (59.0 + localT * 161.0) / 255.0;
-        g = (76.0 + localT * 144.0) / 255.0;
-        b = (192.0 + localT * 28.0) / 255.0;
-    } else {
-        float localT = (t - 0.5) / 0.5;
-        r = (220.0 + localT * 9.0) / 255.0;
-        g = (220.0 - localT * 184.0) / 255.0;
-        b = (220.0 - localT * 161.0) / 255.0;
-    }
-    return vec3(r, g, b);
-}
-
-vec3 colormap_cividis(float t) {
-    float r = 0.0, g = 0.0, b = 0.0;
-    if (t < 0.5) {
-        float localT = t / 0.5;
-        r = (0.0 + localT * 84.0) / 255.0;
-        g = (33.0 + localT * 79.0) / 255.0;
-        b = (84.0 + localT * 53.0) / 255.0;
-    } else {
-        float localT = (t - 0.5) / 0.5;
-        r = (84.0 + localT * 168.0) / 255.0;
-        g = (112.0 + localT * 102.0) / 255.0;
-        b = (137.0 - localT * 86.0) / 255.0;
-    }
-    return vec3(r, g, b);
-}
-
-vec3 colormap_grayscale(float t) {
-    return vec3(t, t, t);
-}
-
-vec3 colormap_materials(float t) {
-    float id = floor(t * 5.0 + 0.5);
-    if (id < 0.5) return vec3(0.53, 0.81, 0.98); // Air (Sky Blue)
-    if (id < 1.5) return vec3(0.05, 0.45, 0.85); // Water (Ocean Blue)
-    if (id < 2.5) return vec3(0.85, 0.58, 0.25); // Soil (Sand Amber)
-    if (id < 3.5) return vec3(1.00, 0.50, 0.00); // HE Solid (Warning Orange)
-    if (id < 4.5) return vec3(0.95, 0.15, 0.15); // Detonation Products (Crimson Fire)
-    return vec3(0.58, 0.20, 0.92);               // FEM Solid / Obstacle (Purple)
-}
-
-vec3 getColormapColor(float t, int cmap) {
-    if (cmap == 0) return colormap_plasma(t);
-    if (cmap == 1) return colormap_viridis(t);
-    if (cmap == 3) return colormap_coolwarm(t);
-    if (cmap == 4) return colormap_cividis(t);
-    if (cmap == 5) return colormap_grayscale(t);
-    if (cmap == 6) return colormap_materials(t);
-    return colormap_rainbow(t);
-}
-
-float getT(float raw, float minVal, float maxVal, bool useLogScale) {
-    float t;
-    float denom = maxVal - minVal;
-    if (denom < 1e-5) denom = 1e-5;
-    if (useLogScale) {
-        float logMin = log(max(minVal, 1e-5));
-        float logMax = log(max(maxVal, 1e-5));
-        float logVal = log(max(raw, 1e-5));
-        float logDenom = logMax - logMin;
-        if (logDenom < 1e-5) logDenom = 1e-5;
-        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
-    } else {
-        t = clamp((raw - minVal) / denom, 0.0, 1.0);
-    }
-    return t;
-}
+${GLSL_COLORMAP_FUNCTIONS}
 
 void main() {
     if (uNumSubmeshMasks > 0) {
@@ -238,7 +155,7 @@ void main() {
                 return;
             }
             float val = vSliceSize.y;
-            float t = getT(val, uMin, uMax, uUseLogScale);
+            float t = quantizeContourT(getT(val, uMin, uMax, uUseLogScale), float(uContourLevels));
             vec3 col = getColormapColor(t, uColormap);
             vec4 baseColor = vec4(col, uAlpha);
             
@@ -335,6 +252,11 @@ void main() {
             vec4 baseAmber = vec4(1.0, 0.72, 0.10, uAlpha * 0.20);
             vec4 rimAmber = vec4(1.0, 0.92, 0.45, uAlpha * 0.90);
             outColor = mix(baseAmber, rimAmber, rim);
+            return;
+        }
+
+        if (uIsWireframe == 23) {
+            outColor = vec4(0.18, 0.56, 0.88, uAlpha);
             return;
         }
 
@@ -498,6 +420,7 @@ void main() {
         // STL Geometry (5 = Solid, 6 = Wireframe, 7 = Solid + Wireframe) or Gauges (8 = Solid Spheres)
         if (uIsWireframe >= 5) {
             vec3 probePos = vLocalPos;
+            vec3 stlOutNormal = vec3(0.0);
             if (uIsWireframe <= 7) {
                 vec3 dLocalX = dFdx(vLocalPos);
                 vec3 dLocalY = dFdy(vLocalPos);
@@ -509,19 +432,33 @@ void main() {
                     if (viewNorm.z < 0.0) {
                         surfNormal = -surfNormal;
                     }
+                    stlOutNormal = surfNormal;
                     probePos += surfNormal * (0.5 * max(uDx, 1e-4));
                 }
             }
-            vec3 relDomainPos = (probePos - uDomainMin) / max(uDomainExtent, vec3(1e-6));
+            vec3 domainSpan = max(uDomainExtent, vec3(1e-6));
+            vec3 relDomainPos = (probePos - uDomainMin) / domainSpan;
             bool inStlDomain = (relDomainPos.x >= -1e-4 && relDomainPos.x <= 1.0001 &&
                                 relDomainPos.y >= -1e-4 && relDomainPos.y <= 1.0001 &&
                                 relDomainPos.z >= -1e-4 && relDomainPos.z <= 1.0001);
 
-            vec4 baseColor = vec4(0.42, 0.44, 0.48, uAlpha);
+            float sampledStlVal = 0.0;
             if (uStlShowResults && inStlDomain && uIsWireframe <= 7) {
                 vec3 baseNorm = clamp(relDomainPos, vec3(0.0), vec3(1.0));
-                float val = texture(uVolumeTexture3D, baseNorm).r;
-                float t = getT(val, uStlMin, uStlMax, uStlLogScale);
+                sampledStlVal = texture(uVolumeTexture3D, baseNorm).r;
+                if (sampledStlVal == 0.0 && dot(stlOutNormal, stlOutNormal) > 0.25) {
+                    vec3 fallbackPos = vLocalPos + stlOutNormal * (1.35 * max(uDx, 1e-4));
+                    vec3 fallbackNorm = clamp((fallbackPos - uDomainMin) / domainSpan, vec3(0.0), vec3(1.0));
+                    float fallbackVal = texture(uVolumeTexture3D, fallbackNorm).r;
+                    if (fallbackVal != 0.0) {
+                        sampledStlVal = fallbackVal;
+                    }
+                }
+            }
+
+            vec4 baseColor = vec4(0.42, 0.44, 0.48, uAlpha);
+            if (uStlShowResults && inStlDomain && uIsWireframe <= 7) {
+                float t = quantizeContourT(getT(sampledStlVal, uStlMin, uStlMax, uStlLogScale), float(uContourLevels));
                 vec3 col = getColormapColor(t, uStlColormap);
                 baseColor = vec4(col, uAlpha);
             }
@@ -574,9 +511,8 @@ void main() {
             if (uIsWireframe == 6) {
                 vec4 wireColor = vec4(0.15, 0.15, 0.15, 0.95);
                 if (uStlShowResults && inStlDomain) {
-                    vec3 baseNorm = clamp(relDomainPos, vec3(0.0), vec3(1.0));
-                    float val = texture(uVolumeTexture3D, baseNorm).r;
-                    vec3 col = getColormapColor(getT(val, uStlMin, uStlMax, uStlLogScale), uStlColormap);
+                    float t = quantizeContourT(getT(sampledStlVal, uStlMin, uStlMax, uStlLogScale), float(uContourLevels));
+                    vec3 col = getColormapColor(t, uStlColormap);
                     wireColor = vec4(col, 0.95);
                 } else if (vSliceSize.y > 0.5) {
                     wireColor = vec4(0.8, 0.1, 0.1, 0.95);
@@ -591,9 +527,8 @@ void main() {
                     if (lineCoverage < 0.01) discard;
                     vec4 wireColor = vec4(0.15, 0.15, 0.15, 0.95);
                     if (uStlShowResults && inStlDomain) {
-                        vec3 baseNorm = clamp(relDomainPos, vec3(0.0), vec3(1.0));
-                        float val = texture(uVolumeTexture3D, baseNorm).r;
-                        vec3 col = getColormapColor(getT(val, uStlMin, uStlMax, uStlLogScale), uStlColormap);
+                        float t = quantizeContourT(getT(sampledStlVal, uStlMin, uStlMax, uStlLogScale), float(uContourLevels));
+                        vec3 col = getColormapColor(t, uStlColormap);
                         wireColor = vec4(col, 0.95);
                     } else if (vSliceSize.y > 0.5) {
                         wireColor = vec4(0.8, 0.1, 0.1, 0.95);
@@ -637,12 +572,7 @@ void main() {
     } else {
         raw = texture(uTexture, vTexCoord).r;
     }
-    float t = getT(raw, uMin, uMax, uUseLogScale);
-    if (uContourLevels > 1) {
-        float nL = float(uContourLevels);
-        float band = min(nL - 1.0, floor(t * nL));
-        t = (band + 0.5) / nL;
-    }
+    float t = quantizeContourT(getT(raw, uMin, uMax, uUseLogScale), float(uContourLevels));
     color = getColormapColor(t, uColormap);
     vec4 finalColor = vec4(color, uAlpha);
     if (uEnableLighting) {
@@ -758,6 +688,7 @@ uniform bool uUseLogScale;
 uniform int uIsWireframe;
 uniform bool uShowCellEdges;
 uniform bool uInterpolate;
+uniform int uContourLevels;
 uniform bool uEnableLighting;
 uniform bool uEnableAO;
 uniform float uAmbientLevel;
@@ -769,6 +700,7 @@ uniform vec3 uDomainExtent;
 uniform float uDx;
 uniform float uStlMin;
 uniform float uStlMax;
+uniform bool uStlLogScale;
 uniform float uParticleDiameter;
 
 uniform int uAxis;
@@ -776,104 +708,7 @@ uniform int uIsSubmesh;
 uniform int uNumSubmeshMasks;
 uniform vec4 uSubmeshMasks[32];
 
-vec3 colormap_plasma(float t) {
-    return vec3(t * 1.5, t * t, 1.0 - t);
-}
-
-vec3 colormap_viridis(float t) {
-    return vec3(1.0 - t, t, 0.5 + 0.5 * t);
-}
-
-vec3 colormap_rainbow(float t) {
-    float r = 0.0, g = 0.0, b = 0.0;
-    if (t < 0.25) {
-        float localT = t / 0.25;
-        r = 0.0; g = localT; b = 1.0;
-    } else if (t < 0.5) {
-        float localT = (t - 0.25) / 0.25;
-        r = 0.0; g = 1.0; b = 1.0 - localT;
-    } else if (t < 0.75) {
-        float localT = (t - 0.5) / 0.25;
-        r = localT; g = 1.0; b = 0.0;
-    } else {
-        float localT = (t - 0.75) / 0.25;
-        r = 1.0; g = 1.0 - localT; b = 0.0;
-    }
-    return vec3(r, g, b);
-}
-
-vec3 colormap_coolwarm(float t) {
-    float r = 0.0, g = 0.0, b = 0.0;
-    if (t < 0.5) {
-        float localT = t / 0.5;
-        r = (59.0 + localT * 161.0) / 255.0;
-        g = (76.0 + localT * 144.0) / 255.0;
-        b = (192.0 + localT * 28.0) / 255.0;
-    } else {
-        float localT = (t - 0.5) / 0.5;
-        r = (220.0 + localT * 9.0) / 255.0;
-        g = (220.0 - localT * 184.0) / 255.0;
-        b = (220.0 - localT * 161.0) / 255.0;
-    }
-    return vec3(r, g, b);
-}
-
-vec3 colormap_cividis(float t) {
-    float r = 0.0, g = 0.0, b = 0.0;
-    if (t < 0.5) {
-        float localT = t / 0.5;
-        r = (0.0 + localT * 84.0) / 255.0;
-        g = (33.0 + localT * 79.0) / 255.0;
-        b = (84.0 + localT * 53.0) / 255.0;
-    } else {
-        float localT = (t - 0.5) / 0.5;
-        r = (84.0 + localT * 168.0) / 255.0;
-        g = (112.0 + localT * 102.0) / 255.0;
-        b = (137.0 - localT * 86.0) / 255.0;
-    }
-    return vec3(r, g, b);
-}
-
-vec3 colormap_grayscale(float t) {
-    return vec3(t, t, t);
-}
-
-vec3 colormap_materials(float t) {
-    float id = floor(t * 5.0 + 0.5);
-    if (id < 0.5) return vec3(0.53, 0.81, 0.98); // Air (Sky Blue)
-    if (id < 1.5) return vec3(0.05, 0.45, 0.85); // Water (Ocean Blue)
-    if (id < 2.5) return vec3(0.85, 0.58, 0.25); // Soil (Sand Amber)
-    if (id < 3.5) return vec3(1.00, 0.50, 0.00); // HE Solid (Warning Orange)
-    if (id < 4.5) return vec3(0.95, 0.15, 0.15); // Detonation Products (Crimson Fire)
-    return vec3(0.58, 0.20, 0.92);               // FEM Solid / Obstacle (Purple)
-}
-
-vec3 getColormapColor(float t, int cmap) {
-    if (cmap == 0) return colormap_plasma(t);
-    if (cmap == 1) return colormap_viridis(t);
-    if (cmap == 3) return colormap_coolwarm(t);
-    if (cmap == 4) return colormap_cividis(t);
-    if (cmap == 5) return colormap_grayscale(t);
-    if (cmap == 6) return colormap_materials(t);
-    return colormap_rainbow(t);
-}
-
-float getT(float raw, float minVal, float maxVal, bool useLogScale) {
-    float t;
-    float denom = maxVal - minVal;
-    if (denom < 1e-5) return 0.0;
-    if (useLogScale) {
-        float logMin = log(max(minVal, 1e-5));
-        float logMax = log(max(maxVal, 1e-5));
-        float logVal = log(max(raw, 1e-5));
-        float logDenom = logMax - logMin;
-        if (logDenom < 1e-5) return 0.0;
-        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
-    } else {
-        t = clamp((raw - minVal) / denom, 0.0, 1.0);
-    }
-    return t;
-}
+${GLSL_COLORMAP_FUNCTIONS}
 
 void main() {
     if (uNumSubmeshMasks > 0) {
@@ -900,7 +735,7 @@ void main() {
                 return;
             }
             float val = vSliceSize.y;
-            float t = getT(val, uMin, uMax, uUseLogScale);
+            float t = quantizeContourT(getT(val, uMin, uMax, uUseLogScale), float(uContourLevels));
             vec3 col = getColormapColor(t, uColormap);
             vec4 baseColor = vec4(col, uAlpha);
             
@@ -982,6 +817,11 @@ void main() {
             vec4 baseAmber = vec4(1.0, 0.72, 0.10, uAlpha * 0.20);
             vec4 rimAmber = vec4(1.0, 0.92, 0.45, uAlpha * 0.90);
             outColor = mix(baseAmber, rimAmber, rim);
+            return;
+        }
+
+        if (uIsWireframe == 23) {
+            outColor = vec4(0.18, 0.56, 0.88, uAlpha);
             return;
         }
 
@@ -1183,16 +1023,15 @@ void main() {
         return;
     }
     vec3 color;
+    float raw;
     if (!uInterpolate) {
         vec2 cellUv = (floor(vTexCoord * vSliceSize) + vec2(0.5)) / vSliceSize;
-        float raw = texture(uTexture, cellUv).r;
-        float t = getT(raw, uMin, uMax, uUseLogScale);
-        color = getColormapColor(t, uColormap);
+        raw = texture2D(uTexture, cellUv).r;
     } else {
-        float raw = texture(uTexture, vTexCoord).r;
-        float t = getT(raw, uMin, uMax, uUseLogScale);
-        color = getColormapColor(t, uColormap);
+        raw = texture2D(uTexture, vTexCoord).r;
     }
+    float t = quantizeContourT(getT(raw, uMin, uMax, uUseLogScale), float(uContourLevels));
+    color = getColormapColor(t, uColormap);
     vec4 finalColor = vec4(color, uAlpha);
     
     if (uEnableLighting) {
@@ -1416,109 +1255,7 @@ fn fs_particle_billboard(in: ParticleOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(lit, uniforms.alpha);
 }
 
-fn colormap_plasma(t: f32) -> vec3<f32> {
-    return vec3<f32>(t * 1.5, t * t, 1.0 - t);
-}
-
-fn colormap_viridis(t: f32) -> vec3<f32> {
-    return vec3<f32>(1.0 - t, t, 0.5 + 0.5 * t);
-}
-
-fn colormap_rainbow(t: f32) -> vec3<f32> {
-    var r: f32 = 0.0; var g: f32 = 0.0; var b: f32 = 0.0;
-    if (t < 0.25) {
-        let localT = t / 0.25;
-        r = 0.0; g = localT; b = 1.0;
-    } else if (t < 0.5) {
-        let localT = (t - 0.25) / 0.25;
-        r = 0.0; g = 1.0; b = 1.0 - localT;
-    } else if (t < 0.75) {
-        let localT = (t - 0.5) / 0.25;
-        r = localT; g = 1.0; b = 0.0;
-    } else {
-        let localT = (t - 0.75) / 0.25;
-        r = 1.0; g = 1.0 - localT; b = 0.0;
-    }
-    return vec3<f32>(r, g, b);
-}
-
-fn colormap_coolwarm(t: f32) -> vec3<f32> {
-    var r: f32 = 0.0; var g: f32 = 0.0; var b: f32 = 0.0;
-    if (t < 0.5) {
-        let localT = t / 0.5;
-        r = (59.0 + localT * 161.0) / 255.0;
-        g = (76.0 + localT * 144.0) / 255.0;
-        b = (192.0 + localT * 28.0) / 255.0;
-    } else {
-        let localT = (t - 0.5) / 0.5;
-        r = (220.0 + localT * 9.0) / 255.0;
-        g = (220.0 - localT * 184.0) / 255.0;
-        b = (220.0 - localT * 161.0) / 255.0;
-    }
-    return vec3<f32>(r, g, b);
-}
-
-fn colormap_cividis(t: f32) -> vec3<f32> {
-    var r: f32 = 0.0; var g: f32 = 0.0; var b: f32 = 0.0;
-    if (t < 0.5) {
-        let localT = t / 0.5;
-        r = (0.0 + localT * 84.0) / 255.0;
-        g = (33.0 + localT * 79.0) / 255.0;
-        b = (84.0 + localT * 53.0) / 255.0;
-    } else {
-        let localT = (t - 0.5) / 0.5;
-        r = (84.0 + localT * 168.0) / 255.0;
-        g = (112.0 + localT * 102.0) / 255.0;
-        b = (137.0 - localT * 86.0) / 255.0;
-    }
-    return vec3<f32>(r, g, b);
-}
-
-fn colormap_grayscale(t: f32) -> vec3<f32> {
-    return vec3<f32>(t, t, t);
-}
-
-fn colormap_materials(t: f32) -> vec3<f32> {
-    let id = floor(t * 5.0 + 0.5);
-    if (id < 0.5) { return vec3<f32>(0.53, 0.81, 0.98); }
-    if (id < 1.5) { return vec3<f32>(0.05, 0.45, 0.85); }
-    if (id < 2.5) { return vec3<f32>(0.85, 0.58, 0.25); }
-    if (id < 3.5) { return vec3<f32>(1.00, 0.50, 0.00); }
-    if (id < 4.5) { return vec3<f32>(0.95, 0.15, 0.15); }
-    return vec3<f32>(0.58, 0.20, 0.92);
-}
-
-fn getColormapColor(t: f32, cmap: f32) -> vec3<f32> {
-    let c = i32(cmap + 0.5);
-    if (c == 0) { return colormap_plasma(t); }
-    if (c == 1) { return colormap_viridis(t); }
-    if (c == 3) { return colormap_coolwarm(t); }
-    if (c == 4) { return colormap_cividis(t); }
-    if (c == 5) { return colormap_grayscale(t); }
-    if (c == 6) { return colormap_materials(t); }
-    return colormap_rainbow(t);
-}
-
-fn getT(raw: f32, minVal: f32, maxVal: f32, useLogScale: f32) -> f32 {
-    var t: f32 = 0.0;
-    let denom = maxVal - minVal;
-    if (denom < 1e-5) {
-        return 0.0;
-    }
-    if (useLogScale > 0.5) {
-        let logMin = log(max(minVal, 1e-5));
-        let logMax = log(max(maxVal, 1e-5));
-        let logVal = log(max(raw, 1e-5));
-        let logDenom = logMax - logMin;
-        if (logDenom < 1e-5) {
-            return 0.0;
-        }
-        t = clamp((logVal - logMin) / logDenom, 0.0, 1.0);
-    } else {
-        t = clamp((raw - minVal) / denom, 0.0, 1.0);
-    }
-    return t;
-}
+${WGSL_COLORMAP_FUNCTIONS}
 
 @fragment
 fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @location(0) vec4<f32> {
@@ -1574,6 +1311,10 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
             let baseAmber = vec4<f32>(1.0, 0.72, 0.10, uniforms.alpha * 0.20);
             let rimAmber = vec4<f32>(1.0, 0.92, 0.45, uniforms.alpha * 0.90);
             return mix(baseAmber, rimAmber, rim);
+        }
+
+        if (uniforms.isWireframe >= 22.5 && uniforms.isWireframe < 23.5) {
+            return vec4<f32>(0.18, 0.56, 0.88, uniforms.alpha);
         }
         
         // Axes Indicator (2.0, 3.0, 4.0) or Gauges (8.0)
@@ -1641,7 +1382,7 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
                 return vec4<f32>(0.8, 0.8, 0.8, uniforms.alpha * 0.5);
             }
             let val = sliceSize.y;
-            let t = getT(val, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
+            let t = quantizeContourT(getT(val, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale), uniforms.contourLevels);
             let col = getColormapColor(t, uniforms.colormap);
             var baseColor = vec4<f32>(col, uniforms.alpha);
 
@@ -1669,6 +1410,7 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
         // STL Geometry (5.0 = Solid, 6.0 = Wireframe, 7.0 = Solid + Wireframe)
         if (uniforms.isWireframe >= 4.5 && uniforms.isWireframe < 7.5) {
             var probePos = vLocalPos;
+            var stlOutNormal = vec3<f32>(0.0, 0.0, 0.0);
             let dLocalX = dpdx(vLocalPos);
             let dLocalY = dpdy(vLocalPos);
             var surfNormal = cross(dLocalX, dLocalY);
@@ -1679,18 +1421,32 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
                 if (viewNormal.z < 0.0) {
                     surfNormal = -surfNormal;
                 }
+                stlOutNormal = surfNormal;
                 probePos = probePos + surfNormal * (0.5 * max(uniforms.dx, 1e-4));
             }
-            let relDomainPos = (probePos - uniforms.domainMin) / max(uniforms.domainExtent, vec3<f32>(1e-6, 1e-6, 1e-6));
+            let domainSpan = max(uniforms.domainExtent, vec3<f32>(1e-6, 1e-6, 1e-6));
+            let relDomainPos = (probePos - uniforms.domainMin) / domainSpan;
             let inStlDomain = (relDomainPos.x >= -1e-4 && relDomainPos.x <= 1.0001 &&
                                relDomainPos.y >= -1e-4 && relDomainPos.y <= 1.0001 &&
                                relDomainPos.z >= -1e-4 && relDomainPos.z <= 1.0001);
 
-            var baseColor = vec4<f32>(0.42, 0.44, 0.48, uniforms.alpha);
+            var sampledStlVal: f32 = 0.0;
             if (uniforms.stlShowResults > 0.5 && inStlDomain) {
                 let baseNorm = clamp(relDomainPos, vec3<f32>(0.0), vec3<f32>(1.0));
-                let val = textureSampleLevel(uVolumeTexture, uSampler, baseNorm, 0.0).r;
-                let t = getT(val, uniforms.stlMinVal, uniforms.stlMaxVal, uniforms.stlLogScale);
+                sampledStlVal = textureSampleLevel(uVolumeTexture, uSampler, baseNorm, 0.0).r;
+                if (sampledStlVal == 0.0 && dot(stlOutNormal, stlOutNormal) > 0.25) {
+                    let fallbackPos = vLocalPos + stlOutNormal * (1.35 * max(uniforms.dx, 1e-4));
+                    let fallbackNorm = clamp((fallbackPos - uniforms.domainMin) / domainSpan, vec3<f32>(0.0), vec3<f32>(1.0));
+                    let fallbackVal = textureSampleLevel(uVolumeTexture, uSampler, fallbackNorm, 0.0).r;
+                    if (fallbackVal != 0.0) {
+                        sampledStlVal = fallbackVal;
+                    }
+                }
+            }
+
+            var baseColor = vec4<f32>(0.42, 0.44, 0.48, uniforms.alpha);
+            if (uniforms.stlShowResults > 0.5 && inStlDomain) {
+                let t = quantizeContourT(getT(sampledStlVal, uniforms.stlMinVal, uniforms.stlMaxVal, uniforms.stlLogScale), uniforms.contourLevels);
                 let col = getColormapColor(t, uniforms.stlColormap);
                 baseColor = vec4<f32>(col, uniforms.alpha);
             }
@@ -1737,9 +1493,8 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
                 // Wireframe only (6.0)
                 var wireColor = vec4<f32>(0.15, 0.15, 0.15, 0.95);
                 if (uniforms.stlShowResults > 0.5 && inStlDomain) {
-                    let baseNorm = clamp(relDomainPos, vec3<f32>(0.0), vec3<f32>(1.0));
-                    let val = textureSampleLevel(uVolumeTexture, uSampler, baseNorm, 0.0).r;
-                    let col = getColormapColor(getT(val, uniforms.stlMinVal, uniforms.stlMaxVal, uniforms.stlLogScale), uniforms.stlColormap);
+                    let t = quantizeContourT(getT(sampledStlVal, uniforms.stlMinVal, uniforms.stlMaxVal, uniforms.stlLogScale), uniforms.contourLevels);
+                    let col = getColormapColor(t, uniforms.stlColormap);
                     wireColor = vec4<f32>(col, 0.95);
                 } else if (sliceSize.y > 0.5) {
                     wireColor = vec4<f32>(0.8, 0.1, 0.1, 0.95);
@@ -1753,9 +1508,8 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
                 if (lineCoverage < 0.01) { discard; }
                 var wireColor = vec4<f32>(0.15, 0.15, 0.15, 0.95);
                 if (uniforms.stlShowResults > 0.5 && inStlDomain) {
-                    let baseNorm = clamp(relDomainPos, vec3<f32>(0.0), vec3<f32>(1.0));
-                    let val = textureSampleLevel(uVolumeTexture, uSampler, baseNorm, 0.0).r;
-                    let col = getColormapColor(getT(val, uniforms.stlMinVal, uniforms.stlMaxVal, uniforms.stlLogScale), uniforms.stlColormap);
+                    let t = quantizeContourT(getT(sampledStlVal, uniforms.stlMinVal, uniforms.stlMaxVal, uniforms.stlLogScale), uniforms.contourLevels);
+                    let col = getColormapColor(t, uniforms.stlColormap);
                     wireColor = vec4<f32>(col, 0.95);
                 } else if (sliceSize.y > 0.5) {
                     wireColor = vec4<f32>(0.8, 0.1, 0.1, 0.95);
@@ -1824,17 +1578,12 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
     var raw: f32;
     if (uniforms.interpolate < 0.5) {
         let cellUv = (floor(texCoord * sliceSize) + vec2<f32>(0.5, 0.5)) / sliceSize;
-        raw = textureSample(uTexture, uSampler, cellUv).r;
+        raw = textureSampleLevel(uTexture, uSampler, cellUv, 0.0).r;
     } else {
-        raw = textureSample(uTexture, uSampler, texCoord).r;
+        raw = textureSampleLevel(uTexture, uSampler, texCoord, 0.0).r;
     }
-    var t = getT(raw, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale);
-    if (uniforms.contourLevels > 1.5) {
-        let nL = uniforms.contourLevels;
-        let band = min(nL - 1.0, floor(t * nL));
-        t = (band + 0.5) / nL;
-    }
-    color = getColormapColor(t, i32(uniforms.colormap));
+    let t = quantizeContourT(getT(raw, uniforms.minVal, uniforms.maxVal, uniforms.useLogScale), uniforms.contourLevels);
+    color = getColormapColor(t, uniforms.colormap);
 
     var finalColor = vec4<f32>(color, uniforms.alpha);
 
@@ -1863,10 +1612,10 @@ fn fs_main(vertexIn: VertexOutput, @builtin(front_facing) isFront: bool) -> @loc
     if (uniforms.colormap > 5.5 && uniforms.colormap < 6.5) {
         let dUV = vec2<f32>(1.0, 1.0) / max(sliceSize, vec2<f32>(1.0, 1.0));
         let raw_c = raw;
-        let raw_r = textureSample(uTexture, uSampler, texCoord + vec2<f32>(dUV.x, 0.0)).r;
-        let raw_l = textureSample(uTexture, uSampler, texCoord - vec2<f32>(dUV.x, 0.0)).r;
-        let raw_u = textureSample(uTexture, uSampler, texCoord + vec2<f32>(0.0, dUV.y)).r;
-        let raw_d = textureSample(uTexture, uSampler, texCoord - vec2<f32>(0.0, dUV.y)).r;
+        let raw_r = textureSampleLevel(uTexture, uSampler, texCoord + vec2<f32>(dUV.x, 0.0), 0.0).r;
+        let raw_l = textureSampleLevel(uTexture, uSampler, texCoord - vec2<f32>(dUV.x, 0.0), 0.0).r;
+        let raw_u = textureSampleLevel(uTexture, uSampler, texCoord + vec2<f32>(0.0, dUV.y), 0.0).r;
+        let raw_d = textureSampleLevel(uTexture, uSampler, texCoord - vec2<f32>(0.0, dUV.y), 0.0).r;
         let id_c = floor(raw_c + 0.5);
         let is_interface = (id_c != floor(raw_r + 0.5) || id_c != floor(raw_l + 0.5) ||
                             id_c != floor(raw_u + 0.5) || id_c != floor(raw_d + 0.5));
@@ -1948,6 +1697,12 @@ let sliceGridlinesCount = 0;
 let gpuSliceGridlinesBuffer: any = null;
 let gpuSliceGridlinesBufferSize: number = 0;
 
+let placeholderSlicesBuffer: WebGLBuffer | null = null;
+let placeholderSlicesCount = 0;
+let gpuPlaceholderSlicesBuffer: any = null;
+let gpuPlaceholderSlicesBufferSize: number = 0;
+let gpuUniformBufferPlaceholderSlices: any = null;
+
 let amrLeafTilesCache: any[] = [];
 let slicesConfigCache: any[] = [];
 
@@ -2009,7 +1764,7 @@ let autoScale = true;
 let showGrid = true;
 let useLogScale = false;
 let showCellEdges = false;
-let interpolate = false;
+let interpolate = true;
 
 // Viewport Background Clear Color (Studio Slate default: #151922)
 let clearColor = { r: 0.082, g: 0.098, b: 0.133, a: 1.0 };
@@ -2132,6 +1887,8 @@ let stlAutoScale = true;
 let stlLogScale = false;
 let stlMinVal = 101325.0;
 let stlMaxVal = 1013250.0;
+let stlContourLevels = 0;
+let stlSmoothContours = true;
 let meshType = 'regular';
 
 let latestVolume3DData: Float32Array | null = null;
@@ -2176,9 +1933,11 @@ let obstaclesQuantity = 'pressure';
 let obstaclesColormap = 'rainbow';
 let obstaclesAutoScale = true;
 let obstaclesLogScale = false;
-let obstaclesInterpolate = false;
+let obstaclesInterpolate = true;
 let obstaclesMinVal = 101325.0;
 let obstaclesMaxVal = 1013250.0;
+let obstaclesContourLevels = 0;
+let obstaclesSmoothContours = true;
 
 // Obstacles Mesh Buffers
 let rawObstacleVertices: Float32Array | null = null;
@@ -2272,102 +2031,10 @@ let specularIntensity = 0.4;
 let ambientLevel = 0.3;
 let sliceOpacities = [1.0, 1.0, 1.0]; // xy, xz, yz
 
-function canonicalizeQuantity(q: string | undefined | null): string {
-    if (!q) return 'pressure';
-    const s = q.trim().toLowerCase();
-    if (s === 'overpressure' || s === 'peak_overpressure' || s === 'peak_pressure' || s === 'pk_press') return 'peak_overpressure';
-    if (s === 'impulse' || s === 'peak_impulse' || s === 'pk_impulse') return 'peak_impulse';
-    if (s === 'species1' || s === 'species_1' || s === 'species' || s === 'products' || s === 'detonation_products' || s === 'detonation' || s === 'reacted' || s === 'reacted_gas' || s === 'alpha1' || s === 'alpha_1') return 'species1';
-    if (s === 'species2' || s === 'species_2' || s === 'unreacted' || s === 'unreacted_solid' || s === 'solid_he' || s === 'alpha2' || s === 'alpha_2') return 'species2';
-    if (s === 'species3' || s === 'species_3' || s === 'air' || s === 'ambient_air' || s === 'alpha3' || s === 'alpha_3') return 'species3';
-    if (s === 'plastic_strain' || s === 'plasticstrain' || s === 'eps_p' || s === 'ep' || s === 'fem_strain' || s === 'mpm_strain') return 'plastic_strain';
-    if (s === 'vonmises' || s === 'von_mises' || s === 'vm_stress' || s === 'stress' || s === 'fem_stress' || s === 'mpm_stress') return 'vonMises';
-    if (s === 'temperature' || s === 'temp' || s === 'fem_temp' || s === 'mpm_temp') return 'temperature';
-    if (s === 'displacement' || s === 'disp' || s === 'fem_disp' || s === 'mpm_disp') return 'displacement';
-    if (s === 'damage' || s === 'fem_damage' || s === 'mpm_damage') return 'damage';
-    if (s === 'has_failed' || s === 'failure' || s === 'failed') return 'has_failed';
-    if (s === 'cluster_id' || s === 'cluster' || s === 'fragment_id' || s === 'fragments') return 'cluster_id';
-    if (s === 'object_id' || s === 'obj_id' || s === 'object') return 'object_id';
-    if (s === 'pressure' || s === 'density' || s === 'velocity' || s === 'energy' || s === 'solid' || s === 'amr_level') return s;
-    return s;
-}
+let quantityStyles: Record<string, QuantityContourStyle> = {};
+let resolvedQuantityRanges: Record<string, [number, number]> = {};
 
-const DEFAULT_QUANTITY_RANGES: Record<string, [number, number]> = {
-    pressure: [101325.0, 101325.0 * 1000.0],
-    density: [1.2, 2500.0],
-    velocity: [0.0, 1000.0],
-    energy: [200000.0, 10000000.0],
-    species1: [0.0, 1.0],
-    species2: [0.0, 1.0],
-    species3: [0.0, 1.0],
-    species_1: [0.0, 1.0],
-    species_2: [0.0, 1.0],
-    species_3: [0.0, 1.0],
-    alpha1: [0.0, 1.0],
-    alpha2: [0.0, 1.0],
-    alpha3: [0.0, 1.0],
-    products: [0.0, 1.0],
-    detonation_products: [0.0, 1.0],
-    detonation: [0.0, 1.0],
-    reacted: [0.0, 1.0],
-    unreacted: [0.0, 1.0],
-    air: [0.0, 1.0],
-    solid: [0.0, 1.0],
-    overpressure: [0.0, 101325.0 * 99.0],
-    peak_overpressure: [0.0, 101325.0 * 99.0],
-    impulse: [0.0, 10000.0],
-    peak_impulse: [0.0, 10000.0],
-    plastic_strain: [0.0, 1.0],
-    plasticStrain: [0.0, 1.0],
-    vonMises: [0.0, 500.0e6],
-    von_mises: [0.0, 500.0e6],
-    damage: [0.0, 1.0],
-    has_failed: [0.0, 1.0],
-    cluster_id: [0.0, 50.0],
-    object_id: [0.0, 10.0],
-    temperature: [300.0, 3000.0],
-    displacement: [0.0, 0.1],
-    momentOrForce: [0.0, 1000.0]
-};
-
-let quantityColormaps: Record<string, string> = {
-    pressure: 'rainbow',
-    density: 'rainbow',
-    velocity: 'rainbow',
-    energy: 'rainbow',
-    species1: 'rainbow',
-    species2: 'rainbow',
-    species3: 'rainbow',
-    species_1: 'rainbow',
-    species_2: 'rainbow',
-    species_3: 'rainbow',
-    alpha1: 'rainbow',
-    alpha2: 'rainbow',
-    alpha3: 'rainbow',
-    products: 'rainbow',
-    detonation_products: 'rainbow',
-    detonation: 'rainbow',
-    reacted: 'rainbow',
-    unreacted: 'rainbow',
-    air: 'rainbow',
-    solid: 'rainbow',
-    overpressure: 'rainbow',
-    peak_overpressure: 'rainbow',
-    impulse: 'rainbow',
-    peak_impulse: 'rainbow',
-    plastic_strain: 'rainbow',
-    plasticStrain: 'rainbow',
-    vonMises: 'rainbow',
-    von_mises: 'rainbow',
-    damage: 'rainbow',
-    has_failed: 'rainbow',
-    cluster_id: 'rainbow',
-    object_id: 'rainbow',
-    temperature: 'rainbow',
-    displacement: 'rainbow',
-    momentOrForce: 'rainbow'
-};
-
+let quantityColormaps: Record<string, string> = {};
 let slicesConfig: any[] = [];
 let quantityRanges: Record<string, [number, number]> = {};
 let quantityLogScales: Record<string, boolean> = {};
@@ -2379,6 +2046,56 @@ let mpmLockQuantityRange = true;
 let femLockQuantityRange = true;
 let beamLockQuantityRange = true;
 let focusedSliceIndex = 0;
+
+function getWorkerQuantityStyle(rawQty?: string | null): QuantityContourStyle {
+    const cQty = canonicalizeQuantity(rawQty);
+    const def = getDefaultQuantityStyle(cQty);
+    const explicit = quantityStyles[cQty] || (rawQty ? quantityStyles[rawQty] : undefined);
+    const legacyRange = quantityRanges[cQty] || (rawQty ? quantityRanges[rawQty] : undefined);
+    const legacyCmap = quantityColormaps[cQty] || (rawQty ? quantityColormaps[rawQty] : undefined);
+    const legacyLog = quantityLogScales[cQty] ?? (rawQty ? quantityLogScales[rawQty] : undefined);
+    const legacyAuto = quantityAutoScales[cQty] ?? (rawQty ? quantityAutoScales[rawQty] : undefined);
+
+    const contourLevels = explicit?.contourLevels !== undefined
+        ? Math.max(0, Math.round(Number(explicit.contourLevels)))
+        : def.contourLevels;
+    const smoothContours = explicit?.smoothContours !== undefined
+        ? (Boolean(explicit.smoothContours) || contourLevels <= 1)
+        : (contourLevels <= 1);
+
+    return {
+        colormap: normalizeColormapId(explicit?.colormap ?? legacyCmap ?? def.colormap),
+        autoScale: explicit?.autoScale !== undefined
+            ? Boolean(explicit.autoScale)
+            : (legacyAuto !== undefined ? Boolean(legacyAuto) : def.autoScale),
+        logScale: explicit?.logScale !== undefined
+            ? Boolean(explicit.logScale)
+            : (legacyLog !== undefined ? Boolean(legacyLog) : def.logScale),
+        minVal: (explicit?.minVal !== undefined && Number.isFinite(Number(explicit.minVal)))
+            ? Number(explicit.minVal)
+            : (legacyRange && Number.isFinite(legacyRange[0]) ? Number(legacyRange[0]) : def.minVal),
+        maxVal: (explicit?.maxVal !== undefined && Number.isFinite(Number(explicit.maxVal)))
+            ? Number(explicit.maxVal)
+            : (legacyRange && Number.isFinite(legacyRange[1]) ? Number(legacyRange[1]) : def.maxVal),
+        contourLevels: smoothContours ? 0 : contourLevels,
+        smoothContours,
+        interpolate: explicit?.interpolate !== undefined ? Boolean(explicit.interpolate) : def.interpolate,
+        showColorbar: explicit?.showColorbar !== undefined ? Boolean(explicit.showColorbar) : def.showColorbar
+    };
+}
+
+function getResolvedQuantityBounds(rawQty?: string | null): [number, number] {
+    const cQty = canonicalizeQuantity(rawQty);
+    const style = getWorkerQuantityStyle(cQty);
+    if (!style.autoScale) {
+        return [style.minVal, style.maxVal];
+    }
+    const dyn = resolvedQuantityRanges[cQty] || quantityRanges[cQty] || (rawQty ? quantityRanges[rawQty] : undefined);
+    if (dyn && Number.isFinite(dyn[0]) && Number.isFinite(dyn[1]) && dyn[1] > dyn[0]) {
+        return [dyn[0], dyn[1]];
+    }
+    return [style.minVal, style.maxVal];
+}
 
 function getSliceConfig(idx: number): any {
     const slice = cachedSlices[idx];
@@ -2868,12 +2585,111 @@ function updateSTLGeometry() {
 }
 
 let cachedObstacleVertexData: Float32Array | null = null;
+let cachedObstacleCornerGroupIds: Uint32Array | null = null;
+let cachedObstacleGroupSums: Float64Array | null = null;
+let cachedObstacleGroupCounts: Uint32Array | null = null;
+let cachedObstacleTopologyLen = 0;
 let cachedObstaclesMinVal = 0.0;
 let cachedObstaclesMaxVal = 1.0;
 
 const stlFinalModelMat = new Float32Array(16);
 const stlModelMat = new Float32Array(16);
 const obsFinalModelMat = new Float32Array(16);
+
+function ensureObstacleCornerTopology() {
+    if (!rawObstacleVertices || rawObstacleVertices.length === 0) {
+        cachedObstacleCornerGroupIds = null;
+        cachedObstacleGroupSums = null;
+        cachedObstacleGroupCounts = null;
+        cachedObstacleTopologyLen = 0;
+        return;
+    }
+    if (cachedObstacleCornerGroupIds && cachedObstacleTopologyLen === rawObstacleVertices.length) {
+        return;
+    }
+    const numCorners = Math.floor(rawObstacleVertices.length / 3);
+    const groupIds = new Uint32Array(numCorners);
+    const keyToGroup = new Map<string, number>();
+    let nextGroup = 0;
+    for (let c = 0; c < numCorners; c++) {
+        const qx = Math.round(rawObstacleVertices[c * 3 + 0] * 1e5);
+        const qy = Math.round(rawObstacleVertices[c * 3 + 1] * 1e5);
+        const qz = Math.round(rawObstacleVertices[c * 3 + 2] * 1e5);
+        const key = `${qx}_${qy}_${qz}`;
+        let gid = keyToGroup.get(key);
+        if (gid === undefined) {
+            gid = nextGroup++;
+            keyToGroup.set(key, gid);
+        }
+        groupIds[c] = gid;
+    }
+    cachedObstacleCornerGroupIds = groupIds;
+    cachedObstacleGroupSums = new Float64Array(Math.max(1, nextGroup));
+    cachedObstacleGroupCounts = new Uint32Array(Math.max(1, nextGroup));
+    cachedObstacleTopologyLen = rawObstacleVertices.length;
+}
+
+function populateObstacleCornerScalars(vertexData: Float32Array, floatData: Float32Array | null) {
+    if (!rawObstacleVertices || rawObstacleVertices.length === 0) return;
+    const numFaces = Math.floor(rawObstacleVertices.length / 12);
+    if (!floatData || floatData.length === 0) {
+        for (let f = 0; f < numFaces; ++f) {
+            const base = f * 28;
+            vertexData[base + 6] = 0.0;
+            vertexData[base + 13] = 0.0;
+            vertexData[base + 20] = 0.0;
+            vertexData[base + 27] = 0.0;
+        }
+        return;
+    }
+
+    const obsStyle = getWorkerQuantityStyle(obstaclesQuantity);
+    if (!obsStyle.interpolate) {
+        for (let f = 0; f < numFaces; ++f) {
+            const val = floatData[f] || 0.0;
+            const base = f * 28;
+            vertexData[base + 6] = val;
+            vertexData[base + 13] = val;
+            vertexData[base + 20] = val;
+            vertexData[base + 27] = val;
+        }
+        return;
+    }
+
+    ensureObstacleCornerTopology();
+    const groupIds = cachedObstacleCornerGroupIds;
+    const sums = cachedObstacleGroupSums;
+    const counts = cachedObstacleGroupCounts;
+    if (!groupIds || !sums || !counts) return;
+
+    sums.fill(0.0);
+    counts.fill(0);
+    const cObsQ = canonicalizeQuantity(obstaclesQuantity);
+
+    for (let f = 0; f < numFaces; ++f) {
+        const val = floatData[f] || 0.0;
+        if (!isValidQuantitySample(cObsQ, val)) continue;
+        const cBase = f * 4;
+        const g0 = groupIds[cBase + 0]; sums[g0] += val; counts[g0]++;
+        const g1 = groupIds[cBase + 1]; sums[g1] += val; counts[g1]++;
+        const g2 = groupIds[cBase + 2]; sums[g2] += val; counts[g2]++;
+        const g3 = groupIds[cBase + 3]; sums[g3] += val; counts[g3]++;
+    }
+
+    for (let f = 0; f < numFaces; ++f) {
+        const fallback = floatData[f] || 0.0;
+        const cBase = f * 4;
+        const base = f * 28;
+        const g0 = groupIds[cBase + 0];
+        const g1 = groupIds[cBase + 1];
+        const g2 = groupIds[cBase + 2];
+        const g3 = groupIds[cBase + 3];
+        vertexData[base + 6]  = counts[g0] > 0 ? (sums[g0] / counts[g0]) : fallback;
+        vertexData[base + 13] = counts[g1] > 0 ? (sums[g1] / counts[g1]) : fallback;
+        vertexData[base + 20] = counts[g2] > 0 ? (sums[g2] / counts[g2]) : fallback;
+        vertexData[base + 27] = counts[g3] > 0 ? (sums[g3] / counts[g3]) : fallback;
+    }
+}
 
 function updateObstaclesValues(floatData: Float32Array) {
     if (!rawObstacleVertices || rawObstacleVertices.length === 0) return;
@@ -2882,14 +2698,7 @@ function updateObstaclesValues(floatData: Float32Array) {
         updateObstaclesGeometry();
         return;
     }
-    for (let f = 0; f < numFaces; ++f) {
-        const val = floatData[f] || 0.0;
-        const base = f * 28;
-        cachedObstacleVertexData[base + 6] = val;
-        cachedObstacleVertexData[base + 13] = val;
-        cachedObstacleVertexData[base + 20] = val;
-        cachedObstacleVertexData[base + 27] = val;
-    }
+    populateObstacleCornerScalars(cachedObstacleVertexData, floatData);
     if (gl && obstacleBuffer) {
         gl.bindBuffer(gl.ARRAY_BUFFER, obstacleBuffer);
         gl.bufferSubData(gl.ARRAY_BUFFER, 0, cachedObstacleVertexData);
@@ -2913,10 +2722,13 @@ function rebuildObstaclesGL() {
     cachedObsAABB = { minX: obsMinX, maxX: obsMaxX, minY: obsMinY, maxY: obsMaxY, minZ: obsMinZ, maxZ: obsMaxZ };
 
     const numFaces = rawObstacleVertices.length / 12;
-    const vertexData = new Float32Array(numFaces * 4 * 7);
+    if (!cachedObstacleVertexData || cachedObstacleVertexData.length !== numFaces * 4 * 7) {
+        cachedObstacleVertexData = new Float32Array(numFaces * 4 * 7);
+    }
+    const vertexData = cachedObstacleVertexData;
+    cachedObstacleTopologyLen = 0;
 
     for (let f = 0; f < numFaces; ++f) {
-        const val = latestObstaclesData ? latestObstaclesData[f] : 0.0;
         const corners = [
             [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]
         ];
@@ -2936,9 +2748,10 @@ function rebuildObstaclesGL() {
 
             // sliceSize
             vertexData[dest + 5] = 0.0;
-            vertexData[dest + 6] = val;
+            vertexData[dest + 6] = 0.0;
         }
     }
+    populateObstacleCornerScalars(vertexData, latestObstaclesData);
 
     if (!obstacleBuffer) {
         obstacleBuffer = gl.createBuffer();
@@ -3014,10 +2827,13 @@ function rebuildObstaclesWebGPU() {
     cachedObsAABB = { minX, maxX, minY, maxY, minZ, maxZ };
 
     const numFaces = rawObstacleVertices.length / 12;
-    const vertexData = new Float32Array(numFaces * 4 * 7);
+    if (!cachedObstacleVertexData || cachedObstacleVertexData.length !== numFaces * 4 * 7) {
+        cachedObstacleVertexData = new Float32Array(numFaces * 4 * 7);
+    }
+    const vertexData = cachedObstacleVertexData;
+    cachedObstacleTopologyLen = 0;
 
     for (let f = 0; f < numFaces; ++f) {
-        const val = latestObstaclesData ? latestObstaclesData[f] : 0.0;
         const corners = [
             [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]
         ];
@@ -3037,9 +2853,10 @@ function rebuildObstaclesWebGPU() {
 
             // sliceSize
             vertexData[dest + 5] = 0.0;
-            vertexData[dest + 6] = val;
+            vertexData[dest + 6] = 0.0;
         }
     }
+    populateObstacleCornerScalars(vertexData, latestObstaclesData);
 
     if (gpuObstaclesVertexBuffer && gpuObstaclesVertexBuffer.size === vertexData.byteLength) {
         gpuDevice.queue.writeBuffer(gpuObstaclesVertexBuffer, 0, vertexData.buffer);
@@ -3157,7 +2974,7 @@ function updateWebGL2Volume3DTexture(floatData: Float32Array, w: number, h: numb
     }
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_3D, glVolume3DTexture);
-    const filter = (stlSamplingMode === 'linear') ? gl.LINEAR : gl.NEAREST;
+    const filter = getWorkerQuantityStyle(stlQuantity).interpolate ? gl.LINEAR : gl.NEAREST;
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
@@ -4075,6 +3892,11 @@ let gpuChargeWireBuffer: any = null;
 let gpuChargeWireBufferSize: number = 0;
 let gpuUniformBufferChargeSolid: any = null;
 let gpuUniformBufferChargeWire: any = null;
+let remapWireBuffer: WebGLBuffer | null = null;
+let remapWireCount: number = 0;
+let gpuRemapWireBuffer: any = null;
+let gpuRemapWireBufferSize: number = 0;
+let gpuUniformBufferRemapWire: any = null;
 
 let detonatorsList: any[] = [];
 let showDetonators: boolean = true;
@@ -4172,6 +3994,7 @@ let femMinVal: number | undefined = undefined;
 let femMaxVal: number | undefined = undefined;
 let femContourLevels: number = 0;
 let femSmoothContours: boolean = true;
+let femInterpolate: boolean = true;
 
 let sliceContourLevels: number = 0;
 let sliceSmoothContours: boolean = true;
@@ -4464,63 +4287,42 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
             if (isEroded) continue;
 
             const val = getBeamQuantityValue(f, beamQuantity);
-            if (isFinite(val)) {
+            if (isValidQuantitySample(beamQuantity, val)) {
                 if (val < beamEmpiricalMin) beamEmpiricalMin = val;
                 if (val > beamEmpiricalMax) beamEmpiricalMax = val;
             }
         } else {
             const val = getFEMFacetQuantityValue(f, femQuantity);
-            if (isFinite(val)) {
+            if (isValidQuantitySample(femQuantity, val)) {
                 if (val < empiricalMin) empiricalMin = val;
                 if (val > empiricalMax) empiricalMax = val;
             }
         }
     }
+
+    if (buffer) {
+        recomputeActiveRanges('fem');
+    }
+
     const cFemQ = canonicalizeQuantity(femQuantity);
-    const defaultFemRange = quantityRanges[cFemQ] || quantityRanges[femQuantity] || DEFAULT_QUANTITY_RANGES[cFemQ] || DEFAULT_QUANTITY_RANGES[femQuantity] || [0.0, (cFemQ === 'plastic_strain' ? 1.0 : 500000000.0)];
-    const isFemFraction = (cFemQ === 'plastic_strain' || cFemQ === 'damage' || cFemQ === 'has_failed');
-    if (!isFinite(empiricalMin) || !isFinite(empiricalMax) || empiricalMax <= empiricalMin || (isFemFraction && empiricalMax <= 1.0e-4)) {
-        empiricalMin = defaultFemRange[0];
-        empiricalMax = defaultFemRange[1];
-    }
-    const cBeamQ = canonicalizeQuantity(beamQuantity);
-    const defaultBeamRange = quantityRanges[cBeamQ] || quantityRanges[beamQuantity] || DEFAULT_QUANTITY_RANGES[cBeamQ] || DEFAULT_QUANTITY_RANGES[beamQuantity] || [0.0, (cBeamQ === 'plastic_strain' ? 0.05 : 1000.0)];
-    const isBeamFraction = (cBeamQ === 'plastic_strain' || cBeamQ === 'damage' || cBeamQ === 'has_failed');
-    if (!isFinite(beamEmpiricalMin) || !isFinite(beamEmpiricalMax) || beamEmpiricalMax <= beamEmpiricalMin || (isBeamFraction && beamEmpiricalMax <= 1.0e-4)) {
-        beamEmpiricalMin = defaultBeamRange[0];
-        beamEmpiricalMax = defaultBeamRange[1];
-    }
+    const femStyle = getWorkerQuantityStyle(femQuantity);
+    const [minScalar, maxScalar] = getResolvedQuantityBounds(femQuantity);
+    const useFemLog = femStyle.logScale;
+    const effectiveFemCmap = femStyle.colormap;
+    const effectiveFemLevels = femStyle.smoothContours ? 0 : femStyle.contourLevels;
 
-    self.postMessage({ type: 'femRangeUpdated', min: empiricalMin, max: empiricalMax });
-    self.postMessage({ type: 'beamRangeUpdated', min: beamEmpiricalMin, max: beamEmpiricalMax });
+    const beamStyle = getWorkerQuantityStyle(beamQuantity);
+    const [minBeamScalar, maxBeamScalar] = getResolvedQuantityBounds(beamQuantity);
+    const useBeamLog = beamStyle.logScale;
+    const effectiveBeamCmap = beamStyle.colormap;
+    const effectiveBeamLevels = beamStyle.smoothContours ? 0 : beamStyle.contourLevels;
 
-    const isFemLocked = lockQuantityRanges && (femLockQuantityRange !== false);
-    const isFemAuto = isFemLocked ? ((quantityAutoScales[cFemQ] ?? quantityAutoScales[femQuantity]) !== false) : (femAutoScale !== false);
-    let minScalar = femMinVal ?? defaultFemRange[0];
-    let maxScalar = femMaxVal ?? defaultFemRange[1];
-    if (isFemLocked) {
-        minScalar = defaultFemRange[0];
-        maxScalar = defaultFemRange[1];
-    } else if (isFemAuto) {
-        minScalar = empiricalMin;
-        maxScalar = empiricalMax;
+    if (isFinite(empiricalMin) && isFinite(empiricalMax)) {
+        self.postMessage({ type: 'femRangeUpdated', min: minScalar, max: maxScalar });
     }
-    const useFemLog = isFemLocked ? (quantityLogScales[cFemQ] ?? quantityLogScales[femQuantity] ?? femLogScale) : femLogScale;
-    const effectiveFemCmap = isFemLocked ? (quantityColormaps[cFemQ] || quantityColormaps[femQuantity] || femColormap) : femColormap;
-
-    const isBeamLocked = lockQuantityRanges && (beamLockQuantityRange !== false);
-    const isBeamAuto = isBeamLocked ? ((quantityAutoScales[cBeamQ] ?? quantityAutoScales[beamQuantity]) !== false) : (beamAutoScale !== false);
-    let minBeamScalar = beamMinVal ?? defaultBeamRange[0];
-    let maxBeamScalar = beamMaxVal ?? defaultBeamRange[1];
-    if (isBeamLocked) {
-        minBeamScalar = defaultBeamRange[0];
-        maxBeamScalar = defaultBeamRange[1];
-    } else if (isBeamAuto) {
-        minBeamScalar = beamEmpiricalMin;
-        maxBeamScalar = beamEmpiricalMax;
+    if (isFinite(beamEmpiricalMin) && isFinite(beamEmpiricalMax)) {
+        self.postMessage({ type: 'beamRangeUpdated', min: minBeamScalar, max: maxBeamScalar });
     }
-    const useBeamLog = isBeamLocked ? (quantityLogScales[cBeamQ] ?? quantityLogScales[beamQuantity] ?? beamLogScale) : beamLogScale;
-    const effectiveBeamCmap = isBeamLocked ? (quantityColormaps[cBeamQ] || quantityColormaps[beamQuantity] || beamColormap) : beamColormap;
 
     const neededSolidFloats = nFacets * 12 * 6;
     const neededWireFloats = nFacets * 8 * 5;
@@ -4537,6 +4339,47 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
 
     let solidIdx = 0;
     let wireIdx = 0;
+
+    // Nodal averaging for smooth (nodal) FEM contours vs cell/element-based contours
+    let femNodalVals: Float32Array | null = null;
+    const nTotalFEMNodes = latestFEMNodesData ? Math.floor(latestFEMNodesData.length / 7) : 0;
+    if (femStyle.interpolate && nTotalFEMNodes > 0 && latestFEMFacetsData) {
+        femNodalVals = new Float32Array(nTotalFEMNodes);
+        const femNodalCounts = new Uint32Array(nTotalFEMNodes);
+        if (cFemQ === 'velocity') {
+            for (let ni = 0; ni < nTotalFEMNodes; ni++) {
+                const v = latestFEMNodesData[ni * 7 + 6];
+                femNodalVals[ni] = Number.isFinite(v) ? Math.max(0, v) : 0;
+                femNodalCounts[ni] = 1;
+            }
+        } else {
+            for (let f = 0; f < nFacets; f++) {
+                const fBase = f * 8;
+                const fn0 = Math.round(latestFEMFacetsData[fBase + 0]);
+                const fn1 = Math.round(latestFEMFacetsData[fBase + 1]);
+                const fn2 = Math.round(latestFEMFacetsData[fBase + 2]);
+                const fn3 = Math.round(latestFEMFacetsData[fBase + 3]);
+                if (fn2 < 0 || fn3 < 0 || fn2 === fn1) continue; // skip 1D beams
+                const isErodedFacetAvg = (latestFEMFacetsData[fBase + 7] < -0.5);
+                if (isErodedFacetAvg) continue;
+                const fVal = getFEMFacetQuantityValue(f, femQuantity);
+                if (!isValidQuantitySample(femQuantity, fVal)) continue;
+                if (fn0 >= 0 && fn0 < nTotalFEMNodes) { femNodalVals[fn0] += fVal; femNodalCounts[fn0]++; }
+                if (fn1 >= 0 && fn1 < nTotalFEMNodes) { femNodalVals[fn1] += fVal; femNodalCounts[fn1]++; }
+                if (fn2 >= 0 && fn2 < nTotalFEMNodes) { femNodalVals[fn2] += fVal; femNodalCounts[fn2]++; }
+                if (fn3 !== fn2 && fn3 >= 0 && fn3 < nTotalFEMNodes) { femNodalVals[fn3] += fVal; femNodalCounts[fn3]++; }
+            }
+            for (let ni = 0; ni < nTotalFEMNodes; ni++) {
+                if (femNodalCounts[ni] > 1) femNodalVals[ni] /= femNodalCounts[ni];
+            }
+        }
+    }
+
+    const mapFemValToRGB = (v: number): [number, number, number] => {
+        const rawT = normalizeScalarToT(v, minScalar, maxScalar, useFemLog);
+        const qt = quantizeContourT(rawT, effectiveFemLevels);
+        return evaluateColormapRGB(qt, effectiveFemCmap);
+    };
 
     for (let f = 0; f < nFacets; f++) {
         let facetObj: any = null;
@@ -4597,22 +4440,9 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
             if (!isSolid && !isWire) continue;
 
             const val = getBeamQuantityValue(f, beamQuantity);
-            let normVal = 0.0;
-            if (useBeamLog) {
-                const logMin = Math.log(Math.max(minBeamScalar, 1e-5));
-                const logMax = Math.log(Math.max(maxBeamScalar, 1e-5));
-                const logVal = Math.log(Math.max(val, 1e-5));
-                normVal = (logVal - logMin) / (Math.max(1e-9, logMax - logMin));
-            } else {
-                normVal = (val - minBeamScalar) / (Math.max(1e-9, maxBeamScalar - minBeamScalar));
-            }
-            normVal = Math.max(0.0, Math.min(1.0, normVal));
-            const effectiveBeamLevels = (beamSmoothContours || beamContourLevels <= 1) ? 0 : beamContourLevels;
-            if (effectiveBeamLevels > 1) {
-                const band = Math.min(effectiveBeamLevels - 1, Math.floor(normVal * effectiveBeamLevels));
-                normVal = (band + 0.5) / effectiveBeamLevels;
-            }
-            const [r, g, b] = sampleColormapRGB(normVal, effectiveBeamCmap);
+            const rawBeamT = normalizeScalarToT(val, minBeamScalar, maxBeamScalar, useBeamLog);
+            const normVal = quantizeContourT(rawBeamT, effectiveBeamLevels);
+            const [r, g, b] = evaluateColormapRGB(normVal, effectiveBeamCmap);
 
             if (isWire) {
                 // Wireframe: 2-vertex line
@@ -4707,23 +4537,22 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         const wantWire = femWireframe && partAllowsWireframe;
         if (!wantSolid && !wantWire) continue;
 
-        const val = getFEMFacetQuantityValue(f, femQuantity);
-        let normVal = 0.0;
-        if (useFemLog) {
-            const logMin = Math.log(Math.max(minScalar, 1e-5));
-            const logMax = Math.log(Math.max(maxScalar, 1e-5));
-            const logVal = Math.log(Math.max(val, 1e-5));
-            normVal = (logVal - logMin) / (Math.max(1e-9, logMax - logMin));
+        let r0: number, g0: number, b0: number;
+        let r1: number, g1: number, b1: number;
+        let r2: number, g2: number, b2: number;
+        let r3: number, g3: number, b3: number;
+        if (femNodalVals) {
+            [r0, g0, b0] = mapFemValToRGB(femNodalVals[n0]);
+            [r1, g1, b1] = mapFemValToRGB(femNodalVals[n1]);
+            [r2, g2, b2] = mapFemValToRGB(femNodalVals[n2]);
+            [r3, g3, b3] = (n3 !== n2) ? mapFemValToRGB(femNodalVals[n3]) : [r2, g2, b2];
         } else {
-            normVal = (val - minScalar) / (Math.max(1e-9, maxScalar - minScalar));
+            const val = getFEMFacetQuantityValue(f, femQuantity);
+            [r0, g0, b0] = mapFemValToRGB(val);
+            r1 = r0; g1 = g0; b1 = b0;
+            r2 = r0; g2 = g0; b2 = b0;
+            r3 = r0; g3 = g0; b3 = b0;
         }
-        normVal = Math.max(0.0, Math.min(1.0, normVal));
-        const effectiveFemLevels = (femSmoothContours || femContourLevels <= 1) ? 0 : femContourLevels;
-        if (effectiveFemLevels > 1) {
-            const band = Math.min(effectiveFemLevels - 1, Math.floor(normVal * effectiveFemLevels));
-            normVal = (band + 0.5) / effectiveFemLevels;
-        }
-        const [r, g, b] = sampleColormapRGB(normVal, effectiveFemCmap);
 
         const p2x = latestFEMNodesData[n2 * 7 + 0] * sx + tx;
         const p2y = latestFEMNodesData[n2 * 7 + 1] * sy + ty;
@@ -4737,20 +4566,20 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         if (wantSolid) {
             // Tri 1: p0, p1, p2
             solidVertexData[solidIdx++] = p0x; solidVertexData[solidIdx++] = p0y; solidVertexData[solidIdx++] = p0z;
-            solidVertexData[solidIdx++] = r;   solidVertexData[solidIdx++] = g;   solidVertexData[solidIdx++] = b;
+            solidVertexData[solidIdx++] = r0;  solidVertexData[solidIdx++] = g0;  solidVertexData[solidIdx++] = b0;
             solidVertexData[solidIdx++] = p1x; solidVertexData[solidIdx++] = p1y; solidVertexData[solidIdx++] = p1z;
-            solidVertexData[solidIdx++] = r;   solidVertexData[solidIdx++] = g;   solidVertexData[solidIdx++] = b;
+            solidVertexData[solidIdx++] = r1;  solidVertexData[solidIdx++] = g1;  solidVertexData[solidIdx++] = b1;
             solidVertexData[solidIdx++] = p2x; solidVertexData[solidIdx++] = p2y; solidVertexData[solidIdx++] = p2z;
-            solidVertexData[solidIdx++] = r;   solidVertexData[solidIdx++] = g;   solidVertexData[solidIdx++] = b;
+            solidVertexData[solidIdx++] = r2;  solidVertexData[solidIdx++] = g2;  solidVertexData[solidIdx++] = b2;
 
             if (!isTri) {
                 // Tri 2: p0, p2, p3
                 solidVertexData[solidIdx++] = p0x; solidVertexData[solidIdx++] = p0y; solidVertexData[solidIdx++] = p0z;
-                solidVertexData[solidIdx++] = r;   solidVertexData[solidIdx++] = g;   solidVertexData[solidIdx++] = b;
+                solidVertexData[solidIdx++] = r0;  solidVertexData[solidIdx++] = g0;  solidVertexData[solidIdx++] = b0;
                 solidVertexData[solidIdx++] = p2x; solidVertexData[solidIdx++] = p2y; solidVertexData[solidIdx++] = p2z;
-                solidVertexData[solidIdx++] = r;   solidVertexData[solidIdx++] = g;   solidVertexData[solidIdx++] = b;
+                solidVertexData[solidIdx++] = r2;  solidVertexData[solidIdx++] = g2;  solidVertexData[solidIdx++] = b2;
                 solidVertexData[solidIdx++] = p3x; solidVertexData[solidIdx++] = p3y; solidVertexData[solidIdx++] = p3z;
-                solidVertexData[solidIdx++] = r;   solidVertexData[solidIdx++] = g;   solidVertexData[solidIdx++] = b;
+                solidVertexData[solidIdx++] = r3;  solidVertexData[solidIdx++] = g3;  solidVertexData[solidIdx++] = b3;
             }
         }
 
@@ -4828,103 +4657,25 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
 }
 
 function sampleColormapRGB(v: number, cmapName: string): [number, number, number] {
-    const val = Math.max(0.0, Math.min(1.0, v));
-    switch (cmapName) {
-        case 'plasma': {
-            const r = Math.min(1.0, Math.pow(val, 0.5));
-            const g = Math.pow(val, 2.0) * 0.85;
-            const b = Math.cos(val * Math.PI * 0.5);
-            return [r, Math.max(0, g), Math.max(0, b)];
-        }
-        case 'viridis': {
-            const r = 0.2 + 0.8 * Math.pow(val, 2);
-            const g = Math.sin(val * Math.PI * 0.8);
-            const b = 0.5 + 0.5 * Math.cos(val * Math.PI);
-            return [Math.max(0, Math.min(1.0, r)), Math.max(0, Math.min(1.0, g)), Math.max(0, Math.min(1.0, b))];
-        }
-        case 'coolwarm': {
-            const r = val;
-            const g = 1.0 - Math.abs(val - 0.5) * 2.0;
-            const b = 1.0 - val;
-            return [r, Math.max(0, g), Math.max(0, b)];
-        }
-        case 'rainbow':
-        case 'jet': {
-            const four = 4.0 * val;
-            const r = Math.min(1.0, Math.max(0.0, Math.min(four - 1.5, -four + 4.5)));
-            const g = Math.min(1.0, Math.max(0.0, Math.min(four - 0.5, -four + 3.5)));
-            const b = Math.min(1.0, Math.max(0.0, Math.min(four + 0.5, -four + 2.5)));
-            return [r, g, b];
-        }
-        case 'grayscale': {
-            return [val, val, val];
-        }
-        default: {
-            const r = Math.min(1.0, Math.pow(val, 0.5));
-            const g = Math.pow(val, 2.0) * 0.85;
-            const b = Math.cos(val * Math.PI * 0.5);
-            return [r, Math.max(0, g), Math.max(0, b)];
-        }
-    }
+    return evaluateColormapRGB(v, cmapName);
 }
 
 function sampleColormapDirect(v: number, cmapName: string, out: Float32Array, offset: number): void {
-    let val = Math.max(0.0, Math.min(1.0, v));
-    if (!isFinite(val)) val = 0.0;
-    switch (cmapName) {
-        case 'plasma': {
-            out[offset] = Math.min(1.0, Math.pow(val, 0.5));
-            out[offset + 1] = Math.max(0, Math.pow(val, 2.0) * 0.85);
-            out[offset + 2] = Math.max(0, Math.cos(val * Math.PI * 0.5));
-            break;
-        }
-        case 'viridis': {
-            out[offset] = Math.max(0, Math.min(1.0, 0.2 + 0.8 * Math.pow(val, 2)));
-            out[offset + 1] = Math.max(0, Math.min(1.0, Math.sin(val * Math.PI * 0.8)));
-            out[offset + 2] = Math.max(0, Math.min(1.0, 0.5 + 0.5 * Math.cos(val * Math.PI)));
-            break;
-        }
-        case 'coolwarm': {
-            out[offset] = val;
-            out[offset + 1] = Math.max(0, 1.0 - Math.abs(val - 0.5) * 2.0);
-            out[offset + 2] = Math.max(0, 1.0 - val);
-            break;
-        }
-        case 'rainbow':
-        case 'jet': {
-            const four = 4.0 * val;
-            out[offset] = Math.min(1.0, Math.max(0.0, Math.min(four - 1.5, -four + 4.5)));
-            out[offset + 1] = Math.min(1.0, Math.max(0.0, Math.min(four - 0.5, -four + 3.5)));
-            out[offset + 2] = Math.min(1.0, Math.max(0.0, Math.min(four + 0.5, -four + 2.5)));
-            break;
-        }
-        case 'grayscale': {
-            out[offset] = val;
-            out[offset + 1] = val;
-            out[offset + 2] = val;
-            break;
-        }
-        default: {
-            out[offset] = Math.min(1.0, Math.pow(val, 0.5));
-            out[offset + 1] = Math.max(0, Math.pow(val, 2.0) * 0.85);
-            out[offset + 2] = Math.max(0, Math.cos(val * Math.PI * 0.5));
-            break;
-        }
-    }
+    const [r, g, b] = evaluateColormapRGB(v, cmapName);
+    out[offset] = r;
+    out[offset + 1] = g;
+    out[offset + 2] = b;
 }
 
 const COLORMAP_LUT_SIZE = 256;
 const colormapLUTs = new Map<string, Float32Array>();
 
 function getColormapLUT(cmapName: string): Float32Array {
-    let lut = colormapLUTs.get(cmapName);
+    const key = normalizeColormapId(cmapName);
+    let lut = colormapLUTs.get(key);
     if (!lut) {
-        lut = new Float32Array(COLORMAP_LUT_SIZE * 3);
-        for (let i = 0; i < COLORMAP_LUT_SIZE; i++) {
-            const v = i / (COLORMAP_LUT_SIZE - 1);
-            sampleColormapDirect(v, cmapName, lut, i * 3);
-        }
-        colormapLUTs.set(cmapName, lut);
+        lut = buildColormapLUT(key, 0, true, COLORMAP_LUT_SIZE);
+        colormapLUTs.set(key, lut);
     }
     return lut;
 }
@@ -5022,7 +4773,7 @@ function getParticleQuantityValue(data: Float32Array, idx: number, qty: string):
 }
 
 function sampleColormapPackedU32(v: number, lut: Float32Array): number {
-    const idx = Math.max(0, Math.min(255, (v * 255) | 0)) * 3;
+    const idx = Math.max(0, Math.min(255, Math.round(v * 255))) * 3;
     const r = Math.max(0, Math.min(255, (lut[idx] * 255 + 0.5) | 0));
     const g = Math.max(0, Math.min(255, (lut[idx + 1] * 255 + 0.5) | 0));
     const b = Math.max(0, Math.min(255, (lut[idx + 2] * 255 + 0.5) | 0));
@@ -5058,12 +4809,6 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
 
     const isFragment = (mpmParticleQuantity === 'cluster_id' || mpmParticleQuantity === 'cluster' || mpmParticleQuantity === 'fragment' || mpmParticleQuantity === 'fragments');
 
-    let minScalar = mpmParticleMinVal;
-    let maxScalar = mpmParticleMaxVal;
-
-    let empiricalMin = Infinity;
-    let empiricalMax = -Infinity;
-
     const mpmObjVisMap = new Map<number, boolean>();
     let anyMpmObjVisible = false;
     if (mpmObjectsData && mpmObjectsData.length > 0) {
@@ -5085,31 +4830,9 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         }
     }
 
-    const rangeSampleStep = (nParticles > 10000) ? Math.ceil(nParticles / 10000) : 1;
-    for (let i = 0; i < nParticles; i += rangeSampleStep) {
-        const base = i * stride;
-        if (mpmObjVisMap.size > 0) {
-            const rawId = getMPMParticleObjectId(latestMPMParticlesData, u32Data, base, stride);
-            if (mpmObjVisMap.has(rawId) && !mpmObjVisMap.get(rawId)) {
-                continue;
-            }
-        }
-
-        const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmParticleQuantity);
-        if (val < empiricalMin) empiricalMin = val;
-        if (val > empiricalMax) empiricalMax = val;
+    if (data) {
+        recomputeActiveRanges('mpm');
     }
-
-    const cMpmQ = canonicalizeQuantity(mpmParticleQuantity);
-    const defaultMpmRange = quantityRanges[cMpmQ] || quantityRanges[mpmParticleQuantity] || DEFAULT_QUANTITY_RANGES[cMpmQ] || DEFAULT_QUANTITY_RANGES[mpmParticleQuantity] || [0.0, 500000000.0];
-    const isMpmFraction = (cMpmQ === 'plastic_strain' || cMpmQ === 'damage' || cMpmQ === 'has_failed' || cMpmQ === 'species1' || cMpmQ === 'species2' || cMpmQ === 'species3' || cMpmQ === 'solid');
-
-    if (!isFinite(empiricalMin) || !isFinite(empiricalMax) || empiricalMax <= empiricalMin || (isMpmFraction && empiricalMax <= 1.0e-4)) {
-        empiricalMin = defaultMpmRange[0];
-        empiricalMax = defaultMpmRange[1];
-    }
-
-    self.postMessage({ type: 'mpmRangeUpdated', min: empiricalMin, max: empiricalMax });
 
     // Compute exact nearest neighbor particle spacing from particle coordinates (only once on initial data)
     if (latestEmpiricalSpacing <= 0) {
@@ -5135,18 +4858,9 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         }
     }
 
-    const isMpmLocked = lockQuantityRanges && (mpmLockQuantityRange !== false);
-    const isMpmAuto = isMpmLocked ? ((quantityAutoScales[cMpmQ] ?? quantityAutoScales[mpmParticleQuantity]) !== false) : (mpmParticleAutoScale !== false);
-    if (isMpmLocked) {
-        minScalar = defaultMpmRange[0];
-        maxScalar = defaultMpmRange[1];
-    } else if (isMpmAuto || minScalar === undefined || maxScalar === undefined) {
-        minScalar = empiricalMin;
-        maxScalar = empiricalMax;
-    } else {
-        minScalar = mpmParticleMinVal !== undefined ? mpmParticleMinVal : empiricalMin;
-        maxScalar = mpmParticleMaxVal !== undefined ? mpmParticleMaxVal : empiricalMax;
-    }
+    const mpmStyle = getWorkerQuantityStyle(mpmParticleQuantity);
+    const [minScalar, maxScalar] = getResolvedQuantityBounds(mpmParticleQuantity);
+    self.postMessage({ type: 'mpmRangeUpdated', min: minScalar, max: maxScalar });
 
     // 16 bytes (4 floats) per particle: [x, y, z, packedRGBA_u32]
     const neededFloats = nParticles * 4;
@@ -5156,12 +4870,9 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     const vertexData = cachedMPMVertexData;
     const vertexU32 = new Uint32Array(vertexData.buffer, vertexData.byteOffset, vertexData.length);
 
-    const useLog = isMpmLocked ? (quantityLogScales[cMpmQ] ?? quantityLogScales[mpmParticleQuantity] ?? mpmParticleLogScale) : mpmParticleLogScale;
-    const logMin = useLog ? Math.log(Math.max(minScalar, 1e-5)) : 0;
-    const logMax = useLog ? Math.log(Math.max(maxScalar, 1e-5)) : 0;
-    const denom = useLog ? Math.max(1e-9, logMax - logMin) : Math.max(1e-9, maxScalar - minScalar);
-    const cmap = isMpmLocked ? (quantityColormaps[cMpmQ] || quantityColormaps[mpmParticleQuantity] || mpmParticleColormap) : mpmParticleColormap;
-    const cmapLUT = getColormapLUT(cmap);
+    const useLog = mpmStyle.logScale;
+    const effectiveMpmLevels = mpmStyle.smoothContours ? 0 : mpmStyle.contourLevels;
+    const cmapLUT = getColormapLUT(mpmStyle.colormap);
 
     let mpmMinX = Infinity, mpmMaxX = -Infinity;
     let mpmMinY = Infinity, mpmMaxY = -Infinity;
@@ -5225,20 +4936,8 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
                 vertexU32[vIdx + 3] = (rb | (gb << 8) | (bb << 16)) >>> 0;
             }
         } else {
-            let normVal = 0.0;
-            if (useLog) {
-                const logVal = Math.log(Math.max(val, 1e-5));
-                normVal = (logVal - logMin) / denom;
-            } else {
-                normVal = (val - minScalar) / denom;
-            }
-            normVal = Math.max(0.0, Math.min(1.0, normVal));
-            const effectiveMpmLevels = (mpmSmoothContours || mpmContourLevels <= 1) ? 0 : mpmContourLevels;
-            if (effectiveMpmLevels > 1) {
-                const band = Math.min(effectiveMpmLevels - 1, Math.floor(normVal * effectiveMpmLevels));
-                normVal = (band + 0.5) / effectiveMpmLevels;
-            }
-
+            const rawT = normalizeScalarToT(val, minScalar, maxScalar, useLog);
+            const normVal = quantizeContourT(rawT, effectiveMpmLevels);
             vertexU32[vIdx + 3] = sampleColormapPackedU32(normVal, cmapLUT);
         }
         writtenParticles++;
@@ -5321,21 +5020,12 @@ function updatePhaseParticlesGeometry(data?: Float32Array) {
     const tz = -zmin * sz - 0.5;
 
     const isVelocity = (phaseParticleQuantity === 'velocity' || phaseParticleQuantity === 'speed');
-    let vMin = 0.0;
-    let vMax = 100.0;
-    if (isVelocity) {
-        let maxV = 0.0;
-        const pSampleStep = (nParticles > 10000) ? Math.ceil(nParticles / 10000) : 1;
-        for (let i = 0; i < nParticles; i += pSampleStep) {
-            const base = i * stride;
-            const vx = latestPhaseParticlesData[base + 3];
-            const vy = latestPhaseParticlesData[base + 4];
-            const vz = latestPhaseParticlesData[base + 5];
-            const spd = Math.sqrt(vx * vx + vy * vy + vz * vz);
-            if (spd > maxV) maxV = spd;
-        }
-        vMax = Math.max(1.0, maxV);
+    if (data && isVelocity) {
+        recomputeActiveRanges('phase');
     }
+    const velStyle = getWorkerQuantityStyle('velocity');
+    const [vMin, vMax] = isVelocity ? getResolvedQuantityBounds('velocity') : [0.0, 100.0];
+    const effectiveVelLevels = velStyle.smoothContours ? 0 : velStyle.contourLevels;
 
     const neededFloats = nParticles * 4;
     if (!cachedPhaseVertexData || cachedPhaseVertexData.length < neededFloats) {
@@ -5343,7 +5033,7 @@ function updatePhaseParticlesGeometry(data?: Float32Array) {
     }
     const vertexData = cachedPhaseVertexData;
     const vertexU32 = new Uint32Array(vertexData.buffer, vertexData.byteOffset, vertexData.length);
-    const phaseCmapLUT = getColormapLUT(phaseParticleColormap);
+    const phaseCmapLUT = getColormapLUT(isVelocity ? velStyle.colormap : phaseParticleColormap);
 
     let writtenParticles = 0;
     const userStep = Math.max(1, phaseParticleUserStride);
@@ -5365,7 +5055,8 @@ function updatePhaseParticlesGeometry(data?: Float32Array) {
             const vy = latestPhaseParticlesData[base + 4];
             const vz = latestPhaseParticlesData[base + 5];
             const spd = Math.sqrt(vx * vx + vy * vy + vz * vz);
-            const normVal = Math.max(0.0, Math.min(1.0, (spd - vMin) / (vMax - vMin)));
+            const rawT = normalizeScalarToT(spd, vMin, vMax, velStyle.logScale);
+            const normVal = quantizeContourT(rawT, effectiveVelLevels);
             vertexU32[vIdx + 3] = sampleColormapPackedU32(normVal, phaseCmapLUT);
         } else {
             const pIdx = Math.max(0, Math.min(PHASE_COLORS.length - 1, phaseId));
@@ -5516,6 +5207,7 @@ function updateChargeGeometry() {
     if (!chargeData || chargeData.visible === false || chargeData.hidden === true) {
         chargeCount = 0;
         chargeWireCount = 0;
+        remapWireCount = 0;
         return;
     }
 
@@ -5560,6 +5252,63 @@ function updateChargeGeometry() {
         wireVerts = getSphereWireframeVertices(px, py, pz, rx, ry, rz);
     }
 
+    // Build dashed electric-cyan R_remap clearance wireframe when chargeData specifies remap_radius > 0
+    const rRemap = Number(chargeData.remap_radius ?? 0);
+    const remapWireVerts: number[] = [];
+    if (rRemap > 0) {
+        const rxR = rRemap / dimX;
+        const ryR = rRemap / dimY;
+        const rzR = rRemap / dimZ;
+        const segs = 48;
+        const addDashLine = (p1: number[], p2: number[]) => {
+            remapWireVerts.push(...p1, 0, 0);
+            remapWireVerts.push(...p2, 0, 0);
+        };
+        if (chargeData.remap_shape === 'Cylinder') {
+            const zBot = normZ(zmin);
+            const zTop = normZ(zmax);
+            const zMid = 0.5 * (zBot + zTop);
+            for (const zRing of [zBot, zMid, zTop]) {
+                for (let i = 0; i < segs; i += 2) {
+                    const t1 = (i * 2 * Math.PI) / segs;
+                    const t2 = ((i + 1) * 2 * Math.PI) / segs;
+                    addDashLine(
+                        [px + rxR * Math.cos(t1), py + ryR * Math.sin(t1), zRing],
+                        [px + rxR * Math.cos(t2), py + ryR * Math.sin(t2), zRing]
+                    );
+                }
+            }
+            for (let k = 0; k < 4; k++) {
+                const ang = (k * Math.PI) / 2;
+                const vx = px + rxR * Math.cos(ang);
+                const vy = py + ryR * Math.sin(ang);
+                const vSegs = 16;
+                for (let j = 0; j < vSegs; j += 2) {
+                    const za = zBot + (j / vSegs) * (zTop - zBot);
+                    const zb = zBot + ((j + 1) / vSegs) * (zTop - zBot);
+                    addDashLine([vx, vy, za], [vx, vy, zb]);
+                }
+            }
+        } else {
+            for (let i = 0; i < segs; i += 2) {
+                const t1 = (i * 2 * Math.PI) / segs;
+                const t2 = ((i + 1) * 2 * Math.PI) / segs;
+                addDashLine(
+                    [px + rxR * Math.cos(t1), py + ryR * Math.sin(t1), pz],
+                    [px + rxR * Math.cos(t2), py + ryR * Math.sin(t2), pz]
+                );
+                addDashLine(
+                    [px + rxR * Math.cos(t1), py, pz + rzR * Math.sin(t1)],
+                    [px + rxR * Math.cos(t2), py, pz + rzR * Math.sin(t2)]
+                );
+                addDashLine(
+                    [px, py + ryR * Math.cos(t1), pz + rzR * Math.sin(t1)],
+                    [px, py + ryR * Math.cos(t2), pz + rzR * Math.sin(t2)]
+                );
+            }
+        }
+    }
+
     if (gl) {
         if (!chargeBuffer) chargeBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, chargeBuffer);
@@ -5570,6 +5319,15 @@ function updateChargeGeometry() {
         gl.bindBuffer(gl.ARRAY_BUFFER, chargeWireBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(wireVerts), gl.STATIC_DRAW);
         chargeWireCount = wireVerts.length / 5;
+
+        if (remapWireVerts.length > 0) {
+            if (!remapWireBuffer) remapWireBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, remapWireBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(remapWireVerts), gl.STATIC_DRAW);
+            remapWireCount = remapWireVerts.length / 5;
+        } else {
+            remapWireCount = 0;
+        }
     }
 
     if (isWebGPU && gpuDevice) {
@@ -5603,6 +5361,22 @@ function updateChargeGeometry() {
             chargeWireCount = wireVerts.length / 5;
         } else {
             chargeWireCount = 0;
+        }
+
+        if (remapWireVerts.length > 0) {
+            const rWireBytes = remapWireVerts.length * 4;
+            if (!gpuRemapWireBuffer || gpuRemapWireBufferSize < rWireBytes) {
+                if (gpuRemapWireBuffer) gpuRemapWireBuffer.destroy();
+                gpuRemapWireBufferSize = rWireBytes;
+                gpuRemapWireBuffer = gpuDevice.createBuffer({
+                    size: rWireBytes,
+                    usage: 32 | 8 // VERTEX | COPY_DST
+                });
+            }
+            gpuDevice.queue.writeBuffer(gpuRemapWireBuffer, 0, new Float32Array(remapWireVerts));
+            remapWireCount = remapWireVerts.length / 5;
+        } else {
+            remapWireCount = 0;
         }
     }
 }
@@ -5903,6 +5677,15 @@ function updateMPMPreviewGeometry() {
                     addLineWire(v1x, v1y, v1z, v2x, v2y, v2z);
                     addLineWire(v2x, v2y, v2z, v0x, v0y, v0z);
                 }
+            } else {
+                const lx = Number(obj.size_x ?? 0.2);
+                const ly = Number(obj.size_y ?? 0.2);
+                const lz = Number(obj.size_z ?? 0.2);
+                const rotX = (Number(obj.rot_x) || 0.0) * Math.PI / 180.0;
+                const rotY = (Number(obj.rot_y) || 0.0) * Math.PI / 180.0;
+                const rotZ = (Number(obj.rot_z) || 0.0) * Math.PI / 180.0;
+                const wire = getRotatedBoxWireframeVertices(px, py, pz, lx, ly, lz, rotX, rotY, rotZ, dimX, dimY, dimZ);
+                allVerts.push(...wire);
             }
         }
     }
@@ -6018,6 +5801,19 @@ function updateFEMPreviewGeometry() {
         } else if (shape === 'Sphere') {
             const r = Number(obj.radius ?? 0.1);
             const wire = getSphereWireframeVertices(px, py, pz, r / dimX, r / dimY, r / dimZ);
+            allVerts.push(...wire);
+        } else {
+            const b = Array.isArray(obj.bounds) && obj.bounds.length === 6 ? obj.bounds : null;
+            const lx = b ? Math.max(1e-4, Number(b[1]) - Number(b[0])) : Number(obj.size_x ?? obj.lx ?? 0.2);
+            const ly = b ? Math.max(1e-4, Number(b[3]) - Number(b[2])) : Number(obj.size_y ?? obj.ly ?? 0.2);
+            const lz = b ? Math.max(1e-4, Number(b[5]) - Number(b[4])) : Number(obj.size_z ?? obj.lz ?? 0.2);
+            const boxCenterX = b ? (Number(b[0]) + Number(b[1])) * 0.5 : cx;
+            const boxCenterY = b ? (Number(b[2]) + Number(b[3])) * 0.5 : cy;
+            const boxCenterZ = b ? (Number(b[4]) + Number(b[5])) * 0.5 : cz;
+            const rotX = (Number(obj.rot_x) || 0.0) * Math.PI / 180.0;
+            const rotY = (Number(obj.rot_y) || 0.0) * Math.PI / 180.0;
+            const rotZ = (Number(obj.rot_z) || 0.0) * Math.PI / 180.0;
+            const wire = getRotatedBoxWireframeVertices(normX(boxCenterX), normY(boxCenterY), normZ(boxCenterZ), lx, ly, lz, rotX, rotY, rotZ, dimX, dimY, dimZ, 1, 1, 1);
             allVerts.push(...wire);
         }
     }
@@ -6326,6 +6122,58 @@ function updateSliceAMRGridlinesGeometry() {
         }
         if (bytes > 0) {
             gpuDevice.queue.writeBuffer(gpuSliceGridlinesBuffer, 0, floatArray.buffer, floatArray.byteOffset, bytes);
+        }
+    }
+}
+
+function updatePlaceholderSlicesGeometry() {
+    if (!slicesConfigCache || slicesConfigCache.length === 0) {
+        placeholderSlicesCount = 0;
+        return;
+    }
+
+    const verts: number[] = [];
+    for (const slice of slicesConfigCache) {
+        if (slice.enabled === false) continue;
+        const rawAxis = slice.axis;
+        const axisNum = (rawAxis === 2 || rawAxis === '2' || String(rawAxis).toLowerCase() === 'yz')
+            ? 2
+            : ((rawAxis === 1 || rawAxis === '1' || String(rawAxis).toLowerCase() === 'xz') ? 1 : 0);
+        const defaultOffset = axisNum === 0
+            ? (zmin + getDimZ() * 0.5)
+            : (axisNum === 1 ? (ymin + getDimY() * 0.5) : (xmin + getDimX() * 0.5));
+        const offset = Number(slice.offset ?? defaultOffset);
+        const quad = getSliceGeometry(axisNum, offset, 1, 1);
+        for (let k = 0; k < quad.length; k++) {
+            verts.push(quad[k]);
+        }
+    }
+
+    if (verts.length === 0) {
+        placeholderSlicesCount = 0;
+        return;
+    }
+
+    const floatArray = new Float32Array(verts);
+    placeholderSlicesCount = floatArray.length / 7;
+
+    if (gl) {
+        if (!placeholderSlicesBuffer) placeholderSlicesBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, placeholderSlicesBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, floatArray, gl.DYNAMIC_DRAW);
+    }
+    if (gpuDevice) {
+        const bytes = floatArray.byteLength;
+        if (!gpuPlaceholderSlicesBuffer || gpuPlaceholderSlicesBufferSize < bytes) {
+            if (gpuPlaceholderSlicesBuffer) gpuPlaceholderSlicesBuffer.destroy();
+            gpuPlaceholderSlicesBufferSize = Math.max(bytes, Math.floor(bytes * 1.25));
+            gpuPlaceholderSlicesBuffer = gpuDevice.createBuffer({
+                size: gpuPlaceholderSlicesBufferSize,
+                usage: 0x20 | 0x08 // GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
+        }
+        if (bytes > 0) {
+            gpuDevice.queue.writeBuffer(gpuPlaceholderSlicesBuffer, 0, floatArray.buffer, floatArray.byteOffset, bytes);
         }
     }
 }
@@ -6671,8 +6519,9 @@ function padFloatData(src: Float32Array, w: number, h: number): { data: Float32A
     return { data: padded, bytesPerRow: destRowBytes };
 }
 
-function getSliceStats(slice: any): { min: number, max: number, posMin: number } {
-    if (slice._cachedStats) return slice._cachedStats;
+function getSliceStats(slice: any, rawQty?: string): { min: number, max: number, posMin: number } {
+    const cQty = canonicalizeQuantity(rawQty || 'pressure');
+    if (slice._cachedStats && slice._cachedStatsQty === cQty) return slice._cachedStats;
     let sliceMin = Infinity;
     let sliceMax = -Infinity;
     let slicePosMin = Infinity;
@@ -6680,264 +6529,310 @@ function getSliceStats(slice: any): { min: number, max: number, posMin: number }
     if (data) {
         for (let j = 0; j < data.length; j++) {
             const v = data[j];
-            if (isFinite(v)) {
+            if (isValidQuantitySample(cQty, v)) {
                 if (v < sliceMin) sliceMin = v;
                 if (v > sliceMax) sliceMax = v;
                 if (v > 0 && v < slicePosMin) slicePosMin = v;
             }
         }
     }
+    slice._cachedStatsQty = cQty;
     slice._cachedStats = { min: sliceMin, max: sliceMax, posMin: slicePosMin };
     return slice._cachedStats;
 }
 
-function recomputeActiveRanges() {
-    // 1. Aggregate dynamic extents per quantity across all active representations ONLY when lockQuantityRanges is enabled
-    if (lockQuantityRanges) {
-        const qtyDynamicExtents: Record<string, { min: number, max: number, posMin: number, hasData: boolean }> = {};
-        const recordQtyVal = (rawQ: string, val: number) => {
-            if (!isFinite(val)) return;
-            const q = canonicalizeQuantity(rawQ);
-            if (!qtyDynamicExtents[q]) {
-                qtyDynamicExtents[q] = { min: val, max: val, posMin: val > 0 ? val : Infinity, hasData: true };
-            } else {
-                const ext = qtyDynamicExtents[q];
-                if (val < ext.min) ext.min = val;
-                if (val > ext.max) ext.max = val;
-                if (val > 0 && val < ext.posMin) ext.posMin = val;
-                ext.hasData = true;
-            }
-        };
+function recomputeActiveRanges(caller?: 'fem' | 'mpm' | 'phase' | 'slice' | 'config') {
+    const activeQuantities = new Set<string>(Object.keys(quantityStyles));
+    const qtyDynamicExtents: Record<string, { min: number, max: number, posMin: number, hasData: boolean }> = {};
 
-        // Aggregate from all active slices using cached stats (O(1) per slice)
-        for (let i = 0; i < cachedSlices.length; i++) {
-            const slice = cachedSlices[i];
-            const config = getSliceConfig(i);
-            const qty = config.quantities?.[0] || 'pressure';
-            const st = getSliceStats(slice);
-            if (isFinite(st.min) && isFinite(st.max)) {
-                recordQtyVal(qty, st.min);
-                recordQtyVal(qty, st.max);
-                if (isFinite(st.posMin)) recordQtyVal(qty, st.posMin);
+    const recordQtyVal = (rawQ: string, val: number) => {
+        const q = canonicalizeQuantity(rawQ);
+        if (!isValidQuantitySample(q, val)) return;
+        if (!qtyDynamicExtents[q]) {
+            qtyDynamicExtents[q] = { min: val, max: val, posMin: val > 0 ? val : Infinity, hasData: true };
+        } else {
+            const ext = qtyDynamicExtents[q];
+            if (val < ext.min) ext.min = val;
+            if (val > ext.max) ext.max = val;
+            if (val > 0 && val < ext.posMin) ext.posMin = val;
+            ext.hasData = true;
+        }
+    };
+
+    // 1. Aggregate from enabled Slices
+    if (showSlices !== false) {
+        if (cachedSlices.length > 0) {
+            for (let i = 0; i < cachedSlices.length; i++) {
+                const slice = cachedSlices[i];
+                const config = getSliceConfig(i);
+                if (config && config.enabled === false) continue;
+                const qty = config?.quantities?.[0] || 'pressure';
+                activeQuantities.add(canonicalizeQuantity(qty));
+                const st = getSliceStats(slice, qty);
+                if (isFinite(st.min) && isFinite(st.max)) {
+                    recordQtyVal(qty, st.min);
+                    recordQtyVal(qty, st.max);
+                    if (isFinite(st.posMin)) recordQtyVal(qty, st.posMin);
+                }
+            }
+        } else if (slicesConfig && slicesConfig.length > 0) {
+            for (let i = 0; i < slicesConfig.length; i++) {
+                const cfg = slicesConfig[i];
+                if (cfg && cfg.enabled !== false) {
+                    activeQuantities.add(canonicalizeQuantity(cfg.quantities?.[0] || 'pressure'));
+                }
             }
         }
+    }
 
-        // Aggregate from Obstacles
-        if (showObstacles && latestObstaclesData && latestObstaclesData.length > 0) {
-            const obsQ = obstaclesQuantity || 'pressure';
+    // 2. Aggregate from Obstacles
+    if (showObstacles) {
+        const obsQ = obstaclesQuantity || 'pressure';
+        activeQuantities.add(canonicalizeQuantity(obsQ));
+        if (latestObstaclesData && latestObstaclesData.length > 0) {
             for (let i = 0; i < latestObstaclesData.length; i++) {
                 recordQtyVal(obsQ, latestObstaclesData[i]);
             }
         }
+    }
 
-        // Aggregate from STL CAD Geometry
-        if (showSTL && latestVolume3DData && latestVolume3DData.length > 0) {
-            const stlQ = stlQuantity || 'pressure';
+    // 3. Aggregate from STL CAD Geometry
+    if (showSTL && stlShowResults) {
+        const stlQ = stlQuantity || 'pressure';
+        activeQuantities.add(canonicalizeQuantity(stlQ));
+        if (latestVolume3DData && latestVolume3DData.length > 0) {
             const vLen = latestVolume3DData.length;
             const stride = vLen > 65536 ? Math.floor(vLen / 32768) : 1;
             for (let k = 0; k < vLen; k += stride) {
-                const val = latestVolume3DData[k];
-                if (isFinite(val)) {
-                    recordQtyVal(stlQ, val);
-                }
+                recordQtyVal(stlQ, latestVolume3DData[k]);
             }
-        }
-
-        // Aggregate from MPM Particles
-        if (showMPMParticles && latestMPMParticlesData && latestMPMParticlesData.length > 0) {
-            const mpmQ = mpmParticleQuantity || 'vonMises';
-            const pStride = latestMPMFloatsPerParticle || 14;
-            const totalP = Math.floor(latestMPMParticlesData.length / pStride);
-
-            const sampleStep = totalP > 32768 ? Math.floor(totalP / 16384) : 1;
-            for (let i = 0; i < totalP; i += sampleStep) {
-                const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmQ);
-                if (isFinite(val)) {
-                    recordQtyVal(mpmQ, val);
-                }
-            }
-        }
-
-        // Aggregate from FEM Facets and Beams
-        if (showFEMMesh && latestFEMFacetsData && latestFEMFacetsData.length > 0) {
-            const totalFacets = Math.floor(latestFEMFacetsData.length / 8);
-            const sampleStep = totalFacets > 32768 ? Math.floor(totalFacets / 16384) : 1;
-            for (let f = 0; f < totalFacets; f += sampleStep) {
-                const isErodedFacetRange = (latestFEMFacetsData[f * 8 + 0] < 0 && latestFEMFacetsData[f * 8 + 1] < 0 && latestFEMFacetsData[f * 8 + 2] < 0 && latestFEMFacetsData[f * 8 + 3] < 0);
-                if (isErodedFacetRange) continue;
-                const n2 = Math.round(latestFEMFacetsData[f * 8 + 2]);
-                const n3 = Math.round(latestFEMFacetsData[f * 8 + 3]);
-                const isLine = (n2 < 0 || n3 < 0);
-                if (isLine) {
-                    if (showBeams) {
-                        const isEroded = (latestFEMFacetsData[f * 8 + 7] > 0.5);
-                        if (isEroded) continue;
-                        const val = getBeamQuantityValue(f, beamQuantity);
-                        if (isFinite(val)) recordQtyVal(beamQuantity, val);
-                    }
-                } else {
-                    const val = getFEMFacetQuantityValue(f, femQuantity);
-                    if (isFinite(val)) recordQtyVal(femQuantity, val);
-                }
-            }
-        }
-
-        // Update unified quantityRanges for any quantity with active dynamic data
-        let quantityRangesModified = false;
-        for (const [rawQ, ext] of Object.entries(qtyDynamicExtents)) {
-            const q = canonicalizeQuantity(rawQ);
-            const isAuto = (quantityAutoScales[q] ?? quantityAutoScales[rawQ]) !== false;
-            const isFraction = (q === 'plastic_strain' || q === 'damage' || q === 'has_failed' || q === 'species1' || q === 'species2' || q === 'species3' || q === 'solid');
-            if (ext.hasData && isFraction && ext.max <= 1e-4) {
-                if (isAuto) {
-                    const defRange = DEFAULT_QUANTITY_RANGES[q] || [0.0, 1.0];
-                    if (quantityRanges[q]?.[1] !== defRange[1] || quantityRanges[q]?.[0] !== defRange[0]) {
-                        quantityRanges[q] = [defRange[0], defRange[1]];
-                        quantityRanges[rawQ] = [defRange[0], defRange[1]];
-                        if (q === 'plastic_strain') quantityRanges['plasticStrain'] = [defRange[0], defRange[1]];
-                        quantityRangesModified = true;
-                    }
-                }
-            } else if (ext.hasData && ext.min < ext.max && (ext.max - ext.min) > Math.max(1e-4 * Math.abs(ext.max), 1e-4)) {
-                if (isAuto) {
-                    let rangeMin = ext.min;
-                    let rangeMax = ext.max;
-                    if (isFraction && rangeMax <= 1e-4) {
-                        rangeMin = DEFAULT_QUANTITY_RANGES[q]?.[0] ?? 0.0;
-                        rangeMax = DEFAULT_QUANTITY_RANGES[q]?.[1] ?? 1.0;
-                    }
-                    const isLog = (quantityLogScales[q] ?? quantityLogScales[rawQ]) === true || (q === 'peak_overpressure' || q === 'energy');
-                    if (isLog && rangeMin <= 0 && rangeMax > 0) {
-                        const dynamicFloor = rangeMax / 1000000.0;
-                        rangeMin = (isFinite(ext.posMin) && ext.posMin > dynamicFloor) ? ext.posMin : dynamicFloor;
-                    }
-                    quantityRanges[q] = [rangeMin, rangeMax];
-                    quantityRanges[rawQ] = [rangeMin, rangeMax];
-                    if (q === 'peak_overpressure') quantityRanges['overpressure'] = [rangeMin, rangeMax];
-                    if (q === 'peak_impulse') quantityRanges['impulse'] = [rangeMin, rangeMax];
-                    if (q === 'plastic_strain') quantityRanges['plasticStrain'] = [rangeMin, rangeMax];
-                    if (q === 'vonMises') quantityRanges['von_mises'] = [rangeMin, rangeMax];
-                    quantityRangesModified = true;
-                }
-            }
-        }
-        if (quantityRangesModified) {
-            self.postMessage({ type: 'quantityRangesUpdated', ranges: quantityRanges });
         }
     }
 
-    // Assign slice-specific ranges and configs
+    // 4. Aggregate from MPM Particles
+    if (showMPMParticles) {
+        const mpmQ = mpmParticleQuantity || 'vonMises';
+        activeQuantities.add(canonicalizeQuantity(mpmQ));
+        if (latestMPMParticlesData && latestMPMParticlesData.length > 0) {
+            const pStride = latestMPMFloatsPerParticle || 14;
+            const totalP = Math.floor(latestMPMParticlesData.length / pStride);
+            const u32Data = mpmParticleHideEroded ? getMPMParticlesUint32View(latestMPMParticlesData) : null;
+            const sampleStep = totalP > 32768 ? Math.floor(totalP / 16384) : 1;
+            for (let i = 0; i < totalP; i += sampleStep) {
+                if (mpmParticleHideEroded && u32Data) {
+                    const base = i * pStride;
+                    if (getMPMParticleHasFailed(latestMPMParticlesData, u32Data, base, pStride) ||
+                        getMPMParticleDamage(latestMPMParticlesData, u32Data, base, pStride) >= 1.0) {
+                        continue;
+                    }
+                }
+                const val = getParticleQuantityValue(latestMPMParticlesData, i, mpmQ);
+                recordQtyVal(mpmQ, val);
+            }
+        }
+    }
+
+    // 5. Aggregate from FEM Facets and 1D Beams/Rebar
+    if (showFEMMesh) {
+        activeQuantities.add(canonicalizeQuantity(femQuantity || 'vonMises'));
+    }
+    if (showBeams || showRebar) {
+        activeQuantities.add(canonicalizeQuantity(beamQuantity || 'axial_stress'));
+    }
+    if ((showFEMMesh || showBeams || showRebar) && latestFEMFacetsData && latestFEMFacetsData.length > 0) {
+        const totalFacets = Math.floor(latestFEMFacetsData.length / 8);
+        const sampleStep = totalFacets > 32768 ? Math.floor(totalFacets / 16384) : 1;
+        for (let f = 0; f < totalFacets; f += sampleStep) {
+            const n0_chk = Math.round(latestFEMFacetsData[f * 8 + 0]);
+            const n1_chk = Math.round(latestFEMFacetsData[f * 8 + 1]);
+            if (n0_chk < 0 || n1_chk < 0) continue;
+            const isErodedFacetRange = (latestFEMFacetsData[f * 8 + 7] < -0.5);
+            if (isErodedFacetRange) continue;
+            const n2 = Math.round(latestFEMFacetsData[f * 8 + 2]);
+            const n3 = Math.round(latestFEMFacetsData[f * 8 + 3]);
+            const isLine = (n2 < 0 || n3 < 0);
+            if (isLine) {
+                if (showBeams || showRebar) {
+                    const isEroded = (latestFEMFacetsData[f * 8 + 7] > 0.5);
+                    if (isEroded) continue;
+                    const val = getBeamQuantityValue(f, beamQuantity);
+                    recordQtyVal(beamQuantity, val);
+                }
+            } else if (showFEMMesh) {
+                const val = getFEMFacetQuantityValue(f, femQuantity);
+                recordQtyVal(femQuantity, val);
+            }
+        }
+    }
+
+    // 6. Aggregate from Phase Tracking Particles when displaying velocity
+    if (showPhaseParticles && (phaseParticleQuantity === 'velocity' || phaseParticleQuantity === 'speed')) {
+        activeQuantities.add('velocity');
+        if (latestPhaseParticlesData && latestPhaseParticlesData.length > 0) {
+            const pStride = latestPhaseFloatsPerParticle || 8;
+            const totalP = Math.floor(latestPhaseParticlesData.length / pStride);
+            const sampleStep = totalP > 32768 ? Math.floor(totalP / 16384) : 1;
+            for (let i = 0; i < totalP; i += sampleStep) {
+                const base = i * pStride;
+                const vx = latestPhaseParticlesData[base + 3];
+                const vy = latestPhaseParticlesData[base + 4];
+                const vz = latestPhaseParticlesData[base + 5];
+                recordQtyVal('velocity', Math.sqrt(vx * vx + vy * vy + vz * vz));
+            }
+        }
+    }
+
+    // Resolve authoritative [min, max] per active quantity
+    const modifiedQuantities = new Set<string>();
+    for (const q of activeQuantities) {
+        const style = getWorkerQuantityStyle(q);
+        const defRange = DEFAULT_QUANTITY_RANGES[q] || [style.minVal, style.maxVal];
+        const isFraction = (q === 'plastic_strain' || q === 'damage' || q === 'has_failed' || q === 'species1' || q === 'species2' || q === 'species3' || q === 'solid');
+
+        let nextMin = style.minVal;
+        let nextMax = style.maxVal;
+
+        if (!style.autoScale) {
+            nextMin = style.minVal;
+            nextMax = style.maxVal;
+            if (style.logScale && nextMin <= 0 && nextMax > 0) {
+                nextMin = Math.max(1e-12, nextMax / 1000000.0);
+            }
+        } else {
+            const ext = qtyDynamicExtents[q];
+            if (ext && ext.hasData) {
+                if (isFraction && ext.max <= 1e-4) {
+                    nextMin = defRange[0];
+                    nextMax = defRange[1];
+                } else if (ext.min < ext.max && (ext.max - ext.min) > Math.max(1e-4 * Math.abs(ext.max), 1e-6)) {
+                    nextMin = ext.min;
+                    nextMax = ext.max;
+                } else if (ext.min >= defRange[0] && ext.max <= defRange[1] && defRange[1] > defRange[0]) {
+                    nextMin = defRange[0];
+                    nextMax = defRange[1];
+                } else {
+                    const span = Math.max(Math.abs(ext.max) * 0.1, 1.0);
+                    nextMin = ext.min >= 0 ? Math.max(0.0, ext.min - span * 0.5) : (ext.min - span * 0.5);
+                    nextMax = ext.max + span;
+                }
+
+                if (style.logScale && nextMin <= 0 && nextMax > 0) {
+                    const dynamicFloor = nextMax / 1000000.0;
+                    nextMin = (isFinite(ext.posMin) && ext.posMin > dynamicFloor) ? ext.posMin : dynamicFloor;
+                }
+            } else {
+                nextMin = defRange[0];
+                nextMax = defRange[1];
+            }
+        }
+
+        if (!(nextMax > nextMin)) {
+            nextMax = nextMin + Math.max(Math.abs(nextMin) * 0.01, 1.0);
+        }
+
+        const prev = resolvedQuantityRanges[q];
+        if (!prev || prev[0] !== nextMin || prev[1] !== nextMax) {
+            resolvedQuantityRanges[q] = [nextMin, nextMax];
+            quantityRanges[q] = [nextMin, nextMax];
+            if (q === 'peak_overpressure') quantityRanges['overpressure'] = [nextMin, nextMax];
+            if (q === 'peak_impulse') quantityRanges['impulse'] = [nextMin, nextMax];
+            if (q === 'plastic_strain') quantityRanges['plasticStrain'] = [nextMin, nextMax];
+            if (q === 'vonMises') quantityRanges['von_mises'] = [nextMin, nextMax];
+            modifiedQuantities.add(q);
+        }
+    }
+
+    if (modifiedQuantities.size > 0) {
+        self.postMessage({ type: 'quantityRangesUpdated', ranges: resolvedQuantityRanges });
+    }
+
+    // Push unified quantity style and resolved bounds onto all slices
     const sliceRanges: { min: number, max: number }[] = [];
     for (let i = 0; i < cachedSlices.length; i++) {
         const slice = cachedSlices[i];
         const config = getSliceConfig(i);
-        const rawQty = config.quantities?.[0] || 'pressure';
-        const qty = canonicalizeQuantity(rawQty);
-        const sliceIsLocked = lockQuantityRanges && (config.lock_quantity_range !== false);
-        const sliceAutoScale = sliceIsLocked 
-            ? ((quantityAutoScales[qty] ?? quantityAutoScales[rawQty]) !== false) 
-            : (config.auto_scale !== false);
-        const colormapVal = sliceIsLocked
-            ? (quantityColormaps[qty] || quantityColormaps[rawQty] || config.colormap || 'rainbow')
-            : (config.colormap || quantityColormaps[qty] || quantityColormaps[rawQty] || 'rainbow');
-        const interpVal = config.interpolate === true;
-        
-        const { min: sliceMin, max: sliceMax, posMin: slicePosMin } = getSliceStats(slice);
-        const logVal = sliceIsLocked
-            ? (quantityLogScales[qty] ?? quantityLogScales[rawQty] ?? (config.log_scale === true))
-            : (config.log_scale === true || (config.log_scale !== false && sliceMax > 0 && sliceMin > 0 && (sliceMax / sliceMin > 50.0)));
-
-        let sliceMinY = minY;
-        let sliceMaxY = maxY;
-
-        const isFraction = qty === 'species1' || qty === 'species2' || qty === 'species3' || qty === 'solid' || qty === 'plastic_strain' || qty === 'damage' || qty === 'has_failed';
-        const defaultRange = config.min_val !== undefined && config.max_val !== undefined
-            ? [config.min_val, config.max_val]
-            : (quantityRanges[qty] || quantityRanges[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || DEFAULT_QUANTITY_RANGES[rawQty] || [0.0, 1.0]);
-
-        const hasDynamicRange = (sliceMax - sliceMin) > Math.max(1e-4 * Math.abs(sliceMax), 1e-4);
-        if (sliceIsLocked) {
-            const unified = quantityRanges[qty] || quantityRanges[rawQty] || DEFAULT_QUANTITY_RANGES[qty] || DEFAULT_QUANTITY_RANGES[rawQty] || [0.0, 1.0];
-            sliceMinY = unified[0];
-            sliceMaxY = unified[1];
-        } else if (sliceAutoScale) {
-            if (sliceMin < sliceMax && hasDynamicRange) {
-                if (isFraction && sliceMax <= 1e-4) {
-                    sliceMinY = defaultRange[0];
-                    sliceMaxY = defaultRange[1];
-                } else if (logVal && sliceMax > 0) {
-                    const dynamicFloor = sliceMax / 1000000.0;
-                    const effMin = (isFinite(slicePosMin) && slicePosMin > dynamicFloor) ? slicePosMin : dynamicFloor;
-                    sliceMinY = effMin;
-                    sliceMaxY = sliceMax;
-                } else {
-                    sliceMinY = sliceMin;
-                    sliceMaxY = sliceMax;
-                }
-            } else {
-                sliceMinY = defaultRange[0];
-                sliceMaxY = defaultRange[1];
-            }
-        } else {
-            sliceMinY = defaultRange[0];
-            sliceMaxY = defaultRange[1];
-        }
+        const rawQty = config?.quantities?.[0] || 'pressure';
+        const sliceStyle = getWorkerQuantityStyle(rawQty);
+        const [sliceMinY, sliceMaxY] = getResolvedQuantityBounds(rawQty);
+        const effLevels = sliceStyle.smoothContours ? 0 : sliceStyle.contourLevels;
 
         slice.minY = sliceMinY;
         slice.maxY = sliceMaxY;
-        slice.colormap = colormapVal;
-        slice.useLogScale = logVal;
-        slice.interpolate = interpVal;
-        if (config.contour_levels !== undefined) {
-            slice.contourLevels = Number(config.contour_levels);
-        }
-        if (config.smooth_contours !== undefined) {
-            slice.smoothContours = Boolean(config.smooth_contours);
-        }
+        slice.colormap = sliceStyle.colormap;
+        slice.useLogScale = sliceStyle.logScale;
+        slice.interpolate = sliceStyle.interpolate;
+        slice.contourLevels = effLevels;
+        slice.smoothContours = sliceStyle.smoothContours;
 
         if (isWebGPU && activeSlicesWebGPU[i]) {
-            activeSlicesWebGPU[i].minY = sliceMinY;
-            activeSlicesWebGPU[i].maxY = sliceMaxY;
-            activeSlicesWebGPU[i].colormap = colormapVal;
-            activeSlicesWebGPU[i].useLogScale = logVal;
-            activeSlicesWebGPU[i].interpolate = interpVal;
-            if (slice.contourLevels !== undefined) activeSlicesWebGPU[i].contourLevels = slice.contourLevels;
-            if (slice.smoothContours !== undefined) activeSlicesWebGPU[i].smoothContours = slice.smoothContours;
+            const gpuSlice = activeSlicesWebGPU[i];
+            if (gpuSlice.interpolate !== sliceStyle.interpolate && gpuDevice && gpuSliceUniformBuffers[i]) {
+                const sampler = sliceStyle.interpolate ? (gpuSamplerLinear || gpuSampler) : (gpuSamplerNearest || gpuSampler);
+                gpuSlice.bindGroup = gpuDevice.createBindGroup({
+                    layout: bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: gpuSliceUniformBuffers[i] } },
+                        { binding: 1, resource: gpuSlice.gpuTextureView },
+                        { binding: 2, resource: sampler! },
+                        { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
+                    ]
+                });
+            }
+            gpuSlice.minY = sliceMinY;
+            gpuSlice.maxY = sliceMaxY;
+            gpuSlice.colormap = sliceStyle.colormap;
+            gpuSlice.useLogScale = sliceStyle.logScale;
+            gpuSlice.interpolate = sliceStyle.interpolate;
+            gpuSlice.contourLevels = effLevels;
+            gpuSlice.smoothContours = sliceStyle.smoothContours;
         }
         if (gl && activeSlicesWebGL[i]) {
-            activeSlicesWebGL[i].minY = sliceMinY;
-            activeSlicesWebGL[i].maxY = sliceMaxY;
-            activeSlicesWebGL[i].colormap = colormapVal;
-            activeSlicesWebGL[i].useLogScale = logVal;
-            activeSlicesWebGL[i].interpolate = interpVal;
-            if (slice.contourLevels !== undefined) activeSlicesWebGL[i].contourLevels = slice.contourLevels;
-            if (slice.smoothContours !== undefined) activeSlicesWebGL[i].smoothContours = slice.smoothContours;
+            const glSlice = activeSlicesWebGL[i];
+            if (glSlice.interpolate !== sliceStyle.interpolate) {
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, glSlice.texture);
+                const filter = sliceStyle.interpolate ? (hasFloatLinear ? gl.LINEAR : gl.NEAREST) : gl.NEAREST;
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+            }
+            glSlice.minY = sliceMinY;
+            glSlice.maxY = sliceMaxY;
+            glSlice.colormap = sliceStyle.colormap;
+            glSlice.useLogScale = sliceStyle.logScale;
+            glSlice.interpolate = sliceStyle.interpolate;
+            glSlice.contourLevels = effLevels;
+            glSlice.smoothContours = sliceStyle.smoothContours;
         }
 
         sliceRanges.push({ min: sliceMinY, max: sliceMaxY });
     }
 
-    self.postMessage({ type: 'sliceRanges', ranges: sliceRanges });
+    if (cachedSlices.length > 0) {
+        self.postMessage({ type: 'sliceRanges', ranges: sliceRanges });
+    }
 
     const focusedSlice = cachedSlices[focusedSliceIndex] || cachedSlices[0];
     if (focusedSlice) {
-        const { min: sliceMin, max: sliceMax } = getSliceStats(focusedSlice);
         const focusedConfig = slicesConfig[focusedSliceIndex] || slicesConfig[0] || {};
         const focusedRawQty = focusedConfig.quantities?.[0] || 'pressure';
-        const focusedQty = canonicalizeQuantity(focusedRawQty);
-        const focusedIsFraction = focusedQty === 'species1' || focusedQty === 'species2' || focusedQty === 'species3' || focusedQty === 'solid' || focusedQty === 'plastic_strain' || focusedQty === 'damage' || focusedQty === 'has_failed';
-        const focusedDefaultRange = focusedConfig.min_val !== undefined && focusedConfig.max_val !== undefined
-            ? [focusedConfig.min_val, focusedConfig.max_val]
-            : (quantityRanges[focusedQty] || quantityRanges[focusedRawQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedRawQty] || [0.0, 1.0]);
+        const [fMin, fMax] = getResolvedQuantityBounds(focusedRawQty);
+        self.postMessage({ type: 'currentRange', min: fMin, max: fMax });
+    }
 
-        const focusedHasDynamicRange = (sliceMax - sliceMin) > Math.max(1e-4 * Math.abs(sliceMax), 1e-4);
-        if (lockQuantityRanges) {
-            const unified = quantityRanges[focusedQty] || quantityRanges[focusedRawQty] || DEFAULT_QUANTITY_RANGES[focusedQty] || DEFAULT_QUANTITY_RANGES[focusedRawQty] || [0.0, 1.0];
-            self.postMessage({ type: 'currentRange', min: unified[0], max: unified[1] });
-        } else if (sliceMin < sliceMax && focusedHasDynamicRange && (!focusedIsFraction || sliceMax > 1e-4)) {
-            self.postMessage({ type: 'currentRange', min: sliceMin, max: sliceMax });
-        } else {
-            self.postMessage({ type: 'currentRange', min: focusedDefaultRange[0], max: focusedDefaultRange[1] });
+    // Keep CPU-baked vertex colors (FEM / Beams / MPM / Phase) synchronized if a shared quantity range updated
+    if (modifiedQuantities.size > 0 && caller !== 'config') {
+        if (caller !== 'fem' && latestFEMFacetsData && latestFEMFacetsData.length > 0) {
+            const femNeedsSync = showFEMMesh && modifiedQuantities.has(canonicalizeQuantity(femQuantity));
+            const beamNeedsSync = (showBeams || showRebar) && modifiedQuantities.has(canonicalizeQuantity(beamQuantity));
+            if (femNeedsSync || beamNeedsSync) {
+                updateFEMMeshGeometry();
+            }
+        }
+        if (caller !== 'mpm' && showMPMParticles && latestMPMParticlesData && latestMPMParticlesData.length > 0 && modifiedQuantities.has(canonicalizeQuantity(mpmParticleQuantity))) {
+            updateMPMParticlesGeometry();
+        }
+        if (caller !== 'phase' && showPhaseParticles && (phaseParticleQuantity === 'velocity' || phaseParticleQuantity === 'speed') && latestPhaseParticlesData && latestPhaseParticlesData.length > 0 && modifiedQuantities.has('velocity')) {
+            updatePhaseParticlesGeometry();
         }
     }
 }
@@ -7053,14 +6948,15 @@ function handleFrame(buffer: ArrayBuffer) {
             let oMin = Infinity, oMax = -Infinity;
             const oLen = latestObstaclesData.length;
             const stride = oLen > 65536 ? Math.floor(oLen / 32768) : 1;
+            const obsQ = obstaclesQuantity || 'pressure';
             for (let i = 0; i < oLen; i += stride) {
                 const v = latestObstaclesData[i];
-                if (isFinite(v)) {
+                if (isValidQuantitySample(obsQ, v)) {
                     if (v < oMin) oMin = v;
                     if (v > oMax) oMax = v;
                 }
             }
-            if (isFinite(oMin) && isFinite(oMax) && oMax > oMin) {
+            if (isFinite(oMin) && isFinite(oMax) && oMax >= oMin) {
                 cachedObstaclesMinVal = oMin;
                 cachedObstaclesMaxVal = oMax;
                 self.postMessage({ type: 'obstaclesRangeUpdated', min: oMin, max: oMax });
@@ -7075,14 +6971,15 @@ function handleFrame(buffer: ArrayBuffer) {
             let vMax = -Infinity;
             const vLen = latestVolume3DData.length;
             const stride = vLen > 65536 ? Math.floor(vLen / 32768) : 1;
+            const stlQ = stlQuantity || 'pressure';
             for (let k = 0; k < vLen; k += stride) {
                 const val = latestVolume3DData[k];
-                if (isFinite(val)) {
+                if (isValidQuantitySample(stlQ, val)) {
                     if (val < vMin) vMin = val;
                     if (val > vMax) vMax = val;
                 }
             }
-            if (isFinite(vMin) && isFinite(vMax) && vMax > vMin) {
+            if (isFinite(vMin) && isFinite(vMax) && vMax >= vMin) {
                 stlVolMin = vMin;
                 stlVolMax = vMax;
                 self.postMessage({ type: 'stlRangeUpdated', min: vMin, max: vMax });
@@ -7109,7 +7006,7 @@ function handleFrame(buffer: ArrayBuffer) {
         cacheOffset = dataStart + (actualElements * 4);
     }
 
-    recomputeActiveRanges();
+    recomputeActiveRanges('slice');
 
     if (is2DFallback) {
         activeSlices2D = cachedSlices;
@@ -8539,6 +8436,9 @@ function buildComponentHighlightGeometry(obj: any): Float32Array {
         }
     } else if (
         objectType === 'DomainMesh3D' ||
+        objectType === 'SparseDomainMesh3D' ||
+        objectType === 'DomainMesh2D' ||
+        objectType === 'SparseDomainMesh2D' ||
         objectType === 'DomainMesh' ||
         objectType === 'CFDSolver3D' ||
         objectType === 'MPMDomain3D' ||
@@ -9093,13 +8993,20 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
     // Only evaluated when clicking on the open fluid field where no 3D entity exists!
     // =========================================================================
     if (showSlices !== false) {
+        const activeWebGLSlices = Object.values(activeSlicesWebGL);
         const allSlices = (cachedSlices && cachedSlices.length > 0)
             ? cachedSlices
-            : Object.values(activeSlicesWebGL).map(s => ({
-                axis: s.axis,
-                offset: s.offset,
-                index: s.index
-            }));
+            : (activeWebGLSlices.length > 0
+                ? activeWebGLSlices.map(s => ({
+                    axis: s.axis,
+                    offset: s.offset,
+                    index: s.index
+                }))
+                : (slicesConfigCache || []).map((s, idx) => ({
+                    axis: s.axis,
+                    offset: s.offset,
+                    index: idx
+                })));
 
         if (allSlices && allSlices.length > 0) {
             let sliceHit: any = null;
@@ -9285,45 +9192,34 @@ function render2D() {
     });
     if (enabledSlices2D.length > 0) {
         const slice = enabledSlices2D[0];
+        const sIdx = activeSlices2D.indexOf(slice);
+        const cfg = getSliceConfig(sIdx >= 0 ? sIdx : 0);
+        const sQty = canonicalizeQuantity(cfg?.quantity || activeQuantity || 'pressure');
+        const sStyle = getWorkerQuantityStyle(sQty);
+        const [sMin, sMax] = getResolvedQuantityBounds(sQty);
+        const sLevels = (sStyle.smoothContours || sStyle.contourLevels <= 1) ? 0 : sStyle.contourLevels;
         const tempCanvas = new OffscreenCanvas(slice.w, slice.h);
         const tempCtx = tempCanvas.getContext("2d")!;
         const imgData = tempCtx.createImageData(slice.w, slice.h);
-        
+        const rgbScratch: [number, number, number] = [0, 0, 0];
+
         for (let i = 0; i < slice.w * slice.h; i++) {
             const val = slice.data[i];
-            let t = 0.0;
-            if (useLogScale) {
-                const logMin = Math.log(Math.max(minY, 1e-5));
-                const logMax = Math.log(Math.max(maxY, 1e-5));
-                const logVal = Math.log(Math.max(val, 1e-5));
-                t = Math.max(0.0, Math.min(1.0, (logVal - logMin) / (logMax - logMin)));
-            } else {
-                t = Math.max(0.0, Math.min(1.0, (val - minY) / (maxY - minY)));
-            }
-            let r = 0, g = 0, b = 0;
-            if (colormap === 1) { // Viridis
-                r = Math.round((1.0 - t) * 255);
-                g = Math.round(t * 255);
-                b = Math.round((0.5 + 0.5 * t) * 255);
-            } else if (colormap === 0) { // Plasma
-                r = Math.round(t * 1.5 * 255);
-                g = Math.round(t * t * 255);
-                b = Math.round((1.0 - t) * 255);
-            } else { // Rainbow (default, colormap === 2)
-                const four = 4.0 * t;
-                r = Math.min(255, Math.max(0, Math.round(255 * Math.min(four - 1.5, -four + 4.5))));
-                g = Math.min(255, Math.max(0, Math.round(255 * Math.min(four - 0.5, -four + 3.5))));
-                b = Math.min(255, Math.max(0, Math.round(255 * Math.min(four + 0.5, -four + 2.5))));
-            }
-            imgData.data[i * 4 + 0] = r;
-            imgData.data[i * 4 + 1] = g;
-            imgData.data[i * 4 + 2] = b;
-            imgData.data[i * 4 + 3] = 180;
+            const rawT = normalizeScalarToT(val, sMin, sMax, sStyle.logScale);
+            const t = quantizeContourT(rawT, sLevels);
+            evaluateColormapRGB(t, sStyle.colormap, rgbScratch);
+            imgData.data[i * 4 + 0] = Math.round(rgbScratch[0] * 255);
+            imgData.data[i * 4 + 1] = Math.round(rgbScratch[1] * 255);
+            imgData.data[i * 4 + 2] = Math.round(rgbScratch[2] * 255);
+            imgData.data[i * 4 + 3] = Math.round(Math.max(0.05, Math.min(1.0, Number(cfg?.opacity ?? 0.85))) * 255);
         }
         tempCtx.putImageData(imgData, 0, 0);
 
         const size = Math.min(width, height) * 0.65;
-        ctx2D.drawImage(tempCanvas, (width - size)/2, (height - size)/2, size, size);
+        ctx2D.save();
+        ctx2D.imageSmoothingEnabled = sStyle.interpolate && sLevels <= 1;
+        ctx2D.drawImage(tempCanvas, (width - size) / 2, (height - size) / 2, size, size);
+        ctx2D.restore();
     }
 
     if (showGauges && gaugesList && gaugesList.length > 0) {
@@ -9487,10 +9383,21 @@ function render() {
                 passEncoder.setVertexBuffer(0, gpuAMRTilesBuffer);
                 passEncoder.draw(amrTilesCount, 1, 0, 0);
             }
-            if (gpuSliceGridlinesBuffer && sliceGridlinesCount > 0) {
-                passEncoder.setVertexBuffer(0, gpuSliceGridlinesBuffer);
-                passEncoder.draw(sliceGridlinesCount, 1, 0, 0);
-            }
+        }
+        if (showSlices !== false && gpuSliceGridlinesBuffer && sliceGridlinesCount > 0 && gpuLinePipeline) {
+            const sliceGridBindGroup = gpuDevice.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: gpuUniformBufferWF! } },
+                    { binding: 1, resource: gpuDummyTextureView },
+                    { binding: 2, resource: gpuSampler! },
+                    { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
+                ]
+            });
+            passEncoder.setPipeline(gpuLinePipeline);
+            passEncoder.setBindGroup(0, sliceGridBindGroup);
+            passEncoder.setVertexBuffer(0, gpuSliceGridlinesBuffer);
+            passEncoder.draw(sliceGridlinesCount, 1, 0, 0);
         }        // Draw STL Geometry in WebGPU
         let stlDrawnThisFrameWebGPU = false;
         const drawSTLWebGPU = () => {
@@ -9538,28 +9445,12 @@ function render() {
                 -cx * invMax, -cy * invMax, -cz * invMax, 1
             ]);
 
-            const cStlQ = canonicalizeQuantity(stlQuantity);
-            const defaultStlRange = quantityRanges[cStlQ] || quantityRanges[stlQuantity] || DEFAULT_QUANTITY_RANGES[cStlQ] || DEFAULT_QUANTITY_RANGES[stlQuantity] || [0.0, 1.0];
-            const stlIsLocked = lockQuantityRanges && (stlLockQuantityRange !== false);
-            const effectiveStlAuto = stlIsLocked ? ((quantityAutoScales[cStlQ] ?? quantityAutoScales[stlQuantity]) !== false) : (stlAutoScale !== false);
-            let finalStlMin = defaultStlRange[0];
-            let finalStlMax = defaultStlRange[1];
-            if (stlIsLocked) {
-                finalStlMin = defaultStlRange[0];
-                finalStlMax = defaultStlRange[1];
-            } else if (effectiveStlAuto) {
-                if (isFinite(stlVolMin) && isFinite(stlVolMax) && stlVolMax > stlVolMin) {
-                    finalStlMin = stlVolMin;
-                    finalStlMax = stlVolMax;
-                }
-            } else {
-                finalStlMin = stlMinVal ?? defaultStlRange[0];
-                finalStlMax = stlMaxVal ?? defaultStlRange[1];
-            }
-
-            const effectiveStlCmap = stlIsLocked ? (quantityColormaps[cStlQ] || quantityColormaps[stlQuantity] || stlColormap) : stlColormap;
-            const effectiveStlLog = stlIsLocked ? (quantityLogScales[cStlQ] ?? quantityLogScales[stlQuantity] ?? stlLogScale) : stlLogScale;
-            const stlSampler = (stlSamplingMode === 'linear') ? (gpuSamplerLinear || gpuSampler) : (gpuSamplerNearest || gpuSampler);
+            const stlStyle = getWorkerQuantityStyle(stlQuantity);
+            const [finalStlMin, finalStlMax] = getResolvedQuantityBounds(stlQuantity);
+            const effectiveStlCmap = stlStyle.colormap;
+            const effectiveStlLog = stlStyle.logScale;
+            const effectiveStlLevels = stlStyle.smoothContours ? 0.0 : stlStyle.contourLevels;
+            const stlSampler = stlStyle.interpolate ? (gpuSamplerLinear || gpuSampler) : (gpuSamplerNearest || gpuSampler);
 
             if (stlSolids && stlOpacity > 0.001 && (gpuPipeline || gpuSlicePipeline)) {
                 stlDrawnThisFrameWebGPU = true;
@@ -9575,6 +9466,7 @@ function render() {
                 uSolid[65] = effectiveStlLog ? 1.0 : 0.0;
                 uSolid[68] = xmin; uSolid[69] = ymin; uSolid[70] = zmin;
                 uSolid[72] = sizeX; uSolid[73] = sizeY; uSolid[74] = sizeZ;
+                uSolid[78] = effectiveStlLevels;
                 gpuDevice.queue.writeBuffer(gpuSTLUniformSolid, 0, uSolid.buffer);
 
                 const solidBindGroup = gpuDevice.createBindGroup({
@@ -9629,6 +9521,7 @@ function render() {
                 uWire[65] = effectiveStlLog ? 1.0 : 0.0;
                 uWire[68] = xmin; uWire[69] = ymin; uWire[70] = zmin;
                 uWire[72] = sizeX; uWire[73] = sizeY; uWire[74] = sizeZ;
+                uWire[78] = effectiveStlLevels;
                 gpuDevice.queue.writeBuffer(gpuSTLUniformWireframe, 0, uWire.buffer);
 
                 const wireBindGroup = gpuDevice.createBindGroup({
@@ -9717,35 +9610,11 @@ function render() {
                 -cx * invMax, -cy * invMax, -cz * invMax, 1
             ]);
 
-            let obsMin = obstaclesMinVal;
-            let obsMax = obstaclesMaxVal;
-            const cObsQ = canonicalizeQuantity(obstaclesQuantity);
-            const defaultObsRange = quantityRanges[cObsQ] || quantityRanges[obstaclesQuantity] || DEFAULT_QUANTITY_RANGES[cObsQ] || DEFAULT_QUANTITY_RANGES[obstaclesQuantity] || [0.0, 1.0];
-            const obsIsLocked = lockQuantityRanges && (obstaclesLockQuantityRange !== false);
-            const effectiveObsAuto = obsIsLocked ? ((quantityAutoScales[cObsQ] ?? quantityAutoScales[obstaclesQuantity]) !== false) : (obstaclesAutoScale !== false);
-            if (obsIsLocked) {
-                if (effectiveObsAuto && isFinite(cachedObstaclesMinVal) && isFinite(cachedObstaclesMaxVal) && cachedObstaclesMaxVal > cachedObstaclesMinVal) {
-                    obsMin = cachedObstaclesMinVal;
-                    obsMax = cachedObstaclesMaxVal;
-                } else {
-                    obsMin = defaultObsRange[0];
-                    obsMax = defaultObsRange[1];
-                }
-            } else if (effectiveObsAuto) {
-                if (isFinite(cachedObstaclesMinVal) && isFinite(cachedObstaclesMaxVal) && cachedObstaclesMaxVal > cachedObstaclesMinVal) {
-                    obsMin = cachedObstaclesMinVal;
-                    obsMax = cachedObstaclesMaxVal;
-                } else {
-                    obsMin = defaultObsRange[0];
-                    obsMax = defaultObsRange[1];
-                }
-            } else {
-                obsMin = obstaclesMinVal ?? defaultObsRange[0];
-                obsMax = obstaclesMaxVal ?? defaultObsRange[1];
-            }
-
-            const effectiveObsCmap = obsIsLocked ? (quantityColormaps[cObsQ] || quantityColormaps[obstaclesQuantity] || obstaclesColormap) : obstaclesColormap;
-            const effectiveObsLog = obsIsLocked ? (quantityLogScales[cObsQ] ?? quantityLogScales[obstaclesQuantity] ?? obstaclesLogScale) : obstaclesLogScale;
+            const obsStyle = getWorkerQuantityStyle(obstaclesQuantity);
+            const [obsMin, obsMax] = getResolvedQuantityBounds(obstaclesQuantity);
+            const effectiveObsCmap = obsStyle.colormap;
+            const effectiveObsLog = obsStyle.logScale;
+            const effectiveObsLevels = obsStyle.smoothContours ? 0.0 : obsStyle.contourLevels;
 
             // Write solid uniforms
             const uSolid = new Float32Array(uniformData);
@@ -9756,6 +9625,7 @@ function render() {
             uSolid[51] = obsMax;
             uSolid[52] = effectiveObsLog ? 1.0 : 0.0;
             uSolid[53] = obstaclesLighting ? 9.0 : 11.0;
+            uSolid[78] = effectiveObsLevels;
             gpuDevice.queue.writeBuffer(gpuUniformBufferObstaclesSolid, 0, uSolid.buffer);
 
             // Write wireframe uniforms
@@ -9765,6 +9635,7 @@ function render() {
             uWire[49] = getColormapIndex(effectiveObsCmap);
             uWire[50] = obsMin;
             uWire[51] = obsMax;
+            uWire[78] = effectiveObsLevels;
             uWire[52] = effectiveObsLog ? 1.0 : 0.0;
             uWire[53] = 10.0;
             gpuDevice.queue.writeBuffer(gpuUniformBufferObstaclesWire, 0, uWire.buffer);
@@ -10056,6 +9927,34 @@ function render() {
                 passEncoder.setVertexBuffer(0, gpuChargeWireBuffer);
                 passEncoder.draw(chargeWireCount);
             }
+
+            if (gpuRemapWireBuffer && remapWireCount > 0 && gpuLinePipeline) {
+                if (!gpuUniformBufferRemapWire) {
+                    gpuUniformBufferRemapWire = gpuDevice.createBuffer({
+                        size: 384,
+                        usage: 64 | 8
+                    });
+                }
+                const uRemapWire = new Float32Array(uniformData);
+                uRemapWire[48] = 0.88;
+                uRemapWire[53] = 16.0; // Electric Cyan wireframe mode
+                gpuDevice.queue.writeBuffer(gpuUniformBufferRemapWire, 0, uRemapWire.buffer);
+
+                const remapWireBindGroup = gpuDevice.createBindGroup({
+                    layout: bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: gpuUniformBufferRemapWire } },
+                        { binding: 1, resource: gpuDummyTextureView },
+                        { binding: 2, resource: gpuSampler! },
+                        { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
+                    ]
+                });
+
+                passEncoder.setPipeline(gpuLinePipeline);
+                passEncoder.setBindGroup(0, remapWireBindGroup);
+                passEncoder.setVertexBuffer(0, gpuRemapWireBuffer);
+                passEncoder.draw(remapWireCount);
+            }
         }
 
         // Draw Detonator Markers in WebGPU
@@ -10195,33 +10094,39 @@ function render() {
             if (opaqueSlices.length > 0) {
                 passEncoder.setPipeline(gpuPipeline!);
                 opaqueSlices.forEach(slice => {
-                    if (!gpuSliceUniformBuffers[slice.index]) {
-                        gpuSliceUniformBuffers[slice.index] = gpuDevice.createBuffer({
-                            size: 384,
-                            usage: 64 | 8
-                        });
+                    const cfg = getSliceConfig(slice.index);
+                    const rawQty = cfg?.quantities?.[0] || 'pressure';
+                    const sliceStyle = getWorkerQuantityStyle(rawQty);
+                    const [sMin, sMax] = getResolvedQuantityBounds(rawQty);
+                    const targetSampler = sliceStyle.interpolate ? (gpuSamplerLinear || gpuSampler) : (gpuSamplerNearest || gpuSampler);
+
+                    if (!gpuSliceUniformBuffers[slice.index] || slice.interpolate !== sliceStyle.interpolate) {
+                        if (!gpuSliceUniformBuffers[slice.index]) {
+                            gpuSliceUniformBuffers[slice.index] = gpuDevice.createBuffer({
+                                size: 384,
+                                usage: 64 | 8
+                            });
+                        }
                         slice.bindGroup = gpuDevice.createBindGroup({
                             layout: bindGroupLayout,
                             entries: [
                                 { binding: 0, resource: { buffer: gpuSliceUniformBuffers[slice.index] } },
                                 { binding: 1, resource: slice.gpuTextureView },
-                                { binding: 2, resource: gpuSampler! },
+                                { binding: 2, resource: targetSampler! },
                                 { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
                             ]
                         });
+                        slice.interpolate = sliceStyle.interpolate;
                     }
                     const sliceUniformData = new Float32Array(uniformData);
                     sliceUniformData[48] = 1.0;
-                    sliceUniformData[49] = getColormapIndex(slice.colormap);
-                    sliceUniformData[50] = slice.minY ?? minY;
-                    sliceUniformData[51] = slice.maxY ?? maxY;
-                    sliceUniformData[52] = slice.useLogScale ? 1.0 : 0.0;
+                    sliceUniformData[49] = getColormapIndex(sliceStyle.colormap);
+                    sliceUniformData[50] = sMin;
+                    sliceUniformData[51] = sMax;
+                    sliceUniformData[52] = sliceStyle.logScale ? 1.0 : 0.0;
                     sliceUniformData[54] = (meshType === 'amr') ? 0.0 : (showCellEdges ? 1.0 : 0.0);
-                    sliceUniformData[55] = slice.interpolate ? 1.0 : 0.0;
-                    const isSliceSmooth = (slice.smoothContours !== undefined ? Boolean(slice.smoothContours) : sliceSmoothContours)
-                        || (slice.contourLevels !== undefined && slice.contourLevels <= 1);
-                    const effectiveLevels = isSliceSmooth ? 0.0 : (slice.contourLevels && slice.contourLevels > 1 ? slice.contourLevels : (sliceContourLevels > 1 ? sliceContourLevels : 0.0));
-                    sliceUniformData[78] = effectiveLevels;
+                    sliceUniformData[55] = sliceStyle.interpolate ? 1.0 : 0.0;
+                    sliceUniformData[78] = sliceStyle.smoothContours ? 0.0 : sliceStyle.contourLevels;
                     gpuDevice.queue.writeBuffer(gpuSliceUniformBuffers[slice.index], 0, sliceUniformData.buffer);
 
                     passEncoder.setBindGroup(0, slice.bindGroup);
@@ -10242,32 +10147,38 @@ function render() {
                     return distB - distA; // Descending: furthest first
                 });
                 transparentSlices.forEach(slice => {
-                    if (!gpuSliceUniformBuffers[slice.index]) {
-                        gpuSliceUniformBuffers[slice.index] = gpuDevice.createBuffer({
-                            size: 384,
-                            usage: 64 | 8
-                        });
+                    const cfg = getSliceConfig(slice.index);
+                    const rawQty = cfg?.quantities?.[0] || 'pressure';
+                    const sliceStyle = getWorkerQuantityStyle(rawQty);
+                    const [sMin, sMax] = getResolvedQuantityBounds(rawQty);
+                    const targetSampler = sliceStyle.interpolate ? (gpuSamplerLinear || gpuSampler) : (gpuSamplerNearest || gpuSampler);
+
+                    if (!gpuSliceUniformBuffers[slice.index] || slice.interpolate !== sliceStyle.interpolate) {
+                        if (!gpuSliceUniformBuffers[slice.index]) {
+                            gpuSliceUniformBuffers[slice.index] = gpuDevice.createBuffer({
+                                size: 384,
+                                usage: 64 | 8
+                            });
+                        }
                         slice.bindGroup = gpuDevice.createBindGroup({
                             layout: bindGroupLayout,
                             entries: [
                                 { binding: 0, resource: { buffer: gpuSliceUniformBuffers[slice.index] } },
                                 { binding: 1, resource: slice.gpuTextureView },
-                                { binding: 2, resource: gpuSampler! },
+                                { binding: 2, resource: targetSampler! },
                                 { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
                             ]
                         });
+                        slice.interpolate = sliceStyle.interpolate;
                     }
                     const sliceUniformData = new Float32Array(uniformData);
                     sliceUniformData[48] = slice.opacity;
-                    sliceUniformData[49] = getColormapIndex(slice.colormap);
-                    sliceUniformData[50] = slice.minY ?? minY;
-                    sliceUniformData[51] = slice.maxY ?? maxY;
-                    sliceUniformData[52] = slice.useLogScale ? 1.0 : 0.0;
-                    sliceUniformData[55] = slice.interpolate ? 1.0 : 0.0;
-                    const isSliceSmooth = (slice.smoothContours !== undefined ? Boolean(slice.smoothContours) : sliceSmoothContours)
-                        || (slice.contourLevels !== undefined && slice.contourLevels <= 1);
-                    const effectiveLevels = isSliceSmooth ? 0.0 : (slice.contourLevels && slice.contourLevels > 1 ? slice.contourLevels : (sliceContourLevels > 1 ? sliceContourLevels : 0.0));
-                    sliceUniformData[78] = effectiveLevels;
+                    sliceUniformData[49] = getColormapIndex(sliceStyle.colormap);
+                    sliceUniformData[50] = sMin;
+                    sliceUniformData[51] = sMax;
+                    sliceUniformData[52] = sliceStyle.logScale ? 1.0 : 0.0;
+                    sliceUniformData[55] = sliceStyle.interpolate ? 1.0 : 0.0;
+                    sliceUniformData[78] = sliceStyle.smoothContours ? 0.0 : sliceStyle.contourLevels;
                     gpuDevice.queue.writeBuffer(gpuSliceUniformBuffers[slice.index], 0, sliceUniformData.buffer);
 
                     passEncoder.setBindGroup(0, slice.bindGroup);
@@ -10275,6 +10186,32 @@ function render() {
                     passEncoder.draw(6);
                 });
             }
+        } else if (showSlices !== false && gpuPlaceholderSlicesBuffer && placeholderSlicesCount > 0 && gpuSlicePipeline) {
+            if (!gpuUniformBufferPlaceholderSlices) {
+                gpuUniformBufferPlaceholderSlices = gpuDevice.createBuffer({
+                    size: 384,
+                    usage: 64 | 8
+                });
+            }
+            const uPlaceholder = new Float32Array(uniformData);
+            uPlaceholder[48] = 0.18;
+            uPlaceholder[53] = 23.0;
+            gpuDevice.queue.writeBuffer(gpuUniformBufferPlaceholderSlices, 0, uPlaceholder.buffer);
+
+            const placeholderBindGroup = gpuDevice.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: gpuUniformBufferPlaceholderSlices } },
+                    { binding: 1, resource: gpuDummyTextureView },
+                    { binding: 2, resource: gpuSampler! },
+                    { binding: 3, resource: gpuVolume3DTextureView || gpuDummy3DTextureView }
+                ]
+            });
+
+            passEncoder.setPipeline(gpuSlicePipeline);
+            passEncoder.setBindGroup(0, placeholderBindGroup);
+            passEncoder.setVertexBuffer(0, gpuPlaceholderSlicesBuffer);
+            passEncoder.draw(placeholderSlicesCount);
         }
 
         // Draw transparent STL exactly once, after all slice passes (whether or not slices were active)
@@ -10599,47 +10536,29 @@ function render() {
         ]);
         if (glUniforms.uStlMatrix) activeGl.uniformMatrix4fv(glUniforms.uStlMatrix, false, stlModelMat);
 
+        const stlStyle = getWorkerQuantityStyle(stlQuantity);
+        const [finalStlMin, finalStlMax] = getResolvedQuantityBounds(stlQuantity);
+
         if (glVolume3DTexture && activeGl.TEXTURE_3D) {
             activeGl.activeTexture(activeGl.TEXTURE1);
             activeGl.bindTexture(activeGl.TEXTURE_3D, glVolume3DTexture);
-            const filter = (stlSamplingMode === 'linear') ? activeGl.LINEAR : activeGl.NEAREST;
+            const filter = stlStyle.interpolate ? activeGl.LINEAR : activeGl.NEAREST;
             activeGl.texParameteri(activeGl.TEXTURE_3D, activeGl.TEXTURE_MIN_FILTER, filter);
             activeGl.texParameteri(activeGl.TEXTURE_3D, activeGl.TEXTURE_MAG_FILTER, filter);
             
             if (glUniforms.uVolumeTexture3D) activeGl.uniform1i(glUniforms.uVolumeTexture3D, 1);
         }
         
-        const cStlQ = canonicalizeQuantity(stlQuantity);
-        const stlIsLocked = lockQuantityRanges && (stlLockQuantityRange !== false);
-        const effectiveStlCmap = stlIsLocked ? (quantityColormaps[cStlQ] || quantityColormaps[stlQuantity] || stlColormap) : stlColormap;
-        const effectiveStlLog = stlIsLocked ? (quantityLogScales[cStlQ] ?? quantityLogScales[stlQuantity] ?? stlLogScale) : stlLogScale;
-        const effectiveStlAuto = stlIsLocked ? ((quantityAutoScales[cStlQ] ?? quantityAutoScales[stlQuantity]) !== false) : (stlAutoScale !== false);
-        
         if (glUniforms.uStlShowResults) activeGl.uniform1i(glUniforms.uStlShowResults, stlShowResults ? 1 : 0);
-        if (glUniforms.uStlColormap) activeGl.uniform1i(glUniforms.uStlColormap, getColormapIndex(effectiveStlCmap));
+        if (glUniforms.uStlColormap) activeGl.uniform1i(glUniforms.uStlColormap, getColormapIndex(stlStyle.colormap));
         if (glUniforms.uDomainMin) activeGl.uniform3f(glUniforms.uDomainMin, xmin, ymin, zmin);
         if (glUniforms.uDomainExtent) activeGl.uniform3f(glUniforms.uDomainExtent, sizeX, sizeY, sizeZ);
         if (glUniforms.uDx) activeGl.uniform1f(glUniforms.uDx, dx || 0.01);
 
-        const defaultStlRange = quantityRanges[cStlQ] || quantityRanges[stlQuantity] || DEFAULT_QUANTITY_RANGES[cStlQ] || DEFAULT_QUANTITY_RANGES[stlQuantity] || [0.0, 1.0];
-        let finalStlMin = defaultStlRange[0];
-        let finalStlMax = defaultStlRange[1];
-        if (stlIsLocked) {
-            finalStlMin = defaultStlRange[0];
-            finalStlMax = defaultStlRange[1];
-        } else if (effectiveStlAuto) {
-            if (isFinite(stlVolMin) && isFinite(stlVolMax) && stlVolMax > stlVolMin) {
-                finalStlMin = stlVolMin;
-                finalStlMax = stlVolMax;
-            }
-        } else {
-            finalStlMin = stlMinVal ?? defaultStlRange[0];
-            finalStlMax = stlMaxVal ?? defaultStlRange[1];
-        }
-
         if (glUniforms.uStlMin) activeGl.uniform1f(glUniforms.uStlMin, finalStlMin);
         if (glUniforms.uStlMax) activeGl.uniform1f(glUniforms.uStlMax, finalStlMax);
-        if (glUniforms.uStlLogScale) activeGl.uniform1i(glUniforms.uStlLogScale, effectiveStlLog ? 1 : 0);
+        if (glUniforms.uStlLogScale) activeGl.uniform1i(glUniforms.uStlLogScale, stlStyle.logScale ? 1 : 0);
+        if (glUniforms.uContourLevels) activeGl.uniform1i(glUniforms.uContourLevels, stlStyle.smoothContours ? 0 : stlStyle.contourLevels);
 
         if (stlSolids && stlOpacity > 0.001) {
             stlDrawnThisFrameWebGL = true;
@@ -10766,35 +10685,13 @@ function render() {
         gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
         gl.enableVertexAttribArray(2);
 
-        const cObsQ = canonicalizeQuantity(obstaclesQuantity);
-        let obsMin = obstaclesMinVal;
-        let obsMax = obstaclesMaxVal;
-        const defaultObsRange = quantityRanges[cObsQ] || quantityRanges[obstaclesQuantity] || DEFAULT_QUANTITY_RANGES[cObsQ] || DEFAULT_QUANTITY_RANGES[obstaclesQuantity] || [0.0, 1.0];
-        const obsIsLocked = lockQuantityRanges && (obstaclesLockQuantityRange !== false);
-        const effectiveObsAuto = obsIsLocked ? ((quantityAutoScales[cObsQ] ?? quantityAutoScales[obstaclesQuantity]) !== false) : (obstaclesAutoScale !== false);
-        if (obsIsLocked) {
-            if (effectiveObsAuto && isFinite(cachedObstaclesMinVal) && isFinite(cachedObstaclesMaxVal) && cachedObstaclesMaxVal > cachedObstaclesMinVal) {
-                obsMin = cachedObstaclesMinVal;
-                obsMax = cachedObstaclesMaxVal;
-            } else {
-                obsMin = defaultObsRange[0];
-                obsMax = defaultObsRange[1];
-            }
-        } else if (effectiveObsAuto) {
-            if (isFinite(cachedObstaclesMinVal) && isFinite(cachedObstaclesMaxVal) && cachedObstaclesMaxVal > cachedObstaclesMinVal) {
-                obsMin = cachedObstaclesMinVal;
-                obsMax = cachedObstaclesMaxVal;
-            } else {
-                obsMin = defaultObsRange[0];
-                obsMax = defaultObsRange[1];
-            }
-        } else {
-            obsMin = obstaclesMinVal ?? defaultObsRange[0];
-            obsMax = obstaclesMaxVal ?? defaultObsRange[1];
-        }
-
-        const effectiveObsCmap = obsIsLocked ? (quantityColormaps[cObsQ] || quantityColormaps[obstaclesQuantity] || obstaclesColormap) : obstaclesColormap;
-        const effectiveObsLog = obsIsLocked ? (quantityLogScales[cObsQ] ?? quantityLogScales[obstaclesQuantity] ?? obstaclesLogScale) : obstaclesLogScale;
+        const obsStyle = getWorkerQuantityStyle(obstaclesQuantity);
+        const [obsMin, obsMax] = getResolvedQuantityBounds(obstaclesQuantity);
+        if (glUniforms.uColormap) gl.uniform1i(glUniforms.uColormap, getColormapIndex(obsStyle.colormap));
+        if (glUniforms.uMin) gl.uniform1f(glUniforms.uMin, obsMin);
+        if (glUniforms.uMax) gl.uniform1f(glUniforms.uMax, obsMax);
+        if (glUniforms.uUseLogScale) gl.uniform1i(glUniforms.uUseLogScale, obsStyle.logScale ? 1 : 0);
+        if (glUniforms.uContourLevels) gl.uniform1i(glUniforms.uContourLevels, obsStyle.smoothContours ? 0 : obsStyle.contourLevels);
 
         // Solid pass
         if (obstaclesOpacity > 0.001) {
@@ -10802,10 +10699,6 @@ function render() {
             if (isTransparentObs) gl.depthMask(false);
             if (uIsWF) gl.uniform1i(uIsWF, obstaclesLighting ? 9 : 11);
             if (uAlpha) gl.uniform1f(uAlpha, obstaclesOpacity);
-            if (glUniforms.uColormap) gl.uniform1i(glUniforms.uColormap, getColormapIndex(effectiveObsCmap));
-            if (glUniforms.uMin) gl.uniform1f(glUniforms.uMin, obsMin);
-            if (glUniforms.uMax) gl.uniform1f(glUniforms.uMax, obsMax);
-            if (glUniforms.uUseLogScale) gl.uniform1i(glUniforms.uUseLogScale, effectiveObsLog ? 1.0 : 0.0);
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, obstacleTriIndexBuffer);
             gl.drawElements(gl.TRIANGLES, obstacleTriIndexCount, gl.UNSIGNED_INT, 0);
             if (isTransparentObs) gl.depthMask(true);
@@ -10833,46 +10726,27 @@ function render() {
     }
 
     const getSliceProperties = (slice: SliceDataWebGL) => {
-        let colormapVal = slice.colormap;
-        let useLogScaleVal = slice.useLogScale;
-        let interpolateVal = slice.interpolate;
-        let minYVal = slice.minY;
-        let maxYVal = slice.maxY;
-        let opacityVal = slice.opacity;
-
         const cfg = getSliceConfig(slice.index);
-        let contourLevelsVal = (cfg?.contour_levels !== undefined ? Number(cfg.contour_levels) : (slice.contourLevels ?? sliceContourLevels));
-        let smoothContoursVal = (cfg?.smooth_contours !== undefined ? Boolean(cfg.smooth_contours) : (slice.smoothContours ?? sliceSmoothContours));
-        if (contourLevelsVal <= 1) {
-            smoothContoursVal = true;
-        }
+        const rawQty = cfg?.quantities?.[0] || 'pressure';
+        const sliceStyle = getWorkerQuantityStyle(rawQty);
+        const [minYVal, maxYVal] = getResolvedQuantityBounds(rawQty);
+        let opacityVal = slice.opacity;
 
         if (slice.is_submesh) {
             const parent = Object.values(activeSlicesWebGL).find(p => !p.is_submesh && p.axis === slice.axis && Math.abs(p.offset - slice.offset) < 1e-4);
             if (parent) {
-                colormapVal = parent.colormap;
-                useLogScaleVal = parent.useLogScale;
-                interpolateVal = parent.interpolate;
-                minYVal = parent.minY;
-                maxYVal = parent.maxY;
                 opacityVal = parent.opacity;
-                const parentCfg = getSliceConfig(parent.index);
-                contourLevelsVal = (parentCfg?.contour_levels !== undefined ? Number(parentCfg.contour_levels) : (parent.contourLevels ?? contourLevelsVal));
-                smoothContoursVal = (parentCfg?.smooth_contours !== undefined ? Boolean(parentCfg.smooth_contours) : (parent.smoothContours ?? smoothContoursVal));
-                if (contourLevelsVal <= 1) {
-                    smoothContoursVal = true;
-                }
             }
         }
         return {
-            colormap: colormapVal,
-            useLogScale: useLogScaleVal,
-            interpolate: interpolateVal,
+            colormap: sliceStyle.colormap,
+            useLogScale: sliceStyle.logScale,
+            interpolate: sliceStyle.interpolate,
             minY: minYVal,
             maxY: maxYVal,
             opacity: opacityVal,
-            contourLevels: contourLevelsVal,
-            smoothContours: smoothContoursVal
+            contourLevels: sliceStyle.smoothContours ? 0 : sliceStyle.contourLevels,
+            smoothContours: sliceStyle.smoothContours
         };
     };
 
@@ -10921,6 +10795,12 @@ function render() {
             if (uIsWF) gl!.uniform1i(uIsWF, 0);
             gl!.activeTexture(gl!.TEXTURE0);
             gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
+            if (slice.interpolate !== props.interpolate) {
+                const filter = props.interpolate ? (hasFloatLinear ? gl!.LINEAR : gl!.NEAREST) : gl!.NEAREST;
+                gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MIN_FILTER, filter);
+                gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MAG_FILTER, filter);
+                slice.interpolate = props.interpolate;
+            }
             gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
 
             // Stride is 28 (7 floats * 4 bytes)
@@ -10931,13 +10811,12 @@ function render() {
             gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
             gl!.enableVertexAttribArray(2);
 
-            if (uMin) gl!.uniform1f(uMin, props.minY ?? minY);
-            if (uMax) gl!.uniform1f(uMax, props.maxY ?? maxY);
+            if (uMin) gl!.uniform1f(uMin, props.minY);
+            if (uMax) gl!.uniform1f(uMax, props.maxY);
             if (uColormap) gl!.uniform1i(uColormap, getColormapIndex(props.colormap));
             if (uUseLog) gl!.uniform1i(uUseLog, props.useLogScale ? 1 : 0);
             if (glUniforms.uInterpolate) gl!.uniform1i(glUniforms.uInterpolate, props.interpolate ? 1 : 0);
-            const effSliceLevels = props.smoothContours ? 0 : (props.contourLevels && props.contourLevels > 1 ? props.contourLevels : 0);
-            if (glUniforms.uContourLevels) gl!.uniform1i(glUniforms.uContourLevels, effSliceLevels);
+            if (glUniforms.uContourLevels) gl!.uniform1i(glUniforms.uContourLevels, props.contourLevels);
             if (uAlpha) gl!.uniform1f(uAlpha, 1.0);
 
             // Set submesh mask uniforms
@@ -10971,6 +10850,12 @@ function render() {
                 if (uIsWF) gl!.uniform1i(uIsWF, 0);
                 gl!.activeTexture(gl!.TEXTURE0);
                 gl!.bindTexture(gl!.TEXTURE_2D, slice.texture);
+                if (slice.interpolate !== props.interpolate) {
+                    const filter = props.interpolate ? (hasFloatLinear ? gl!.LINEAR : gl!.NEAREST) : gl!.NEAREST;
+                    gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MIN_FILTER, filter);
+                    gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MAG_FILTER, filter);
+                    slice.interpolate = props.interpolate;
+                }
                 gl!.bindBuffer(gl!.ARRAY_BUFFER, slice.buffer);
 
                 // Stride is 28 (7 floats * 4 bytes)
@@ -10981,13 +10866,12 @@ function render() {
                 gl!.vertexAttribPointer(2, 2, gl!.FLOAT, false, 28, 20);
                 gl!.enableVertexAttribArray(2);
 
-                if (uMin) gl!.uniform1f(uMin, props.minY ?? minY);
-                if (uMax) gl!.uniform1f(uMax, props.maxY ?? maxY);
+                if (uMin) gl!.uniform1f(uMin, props.minY);
+                if (uMax) gl!.uniform1f(uMax, props.maxY);
                 if (uColormap) gl!.uniform1i(uColormap, getColormapIndex(props.colormap));
                 if (uUseLog) gl!.uniform1i(uUseLog, props.useLogScale ? 1 : 0);
                 if (glUniforms.uInterpolate) gl!.uniform1i(glUniforms.uInterpolate, props.interpolate ? 1 : 0);
-                const effSliceLevels = props.smoothContours ? 0 : (props.contourLevels && props.contourLevels > 1 ? props.contourLevels : 0);
-                if (glUniforms.uContourLevels) gl!.uniform1i(glUniforms.uContourLevels, effSliceLevels);
+                if (glUniforms.uContourLevels) gl!.uniform1i(glUniforms.uContourLevels, props.contourLevels);
                 if (uAlpha) gl!.uniform1f(uAlpha, props.opacity);
 
                 // Set submesh mask uniforms
@@ -11005,6 +10889,33 @@ function render() {
             gl.depthMask(true);
         }
 
+        if (showSlices !== false && sliceGridlinesBuffer && sliceGridlinesCount > 0) {
+            gl.depthMask(false);
+            if (uIsWF) gl.uniform1i(uIsWF, 10);
+            if (uAlpha) gl.uniform1f(uAlpha, 1.0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, sliceGridlinesBuffer);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+            gl.enableVertexAttribArray(0);
+            gl.disableVertexAttribArray(1);
+            gl.disableVertexAttribArray(2);
+            gl.drawArrays(gl.LINES, 0, sliceGridlinesCount);
+            gl.depthMask(true);
+        }
+    } else if (showSlices !== false) {
+        if (placeholderSlicesBuffer && placeholderSlicesCount > 0) {
+            gl.depthMask(false);
+            if (uIsWF) gl.uniform1i(uIsWF, 23);
+            if (uAlpha) gl.uniform1f(uAlpha, 0.18);
+            gl.bindBuffer(gl.ARRAY_BUFFER, placeholderSlicesBuffer);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 12);
+            gl.enableVertexAttribArray(1);
+            gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 28, 20);
+            gl.enableVertexAttribArray(2);
+            gl.drawArrays(gl.TRIANGLES, 0, placeholderSlicesCount);
+            gl.depthMask(true);
+        }
         if (sliceGridlinesBuffer && sliceGridlinesCount > 0) {
             gl.depthMask(false);
             if (uIsWF) gl.uniform1i(uIsWF, 10);
@@ -11145,6 +11056,16 @@ function render() {
             gl.disableVertexAttribArray(1);
             gl.disableVertexAttribArray(2);
             gl.drawArrays(gl.LINES, 0, chargeWireCount);
+        }
+        if (remapWireBuffer && remapWireCount > 0) {
+            if (uIsWF) gl.uniform1i(uIsWF, 16);
+            if (uAlpha) gl.uniform1f(uAlpha, 0.88);
+            gl.bindBuffer(gl.ARRAY_BUFFER, remapWireBuffer);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 20, 0);
+            gl.enableVertexAttribArray(0);
+            gl.disableVertexAttribArray(1);
+            gl.disableVertexAttribArray(2);
+            gl.drawArrays(gl.LINES, 0, remapWireCount);
         }
     }
 
@@ -12205,6 +12126,7 @@ self.onmessage = async (e) => {
             cachedFemAABB = null;
             cachedMpmAABB = null;
             cachedSlices = [];
+            activeSlices2D = [];
             Object.values(activeSlicesWebGL).forEach(s => {
                 if (gl) {
                     if (s.texture) gl.deleteTexture(s.texture);
@@ -12217,6 +12139,8 @@ self.onmessage = async (e) => {
                 if (s.vertexBuffer) s.vertexBuffer.destroy();
             });
             activeSlicesWebGPU = {};
+            updateSliceAMRGridlinesGeometry();
+            updatePlaceholderSlicesGeometry();
             femBoundsInitialized = false;
             if (gl) {
                 if (femSolidBuffer) {
@@ -12330,109 +12254,117 @@ self.onmessage = async (e) => {
             if (data.ambientLevel !== undefined) ambientLevel = data.ambientLevel;
             let mpmChanged = false;
             let femChanged = false;
-            if (data.quantityColormaps !== undefined) {
-                let cmapsDiff = false;
-                for (const [k, v] of Object.entries(data.quantityColormaps)) {
+            let stylesChanged = false;
+            const prevObsQty = obstaclesQuantity;
+            const prevObsInterpolate = getWorkerQuantityStyle(obstaclesQuantity).interpolate;
+            const prevStlInterpolate = getWorkerQuantityStyle(stlQuantity).interpolate;
+
+            const incomingStyles = data.quantityStyles || data.quantity_styles;
+            if (incomingStyles && typeof incomingStyles === 'object') {
+                for (const [k, rawVal] of Object.entries(incomingStyles)) {
+                    if (!rawVal || typeof rawVal !== 'object') continue;
                     const ck = canonicalizeQuantity(k);
-                    if (quantityColormaps[ck] !== v || quantityColormaps[k] !== v) {
-                        quantityColormaps[ck] = v as string;
-                        quantityColormaps[k] = v as string;
-                        cmapsDiff = true;
+                    const prevS = getWorkerQuantityStyle(ck);
+                    const rv = rawVal as Partial<QuantityContourStyle>;
+                    const rawLevels = rv.contourLevels !== undefined
+                        ? Math.max(0, Math.round(Number(rv.contourLevels)))
+                        : prevS.contourLevels;
+                    const nextSmooth = rv.smoothContours !== undefined
+                        ? (Boolean(rv.smoothContours) || rawLevels <= 1)
+                        : (rv.contourLevels !== undefined ? rawLevels <= 1 : prevS.smoothContours);
+                    const nextS: QuantityContourStyle = {
+                        colormap: rv.colormap !== undefined ? normalizeColormapId(rv.colormap) : prevS.colormap,
+                        autoScale: rv.autoScale !== undefined ? Boolean(rv.autoScale) : prevS.autoScale,
+                        logScale: rv.logScale !== undefined ? Boolean(rv.logScale) : prevS.logScale,
+                        minVal: (rv.minVal !== undefined && Number.isFinite(Number(rv.minVal))) ? Number(rv.minVal) : prevS.minVal,
+                        maxVal: (rv.maxVal !== undefined && Number.isFinite(Number(rv.maxVal))) ? Number(rv.maxVal) : prevS.maxVal,
+                        contourLevels: nextSmooth ? 0 : rawLevels,
+                        smoothContours: nextSmooth,
+                        interpolate: rv.interpolate !== undefined ? Boolean(rv.interpolate) : prevS.interpolate,
+                        showColorbar: rv.showColorbar !== undefined ? Boolean(rv.showColorbar) : prevS.showColorbar
+                    };
+                    if (!(nextS.maxVal > nextS.minVal)) {
+                        nextS.maxVal = nextS.minVal + Math.max(Math.abs(nextS.minVal) * 0.01, 1.0);
+                    }
+                    if (
+                        prevS.colormap !== nextS.colormap ||
+                        prevS.autoScale !== nextS.autoScale ||
+                        prevS.logScale !== nextS.logScale ||
+                        prevS.minVal !== nextS.minVal ||
+                        prevS.maxVal !== nextS.maxVal ||
+                        prevS.contourLevels !== nextS.contourLevels ||
+                        prevS.smoothContours !== nextS.smoothContours ||
+                        prevS.interpolate !== nextS.interpolate
+                    ) {
+                        stylesChanged = true;
+                    }
+                    quantityStyles[ck] = nextS;
+                    quantityColormaps[ck] = nextS.colormap;
+                    quantityLogScales[ck] = nextS.logScale;
+                    quantityAutoScales[ck] = nextS.autoScale;
+                    if (!nextS.autoScale) {
+                        quantityRanges[ck] = [nextS.minVal, nextS.maxVal];
+                        resolvedQuantityRanges[ck] = [nextS.minVal, nextS.maxVal];
                     }
                 }
-                if (cmapsDiff && lockQuantityRanges) {
-                    mpmChanged = true;
-                    femChanged = true;
-                }
-                if (cachedSlices.length > 0) {
-                    cachedSlices.forEach((sliceObj, i) => {
-                        const config = getSliceConfig(i);
-                        const rawQ = config?.quantities?.[0] || 'pressure';
-                        const cQ = canonicalizeQuantity(rawQ);
-                        sliceObj.colormap = quantityColormaps[cQ] || quantityColormaps[rawQ] || config?.colormap || 'rainbow';
-                    });
-                }
-            }
-            if (data.quantityRanges !== undefined) {
-                let rangesDiff = false;
-                for (const [k, v] of Object.entries(data.quantityRanges)) {
-                    const ck = canonicalizeQuantity(k);
-                    const arr = v as [number, number];
-                    const prev = quantityRanges[ck];
-                    if (!prev || prev[0] !== arr[0] || prev[1] !== arr[1]) {
-                        rangesDiff = true;
+            } else {
+                const incomingAutos = data.quantityAutoScales || data.quantity_auto_scales;
+                if (incomingAutos !== undefined) {
+                    for (const [k, v] of Object.entries(incomingAutos)) {
+                        const ck = canonicalizeQuantity(k);
+                        const bv = Boolean(v);
+                        const prevS = getWorkerQuantityStyle(ck);
+                        if (prevS.autoScale !== bv) stylesChanged = true;
+                        quantityAutoScales[ck] = bv;
+                        quantityStyles[ck] = { ...prevS, autoScale: bv };
                     }
-                    quantityRanges[ck] = arr;
-                    quantityRanges[k] = arr;
                 }
-                if (rangesDiff && lockQuantityRanges) {
-                    mpmChanged = true;
-                    femChanged = true;
+                if (data.quantityColormaps !== undefined) {
+                    for (const [k, v] of Object.entries(data.quantityColormaps)) {
+                        const ck = canonicalizeQuantity(k);
+                        const cmap = normalizeColormapId(v as string);
+                        const prevS = getWorkerQuantityStyle(ck);
+                        if (prevS.colormap !== cmap) stylesChanged = true;
+                        quantityColormaps[ck] = cmap;
+                        quantityStyles[ck] = { ...prevS, colormap: cmap };
+                    }
                 }
-            }
-            const incomingLogs = data.quantityLogScales || data.quantity_log_scales;
-            if (incomingLogs !== undefined) {
-                let logsDiff = false;
-                for (const [k, v] of Object.entries(incomingLogs)) {
-                    const ck = canonicalizeQuantity(k);
-                    const bv = Boolean(v);
-                    if (quantityLogScales[ck] !== bv) logsDiff = true;
-                    quantityLogScales[ck] = bv;
-                    quantityLogScales[k] = bv;
+                const incomingLogs = data.quantityLogScales || data.quantity_log_scales;
+                if (incomingLogs !== undefined) {
+                    for (const [k, v] of Object.entries(incomingLogs)) {
+                        const ck = canonicalizeQuantity(k);
+                        const bv = Boolean(v);
+                        const prevS = getWorkerQuantityStyle(ck);
+                        if (prevS.logScale !== bv) stylesChanged = true;
+                        quantityLogScales[ck] = bv;
+                        quantityStyles[ck] = { ...prevS, logScale: bv };
+                    }
                 }
-                if (logsDiff && lockQuantityRanges) {
-                    mpmChanged = true;
-                    femChanged = true;
-                }
-            }
-            const incomingAutos = data.quantityAutoScales || data.quantity_auto_scales;
-            if (incomingAutos !== undefined) {
-                let autosDiff = false;
-                for (const [k, v] of Object.entries(incomingAutos)) {
-                    const ck = canonicalizeQuantity(k);
-                    const bv = Boolean(v);
-                    if (quantityAutoScales[ck] !== bv) autosDiff = true;
-                    quantityAutoScales[ck] = bv;
-                    quantityAutoScales[k] = bv;
-                }
-                if (autosDiff && lockQuantityRanges) {
-                    mpmChanged = true;
-                    femChanged = true;
-                }
-            }
-            if (data.lockQuantityRanges !== undefined || data.lock_quantity_ranges !== undefined) {
-                const nextLock = Boolean(data.lockQuantityRanges ?? data.lock_quantity_ranges);
-                if (lockQuantityRanges !== nextLock) {
-                    lockQuantityRanges = nextLock;
-                    mpmChanged = true;
-                    femChanged = true;
+                if (data.quantityRanges !== undefined) {
+                    for (const [k, v] of Object.entries(data.quantityRanges)) {
+                        const ck = canonicalizeQuantity(k);
+                        const arr = v as [number, number];
+                        if (!Array.isArray(arr) || arr.length < 2) continue;
+                        const prevS = getWorkerQuantityStyle(ck);
+                        if (!prevS.autoScale) {
+                            if (prevS.minVal !== arr[0] || prevS.maxVal !== arr[1]) stylesChanged = true;
+                            quantityRanges[ck] = arr;
+                            resolvedQuantityRanges[ck] = [arr[0], arr[1]];
+                            quantityStyles[ck] = { ...prevS, minVal: arr[0], maxVal: arr[1] };
+                        }
+                    }
                 }
             }
-            if (data.stlLockQuantityRange !== undefined) stlLockQuantityRange = Boolean(data.stlLockQuantityRange);
-            if (data.stl_lock_quantity_range !== undefined) stlLockQuantityRange = Boolean(data.stl_lock_quantity_range);
-            if (data.obstaclesLockQuantityRange !== undefined) obstaclesLockQuantityRange = Boolean(data.obstaclesLockQuantityRange);
-            if (data.obstacles_lock_quantity_range !== undefined) obstaclesLockQuantityRange = Boolean(data.obstacles_lock_quantity_range);
-            if (data.mpmLockQuantityRange !== undefined || data.mpm_lock_quantity_range !== undefined) {
-                const nextMpmLock = Boolean(data.mpmLockQuantityRange ?? data.mpm_lock_quantity_range);
-                if (mpmLockQuantityRange !== nextMpmLock) {
-                    mpmLockQuantityRange = nextMpmLock;
-                    mpmChanged = true;
-                }
+            if (stylesChanged) {
+                mpmChanged = true;
+                femChanged = true;
             }
-            if (data.femLockQuantityRange !== undefined || data.fem_lock_quantity_range !== undefined) {
-                const nextFemLock = Boolean(data.femLockQuantityRange ?? data.fem_lock_quantity_range);
-                if (femLockQuantityRange !== nextFemLock) {
-                    femLockQuantityRange = nextFemLock;
-                    femChanged = true;
-                }
-            }
-            if (data.beamLockQuantityRange !== undefined || data.beam_lock_quantity_range !== undefined) {
-                const nextBeamLock = Boolean(data.beamLockQuantityRange ?? data.beam_lock_quantity_range);
-                if (beamLockQuantityRange !== nextBeamLock) {
-                    beamLockQuantityRange = nextBeamLock;
-                    femChanged = true;
-                }
-            }
+            lockQuantityRanges = true;
+            stlLockQuantityRange = true;
+            obstaclesLockQuantityRange = true;
+            mpmLockQuantityRange = true;
+            femLockQuantityRange = true;
+            beamLockQuantityRange = true;
             if (data.sliceOpacities !== undefined) sliceOpacities = data.sliceOpacities;
 
             if (data.showSlices !== undefined) showSlices = data.showSlices;
@@ -12452,6 +12384,12 @@ self.onmessage = async (e) => {
             if (data.obstaclesInterpolate !== undefined) obstaclesInterpolate = data.obstaclesInterpolate;
             if (data.obstaclesMinVal !== undefined) obstaclesMinVal = data.obstaclesMinVal;
             if (data.obstaclesMaxVal !== undefined) obstaclesMaxVal = data.obstaclesMaxVal;
+            if (data.obstaclesContourLevels !== undefined || data.obstacles_contour_levels !== undefined) {
+                obstaclesContourLevels = Math.max(0, Math.round(Number(data.obstaclesContourLevels ?? data.obstacles_contour_levels)));
+            }
+            if (data.obstaclesSmoothContours !== undefined || data.obstacles_smooth_contours !== undefined) {
+                obstaclesSmoothContours = Boolean(data.obstaclesSmoothContours ?? data.obstacles_smooth_contours);
+            }
 
             if (data.meshType !== undefined) meshType = data.meshType;
             if (data.gridOpacity !== undefined) gridOpacity = data.gridOpacity;
@@ -12464,6 +12402,7 @@ self.onmessage = async (e) => {
                 if (slicesGridSig !== lastSlicesGridlinesSig || boundsChanged) {
                     lastSlicesGridlinesSig = slicesGridSig;
                     updateSliceAMRGridlinesGeometry();
+                    updatePlaceholderSlicesGeometry();
                 }
             }
             if (data.amr_leaf_tiles !== undefined) {
@@ -12486,6 +12425,7 @@ self.onmessage = async (e) => {
                     amrLeafTilesCache = submeshTiles;
                     updateAMRTilesGeometry(submeshTiles);
                     updateSliceAMRGridlinesGeometry();
+                    updatePlaceholderSlicesGeometry();
                 }
             }
 
@@ -12591,6 +12531,12 @@ self.onmessage = async (e) => {
             if (data.stlShowResults !== undefined) stlShowResults = data.stlShowResults;
             if (data.stlQuantity !== undefined) stlQuantity = data.stlQuantity;
             if (data.stlSamplingMode !== undefined) stlSamplingMode = data.stlSamplingMode;
+            if (data.stlContourLevels !== undefined || data.stl_contour_levels !== undefined) {
+                stlContourLevels = Math.max(0, Math.round(Number(data.stlContourLevels ?? data.stl_contour_levels)));
+            }
+            if (data.stlSmoothContours !== undefined || data.stl_smooth_contours !== undefined) {
+                stlSmoothContours = Boolean(data.stlSmoothContours ?? data.stl_smooth_contours);
+            }
 
             let gaugesChanged = false;
             if (data.showGauges !== undefined) showGauges = data.showGauges;
@@ -12688,6 +12634,13 @@ self.onmessage = async (e) => {
                     femChanged = true;
                 }
             }
+            if (data.femInterpolate !== undefined) {
+                const fi = Boolean(data.femInterpolate);
+                if (femInterpolate !== fi) {
+                    femInterpolate = fi;
+                    femChanged = true;
+                }
+            }
             if (data.sliceContourLevels !== undefined) {
                 const scl = Math.max(0, Math.round(Number(data.sliceContourLevels)));
                 if (sliceContourLevels !== scl) {
@@ -12745,10 +12698,6 @@ self.onmessage = async (e) => {
                     femChanged = true;
                     updateFEMPreviewGeometry();
                 }
-            }
-            if (femChanged) {
-                updateFEMMeshGeometry();
-                requestRender();
             }
             if (data.gaugeQuantity !== undefined) gaugeQuantity = data.gaugeQuantity;
             if (data.gaugeSolid !== undefined) gaugeSolid = data.gaugeSolid;
@@ -12857,11 +12806,6 @@ self.onmessage = async (e) => {
                     mpmRenderNeeded = true;
                 }
             }
-            if (mpmChanged) {
-                updateMPMParticlesGeometry();
-            } else if (mpmRenderNeeded) {
-                requestRender();
-            }
 
             let phaseChanged = false;
             let phaseRenderNeeded = false;
@@ -12885,11 +12829,39 @@ self.onmessage = async (e) => {
                     phaseChanged = true;
                 }
             }
-            if (phaseChanged) {
-                updatePhaseParticlesGeometry();
-            } else if (phaseRenderNeeded) {
-                requestRender();
+            if (stylesChanged && showPhaseParticles && (phaseParticleQuantity === 'velocity' || phaseParticleQuantity === 'speed')) {
+                phaseChanged = true;
             }
+
+            if (data.focusedSliceIndex !== undefined) focusedSliceIndex = data.focusedSliceIndex;
+            if (data.showSTL !== undefined) showSTL = data.showSTL;
+            if (data.show_stl !== undefined) showSTL = data.show_stl;
+            if (data.stlWireframe !== undefined) stlWireframe = data.stlWireframe;
+            if (data.stl_wireframe !== undefined) stlWireframe = data.stl_wireframe;
+            if (data.stlSolids !== undefined) stlSolids = data.stlSolids;
+            if (data.stl_solids !== undefined) stlSolids = data.stl_solids;
+            if (data.stlOpacity !== undefined) stlOpacity = Number(data.stlOpacity);
+            if (data.stl_opacity !== undefined) stlOpacity = Number(data.stl_opacity);
+            if (data.stlColormap !== undefined) stlColormap = data.stlColormap;
+            if (data.stl_colormap !== undefined) stlColormap = data.stl_colormap;
+            if (data.stlShowResults !== undefined) stlShowResults = data.stlShowResults;
+            if (data.stl_show_results !== undefined) stlShowResults = data.stl_show_results;
+            if (data.stlQuantity !== undefined) stlQuantity = data.stlQuantity;
+            if (data.stl_quantity !== undefined) stlQuantity = data.stl_quantity;
+            if (data.stlSamplingMode !== undefined) stlSamplingMode = data.stlSamplingMode;
+            if (data.stl_sampling_mode !== undefined) stlSamplingMode = data.stl_sampling_mode;
+            if (data.stlAutoScale !== undefined) stlAutoScale = data.stlAutoScale;
+            if (data.stl_auto_scale !== undefined) stlAutoScale = data.stl_auto_scale;
+            if (data.stlLogScale !== undefined) stlLogScale = data.stlLogScale;
+            if (data.stl_log_scale !== undefined) stlLogScale = data.stl_log_scale;
+            if (data.stlMinVal !== undefined) stlMinVal = data.stlMinVal;
+            if (data.stl_min_val !== undefined) stlMinVal = data.stl_min_val;
+            if (data.stlMaxVal !== undefined) stlMaxVal = data.stlMaxVal;
+            if (data.stl_max_val !== undefined) stlMaxVal = data.stl_max_val;
+            if (data.stlContourLevels !== undefined) stlContourLevels = Math.max(0, Math.round(Number(data.stlContourLevels)));
+            if (data.stl_contour_levels !== undefined) stlContourLevels = Math.max(0, Math.round(Number(data.stl_contour_levels)));
+            if (data.stlSmoothContours !== undefined) stlSmoothContours = Boolean(data.stlSmoothContours);
+            if (data.stl_smooth_contours !== undefined) stlSmoothContours = Boolean(data.stl_smooth_contours);
 
             if (boundsChanged) {
                 gaugesChanged = true;
@@ -12898,26 +12870,35 @@ self.onmessage = async (e) => {
                 updateDetonatorGeometry();
                 updateMPMPreviewGeometry();
                 updateFEMPreviewGeometry();
-                if (latestPhaseParticlesData && latestPhaseParticlesData.length > 0 && !phaseChanged) {
-                    updatePhaseParticlesGeometry();
+                updateSliceAMRGridlinesGeometry();
+                updatePlaceholderSlicesGeometry();
+                if (latestPhaseParticlesData && latestPhaseParticlesData.length > 0) {
+                    phaseChanged = true;
                 }
-                if (latestMPMParticlesData && latestMPMParticlesData.length > 0 && !mpmChanged) {
-                    updateMPMParticlesGeometry();
+                if (latestMPMParticlesData && latestMPMParticlesData.length > 0) {
+                    mpmChanged = true;
                 }
             }
             if (gaugesChanged) {
                 updateGaugesGeometry();
             }
+
             if (data.slices !== undefined) {
                 slicesConfig = data.slices;
-                
-                // If cachedSlices exists (from simulation frames), update or trim
+                slicesConfigCache = data.slices;
+                const slicesGridSig = JSON.stringify(data.slices.map((s: any) => [s.enabled, s.axis, s.offset, s.gridlines, s.show_mesh]));
+                if (slicesGridSig !== lastSlicesGridlinesSig || boundsChanged) {
+                    lastSlicesGridlinesSig = slicesGridSig;
+                    updateSliceAMRGridlinesGeometry();
+                    updatePlaceholderSlicesGeometry();
+                }
+
+                // If cachedSlices exists (from simulation frames), trim deleted slices and update geometry axis/offset ONLY
                 if (cachedSlices.length > 0) {
                     const parentSlices = cachedSlices.filter(s => !s.is_submesh);
                     const submeshSlices = cachedSlices.filter(s => s.is_submesh);
 
                     if (parentSlices.length > slicesConfig.length) {
-                        // Destroy resources for slices that are being deleted
                         for (let i = slicesConfig.length; i < parentSlices.length; i++) {
                             const origIdx = cachedSlices.indexOf(parentSlices[i]);
                             if (origIdx !== -1) {
@@ -12938,28 +12919,20 @@ self.onmessage = async (e) => {
 
                     cachedSlices = [...parentSlices, ...submeshSlices];
                 }
-                
-                // Now, update cachedSlices configurations in-place (including axis and offset)
+
                 cachedSlices.forEach((sliceObj, i) => {
                     const config = getSliceConfig(i);
                     if (!config) return;
                     const targetAxis = config.axis === 'xy' ? 0 : config.axis === 'xz' ? 1 : 2;
                     sliceObj.axis = targetAxis;
                     sliceObj.offset = Number(config.offset ?? sliceObj.offset);
-                    sliceObj.minY = config.min_val ?? sliceObj.minY;
-                    sliceObj.maxY = config.max_val ?? sliceObj.maxY;
-                    sliceObj.colormap = config.colormap || 'rainbow';
-                    sliceObj.useLogScale = config.log_scale === true;
-                    sliceObj.interpolate = config.interpolate === true;
-                    if (config.contour_levels !== undefined) {
-                        sliceObj.contourLevels = Number(config.contour_levels);
-                    }
-                    if (config.smooth_contours !== undefined) {
-                        sliceObj.smoothContours = Boolean(config.smooth_contours);
-                    }
                 });
+            }
 
-                // Update active slices (WebGL / WebGPU) immediately so they are in sync!
+            // Unconditionally recompute authoritative per-quantity ranges and push unified styles onto cachedSlices BEFORE syncing GPU/CPU buffers!
+            recomputeActiveRanges('config');
+
+            if (data.slices !== undefined) {
                 if (isWebGPU && gpuDevice) {
                     cachedSlices.forEach((sliceObj, i) => {
                         const axis = sliceObj.axis;
@@ -13202,35 +13175,30 @@ self.onmessage = async (e) => {
                     });
                 }
             }
-            if (data.focusedSliceIndex !== undefined) focusedSliceIndex = data.focusedSliceIndex;
-            if (data.showSTL !== undefined) showSTL = data.showSTL;
-            if (data.show_stl !== undefined) showSTL = data.show_stl;
-            if (data.stlWireframe !== undefined) stlWireframe = data.stlWireframe;
-            if (data.stl_wireframe !== undefined) stlWireframe = data.stl_wireframe;
-            if (data.stlSolids !== undefined) stlSolids = data.stlSolids;
-            if (data.stl_solids !== undefined) stlSolids = data.stl_solids;
-            if (data.stlOpacity !== undefined) stlOpacity = Number(data.stlOpacity);
-            if (data.stl_opacity !== undefined) stlOpacity = Number(data.stl_opacity);
-            if (data.stlColormap !== undefined) stlColormap = data.stlColormap;
-            if (data.stl_colormap !== undefined) stlColormap = data.stl_colormap;
-            if (data.stlShowResults !== undefined) stlShowResults = data.stlShowResults;
-            if (data.stl_show_results !== undefined) stlShowResults = data.stl_show_results;
-            if (data.stlQuantity !== undefined) stlQuantity = data.stlQuantity;
-            if (data.stl_quantity !== undefined) stlQuantity = data.stl_quantity;
-            if (data.stlSamplingMode !== undefined) stlSamplingMode = data.stlSamplingMode;
-            if (data.stl_sampling_mode !== undefined) stlSamplingMode = data.stl_sampling_mode;
-            if (data.stlAutoScale !== undefined) stlAutoScale = data.stlAutoScale;
-            if (data.stl_auto_scale !== undefined) stlAutoScale = data.stl_auto_scale;
-            if (data.stlLogScale !== undefined) stlLogScale = data.stlLogScale;
-            if (data.stl_log_scale !== undefined) stlLogScale = data.stl_log_scale;
-            if (data.stlMinVal !== undefined) stlMinVal = data.stlMinVal;
-            if (data.stl_min_val !== undefined) stlMinVal = data.stl_min_val;
-            if (data.stlMaxVal !== undefined) stlMaxVal = data.stlMaxVal;
-            if (data.stl_max_val !== undefined) stlMaxVal = data.stl_max_val;
 
-            // Recalculate range immediately using cached per-slice stats (O(1) per slice)
-            if (cachedSlices.length > 0) {
-                recomputeActiveRanges();
+            // Synchronize Obstacle corner interpolation and STL 3D volume texture filter when interpolation mode changes
+            const nextObsInterpolate = getWorkerQuantityStyle(obstaclesQuantity).interpolate;
+            if ((obstaclesQuantity !== prevObsQty || nextObsInterpolate !== prevObsInterpolate) && latestObstaclesData && latestObstaclesData.length > 0) {
+                updateObstaclesValues(latestObstaclesData);
+            }
+            const nextStlInterpolate = getWorkerQuantityStyle(stlQuantity).interpolate;
+            if (nextStlInterpolate !== prevStlInterpolate && gl && isWebGL2 && glVolume3DTexture) {
+                gl.activeTexture(gl.TEXTURE1);
+                gl.bindTexture(gl.TEXTURE_3D, glVolume3DTexture);
+                const filter = nextStlInterpolate ? gl.LINEAR : gl.NEAREST;
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, filter);
+                gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, filter);
+            }
+
+            // Rebuild CPU-baked vertex buffers ONCE after authoritative ranges and styles are resolved
+            if (femChanged) {
+                updateFEMMeshGeometry();
+            }
+            if (mpmChanged) {
+                updateMPMParticlesGeometry();
+            }
+            if (phaseChanged) {
+                updatePhaseParticlesGeometry();
             }
 
             if (matricesNeedUpdate) {
@@ -13244,68 +13212,74 @@ self.onmessage = async (e) => {
             const idx = e.data.index !== undefined ? e.data.index : focusedSliceIndex;
             const slice = cachedSlices[idx];
             if (slice) {
+                const cfg = getSliceConfig(idx);
+                const rawQty = cfg?.quantities?.[0] || 'pressure';
+                const cQty = canonicalizeQuantity(rawQty);
                 let sliceMin = Infinity;
                 let sliceMax = -Infinity;
                 for (let j = 0; j < slice.data.length; j++) {
                     const v = slice.data[j];
-                    if (isFinite(v)) {
+                    if (isValidQuantitySample(cQty, v)) {
                         if (v < sliceMin) sliceMin = v;
                         if (v > sliceMax) sliceMax = v;
                     }
                 }
 
-                if (sliceMin < sliceMax) {
-                    slice.minY = sliceMin;
-                    slice.maxY = sliceMax;
-                    
-                    if (isWebGPU && activeSlicesWebGPU[idx]) {
-                        activeSlicesWebGPU[idx].minY = sliceMin;
-                        activeSlicesWebGPU[idx].maxY = sliceMax;
-                    } else if (gl && activeSlicesWebGL[idx]) {
-                        activeSlicesWebGL[idx].minY = sliceMin;
-                        activeSlicesWebGL[idx].maxY = sliceMax;
-                    }
-
-                    self.postMessage({ type: 'rangeUpdated', index: idx, min: sliceMin, max: sliceMax });
+                if (sliceMin < sliceMax && isFinite(sliceMin) && isFinite(sliceMax)) {
+                    const prevS = getWorkerQuantityStyle(cQty);
+                    quantityStyles[cQty] = { ...prevS, autoScale: false, minVal: sliceMin, maxVal: sliceMax };
+                    quantityAutoScales[cQty] = false;
+                    quantityRanges[cQty] = [sliceMin, sliceMax];
+                    resolvedQuantityRanges[cQty] = [sliceMin, sliceMax];
+                    recomputeActiveRanges('scale');
+                    self.postMessage({ type: 'rangeUpdated', index: idx, quantity: cQty, min: sliceMin, max: sliceMax });
                     requestRender();
                 }
             }
         } else if (type === "scaleObstaclesToCurrent") {
+            const cQty = canonicalizeQuantity(obstaclesQuantity);
             let obsMin = Infinity;
             let obsMax = -Infinity;
             if (latestObstaclesData && latestObstaclesData.length > 0) {
                 for (let i = 0; i < latestObstaclesData.length; i++) {
                     const v = latestObstaclesData[i];
-                    if (isFinite(v)) {
+                    if (isValidQuantitySample(cQty, v)) {
                         if (v < obsMin) obsMin = v;
                         if (v > obsMax) obsMax = v;
                     }
                 }
             }
             if (obsMin < obsMax && isFinite(obsMin) && isFinite(obsMax)) {
-                obstaclesMinVal = obsMin;
-                obstaclesMaxVal = obsMax;
-                obstaclesAutoScale = false;
-                self.postMessage({ type: 'obstaclesRangeUpdated', min: obsMin, max: obsMax });
+                const prevS = getWorkerQuantityStyle(cQty);
+                quantityStyles[cQty] = { ...prevS, autoScale: false, minVal: obsMin, maxVal: obsMax };
+                quantityAutoScales[cQty] = false;
+                quantityRanges[cQty] = [obsMin, obsMax];
+                resolvedQuantityRanges[cQty] = [obsMin, obsMax];
+                recomputeActiveRanges('scale');
+                self.postMessage({ type: 'obstaclesRangeUpdated', quantity: cQty, min: obsMin, max: obsMax });
                 requestRender();
             }
         } else if (type === "scaleStlToCurrent") {
+            const cQty = canonicalizeQuantity(stlQuantity);
             let stlMin = Infinity;
             let stlMax = -Infinity;
             if (latestVolume3DData && latestVolume3DData.length > 0) {
                 for (let k = 0; k < latestVolume3DData.length; k++) {
                     const val = latestVolume3DData[k];
-                    if (isFinite(val)) {
+                    if (isValidQuantitySample(cQty, val)) {
                         if (val < stlMin) stlMin = val;
                         if (val > stlMax) stlMax = val;
                     }
                 }
             }
             if (stlMin < stlMax && isFinite(stlMin) && isFinite(stlMax)) {
-                stlMinVal = stlMin;
-                stlMaxVal = stlMax;
-                stlAutoScale = false;
-                self.postMessage({ type: 'stlRangeUpdated', min: stlMin, max: stlMax });
+                const prevS = getWorkerQuantityStyle(cQty);
+                quantityStyles[cQty] = { ...prevS, autoScale: false, minVal: stlMin, maxVal: stlMax };
+                quantityAutoScales[cQty] = false;
+                quantityRanges[cQty] = [stlMin, stlMax];
+                resolvedQuantityRanges[cQty] = [stlMin, stlMax];
+                recomputeActiveRanges('scale');
+                self.postMessage({ type: 'stlRangeUpdated', quantity: cQty, min: stlMin, max: stlMax });
                 requestRender();
             }
         }

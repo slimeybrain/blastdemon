@@ -4,16 +4,17 @@
  * parent-child entity nesting, visibility toggles, filter pipelines, and execution.
  */
 
-import { StateManager, prepareModelSavePayload, getSliceAxisLabel, isExplosiveMaterialNode, isSeabedMaterialNode, isWaterMaterialNode, isSolidMaterialNode, resolveFEMCounts, getLSDynaDeckMeta } from './state-manager.js';
-import { Model, Node, NodeType, SimulationStatus, SimulationState } from './types.js';
+import { StateManager, prepareModelSavePayload, resolveResourcePath, getSliceAxisLabel, isExplosiveMaterialNode, isSeabedMaterialNode, isWaterMaterialNode, isSolidMaterialNode, resolveFEMCounts, getLSDynaDeckMeta } from './state-manager.js';
+import { Model, Node, NodeType, SimulationStatus, SimulationState, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { PlatformBridge } from './PlatformBridge.js';
 import { CustomDialog } from './custom-dialog.js';
-import { HostFileBrowserModal } from './host-file-browser.js';
+import { HostFileBrowserModal, showRecentFoldersQuickMenu, recordRecentFolder } from './host-file-browser.js';
 import { GaugeManagerModal } from './gauge-manager-modal.js';
 import { PipelineConnectionModal } from './pipeline-connection-modal.js';
 import { FEMSetupModal } from './fem-setup-modal.js';
 import { syncModelFEMSetup, FEMSetupConfig, FEMPartConfig, FEMEntitySet, FEMBoundaryCondition, FEMContactConfig, FEMSectionType, getPartColor } from './fem-setup-types.js';
-import { isAirMaterialNode, isJWLMaterialNode, isIdealGasMaterialNode } from './serialization.js';
+import { isAirMaterialNode, isJWLMaterialNode, isIdealGasMaterialNode, resolveRemapInheritance } from './serialization.js';
+import { showModelErrorModal, getErrorBadgeTooltip } from './model-error-modal.js';
 
 interface EntityCategory {
     id: string;
@@ -38,7 +39,7 @@ const CATEGORIES: EntityCategory[] = [
         label: 'Domain & Grid Meshes',
         icon: '📐',
         color: '#4fc3f7',
-        types: ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D']
+        types: ['DomainMesh', 'DomainMesh2D', 'SparseDomainMesh2D', 'DomainMesh3D', 'SparseDomainMesh3D']
     },
     {
         id: 'materials',
@@ -87,7 +88,7 @@ const CATEGORIES: EntityCategory[] = [
         label: 'Remap & Initial State',
         icon: '🔄',
         color: '#a1887f',
-        types: ['Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'ThePainter']
+        types: ['Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode', 'ThePainter']
     },
     {
         id: 'sinks',
@@ -193,7 +194,10 @@ export class PipelineBrowser {
             const nodeId = this.stateManager.selectedNodeId;
             this.handleSelectionChange(nodeId, null, gaugeIdx);
         };
-        this.modelStatusListener = () => this.renderHeader();
+        this.modelStatusListener = () => {
+            this.renderHeader();
+            this.refreshStatusUI();
+        };
         this.inPlaceListener = (nodeId: string, params: Record<string, any>) => {
             const visKeys = [
                 'visible', 'hidden', 'showMPMParticles', 'showFEMMesh', 'showBeams', 'showRebar',
@@ -450,20 +454,25 @@ export class PipelineBrowser {
         treeContainer.className = 'pipeline-tree-container';
 
         const groups = this.buildPipelineGroups(models);
+        const activeGroup = groups.find(g => g.models.some(m => m.id === this.activeModelId));
 
-        if (this.viewMode === 'ALL_MODELS' || groups.some(g => g.isMultiModel)) {
-            // Render pipeline groups (multi-model remap pipelines and standalone models)
+        if (this.viewMode === 'ALL_MODELS') {
+            // Render all pipeline groups (multi-model remap pipelines and standalone models)
             groups.forEach(group => {
                 if (group.isMultiModel) {
                     const groupCard = this.createPipelineGroupCard(group, models);
                     treeContainer.appendChild(groupCard);
-                } else if (this.viewMode === 'ALL_MODELS' || group.models.some(m => m.id === this.activeModelId)) {
+                } else {
                     const card = this.createModelCard(group.models[0], models);
                     treeContainer.appendChild(card);
                 }
             });
+        } else if (activeGroup && activeGroup.isMultiModel) {
+            // Focused mode on a remap pipeline: show only the single active remap pipeline
+            const groupCard = this.createPipelineGroupCard(activeGroup, models);
+            treeContainer.appendChild(groupCard);
         } else {
-            // Render focused model categories (single model workspace with no remap)
+            // Render focused model categories (standalone active model)
             for (const cat of CATEGORIES) {
                 const catNodes = model.nodes.filter(n => isNodeTypeInCategory(cat.id, cat.types, n.type));
                 if (catNodes.length > 0) {
@@ -721,21 +730,47 @@ export class PipelineBrowser {
         const saveModelBtn = document.createElement('button');
         saveModelBtn.className = 'pipeline-model-rename-btn';
         saveModelBtn.innerHTML = '💾';
-        saveModelBtn.title = 'Save / Export Model JSON';
+        saveModelBtn.title = model.filename
+            ? `Save Model (${model.filename})\nShift+Click or Right-Click to Save As...`
+            : 'Save Model As... (Ctrl+S)';
         saveModelBtn.setAttribute('aria-label', 'Save Model JSON');
         saveModelBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            this.exportModel(model);
+            this.exportModel(model, e.shiftKey);
+        });
+        saveModelBtn.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.exportModel(model, true);
         });
 
         const loadModelBtn = document.createElement('button');
         loadModelBtn.className = 'pipeline-model-rename-btn';
         loadModelBtn.innerHTML = '📂';
-        loadModelBtn.title = 'Load / Import Model JSON';
-        loadModelBtn.setAttribute('aria-label', 'Load Model JSON');
+        loadModelBtn.title = 'Open Model File (Click: Replace Active | Shift+Click: Import as New Model in Workspace)';
+        loadModelBtn.setAttribute('aria-label', 'Open or Import Model JSON');
         loadModelBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            this.importModel();
+            this.importModel(e.shiftKey ? 'add_to_workspace' : 'replace_active');
+        });
+
+        const recentFolderBtn = document.createElement('button');
+        recentFolderBtn.className = 'pipeline-model-rename-btn';
+        recentFolderBtn.innerHTML = '🕒';
+        recentFolderBtn.title = 'Quick Open from Recent Folder...';
+        recentFolderBtn.setAttribute('aria-label', 'Recent Folders');
+        recentFolderBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showRecentFoldersQuickMenu(
+                recentFolderBtn,
+                (folderPath) => {
+                    this.importModel('replace_active', folderPath);
+                },
+                {
+                    title: 'Open Model from Recent Folder',
+                    onBrowse: () => this.importModel('replace_active')
+                }
+            );
         });
 
         const deleteModelBtn = document.createElement('button');
@@ -753,6 +788,7 @@ export class PipelineBrowser {
         modelControlContainer.appendChild(newModelBtn);
         modelControlContainer.appendChild(saveModelBtn);
         modelControlContainer.appendChild(loadModelBtn);
+        modelControlContainer.appendChild(recentFolderBtn);
         modelControlContainer.appendChild(deleteModelBtn);
 
         modelRow.appendChild(modelLabel);
@@ -764,13 +800,21 @@ export class PipelineBrowser {
         statusRow.className = 'pipeline-status-row';
 
         const status = this.stateManager.getModelStatus(model.id);
+        const isUpstreamRunning = Boolean((window as any).isUpstreamAutoRunningFor?.(model.id));
         const statusBadge = document.createElement('span');
-        statusBadge.className = `pipeline-status-badge status-${status.toLowerCase()}`;
-        statusBadge.textContent = status;
-        if (status === 'INCOMPLETE') {
-            const completeness = this.stateManager.isModelComplete(model.id);
-            if (!completeness.complete && completeness.reason) {
-                statusBadge.title = completeness.reason;
+        if (isUpstreamRunning && (status === 'UNINITIALIZED' || status === 'TERMINATED')) {
+            statusBadge.className = 'pipeline-status-badge status-running';
+            statusBadge.textContent = 'UPSTREAM RUNNING…';
+        } else {
+            statusBadge.className = `pipeline-status-badge status-${status.toLowerCase()}`;
+            statusBadge.textContent = status;
+            if (status === 'INCOMPLETE') {
+                const completeness = this.stateManager.isModelComplete(model.id);
+                if (!completeness.complete && completeness.reason) {
+                    statusBadge.title = completeness.reason;
+                }
+            } else if (status === 'ERROR') {
+                this.bindErrorBadgeInteraction(statusBadge, [model.id]);
             }
         }
 
@@ -807,10 +851,16 @@ export class PipelineBrowser {
         this.render();
     }
 
-    private async exportModel(model: Model): Promise<void> {
+    private async exportModel(model: Model, forceSaveAs: boolean = false): Promise<void> {
+        const actions = (window as any).blastFileActions;
+        if (actions && typeof actions.saveModel === 'function') {
+            await actions.saveModel(model.id, forceSaveAs);
+            return;
+        }
+
         const net = (window as any).networkManager;
         if (net && net.isConnected()) {
-            if (model.filename && model.filename.includes('/')) {
+            if (!forceSaveAs && model.filename && model.filename.includes('/')) {
                 const prepared = prepareModelSavePayload(model, model.filename);
                 net.send({
                     command: "SAVE_MODEL_FILE",
@@ -822,10 +872,12 @@ export class PipelineBrowser {
                 return;
             }
 
+            const rawName = (model.filename || '').split('/').pop() || `${(model.name || model.id).toLowerCase().replace(/\s+/g, '_')}.json`;
             const browser = new HostFileBrowserModal(net, {
-                title: 'Save Model As (Host)',
+                title: `Save Model As — ${model.name}`,
                 mode: 'save',
-                defaultFilename: model.filename || `${(model.name || model.id).toLowerCase().replace(/\s+/g, '_')}.json`,
+                defaultFilename: rawName,
+                initialPath: model.filename || '',
                 filters: [
                     { label: 'JSON Model Files (*.json)', extensions: ['.json'] },
                     { label: 'All Files (*.*)', extensions: ['*'] }
@@ -851,38 +903,30 @@ export class PipelineBrowser {
         await bridge.saveFileDialog(filename, jsonStr, 'application/json');
     }
 
-    private async importModel(): Promise<void> {
+    private async importModel(mode: 'replace_active' | 'add_to_workspace' = 'replace_active', initialFolder?: string): Promise<void> {
+        const actions = (window as any).blastFileActions;
+        if (actions && typeof actions.openModel === 'function') {
+            actions.openModel({
+                mode,
+                initialFolder,
+                targetModelId: this.activeModelId || undefined
+            });
+            return;
+        }
+
         const bridge = PlatformBridge.getInstance();
         const res = await bridge.openFileDialog([{ name: 'BlastDaemon Model JSON', extensions: ['json'] }]);
         if (res && res.data) {
             try {
-                let text = '';
-                if (typeof res.data === 'string') text = res.data;
-                else text = new TextDecoder().decode(res.data);
+                const text = typeof res.data === 'string' ? res.data : new TextDecoder().decode(res.data);
                 const parsed = JSON.parse(text);
                 if (parsed && Array.isArray(parsed.nodes)) {
-                    const newId = 'model-' + Date.now().toString(36);
-                    parsed.id = newId;
-                    if (!parsed.name) parsed.name = res.filename.replace('.json', '');
-                    if (parsed.filename === undefined) parsed.filename = null;
-                    if (parsed.refresh_rate !== undefined) {
-                        parsed.refresh_rate = Number(parsed.refresh_rate);
-                        parsed.fps = parsed.fps !== undefined ? Number(parsed.fps) : StateManager.rateToFps(parsed.refresh_rate);
-                    }
-                    this.stateManager.addModelToWorkspace(parsed);
-                    this.activeModelId = newId;
-                    this.stateManager.setActiveModel(newId);
+                    const loaded = this.stateManager.loadModelData(parsed, res.filename, { mode });
+                    this.activeModelId = loaded.id;
                     this.saveSettings();
                     this.render();
-                } else if (parsed && parsed.models) {
-                    Object.values(parsed.models).forEach((m: any) => {
-                        if (m.filename === undefined) m.filename = null;
-                        if (m.refresh_rate !== undefined) {
-                            m.refresh_rate = Number(m.refresh_rate);
-                            m.fps = m.fps !== undefined ? Number(m.fps) : StateManager.rateToFps(m.refresh_rate);
-                        }
-                        this.stateManager.addModelToWorkspace(m);
-                    });
+                } else if (parsed && parsed.models && Array.isArray(parsed.workspaces)) {
+                    this.stateManager.loadAppState(parsed);
                     this.saveSettings();
                     this.render();
                 }
@@ -891,6 +935,93 @@ export class PipelineBrowser {
                 CustomDialog.alert('Failed to parse model JSON file: ' + String(err), 'Import Error');
             }
         }
+    }
+
+    private getNodePrimaryFileTarget(node: Node): {
+        key: string;
+        isFolder: boolean;
+        label: string;
+        extensions: string[];
+        filterLabel: string;
+    } | null {
+        const p = node.parameters || {};
+        if (node.type === 'STLGeometry') {
+            return { key: 'stl_file', isFolder: false, label: 'STL Mesh', extensions: ['.stl'], filterLabel: 'STL Mesh Files (*.stl)' };
+        }
+        if (node.type === 'LSDynaImporter3D') {
+            return { key: 'k_file', isFolder: false, label: 'LS-DYNA Deck', extensions: ['.k', '.key', '.dyn'], filterLabel: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)' };
+        }
+        if (node.type === 'FEMObject3D') {
+            if (p.shape_type === 'STL' || p.mesh_source === 'STL Tetrahedral Mesher') {
+                return { key: 'stl_file', isFolder: false, label: 'STL Mesh', extensions: ['.stl'], filterLabel: 'STL Mesh Files (*.stl)' };
+            }
+            if (p.shape_type === 'LS-DYNA File' || p.mesh_source === 'LS-DYNA Keyword File') {
+                return { key: 'k_file', isFolder: false, label: 'LS-DYNA Deck', extensions: ['.k', '.key', '.dyn'], filterLabel: 'LS-DYNA Keyword Files (*.k, *.key, *.dyn)' };
+            }
+        }
+        if (node.type === 'MPMObject3D' && p.shape_type === 'STL') {
+            return { key: 'stl_file', isFolder: false, label: 'STL Mesh', extensions: ['.stl'], filterLabel: 'STL Mesh Files (*.stl)' };
+        }
+        if (node.type === 'VTKOutput') {
+            return { key: 'vtk_dir', isFolder: true, label: 'VTK Output Dir', extensions: ['*'], filterLabel: 'Folders Only' };
+        }
+        if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
+            if (p.source_mode === 'external_file') {
+                return { key: 'external_file_path', isFolder: false, label: 'Sensor Coords File', extensions: ['.csv', '.txt', '.json'], filterLabel: 'Coordinate Files (*.csv, *.txt, *.json)' };
+            }
+            return { key: 'output_dir', isFolder: true, label: 'Gauge Output Dir', extensions: ['*'], filterLabel: 'Folders Only' };
+        }
+        return null;
+    }
+
+    private applyNodeFileOrFolderValue(node: Node, model: Model, key: string, selectedPath: string): void {
+        recordRecentFolder(selectedPath, key === 'output_dir' || key === 'vtk_dir');
+        const updates: Record<string, any> = { [key]: selectedPath };
+        if (key === 'stl_file') {
+            updates['geometry_hash'] = 'stl_' + Math.floor(Math.random() * 1000000).toString(36);
+            (this.stateManager as any).invalidateSTLGeometry?.(node.id);
+        } else if (key === 'k_file') {
+            updates['geometry_hash'] = 'k_' + Math.floor(Math.random() * 1000000).toString(36);
+        }
+        this.stateManager.updateNodeParameters(node.id, updates);
+        if (key === 'stl_file') {
+            const net = (window as any).networkManager;
+            if (net && net.isConnected()) {
+                const resolvedPath = resolveResourcePath(selectedPath, model.filename);
+                net.send({ command: 'LOAD_STL_GEOMETRY', filePath: resolvedPath, modelId: model.id });
+            }
+        }
+        this.render();
+    }
+
+    private browseNodeFileOrFolder(node: Node, model: Model, initialFolderOverride?: string): void {
+        const spec = this.getNodePrimaryFileTarget(node);
+        if (!spec) return;
+        const net = (window as any).networkManager;
+        if (!net || !net.isConnected()) {
+            CustomDialog.alert('Broker is offline. Connect to the BlastDaemon Broker to browse host files and directories.');
+            return;
+        }
+        const currentRaw = String(node.parameters?.[spec.key] ?? '').trim();
+        const startPath = initialFolderOverride
+            || (currentRaw && currentRaw !== 'None specified' ? resolveResourcePath(currentRaw, model.filename) : (model.filename || ''));
+
+        const browser = new HostFileBrowserModal(net, {
+            title: spec.isFolder ? `Select ${spec.label} (${node.parameters?.name || node.id})` : `Select ${spec.label} (${node.parameters?.name || node.id})`,
+            mode: 'open',
+            selectFolderOnly: spec.isFolder,
+            initialPath: startPath,
+            filters: spec.isFolder
+                ? [{ label: 'Folders Only', extensions: [] }]
+                : [
+                    { label: spec.filterLabel, extensions: spec.extensions },
+                    { label: 'All Files (*.*)', extensions: ['*'] }
+                ],
+            onSelect: (selectedPath) => {
+                this.applyNodeFileOrFolderValue(node, model, spec.key, selectedPath);
+            }
+        });
+        browser.open(startPath);
     }
 
     private async closeModel(model: Model): Promise<void> {
@@ -927,15 +1058,16 @@ export class PipelineBrowser {
     }
 
     private getRemapSourceInfo(model: Model, allModels: Model[]): { sourceModel: Model; remapType: string } | null {
-        const remapNode = model.nodes.find(n => n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode' || n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode');
+        const remapNode = model.nodes.find(n => n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode' || n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode' || n.type === 'Remap3DTo3DNode');
         if (!remapNode) return null;
+
+        const formatRemapType = (t: string) => t === 'Remap3DTo3DNode' ? '3D ➔ 3D' : (t === 'Remap2DTo3DNode' ? '2D ➔ 3D' : (t === 'Remap1DTo3DNode' ? '1D ➔ 3D' : '1D ➔ 2D'));
 
         // 1. Explicit user selection via source_model_id takes top priority
         if (remapNode.parameters?.source_model_id) {
             const sourceModel = allModels.find(m => m.id === remapNode.parameters.source_model_id);
             if (sourceModel && sourceModel.id !== model.id) {
-                const remapType = remapNode.type === 'Remap2DTo3DNode' ? '2D ➔ 3D' : (remapNode.type === 'Remap1DTo3DNode' ? '1D ➔ 3D' : '1D ➔ 2D');
-                return { sourceModel, remapType };
+                return { sourceModel, remapType: formatRemapType(remapNode.type) };
             }
         }
 
@@ -945,8 +1077,7 @@ export class PipelineBrowser {
                 if (conn.toNode === remapNode.id) {
                     const sourceModel = allModels.find(m => m.nodes.some(n => n.id === conn.fromNode));
                     if (sourceModel && sourceModel.id !== model.id) {
-                        const remapType = remapNode.type === 'Remap2DTo3DNode' ? '2D ➔ 3D' : (remapNode.type === 'Remap1DTo3DNode' ? '1D ➔ 3D' : '1D ➔ 2D');
-                        return { sourceModel, remapType };
+                        return { sourceModel, remapType: formatRemapType(remapNode.type) };
                     }
                 }
             }
@@ -1059,6 +1190,245 @@ export class PipelineBrowser {
         return groups;
     }
 
+    private bindErrorBadgeInteraction(badge: HTMLElement, modelIds: string[]): void {
+        badge.style.cursor = 'pointer';
+        badge.title = getErrorBadgeTooltip(this.stateManager, modelIds);
+        badge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showModelErrorModal(this.stateManager, modelIds);
+        });
+    }
+
+    private dispatchModelSimCommand(
+        model: Model,
+        command: string,
+        extra: Record<string, any> = {},
+        focusModel: boolean = true
+    ): void {
+        if (focusModel) {
+            this.activeModelId = model.id;
+            this.stateManager.setActiveModel(model.id);
+            this.saveSettings();
+        }
+        if ((window as any).executeModelCommand) {
+            const allowAutoRun = extra.allowAutoRun !== undefined ? Boolean(extra.allowAutoRun) : true;
+            (window as any).executeModelCommand(model.id, command, extra, false, allowAutoRun);
+        } else if (this.onSimCommand) {
+            this.onSimCommand(command, model.id);
+        }
+    }
+
+    private computeGroupCompositeStatus(group: PipelineHierarchyGroup): SimulationStatus {
+        const statuses = group.models.map(m => this.stateManager.getModelStatus(m.id));
+        if (statuses.some(s => s === 'RUNNING')) return 'RUNNING';
+        if (statuses.some(s => s === 'ERROR')) return 'ERROR';
+        if (statuses.some(s => s === 'INCOMPLETE')) return 'INCOMPLETE';
+        if (statuses.some(s => s === 'PAUSED')) return 'PAUSED';
+        if (statuses.some(s => s === 'INITIALIZED')) return 'INITIALIZED';
+        if (statuses.some(s => s === 'TERMINATED')) return 'TERMINATED';
+        return 'UNINITIALIZED';
+    }
+
+    private populatePipelineGroupActions(actionsEl: HTMLElement, group: PipelineHierarchyGroup): void {
+        actionsEl.innerHTML = '';
+        const statuses = group.models.map(m => this.stateManager.getModelStatus(m.id));
+        const anyRunning = statuses.some(s => s === 'RUNNING');
+        const anyActive = statuses.some(s => s === 'RUNNING' || s === 'PAUSED' || s === 'INITIALIZED');
+        const anyIncomplete = statuses.some(s => s === 'INCOMPLETE');
+
+        if (anyRunning) {
+            const pauseBtn = document.createElement('button');
+            pauseBtn.className = 'pipeline-model-rename-btn pipeline-action-pause';
+            pauseBtn.innerHTML = '⏸';
+            pauseBtn.title = 'Pause running stage in this pipeline';
+            pauseBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                group.models
+                    .filter(m => this.stateManager.getModelStatus(m.id) === 'RUNNING')
+                    .forEach(rm => this.dispatchModelSimCommand(rm, 'PAUSE', {}, false));
+            });
+            actionsEl.appendChild(pauseBtn);
+        } else {
+            const runBtn = document.createElement('button');
+            runBtn.className = 'pipeline-model-rename-btn';
+            runBtn.innerHTML = '⚡';
+            runBtn.disabled = anyIncomplete;
+            runBtn.title = 'Execute full multi-stage remap pipeline sequentially';
+            runBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if ((window as any).executeWorkspacePipeline) {
+                    (window as any).executeWorkspacePipeline(group.models.map(m => m.id));
+                } else if ((window as any).executeModelCommand) {
+                    (window as any).executeModelCommand(group.models[group.models.length - 1].id, 'EXEC_ALL', { forceFullPipeline: true });
+                }
+            });
+            actionsEl.appendChild(runBtn);
+        }
+
+        if (anyActive) {
+            const termBtn = document.createElement('button');
+            termBtn.className = 'pipeline-model-rename-btn';
+            termBtn.innerHTML = '⏹';
+            termBtn.title = 'Terminate active stages in this pipeline';
+            termBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                [...group.models]
+                    .reverse()
+                    .filter(m => {
+                        const st = this.stateManager.getModelStatus(m.id);
+                        return st === 'RUNNING' || st === 'PAUSED' || st === 'INITIALIZED';
+                    })
+                    .forEach(am => this.dispatchModelSimCommand(am, 'TERMINATE', {}, false));
+            });
+            actionsEl.appendChild(termBtn);
+        }
+    }
+
+    private populateModelActionDeck(actionDeck: HTMLElement, model: Model, allModels: Model[]): void {
+        actionDeck.innerHTML = '';
+        const status = this.stateManager.getModelStatus(model.id);
+        const cardRemapInfo = this.getRemapSourceInfo(model, allModels);
+        const isUpstreamRunning = Boolean((window as any).isUpstreamAutoRunningFor?.(model.id));
+        const stageExtra: Record<string, any> = cardRemapInfo ? { skipUpstreamAutoRun: true, allowAutoRun: false } : {};
+        const isActiveState = status === 'INITIALIZED' || status === 'PAUSED' || status === 'RUNNING';
+        const isBusy = status === 'RUNNING' || isUpstreamRunning;
+        const isAtEnd = this.stateManager.isModelAtEndTime(model.id);
+        const canContinue = status === 'PAUSED' && !isAtEnd;
+
+        // Init / Re-Init Button (also serves as clean reset/restart to t₀)
+        const initBtn = document.createElement('button');
+        initBtn.className = 'pipeline-model-rename-btn';
+        initBtn.innerHTML = isActiveState ? '🔄' : '⚡';
+        initBtn.disabled = status === 'INCOMPLETE' || isUpstreamRunning;
+        initBtn.title = isActiveState
+            ? (cardRemapInfo
+                ? `Re-initialize ${model.name || model.id} from t₀ (remaps from existing upstream results without re-running upstream)`
+                : `Re-initialize / Restart ${model.name || model.id} at t₀`)
+            : (cardRemapInfo
+                ? `Initialize ${model.name || model.id} (remaps from existing upstream results without re-running upstream)`
+                : `Initialize solver process for ${model.name || model.id}`);
+        initBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.dispatchModelSimCommand(model, 'INIT', { ...stageExtra, forceRestart: true });
+        });
+        actionDeck.appendChild(initBtn);
+
+        // Adaptive Play / Pause / Continue / Re-Run Button
+        const playPauseBtn = document.createElement('button');
+        if (isBusy) {
+            playPauseBtn.className = 'pipeline-model-rename-btn pipeline-action-pause';
+            playPauseBtn.innerHTML = '⏸';
+            playPauseBtn.title = isUpstreamRunning
+                ? `Pause active upstream pipeline stage for ${model.name || model.id}`
+                : `Pause ${model.name || model.id} (preserves state to Continue later)`;
+            playPauseBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.dispatchModelSimCommand(model, 'PAUSE', {}, false);
+            });
+        } else {
+            playPauseBtn.className = canContinue
+                ? 'pipeline-model-rename-btn pipeline-action-continue'
+                : 'pipeline-model-rename-btn';
+            playPauseBtn.innerHTML = isAtEnd ? '↻' : '▶';
+            playPauseBtn.disabled = status === 'INCOMPLETE';
+            playPauseBtn.title = isAtEnd
+                ? `Reached end time — click to re-initialize & run ${model.name || model.id} from t₀ (or increase End Time to continue)`
+                : (canContinue
+                    ? `Continue ${model.name || model.id} from current time/step`
+                    : (cardRemapInfo
+                        ? `Run ${model.name || model.id} only (uses existing upstream results; remaps only if uninitialized)`
+                        : `Run ${model.name || model.id}`));
+            playPauseBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const atEndNow = this.stateManager.isModelAtEndTime(model.id);
+                this.dispatchModelSimCommand(model, 'EXEC_ALL', { ...stageExtra, forceRestart: atEndNow });
+            });
+        }
+        actionDeck.appendChild(playPauseBtn);
+
+        // Terminate Button
+        if (isActiveState || isUpstreamRunning) {
+            const termBtn = document.createElement('button');
+            termBtn.className = 'pipeline-model-rename-btn';
+            termBtn.innerHTML = '⏹';
+            termBtn.title = isUpstreamRunning
+                ? `Terminate active upstream pipeline run`
+                : `Terminate solver process for ${model.name || model.id} (preserves recorded telemetry)`;
+            termBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.dispatchModelSimCommand(model, 'TERMINATE', {}, false);
+            });
+            actionDeck.appendChild(termBtn);
+        }
+    }
+
+    private refreshStatusUI(): void {
+        if (!this.rootElement) return;
+        const allModels = this.stateManager.getWorkspaceModels();
+        const groups = this.buildPipelineGroups(allModels);
+        const groupMap = new Map(groups.map(g => [g.id, g]));
+
+        this.rootElement.querySelectorAll('.pipeline-hierarchy-group').forEach((cardEl) => {
+            const el = cardEl as HTMLElement;
+            const gid = el.dataset.groupId;
+            if (!gid) return;
+            const group = groupMap.get(gid);
+            if (!group) return;
+
+            const compositeStatus = this.computeGroupCompositeStatus(group);
+            const badgeEl = el.querySelector('.pipeline-hierarchy-header-right > .pipeline-status-badge') as HTMLElement | null;
+            if (badgeEl) {
+                const freshBadge = document.createElement('span');
+                freshBadge.className = `pipeline-status-badge status-${compositeStatus.toLowerCase()}`;
+                freshBadge.textContent = compositeStatus;
+                if (compositeStatus === 'ERROR') {
+                    this.bindErrorBadgeInteraction(freshBadge, group.models.map(m => m.id));
+                }
+                badgeEl.replaceWith(freshBadge);
+            }
+            const grpActionsEl = el.querySelector('.pipeline-group-actions') as HTMLElement | null;
+            if (grpActionsEl) {
+                this.populatePipelineGroupActions(grpActionsEl, group);
+            }
+        });
+
+        this.rootElement.querySelectorAll('.pipeline-model-card').forEach((cardEl) => {
+            const el = cardEl as HTMLElement;
+            const mId = el.dataset.modelId;
+            if (!mId) return;
+            const model = allModels.find(m => m.id === mId);
+            if (!model) return;
+
+            const badgeEl = el.querySelector('.pipeline-model-header-right > .pipeline-status-badge') as HTMLElement | null;
+            if (badgeEl) {
+                const status = this.stateManager.getModelStatus(model.id);
+                const isUpstreamRunning = Boolean((window as any).isUpstreamAutoRunningFor?.(model.id));
+                const freshBadge = document.createElement('span');
+                if (isUpstreamRunning && (status === 'UNINITIALIZED' || status === 'TERMINATED')) {
+                    freshBadge.className = 'pipeline-status-badge status-running';
+                    freshBadge.textContent = 'UPSTREAM RUNNING…';
+                } else {
+                    freshBadge.className = `pipeline-status-badge status-${status.toLowerCase()}`;
+                    freshBadge.textContent = status;
+                    if (status === 'INCOMPLETE') {
+                        const completeness = this.stateManager.isModelComplete(model.id);
+                        if (!completeness.complete && completeness.reason) {
+                            freshBadge.title = completeness.reason;
+                        }
+                    } else if (status === 'ERROR') {
+                        this.bindErrorBadgeInteraction(freshBadge, [model.id]);
+                    }
+                }
+                badgeEl.replaceWith(freshBadge);
+            }
+
+            const actionDeck = el.querySelector('.pipeline-model-header-right > .pipeline-model-actions') as HTMLElement | null;
+            if (actionDeck) {
+                this.populateModelActionDeck(actionDeck, model, allModels);
+            }
+        });
+    }
+
     private createPipelineGroupCard(group: PipelineHierarchyGroup, allModels: Model[]): HTMLElement {
         const card = document.createElement('div');
         const hasActive = group.models.some(m => m.id === this.activeModelId);
@@ -1121,33 +1491,35 @@ export class PipelineBrowser {
         const rightGroup = document.createElement('div');
         rightGroup.className = 'pipeline-hierarchy-header-right';
 
-        const statuses = group.models.map(m => this.stateManager.getModelStatus(m.id));
-        let compositeStatus: SimulationStatus = 'UNINITIALIZED';
-        if (statuses.some(s => s === 'RUNNING')) compositeStatus = 'RUNNING';
-        else if (statuses.some(s => s === 'ERROR')) compositeStatus = 'ERROR';
-        else if (statuses.some(s => s === 'INCOMPLETE')) compositeStatus = 'INCOMPLETE';
-        else if (statuses.some(s => s === 'PAUSED')) compositeStatus = 'PAUSED';
-        else if (statuses.every(s => s === 'INITIALIZED')) compositeStatus = 'INITIALIZED';
+        const compositeStatus = this.computeGroupCompositeStatus(group);
 
         const statusBadge = document.createElement('span');
         statusBadge.className = `pipeline-status-badge status-${compositeStatus.toLowerCase()}`;
         statusBadge.textContent = compositeStatus;
+        if (compositeStatus === 'ERROR') {
+            this.bindErrorBadgeInteraction(statusBadge, group.models.map(m => m.id));
+        }
         rightGroup.appendChild(statusBadge);
 
-        // Run entire workspace / multi-stage pipeline button
-        const runBtn = document.createElement('button');
-        runBtn.className = 'pipeline-model-rename-btn';
-        runBtn.innerHTML = '⚡';
-        runBtn.title = 'Execute full multi-stage remap pipeline sequentially';
-        runBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if ((window as any).executeWorkspacePipeline) {
-                (window as any).executeWorkspacePipeline();
-            } else if ((window as any).executeModelCommand) {
-                (window as any).executeModelCommand(group.models[0].id, 'EXEC_ALL');
-            }
-        });
-        rightGroup.appendChild(runBtn);
+        if (group.isMultiModel && group.models.length >= 2) {
+            const splitBtn = document.createElement('button');
+            splitBtn.className = 'pipeline-model-rename-btn';
+            splitBtn.innerHTML = '📐';
+            splitBtn.title = 'Open Side-by-Side Split View (Stage 1 Source + Downstream Target)';
+            splitBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                (window as any).openRemapSplitView?.(group.models[0].id, group.models[group.models.length - 1].id);
+            });
+            rightGroup.appendChild(splitBtn);
+        }
+
+        const groupActionsEl = document.createElement('span');
+        groupActionsEl.className = 'pipeline-group-actions';
+        groupActionsEl.style.display = 'inline-flex';
+        groupActionsEl.style.alignItems = 'center';
+        groupActionsEl.style.gap = '2px';
+        this.populatePipelineGroupActions(groupActionsEl, group);
+        rightGroup.appendChild(groupActionsEl);
 
         header.appendChild(leftGroup);
         header.appendChild(rightGroup);
@@ -1270,13 +1642,21 @@ export class PipelineBrowser {
         rightGroup.className = 'pipeline-model-header-right';
 
         const status = this.stateManager.getModelStatus(model.id);
+        const isUpstreamRunning = Boolean((window as any).isUpstreamAutoRunningFor?.(model.id));
         const statusBadge = document.createElement('span');
-        statusBadge.className = `pipeline-status-badge status-${status.toLowerCase()}`;
-        statusBadge.textContent = status;
-        if (status === 'INCOMPLETE') {
-            const completeness = this.stateManager.isModelComplete(model.id);
-            if (!completeness.complete && completeness.reason) {
-                statusBadge.title = completeness.reason;
+        if (isUpstreamRunning && (status === 'UNINITIALIZED' || status === 'TERMINATED')) {
+            statusBadge.className = 'pipeline-status-badge status-running';
+            statusBadge.textContent = 'UPSTREAM RUNNING…';
+        } else {
+            statusBadge.className = `pipeline-status-badge status-${status.toLowerCase()}`;
+            statusBadge.textContent = status;
+            if (status === 'INCOMPLETE') {
+                const completeness = this.stateManager.isModelComplete(model.id);
+                if (!completeness.complete && completeness.reason) {
+                    statusBadge.title = completeness.reason;
+                }
+            } else if (status === 'ERROR') {
+                this.bindErrorBadgeInteraction(statusBadge, [model.id]);
             }
         }
         rightGroup.appendChild(statusBadge);
@@ -1287,76 +1667,7 @@ export class PipelineBrowser {
         actionDeck.style.display = 'inline-flex';
         actionDeck.style.alignItems = 'center';
         actionDeck.style.gap = '3px';
-
-        // Init Button
-        const initBtn = document.createElement('button');
-        initBtn.className = 'pipeline-model-rename-btn';
-        initBtn.innerHTML = '⚡';
-        initBtn.title = `Initialize solver process for ${model.name || model.id}`;
-        initBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            this.activeModelId = model.id;
-            this.stateManager.setActiveModel(model.id);
-            this.saveSettings();
-            if ((window as any).executeModelCommand) {
-                (window as any).executeModelCommand(model.id, 'INIT');
-            } else if (this.onSimCommand) {
-                this.onSimCommand('INIT', model.id);
-            }
-        });
-        actionDeck.appendChild(initBtn);
-
-        // Run / Step Button
-        const runBtn = document.createElement('button');
-        runBtn.className = 'pipeline-model-rename-btn';
-        runBtn.innerHTML = '▶';
-        runBtn.title = `Run simulation for ${model.name || model.id}`;
-        runBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            this.activeModelId = model.id;
-            this.stateManager.setActiveModel(model.id);
-            this.saveSettings();
-            if ((window as any).executeModelCommand) {
-                (window as any).executeModelCommand(model.id, 'EXEC_ALL');
-            } else if (this.onSimCommand) {
-                this.onSimCommand('EXEC_ALL', model.id);
-            }
-        });
-        actionDeck.appendChild(runBtn);
-
-        // Pause Button
-        if (status === 'RUNNING') {
-            const pauseBtn = document.createElement('button');
-            pauseBtn.className = 'pipeline-model-rename-btn';
-            pauseBtn.innerHTML = '⏸';
-            pauseBtn.title = `Pause simulation for ${model.name || model.id}`;
-            pauseBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if ((window as any).executeModelCommand) {
-                    (window as any).executeModelCommand(model.id, 'PAUSE');
-                } else if (this.onSimCommand) {
-                    this.onSimCommand('PAUSE', model.id);
-                }
-            });
-            actionDeck.appendChild(pauseBtn);
-        }
-
-        // Terminate Button
-        if (status !== 'UNINITIALIZED' && status !== 'TERMINATED') {
-            const termBtn = document.createElement('button');
-            termBtn.className = 'pipeline-model-rename-btn';
-            termBtn.innerHTML = '⏹';
-            termBtn.title = `Terminate solver process for ${model.name || model.id}`;
-            termBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if ((window as any).executeModelCommand) {
-                    (window as any).executeModelCommand(model.id, 'TERMINATE');
-                } else if (this.onSimCommand) {
-                    this.onSimCommand('TERMINATE', model.id);
-                }
-            });
-            actionDeck.appendChild(termBtn);
-        }
+        this.populateModelActionDeck(actionDeck, model, allModels);
 
         rightGroup.appendChild(actionDeck);
 
@@ -1736,7 +2047,67 @@ export class PipelineBrowser {
             });
         }
 
-        const hasWiring = !!connChip || !!femSetupBtn;
+        // File / Folder Quick Action Chip (STL, LS-DYNA .k, VTK Dir, Gauge Dir / Sensor File)
+        const fileSpec = this.getNodePrimaryFileTarget(node);
+        let fileQuickGroup: HTMLElement | null = null;
+        if (fileSpec) {
+            const rawVal = String(node.parameters?.[fileSpec.key] ?? '').trim();
+            const hasInlineDeck = fileSpec.key === 'k_file' && typeof node.parameters?.deck_content === 'string' && node.parameters.deck_content.trim() !== '';
+            const hasVal = (rawVal !== '' && rawVal !== 'None specified') || hasInlineDeck;
+            const shortVal = rawVal && rawVal !== 'None specified'
+                ? (rawVal.replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop() || rawVal)
+                : (hasInlineDeck ? 'Inline .k Deck' : `Select ${fileSpec.label}...`);
+
+            fileQuickGroup = document.createElement('span');
+            fileQuickGroup.style.display = 'inline-flex';
+            fileQuickGroup.style.alignItems = 'center';
+            fileQuickGroup.style.gap = '2px';
+
+            const browseChip = document.createElement('button');
+            browseChip.className = `pipeline-conn-chip ${!hasVal && !fileSpec.isFolder ? 'unconnected' : ''}`;
+            browseChip.style.cursor = 'pointer';
+            browseChip.style.maxWidth = '150px';
+            browseChip.style.overflow = 'hidden';
+            browseChip.style.textOverflow = 'ellipsis';
+            browseChip.style.whiteSpace = 'nowrap';
+            browseChip.textContent = `${fileSpec.isFolder ? '📁' : '📂'} ${shortVal}`;
+            browseChip.title = `${fileSpec.label}: ${rawVal || (hasInlineDeck ? '(Inline deck_content)' : 'Not set')}\nClick to browse host ${fileSpec.isFolder ? 'directory' : 'file'}...`;
+            browseChip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.browseNodeFileOrFolder(node, model);
+            });
+
+            const recentChip = document.createElement('button');
+            recentChip.className = 'pipeline-conn-chip';
+            recentChip.style.cursor = 'pointer';
+            recentChip.style.padding = '1px 5px';
+            recentChip.textContent = '🕒';
+            recentChip.title = fileSpec.isFolder
+                ? `Set ${fileSpec.label} from Recent Folders`
+                : `Browse ${fileSpec.label} starting in a Recent Folder`;
+            recentChip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                showRecentFoldersQuickMenu(
+                    recentChip,
+                    (folderPath) => {
+                        if (fileSpec.isFolder) {
+                            this.applyNodeFileOrFolderValue(node, model, fileSpec.key, folderPath);
+                        } else {
+                            this.browseNodeFileOrFolder(node, model, folderPath);
+                        }
+                    },
+                    {
+                        title: fileSpec.isFolder ? `Set ${fileSpec.label}` : `Open ${fileSpec.label} from Folder`,
+                        onBrowse: () => this.browseNodeFileOrFolder(node, model)
+                    }
+                );
+            });
+
+            fileQuickGroup.appendChild(browseChip);
+            fileQuickGroup.appendChild(recentChip);
+        }
+
+        const hasWiring = !!connChip || !!femSetupBtn || !!fileQuickGroup;
 
         item.appendChild(eyeBtn);
         item.appendChild(badge);
@@ -1744,11 +2115,12 @@ export class PipelineBrowser {
 
         // In Focus mode: if not selected, add compact wiring indicator pill to line 1
         if (hasWiring && this.wiringViewMode === 'FOCUS') {
-            const hasUnconnected = connChip ? (connChip.classList.contains('unconnected') || !!connChip.querySelector('.unconnected')) : false;
+            const hasUnconnected = (connChip ? (connChip.classList.contains('unconnected') || !!connChip.querySelector('.unconnected')) : false)
+                || (fileQuickGroup ? !!fileQuickGroup.querySelector('.unconnected') : false);
             const focusPill = document.createElement('span');
             focusPill.className = `pipeline-conn-focus-pill ${hasUnconnected ? 'warn' : ''}`;
             focusPill.textContent = hasUnconnected ? '⚠️ Unwired' : '🔗 Wired';
-            focusPill.title = hasUnconnected ? 'Unassigned connections! Click node to inspect wiring.' : 'Connections active. Click node to inspect wiring.';
+            focusPill.title = hasUnconnected ? 'Unassigned connections or file paths! Click node to inspect.' : 'Connections active. Click node to inspect wiring.';
             item.appendChild(focusPill);
         }
 
@@ -1800,6 +2172,9 @@ export class PipelineBrowser {
 
             if (connChip) {
                 chipsGroup.appendChild(connChip);
+            }
+            if (fileQuickGroup) {
+                chipsGroup.appendChild(fileQuickGroup);
             }
             if (femSetupBtn) {
                 chipsGroup.appendChild(femSetupBtn);
@@ -1881,8 +2256,12 @@ export class PipelineBrowser {
             if (!isExternal) {
                 const addGaugeRow = document.createElement('div');
                 addGaugeRow.className = 'pipeline-add-child-row';
+                addGaugeRow.style.display = 'flex';
+                addGaugeRow.style.gap = '4px';
+
                 const addGaugeBtn = document.createElement('button');
                 addGaugeBtn.className = 'pipeline-add-child-btn';
+                addGaugeBtn.style.flex = '1';
                 addGaugeBtn.innerHTML = '<span>➕</span> <span>Add Gauge Probe</span>';
                 addGaugeBtn.title = `Add a new virtual gauge probe to ${node.parameters?.name || node.id}`;
                 addGaugeBtn.addEventListener('click', (e) => {
@@ -1890,6 +2269,19 @@ export class PipelineBrowser {
                     this.addNewGaugeToNode(node, model);
                 });
                 addGaugeRow.appendChild(addGaugeBtn);
+
+                const plotWaveBtn = document.createElement('button');
+                plotWaveBtn.className = 'pipeline-add-child-btn';
+                plotWaveBtn.style.flex = '1';
+                plotWaveBtn.style.color = '#38bdf8';
+                plotWaveBtn.innerHTML = '<span>📈</span> <span>Plot Waveforms</span>';
+                plotWaveBtn.title = 'Open Virtual Gauge Time-History Waveforms f(t) in active Workspace Viewport';
+                plotWaveBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    window.dispatchEvent(new CustomEvent('blastdemon-open-gauge-waveforms', { detail: { modelId: model.id } }));
+                });
+                addGaugeRow.appendChild(plotWaveBtn);
+
                 childList.appendChild(addGaugeRow);
             }
 
@@ -2489,7 +2881,7 @@ export class PipelineBrowser {
 
             // 5. Zonal Absorbing Boundaries (Quiet Ports)
             const meshConn = model.connections?.find(c => (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in')) || (c.fromNode === node.id && c.fromPort === 'mesh'));
-            const meshNode = meshConn ? model.nodes.find(n => n.id === (meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode)) : model.nodes.find(n => n.type === 'DomainMesh3D');
+            const meshNode = meshConn ? model.nodes.find(n => n.id === (meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode)) : model.nodes.find(n => isDomainMesh3DNode(n.type));
 
             const curSky = String(meshNode?.parameters?.bc_z_max ?? node.parameters?.bc_z_max ?? 'Transmitting');
             const curBed = String(meshNode?.parameters?.bc_z_min ?? node.parameters?.bc_z_min ?? 'Lysmer');
@@ -2548,7 +2940,7 @@ export class PipelineBrowser {
                     if (meshNode) {
                         candidates.push({
                             id: 'open_mesh_node',
-                            label: `📐 Inspect DomainMesh3D Boundaries (${meshNode.parameters?.name || meshNode.id})`,
+                            label: `📐 Inspect ${meshNode.type} Boundaries (${meshNode.parameters?.name || meshNode.id})`,
                             sublabel: 'View and tune individual face boundary conditions and Lysmer dashpot parameters in Property Editor'
                         });
                     }
@@ -2628,16 +3020,15 @@ export class PipelineBrowser {
     }
 
     private isSliceDomainNode(node: Node, model: Model): boolean {
-        if (node.type === 'DomainMesh3D') {
+        if (isDomainMesh3DNode(node.type)) {
             return true;
         }
         if (['CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D', 'MarineHarbourDomain'].includes(node.type)) {
-            const hasMesh = model.nodes.some(n => n.type === 'DomainMesh3D');
+            const hasMesh = model.nodes.some(n => isDomainMesh3DNode(n.type));
             if (!hasMesh) return true;
         }
         if (node.type === 'Telemetry3DViewport') {
-            const hasAnyDomain = model.nodes.some(n => [
-                'DomainMesh3D',
+            const hasAnyDomain = model.nodes.some(n => isDomainMesh3DNode(n.type) || [
                 'CFDSolver3D',
                 'MPMDomain3D',
                 'FEMDomain3D', 'MarineHarbourDomain'
@@ -3905,7 +4296,7 @@ export class PipelineBrowser {
         const label = document.createElement('span');
         label.className = 'pipeline-node-label';
         label.textContent = customName;
-        const is1DModel = !model.nodes.some(n => ['DomainMesh3D', 'CFDSolver3D', 'MarineHarbourDomain', 'MPMDomain3D', 'FEMDomain3D', 'DomainMesh2D', 'CFDSolver2D', 'MPMDomain2D'].includes(n.type)) && model.nodes.some(n => n.type === 'DomainMesh' || n.type === 'CFDSolver');
+        const is1DModel = !model.nodes.some(n => isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type) || ['CFDSolver3D', 'MarineHarbourDomain', 'MPMDomain3D', 'FEMDomain3D', 'CFDSolver2D', 'MPMDomain2D'].includes(n.type)) && model.nodes.some(n => n.type === 'DomainMesh' || n.type === 'CFDSolver');
         const posStr = gauge.x !== undefined
             ? `(${gauge.x}, ${gauge.y}, ${gauge.z})`
             : (gauge.r !== undefined
@@ -4019,8 +4410,8 @@ export class PipelineBrowser {
 
     private addNewGaugeToNode(vgNode: Node, model: Model): void {
         const currentGauges = [...(vgNode.parameters.gauges || [])];
-        const is3D = model.nodes.some(n => n.type === 'DomainMesh3D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D');
-        const is1D = !is3D && !model.nodes.some(n => n.type === 'DomainMesh2D' || n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D') && model.nodes.some(n => n.type === 'DomainMesh' || n.type === 'CFDSolver');
+        const is3D = model.nodes.some(n => isDomainMesh3DNode(n.type) || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'MPMDomain3D' || n.type === 'FEMDomain3D');
+        const is1D = !is3D && !model.nodes.some(n => isDomainMesh2DNode(n.type) || n.type === 'CFDSolver2D' || n.type === 'MPMDomain2D') && model.nodes.some(n => n.type === 'DomainMesh' || n.type === 'CFDSolver');
         const nextIdx = currentGauges.length + 1;
         const newGauge = is3D
             ? { id: `G${nextIdx}`, name: `Gauge ${nextIdx}`, x: 0.5, y: 0.5, z: 0.5, active: true, plot: true }
@@ -4234,8 +4625,8 @@ export class PipelineBrowser {
     }
 
     private promptEditGaugeCoordinates(vgNode: Node, idx: number, gauge: any, model: Model): void {
-        const is3D = gauge.is_3d ?? (gauge.x !== undefined || gauge.y !== undefined || vgNode.parameters.domain_type === '3D' || model.nodes.some(n => ['DomainMesh3D', 'CFDSolver3D', 'MarineHarbourDomain', 'MPMDomain3D', 'FEMDomain3D'].includes(n.type)));
-        const is1D = !is3D && (gauge.is_1d || (!model.nodes.some(n => ['DomainMesh2D', 'CFDSolver2D', 'MPMDomain2D'].includes(n.type)) && model.nodes.some(n => n.type === 'DomainMesh' || n.type === 'CFDSolver')));
+        const is3D = gauge.is_3d ?? (gauge.x !== undefined || gauge.y !== undefined || vgNode.parameters.domain_type === '3D' || model.nodes.some(n => isDomainMesh3DNode(n.type) || ['CFDSolver3D', 'MarineHarbourDomain', 'MPMDomain3D', 'FEMDomain3D'].includes(n.type)));
+        const is1D = !is3D && (gauge.is_1d || (!model.nodes.some(n => isDomainMesh2DNode(n.type) || ['CFDSolver2D', 'MPMDomain2D'].includes(n.type)) && model.nodes.some(n => n.type === 'DomainMesh' || n.type === 'CFDSolver')));
         const defaultPrompt = is3D
             ? `${gauge.x ?? 0}, ${gauge.y ?? 0}, ${gauge.z ?? 0}`
             : (is1D ? `${gauge.r ?? 0.1}` : `${gauge.r ?? 0}, ${gauge.z ?? 0}`);
@@ -4287,7 +4678,7 @@ export class PipelineBrowser {
         const gauges: any[] = vgNode.parameters.gauges || [];
         const gauge = gauges[idx] || { id: `P${idx + 1}` };
         const name = gauge.name || gauge.id || `Probe #${idx + 1}`;
-        const is1DModel = !model.nodes.some(n => ['DomainMesh3D', 'CFDSolver3D', 'MarineHarbourDomain', 'MPMDomain3D', 'FEMDomain3D', 'DomainMesh2D', 'CFDSolver2D', 'MPMDomain2D'].includes(n.type)) && model.nodes.some(n => n.type === 'DomainMesh' || n.type === 'CFDSolver');
+        const is1DModel = !model.nodes.some(n => isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type) || ['CFDSolver3D', 'MarineHarbourDomain', 'MPMDomain3D', 'FEMDomain3D', 'CFDSolver2D', 'MPMDomain2D'].includes(n.type)) && model.nodes.some(n => n.type === 'DomainMesh' || n.type === 'CFDSolver');
         const posStr = gauge.x !== undefined
             ? `(${gauge.x}, ${gauge.y}, ${gauge.z})`
             : (gauge.r !== undefined
@@ -4746,11 +5137,16 @@ export class PipelineBrowser {
     }
 
     private exportSingleProbeCSV(node: Node, gaugeIdx: number): void {
-        const history = this.stateManager.getTelemetry(node.id);
+        const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+        const history = this.stateManager.getTelemetry(node.id)
+            || (owningModel ? this.stateManager.getTelemetry(`${owningModel.id}-gauges`) : undefined);
         const gauges: any[] = node.parameters.gauges || [];
         const gauge = gauges[gaugeIdx] || { id: `P${gaugeIdx + 1}` };
-        const times: number[] = history?.times || [];
-        const histItem = history?.[gaugeIdx] || history?.gauges_history?.[gaugeIdx];
+        const times: number[] = history?.times || history?.gauge_times || [];
+        const gId = gauge.id || gauge.name || `G${gaugeIdx + 1}`;
+        const histItem = history?.[gaugeIdx]
+            || history?.gauges_history?.find?.((h: any) => h.id === gId || h.id === String(gaugeIdx))
+            || history?.gauges_history?.[gaugeIdx];
         
         let csvContent = `time_s,pressure_Pa,overpressure_Pa,impulse_Pas\n`;
         if (histItem && histItem.channel_values) {
@@ -5039,11 +5435,14 @@ export class PipelineBrowser {
             case 'FSICoupler2D': return 'FSI Coupler 2D';
             case 'MPMContactCoupler3D': return 'Bardenhagen Coupler';
             case 'DomainMesh3D': return 'Domain Mesh 3D';
+            case 'SparseDomainMesh3D': return 'Sparse Mesh 3D';
             case 'DomainMesh2D': return 'Domain Mesh 2D';
+            case 'SparseDomainMesh2D': return 'Sparse Mesh 2D';
             case 'DomainMesh': return 'Domain Mesh 1D';
             case 'MarineHarbourDomain': return 'Marine Harbour Domain';
             case 'Remap1DTo3DNode': return '1D→3D Remap';
             case 'Remap2DTo3DNode': return '2D→3D Remap';
+            case 'Remap3DTo3DNode': return '3D→3D Remap';
             case 'Remap1DTo2DNode': return '1D→2D Remap';
             case 'RemapNode': return '1D→2D Remap';
             case 'Obstacle': return '2D Rigid Obstacle';
@@ -5063,8 +5462,14 @@ export class PipelineBrowser {
                 return 'Multi-Physics';
             case 'CFDSolver3D': {
                 const dev = (node.parameters.device || 'CUDA').toUpperCase();
-                const order = node.parameters.temporal_order ? `O${node.parameters.temporal_order}` : 'ADER-2';
-                return `${dev} ${order}`;
+                const sts = String(node.parameters.space_time_scheme || '');
+                let schemeLabel = 'MUSCL';
+                if (sts.includes('ADER-3') || (!sts && (node.parameters.temporal_order === 6 || node.parameters.temporal_order === 3 || node.parameters.spatial_order === 3))) {
+                    schemeLabel = 'ADER-3';
+                } else if (sts.includes('ADER-2') || (!sts && node.parameters.temporal_order === 5)) {
+                    schemeLabel = 'ADER-2';
+                }
+                return `${dev} ${schemeLabel}`;
             }
             case 'CFDSolver2D': {
                 const dev = (node.parameters.device || 'CUDA').toUpperCase();
@@ -5109,13 +5514,16 @@ export class PipelineBrowser {
             }
             case 'Charge1D':
                 return `${node.parameters.charge_mass ?? '0.85'} kg (1D)`;
-            case 'DomainMesh3D': {
+            case 'DomainMesh3D':
+            case 'SparseDomainMesh3D': {
                 const nx = node.parameters.nx || 100;
                 const ny = node.parameters.ny || 100;
                 const nz = node.parameters.nz || 100;
-                return (nx === ny && ny === nz) ? `${nx}³` : `${nx}×${ny}×${nz}`;
+                const dims = (nx === ny && ny === nz) ? `${nx}³` : `${nx}×${ny}×${nz}`;
+                return node.type === 'SparseDomainMesh3D' ? `⚡ ${dims} (Sparse 8³)` : dims;
             }
-            case 'DomainMesh2D': {
+            case 'DomainMesh2D':
+            case 'SparseDomainMesh2D': {
                 const maxR = Number(node.parameters.max_r ?? 1.0);
                 const minR = Number(node.parameters.min_r ?? 0.0);
                 const maxZ = Number(node.parameters.max_z ?? 1.0);
@@ -5123,7 +5531,8 @@ export class PipelineBrowser {
                 const cs = Number(node.parameters.cell_size ?? 0.005);
                 const nr = Math.max(1, Math.round((maxR - minR) / (cs || 0.005)));
                 const nz = Math.max(1, Math.round((maxZ - minZ) / (cs || 0.005)));
-                return `${nr}×${nz} (${cs}m)`;
+                const dims = `${nr}×${nz} (${cs}m)`;
+                return node.type === 'SparseDomainMesh2D' ? `⚡ ${dims} (Sparse 8²)` : dims;
             }
             case 'DomainMesh':
                 return `${node.parameters.domain_radius ?? 1.0}m (${node.parameters.num_cells ?? 500} cells)`;
@@ -5140,6 +5549,8 @@ export class PipelineBrowser {
                 return '1D→3D';
             case 'Remap2DTo3DNode':
                 return '2D→3D';
+            case 'Remap3DTo3DNode':
+                return '3D→3D';
             case 'ThePainter':
                 return '1D Init';
             case 'TelemetryContour':
@@ -5150,8 +5561,10 @@ export class PipelineBrowser {
                 return 'Console Log';
             case 'VTKOutput':
                 return 'VTK/HDF5';
-            case 'STLGeometry':
-                return node.parameters.file_path ? (String(node.parameters.file_path).split('/').pop() || 'STL') : 'STL CAD';
+            case 'STLGeometry': {
+                const stlRef = node.parameters.stl_file || node.parameters.file_path;
+                return stlRef && stlRef !== 'None specified' ? (String(stlRef).replace(/\\/g, '/').split('/').pop() || 'STL') : 'STL CAD';
+            }
             case 'PrimitiveGeometry3D':
                 return node.parameters.shape_type || 'CSG';
             case 'FSICoupler2D':
@@ -5187,8 +5600,10 @@ export class PipelineBrowser {
                     return `${shape}${topo}`;
                 }
             }
-            case 'LSDynaImporter3D':
-                return node.parameters.file_path ? (String(node.parameters.file_path).split('/').pop() || 'LS-DYNA') : 'LS-DYNA';
+            case 'LSDynaImporter3D': {
+                const kRef = node.parameters.k_file || node.parameters.file_path;
+                return kRef && kRef !== 'None specified' ? (String(kRef).replace(/\\/g, '/').split('/').pop() || 'LS-DYNA') : 'LS-DYNA';
+            }
             case 'VirtualGauges':
             case 'VirtualGauges3D': {
                 const isExternal = node.parameters.source_mode === 'external_file';
@@ -5246,6 +5661,10 @@ export class PipelineBrowser {
     private getCleanEntityName(name: string): string {
         if (!name) return '';
         let clean = name.replace(/^(Material_|Material\s+|Mesh_|Mesh\s+)/i, '').trim();
+        clean = clean.replace(/Sparse\s+Domain\s+Mesh\s+3D/i, 'Sparse 3D');
+        clean = clean.replace(/Sparse\s+Domain\s+Mesh\s+2D/i, 'Sparse 2D');
+        clean = clean.replace(/SparseDomainMesh3D/i, 'Sparse 3D');
+        clean = clean.replace(/SparseDomainMesh2D/i, 'Sparse 2D');
         clean = clean.replace(/Domain\s+Mesh\s+3D/i, 'Mesh 3D');
         clean = clean.replace(/Domain\s+Mesh\s+2D/i, 'Mesh 2D');
         clean = clean.replace(/Domain\s+Mesh\s+1D/i, 'Mesh 1D');
@@ -5310,8 +5729,33 @@ export class PipelineBrowser {
             return chip;
         }
 
-        // 2. Domain meshes
-        if (node.type === 'DomainMesh3D' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh') {
+        // 2. Domain meshes (Dense & Sparse 8³ / 8² Block-Tile Grids)
+        if (isDomainMesh3DNode(node.type) || isDomainMesh2DNode(node.type) || node.type === 'DomainMesh') {
+            const is3D = isDomainMesh3DNode(node.type);
+            const is2D = isDomainMesh2DNode(node.type);
+            const isSparse = node.type === 'SparseDomainMesh3D' || node.type === 'SparseDomainMesh2D';
+
+            const group = document.createElement('span');
+            group.className = 'pipeline-conn-chip-group';
+
+            if ((is3D || is2D) && (isSparse || this.stateManager.isMeshSparseSupported(node.id, model.id))) {
+                const modeChip = document.createElement('span');
+                modeChip.className = 'pipeline-conn-chip connected';
+                modeChip.style.borderColor = isSparse ? '#a855f7' : '#38bdf8';
+                modeChip.style.background = isSparse ? 'rgba(168, 85, 247, 0.2)' : 'rgba(56, 189, 248, 0.14)';
+                modeChip.style.color = isSparse ? '#e9d5ff' : '#7dd3fc';
+                modeChip.textContent = isSparse ? (is3D ? '⚡ Sparse 8³' : '⚡ Sparse 8²') : '▦ Dense';
+                modeChip.title = isSparse
+                    ? `Sparse Block-Tile Grid (${is3D ? '8×8×8' : '8×8'} tiles) — Only active particle tiles allocate RAM/VRAM. Click to switch in-place to Dense Grid.`
+                    : `Dense Uniform Grid — Full domain allocated in RAM/VRAM. Click to switch in-place to Sparse ${is3D ? '8×8×8' : '8×8'} Block-Tile Grid (90–98% MPM memory reduction).`;
+                modeChip.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.stateManager.toggleMeshSparsity(node.id, model.id);
+                    this.render();
+                });
+                group.appendChild(modeChip);
+            }
+
             const conn = state.connections.find(c => (c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in')) || (c.toNode === node.id && c.fromPort === 'mesh'));
             const solverId = conn ? (conn.fromNode === node.id ? conn.toNode : conn.fromNode) : (node.parameters?.target_domain || '');
             const solver = model.nodes.find(n => n.id === solverId);
@@ -5328,8 +5772,6 @@ export class PipelineBrowser {
             }
             chip.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const is3D = node.type === 'DomainMesh3D';
-                const is2D = node.type === 'DomainMesh2D';
                 const candidates = model.nodes
                     .filter(n => is3D ? ['CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D', 'MarineHarbourDomain'].includes(n.type) : (is2D ? ['CFDSolver2D', 'MPMDomain2D'].includes(n.type) : ['CFDSolver', 'CFDSolver2D', 'CFDSolver3D'].includes(n.type)))
                     .map(n => ({ id: n.id, label: n.parameters?.name || n.type, sublabel: n.type }));
@@ -5342,7 +5784,8 @@ export class PipelineBrowser {
                     onSelect: (selectedId) => this.assignSolverToMesh(node, selectedId, model)
                 });
             });
-            return chip;
+            group.appendChild(chip);
+            return group;
         }
 
         // 3. Structural Objects (MPM / FEM)
@@ -5775,18 +6218,19 @@ export class PipelineBrowser {
 
             // Check if remap is active or connected for CFD
             const remapConn = state.connections.find(c => (c.toNode === node.id && (c.toPort === 'remap' || c.toPort === 'in')) || (c.fromNode === node.id && c.fromPort === 'remap'));
-            const remapNodes = model.nodes.filter(n => is3D ? (n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode') : (n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode'));
+            const remapNodes = model.nodes.filter(n => is3D ? (n.type === 'Remap1DTo3DNode' || n.type === 'Remap2DTo3DNode' || n.type === 'Remap3DTo3DNode') : (n.type === 'RemapNode' || n.type === 'Remap1DTo2DNode'));
             let currentRemapId = remapConn ? (remapConn.toNode === node.id ? remapConn.fromNode : remapConn.toNode) : (node.parameters?.remap || '');
             if (!currentRemapId && remapNodes.length === 1) {
                 currentRemapId = remapNodes[0].id;
             }
             const remapNode = model.nodes.find(n => n.id === currentRemapId);
-            const isRemapActive = isCFD && (is2D || is3D) && (!!remapNode || node.parameters?.init_mode === 'From1D' || node.parameters?.init_mode === 'From2D');
+            const isRemapActive = isCFD && (is2D || is3D) && (!!remapNode || node.parameters?.init_mode === 'From1D' || node.parameters?.init_mode === 'From2D' || node.parameters?.init_mode === 'From3D');
+            const inheritedRemap = isRemapActive ? resolveRemapInheritance(model, model.id, this.stateManager.getAllModels()) : null;
 
             // 1. Mesh Chip (optional for FEMDomain3D unless convert_failed_elements_to_mpm is enabled)
             const meshConn = state.connections.find(c => (c.toNode === node.id && (c.toPort === 'mesh' || c.toPort === 'in')) || (c.fromNode === node.id && c.fromPort === 'mesh'));
             let currentMeshId = meshConn ? (meshConn.toNode === node.id ? meshConn.fromNode : meshConn.toNode) : (node.parameters?.mesh || '');
-            const meshNode = model.nodes.find(n => n.id === currentMeshId && ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D'].includes(n.type));
+            const meshNode = model.nodes.find(n => n.id === currentMeshId && (isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type) || n.type === 'DomainMesh'));
             const needsBgMesh = node.type !== 'FEMDomain3D' || Boolean(node.parameters?.convert_failed_elements_to_mpm);
             if (meshNode || needsBgMesh) {
                 const meshChip = document.createElement('span');
@@ -5795,25 +6239,77 @@ export class PipelineBrowser {
                     meshChip.classList.add('connected');
                     const cs = meshNode.parameters?.cell_size ?? meshNode.parameters?.dx;
                     const csStr = cs !== undefined ? ` (${cs}m)` : '';
-                    meshChip.textContent = `📐 ${this.getCleanEntityName(meshNode.parameters?.name || meshNode.type)}${csStr}`;
-                    meshChip.title = `Background Mesh [${meshNode.parameters?.name || meshNode.id}] is wired. Click to reassign or disconnect.`;
+                    const isSparseMesh = meshNode.type === 'SparseDomainMesh3D' || meshNode.type === 'SparseDomainMesh2D';
+                    meshChip.textContent = `${isSparseMesh ? '⚡' : '📐'} ${this.getCleanEntityName(meshNode.parameters?.name || meshNode.type)}${csStr}`;
+                    meshChip.title = isCFD
+                        ? `Background Mesh [${meshNode.parameters?.name || meshNode.id}] (${meshNode.type}) is wired. Click to reassign, create dense grid, or disconnect.`
+                        : `Background Mesh [${meshNode.parameters?.name || meshNode.id}] (${meshNode.type}) is wired. Click to reassign, create sparse/dense grid, or disconnect.`;
                 } else {
                     meshChip.classList.add('unconnected');
                     meshChip.textContent = '📐 +Mesh';
-                    meshChip.title = 'No background mesh connected! Click to assign mesh.';
+                    meshChip.title = isCFD
+                        ? 'No background mesh connected! Click to assign or create a dense mesh.'
+                        : 'No background mesh connected! Click to assign or create a dense/sparse mesh.';
                 }
                 meshChip.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    const candidates = model.nodes
-                        .filter(n => is3D ? n.type === 'DomainMesh3D' : (is2D ? n.type === 'DomainMesh2D' : ['DomainMesh', 'DomainMesh2D', 'DomainMesh3D'].includes(n.type)))
+                    const candidates: { id: string; label: string; sublabel?: string }[] = model.nodes
+                        .filter(n => {
+                            if (isCFD) {
+                                return is3D ? n.type === 'DomainMesh3D' : (is2D ? n.type === 'DomainMesh2D' : n.type === 'DomainMesh');
+                            }
+                            return is3D ? isDomainMesh3DNode(n.type) : (is2D ? isDomainMesh2DNode(n.type) : (n.type === 'DomainMesh' || isDomainMesh2DNode(n.type) || isDomainMesh3DNode(n.type)));
+                        })
                         .map(n => ({ id: n.id, label: n.parameters?.name || n.type, sublabel: n.type }));
+                    if (is3D) {
+                        if (!isCFD) {
+                            candidates.push({
+                                id: '__create_sparse_3d__',
+                                label: '⚡ Create New Sparse Grid (SparseDomainMesh3D)',
+                                sublabel: '8×8×8 block-tile MPM sparse grid (90–98% RAM/VRAM reduction)'
+                            });
+                        }
+                        candidates.push({
+                            id: '__create_dense_3d__',
+                            label: '➕ Create New Dense Grid (DomainMesh3D)',
+                            sublabel: 'Uniform 3D Cartesian background grid'
+                        });
+                    } else if (is2D) {
+                        if (!isCFD) {
+                            candidates.push({
+                                id: '__create_sparse_2d__',
+                                label: '⚡ Create New Sparse Grid (SparseDomainMesh2D)',
+                                sublabel: '8×8 block-tile MPM sparse grid (90–98% RAM reduction)'
+                            });
+                        }
+                        candidates.push({
+                            id: '__create_dense_2d__',
+                            label: '➕ Create New Dense Grid (DomainMesh2D)',
+                            sublabel: 'Uniform 2D axisymmetric/planar background grid'
+                        });
+                    }
                     this.showQuickAssignPopup({
                         anchorEl: meshChip,
                         title: 'Background Mesh',
                         currentId: meshNode ? meshNode.id : '',
                         candidateNodes: candidates,
                         model,
-                        onSelect: (selectedId) => this.assignMeshToSolver(node, selectedId, model)
+                        onSelect: (selectedId) => {
+                            if (selectedId === '__create_sparse_3d__' || selectedId === '__create_dense_3d__' || selectedId === '__create_sparse_2d__' || selectedId === '__create_dense_2d__') {
+                                const newType: NodeType = selectedId === '__create_sparse_3d__'
+                                    ? 'SparseDomainMesh3D'
+                                    : (selectedId === '__create_dense_3d__'
+                                        ? 'DomainMesh3D'
+                                        : (selectedId === '__create_sparse_2d__' ? 'SparseDomainMesh2D' : 'DomainMesh2D'));
+                                this.addNodeToModel(model, newType);
+                                const createdMesh = model.nodes.find(n => n.type === newType);
+                                if (createdMesh) {
+                                    this.assignMeshToSolver(node, createdMesh.id, model);
+                                }
+                            } else {
+                                this.assignMeshToSolver(node, selectedId, model);
+                            }
+                        }
                     });
                 });
                 group.appendChild(meshChip);
@@ -5966,8 +6462,11 @@ export class PipelineBrowser {
                     const airChip = document.createElement('span');
                     airChip.className = 'pipeline-conn-chip chip-air connected';
                     const airPreset = airNode.parameters?.preset || airNode.parameters?.material_model || 'Air';
-                    airChip.textContent = `💨 ${this.getCleanEntityName(airNode.parameters?.name || airPreset)}`;
-                    airChip.title = `Ambient Air Material [${airNode.parameters?.name || airNode.id}] is wired. Click to reassign or disconnect.`;
+                    const overrideSuffix = isRemapActive ? ' (Override)' : '';
+                    airChip.textContent = `💨 ${this.getCleanEntityName(airNode.parameters?.name || airPreset)}${overrideSuffix}`;
+                    airChip.title = isRemapActive
+                        ? `Local Ambient Air [${airNode.parameters?.name || airNode.id}] overrides upstream remap air. Click to reassign or disconnect to inherit.`
+                        : `Ambient Air Material [${airNode.parameters?.name || airNode.id}] is wired. Click to reassign or disconnect.`;
                     airChip.addEventListener('click', (e) => {
                         e.stopPropagation();
                         const candidates = model.nodes
@@ -5979,6 +6478,31 @@ export class PipelineBrowser {
                         this.showQuickAssignPopup({
                             anchorEl: airChip,
                             title: 'Ambient Air Material',
+                            currentId: currentAirId,
+                            candidateNodes: candidates,
+                            model,
+                            onSelect: (selectedId) => this.assignAirToSolver(node, selectedId, model)
+                        });
+                    });
+                    group.appendChild(airChip);
+                } else if (isRemapActive && inheritedRemap?.hasRemap) {
+                    const airChip = document.createElement('span');
+                    airChip.className = 'pipeline-conn-chip chip-air connected';
+                    airChip.style.opacity = '0.88';
+                    const pKpa = (inheritedRemap.airParams.atm_pressure / 1000.0).toFixed(1);
+                    airChip.textContent = `💨 Inherited: ${pKpa} kPa`;
+                    airChip.title = `Ambient Air inherited from ${inheritedRemap.airSourceModelName || 'upstream'} (γ=${inheritedRemap.airParams.gamma.toFixed(2)}, P=${pKpa} kPa). Click to assign a local Air override.`;
+                    airChip.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const candidates = model.nodes
+                            .filter(n => n.type === 'Material')
+                            .map(n => {
+                                const preset = n.parameters?.preset || n.parameters?.material_model || 'Material';
+                                return { id: n.id, label: n.parameters?.name || n.type, sublabel: preset };
+                            });
+                        this.showQuickAssignPopup({
+                            anchorEl: airChip,
+                            title: 'Ambient Air Material (Local Override)',
                             currentId: currentAirId,
                             candidateNodes: candidates,
                             model,
@@ -6011,16 +6535,20 @@ export class PipelineBrowser {
                     group.appendChild(airChip);
                 }
 
-                // 3. Charge Chip (for CFD solvers) - suppress unconnected chip if remap is active!
+                // 3. Charge Chip (for CFD solvers) - show Inherited badge or warning if local Charge is wired while remap is active
                 const chgConn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'charge' || c.toPort === 'explosive'));
                 let currentChgId = chgConn ? chgConn.fromNode : (node.parameters?.explosive_charge || '');
                 const chgNode = model.nodes.find(n => n.id === currentChgId);
                 if (chgNode) {
                     const chgChip = document.createElement('span');
-                    chgChip.className = 'pipeline-conn-chip chip-charge connected';
+                    chgChip.className = isRemapActive ? 'pipeline-conn-chip chip-charge unconnected' : 'pipeline-conn-chip chip-charge connected';
                     const chgMass = chgNode.parameters?.charge_mass ?? '0.85';
-                    chgChip.textContent = `💥 ${this.getCleanEntityName(chgNode.parameters?.name || chgNode.type)} (${chgMass}kg)`;
-                    chgChip.title = `Explosive Charge [${chgNode.parameters?.name || chgNode.id}] is wired. Click to reassign or disconnect.`;
+                    chgChip.textContent = isRemapActive
+                        ? `⚠️ ${this.getCleanEntityName(chgNode.parameters?.name || chgNode.type)} (Ignored: Remap)`
+                        : `💥 ${this.getCleanEntityName(chgNode.parameters?.name || chgNode.type)} (${chgMass}kg)`;
+                    chgChip.title = isRemapActive
+                        ? `Local Charge [${chgNode.parameters?.name || chgNode.id}] is ignored because Charge & EOS are inherited from ${inheritedRemap?.chargeSourceModelName || 'upstream remap'}. Click to disconnect.`
+                        : `Explosive Charge [${chgNode.parameters?.name || chgNode.id}] is wired. Click to reassign or disconnect.`;
                     chgChip.addEventListener('click', (e) => {
                         e.stopPropagation();
                         const candidates = model.nodes
@@ -6038,6 +6566,23 @@ export class PipelineBrowser {
                             model,
                             onSelect: (selectedId) => this.assignChargeToSolver(node, selectedId, model)
                         });
+                    });
+                    group.appendChild(chgChip);
+                } else if (isRemapActive && inheritedRemap?.hasRemap) {
+                    const chgChip = document.createElement('span');
+                    chgChip.className = 'pipeline-conn-chip chip-charge connected';
+                    chgChip.style.opacity = '0.88';
+                    const cp = inheritedRemap.chargeParams;
+                    const massStr = cp.charge_mass > 0 ? ` ${cp.charge_mass.toFixed(2)}kg` : '';
+                    chgChip.textContent = `💥 Inherited: ${cp.composition}${massStr}`;
+                    chgChip.title = `Charge & EOS (${cp.material_type}: ${cp.composition}${massStr}, Afterburn: ${cp.afterburn_enabled ? 'ON' : 'OFF'}) inherited from ${inheritedRemap.chargeSourceModelName || 'upstream stage'}. Click to inspect upstream model.`;
+                    chgChip.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const jumpId = inheritedRemap.chargeSourceModelId || inheritedRemap.sourceModelId;
+                        if (jumpId) {
+                            this.stateManager.setActiveModel(jumpId);
+                            this.render();
+                        }
                     });
                     group.appendChild(chgChip);
                 } else if (!isRemapActive) {
@@ -6513,13 +7058,14 @@ export class PipelineBrowser {
             return group;
         }
 
-        // 8. Remap Nodes (1D->3D, 2D->3D, 1D->2D)
-        if (['Remap1DTo3DNode', 'Remap2DTo3DNode', 'RemapNode', 'Remap1DTo2DNode'].includes(node.type)) {
+        // 8. Remap Nodes (1D->3D, 2D->3D, 3D->3D, 1D->2D)
+        if (['Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode', 'RemapNode', 'Remap1DTo2DNode'].includes(node.type)) {
             const group = document.createElement('span');
             group.className = 'pipeline-conn-chip-group';
 
-            const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode';
+            const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode';
             const is2Dto3D = node.type === 'Remap2DTo3DNode';
+            const is3Dto3D = node.type === 'Remap3DTo3DNode';
             const allModels = this.stateManager.getAllModels();
             const ws = this.stateManager.getActiveWorkspace();
 
@@ -6534,14 +7080,14 @@ export class PipelineBrowser {
             }
             if (!currentSourceModelId) {
                 const localSrcConn = state.connections.find(c => c.toNode === node.id && (c.toPort === 'in' || c.fromPort === 'telemetry'));
-                if (localSrcConn && model.nodes.some(n => n.id === localSrcConn.fromNode && (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'))) {
+                if (localSrcConn && model.nodes.some(n => n.id === localSrcConn.fromNode && (is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver')))) {
                     currentSourceModelId = model.id;
                 }
             }
             const sourceModel = allModels.find(m => m.id === currentSourceModelId);
             const srcChip = document.createElement('span');
             srcChip.className = 'pipeline-conn-chip chip-remap';
-            const sourceDimLabel = is2Dto3D ? '2D' : '1D';
+            const sourceDimLabel = is3Dto3D ? '3D' : (is2Dto3D ? '2D' : '1D');
 
             if (sourceModel) {
                 srcChip.classList.add('connected');
@@ -6555,19 +7101,28 @@ export class PipelineBrowser {
 
             srcChip.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const compatibleModels = allModels.filter(m => m.nodes.some(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
-                const candidates = [
+                const compatibleModels = allModels.filter(m =>
+                    m.id !== model.id && m.nodes.some(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'))
+                );
+                const candidates: Array<{ id: string; label: string; sublabel?: string }> = [
                     { id: '', label: '🚫 [None (Disconnect)]', sublabel: 'Disconnect upstream source shock model' },
-                    ...compatibleModels.map(m => {
-                        const solver = m.nodes.find(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
-                        const solverLabel = solver?.parameters?.name || (is2Dto3D ? 'CFDSolver2D' : 'CFDSolver');
-                        return {
-                            id: m.id,
-                            label: m.id === model.id ? `${m.name || m.id} (Same Model)` : (m.name || m.id),
-                            sublabel: `${sourceDimLabel} CFD (${solverLabel})`
-                        };
-                    })
                 ];
+                if (!is2Dto3D && !is3Dto3D) {
+                    candidates.push({
+                        id: '__create_new_1d_source__',
+                        label: '✨ + Create & Wire 1D Spherical Source Stage',
+                        sublabel: 'Instantly build & wire a pre-configured 1D Spherical CFD blast model upstream'
+                    });
+                }
+                compatibleModels.forEach(m => {
+                    const solver = m.nodes.find(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
+                    const solverLabel = solver?.parameters?.name || (is3Dto3D ? 'CFDSolver3D' : (is2Dto3D ? 'CFDSolver2D' : 'CFDSolver'));
+                    candidates.push({
+                        id: m.id,
+                        label: m.name || m.id,
+                        sublabel: `${sourceDimLabel} CFD (${solverLabel})`
+                    });
+                });
                 this.showQuickAssignPopup({
                     anchorEl: srcChip,
                     title: `Upstream Source ${sourceDimLabel} Model`,
@@ -6602,11 +7157,14 @@ export class PipelineBrowser {
 
             solverChip.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const candidates = targetSolvers.map(s => ({
-                    id: s.id,
-                    label: s.parameters?.name || s.type,
-                    sublabel: is3D ? '3D CFD Grid' : '2D CFD Grid'
-                }));
+                const candidates = [
+                    { id: '', label: '🚫 [None (Disconnect)]', sublabel: 'Disconnect target CFD solver' },
+                    ...targetSolvers.map(s => ({
+                        id: s.id,
+                        label: s.parameters?.name || s.type,
+                        sublabel: is3D ? '3D CFD Grid' : '2D CFD Grid'
+                    }))
+                ];
                 this.showQuickAssignPopup({
                     anchorEl: solverChip,
                     title: 'Target Receiving CFD Solver',
@@ -6617,13 +7175,26 @@ export class PipelineBrowser {
                         const s = model.nodes.find(n => n.id === selectedId);
                         if (s) {
                             this.assignRemapToSolver(s, node.id, model);
-                        } else {
+                        } else if (targetSolver || targetSolvers[0]) {
                             this.assignRemapToSolver(targetSolver || targetSolvers[0], '', model);
                         }
                     }
                 });
             });
             group.appendChild(solverChip);
+
+            // 3. Side-by-Side Split View Chip when upstream source model is wired
+            if (sourceModel && sourceModel.id !== model.id) {
+                const splitChip = document.createElement('span');
+                splitChip.className = 'pipeline-conn-chip chip-mesh connected';
+                splitChip.textContent = '📐 Split View';
+                splitChip.title = `Open Side-by-Side Split View (${sourceModel.name || sourceModel.id} + ${model.name || model.id})`;
+                splitChip.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    (window as any).openRemapSplitView?.(sourceModel.id, model.id);
+                });
+                group.appendChild(splitChip);
+            }
 
             return group;
         }
@@ -6646,12 +7217,13 @@ export class PipelineBrowser {
                 const ny = meshNode.parameters?.ny ?? 100;
                 const nz = meshNode.parameters?.nz ?? 100;
                 const dimStr = (nx === ny && ny === nz) ? `${nx}³` : `${nx}×${ny}×${nz}`;
-                meshChip.textContent = `📐 Mesh ${dimStr} (${cs}m)`;
-                meshChip.title = `Background Mesh [${meshNode.parameters?.name || meshNode.id}] is wired (dx = ${cs}m, ${nx}x${ny}x${nz}). Click to reassign or disconnect.`;
+                const isSparse = meshNode.type === 'SparseDomainMesh3D';
+                meshChip.textContent = `${isSparse ? '⚡ Sparse' : '📐 Mesh'} ${dimStr} (${cs}m)`;
+                meshChip.title = `Background Mesh [${meshNode.parameters?.name || meshNode.id}] (${meshNode.type}) is wired (dx = ${cs}m, ${nx}x${ny}x${nz}). Click to reassign or disconnect.`;
             } else {
                 meshChip.classList.add('unconnected');
                 meshChip.textContent = '📐 +Mesh';
-                meshChip.title = 'Marine Harbour Domain requires a background mesh! Click to assign DomainMesh3D.';
+                meshChip.title = 'Marine Harbour Domain requires a dense 3D background mesh! Click to assign DomainMesh3D.';
             }
             meshChip.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -6660,7 +7232,7 @@ export class PipelineBrowser {
                     .map(n => ({ id: n.id, label: n.parameters?.name || n.type, sublabel: n.type }));
                 candidates.push({
                     id: '__create_new_mesh__',
-                    label: '➕ Create New Background Grid (DomainMesh3D)',
+                    label: '➕ Create New Dense Background Grid (DomainMesh3D)',
                     sublabel: 'Adds a 3D Cartesian background grid and connects it to this domain'
                 });
                 this.showQuickAssignPopup({
@@ -6670,20 +7242,13 @@ export class PipelineBrowser {
                     candidateNodes: candidates,
                     model,
                     onSelect: (selectedId) => {
-                        if (selectedId === '__create_new_mesh__') {
-                            const newMeshId = this.stateManager.generateUniqueNodeId('DomainMesh3D');
-                            const newMeshNode: Node = {
-                                id: newMeshId,
-                                type: 'DomainMesh3D',
-                                x: (node.x || 300) - 320,
-                                y: node.y || 100,
-                                displayMode: 'expanded',
-                                inputs: this.stateManager.getDefaultInputs('DomainMesh3D'),
-                                outputs: this.stateManager.getDefaultOutputs('DomainMesh3D'),
-                                parameters: { ...this.stateManager.getDefaultParameters('DomainMesh3D'), name: 'Domain Mesh 3D' }
-                            };
-                            model.nodes.push(newMeshNode);
-                            this.assignMeshToSolver(node, newMeshId, model);
+                        if (selectedId === '__create_new_mesh__' || selectedId === '__create_new_sparse_mesh__') {
+                            const newType: NodeType = selectedId === '__create_new_sparse_mesh__' ? 'SparseDomainMesh3D' : 'DomainMesh3D';
+                            this.addNodeToModel(model, newType);
+                            const createdMesh = model.nodes.find(n => n.type === newType);
+                            if (createdMesh) {
+                                this.assignMeshToSolver(node, createdMesh.id, model);
+                            }
                         } else {
                             this.assignMeshToSolver(node, selectedId, model);
                         }
@@ -7151,7 +7716,7 @@ export class PipelineBrowser {
     private assignRemapToSolver(solver: Node, newRemapId: string, model: Model): void {
         const state = this.stateManager.getCurrentState();
         if (!state) return;
-        state.connections = state.connections.filter(c => !(c.toNode === solver.id && (c.toPort === 'remap' || c.toPort === 'in')));
+        state.connections = state.connections.filter(c => !(c.toNode === solver.id && (c.toPort === 'remap' || c.toPort === 'in')) && !(c.fromNode === newRemapId && (c.toPort === 'remap' || c.toPort === 'in')));
         if (newRemapId) {
             state.connections.push({
                 fromNode: newRemapId,
@@ -7160,17 +7725,39 @@ export class PipelineBrowser {
                 toPort: 'remap'
             });
         }
-        this.syncParamInStateAndModel(state, model, solver.id, { remap: newRemapId });
-
+        const solverUpdates: Record<string, any> = { remap: newRemapId };
         if (newRemapId) {
+            const remapObj = model.nodes.find(n => n.id === newRemapId);
+            const desiredInitMode = remapObj?.type === 'Remap3DTo3DNode' ? 'From3D' : (remapObj?.type === 'Remap2DTo3DNode' ? 'From2D' : 'From1D');
+            if (solver.type !== 'MarineHarbourDomain' || solver.parameters?.init_mode !== 'Hydrostatic_Stratified_3D') {
+                solverUpdates.init_mode = desiredInitMode;
+            }
             this.syncParamInStateAndModel(state, model, newRemapId, { target_solver: solver.id });
+        } else {
+            // Clear target_solver on any remap nodes in this model pointing to solver.id
+            model.nodes.forEach(n => {
+                if (['RemapNode', 'Remap1DTo2DNode', 'Remap1DTo3DNode', 'Remap2DTo3DNode', 'Remap3DTo3DNode'].includes(n.type) && n.parameters?.target_solver === solver.id) {
+                    this.syncParamInStateAndModel(state, model, n.id, { target_solver: '' });
+                }
+            });
+            if (solver.parameters?.init_mode === 'From1D' || solver.parameters?.init_mode === 'From2D' || solver.parameters?.init_mode === 'From3D') {
+                solverUpdates.init_mode = 'Multi-Material JWL';
+            }
         }
+        this.syncParamInStateAndModel(state, model, solver.id, solverUpdates);
+
         this.stateManager.setModelStatus(model.id, 'UNINITIALIZED');
         this.stateManager.pushState(state);
         this.render();
     }
 
     private assignRemapSourceModel(remapNode: Node, newSourceModelId: string, model: Model): void {
+        if (newSourceModelId === '__create_new_1d_source__') {
+            this.stateManager.createAndWire1DSourceStageForRemap(model.id, remapNode.id);
+            this.render();
+            return;
+        }
+
         const ws = this.stateManager.getActiveWorkspace();
         const allModels = this.stateManager.getAllModels();
         const state = this.stateManager.getCurrentState();
@@ -7181,7 +7768,7 @@ export class PipelineBrowser {
         }
         state.connections = state.connections.filter(c => !(c.toNode === remapNode.id && (c.toPort === 'in' || c.toPort === 'telemetry')));
 
-        const isAuto = !newSourceModelId || newSourceModelId === '__auto__';
+        const isAuto = !newSourceModelId || newSourceModelId === '__auto__' || newSourceModelId === model.id;
         const finalModelId = isAuto ? '' : newSourceModelId;
 
         this.syncParamInStateAndModel(state, model, remapNode.id, { source_model_id: finalModelId });
@@ -7190,22 +7777,33 @@ export class PipelineBrowser {
             const sourceModel = allModels.find(m => m.id === finalModelId);
             if (sourceModel) {
                 const is2D = remapNode.type === 'Remap2DTo3DNode';
-                const sourceSolver = sourceModel.nodes.find(n => is2D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver');
-                if (sourceSolver) {
-                    if (finalModelId === model.id) {
+                const isFrom3D = remapNode.type === 'Remap3DTo3DNode';
+                const sourceSolver = sourceModel.nodes.find(n => isFrom3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
+                if (sourceSolver && ws) {
+                    if (!ws.connections) ws.connections = [];
+                    ws.connections.push({
+                        fromNode: sourceSolver.id,
+                        fromPort: 'telemetry',
+                        toNode: remapNode.id,
+                        toPort: 'in'
+                    });
+                }
+                // Auto-sync connected target solver init_mode
+                const is3D = remapNode.type === 'Remap1DTo3DNode' || remapNode.type === 'Remap2DTo3DNode' || remapNode.type === 'Remap3DTo3DNode';
+                const desiredInitMode = isFrom3D ? 'From3D' : (is2D ? 'From2D' : 'From1D');
+                const linkedSolver = model.nodes.find(n =>
+                    n.id === remapNode.parameters?.target_solver ||
+                    (is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D')
+                );
+                if (linkedSolver && (linkedSolver.type !== 'MarineHarbourDomain' || linkedSolver.parameters?.init_mode !== 'Hydrostatic_Stratified_3D')) {
+                    this.syncParamInStateAndModel(state, model, linkedSolver.id, { init_mode: desiredInitMode, remap: remapNode.id });
+                    this.syncParamInStateAndModel(state, model, remapNode.id, { target_solver: linkedSolver.id });
+                    if (!state.connections.some(c => c.fromNode === remapNode.id && c.toNode === linkedSolver.id)) {
                         state.connections.push({
-                            fromNode: sourceSolver.id,
-                            fromPort: 'telemetry',
-                            toNode: remapNode.id,
-                            toPort: 'in'
-                        });
-                    } else if (ws) {
-                        if (!ws.connections) ws.connections = [];
-                        ws.connections.push({
-                            fromNode: sourceSolver.id,
-                            fromPort: 'telemetry',
-                            toNode: remapNode.id,
-                            toPort: 'in'
+                            fromNode: remapNode.id,
+                            fromPort: 'remap',
+                            toNode: linkedSolver.id,
+                            toPort: 'remap'
                         });
                     }
                 }
@@ -7640,7 +8238,7 @@ export class PipelineBrowser {
         const isCharge = myType === 'Charge3D' || myType === 'Charge2D' || myType === 'ExplosiveMaterial';
         const isDetonator = myType === 'DetonatorLocation3D' || myType === 'DetonatorLocation' || myType === 'TriggerLocation3D' || myType === 'TriggerLocation' || myType === 'DetonatorPoint3D' || myType === 'DetonatorLine3D' || myType === 'DetonatorPlane3D' || myType === 'Detonator';
         const isGauges = myType === 'VirtualGauges' || myType === 'VirtualGauges3D' || myType === 'VirtualGaugeProbe3D' || myType === 'VirtualGauge' || myType === 'VirtualGaugeArray';
-        const isGrid = myType === 'DomainMesh3D' || myType === 'DomainMesh' || myType === 'DomainMesh2D';
+        const isGrid = isDomainMesh3DNode(myType) || myType === 'DomainMesh' || isDomainMesh2DNode(myType);
         const isCFD = myType === 'CFDSolver3D' || myType === 'CFDSolver2D' || myType === 'CFDSolver1D';
         const isHarbour = myType === 'MarineHarbourDomain';
 
@@ -7898,7 +8496,7 @@ export class PipelineBrowser {
                     vpUpdates.slices = updatedSlices;
                     (window as any).transportController?.onSliceConfigChange?.(updatedSlices);
                 }
-                for (const meshNode of model.nodes.filter(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh')) {
+                for (const meshNode of model.nodes.filter(n => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh')) {
                     if (Array.isArray(meshNode.parameters?.slices)) {
                         const updatedMeshSlices = meshNode.parameters.slices.map((s: any) => ({ ...s, enabled: isVisible }));
                         this.stateManager.updateNodeParametersInPlace(meshNode.id, { slices: updatedMeshSlices });
@@ -8135,12 +8733,12 @@ export class PipelineBrowser {
             item.textContent = spec.label;
             item.addEventListener('click', () => {
                 menu.remove();
-                let targetDomain = model.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'DomainMesh2D') ||
+                let targetDomain = model.nodes.find(n => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh' || isDomainMesh2DNode(n.type)) ||
                                    model.nodes.find(n => ['CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D', 'Telemetry3DViewport'].includes(n.type));
                 if (!targetDomain) {
                     this.addNodeToModel(model, 'DomainMesh3D');
                     const updatedState = this.stateManager.getCurrentState();
-                    targetDomain = updatedState?.nodes.find(n => n.type === 'DomainMesh3D');
+                    targetDomain = updatedState?.nodes.find(n => isDomainMesh3DNode(n.type));
                 }
                 if (targetDomain) {
                     this.addNewSliceToDomain(targetDomain, model, spec.plane);
@@ -8227,12 +8825,12 @@ export class PipelineBrowser {
                 item.textContent = spec.label;
                 item.addEventListener('click', () => {
                     menu.remove();
-                    let targetDomain = model.nodes.find(n => n.type === 'DomainMesh3D' || n.type === 'DomainMesh' || n.type === 'DomainMesh2D') ||
+                    let targetDomain = model.nodes.find(n => isDomainMesh3DNode(n.type) || n.type === 'DomainMesh' || isDomainMesh2DNode(n.type)) ||
                                        model.nodes.find(n => ['CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D', 'Telemetry3DViewport'].includes(n.type));
                     if (!targetDomain) {
                         this.addNodeToModel(model, 'DomainMesh3D');
                         const updatedState = this.stateManager.getCurrentState();
-                        targetDomain = updatedState?.nodes.find(n => n.type === 'DomainMesh3D');
+                        targetDomain = updatedState?.nodes.find(n => isDomainMesh3DNode(n.type));
                     }
                     if (targetDomain) {
                         this.addNewSliceToDomain(targetDomain, model, spec.plane);
@@ -8287,8 +8885,10 @@ export class PipelineBrowser {
     private getNodeTypeFriendlyName(type: string): string {
         switch (type) {
             case 'DomainMesh': return 'Domain Mesh (1D)';
-            case 'DomainMesh2D': return 'Domain Mesh 2D';
-            case 'DomainMesh3D': return 'Domain Mesh 3D';
+            case 'DomainMesh2D': return 'Domain Mesh 2D (Dense)';
+            case 'SparseDomainMesh2D': return 'Sparse Domain Mesh 2D (8² Block-Tile)';
+            case 'DomainMesh3D': return 'Domain Mesh 3D (Dense)';
+            case 'SparseDomainMesh3D': return 'Sparse Domain Mesh 3D (8³ Block-Tile)';
             case 'Material': return 'Material & EOS';
             case 'Charge1D': return 'Charge 1D';
             case 'Charge2D': return 'Charge 2D';
@@ -8320,6 +8920,7 @@ export class PipelineBrowser {
             case 'Remap1DTo2DNode': return 'Remapper (1D ➔ 2D)';
             case 'Remap1DTo3DNode': return 'Remapper (1D ➔ 3D)';
             case 'Remap2DTo3DNode': return 'Remapper (2D ➔ 3D)';
+            case 'Remap3DTo3DNode': return 'Remapper (3D ➔ 3D)';
             case 'ThePainter': return 'Initializer (The Painter)';
             case 'Telemetry3DViewport': return 'Telemetry - 3D Viewport';
             case 'TelemetryContour': return 'Telemetry - Contour (2D)';
@@ -8346,19 +8947,55 @@ export class PipelineBrowser {
         title.textContent = `${group.name} (Pipeline)`;
         menu.appendChild(title);
 
+        const statuses = group.models.map(m => this.stateManager.getModelStatus(m.id));
+        const anyRunning = statuses.some(s => s === 'RUNNING');
+        const anyActive = statuses.some(s => s === 'RUNNING' || s === 'PAUSED' || s === 'INITIALIZED');
+        const anyIncomplete = statuses.some(s => s === 'INCOMPLETE');
+
         // Run Pipeline
         const runItem = document.createElement('div');
-        runItem.className = 'context-menu-item';
-        runItem.textContent = '⚡ Run Full Pipeline';
+        runItem.className = `context-menu-item${anyRunning || anyIncomplete ? ' disabled' : ''}`;
+        runItem.textContent = '⛓️ Run Full Pipeline';
         runItem.addEventListener('click', () => {
+            if (anyRunning || anyIncomplete) return;
             menu.remove();
             if ((window as any).executeWorkspacePipeline) {
-                (window as any).executeWorkspacePipeline();
+                (window as any).executeWorkspacePipeline(group.models.map(m => m.id));
             } else if ((window as any).executeModelCommand) {
-                (window as any).executeModelCommand(group.models[0].id, 'EXEC_ALL');
+                (window as any).executeModelCommand(group.models[group.models.length - 1].id, 'EXEC_ALL', { forceFullPipeline: true });
             }
         });
         menu.appendChild(runItem);
+
+        if (anyRunning) {
+            const pauseItem = document.createElement('div');
+            pauseItem.className = 'context-menu-item';
+            pauseItem.textContent = '⏸ Pause Running Stage';
+            pauseItem.addEventListener('click', () => {
+                menu.remove();
+                group.models
+                    .filter(m => this.stateManager.getModelStatus(m.id) === 'RUNNING')
+                    .forEach(rm => this.dispatchModelSimCommand(rm, 'PAUSE', {}, false));
+            });
+            menu.appendChild(pauseItem);
+        }
+
+        if (anyActive) {
+            const termItem = document.createElement('div');
+            termItem.className = 'context-menu-item danger';
+            termItem.textContent = '⏹ Terminate Active Stages';
+            termItem.addEventListener('click', () => {
+                menu.remove();
+                [...group.models]
+                    .reverse()
+                    .filter(m => {
+                        const st = this.stateManager.getModelStatus(m.id);
+                        return st === 'RUNNING' || st === 'PAUSED' || st === 'INITIALIZED';
+                    })
+                    .forEach(am => this.dispatchModelSimCommand(am, 'TERMINATE', {}, false));
+            });
+            menu.appendChild(termItem);
+        }
 
         // Expand All
         const expandItem = document.createElement('div');
@@ -8411,6 +9048,89 @@ export class PipelineBrowser {
         title.textContent = `${model.name || model.id} (Model)`;
         menu.appendChild(title);
 
+        // Simulation Controls Section (full lifecycle parity per Directive 18)
+        const allWsModels = this.stateManager.getWorkspaceModels();
+        const remapInfo = this.getRemapSourceInfo(model, allWsModels);
+        const status = this.stateManager.getModelStatus(model.id);
+        const isUpstreamRunning = Boolean((window as any).isUpstreamAutoRunningFor?.(model.id));
+        const stageExtra: Record<string, any> = remapInfo ? { skipUpstreamAutoRun: true, allowAutoRun: false } : {};
+        const isActiveState = status === 'INITIALIZED' || status === 'PAUSED' || status === 'RUNNING';
+        const isBusy = status === 'RUNNING' || isUpstreamRunning;
+        const canContinue = status === 'PAUSED';
+
+        const addMenuAction = (label: string, disabled: boolean, danger: boolean, onClick: () => void) => {
+            const item = document.createElement('div');
+            item.className = `context-menu-item${danger ? ' danger' : ''}${disabled ? ' disabled' : ''}`;
+            item.textContent = label;
+            item.addEventListener('click', () => {
+                if (disabled) return;
+                menu.remove();
+                onClick();
+            });
+            menu.appendChild(item);
+        };
+
+        addMenuAction(
+            isActiveState ? '🔄 Re-Init / Restart Stage' : '⚡ Init Stage',
+            status === 'INCOMPLETE' || isUpstreamRunning,
+            false,
+            () => this.dispatchModelSimCommand(model, 'INIT', { ...stageExtra, forceRestart: true })
+        );
+
+        if (isBusy) {
+            addMenuAction(
+                isUpstreamRunning ? '⏸ Pause Upstream Stage' : '⏸ Pause Stage',
+                false,
+                false,
+                () => this.dispatchModelSimCommand(model, 'PAUSE', {}, false)
+            );
+        } else {
+            addMenuAction(
+                canContinue ? '▶ Continue Running' : (status === 'INITIALIZED' ? '▶ Run Stage' : '▶ Init & Run Stage'),
+                status === 'INCOMPLETE',
+                false,
+                () => this.dispatchModelSimCommand(model, 'EXEC_ALL', { ...stageExtra, forceRestart: false })
+            );
+        }
+
+        const stepRow = document.createElement('div');
+        stepRow.className = 'context-menu-step-row';
+        const stepLabel = document.createElement('span');
+        stepLabel.textContent = '⏭ Step:';
+        const stepBtnsWrap = document.createElement('div');
+        stepBtnsWrap.className = 'context-menu-step-btns';
+        [1, 10, 100, 1000].forEach(count => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'context-menu-step-btn';
+            btn.textContent = String(count);
+            btn.disabled = isBusy || status === 'INCOMPLETE';
+            btn.title = `Step ${count} cycle${count > 1 ? 's' : ''}`;
+            btn.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                if (btn.disabled) return;
+                menu.remove();
+                this.dispatchModelSimCommand(model, 'STEP', { ...stageExtra, steps: count, forceRestart: false });
+            });
+            stepBtnsWrap.appendChild(btn);
+        });
+        stepRow.appendChild(stepLabel);
+        stepRow.appendChild(stepBtnsWrap);
+        menu.appendChild(stepRow);
+
+        if (isActiveState || isUpstreamRunning) {
+            addMenuAction(
+                isUpstreamRunning ? '⏹ Terminate Upstream Stage' : '⏹ Terminate Stage',
+                false,
+                true,
+                () => this.dispatchModelSimCommand(model, 'TERMINATE', {}, false)
+            );
+        }
+
+        const sepSim = document.createElement('div');
+        sepSim.className = 'context-menu-separator';
+        menu.appendChild(sepSim);
+
         // Rename Model
         const renameItem = document.createElement('div');
         renameItem.className = 'context-menu-item';
@@ -8436,6 +9156,70 @@ export class PipelineBrowser {
             this.render();
         });
         menu.appendChild(activeItem);
+
+        // Save Model
+        const saveItem = document.createElement('div');
+        saveItem.className = 'context-menu-item';
+        saveItem.textContent = '💾 Save Model (Ctrl+S)';
+        saveItem.addEventListener('click', () => {
+            menu.remove();
+            this.exportModel(model, false);
+        });
+        menu.appendChild(saveItem);
+
+        // Save Model As
+        const saveAsItem = document.createElement('div');
+        saveAsItem.className = 'context-menu-item';
+        saveAsItem.textContent = '📥 Save Model As...';
+        saveAsItem.addEventListener('click', () => {
+            menu.remove();
+            this.exportModel(model, true);
+        });
+        menu.appendChild(saveAsItem);
+
+        // Replace Model from File
+        const openReplaceItem = document.createElement('div');
+        openReplaceItem.className = 'context-menu-item';
+        openReplaceItem.textContent = '📂 Open / Replace Model from File...';
+        openReplaceItem.addEventListener('click', () => {
+            menu.remove();
+            this.activeModelId = model.id;
+            this.stateManager.setActiveModel(model.id);
+            this.importModel('replace_active');
+        });
+        menu.appendChild(openReplaceItem);
+
+        // Import Model into Workspace
+        const importWsItem = document.createElement('div');
+        importWsItem.className = 'context-menu-item';
+        importWsItem.textContent = '➕ Import Another Model into Workspace...';
+        importWsItem.addEventListener('click', () => {
+            menu.remove();
+            this.importModel('add_to_workspace');
+        });
+        menu.appendChild(importWsItem);
+
+        // Open from Recent Folder
+        const recentFolderItem = document.createElement('div');
+        recentFolderItem.className = 'context-menu-item';
+        recentFolderItem.textContent = '🕒 Open from Recent Folder...';
+        recentFolderItem.addEventListener('click', () => {
+            menu.remove();
+            const anchor = (this.rootElement.querySelector('.pipeline-header') as HTMLElement) || this.rootElement;
+            showRecentFoldersQuickMenu(
+                anchor,
+                (folderPath) => {
+                    this.activeModelId = model.id;
+                    this.stateManager.setActiveModel(model.id);
+                    this.importModel('replace_active', folderPath);
+                },
+                {
+                    title: 'Open Model from Recent Folder',
+                    onBrowse: () => this.importModel('replace_active')
+                }
+            );
+        });
+        menu.appendChild(recentFolderItem);
 
         // Expand All
         const expandAllItem = document.createElement('div');
@@ -8463,9 +9247,9 @@ export class PipelineBrowser {
             const delItem = document.createElement('div');
             delItem.className = 'context-menu-item danger';
             delItem.textContent = '🗑 Delete Model';
-            delItem.addEventListener('click', () => {
+            delItem.addEventListener('click', async () => {
                 menu.remove();
-                if (confirm(`Are you sure you want to delete model "${model.name || model.id}"?`)) {
+                if (await CustomDialog.confirm(`Are you sure you want to delete model "${model.name || model.id}"?`, 'Delete Model')) {
                     this.stateManager.removeModelFromWorkspace(model.id);
                 }
             });
@@ -8659,6 +9443,42 @@ export class PipelineBrowser {
         });
         menu.appendChild(visItem);
 
+        const fileSpec = this.getNodePrimaryFileTarget(node);
+        if (fileSpec) {
+            const browseFileItem = document.createElement('div');
+            browseFileItem.className = 'context-menu-item';
+            browseFileItem.style.color = '#38bdf8';
+            browseFileItem.textContent = `${fileSpec.isFolder ? '📁' : '📂'} Browse ${fileSpec.label}...`;
+            browseFileItem.addEventListener('click', () => {
+                menu.remove();
+                this.browseNodeFileOrFolder(node, model);
+            });
+            menu.appendChild(browseFileItem);
+
+            const recentFileItem = document.createElement('div');
+            recentFileItem.className = 'context-menu-item';
+            recentFileItem.textContent = `🕒 ${fileSpec.isFolder ? `Set ${fileSpec.label} from Recent Folder...` : `Open ${fileSpec.label} from Recent Folder...`}`;
+            recentFileItem.addEventListener('click', () => {
+                menu.remove();
+                const rowAnchor = (this.rootElement.querySelector(`[data-node-id="${node.id}"]`) as HTMLElement) || this.rootElement;
+                showRecentFoldersQuickMenu(
+                    rowAnchor,
+                    (folderPath) => {
+                        if (fileSpec.isFolder) {
+                            this.applyNodeFileOrFolderValue(node, model, fileSpec.key, folderPath);
+                        } else {
+                            this.browseNodeFileOrFolder(node, model, folderPath);
+                        }
+                    },
+                    {
+                        title: fileSpec.isFolder ? `Set ${fileSpec.label}` : `Open ${fileSpec.label} from Folder`,
+                        onBrowse: () => this.browseNodeFileOrFolder(node, model)
+                    }
+                );
+            });
+            menu.appendChild(recentFileItem);
+        }
+
         if (node.type === 'VirtualGauges' || node.type === 'VirtualGauges3D') {
             const addGaugeItem = document.createElement('div');
             addGaugeItem.className = 'context-menu-item';
@@ -8668,6 +9488,16 @@ export class PipelineBrowser {
                 this.addNewGaugeToNode(node, model);
             });
             menu.appendChild(addGaugeItem);
+
+            const plotWaveItem = document.createElement('div');
+            plotWaveItem.className = 'context-menu-item';
+            plotWaveItem.style.color = '#38bdf8';
+            plotWaveItem.textContent = '📈 Plot Gauge Waveforms f(t)';
+            plotWaveItem.addEventListener('click', () => {
+                menu.remove();
+                window.dispatchEvent(new CustomEvent('blastdemon-open-gauge-waveforms', { detail: { modelId: model.id } }));
+            });
+            menu.appendChild(plotWaveItem);
 
             const gaugeMgrItem = document.createElement('div');
             gaugeMgrItem.className = 'context-menu-item';
@@ -8735,7 +9565,7 @@ export class PipelineBrowser {
                 }
             } else if (['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MPMDomain2D', 'CFDSolver2D', 'CFDSolver', 'MarineHarbourDomain'].includes(node.type)) {
                 // Background mesh options
-                const meshNodes = model.nodes.filter(n => ['DomainMesh3D', 'DomainMesh2D', 'DomainMesh'].includes(n.type));
+                const meshNodes = model.nodes.filter(n => isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type) || n.type === 'DomainMesh');
                 for (const mesh of meshNodes) {
                     const meshName = mesh.parameters?.name || mesh.type;
                     const isConnected = state.connections.some(c => (c.fromNode === mesh.id && c.toNode === node.id && c.toPort === 'mesh') || (c.toNode === mesh.id && c.fromNode === node.id && c.fromPort === 'mesh'));
@@ -8926,7 +9756,24 @@ export class PipelineBrowser {
                         menu.appendChild(detItem);
                     }
                 }
-            } else if (node.type === 'DomainMesh3D' || node.type === 'DomainMesh2D' || node.type === 'DomainMesh') {
+            } else if (isDomainMesh3DNode(node.type) || isDomainMesh2DNode(node.type) || node.type === 'DomainMesh') {
+                if (isDomainMesh3DNode(node.type) || isDomainMesh2DNode(node.type)) {
+                    const isSparseNow = node.type === 'SparseDomainMesh3D' || node.type === 'SparseDomainMesh2D' || !!node.parameters?.use_sparse_grid;
+                    if (isSparseNow || this.stateManager.isMeshSparseSupported(node.id, model.id)) {
+                        const toggleSparseItem = document.createElement('div');
+                        toggleSparseItem.className = 'context-menu-item';
+                        toggleSparseItem.style.color = isSparseNow ? '#38bdf8' : '#2dd4bf';
+                        toggleSparseItem.style.fontWeight = '600';
+                        toggleSparseItem.textContent = isSparseNow ? '▦ Switch to Dense Background Grid' : '⚡ Switch to Sparse Block-Tile Grid';
+                        toggleSparseItem.addEventListener('click', () => {
+                            menu.remove();
+                            this.stateManager.toggleMeshSparsity(node.id, model.id);
+                            this.render();
+                        });
+                        menu.appendChild(toggleSparseItem);
+                    }
+                }
+
                 const solverNodes = model.nodes.filter(n => ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MPMDomain2D', 'CFDSolver2D', 'CFDSolver', 'MarineHarbourDomain'].includes(n.type));
                 for (const solver of solverNodes) {
                     const solverName = solver.parameters?.name || solver.type;
@@ -9029,8 +9876,8 @@ export class PipelineBrowser {
                     }
                     menu.appendChild(matItem);
                 }
-            } else if (node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode') {
-                const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode';
+            } else if (node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode' || node.type === 'RemapNode' || node.type === 'Remap1DTo2DNode') {
+                const is3D = node.type === 'Remap1DTo3DNode' || node.type === 'Remap2DTo3DNode' || node.type === 'Remap3DTo3DNode';
                 const compatibleSolvers = model.nodes.filter(n => is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D');
                 for (const solver of compatibleSolvers) {
                     const solverName = solver.parameters?.name || solver.type;
@@ -9058,7 +9905,8 @@ export class PipelineBrowser {
                 // Upstream source simulation model context actions
                 const allModels = this.stateManager.getAllModels();
                 const is2Dto3D = node.type === 'Remap2DTo3DNode';
-                const upstreamModels = allModels.filter(m => m.nodes.some(n => is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
+                const is3Dto3D = node.type === 'Remap3DTo3DNode';
+                const upstreamModels = allModels.filter(m => m.nodes.some(n => is3Dto3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (is2Dto3D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver')));
                 for (const uModel of upstreamModels) {
                     const uName = uModel.name || uModel.id;
                     const isCurrent = node.parameters?.source_model_id === uModel.id;
@@ -9305,7 +10153,7 @@ export class PipelineBrowser {
                 }
             }
 
-            if (node.type === 'DomainMesh3D') {
+            if (isDomainMesh3DNode(node.type)) {
                 const sliceItem = document.createElement('div');
                 sliceItem.className = 'context-menu-item';
                 sliceItem.textContent = '🥞 + Add Slice Plane (Z-Normal)';
@@ -9406,6 +10254,81 @@ export class PipelineBrowser {
             parameters: { ...defaultParams }
         };
 
+        // If adding a DomainMesh / SparseDomainMesh and the model already has a mesh of the same dimension:
+        // - In coupled CFD+MPM models, allow one dense DomainMesh (for CFD) AND one SparseDomainMesh (for MPM) to coexist.
+        // - Otherwise, inherit domain bounds/cell_size/slices and replace the existing mesh cleanly.
+        if (isDomainMesh3DNode(type) || isDomainMesh2DNode(type) || type === 'DomainMesh') {
+            const hasCFD3D = model.nodes.some(n => n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain');
+            const hasMPM3D = model.nodes.some(n => n.type === 'MPMDomain3D');
+            const hasCFD2D = model.nodes.some(n => n.type === 'CFDSolver2D');
+            const hasMPM2D = model.nodes.some(n => n.type === 'MPMDomain2D');
+            const allowDualMesh = isDomainMesh3DNode(type) ? (hasCFD3D && hasMPM3D) : (isDomainMesh2DNode(type) ? (hasCFD2D && hasMPM2D) : false);
+
+            const sameDimMeshes = model.nodes.filter(n =>
+                isDomainMesh3DNode(type)
+                    ? isDomainMesh3DNode(n.type)
+                    : (isDomainMesh2DNode(type) ? isDomainMesh2DNode(n.type) : n.type === 'DomainMesh')
+            );
+            const exactSameTypeMeshes = sameDimMeshes.filter(n => n.type === type);
+            const meshesToReplace = allowDualMesh ? exactSameTypeMeshes : sameDimMeshes;
+
+            if (meshesToReplace.length > 0) {
+                const primaryOld = meshesToReplace[0];
+                newNode.x = primaryOld.x ?? newX;
+                newNode.y = primaryOld.y ?? newY;
+                newNode.parameters = {
+                    ...defaultParams,
+                    ...(primaryOld.parameters || {}),
+                    name: type === 'SparseDomainMesh3D'
+                        ? 'Sparse Domain Mesh 3D'
+                        : (type === 'DomainMesh3D'
+                            ? 'Domain Mesh 3D'
+                            : (type === 'SparseDomainMesh2D'
+                                ? 'Sparse Domain Mesh 2D'
+                                : (type === 'DomainMesh2D' ? 'Domain Mesh 2D' : 'Domain Mesh'))),
+                    use_sparse_grid: type === 'SparseDomainMesh3D' || type === 'SparseDomainMesh2D',
+                    hidden: false,
+                    visible: true
+                };
+                const oldIds = new Set(meshesToReplace.map(m => m.id));
+                state.connections.forEach(c => {
+                    if (oldIds.has(c.fromNode)) c.fromNode = id;
+                    if (oldIds.has(c.toNode)) c.toNode = id;
+                });
+                model.connections.forEach(c => {
+                    if (oldIds.has(c.fromNode)) c.fromNode = id;
+                    if (oldIds.has(c.toNode)) c.toNode = id;
+                });
+                state.nodes = state.nodes.filter(n => !oldIds.has(n.id));
+                model.nodes = model.nodes.filter(n => !oldIds.has(n.id));
+            } else {
+                const donorMesh = sameDimMeshes[0];
+                if (donorMesh && donorMesh.parameters) {
+                    for (const k of ['xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax']) {
+                        if (donorMesh.parameters[k] !== undefined) {
+                            newNode.parameters[k] = donorMesh.parameters[k];
+                        }
+                    }
+                    if (donorMesh.parameters['cell_size'] !== undefined) {
+                        const baseCell = Number(donorMesh.parameters['cell_size']);
+                        if (Number.isFinite(baseCell) && baseCell > 0) {
+                            newNode.parameters['cell_size'] = (type === 'SparseDomainMesh3D' || type === 'SparseDomainMesh2D')
+                                ? Number((baseCell * 0.5).toPrecision(4))
+                                : baseCell;
+                        }
+                    }
+                }
+                newNode.parameters['name'] = type === 'SparseDomainMesh3D'
+                    ? 'Sparse Domain Mesh 3D'
+                    : (type === 'DomainMesh3D'
+                        ? 'Domain Mesh 3D'
+                        : (type === 'SparseDomainMesh2D'
+                            ? 'Sparse Domain Mesh 2D'
+                            : (type === 'DomainMesh2D' ? 'Domain Mesh 2D' : 'Domain Mesh')));
+                newNode.parameters['use_sparse_grid'] = type === 'SparseDomainMesh3D' || type === 'SparseDomainMesh2D';
+            }
+        }
+
         state.nodes.push(newNode);
         model.nodes.push(newNode);
 
@@ -9418,8 +10341,9 @@ export class PipelineBrowser {
 
         // Auto-connect complementary nodes within the same model (1D, 2D, and 3D)
         if (type === 'MPMDomain3D' || type === 'FEMDomain3D' || type === 'MarineHarbourDomain' || type === 'MPMDomain2D') {
-            const expectedMeshType = type === 'MPMDomain2D' ? 'DomainMesh2D' : 'DomainMesh3D';
-            const meshNode = model.nodes.find(n => n.id !== id && n.type === expectedMeshType);
+            const sparseType = type === 'MPMDomain2D' ? 'SparseDomainMesh2D' : 'SparseDomainMesh3D';
+            const meshNode = ((type === 'MPMDomain3D' || type === 'MPMDomain2D') ? model.nodes.find(n => n.id !== id && n.type === sparseType) : undefined)
+                || model.nodes.find(n => n.id !== id && (type === 'MPMDomain2D' ? isDomainMesh2DNode(n.type) : isDomainMesh3DNode(n.type)));
             const hasMeshConn = state.connections.some(c => c.toNode === id && c.toPort === 'mesh');
             if (meshNode && !hasMeshConn) {
                 addConn(meshNode.id, 'mesh', id, 'mesh');
@@ -9443,8 +10367,9 @@ export class PipelineBrowser {
                 }
             }
         } else if (type === 'CFDSolver' || type === 'CFDSolver2D' || type === 'CFDSolver3D') {
-            const expectedMeshType = type === 'CFDSolver' ? 'DomainMesh' : (type === 'CFDSolver2D' ? 'DomainMesh2D' : 'DomainMesh3D');
-            const meshNode = model.nodes.find(n => n.id !== id && n.type === expectedMeshType);
+            const denseType = type === 'CFDSolver' ? 'DomainMesh' : (type === 'CFDSolver2D' ? 'DomainMesh2D' : 'DomainMesh3D');
+            const meshNode = model.nodes.find(n => n.id !== id && n.type === denseType)
+                || model.nodes.find(n => n.id !== id && (type === 'CFDSolver' ? n.type === 'DomainMesh' : (type === 'CFDSolver2D' ? isDomainMesh2DNode(n.type) : isDomainMesh3DNode(n.type))));
             if (meshNode) addConn(meshNode.id, 'mesh', id, 'mesh');
             const expectedChargeType = type === 'CFDSolver' ? 'Charge1D' : (type === 'CFDSolver2D' ? 'Charge2D' : 'Charge3D');
             const chgNode = model.nodes.find(n => n.id !== id && n.type === expectedChargeType);
@@ -9452,16 +10377,24 @@ export class PipelineBrowser {
                 addConn(chgNode.id, 'charge', id, 'charge');
                 chgNode.parameters['target_domain'] = id;
             }
-        } else if (type === 'DomainMesh3D' || type === 'DomainMesh2D' || type === 'DomainMesh') {
+        } else if (isDomainMesh3DNode(type) || isDomainMesh2DNode(type) || type === 'DomainMesh') {
+            const isSparseMesh = type === 'SparseDomainMesh3D' || type === 'SparseDomainMesh2D';
             const compatibleSolverTypes = type === 'DomainMesh'
                 ? ['CFDSolver', 'ThePainter']
-                : (type === 'DomainMesh2D'
+                : (isDomainMesh2DNode(type)
                     ? ['CFDSolver2D', 'MPMDomain2D']
                     : ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MarineHarbourDomain']);
             const solverNodes = model.nodes.filter(n => n.id !== id && compatibleSolverTypes.includes(n.type));
             for (const solverNode of solverNodes) {
+                const isMPMSolver = solverNode.type === 'MPMDomain3D' || solverNode.type === 'MPMDomain2D';
+                const isCFDSolver = solverNode.type === 'CFDSolver3D' || solverNode.type === 'MarineHarbourDomain' || solverNode.type === 'CFDSolver2D';
                 const hasMeshConn = state.connections.some(c => c.toNode === solverNode.id && c.toPort === 'mesh');
                 if (!hasMeshConn) {
+                    addConn(id, 'mesh', solverNode.id, 'mesh');
+                } else if ((isSparseMesh && isMPMSolver) || (!isSparseMesh && isCFDSolver)) {
+                    // Rewire MPM to SparseDomainMesh (or CFD to dense DomainMesh) when adding a dedicated dual mesh
+                    state.connections = state.connections.filter(c => !(c.toNode === solverNode.id && c.toPort === 'mesh'));
+                    model.connections = model.connections.filter(c => !(c.toNode === solverNode.id && c.toPort === 'mesh'));
                     addConn(id, 'mesh', solverNode.id, 'mesh');
                 }
             }
@@ -9512,20 +10445,29 @@ export class PipelineBrowser {
             if (solverNode) {
                 addConn(solverNode.id, 'telemetry', id, 'telemetry');
             }
-        } else if (type === 'Remap1DTo2DNode' || type === 'RemapNode' || type === 'Remap1DTo3DNode' || type === 'Remap2DTo3DNode') {
-            const is3D = type === 'Remap1DTo3DNode' || type === 'Remap2DTo3DNode';
+        } else if (type === 'Remap1DTo2DNode' || type === 'RemapNode' || type === 'Remap1DTo3DNode' || type === 'Remap2DTo3DNode' || type === 'Remap3DTo3DNode') {
+            const is3D = type === 'Remap1DTo3DNode' || type === 'Remap2DTo3DNode' || type === 'Remap3DTo3DNode';
             const targetSolver = model.nodes.find(n => n.id !== id && (is3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : n.type === 'CFDSolver2D'));
             if (targetSolver) {
                 addConn(id, 'remap', targetSolver.id, 'remap');
                 newNode.parameters['target_solver'] = targetSolver.id;
             }
             const isFrom2D = type === 'Remap2DTo3DNode';
-            const localSourceSolver = model.nodes.find(n => n.id !== id && (isFrom2D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver'));
+            const isFrom3D = type === 'Remap3DTo3DNode';
+            const localSourceSolver = model.nodes.find(n => n.id !== id && (!targetSolver || n.id !== targetSolver.id) && (isFrom3D ? (n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') : (isFrom2D ? n.type === 'CFDSolver2D' : n.type === 'CFDSolver')));
             if (localSourceSolver) {
                 addConn(localSourceSolver.id, 'telemetry', id, 'in');
                 newNode.parameters['source_model_id'] = model.id;
             }
         }
+
+        // Ensure the category and model containing the newly added node are expanded in the Pipeline Browser
+        const matchCat = CATEGORIES.find(c => isNodeTypeInCategory(c.id, c.types, type));
+        if (matchCat) {
+            this.collapsedCategories.delete(matchCat.id);
+        }
+        this.collapsedModels.delete(model.id);
+        this.saveSettings();
 
         this.stateManager.healModelGraph(model);
         this.stateManager.pushState(state);

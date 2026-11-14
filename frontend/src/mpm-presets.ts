@@ -198,6 +198,15 @@ export interface MPMMaterialParams {
     lt_F_ig_max?: number;
     lt_F_G1_max?: number;
     lt_F_G2_min?: number;
+    // Unreacted-explosive JWL EOS (solid_model = 'Unreacted JWL (Lee-Tarver)'), strict SI
+    jwlr_A?: number;
+    jwlr_B?: number;
+    jwlr_R1?: number;
+    jwlr_R2?: number;
+    jwlr_omega?: number;
+    jwlr_Cv?: number;
+    jwlr_T0?: number;
+    mixture_rule?: string;
     // Afterburn Kinetics (Aerobic Secondary Combustion)
     afterburn_enabled?: boolean;
     afterburn_energy?: number;
@@ -2135,6 +2144,14 @@ export const MPM_MATERIAL_CATEGORIES: MPMCategoryGroup[] = [
         ]
     },
     {
+        category: 'Lee-Tarver Ignition & Growth Presets',
+        presets: [
+            'PBX 9501 (LLNL Ignition & Growth)',
+            'C-4 (LLNL Ignition & Growth)',
+            'Composition B (LLNL Ignition & Growth, PARTIAL)',
+        ]
+    },
+    {
         category: 'JWL Programmed Burn Presets',
         presets: [
             'C-4 (Composition C-4) - JWL Programmed Burn',
@@ -4045,6 +4062,112 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     }
 };
 
+// ============================================================================
+// Lee-Tarver Ignition & Growth presets (published LLNL calibrations)
+// ============================================================================
+// Source constants are kept in the PUBLISHED cm-g-us-Mbar system so every number can be checked
+// against the paper. They are converted to strict SI in exactly ONE place (llnlLeeTarverToSI):
+//     I[1/s]            = I[1/us] * 1e6
+//     G[1/(s Pa^n)]     = G[1/(us Mbar^n)] * 1e6 * (1e-11)^n
+//     A, B [Pa]         = A, B [Mbar] * 1e11        Cv [Pa/K] = Cv [Mbar/K] * 1e11
+//     rho [kg/m^3]      = rho [g/cm^3] * 1000       e0 [J/kg] = E0[Mbar] * 1e11 / rho[kg/m^3]
+const MBAR_TO_PA = 1.0e11;
+const PER_US_TO_PER_S = 1.0e6;
+
+interface LLNLLeeTarverSource {
+    rho_gcc: number;
+    unreactedJWL: { A: number; B: number; R1: number; R2: number; omega: number; Cv: number; T0: number };
+    productJWL: { A: number; B: number; R1: number; R2: number; omega: number; E0: number };
+    rate: { I: number; a: number; b: number; x: number; Fig: number;
+            G1: number; c: number; d: number; y: number; FG1: number;
+            G2: number; e: number; g: number; z: number; FG2: number };
+    shearModulusMbar: number;
+    yieldStrengthMbar: number;
+    det_vel: number;       // m/s, LASL Explosive Property Data (not part of the LLNL rate table)
+    reference: string;
+    test_method: string;
+    provenance: 'experimental' | 'hybrid';
+}
+
+function llnlGToSI(G: number, n: number): number {
+    return G * PER_US_TO_PER_S * Math.pow(1.0 / MBAR_TO_PA, n);
+}
+
+function llnlLeeTarverToSI(src: LLNLLeeTarverSource, category: string): MPMMaterialParams {
+    const rho = src.rho_gcc * 1000.0;
+    const G = src.shearModulusMbar * MBAR_TO_PA;
+    const nu = 0.25; // Poisson ratio is NOT published for these calibrations; documented assumption.
+    const u = src.unreactedJWL, p = src.productJWL, r = src.rate;
+    return {
+        density: rho,
+        jc_A: 2.0e6, jc_B: 10.0e6, jc_n: 0.40, jc_C: 0.02, jc_m: 1.0, T_melt: 477.0, mg_gamma0: 1.0, mg_c0: 2500.0, mg_s: 1.5, // inert here: solid_model = Unreacted JWL; shared-schema placeholders (hidden in UI)
+        youngs_modulus: 2.0 * G * (1.0 + nu), poissons_ratio: nu,
+        yield_stress: src.yieldStrengthMbar * MBAR_TO_PA, hardening_modulus: 0.0,
+        failure_strain: 0.10, tensile_failure_stress: 55.0e6,
+        T_room: u.T0, Cp: 1000.0,
+        det_vel: src.det_vel, detonation_energy: p.E0 * MBAR_TO_PA / rho,
+        burn_zone_cells: 4, tau_burn_min: 1.0e-7,
+        jwl_A: p.A * MBAR_TO_PA, jwl_B: p.B * MBAR_TO_PA, jwl_R1: p.R1, jwl_R2: p.R2, jwl_omega: p.omega,
+        jwlr_A: u.A * MBAR_TO_PA, jwlr_B: u.B * MBAR_TO_PA, jwlr_R1: u.R1, jwlr_R2: u.R2,
+        jwlr_omega: u.omega, jwlr_Cv: u.Cv * MBAR_TO_PA, jwlr_T0: u.T0,
+        lt_I: r.I * PER_US_TO_PER_S, lt_a: r.a, lt_b: r.b, lt_x: r.x, lt_F_ig_max: r.Fig,
+        lt_G1: llnlGToSI(r.G1, r.y), lt_c: r.c, lt_d: r.d, lt_y: r.y, lt_F_G1_max: r.FG1,
+        lt_G2: llnlGToSI(r.G2, r.z), lt_e: r.e, lt_g: r.g, lt_z: r.z, lt_F_G2_min: r.FG2,
+        mixture_rule: 'Pressure Equilibrium (Volume Additive)',
+        afterburn_enabled: false, afterburn_energy: 0.0, afterburn_fuel_fraction: 0.0, afterburn_stoich_ratio: 0.0,
+        afterburn_ignition_temp: 0.0, afterburn_tau_chem: 0.0, afterburn_c_mix: 0.0, afterburn_provenance: 'zero_no_data',
+        provenance: src.provenance, reference: src.reference, test_method: src.test_method,
+        solid_model: 'Unreacted JWL (Lee-Tarver)', burn_model: 'Lee-Tarver 3-Stage ODE', product_model: 'JWL Product Gas',
+        category
+    };
+}
+
+const LLNL_UNREACTED_RDX_FAMILY = { A: 778.1, B: -0.05031, R1: 11.3, R2: 1.13, omega: 0.8938, Cv: 2.487e-5, T0: 298.0 };
+
+const LEE_TARVER_SOURCES: Record<string, LLNLLeeTarverSource> = {
+    'PBX 9501 (LLNL Ignition & Growth)': {
+        rho_gcc: 1.838,
+        unreactedJWL: { A: 7320.0, B: -0.052654, R1: 14.1, R2: 1.41, omega: 0.8867, Cv: 2.7806e-5, T0: 298.0 },
+        productJWL: { A: 16.689, B: 0.5969, R1: 5.9, R2: 2.1, omega: 0.45, E0: 0.095 },
+        rate: { I: 1.4e11, a: 0.0, b: 0.667, x: 20.0, Fig: 0.3,
+                G1: 130.0, c: 0.667, d: 0.277, y: 2.0, FG1: 0.5,
+                G2: 400.0, e: 0.333, g: 1.0, z: 2.0, FG2: 0.5 },
+        shearModulusMbar: 0.0354, yieldStrengthMbar: 0.002, det_vel: 8800.0,
+        reference: 'Tarver, Forbes, Garcia & Urtiew, UCRL-JC-141967, Table 1 (rates, EOS, shear/yield); detonation velocity from Gibbs & Popolato LASL Explosive Property Data',
+        test_method: 'Embedded manganin gauges, 101 mm gas gun, 25 C and 50 C',
+        provenance: 'experimental'
+    },
+    'C-4 (LLNL Ignition & Growth)': {
+        rho_gcc: 1.601,
+        unreactedJWL: LLNL_UNREACTED_RDX_FAMILY,
+        productJWL: { A: 6.0977, B: 0.1295, R1: 4.5, R2: 1.4, omega: 0.25, E0: 0.09 },
+        rate: { I: 4.0e6, a: 0.0367, b: 0.667, x: 7.0, Fig: 0.022,
+                G1: 140.0, c: 0.667, d: 0.333, y: 2.0, FG1: 1.0,
+                G2: 0.0, e: 0.667, g: 0.667, z: 3.0, FG2: 0.0 },
+        shearModulusMbar: 0.0354, yieldStrengthMbar: 0.002, det_vel: 8040.0,
+        reference: 'Urtiew, Vandersall, Tarver, Garcia et al., UCRL-CONF-223847, Table 2 (25 C C-4); detonation velocity from LASL Explosive Property Data',
+        test_method: 'Embedded manganin gauges, disc targets, 2.2-4.2 GPa',
+        provenance: 'experimental'
+    },
+    'Composition B (LLNL Ignition & Growth, PARTIAL)': {
+        rho_gcc: 1.717,
+        unreactedJWL: LLNL_UNREACTED_RDX_FAMILY,
+        productJWL: { A: 5.242, B: 0.07678, R1: 4.2, R2: 1.1, omega: 0.5, E0: 0.085 },
+        rate: { I: 4.0e6, a: 0.0367, b: 0.667, x: 7.0, Fig: 0.022,
+                G1: 140.0, c: 0.667, d: 0.333, y: 2.0, FG1: 0.7,
+                G2: 1000.0, e: 0.222, g: 1.0, z: 3.0, FG2: 0.0 },
+        shearModulusMbar: 0.0354, yieldStrengthMbar: 0.002, det_vel: 7980.0,
+        reference: 'Urtiew, Vandersall, Tarver, Garcia et al., UCRL-CONF-223847, Table 4 (25 C Comp B); detonation velocity from LASL Explosive Property Data. '
+            + 'PARTIAL: the paper releases 70% of the chemical energy at the RDX rates and 30% at the slower TNT rate; this model has a single reaction progress variable, so the energy is released at the combined rate and the 70/30 split is NOT represented.',
+        test_method: 'Embedded manganin gauges, wedge targets, 3.8-6.8 GPa',
+        provenance: 'hybrid'
+    }
+};
+
+for (const [name, src] of Object.entries(LEE_TARVER_SOURCES)) {
+    MPM_MATERIAL_PRESETS[name] = llnlLeeTarverToSI(src, 'Lee-Tarver Ignition & Growth Presets');
+}
+
 export function getConstitutiveModels(): string[] {
     return [
         'Hypoelastic',
@@ -4156,9 +4279,8 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
             return (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'JWL Programmed Burn Presets')?.presets || []).concat(['Custom']);
 
         case 'Lee-Tarver Ignition & Growth':
-            // No verified Lee-Tarver calibration is shipped. The previous 4 presets could not be traced to a source
-            // table (and the backend rate-unit convention is unresolved), so they were removed. Use 'Custom'.
-            return ['Custom'];
+            // Only published LLNL calibrations are shipped (converted once to SI from cm-g-us-Mbar).
+            return (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Lee-Tarver Ignition & Growth Presets')?.presets || []).concat(['Custom']);
 
         case 'RHT Concrete':
             return [
@@ -4241,7 +4363,8 @@ export function getCategorizedPresetsForModel(modelName: string): CategorizedPre
         const crestPresets = (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'CREST Reactive Burn Presets')?.presets || []).filter(p => validPresets.has(p));
         if (crestPresets.length > 0) result.push({ category: 'AWE CREST Calibrations (published)', presets: crestPresets });
     } else if (modelName === 'Lee-Tarver Ignition & Growth') {
-        // Intentionally no calibration groups: no verified preset exists for this model.
+        const ltPresets = (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Lee-Tarver Ignition & Growth Presets')?.presets || []).filter(p => validPresets.has(p));
+        if (ltPresets.length > 0) result.push({ category: 'LLNL Ignition & Growth Calibrations (published)', presets: ltPresets });
     } else if (modelName === 'JWL Programmed Burn') {
         const jwlPresets = (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'JWL Programmed Burn Presets')?.presets || []).filter(p => validPresets.has(p));
         if (jwlPresets.length > 0) {
@@ -4378,7 +4501,7 @@ export function getDefaultPresetForModel(modelName: string): string {
     if (modelName === 'Tait Water') return 'Liquid Water (Isentropic Modified Tait)';
     if (modelName === 'CREST Reactive Burn') return 'EDC37 (CREST Reactive Burn)';
     if (modelName === 'JWL Programmed Burn') return 'C-4 (Composition C-4) - JWL Programmed Burn';
-    if (modelName === 'Lee-Tarver Ignition & Growth') return 'Custom';
+    if (modelName === 'Lee-Tarver Ignition & Growth') return 'PBX 9501 (LLNL Ignition & Growth)';
     if (modelName === 'RHT Concrete') return 'Normal-Strength Concrete C35/45 (RHT Default)';
     if (modelName === 'Karagozian & Case (K&C)') return 'Normal-Strength Concrete C35/45 (K&C Auto MAT_072R3)';
     if (modelName === 'CSCM Concrete') return 'Normal-Strength Concrete C35/45 (CSCM MAT_159 Standard)';
