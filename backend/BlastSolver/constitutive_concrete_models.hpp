@@ -173,7 +173,8 @@ HD_CONC_FUNC void updateRHTStress(
     T dif_cap_c,
     T dif_cap_t,
     // State history
-    RHTStateVariables<T>& state
+    RHTStateVariables<T>& state,
+    T f_el_c = static_cast<T>(0.53)
 ) {
     if (fc < static_cast<T>(1.0e5)) fc = static_cast<T>(30.0e6);
     if (ft < static_cast<T>(1.0e4)) ft = static_cast<T>(0.1) * fc;
@@ -248,8 +249,10 @@ HD_CONC_FUNC void updateRHTStress(
         Y_fail = fc * rht_A * std::pow(P_eff, rht_N) * R3 * dif_c;
     }
 
-    // Elastic Limit Surface Y_elastic (onset of microcracking)
-    T Y_elastic = Y_fail * static_cast<T>(0.53);
+    // Elastic Limit Surface Y_elastic (onset of microcracking / pre-peak hardening)
+    T f_el_eff = (f_el_c > static_cast<T>(0.05) && f_el_c < static_cast<T>(1.0)) ? f_el_c : static_cast<T>(0.53);
+    T Y_elastic = Y_fail * f_el_eff;
+    if (Y_elastic < static_cast<T>(1.0e4)) Y_elastic = static_cast<T>(1.0e4);
 
     // Residual Friction Surface Y_res (fully crushed pulverized granular state)
     T Y_res = static_cast<T>(0.0);
@@ -257,9 +260,22 @@ HD_CONC_FUNC void updateRHTStress(
         Y_res = fc * rht_B * std::pow(P_star, rht_M);
     }
 
-    // Interpolate current yield strength based on damage D
-    T Y_curr = (static_cast<T>(1.0) - state.damage) * Y_fail + state.damage * Y_res;
-    if (Y_curr < Y_res) Y_curr = Y_res;
+    // Pre-peak hardening plastic strain scale between Y_elastic and Y_fail
+    T ep_peak = (Y_fail > Y_elastic && G_shear > static_cast<T>(1.0))
+        ? ((Y_fail - Y_elastic) / (static_cast<T>(2.0) * G_shear))
+        : static_cast<T>(1.0e-5);
+    if (ep_peak < static_cast<T>(1.0e-5)) ep_peak = static_cast<T>(1.0e-5);
+
+    T Y_curr = Y_fail;
+    bool in_pre_peak_hardening = (state.damage <= static_cast<T>(1.0e-9)) && (state.ep_bar < ep_peak);
+    if (in_pre_peak_hardening) {
+        T hard_frac = state.ep_bar / ep_peak;
+        Y_curr = Y_elastic + (Y_fail - Y_elastic) * hard_frac;
+    } else {
+        // Post-peak damage softening from Y_fail down to residual friction surface Y_res
+        Y_curr = (static_cast<T>(1.0) - state.damage) * Y_fail + state.damage * Y_res;
+        if (Y_curr < Y_res) Y_curr = Y_res;
+    }
     if (Y_curr < static_cast<T>(1.0e4)) Y_curr = static_cast<T>(1.0e4);
 
     // 5. Radial Return Mapping & Plastic Strain Increment
@@ -267,7 +283,9 @@ HD_CONC_FUNC void updateRHTStress(
         T d_sigma = q_vm - Y_curr;
         T scale = Y_curr / q_vm;
 
-        T d_ep = d_sigma / (static_cast<T>(3.0) * G_shear + static_cast<T>(1.0e7));
+        T H_pre = in_pre_peak_hardening ? ((Y_fail - Y_elastic) / ep_peak) : static_cast<T>(0.0);
+        T d_ep = d_sigma / (static_cast<T>(3.0) * G_shear + H_pre + static_cast<T>(1.0e7));
+        T ep_before = state.ep_bar;
         state.ep_bar += d_ep;
 
         for (int r = 0; r < 3; ++r) {
@@ -276,24 +294,33 @@ HD_CONC_FUNC void updateRHTStress(
             }
         }
 
-        // 6. Fracture Energy Regularized Damage Accumulation
-        // Hydrodynamic pressure-dependent failure plastic strain epsilon_p_f(P*)
-        T ep_f_comp = rht_D1 * std::pow(P_eff > static_cast<T>(1.0e-4) ? P_eff : static_cast<T>(1.0e-4), rht_D2);
-        if (ep_f_comp < static_cast<T>(0.0001)) ep_f_comp = static_cast<T>(0.0001);
+        // Only accumulate softening damage once pre-peak hardening reaches Y_fail
+        T d_ep_dmg = static_cast<T>(0.0);
+        if (!in_pre_peak_hardening) {
+            d_ep_dmg = d_ep;
+        } else if (state.ep_bar > ep_peak) {
+            d_ep_dmg = state.ep_bar - ep_peak;
+            (void)ep_before;
+        }
 
-        // Fracture energy regularization for tensile softening (Bažant crack-band formulation)
-        T h = (char_len > static_cast<T>(1.0e-6)) ? char_len : static_cast<T>(0.01);
-        T ep_f_tensile = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (G_f / (ft * h)) : ep_f_comp;
-        if (ep_f_tensile < static_cast<T>(1.0e-5)) ep_f_tensile = static_cast<T>(1.0e-5);
-        if (ep_f_tensile > static_cast<T>(1.0)) ep_f_tensile = static_cast<T>(1.0);
+        if (d_ep_dmg > static_cast<T>(0.0)) {
+            // 6. Fracture Energy Regularized Damage Accumulation
+            // Hydrodynamic pressure-dependent failure plastic strain epsilon_p_f(P*)
+            T ep_f_comp = rht_D1 * std::pow(P_eff > static_cast<T>(1.0e-4) ? P_eff : static_cast<T>(1.0e-4), rht_D2);
+            if (ep_f_comp < static_cast<T>(0.0001)) ep_f_comp = static_cast<T>(0.0001);
 
-        // Under tension/spall (P_star < 0), crack-band tensile regularization governs.
-        // Under compression/shear (P_star >= 0), RHT pressure-hardening law governs with tensile lower bound.
-        T ep_f_eff = (P_star < static_cast<T>(0.0)) ? ep_f_tensile : (ep_f_comp > ep_f_tensile ? ep_f_comp : ep_f_tensile);
+            // Fracture energy regularization for tensile softening (Bažant crack-band formulation)
+            T h = (char_len > static_cast<T>(1.0e-6)) ? char_len : static_cast<T>(0.01);
+            T ep_f_tensile = (G_f > static_cast<T>(0.0) && ft > static_cast<T>(0.0)) ? (G_f / (ft * h)) : ep_f_comp;
+            if (ep_f_tensile < static_cast<T>(1.0e-5)) ep_f_tensile = static_cast<T>(1.0e-5);
+            if (ep_f_tensile > static_cast<T>(1.0)) ep_f_tensile = static_cast<T>(1.0);
 
-        T d_D = d_ep / ep_f_eff;
-        state.damage += d_D;
-        if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
+            T ep_f_eff = (P_star < static_cast<T>(0.0)) ? ep_f_tensile : (ep_f_comp > ep_f_tensile ? ep_f_comp : ep_f_tensile);
+
+            T d_D = d_ep_dmg / ep_f_eff;
+            state.damage += d_D;
+            if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
+        }
     }
 
     if (state.p_hydro < static_cast<T>(0.0)) {
@@ -649,7 +676,8 @@ HD_CONC_FUNC void updateRHTStress(
         static_cast<T>(mat.rht_alpha0), static_cast<T>(mat.rht_n_comp),
         static_cast<T>(mat.rht_betac), static_cast<T>(mat.rht_deltat),
         static_cast<T>(mat.dif_cap_compression), static_cast<T>(mat.dif_cap_tension),
-        state
+        state,
+        static_cast<T>(mat.rht_f_el_c)
     );
 
     damage = state.damage;

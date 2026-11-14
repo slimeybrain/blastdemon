@@ -233,50 +233,66 @@ bool LSDynaReader3D<T>::parseStream(
                     m_parts[part_id].name = "Part_" + std::to_string(part_id);
                 }
             }
+        } else if ((current_keyword.rfind("*MAT_", 0) == 0 || current_keyword.rfind("*EOS_", 0) == 0) &&
+                   current_keyword.find("_TITLE") != std::string::npos) {
+            size_t tpos = current_keyword.find("_TITLE");
+            current_keyword.erase(tpos, 6);
+            continue;
         } else if (current_keyword.rfind("*MAT_ELASTIC", 0) == 0 || current_keyword.rfind("*MAT_001", 0) == 0) {
             // Card 1: MID, RO, E, PR
-            T mid = parseFieldVal(line, 0, 1.0f);
-            T ro = parseFieldVal(line, 1, 7850.0f);
-            T e = parseFieldVal(line, 2, 210.0e9f);
-            T pr = parseFieldVal(line, 3, 0.30f);
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::LinearElastic;
+            m_tb.density = static_cast<float>(parseFieldVal(line, 1, 7850.0f));
+            m_tb.youngs_modulus = static_cast<float>(parseFieldVal(line, 2, 210.0e9f));
+            m_tb.poissons_ratio = static_cast<float>(parseFieldVal(line, 3, 0.30f));
 
-            out_default_mat.density = static_cast<float>(ro);
-            out_default_mat.youngs_modulus = static_cast<float>(e);
-            out_default_mat.poissons_ratio = static_cast<float>(pr);
-
-            MaterialTable3D m_tb = out_default_mat;
-            m_imported_materials[static_cast<int>(mid)] = m_tb;
+            m_imported_materials[mid] = m_tb;
             current_keyword = "";
         } else if (current_keyword.rfind("*MAT_PIECEWISE_LINEAR_PLASTICITY", 0) == 0 ||
                    current_keyword.rfind("*MAT_024", 0) == 0 ||
                    current_keyword.rfind("*MAT_PLASTIC_KINEMATIC", 0) == 0 ||
                    current_keyword.rfind("*MAT_003", 0) == 0) {
             // Card 1: MID, RO, E, PR, SIGY, ETAN, FAIL, TDEL
-            T mid = parseFieldVal(line, 0, 1.0f);
-            T ro = parseFieldVal(line, 1, 7850.0f);
-            T e = parseFieldVal(line, 2, 210.0e9f);
-            T pr = parseFieldVal(line, 3, 0.30f);
-            T sigy = parseFieldVal(line, 4, 400.0e6f);
-            T etan = parseFieldVal(line, 5, 1.0e9f);
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            const bool is_mat024 = (current_keyword.rfind("*MAT_PIECEWISE_LINEAR_PLASTICITY", 0) == 0 ||
+                                    current_keyword.rfind("*MAT_024", 0) == 0);
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::Hypoelastic;
+            m_tb.density = static_cast<float>(parseFieldVal(line, 1, 7850.0f));
+            m_tb.youngs_modulus = static_cast<float>(parseFieldVal(line, 2, 210.0e9f));
+            m_tb.poissons_ratio = static_cast<float>(parseFieldVal(line, 3, 0.30f));
+            m_tb.yield_stress = static_cast<float>(parseFieldVal(line, 4, 400.0e6f));
+            m_tb.hardening_modulus = static_cast<float>(parseFieldVal(line, 5, 1.0e9f));
             T fail = parseFieldVal(line, 6, 0.0f);
+            if (fail > 0.0f) m_tb.failure_strain = static_cast<float>(fail);
 
-            out_default_mat.material_model = MPMMaterialModel::Hypoelastic;
-            out_default_mat.density = static_cast<float>(ro);
-            out_default_mat.youngs_modulus = static_cast<float>(e);
-            out_default_mat.poissons_ratio = static_cast<float>(pr);
-            out_default_mat.yield_stress = static_cast<float>(sigy);
-            out_default_mat.hardening_modulus = static_cast<float>(etan);
-            if (fail > 0.0f) out_default_mat.failure_strain = static_cast<float>(fail);
+            if (is_mat024) {
+                // Optional Card 2: C, P, LCSS, LCSR, VP
+                std::streampos pos = file.tellg();
+                std::string line2;
+                while (std::getline(file, line2)) {
+                    std::string trimmed2 = trim(line2);
+                    if (trimmed2.empty() || trimmed2[0] == '$') continue;
+                    if (trimmed2[0] == '*') { file.seekg(pos); break; }
+                    float cs_c = static_cast<float>(parseFieldVal(line2, 0, 0.0f));
+                    float cs_p = static_cast<float>(parseFieldVal(line2, 1, 0.0f));
+                    if (cs_c > 0.0f && cs_p > 0.0f) {
+                        m_tb.cs_C = cs_c;
+                        m_tb.cs_P = cs_p;
+                    }
+                    break;
+                }
+            }
 
-            MaterialTable3D m_tb = out_default_mat;
-            m_imported_materials[static_cast<int>(mid)] = m_tb;
+            m_imported_materials[mid] = m_tb;
             current_keyword = "";
         } else if (current_keyword.rfind("*MAT_CONCRETE_DAMAGE_REL3", 0) == 0 ||
                    current_keyword.rfind("*MAT_072R3", 0) == 0 ||
                    current_keyword.rfind("*MAT_072", 0) == 0 ||
                    current_keyword.rfind("*MAT_CONCRETE_DAMAGE", 0) == 0) {
             // Card 1: MID, RO, PR
-            T mid = parseFieldVal(line, 0, 1.0f);
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
             T ro = parseFieldVal(line, 1, 2400.0f);
             T pr = parseFieldVal(line, 2, 0.20f);
 
@@ -292,69 +308,247 @@ bool LSDynaReader3D<T>::parseStream(
                 break;
             }
 
-            out_default_mat.material_model = MPMMaterialModel::RHTConcrete;
-            out_default_mat.density = static_cast<float>(ro);
-            out_default_mat.poissons_ratio = static_cast<float>(pr > 0.0f ? pr : 0.18f);
-            out_default_mat.youngs_modulus = 34.0e9f;
-            out_default_mat.yield_stress = static_cast<float>(sigf > 0.0f ? sigf : 35.0e6f);
-            out_default_mat.fc = out_default_mat.yield_stress;
-            out_default_mat.ft = 0.09f * out_default_mat.fc;
-            out_default_mat.G_f = 150.0f;
-            out_default_mat.rht_A = 1.6f;
-            out_default_mat.rht_N = 0.61f;
-            out_default_mat.rht_B = 0.7f;
-            out_default_mat.rht_M = 0.8f;
-            out_default_mat.rht_p_crush = 17.0e6f;
-            out_default_mat.rht_p_lock = 600.0e6f;
-            out_default_mat.rht_alpha0 = 1.22f;
-            out_default_mat.enable_strain_erosion = true;
-            out_default_mat.erosion_strain = 1.20f;
-            out_default_mat.failure_strain = 0.0035f;
-            out_default_mat.tensile_failure_stress = out_default_mat.ft;
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::RHTConcrete;
+            m_tb.density = static_cast<float>(ro);
+            m_tb.poissons_ratio = static_cast<float>(pr > 0.0f ? pr : 0.18f);
+            m_tb.youngs_modulus = 34.0e9f;
+            m_tb.yield_stress = static_cast<float>(sigf > 0.0f ? sigf : 35.0e6f);
+            m_tb.fc = m_tb.yield_stress;
+            m_tb.ft = 0.09f * m_tb.fc;
+            m_tb.G_f = 150.0f;
+            m_tb.rht_A = 1.6f;
+            m_tb.rht_N = 0.61f;
+            m_tb.rht_B = 0.7f;
+            m_tb.rht_M = 0.8f;
+            m_tb.rht_p_crush = 17.0e6f;
+            m_tb.rht_p_lock = 600.0e6f;
+            m_tb.rht_alpha0 = 1.22f;
+            m_tb.enable_strain_erosion = true;
+            m_tb.erosion_strain = 1.20f;
+            m_tb.failure_strain = 0.0035f;
+            m_tb.tensile_failure_stress = m_tb.ft;
 
-            MaterialTable3D m_tb = out_default_mat;
-            m_imported_materials[static_cast<int>(mid)] = m_tb;
+            m_imported_materials[mid] = m_tb;
             current_keyword = "";
         } else if (current_keyword.rfind("*MAT_JOHNSON_COOK", 0) == 0 || current_keyword.rfind("*MAT_015", 0) == 0) {
             // Card 1: MID, RO, E, PR, A, B, N, C
-            T mid = parseFieldVal(line, 0, 1.0f);
-            out_default_mat.material_model = MPMMaterialModel::JohnsonCookMieGruneisen;
-            out_default_mat.density = static_cast<float>(parseFieldVal(line, 1, 7850.0f));
-            out_default_mat.youngs_modulus = static_cast<float>(parseFieldVal(line, 2, 210.0e9f));
-            out_default_mat.poissons_ratio = static_cast<float>(parseFieldVal(line, 3, 0.30f));
-            out_default_mat.jc_A = static_cast<float>(parseFieldVal(line, 4, 792.0e6f));
-            out_default_mat.jc_B = static_cast<float>(parseFieldVal(line, 5, 510.0e6f));
-            out_default_mat.jc_n = static_cast<float>(parseFieldVal(line, 6, 0.26f));
-            out_default_mat.jc_C = static_cast<float>(parseFieldVal(line, 7, 0.014f));
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::JohnsonCookMieGruneisen;
+            m_tb.density = static_cast<float>(parseFieldVal(line, 1, 7850.0f));
+            m_tb.youngs_modulus = static_cast<float>(parseFieldVal(line, 2, 210.0e9f));
+            m_tb.poissons_ratio = static_cast<float>(parseFieldVal(line, 3, 0.30f));
+            m_tb.jc_A = static_cast<float>(parseFieldVal(line, 4, 792.0e6f));
+            m_tb.jc_B = static_cast<float>(parseFieldVal(line, 5, 510.0e6f));
+            m_tb.jc_n = static_cast<float>(parseFieldVal(line, 6, 0.26f));
+            m_tb.jc_C = static_cast<float>(parseFieldVal(line, 7, 0.014f));
+            m_tb.yield_stress = m_tb.jc_A;
 
             // Card 2: M, TM, TR, CP, PC, SPALL, ...
             std::streampos pos = file.tellg();
             std::string line2;
             while (std::getline(file, line2)) {
                 std::string trimmed2 = trim(line2);
-                if (trimmed2.empty()) continue;
-                if (trimmed2[0] == '$') continue;
-                if (trimmed2[0] == '*') {
-                    file.seekg(pos);
-                    break;
-                }
-                out_default_mat.jc_m = static_cast<float>(parseFieldVal(line2, 0, 1.03f));
-                out_default_mat.T_melt = static_cast<float>(parseFieldVal(line2, 1, 1793.0f));
-                out_default_mat.T_room = static_cast<float>(parseFieldVal(line2, 2, 293.0f));
-                out_default_mat.Cp = static_cast<float>(parseFieldVal(line2, 3, 477.0f));
+                if (trimmed2.empty() || trimmed2[0] == '$') continue;
+                if (trimmed2[0] == '*') { file.seekg(pos); break; }
+                m_tb.jc_m = static_cast<float>(parseFieldVal(line2, 0, 1.03f));
+                m_tb.T_melt = static_cast<float>(parseFieldVal(line2, 1, 1793.0f));
+                m_tb.T_room = static_cast<float>(parseFieldVal(line2, 2, 293.0f));
+                m_tb.Cp = static_cast<float>(parseFieldVal(line2, 3, 477.0f));
                 T spall = parseFieldVal(line2, 5, 0.0f);
-                if (spall > 0.0f) out_default_mat.tensile_failure_stress = static_cast<float>(spall);
+                if (spall > 0.0f) m_tb.tensile_failure_stress = static_cast<float>(spall);
                 break;
             }
 
-            MaterialTable3D m_tb = out_default_mat;
-            m_imported_materials[static_cast<int>(mid)] = m_tb;
+            m_imported_materials[mid] = m_tb;
+            current_keyword = "";
+        } else if (current_keyword.rfind("*MAT_STEINBERG", 0) == 0 || current_keyword.rfind("*MAT_011", 0) == 0) {
+            // Card 1: MID, RO, G0, SIGO, BETA, N, GAMA, SIGM
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::SteinbergGuinan;
+            m_tb.density = static_cast<float>(parseFieldVal(line, 1, 8930.0f));
+            float G0 = static_cast<float>(parseFieldVal(line, 2, 47.7e9f));
+            m_tb.sg_Y0 = static_cast<float>(parseFieldVal(line, 3, 120.0e6f));
+            m_tb.sg_beta = static_cast<float>(parseFieldVal(line, 4, 36.0f));
+            m_tb.sg_n = static_cast<float>(parseFieldVal(line, 5, 0.45f));
+            m_tb.sg_Ymax = static_cast<float>(parseFieldVal(line, 7, 640.0e6f));
+            m_tb.yield_stress = m_tb.sg_Y0;
+            m_tb.poissons_ratio = 0.34f;
+            m_tb.youngs_modulus = 2.0f * G0 * (1.0f + m_tb.poissons_ratio);
+
+            // Card 2: B, BP, H, F, A, TM0, GAM0
+            std::streampos pos = file.tellg();
+            std::string line2;
+            while (std::getline(file, line2)) {
+                std::string trimmed2 = trim(line2);
+                if (trimmed2.empty() || trimmed2[0] == '$') continue;
+                if (trimmed2[0] == '*') { file.seekg(pos); break; }
+                m_tb.sg_bp = static_cast<float>(parseFieldVal(line2, 1, 2.83e-11f));
+                m_tb.sg_bT = static_cast<float>(parseFieldVal(line2, 2, 3.77e-4f));
+                float tm0 = static_cast<float>(parseFieldVal(line2, 5, 1360.0f));
+                float gam0 = static_cast<float>(parseFieldVal(line2, 6, 1.99f));
+                if (tm0 > 0.0f) m_tb.T_melt = tm0;
+                if (gam0 > 0.0f) m_tb.mg_gamma0 = gam0;
+                break;
+            }
+
+            m_imported_materials[mid] = m_tb;
+            current_keyword = "";
+        } else if (current_keyword.rfind("*MAT_GEOLOGICAL_CAP_MODEL", 0) == 0 || current_keyword.rfind("*MAT_025", 0) == 0) {
+            // Card 1: MID, RO, BULK, G, ALPHA, THETA, GAMMA, BETA
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::GeologicalCap;
+            m_tb.density = static_cast<float>(parseFieldVal(line, 1, 1950.0f));
+            float K = static_cast<float>(parseFieldVal(line, 2, 1.5e8f));
+            float G = static_cast<float>(parseFieldVal(line, 3, 7.5e7f));
+            float alpha = static_cast<float>(parseFieldVal(line, 4, 25.0e3f));
+            float theta = static_cast<float>(parseFieldVal(line, 5, 0.25f));
+            m_tb.poissons_ratio = std::clamp((3.0f * K - 2.0f * G) / std::max(1.0f, 2.0f * (3.0f * K + G)), 0.01f, 0.49f);
+            m_tb.youngs_modulus = (9.0f * K * G) / std::max(1.0f, 3.0f * K + G);
+            m_tb.dp_cohesion = alpha;
+            m_tb.dp_friction_angle = std::atan(std::clamp(3.0f * theta, 0.0f, 1.5f)) * (180.0f / 3.14159265f);
+
+            // Card 2: R, D, W, X0, C, N
+            std::streampos pos = file.tellg();
+            std::string line2;
+            while (std::getline(file, line2)) {
+                std::string trimmed2 = trim(line2);
+                if (trimmed2.empty() || trimmed2[0] == '$') continue;
+                if (trimmed2[0] == '*') { file.seekg(pos); break; }
+                m_tb.cap_R = static_cast<float>(parseFieldVal(line2, 0, 2.5f));
+                m_tb.cap_D1 = static_cast<float>(parseFieldVal(line2, 1, 5.0e-7f));
+                m_tb.cap_W = static_cast<float>(parseFieldVal(line2, 2, 0.15f));
+                m_tb.cap_X0 = static_cast<float>(parseFieldVal(line2, 3, 4.0e5f));
+                float t_cut = static_cast<float>(parseFieldVal(line2, 4, 0.0f));
+                if (t_cut > 0.0f) m_tb.dp_tensile_cutoff = t_cut;
+                break;
+            }
+
+            m_imported_materials[mid] = m_tb;
+            current_keyword = "";
+        } else if (current_keyword.rfind("*MAT_MOONEY", 0) == 0 || current_keyword.rfind("*MAT_027", 0) == 0) {
+            // Card 1: MID, RO, PR, A (C10), B (C01)
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::HyperelasticMooneyRivlin;
+            m_tb.density = static_cast<float>(parseFieldVal(line, 1, 1100.0f));
+            float pr = std::clamp(static_cast<float>(parseFieldVal(line, 2, 0.495f)), 0.01f, 0.499f);
+            m_tb.mr_c10 = static_cast<float>(parseFieldVal(line, 3, 0.40e6f));
+            m_tb.mr_c01 = static_cast<float>(parseFieldVal(line, 4, 0.10e6f));
+            float G0 = 2.0f * (m_tb.mr_c10 + m_tb.mr_c01);
+            m_tb.poissons_ratio = pr;
+            m_tb.youngs_modulus = 2.0f * G0 * (1.0f + pr);
+            m_tb.k_bulk = m_tb.youngs_modulus / (3.0f * std::max(0.002f, 1.0f - 2.0f * pr));
+
+            m_imported_materials[mid] = m_tb;
+            current_keyword = "";
+        } else if (current_keyword.rfind("*MAT_CRUSHABLE_FOAM", 0) == 0 || current_keyword.rfind("*MAT_063", 0) == 0) {
+            // Card 1: MID, RO, E, PR, LCID, TSC, DAMP
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::CrushableFoam;
+            m_tb.density = static_cast<float>(parseFieldVal(line, 1, 120.0f));
+            m_tb.youngs_modulus = static_cast<float>(parseFieldVal(line, 2, 1.5e8f));
+            m_tb.poissons_ratio = static_cast<float>(parseFieldVal(line, 3, 0.05f));
+            float tsc = static_cast<float>(parseFieldVal(line, 5, 0.0f));
+            m_tb.foam_plateau_stress = (tsc > 0.0f) ? tsc : 0.02f * m_tb.youngs_modulus;
+            m_tb.tensile_failure_stress = m_tb.foam_plateau_stress;
+            m_tb.foam_alpha = 1.5f;
+            m_tb.foam_densification_strain = 0.60f;
+
+            m_imported_materials[mid] = m_tb;
+            current_keyword = "";
+        } else if (current_keyword.rfind("*MAT_JOHNSON_HOLMQUIST_CERAMICS", 0) == 0 || current_keyword.rfind("*MAT_110", 0) == 0) {
+            // Card 1: MID, RO, G, A, B, C, M, N
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::JohnsonHolmquistJH2;
+            m_tb.density = static_cast<float>(parseFieldVal(line, 1, 3200.0f));
+            float G = static_cast<float>(parseFieldVal(line, 2, 193.0e9f));
+            m_tb.jh2_A = static_cast<float>(parseFieldVal(line, 3, 0.96f));
+            m_tb.jh2_B = static_cast<float>(parseFieldVal(line, 4, 0.35f));
+            m_tb.jh2_C = static_cast<float>(parseFieldVal(line, 5, 0.009f));
+            m_tb.jh2_M = static_cast<float>(parseFieldVal(line, 6, 1.0f));
+            m_tb.jh2_N = static_cast<float>(parseFieldVal(line, 7, 0.65f));
+
+            // Card 2: EPSI, T, SFMAX, HEL, PHEL, BETA, D1, D2
+            std::streampos pos = file.tellg();
+            std::string line2;
+            while (std::getline(file, line2)) {
+                std::string trimmed2 = trim(line2);
+                if (trimmed2.empty() || trimmed2[0] == '$') continue;
+                if (trimmed2[0] == '*') { file.seekg(pos); break; }
+                m_tb.jh2_t_max = static_cast<float>(parseFieldVal(line2, 1, 370.0e6f));
+                m_tb.jh2_sigma_hel = static_cast<float>(parseFieldVal(line2, 3, 14.5e9f));
+                m_tb.jh2_p_hel = static_cast<float>(parseFieldVal(line2, 4, 5.9e9f));
+                m_tb.jh2_beta = static_cast<float>(parseFieldVal(line2, 5, 1.0f));
+                m_tb.jh2_D1 = static_cast<float>(parseFieldVal(line2, 6, 0.48f));
+                m_tb.jh2_D2 = static_cast<float>(parseFieldVal(line2, 7, 0.48f));
+                break;
+            }
+            // Card 3: K1, K2, K3, FS
+            std::streampos pos3 = file.tellg();
+            std::string line3;
+            while (std::getline(file, line3)) {
+                std::string trimmed3 = trim(line3);
+                if (trimmed3.empty() || trimmed3[0] == '$') continue;
+                if (trimmed3[0] == '*') { file.seekg(pos3); break; }
+                m_tb.jh2_K1 = static_cast<float>(parseFieldVal(line3, 0, 204.0e9f));
+                m_tb.jh2_K2 = static_cast<float>(parseFieldVal(line3, 1, 0.0f));
+                m_tb.jh2_K3 = static_cast<float>(parseFieldVal(line3, 2, 0.0f));
+                break;
+            }
+            float K1 = std::max(1.0e6f, m_tb.jh2_K1);
+            m_tb.poissons_ratio = std::clamp((3.0f * K1 - 2.0f * G) / std::max(1.0f, 2.0f * (3.0f * K1 + G)), 0.01f, 0.49f);
+            m_tb.youngs_modulus = (9.0f * K1 * G) / std::max(1.0f, 3.0f * K1 + G);
+
+            m_imported_materials[mid] = m_tb;
+            current_keyword = "";
+        } else if (current_keyword.rfind("*MAT_MOHR_COULOMB", 0) == 0 || current_keyword.rfind("*MAT_173", 0) == 0) {
+            // Card 1: MID, RO, GMOD, RNU, NPLANES, PHI, CVAL, PSI
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::MohrCoulomb;
+            m_tb.density = static_cast<float>(parseFieldVal(line, 1, 2000.0f));
+            float Gmod = static_cast<float>(parseFieldVal(line, 2, 4.0e7f));
+            m_tb.poissons_ratio = std::clamp(static_cast<float>(parseFieldVal(line, 3, 0.30f)), 0.01f, 0.49f);
+            m_tb.youngs_modulus = 2.0f * Gmod * (1.0f + m_tb.poissons_ratio);
+            m_tb.dp_friction_angle = static_cast<float>(parseFieldVal(line, 5, 30.0f));
+            m_tb.dp_cohesion = static_cast<float>(parseFieldVal(line, 6, 20.0e3f));
+            m_tb.dp_dilatancy_angle = static_cast<float>(parseFieldVal(line, 7, 0.0f));
+
+            m_imported_materials[mid] = m_tb;
+            current_keyword = "";
+        } else if (current_keyword.rfind("*MAT_SIMPLIFIED_RUBBER", 0) == 0 || current_keyword.rfind("*MAT_181", 0) == 0) {
+            // Card 1: MID, RO, KM, MU, G, SIGF
+            int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            MaterialTable3D m_tb{};
+            m_tb.material_model = MPMMaterialModel::HyperelasticYeoh;
+            m_tb.density = static_cast<float>(parseFieldVal(line, 1, 1100.0f));
+            float KM = static_cast<float>(parseFieldVal(line, 2, 1.0e8f));
+            float G = static_cast<float>(parseFieldVal(line, 4, 1.0e6f));
+            m_tb.k_bulk = KM;
+            m_tb.yeoh_c10 = 0.5f * G;
+            m_tb.yeoh_c20 = 0.0f;
+            m_tb.yeoh_c30 = 0.0f;
+            m_tb.poissons_ratio = std::clamp((3.0f * KM - 2.0f * G) / std::max(1.0f, 2.0f * (3.0f * KM + G)), 0.01f, 0.495f);
+            m_tb.youngs_modulus = 2.0f * G * (1.0f + m_tb.poissons_ratio);
+
+            m_imported_materials[mid] = m_tb;
             current_keyword = "";
         } else if (current_keyword.rfind("*EOS_GRUNEISEN", 0) == 0 || current_keyword.rfind("*EOS_004", 0) == 0) {
             // Card 1: EOSID, C, S1, S2, S3, GAMAO, A, E0
-            out_default_mat.mg_c0 = static_cast<float>(parseFieldVal(line, 1, 4570.0f));
-            out_default_mat.mg_s = static_cast<float>(parseFieldVal(line, 2, 1.49f));
-            out_default_mat.mg_gamma0 = static_cast<float>(parseFieldVal(line, 5, 1.81f));
+            int eosid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
+            GruneisenEOSProps eos{};
+            eos.c0 = static_cast<float>(parseFieldVal(line, 1, 4570.0f));
+            eos.s1 = static_cast<float>(parseFieldVal(line, 2, 1.49f));
+            eos.gamma0 = static_cast<float>(parseFieldVal(line, 5, 1.81f));
+            eos.valid = true;
+            m_imported_eos[eosid] = eos;
+            current_keyword = "";
         } else if (current_keyword.rfind("*MAT_ADD_EROSION", 0) == 0) {
             // Card 1: MID, EXFAIL, MXPRES, MNEPS, EFFEPS, VOLEPS, NUMFIP, NCS
             int mid = static_cast<int>(parseFieldVal(line, 0, 1.0f));
@@ -364,22 +558,16 @@ bool LSDynaReader3D<T>::parseStream(
             if (f4 > 0.0f && f4 <= 10.0f) fail_eps = static_cast<float>(f4);
             else if (exf > 0.0f && exf <= 10.0f) fail_eps = static_cast<float>(exf);
 
-            if (fail_eps > 0.0f) {
-                out_default_mat.failure_strain = fail_eps;
-                out_default_mat.enable_strain_erosion = true;
-                if (m_imported_materials.count(mid)) {
-                    m_imported_materials[mid].failure_strain = fail_eps;
-                    m_imported_materials[mid].enable_strain_erosion = true;
-                }
+            if (fail_eps > 0.0f && m_imported_materials.count(mid)) {
+                m_imported_materials[mid].failure_strain = fail_eps;
+                m_imported_materials[mid].erosion_strain = fail_eps;
+                m_imported_materials[mid].enable_strain_erosion = true;
             }
 
-            if (f4 > 1.0e5f) {
-                out_default_mat.tensile_failure_stress = static_cast<float>(f4);
-                out_default_mat.enable_stress_erosion = true;
-                if (m_imported_materials.count(mid)) {
-                    m_imported_materials[mid].tensile_failure_stress = static_cast<float>(f4);
-                    m_imported_materials[mid].enable_stress_erosion = true;
-                }
+            if (f4 > 1.0e5f && m_imported_materials.count(mid)) {
+                m_imported_materials[mid].tensile_failure_stress = static_cast<float>(f4);
+                m_imported_materials[mid].erosion_stress = static_cast<float>(f4);
+                m_imported_materials[mid].enable_stress_erosion = true;
             }
 
             // Optional Card 2: MNPRES, SIGP1, SIGVM, ...
@@ -393,13 +581,10 @@ bool LSDynaReader3D<T>::parseStream(
                     break;
                 }
                 T sigp1_c2 = parseFieldVal(line2, 1, 0.0f);
-                if (sigp1_c2 > 1.0e5f) {
-                    out_default_mat.tensile_failure_stress = static_cast<float>(sigp1_c2);
-                    out_default_mat.enable_stress_erosion = true;
-                    if (m_imported_materials.count(mid)) {
-                        m_imported_materials[mid].tensile_failure_stress = static_cast<float>(sigp1_c2);
-                        m_imported_materials[mid].enable_stress_erosion = true;
-                    }
+                if (sigp1_c2 > 1.0e5f && m_imported_materials.count(mid)) {
+                    m_imported_materials[mid].tensile_failure_stress = static_cast<float>(sigp1_c2);
+                    m_imported_materials[mid].erosion_stress = static_cast<float>(sigp1_c2);
+                    m_imported_materials[mid].enable_stress_erosion = true;
                 }
                 break;
             }
@@ -562,15 +747,16 @@ bool LSDynaReader3D<T>::parseStream(
             int part_id = static_cast<int>(parseFieldVal(line, 0, 1.0f));
             int sec_id = static_cast<int>(parseFieldVal(line, 1, 1.0f));
             int mat_id = static_cast<int>(parseFieldVal(line, 2, 1.0f));
+            int eos_id = static_cast<int>(parseFieldVal(line, 3, 0.0f));
             m_part_to_secid[part_id] = sec_id;
             m_part_to_matid[part_id] = mat_id;
+            if (eos_id > 0) m_part_to_eosid[part_id] = eos_id;
             PartInfo& pinfo = m_parts[part_id];
             pinfo.part_id = part_id;
             pinfo.sec_id = sec_id;
             pinfo.mat_id = mat_id;
             pinfo.name = pending_part_title.empty() ? ("Part_" + std::to_string(part_id)) : pending_part_title;
             pending_part_title.clear();
-            m_part_to_secid[part_id] = sec_id;
         } else if (current_keyword.rfind("*SECTION_BEAM", 0) == 0) {
             if (current_keyword.rfind("*SECTION_BEAM_TITLE", 0) == 0) {
                 std::getline(file, line);
@@ -907,9 +1093,11 @@ bool LSDynaReader3D<T>::parseFile(
     m_secid_to_shell_props.clear();
     m_part_to_secid.clear();
     m_part_to_matid.clear();
+    m_part_to_eosid.clear();
     m_parts.clear();
     m_sets.clear();
     m_imported_materials.clear();
+    m_imported_eos.clear();
     m_pending_spc_nodes.clear();
     m_pending_spc_sets.clear();
 
@@ -929,6 +1117,7 @@ bool LSDynaReader3D<T>::parseFile(
         }
     }
 
+    const bool caller_ts_erode = out_default_mat.enable_timestep_erosion;
     bool ok = parseStream(filepath, out_nodes, out_elements, out_trusses, out_beams, out_shells, out_default_mat, out_materials, 0);
     if (ok) {
         for (const auto& spc : m_pending_spc_nodes) {
@@ -955,38 +1144,80 @@ bool LSDynaReader3D<T>::parseFile(
             }
         }
     }
-    if (ok && out_materials.empty() && !m_imported_materials.empty()) {
-        std::unordered_map<int, int> mid_to_index;
-        for (const auto& kv : m_imported_materials) {
-            mid_to_index[kv.first] = static_cast<int>(out_materials.size());
-            out_materials.push_back(kv.second);
-        }
-        for (auto& el : out_elements) {
-            if (mid_to_index.count(el.mat_id)) {
-                el.mat_id = mid_to_index[el.mat_id];
-            } else if (!out_materials.empty()) {
-                el.mat_id = 0;
+    if (ok && !m_imported_materials.empty()) {
+        std::unordered_map<int, int> mat_to_eos_linked;
+        for (const auto& pk : m_part_to_eosid) {
+            int pid = pk.first;
+            int eosid = pk.second;
+            if (eosid > 0 && m_part_to_matid.count(pid)) {
+                mat_to_eos_linked[m_part_to_matid[pid]] = eosid;
             }
         }
-        for (auto& tr : out_trusses) {
-            if (mid_to_index.count(tr.mat_id)) {
-                tr.mat_id = mid_to_index[tr.mat_id];
-            } else if (!out_materials.empty()) {
-                tr.mat_id = 0;
+        for (auto& kv : m_imported_materials) {
+            int mid = kv.first;
+            MaterialTable3D& m = kv.second;
+            if (m.material_model == MPMMaterialModel::JohnsonCookMieGruneisen ||
+                m.material_model == MPMMaterialModel::SteinbergGuinan) {
+                int eos_id = 0;
+                if (mat_to_eos_linked.count(mid)) {
+                    eos_id = mat_to_eos_linked[mid];
+                } else if (m_imported_eos.count(mid)) {
+                    eos_id = mid;
+                } else if (m_imported_eos.size() == 1) {
+                    eos_id = m_imported_eos.begin()->first;
+                }
+                if (eos_id > 0 && m_imported_eos.count(eos_id)) {
+                    const auto& eos = m_imported_eos[eos_id];
+                    m.mg_c0 = eos.c0;
+                    m.mg_s = eos.s1;
+                    m.mg_gamma0 = eos.gamma0;
+                    if (m.material_model == MPMMaterialModel::SteinbergGuinan && eos.c0 > 0.0f && m.density > 0.0f) {
+                        float G0 = m.youngs_modulus / (2.0f * (1.0f + std::clamp(m.poissons_ratio, 0.05f, 0.49f)));
+                        float K0 = m.density * eos.c0 * eos.c0;
+                        float nu_calc = std::clamp((3.0f * K0 - 2.0f * G0) / std::max(1.0f, 6.0f * K0 + 2.0f * G0), 0.05f, 0.49f);
+                        m.poissons_ratio = nu_calc;
+                        m.youngs_modulus = 2.0f * G0 * (1.0f + nu_calc);
+                    }
+                }
+            }
+            if (!caller_ts_erode && out_default_mat.timestep_erosion_factor > 0.0f && out_default_mat.timestep_erosion_factor <= 1.0f) {
+                // Keep caller default factor untouched unless specified
             }
         }
-        for (auto& bm : out_beams) {
-            if (mid_to_index.count(bm.mat_id)) {
-                bm.mat_id = mid_to_index[bm.mat_id];
-            } else if (!out_materials.empty()) {
-                bm.mat_id = 0;
+        if (out_materials.empty()) {
+            std::unordered_map<int, int> mid_to_index;
+            for (const auto& kv : m_imported_materials) {
+                mid_to_index[kv.first] = static_cast<int>(out_materials.size());
+                out_materials.push_back(kv.second);
             }
-        }
-        for (auto& sh : out_shells) {
-            if (mid_to_index.count(sh.mat_id)) {
-                sh.mat_id = mid_to_index[sh.mat_id];
-            } else if (!out_materials.empty()) {
-                sh.mat_id = 0;
+            out_default_mat = out_materials[0];
+            for (auto& el : out_elements) {
+                if (mid_to_index.count(el.mat_id)) {
+                    el.mat_id = mid_to_index[el.mat_id];
+                } else if (!out_materials.empty()) {
+                    el.mat_id = 0;
+                }
+            }
+            for (auto& tr : out_trusses) {
+                if (mid_to_index.count(tr.mat_id)) {
+                    tr.mat_id = mid_to_index[tr.mat_id];
+                } else if (!out_materials.empty()) {
+                    tr.mat_id = 0;
+                }
+            }
+            for (auto& bm : out_beams) {
+                if (mid_to_index.count(bm.mat_id)) {
+                    bm.mat_id = mid_to_index[bm.mat_id];
+                } else if (!out_materials.empty()) {
+                    bm.mat_id = 0;
+                }
+            }
+            for (auto& sh : out_shells) {
+                if (mid_to_index.count(sh.mat_id)) {
+                    sh.mat_id = mid_to_index[sh.mat_id];
+                } else if (!out_materials.empty()) {
+                    sh.mat_id = 0;
+                }
             }
         }
     }

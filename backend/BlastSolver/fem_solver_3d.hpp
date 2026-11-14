@@ -3,6 +3,7 @@
 
 #include "mpm_solver_3d.hpp"
 #include "cfd_eos_water.hpp"
+#include "materials/ConstitutiveDispatcher.hpp"
 #include <vector>
 #include <array>
 #include <memory>
@@ -102,6 +103,8 @@ struct alignas(32) FEMGaussPointHistory3D {
     T temp_gp[8];
     T damage_gp[8];
     T lambda_gp[8];
+    T p_gp[8];
+    T e_int_gp[8];
 };
 
 template <typename T>
@@ -324,10 +327,7 @@ HD_FEM_FUNC inline T computeTet4CharacteristicLength(const T x_nodes[4][3], T V_
 }
 
 template <typename T>
-HD_FEM_FUNC inline T computeDilatationalWaveSpeed(const MaterialTable3D& mat, T v_rel = static_cast<T>(1.0f), T lambda = static_cast<T>(0.0f), T p_val = static_cast<T>(0.0f)) {
-    if (mat.material_model == MPMMaterialModel::TaitWater) {
-        return static_cast<T>(mat.tait_c0 > 0.0f ? mat.tait_c0 : 1482.0f);
-    }
+HD_FEM_FUNC inline T computeDilatationalWaveSpeed(const MaterialTable3D& mat, T v_rel = static_cast<T>(1.0f), T lambda = static_cast<T>(0.0f), T p_val = static_cast<T>(0.0f), T e_int = static_cast<T>(0.0f)) {
     if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn ||
         mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
         mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
@@ -353,18 +353,282 @@ HD_FEM_FUNC inline T computeDilatationalWaveSpeed(const MaterialTable3D& mat, T 
         }
         return static_cast<T>(fmaxf(C0, 2000.0f));
     }
-    T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
-    T nu = static_cast<T>(mat.poissons_ratio);
-    T density = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
-    T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
-    T K = E / (static_cast<T>(3.0f) * (static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu));
-    if (mat.material_model == MPMMaterialModel::RHTConcrete || 
-        mat.material_model == MPMMaterialModel::KCConcrete || 
-        mat.material_model == MPMMaterialModel::CSCMConcrete) {
-        K *= static_cast<T>(1.6f);
+    return Blast::Materials::computeInstantaneousSoundSpeed<T>(mat, v_rel, p_val, e_int);
+}
+
+template <typename T>
+HD_FEM_FUNC inline T computeFEMWeibullFactor(uint32_t seed_base, const BlastPhysicsParams<T>& params) {
+    if (!params.enable_heterogeneity) return static_cast<T>(1.0f);
+    uint32_t seed = seed_base;
+    seed = (seed ^ 61u) ^ (seed >> 16);
+    seed *= 9u;
+    seed = seed ^ (seed >> 4);
+    seed *= 0x27d4eb2du;
+    seed = seed ^ (seed >> 15);
+    float u = static_cast<float>(seed & 0xFFFFu) / 65535.0f;
+    u = fminf(0.999f, fmaxf(0.001f, u));
+    float m_w = (params.weibull_modulus > static_cast<T>(0.001f))
+        ? static_cast<float>(params.weibull_modulus)
+        : ((params.material_heterogeneity > static_cast<T>(1.0e-4f)) ? (1.0f / static_cast<float>(params.material_heterogeneity)) : 8.0f);
+    float eta_w = (params.weibull_scale > static_cast<T>(0.001f)) ? static_cast<float>(params.weibull_scale) : 1.0f;
+    float gamma_mean = tgammaf(1.0f + 1.0f / m_w);
+    float w = (powf(-logf(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w;
+    w = fminf(3.0f, fmaxf(0.10f, w));
+    return static_cast<T>(w);
+}
+
+template <typename T>
+HD_FEM_FUNC inline void extractPolarRotation3x3(const T F[3][3], T R[3][3]) {
+    const T detF = F[0][0] * (F[1][1] * F[2][2] - F[1][2] * F[2][1])
+                 - F[0][1] * (F[1][0] * F[2][2] - F[1][2] * F[2][0])
+                 + F[0][2] * (F[1][0] * F[2][1] - F[1][1] * F[2][0]);
+    if (!(detF > static_cast<T>(1.0e-8))) {
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                R[r][c] = (r == c) ? static_cast<T>(1.0) : static_cast<T>(0.0);
+        return;
     }
-    T cd = sqrt((K + static_cast<T>(4.0f) / static_cast<T>(3.0f) * G) / density);
-    return (cd > static_cast<T>(1.0f)) ? cd : static_cast<T>(5000.0f);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            R[r][c] = F[r][c];
+    for (int iter = 0; iter < 5; ++iter) {
+        const T d = R[0][0] * (R[1][1] * R[2][2] - R[1][2] * R[2][1])
+                  - R[0][1] * (R[1][0] * R[2][2] - R[1][2] * R[2][0])
+                  + R[0][2] * (R[1][0] * R[2][1] - R[1][1] * R[2][0]);
+        if (d < static_cast<T>(1.0e-12) && d > static_cast<T>(-1.0e-12)) break;
+        const T inv_d = static_cast<T>(1.0) / d;
+        T R_invT[3][3];
+        R_invT[0][0] = (R[1][1] * R[2][2] - R[1][2] * R[2][1]) * inv_d;
+        R_invT[0][1] = (R[1][2] * R[2][0] - R[1][0] * R[2][2]) * inv_d;
+        R_invT[0][2] = (R[1][0] * R[2][1] - R[1][1] * R[2][0]) * inv_d;
+        R_invT[1][0] = (R[0][2] * R[2][1] - R[0][1] * R[2][2]) * inv_d;
+        R_invT[1][1] = (R[0][0] * R[2][2] - R[0][2] * R[2][0]) * inv_d;
+        R_invT[1][2] = (R[0][1] * R[2][0] - R[0][0] * R[2][1]) * inv_d;
+        R_invT[2][0] = (R[0][1] * R[1][2] - R[0][2] * R[1][1]) * inv_d;
+        R_invT[2][1] = (R[0][2] * R[1][0] - R[0][0] * R[1][2]) * inv_d;
+        R_invT[2][2] = (R[0][0] * R[1][1] - R[0][1] * R[1][0]) * inv_d;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                R[r][c] = static_cast<T>(0.5) * (R[r][c] + R_invT[r][c]);
+    }
+}
+
+template <typename T>
+HD_FEM_FUNC inline void runFEMConstitutivePoint(
+    const MaterialTable3D& mat,
+    const BlastPhysicsParams<T>& physics_params,
+    const T F_cur[3][3],
+    const T d_dev[3][3],
+    T active_div_v,
+    T J_vol,
+    T dt,
+    T h_e,
+    T q_visc_in,
+    T weibull_factor,
+    bool is_detached,
+    T s_dev[3][3],
+    T& p_constit,
+    T& p_hydro_total,
+    T& ep_bar,
+    T& damage,
+    T& lambda,
+    T& temperature,
+    T& e_internal
+) {
+    const MaterialTable3D* mat_ptr = &mat;
+    MaterialTable3D mat_local;
+    const bool need_bridge =
+        (mat.cs_C <= 0.0f && physics_params.cowper_symonds_C > static_cast<T>(0.0f) && physics_params.cowper_symonds_P > static_cast<T>(0.0f)) ||
+        (!mat.enable_heterogeneity && physics_params.enable_heterogeneity) ||
+        (!mat.enable_anisotropy && physics_params.enable_anisotropy) ||
+        (!mat.directional_crack_band && physics_params.enable_directional_crack_band);
+    if (need_bridge) {
+        mat_local = mat;
+        if (mat_local.cs_C <= 0.0f && physics_params.cowper_symonds_C > static_cast<T>(0.0f) && physics_params.cowper_symonds_P > static_cast<T>(0.0f)) {
+            mat_local.cs_C = static_cast<float>(physics_params.cowper_symonds_C);
+            mat_local.cs_P = static_cast<float>(physics_params.cowper_symonds_P);
+        }
+        if (!mat_local.enable_heterogeneity && physics_params.enable_heterogeneity) {
+            mat_local.enable_heterogeneity = true;
+        }
+        if (!mat_local.enable_anisotropy && physics_params.enable_anisotropy) {
+            mat_local.enable_anisotropy = true;
+            mat_local.anisotropy_ratio = static_cast<float>(physics_params.anisotropy_ratio);
+            mat_local.anisotropy_dir[0] = static_cast<float>(physics_params.anisotropy_dir[0]);
+            mat_local.anisotropy_dir[1] = static_cast<float>(physics_params.anisotropy_dir[1]);
+            mat_local.anisotropy_dir[2] = static_cast<float>(physics_params.anisotropy_dir[2]);
+        }
+        if (!mat_local.directional_crack_band && physics_params.enable_directional_crack_band) {
+            mat_local.directional_crack_band = true;
+        }
+        mat_ptr = &mat_local;
+    }
+
+    Blast::Materials::ConstitutiveState3D<T> st;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            st.sigma[r][c] = s_dev[r][c] - ((r == c) ? p_constit : static_cast<T>(0.0));
+            st.F_total[r][c] = F_cur[r][c];
+        }
+    }
+    if (mat_ptr->material_model == MPMMaterialModel::Hill48Orthotropic) {
+        T R_pol[3][3];
+        extractPolarRotation3x3<T>(F_cur, R_pol);
+        T a0[3] = {
+            static_cast<T>(mat_ptr->anisotropy_dir[0]),
+            static_cast<T>(mat_ptr->anisotropy_dir[1]),
+            static_cast<T>(mat_ptr->anisotropy_dir[2])
+        };
+        const T na0 = std::sqrt(a0[0] * a0[0] + a0[1] * a0[1] + a0[2] * a0[2]);
+        if (na0 < static_cast<T>(1.0e-8)) {
+            a0[0] = static_cast<T>(1.0); a0[1] = static_cast<T>(0.0); a0[2] = static_cast<T>(0.0);
+        } else {
+            const T inv_a0 = static_cast<T>(1.0) / na0;
+            a0[0] *= inv_a0; a0[1] *= inv_a0; a0[2] *= inv_a0;
+        }
+        T b0[3] = {static_cast<T>(0.0), static_cast<T>(1.0), static_cast<T>(0.0)};
+        if (std::abs(a0[1]) > static_cast<T>(0.9)) {
+            b0[0] = static_cast<T>(1.0); b0[1] = static_cast<T>(0.0); b0[2] = static_cast<T>(0.0);
+        }
+        const T dot_ab0 = a0[0] * b0[0] + a0[1] * b0[1] + a0[2] * b0[2];
+        b0[0] -= dot_ab0 * a0[0]; b0[1] -= dot_ab0 * a0[1]; b0[2] -= dot_ab0 * a0[2];
+        const T nb0 = std::sqrt(b0[0] * b0[0] + b0[1] * b0[1] + b0[2] * b0[2]);
+        if (nb0 > static_cast<T>(1.0e-12)) {
+            const T inv_b0 = static_cast<T>(1.0) / nb0;
+            b0[0] *= inv_b0; b0[1] *= inv_b0; b0[2] *= inv_b0;
+        }
+        for (int k = 0; k < 3; ++k) {
+            st.hill_a[k] = R_pol[k][0] * a0[0] + R_pol[k][1] * a0[1] + R_pol[k][2] * a0[2];
+            st.hill_b[k] = R_pol[k][0] * b0[0] + R_pol[k][1] * b0[1] + R_pol[k][2] * b0[2];
+        }
+    }
+    st.ep_bar = ep_bar;
+    st.damage = damage;
+    st.lambda = lambda;
+    st.temperature = temperature;
+    st.e_internal = e_internal;
+    st.J = (J_vol > static_cast<T>(0.01)) ? J_vol : static_cast<T>(0.01);
+    st.has_failed = false;
+
+    T deps[3][3];
+    const T iso_de = (static_cast<T>(1.0) / static_cast<T>(3.0)) * active_div_v * dt;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            deps[r][c] = d_dev[r][c] * dt + ((r == c) ? iso_de : static_cast<T>(0.0));
+        }
+    }
+    const T zero_m[3][3]{};
+    Blast::Materials::ConstitutiveDispatcher3D<T>::step(
+        *mat_ptr, st, deps, zero_m, zero_m, dt, h_e, weibull_factor, false
+    );
+
+    p_constit = -(st.sigma[0][0] + st.sigma[1][1] + st.sigma[2][2]) / static_cast<T>(3.0);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            s_dev[r][c] = st.sigma[r][c] + ((r == c) ? p_constit : static_cast<T>(0.0));
+        }
+    }
+    ep_bar = st.ep_bar;
+    damage = st.damage;
+    lambda = st.lambda;
+    temperature = st.temperature;
+    e_internal = st.e_internal;
+
+    const bool model_handles_qvisc =
+        (mat_ptr->material_model == MPMMaterialModel::TaitWater ||
+         mat_ptr->material_model == MPMMaterialModel::IdealGas);
+    p_hydro_total = p_constit + (model_handles_qvisc ? static_cast<T>(0.0) : q_visc_in);
+    if (is_detached) {
+        if (p_constit < static_cast<T>(0.0)) p_constit = static_cast<T>(0.0);
+        if (p_hydro_total < static_cast<T>(0.0)) p_hydro_total = static_cast<T>(0.0);
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                s_dev[r][c] *= static_cast<T>(0.2);
+            }
+        }
+    }
+}
+
+template <typename T>
+HD_FEM_FUNC inline void evaluateFEMAxialPlasticity(
+    const MaterialTable3D& mat,
+    T eps_total,
+    T axial_strain_rate,
+    T temperature,
+    T& eps_p,
+    T& ep_bar,
+    T& sigma_out,
+    T& current_yield_out,
+    T fallback_fail_strain,
+    bool& eroded_out
+) {
+    const T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+    const T trial_stress = E * (eps_total - eps_p);
+
+    if (mat.material_model == MPMMaterialModel::LinearElastic) {
+        sigma_out = trial_stress;
+        current_yield_out = static_cast<T>(1.0e30);
+        if (mat.enable_strain_erosion && mat.erosion_strain > 0.0f && std::abs(eps_total) >= static_cast<T>(mat.erosion_strain)) {
+            eroded_out = true;
+        }
+        return;
+    }
+
+    T sigma_y0 = static_cast<T>(mat.yield_stress > 0.0f ? mat.yield_stress : 500.0e6f);
+    if (mat.material_model == MPMMaterialModel::Hill48Orthotropic && mat.hill_sigma_y0 > 0.0f) {
+        sigma_y0 = static_cast<T>(mat.hill_sigma_y0);
+    }
+    T Etan = static_cast<T>(mat.hardening_modulus >= 0.0f ? mat.hardening_modulus : 0.0f);
+    T current_yield = sigma_y0 + Etan * ep_bar;
+
+    if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen && mat.jc_A > 0.0f) {
+        const T A_jc = static_cast<T>(mat.jc_A);
+        const T B_jc = static_cast<T>(mat.jc_B);
+        const T n_jc = static_cast<T>(mat.jc_n > 0.0f ? mat.jc_n : 1.0f);
+        const T C_jc = static_cast<T>(mat.jc_C);
+        const T m_jc = static_cast<T>(mat.jc_m);
+        const T ep_pos = (ep_bar > static_cast<T>(1.0e-12)) ? ep_bar : static_cast<T>(1.0e-12);
+        const T sig_hard = A_jc + (B_jc > static_cast<T>(0.0) ? B_jc * std::pow(ep_pos, n_jc) : static_cast<T>(0.0));
+        T rate_fac = static_cast<T>(1.0);
+        const T abs_edot = std::abs(axial_strain_rate);
+        if (C_jc > static_cast<T>(0.0) && abs_edot > static_cast<T>(1.0)) {
+            rate_fac += C_jc * std::log(abs_edot);
+        }
+        T therm_fac = static_cast<T>(1.0);
+        if (m_jc > static_cast<T>(0.0) && mat.T_melt > mat.T_room) {
+            T t_star = (temperature - static_cast<T>(mat.T_room)) / static_cast<T>(mat.T_melt - mat.T_room);
+            if (t_star < static_cast<T>(0.0)) t_star = static_cast<T>(0.0);
+            if (t_star > static_cast<T>(1.0)) t_star = static_cast<T>(1.0);
+            therm_fac = static_cast<T>(1.0) - std::pow(t_star, m_jc);
+            if (therm_fac < static_cast<T>(0.01)) therm_fac = static_cast<T>(0.01);
+        }
+        current_yield = sig_hard * rate_fac * therm_fac;
+        Etan = (B_jc > static_cast<T>(0.0)) ? (B_jc * n_jc * std::pow(ep_pos, n_jc - static_cast<T>(1.0)) * rate_fac * therm_fac) : static_cast<T>(0.0);
+    } else if (mat.cs_C > 0.0f && mat.cs_P > 0.0f && std::abs(axial_strain_rate) > static_cast<T>(0.0)) {
+        const T rate_fac = static_cast<T>(1.0) + std::pow(std::abs(axial_strain_rate) / static_cast<T>(mat.cs_C), static_cast<T>(1.0) / static_cast<T>(mat.cs_P));
+        current_yield *= rate_fac;
+        Etan *= rate_fac;
+    }
+
+    const T abs_trial = std::abs(trial_stress);
+    T sigma = trial_stress;
+    if (abs_trial > current_yield) {
+        const T dep = (abs_trial - current_yield) / (E + Etan);
+        const T sign_trial = (trial_stress > static_cast<T>(0.0)) ? static_cast<T>(1.0) : static_cast<T>(-1.0);
+        eps_p += sign_trial * dep;
+        ep_bar += dep;
+        sigma = sign_trial * (current_yield + Etan * dep);
+        current_yield += Etan * dep;
+    }
+    sigma_out = sigma;
+    current_yield_out = current_yield;
+
+    const T fail_lim = (mat.enable_strain_erosion && mat.erosion_strain > 0.0f)
+        ? static_cast<T>(mat.erosion_strain)
+        : (mat.failure_strain > 0.0f ? static_cast<T>(mat.failure_strain) : fallback_fail_strain);
+    if (fail_lim > static_cast<T>(0.0) && ep_bar >= fail_lim) {
+        eroded_out = true;
+    }
 }
 
 // Characteristic element length for Hex8 3D solid elements: L_e = V_e / max(A_1 ... A_6)
@@ -624,9 +888,11 @@ public:
     T getMaxVonMisesStress() const;
 
     // Multi-Physics Coupling & MPM Particle Conversion
-    void setMPMSolver(MPMSolver3D* mpm_solver) { m_mpm_solver = mpm_solver; }
-    void setMPMSolver(std::shared_ptr<MPMSolver3D> mpm_solver) { m_mpm_solver_ref = mpm_solver; m_mpm_solver = mpm_solver.get(); }
+    void setMPMSolver(MPMSolver3D* mpm_solver) { m_mpm_solver = mpm_solver; m_mpm_material_offset = 0; m_mpm_synced_fem_mat_count = 0; }
+    void setMPMSolver(std::shared_ptr<MPMSolver3D> mpm_solver) { m_mpm_solver_ref = mpm_solver; m_mpm_solver = mpm_solver.get(); m_mpm_material_offset = 0; m_mpm_synced_fem_mat_count = 0; }
     MPMSolver3D* getMPMSolver() const { return m_mpm_solver; }
+    void syncMaterialTablesToMPM();
+    int getMPMMaterialOffset() const { return m_mpm_material_offset; }
     void convertElementToMPMParticles(const FEMElement3D<T>& elem, std::vector<MPMParticle3D>& out_particles, const float* v_cluster_com = nullptr) const;
 
     // Lysmer-Kuhlemeyer Absorbing Boundary Condition
@@ -720,6 +986,8 @@ private:
     // Multi-Physics Solver References
     MPMSolver3D* m_mpm_solver{nullptr};
     std::shared_ptr<MPMSolver3D> m_mpm_solver_ref{nullptr};
+    int m_mpm_material_offset{0};
+    size_t m_mpm_synced_fem_mat_count{0};
     LysmerBoundaryParams m_lysmer_params;
     void* m_cuda_stream{nullptr};
 };

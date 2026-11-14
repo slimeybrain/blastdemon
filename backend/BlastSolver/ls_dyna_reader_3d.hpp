@@ -145,6 +145,13 @@ private:
     std::vector<PendingSPCNode> m_pending_spc_nodes;
     std::vector<PendingSPCSet> m_pending_spc_sets;
 
+    struct GruneisenEOSProps {
+        float c0{0.0f};
+        float s1{0.0f};
+        float gamma0{0.0f};
+        bool valid{false};
+    };
+
     std::unordered_map<int64_t, int> m_id_to_node_index;
     std::unordered_map<int64_t, int> m_id_to_elem_index;
     std::unordered_map<int64_t, int> m_id_to_beam_index;
@@ -153,9 +160,11 @@ private:
     std::unordered_map<int, ShellSectionProps> m_secid_to_shell_props;
     std::unordered_map<int, int> m_part_to_secid;
     std::unordered_map<int, int> m_part_to_matid;
+    std::unordered_map<int, int> m_part_to_eosid;
     std::unordered_map<int, PartInfo> m_parts;
     std::unordered_map<int, SetInfo> m_sets;
     std::map<int, MaterialTable3D> m_imported_materials;
+    std::unordered_map<int, GruneisenEOSProps> m_imported_eos;
 };
 
 } // namespace Blast

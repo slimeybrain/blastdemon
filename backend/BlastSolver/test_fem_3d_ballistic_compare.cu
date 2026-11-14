@@ -16,6 +16,7 @@ int main() {
     FEMSolver3DCUDA<float> gpu_solver;
 
     MaterialTable3D target_mat{};
+    target_mat.material_model = MPMMaterialModel::JohnsonCookMieGruneisen;
     target_mat.density = 7850.0f;
     target_mat.youngs_modulus = 210.0e9f;
     target_mat.poissons_ratio = 0.30f;
@@ -38,6 +39,7 @@ int main() {
     target_mat.tensile_failure_stress = 1200.0e6f;
 
     MaterialTable3D proj_mat{};
+    proj_mat.material_model = MPMMaterialModel::JohnsonCookMieGruneisen;
     proj_mat.density = 17800.0f;
     proj_mat.youngs_modulus = 360.0e9f;
     proj_mat.poissons_ratio = 0.28f;

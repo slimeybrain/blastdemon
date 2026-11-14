@@ -7,6 +7,7 @@
 #include "constitutive_mixture.hpp"
 #include "materials/ConstitutiveSolids.hpp"
 #include "materials/ConstitutiveGeomaterials.hpp"
+#include "materials/ConstitutiveDispatcher.hpp"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <algorithm>
@@ -449,7 +450,7 @@ __global__ void kernel_reset_mat_tags_3d(int* d_mat_tag, const int* active_nodes
 }
 
 // SoA Pack/Unpack Kernels
-__global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSoA soa, int chunk_size, int offset = 0) {
+__global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSoA soa, int chunk_size, int offset = 0, const MPMParticleAux3D* d_aux = nullptr, int aux_count = 0) {
     int local_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (local_idx >= chunk_size) return;
     int idx = offset + local_idx;
@@ -499,9 +500,36 @@ __global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSo
     if (soa.state) soa.state[idx] = static_cast<int>(p.state);
     if (soa.cluster_id) soa.cluster_id[idx] = p.cluster_id;
     if (soa.material_id) soa.material_id[idx] = p.material_id;
+
+    int aux_i = (d_aux && p.aux_state_idx >= 0 && p.aux_state_idx < aux_count) ? p.aux_state_idx : -1;
+    if (soa.F_total[0]) {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                int k = r * 3 + c;
+                if (soa.F_total[k]) {
+                    soa.F_total[k][idx] = (aux_i >= 0) ? d_aux[aux_i].F[r][c] : ((r == c) ? 1.0f : 0.0f);
+                }
+            }
+        }
+    }
+    if (soa.hill_axes[0]) {
+        if (aux_i >= 0) {
+            for (int d = 0; d < 3; ++d) {
+                if (soa.hill_axes[d]) soa.hill_axes[d][idx] = d_aux[aux_i].hill_a1[d];
+                if (soa.hill_axes[3 + d]) soa.hill_axes[3 + d][idx] = d_aux[aux_i].hill_a2[d];
+            }
+        } else {
+            if (soa.hill_axes[0]) soa.hill_axes[0][idx] = 1.0f;
+            if (soa.hill_axes[1]) soa.hill_axes[1][idx] = 0.0f;
+            if (soa.hill_axes[2]) soa.hill_axes[2][idx] = 0.0f;
+            if (soa.hill_axes[3]) soa.hill_axes[3][idx] = 0.0f;
+            if (soa.hill_axes[4]) soa.hill_axes[4][idx] = 1.0f;
+            if (soa.hill_axes[5]) soa.hill_axes[5][idx] = 0.0f;
+        }
+    }
 }
 
-__global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA soa, int chunk_size, int offset = 0) {
+__global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA soa, int chunk_size, int offset = 0, MPMParticleAux3D* d_aux = nullptr, int aux_count = 0) {
     int local_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (local_idx >= chunk_size) return;
     int idx = offset + local_idx;
@@ -550,6 +578,28 @@ __global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA so
     if (soa.state) p.state = static_cast<uint8_t>(soa.state[idx]);
     if (soa.cluster_id) p.cluster_id = soa.cluster_id[idx];
     if (soa.material_id) p.material_id = soa.material_id[idx];
+
+    if (d_aux && idx < aux_count && (soa.F_total[0] || soa.hill_axes[0])) {
+        MPMParticleAux3D aux{};
+        if (soa.F_total[0]) {
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    int k = r * 3 + c;
+                    aux.F[r][c] = soa.F_total[k] ? soa.F_total[k][idx] : ((r == c) ? 1.0f : 0.0f);
+                }
+            }
+        }
+        if (soa.hill_axes[0]) {
+            for (int d = 0; d < 3; ++d) {
+                aux.hill_a1[d] = soa.hill_axes[d] ? soa.hill_axes[d][idx] : (d == 0 ? 1.0f : 0.0f);
+                aux.hill_a2[d] = soa.hill_axes[3 + d] ? soa.hill_axes[3 + d][idx] : (d == 1 ? 1.0f : 0.0f);
+            }
+        }
+        d_aux[idx] = aux;
+        p.aux_state_idx = idx;
+    } else {
+        p.aux_state_idx = -1;
+    }
 }
 
 __host__ __device__ inline int* mpm_cell_slot_ptr(MPMGridNode3D& node, int slot) {
@@ -2272,7 +2322,7 @@ __global__ void kernel_thermal_conduction_3d(MPMGridNode3D* grid, int nx, int ny
 }
 
 // Forward declaration of constitutive stress update
-__device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat, float ep_smoothed = 0.0f, bool enable_impact_welding = false);
+__device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat, float ep_smoothed = 0.0f, bool enable_impact_welding = false, float dx_elem = 0.0f);
 
 // Device helper: integrate particle position and enforce domain boundary conditions
 __device__ inline void integrate_particle_position_and_bc(
@@ -3693,7 +3743,7 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
     }
 
     if constexpr (FUSE_STRESS) {
-        update_particle_stress_constitutive(p_idx, dt, L_eff, soa, mat, ep_smoothed, enable_impact_welding);
+        update_particle_stress_constitutive(p_idx, dt, L_eff, soa, mat, ep_smoothed, enable_impact_welding, fminf(dx, fminf(dy, dz)));
     }
 
     // Density-Based Particle Erosion (Standalone MPM or when not deferred to FV Coupler)
@@ -3790,7 +3840,7 @@ __global__ void kernel_g2p_stress_update_3d(MPMParticle3DSoA soa, int num_partic
 }
 
 // 4. Stress Update Constitutive Routine (Shared by Fused G2P-Stress and Standalone Stress Update)
-__device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat, float ep_smoothed, bool enable_impact_welding) {
+__device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat, float ep_smoothed, bool enable_impact_welding, float dx_elem) {
     if ((soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
 
     float deps[3][3], W[3][3];
@@ -3853,315 +3903,100 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         }
     }
 
-    // --- Unified Parent Material Response for Eroded / Failed / Fractured Particles ---
-    if (has_failed_p || damage_p >= 1.0f) {
-        soa.has_failed[p_idx] = 1;
-        soa.damage[p_idx] = 1.0f;
+    const bool dispatch_energetic = is_energetic_p && !has_failed_p && (damage_p < 1.0f);
+    if (!dispatch_energetic) {
+        (void)ep_smoothed;
 
-        bool is_concrete_model = (mat.material_model == MPMMaterialModel::RHTConcrete ||
-                                  mat.material_model == MPMMaterialModel::KCConcrete ||
-                                  mat.material_model == MPMMaterialModel::CSCMConcrete);
+        float w_factor = 1.0f;
+        if (mat.enable_heterogeneity) {
+            if (soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) {
+                w_factor = soa.weibull_factor[p_idx];
+            } else if (mat.weibull_modulus > 0.001f) {
+                float v0_val = soa.V0 ? soa.V0[p_idx] : mat.weibull_ref_volume;
+                w_factor = computeWeibullFactor_dev(
+                    soa.x[0][p_idx], soa.x[1][p_idx], soa.x[2][p_idx],
+                    v0_val, mat.weibull_modulus, mat.weibull_scale, mat.weibull_ref_volume);
+                if (soa.weibull_factor) soa.weibull_factor[p_idx] = w_factor;
+            }
+        }
 
-        // Preserve kinematic volume V_p > V0_p so J = V_p / V0_p > 1.0 tracks macroscopic crack/void opening
-        // (bulking), requiring open voids to re-close back to J <= 1.0 before solid grain compression engages.
-        // Only cap the GIMP support half-length lp at V0_p so separated fragments do not inflate stencil size.
-        if (is_solid_mat && !is_concrete_model && V_p > V0_p) {
+        Blast::Materials::ConstitutiveState3D<float> st{};
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                st.sigma[r][c] = sigma_p[r][c];
+        st.ep_bar = ep_bar_p;
+        st.damage = damage_p;
+        st.lambda = soa.lambda ? soa.lambda[p_idx] : 0.0f;
+        st.e_internal = e_int_p;
+        st.temperature = temperature_p;
+        st.has_failed = has_failed_p;
+        st.J = (V_p == V0_p) ? 1.0f : (V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f));
+
+        if (soa.F_total[0]) {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    st.F_total[r][c] = soa.F_total[r * 3 + c][p_idx];
+        }
+        if (soa.hill_axes[0]) {
+            st.hill_a[0] = soa.hill_axes[0][p_idx];
+            st.hill_a[1] = soa.hill_axes[1][p_idx];
+            st.hill_a[2] = soa.hill_axes[2][p_idx];
+            st.hill_b[0] = soa.hill_axes[3][p_idx];
+            st.hill_b[1] = soa.hill_axes[4][p_idx];
+            st.hill_b[2] = soa.hill_axes[5][p_idx];
+        } else if (mat.material_model == MPMMaterialModel::Hill48Orthotropic) {
+            float ax = mat.anisotropy_dir[0], ay = mat.anisotropy_dir[1], az = mat.anisotropy_dir[2];
+            float an = sqrtf(ax * ax + ay * ay + az * az);
+            if (an > 1.0e-6f) {
+                st.hill_a[0] = ax / an;
+                st.hill_a[1] = ay / an;
+                st.hill_a[2] = az / an;
+                if (fabsf(st.hill_a[0]) < 0.9f) {
+                    st.hill_b[0] = 0.0f; st.hill_b[1] = -st.hill_a[2]; st.hill_b[2] = st.hill_a[1];
+                } else {
+                    st.hill_b[0] = st.hill_a[2]; st.hill_b[1] = 0.0f; st.hill_b[2] = -st.hill_a[0];
+                }
+                float bn = sqrtf(st.hill_b[0]*st.hill_b[0] + st.hill_b[1]*st.hill_b[1] + st.hill_b[2]*st.hill_b[2]);
+                if (bn > 1.0e-6f) { st.hill_b[0] /= bn; st.hill_b[1] /= bn; st.hill_b[2] /= bn; }
+            }
+        }
+
+        const float h_elem = (mat.cell_dx > 0.0f) ? mat.cell_dx : ((dx_elem > 0.0f) ? dx_elem : cbrtf(fmaxf(1.0e-18f, V0_p)));
+        Blast::Materials::ConstitutiveDispatcher3D<float>::step(
+            mat, st, deps, W, L, dt, h_elem, w_factor, true
+        );
+
+        store_particle_stress_matrix(soa, p_idx, st.sigma);
+        soa.ep_bar[p_idx] = st.ep_bar;
+        soa.damage[p_idx] = st.damage;
+        if (soa.lambda) soa.lambda[p_idx] = st.lambda;
+        soa.e_int[p_idx] = st.e_internal;
+        soa.temperature[p_idx] = st.temperature;
+        soa.has_failed[p_idx] = st.has_failed ? 1 : 0;
+
+        if (isHyperelasticModel(mat.material_model)) {
+            float V_hyper = fminf(fmaxf(st.J * V0_p, V_min_limit), V_max_limit);
+            soa.V[p_idx] = V_hyper;
+            float lp_h = 0.5f * cbrtf(V_hyper);
+            soa.lp[0][p_idx] = lp_h; soa.lp[1][p_idx] = lp_h; soa.lp[2][p_idx] = lp_h;
+        } else if (st.has_failed && is_solid_mat && !isConcreteModel(mat.material_model) && V_p > V0_p) {
             float lp_f = 0.5f * cbrtf(V0_p);
             soa.lp[0][p_idx] = lp_f; soa.lp[1][p_idx] = lp_f; soa.lp[2][p_idx] = lp_f;
         }
 
-        // 1. Bulk Pressure from Volumetric Compression J = V / V0 using Parent EOS
-        const float J = (V_p == V0_p) ? 1.0f : (V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f));
-        float p_comp = 0.0f;
-
-        float c_residual = 0.0f;
-        float sigma_t_rubble = 0.0f;
-        if (is_concrete_model) {
-            // Aggregate interlocking and unbroken mortar cohesion with post-failure plastic strain softening
-            float c0 = fmaxf(0.04f * mat.fc, 0.8e6f);
-            float ep_debris = fmaxf(0.0f, ep_bar_p - 0.01f);
-            c_residual = c0 * expf(-ep_debris / 0.08f);
-            sigma_t_rubble = fminf(c_residual * 0.20f, 0.10f * mat.ft);
-        }
-
-        if (J < 1.0f) {
-            if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen && mat.mg_c0 > 0.0f) {
-                const float mu_vol = (1.0f - J) / fmaxf(0.25f, J);
-                p_comp = fmaxf(0.0f, Blast::Materials::mie_gruneisen_compression_pressure<float>(
-                    mat.density, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mu_vol, 0.0f));
-            } else {
-                const float E_mod    = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
-                const float nu       = fminf(fmaxf(mat.poissons_ratio, 0.01f), 0.49f);
-                const float K_parent = E_mod / (3.0f * (1.0f - 2.0f * nu));
-                p_comp = K_parent * (1.0f - J) / fmaxf(0.01f, J);
-            }
-        } else if (is_concrete_model && sigma_t_rubble > 0.0f) {
-            // Softened tensile resistance for cohesive rubble chunks
-            const float E_mod    = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 30.0e9f;
-            const float nu       = fminf(fmaxf(mat.poissons_ratio, 0.01f), 0.49f);
-            const float K_parent = E_mod / (3.0f * (1.0f - 2.0f * nu));
-            float p_unconfined   = K_parent * (1.0f - J) / fmaxf(0.01f, J);
-            p_comp = fmaxf(p_unconfined, -sigma_t_rubble);
-        }
-
-        // 2. Frictional Shear Resistance under Confinement (Mohr-Coulomb / Drucker-Prager: q <= c_res + M * p_comp)
-        //    Concrete rubble: aggregate friction M = 0.6 plus decaying cohesion.
-        //    Fractured metals: intergranular Coulomb friction under compression, capped by the intact
-        //    quasi-static yield; zero shear in tension (open cracks) and zero shear once molten.
-        float q_max = c_residual;
-        if (is_concrete_model) {
-            q_max = c_residual + 0.60f * fmaxf(0.0f, p_comp);
-        } else if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen ||
-                   mat.material_model == MPMMaterialModel::Hypoelastic ||
-                   mat.material_model == MPMMaterialModel::LinearElastic) {
-            const bool is_jc = (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen);
-            const float sigma_y_intact = is_jc ? mat.jc_A : mat.yield_stress;
-            const bool melted = is_jc && (mat.T_melt > mat.T_room) && (temperature_p >= mat.T_melt);
-            q_max = Blast::Materials::fractured_metal_residual_strength<float>(p_comp, sigma_y_intact, melted);
-        }
-
-        if (q_max <= 1.0e-5f) {
-            store_particle_stress_isotropic(soa, p_idx, p_comp);
-            return;
-        }
-
-        const float E_mod = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
-        const float nu = fminf(fmaxf(mat.poissons_ratio, 0.01f), 0.49f);
-        const float mu_parent = E_mod / (2.0f * (1.0f + nu));
-
-        float deps_dev[3][3];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) {
-                deps_dev[r][c] = deps[r][c];
-                if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
-            }
-
-        float sig_rot_f[3][3];
-        rotate_stress_cayley_3d(sigma_p, W, dt, sig_rot_f);
-
-        float s_trial[3][3];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                s_trial[r][c] = sig_rot_f[r][c] + 2.0f * mu_parent * deps_dev[r][c];
-
-        float press_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
-        for (int r = 0; r < 3; ++r)
-            s_trial[r][r] += press_s;
-
-        float s_s = 0.0f;
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                s_s += s_trial[r][c] * s_trial[r][c];
-        float q_trial = sqrtf(1.5f * s_s);
-
-        if (q_trial > q_max && q_trial > 1.0e-7f) {
-            float scale = q_max / q_trial;
+        if (soa.F_total[0]) {
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 3; ++c)
-                    s_trial[r][c] *= scale;
+                    soa.F_total[r * 3 + c][p_idx] = st.F_total[r][c];
         }
-
-        for (int r = 0; r < 3; ++r)
-            s_trial[r][r] -= p_comp;
-        store_particle_stress_matrix(soa, p_idx, s_trial);
-
-        return;
-    }
-
-    // --- Linear Elastic Model (Hooke's Law with Orthogonal Cayley Stress Rotation) ---
-    if (mat.material_model == MPMMaterialModel::LinearElastic) {
-        const float J = (V_p == V0_p) ? 1.0f : (V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f));
-
-        float sig_base[3][3];
-        rotate_stress_cayley_3d(sigma_p, W, dt, sig_base);
-
-        const float E_mod    = mat.youngs_modulus;
-        const float nu_val   = mat.poissons_ratio;
-        const float mu_shear = E_mod / (2.0f * (1.0f + nu_val));
-        const float K_bulk   = E_mod / (3.0f * fmaxf(0.01f, 1.0f - 2.0f * nu_val));
-
-        float deps_dev[3][3];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) {
-                deps_dev[r][c] = deps[r][c];
-                if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
-            }
-
-        float s_trial[3][3];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                s_trial[r][c] = sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c];
-
-        float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
-        for (int r = 0; r < 3; ++r)
-            s_trial[r][r] += p_s;
-
-        float p_hydro = K_bulk * (1.0f - J) / fmaxf(0.01f, J);
-        for (int r = 0; r < 3; ++r)
-            s_trial[r][r] -= p_hydro;
-        store_particle_stress_matrix(soa, p_idx, s_trial);
-        return;
-    }
-
-    // --- Tait Fluid Model (Weakly Compressible & Shock Water) ---
-    if (mat.material_model == MPMMaterialModel::TaitWater) {
-        const float J = (soa.V[p_idx] == soa.V0[p_idx]) ? 1.0f : (soa.V[p_idx] / (soa.V0[p_idx] > 1.0e-20f ? soa.V0[p_idx] : 1.0e-20f));
-        float h_elem = cbrtf(soa.V[p_idx]);
-        float p_hydro = 0.0f;
-        float sig_tait[3][3] = {};
-
-        Blast::Materials::update_constitutive_tait_fluid(
-            mat.tait_B, mat.tait_gamma, mat.tait_rho0, mat.tait_viscosity, mat.tait_p_cav,
-            mat.tait_gruneisen, mat.tait_variant,
-            J, dt, h_elem, soa.e_int[p_idx], deps, sig_tait, p_hydro,
-            mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : 0.06f,
-            mat.bulk_viscosity_b2 > 0.0f ? mat.bulk_viscosity_b2 : 1.20f,
-            mat.tait_p0
-        );
-
-        float rho_p = mat.tait_rho0 / fmaxf(0.05f, J);
-        float work_rate = 0.0f;
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                work_rate += sig_tait[r][c] * (deps[r][c] / fmaxf(1e-12f, dt));
-            }
+        if (soa.hill_axes[0]) {
+            soa.hill_axes[0][p_idx] = st.hill_a[0];
+            soa.hill_axes[1][p_idx] = st.hill_a[1];
+            soa.hill_axes[2][p_idx] = st.hill_a[2];
+            soa.hill_axes[3][p_idx] = st.hill_b[0];
+            soa.hill_axes[4][p_idx] = st.hill_b[1];
+            soa.hill_axes[5][p_idx] = st.hill_b[2];
         }
-        soa.e_int[p_idx] += (work_rate / rho_p) * dt;
-        if (soa.e_int[p_idx] < 0.0f) soa.e_int[p_idx] = 0.0f;
-
-        store_particle_stress_matrix(soa, p_idx, sig_tait);
-        return;
-    }
-
-    // --- Hyperelastic Model: Yeoh Strain Energy Function ---
-    if (mat.material_model == MPMMaterialModel::HyperelasticYeoh) {
-        float sig_base[3][3];
-        rotate_stress_cayley_3d(sigma_p, W, dt, sig_base);
-
-        float F_inc[3][3] = {
-            {1.0f + deps[0][0], deps[0][1], deps[0][2]},
-            {deps[1][0], 1.0f + deps[1][1], deps[1][2]},
-            {deps[2][0], deps[2][1], 1.0f + deps[2][2]}
-        };
-        float s_yeoh[3][3] = {};
-        Blast::Materials::update_constitutive_yeoh(
-            mat.yeoh_c10, mat.yeoh_c20, mat.yeoh_c30, mat.k_bulk, F_inc, s_yeoh
-        );
-
-        float s_updated[3][3];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                s_updated[r][c] = sig_base[r][c] + s_yeoh[r][c];
-
-        store_particle_stress_matrix(soa, p_idx, s_updated);
-        return;
-    }
-
-    // --- Hyperelastic Model: Mooney-Rivlin Strain Energy Function ---
-    if (mat.material_model == MPMMaterialModel::HyperelasticMooneyRivlin) {
-        float sig_base[3][3];
-        rotate_stress_cayley_3d(sigma_p, W, dt, sig_base);
-
-        float F_inc[3][3] = {
-            {1.0f + deps[0][0], deps[0][1], deps[0][2]},
-            {deps[1][0], 1.0f + deps[1][1], deps[1][2]},
-            {deps[2][0], deps[2][1], 1.0f + deps[2][2]}
-        };
-        float s_mr[3][3] = {};
-        Blast::Materials::update_constitutive_mooney_rivlin(
-            mat.mr_c10, mat.mr_c01, mat.k_bulk, F_inc, s_mr
-        );
-
-        float s_updated[3][3];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                s_updated[r][c] = sig_base[r][c] + s_mr[r][c];
-
-        store_particle_stress_matrix(soa, p_idx, s_updated);
-        return;
-    }
-
-    // --- Concrete Damage Plasticity (CDP) Model ---
-    if (mat.material_model == MPMMaterialModel::ConcreteDamagePlasticity) {
-        rotate_stress_cayley_3d(sigma_p, W, dt, sigma_p);
-        float d_t = soa.damage[p_idx];
-        float d_c = 0.0f;
-        float ep_t = soa.ep_bar[p_idx];
-        float ep_c = 0.0f;
-
-        Blast::Materials::update_constitutive_cdp(
-            mat.youngs_modulus, mat.poissons_ratio, mat.cdp_f_t0, mat.cdp_f_c0, mat.cdp_g_f, mat.cdp_l_ch,
-            deps, sigma_p, d_t, d_c, ep_t, ep_c
-        );
-
-        soa.damage[p_idx] = fmaxf(d_t, d_c);
-        soa.ep_bar[p_idx] = ep_t + ep_c;
-        store_particle_stress_matrix(soa, p_idx, sigma_p);
-        return;
-    }
-
-    // --- Hill48 Orthotropic Plasticity Model ---
-    if (mat.material_model == MPMMaterialModel::Hill48Orthotropic) {
-        rotate_stress_cayley_3d(sigma_p, W, dt, sigma_p);
-
-        float s_dev[3][3];
-        float p_mean = (sigma_p[0][0] + sigma_p[1][1] + sigma_p[2][2]) / 3.0f;
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                s_dev[r][c] = sigma_p[r][c] - (r == c ? p_mean : 0.0f);
-
-        float ep_bar_prev_h = ep_bar_p;
-        Blast::Materials::update_constitutive_hill48(
-            mat.hill_F, mat.hill_G, mat.hill_H, mat.hill_L, mat.hill_M, mat.hill_N,
-            mat.hill_sigma_y0, deps, s_dev, ep_bar_p
-        );
-
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                sigma_p[r][c] = s_dev[r][c] + (r == c ? p_mean : 0.0f);
-
-        if (ep_smoothed > 0.0f && ep_bar_p > ep_bar_prev_h) {
-            ep_bar_p = fmaxf(ep_bar_prev_h, 0.90f * ep_bar_p + 0.10f * ep_smoothed);
-        }
-        soa.ep_bar[p_idx] = ep_bar_p;
-        store_particle_stress_matrix(soa, p_idx, sigma_p);
-        return;
-    }
-
-    // --- Drucker-Prager Soil Mechanics with Conical Return Mapping ---
-    if (mat.material_model == MPMMaterialModel::DruckerPragerSoil) {
-        float sig_base[3][3];
-        rotate_stress_cayley_3d(sigma_p, W, dt, sig_base);
-
-        float p_hydro = -(sig_base[0][0] + sig_base[1][1] + sig_base[2][2]) / 3.0f;
-        float s_dev[3][3];
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                s_dev[r][c] = sig_base[r][c] + (r == c ? p_hydro : 0.0f);
-            }
-        }
-
-        Blast::Materials::DruckerPragerParams<float> dp_p;
-        dp_p.cohesion = mat.dp_cohesion;
-        dp_p.friction_angle = mat.dp_friction_angle * 3.14159265f / 180.0f;
-        dp_p.dilatancy_angle = mat.dp_dilatancy_angle * 3.14159265f / 180.0f;
-        dp_p.tensile_cutoff = mat.dp_tensile_cutoff;
-        dp_p.H_plastic = mat.dp_hardening_modulus;
-
-        float ep_bar_val = ep_bar_p;
-        Blast::Materials::update_constitutive_drucker_prager<float>(
-            mat.youngs_modulus, mat.poissons_ratio, dp_p,
-            deps, s_dev, p_hydro, ep_bar_val
-        );
-        soa.ep_bar[p_idx] = ep_bar_val;
-        soa.damage[p_idx] = fminf(1.0f, ep_bar_val / 0.05f);
-
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                sigma_p[r][c] = s_dev[r][c] - (r == c ? p_hydro : 0.0f);
-            }
-        }
-        store_particle_stress_matrix(soa, p_idx, sigma_p);
         return;
     }
 
@@ -4301,7 +4136,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
             [&](double v) { return static_cast<double>(solid_pressure_at(static_cast<float>(v))); },
             [&](double v) { return static_cast<double>(product_pressure_at(static_cast<float>(v))); });
         float p_mix = static_cast<float>(mix.p);
-        if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+        if (!isfinite(p_mix)) p_mix = 0.0f;   // numerical guard only; tension is physical and is not clipped
         // Phase pressures at the phase volumes chosen by the mixture rule (used by sound-speed/CFL closures)
         [[maybe_unused]] const float p_solid = solid_pressure_at(static_cast<float>(mix.v_s));
         [[maybe_unused]] const float p_prod = product_pressure_at(static_cast<float>(mix.v_p));
@@ -4337,10 +4172,6 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         //   de = -((p + q) / rho) * tr(d_eps),  rho = rho0 / v_rel  (current density, not reference density)
         // Expansion work (tr(d_eps) > 0) is what cools the products along the JWL isentrope.
         float de_comp = -(p_total / rho_cur) * tr_deps;
-        if (v_rel > 2.0f && tr_deps < 0.0f) {
-            // For highly expanded detonation product gas, limit unphysical numerical compression shock heating
-            de_comp = fminf(de_comp, 0.05f * e_int_p);
-        }
         float de_chem = d_lam * q_heat;
         e_int_p += de_comp + de_chem;
         // Realizability limiter (Directive 19): total specific internal energy cannot be negative.
@@ -4359,7 +4190,8 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
 
         const float E_mod    = mat.youngs_modulus;
         const float nu_val   = mat.poissons_ratio;
-        const float mu_shear = (1.0f - lam_new) * (E_mod / (2.0f * (1.0f + nu_val)));
+        const float mu_shear = E_mod / (2.0f * (1.0f + nu_val));   // solid-phase shear modulus (unscaled)
+        const float solid_ratio = (1.0f - lam_new) / fmaxf(1.0f - lam_curr, 1.0e-6f);
 
         float deps_dev[3][3];
         for (int r = 0; r < 3; ++r)
@@ -4371,7 +4203,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         float s_trial[3][3];
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
-                s_trial[r][c] = (1.0f - lam_new) * (sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c]);
+                s_trial[r][c] = solid_ratio * sig_base[r][c] + (1.0f - lam_new) * 2.0f * mu_shear * deps_dev[r][c];
 
         float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
         for (int r = 0; r < 3; ++r)
@@ -4394,424 +4226,6 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         for (int r = 0; r < 3; ++r)
             s_trial[r][r] -= p_total;
         store_particle_stress_matrix(soa, p_idx, s_trial);
-        return;
-    }
-
-    // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
-    if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
-        float w_factor = (mat.enable_heterogeneity && soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
-
-        const float J_raw = (V_p == V0_p) ? 1.0f : (V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f));
-        const float J = fmaxf(0.25f, J_raw);
-        const float mu_vol = (1.0f - J) / J;
-
-        float p_hydro = 0.0f;
-        if (mu_vol > 0.0f) {
-            p_hydro = Blast::Materials::mie_gruneisen_compression_pressure<float>(
-                mat.density, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mu_vol, e_int_p);
-        } else {
-            p_hydro = mat.density * mat.mg_c0 * mat.mg_c0 * mu_vol;
-        }
-
-        float sig_base[3][3];
-        rotate_stress_cayley_3d(sigma_p, W, dt, sig_base);
-
-        const float E_mod    = mat.youngs_modulus;
-        const float nu_val   = mat.poissons_ratio;
-        const float mu_shear = E_mod / (2.0f * (1.0f + nu_val));
-
-        float deps_dev[3][3];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) {
-                deps_dev[r][c] = deps[r][c];
-                if (r == c) deps_dev[r][c] -= tr_deps / 3.0f;
-            }
-
-        float s_trial[3][3];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                s_trial[r][c] = sig_base[r][c] + 2.0f * mu_shear * deps_dev[r][c];
-
-        float p_s = -(s_trial[0][0] + s_trial[1][1] + s_trial[2][2]) / 3.0f;
-        for (int r = 0; r < 3; ++r)
-            s_trial[r][r] += p_s;
-
-        float s_s = 0.0f;
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                s_s += s_trial[r][c] * s_trial[r][c];
-        const float q_trial = sqrtf(1.5f * s_s);
-
-        float deps_eq = sqrtf(fmaxf(0.0f, (2.0f / 3.0f) * (deps_dev[0][0]*deps_dev[0][0] + deps_dev[1][1]*deps_dev[1][1] + deps_dev[2][2]*deps_dev[2][2] +
-                              2.0f * (deps_dev[0][1]*deps_dev[0][1] + deps_dev[0][2]*deps_dev[0][2] + deps_dev[1][2]*deps_dev[1][2]))));
-        float ep_dot_star = fmaxf(1.0f, deps_eq / (dt > 1e-12f ? dt : 1e-12f));
-        float T_star = fminf(fmaxf((temperature_p - mat.T_room) / (mat.T_melt > mat.T_room ? mat.T_melt - mat.T_room : 1.0f), 0.0f), 1.0f);
-
-        float term_strain = mat.jc_A + mat.jc_B * powf(fmaxf(0.0f, ep_bar_p), mat.jc_n);
-        float term_rate   = 1.0f + mat.jc_C * logf(ep_dot_star);
-        float term_temp   = 1.0f - powf(T_star, mat.jc_m);
-        if (term_temp < 0.0f) term_temp = 0.0f;
-
-        float aniso_factor = 1.0f;
-        if (mat.enable_anisotropy && fabsf(mat.anisotropy_ratio - 1.0f) > 0.001f) {
-            float ax = mat.anisotropy_dir[0], ay = mat.anisotropy_dir[1], az = mat.anisotropy_dir[2];
-            float sigma_a = ax * (s_trial[0][0]*ax + s_trial[0][1]*ay + s_trial[0][2]*az) +
-                            ay * (s_trial[1][0]*ax + s_trial[1][1]*ay + s_trial[1][2]*az) +
-                            az * (s_trial[2][0]*ax + s_trial[2][1]*ay + s_trial[2][2]*az);
-            float q_norm = (q_trial > 1e-12f) ? q_trial : 1.0f;
-            float xi = fminf(fmaxf(fabsf(sigma_a) / q_norm, 0.0f), 1.0f);
-            aniso_factor = 1.0f + (mat.anisotropy_ratio - 1.0f) * (1.0f - xi * xi);
-        }
-
-        const float fail_strain_base = ((mat.enable_strain_erosion && mat.erosion_strain > 0.0f) ? mat.erosion_strain : mat.failure_strain) * w_factor * aniso_factor;
-        const float tensile_fail_base = ((mat.enable_stress_erosion && mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor * aniso_factor;
-        const float p_spall_limit = fmaxf(tensile_fail_base, 1.5f * mat.jc_A * w_factor * aniso_factor);
-        const float p_hydro_raw = p_hydro;
-        if (p_spall_limit > 0.0f && p_hydro < 0.0f) {
-            p_hydro = fmaxf(p_hydro, -p_spall_limit * fmaxf(0.0f, 1.0f - damage_p));
-        }
-
-        // Johnson-Cook flow stress. Damage is UNCOUPLED from strength until fracture (D = 1), per the
-        // original JC formulation; Weibull flaw statistics govern fracture thresholds only (failure
-        // strain, spall strength) and never the ductile plastic flow stress.
-        float jc_yield = term_strain * term_rate * term_temp * aniso_factor;
-        if (T_star >= 1.0f) {
-            // Melted metal behaves hydrodynamically: zero deviatoric shear stress while preserving affine B_p
-            store_particle_stress_isotropic(soa, p_idx, p_hydro);
-            return;
-        }
-
-        float H_jc = (mat.jc_n > 0.0f && ep_bar_p > 1.0e-6f)
-            ? (mat.jc_n * mat.jc_B * powf(ep_bar_p, mat.jc_n - 1.0f) * term_rate * term_temp)
-            : mat.hardening_modulus;
-        float ep_bar_prev_jc = ep_bar_p;
-        float delta_ep = 0.0f;
-        if (q_trial > 1.0e-5f && q_trial > jc_yield) {
-            delta_ep = (q_trial - jc_yield) / (3.0f * mu_shear + H_jc);
-            float scale = (q_trial > 1e-12f) ? (jc_yield / q_trial) : 0.0f;
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    s_trial[r][c] *= scale;
-            ep_bar_p += delta_ep;
-            soa.ep_bar[p_idx] = ep_bar_p;
-        }
-        if (ep_smoothed > 0.0f && delta_ep > 1.0e-5f) {
-            float ep_target = 0.98f * ep_bar_p + 0.02f * fminf(ep_smoothed, ep_bar_prev_jc + 2.0f * delta_ep);
-            ep_bar_p = fmaxf(ep_bar_prev_jc, ep_target);
-            soa.ep_bar[p_idx] = ep_bar_p;
-        }
-
-        if (delta_ep > 0.0f && mat.density > 0.0f && mat.Cp > 0.0f) {
-            float dw_p = jc_yield * delta_ep;
-            float de_p = (0.90f * dw_p) / mat.density;
-            e_int_p += de_p;
-            temperature_p = mat.T_room + e_int_p / mat.Cp;
-            soa.e_int[p_idx] = e_int_p;
-            soa.temperature[p_idx] = temperature_p;
-        }
-
-        // Johnson-Cook triaxiality, strain-rate, and temperature fracture criterion
-        const float jc_flow_undamaged = fmaxf(term_strain * term_rate * term_temp * aniso_factor, 1.0e6f);
-        const float sigma_star = fminf(fmaxf(-p_hydro_raw / jc_flow_undamaged, -2.5f), 2.5f);
-        const float jc_triax = fmaxf(0.02f, mat.jc_d1 + mat.jc_d2 * expf(mat.jc_d3 * sigma_star));
-        const float triax_ratio = Blast::Materials::jc_fracture_triaxiality_ratio<float>(mat.jc_d1, mat.jc_d2, mat.jc_d3, sigma_star);
-        const float jc_rate_f = fmaxf(0.1f, 1.0f + mat.jc_d4 * logf(ep_dot_star));
-        const float jc_temp_f = fmaxf(0.1f, 1.0f + mat.jc_d5 * T_star);
-        const float eps_f = (fail_strain_base > 0.0f && mat.jc_d1 <= 0.20f)
-            ? fmaxf(0.01f, fail_strain_base * triax_ratio * jc_rate_f * jc_temp_f)
-            : fmaxf(0.01f, jc_triax * jc_rate_f * jc_temp_f * w_factor * aniso_factor);
-
-        if (delta_ep > 0.0f && eps_f > 0.0f) {
-            damage_p = fminf(1.0f, damage_p + delta_ep / eps_f);
-        }
-        if (mat.enable_strain_erosion && fail_strain_base > 0.0f) {
-            damage_p = fmaxf(damage_p, fminf(fmaxf(ep_bar_p / fail_strain_base, 0.0f), 1.0f));
-        }
-
-        if (p_spall_limit > 0.0f && (-p_hydro_raw) > p_spall_limit) {
-            if (mat.enable_stress_erosion) {
-                damage_p = fmaxf(damage_p, fminf((-p_hydro_raw) / p_spall_limit, 1.0f));
-            } else if (J > 1.025f && tr_deps > 0.0f) {
-                float spall_over = ((-p_hydro_raw) - p_spall_limit) / p_spall_limit;
-                damage_p = fminf(1.0f, damage_p + 0.5f * spall_over);
-            }
-        }
-
-        soa.damage[p_idx] = damage_p;
-        if (p_spall_limit > 0.0f && p_hydro < 0.0f) {
-            p_hydro = fmaxf(p_hydro, -p_spall_limit * fmaxf(0.0f, 1.0f - damage_p));
-        }
-
-        if (damage_p >= 1.0f) {
-            soa.has_failed[p_idx] = 1;
-            soa.damage[p_idx] = 1.0f;
-            if (V_p > V0_p) {
-                float lp_f = 0.5f * cbrtf(V0_p);
-                soa.lp[0][p_idx] = lp_f; soa.lp[1][p_idx] = lp_f; soa.lp[2][p_idx] = lp_f;
-            }
-
-            const float J_eff = (V_p == V0_p) ? 1.0f : (V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f));
-            float p_comp = 0.0f;
-            if (J_eff < 1.0f) {
-                if (mat.mg_c0 > 0.0f) {
-                    const float mu_vol_c = (1.0f - J_eff) / fmaxf(0.25f, J_eff);
-                    p_comp = fmaxf(0.0f, Blast::Materials::mie_gruneisen_compression_pressure<float>(
-                        mat.density, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mu_vol_c, 0.0f));
-                } else {
-                    const float E_mod_d  = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
-                    const float nu_d     = fminf(fmaxf(mat.poissons_ratio, 0.01f), 0.49f);
-                    const float K_parent = E_mod_d / (3.0f * (1.0f - 2.0f * nu_d));
-                    p_comp = K_parent * (1.0f - J_eff) / fmaxf(0.01f, J_eff);
-                }
-            }
-            // Fractured metal keeps confined Coulomb shear (s_trial is deviatoric and already returned to jc_yield)
-            const float q_res = Blast::Materials::fractured_metal_residual_strength<float>(p_comp, mat.jc_A, false);
-            float s_s_f = 0.0f;
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    s_s_f += s_trial[r][c] * s_trial[r][c];
-            const float q_cur = sqrtf(1.5f * s_s_f);
-            const float s_scale = (q_cur > q_res && q_cur > 1.0e-7f) ? (q_res / q_cur) : 1.0f;
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    s_trial[r][c] *= s_scale;
-            for (int r = 0; r < 3; ++r)
-                s_trial[r][r] -= p_comp;
-            store_particle_stress_matrix(soa, p_idx, s_trial);
-            return;
-        }
-
-        for (int r = 0; r < 3; ++r)
-            s_trial[r][r] -= p_hydro;
-        store_particle_stress_matrix(soa, p_idx, s_trial);
-        return;
-    }
-
-    // --- Standard Hypoelastic Model ---
-    float sig_base[3][3];
-    rotate_stress_cayley_3d(sigma_p, W, dt, sig_base);
-
-    const float E_mod  = mat.youngs_modulus;
-    const float nu     = mat.poissons_ratio;
-    const float mu     = E_mod / (2.0f * (1.0f + nu));
-    const float lambda = (E_mod * nu) / ((1.0f + nu) * (1.0f - 2.0f * nu));
-    const float K_bulk = E_mod / (3.0f * (1.0f - 2.0f * nu));
-
-    float sig_trial[3][3];
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c) {
-            sig_trial[r][c] = sig_base[r][c] + 2.0f * mu * deps[r][c];
-            if (r == c) sig_trial[r][c] += lambda * tr_deps;
-        }
-
-    float press = -(sig_trial[0][0] + sig_trial[1][1] + sig_trial[2][2]) / 3.0f;
-    float s[3][3];
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c) {
-            s[r][c] = sig_trial[r][c];
-            if (r == c) s[r][c] += press;
-        }
-
-    float char_len_p = fmaxf(cbrtf(V_p > 1.0e-20f ? V_p : 1.0e-6f), 1.25f * cbrtf(V0_p > 1.0e-20f ? V0_p : 1.0e-6f));
-    float deps_norm = 0.0f;
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c)
-            deps_norm += deps[r][c] * deps[r][c];
-    float ep_dot = sqrtf((2.0f / 3.0f) * deps_norm) / (dt > 1.0e-12f ? dt : 1.0e-12f);
-    float lambda_p = soa.lambda ? soa.lambda[p_idx] : 0.0f;
-    float w_factor = (mat.enable_heterogeneity && soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
-
-    if (mat.material_model == MPMMaterialModel::RHTConcrete) {
-        RHTStateVariables<float> rht_state;
-        rht_state.damage = damage_p;
-        rht_state.ep_bar = ep_bar_p;
-        rht_state.p_hydro = press;
-        updateRHTStress<float>(
-            s, press, tr_deps, dt, char_len_p, ep_dot,
-            mat.fc * w_factor, mat.ft * w_factor, mu, K_bulk,
-            mat.G_f, mat.moisture_content,
-            mat.rht_A, mat.rht_N,
-            mat.rht_B, mat.rht_M,
-            mat.rht_Q0, mat.rht_BQ,
-            mat.rht_D1, mat.rht_D2,
-            mat.rht_p_crush, mat.rht_p_lock,
-            mat.rht_alpha0, mat.rht_n_comp,
-            mat.rht_betac, mat.rht_deltat,
-            mat.dif_cap_compression, mat.dif_cap_tension,
-            rht_state
-        );
-        damage_p = rht_state.damage;
-        ep_bar_p = rht_state.ep_bar;
-        press = rht_state.p_hydro;
-        soa.damage[p_idx] = damage_p;
-        soa.ep_bar[p_idx] = ep_bar_p;
-        for (int r = 0; r < 3; ++r)
-            s[r][r] -= press;
-        store_particle_stress_matrix(soa, p_idx, s);
-        return;
-    } else if (mat.material_model == MPMMaterialModel::KCConcrete) {
-        KCStateVariables<float> kc_state;
-        kc_state.damage = damage_p;
-        kc_state.lambda = lambda_p;
-        kc_state.ep_bar = ep_bar_p;
-        kc_state.p_hydro = press;
-        updateKCStress<float>(
-            s, press, tr_deps, dt, char_len_p, ep_dot,
-            mat.fc * w_factor, mat.ft * w_factor, mu, K_bulk,
-            mat.G_f, mat.moisture_content,
-            mat.kc_auto_generate,
-            mat.kc_a0, mat.kc_a1, mat.kc_a2,
-            mat.kc_a0y, mat.kc_a1y, mat.kc_a2y,
-            mat.kc_a1r, mat.kc_a2r,
-            mat.kc_b1, mat.kc_omega,
-            mat.dif_cap_compression, mat.dif_cap_tension,
-            kc_state
-        );
-        damage_p = kc_state.damage;
-        lambda_p = kc_state.lambda;
-        ep_bar_p = kc_state.ep_bar;
-        press = kc_state.p_hydro;
-        soa.damage[p_idx] = damage_p;
-        if (soa.lambda) soa.lambda[p_idx] = lambda_p;
-        soa.ep_bar[p_idx] = ep_bar_p;
-        for (int r = 0; r < 3; ++r)
-            s[r][r] -= press;
-        store_particle_stress_matrix(soa, p_idx, s);
-        return;
-    } else if (mat.material_model == MPMMaterialModel::CSCMConcrete) {
-        CSCMStateVariables<float> cscm_state;
-        cscm_state.damage = damage_p;
-        cscm_state.kappa = lambda_p;
-        cscm_state.ep_bar = ep_bar_p;
-        cscm_state.p_hydro = press;
-        updateCSCMStress<float>(
-            s, press, tr_deps, dt, char_len_p, ep_dot,
-            mat.fc * w_factor, mat.ft * w_factor, mu, K_bulk,
-            mat.G_f,
-            mat.cscm_alpha * w_factor, mat.cscm_theta,
-            mat.cscm_lambda * w_factor, mat.cscm_beta,
-            mat.cscm_R, mat.cscm_X0,
-            mat.cscm_W, mat.cscm_D1,
-            mat.cscm_D2,
-            mat.dif_cap_compression, mat.dif_cap_tension,
-            cscm_state
-        );
-        damage_p = cscm_state.damage;
-        lambda_p = cscm_state.kappa;
-        ep_bar_p = cscm_state.ep_bar;
-        press = cscm_state.p_hydro;
-        soa.damage[p_idx] = damage_p;
-        if (soa.lambda) soa.lambda[p_idx] = lambda_p;
-        soa.ep_bar[p_idx] = ep_bar_p;
-        for (int r = 0; r < 3; ++r)
-            s[r][r] -= press;
-        store_particle_stress_matrix(soa, p_idx, s);
-        return;
-    } else {
-        // Default Hypoelastic J2 Elastoplasticity with Weibull flaw scatter & plastic damage softening
-        float w_factor = (mat.enable_heterogeneity && soa.weibull_factor && soa.weibull_factor[p_idx] > 0.001f) ? soa.weibull_factor[p_idx] : 1.0f;
-        if (mat.enable_heterogeneity && w_factor <= 0.001f && mat.weibull_modulus > 0.001f) {
-            float v0_val = (soa.V0) ? soa.V0[p_idx] : mat.weibull_ref_volume;
-            w_factor = computeWeibullFactor_dev(soa.x[0][p_idx], soa.x[1][p_idx], soa.x[2][p_idx], v0_val, mat.weibull_modulus, mat.weibull_scale, mat.weibull_ref_volume);
-            soa.weibull_factor[p_idx] = w_factor;
-        }
-
-        float s_s = 0.0f;
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                s_s += s[r][c] * s[r][c];
-        const float q_trial = sqrtf(1.5f * s_s);
-
-        float aniso_factor = 1.0f;
-        if (mat.enable_anisotropy && fabsf(mat.anisotropy_ratio - 1.0f) > 0.001f) {
-            float ax = mat.anisotropy_dir[0], ay = mat.anisotropy_dir[1], az = mat.anisotropy_dir[2];
-            float sigma_a = ax * (s[0][0]*ax + s[0][1]*ay + s[0][2]*az) +
-                            ay * (s[1][0]*ax + s[1][1]*ay + s[1][2]*az) +
-                            az * (s[2][0]*ax + s[2][1]*ay + s[2][2]*az);
-            float q_norm = (q_trial > 1e-12f) ? q_trial : 1.0f;
-            float xi = fminf(fmaxf(fabsf(sigma_a) / q_norm, 0.0f), 1.0f);
-            aniso_factor = 1.0f + (mat.anisotropy_ratio - 1.0f) * (1.0f - xi * xi);
-        }
-        const float yield_base = mat.yield_stress * w_factor;
-        const float fail_strain_base = ((mat.enable_strain_erosion && mat.erosion_strain > 0.0f) ? mat.erosion_strain : mat.failure_strain) * w_factor * aniso_factor;
-        const float fail_stress = ((mat.enable_stress_erosion && mat.erosion_stress > 0.0f) ? mat.erosion_stress : mat.tensile_failure_stress) * w_factor * aniso_factor;
-        const float p_spall_hypo = fmaxf(fail_stress, 1.5f * yield_base * aniso_factor);
-        const float press_raw = press;
-        if (p_spall_hypo > 0.0f && press < 0.0f) {
-            press = fmaxf(press, -p_spall_hypo * fmaxf(0.0f, 1.0f - damage_p));
-        }
-
-        const float soft_factor = fminf(fmaxf(1.0f - 0.70f * damage_p, 0.10f), 1.0f);
-        const float yield_eff = (yield_base * soft_factor + mat.hardening_modulus * ep_bar_p) * aniso_factor;
-        const float yield_surf = q_trial - yield_eff;
-
-        float delta_ep = 0.0f;
-        if (q_trial > 1.0e-5f && yield_surf > 0.0f) {
-            delta_ep = yield_surf / (3.0f * mu + mat.hardening_modulus);
-            float scale = 1.0f - (3.0f * mu * delta_ep) / q_trial;
-            if (scale < 0.0f) scale = 0.0f;
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    s[r][c] *= scale;
-            ep_bar_p += delta_ep;
-            soa.ep_bar[p_idx] = ep_bar_p;
-            if (mat.density > 0.0f && mat.Cp > 0.0f) {
-                float dw_p = yield_eff * delta_ep;
-                float de_p = (0.90f * dw_p) / mat.density;
-                e_int_p += de_p;
-                temperature_p = mat.T_room + e_int_p / mat.Cp;
-                soa.e_int[p_idx] = e_int_p;
-                soa.temperature[p_idx] = temperature_p;
-            }
-        }
-        for (int r = 0; r < 3; ++r)
-            s[r][r] -= press;
-        store_particle_stress_matrix(soa, p_idx, s);
-
-        if (delta_ep > 0.0f && fail_strain_base > 0.0f) {
-            const float sigma_star_h = fminf(fmaxf(-press_raw / fmaxf(yield_base * aniso_factor, 1.0e6f), -2.5f), 2.5f);
-            const float triax_mult = (sigma_star_h >= 0.33f) ? 1.0f : ((sigma_star_h >= 0.0f) ? (2.0f - 3.0f * sigma_star_h) : 4.0f);
-            damage_p = fminf(1.0f, damage_p + delta_ep / fmaxf(0.01f, fail_strain_base * triax_mult));
-        }
-        if (mat.enable_strain_erosion && fail_strain_base > 0.0f) {
-            damage_p = fmaxf(damage_p, fminf(fmaxf(ep_bar_p / fail_strain_base, 0.0f), 1.0f));
-        }
-        if (p_spall_hypo > 0.0f && (-press_raw) > p_spall_hypo) {
-            if (mat.enable_stress_erosion) {
-                damage_p = fmaxf(damage_p, fminf((-press_raw) / p_spall_hypo, 1.0f));
-            } else if (ep_bar_p > 0.005f || (V_p > 1.03f * V0_p)) {
-                float spall_over = ((-press_raw) - p_spall_hypo) / p_spall_hypo;
-                damage_p = fminf(1.0f, damage_p + 0.5f * spall_over);
-            }
-        }
-
-        soa.damage[p_idx] = damage_p;
-    }
-
-    if (damage_p >= 1.0f) {
-        soa.has_failed[p_idx] = 1;
-        soa.damage[p_idx] = 1.0f;
-        if (V_p > V0_p) {
-            float lp_f = 0.5f * cbrtf(V0_p);
-            soa.lp[0][p_idx] = lp_f; soa.lp[1][p_idx] = lp_f; soa.lp[2][p_idx] = lp_f;
-        }
-
-        const float J = (V_p == V0_p) ? 1.0f : (V_p / (V0_p > 1.0e-20f ? V0_p : 1.0e-20f));
-        float p_comp = 0.0f;
-        if (J < 1.0f) {
-            if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen && mat.mg_c0 > 0.0f) {
-                const float mu_vol = (1.0f - J) / fmaxf(0.25f, J);
-                p_comp = fmaxf(0.0f, Blast::Materials::mie_gruneisen_compression_pressure<float>(
-                    mat.density, mat.mg_c0, mat.mg_s, mat.mg_gamma0, mu_vol, 0.0f));
-            } else {
-                const float E_mod_d  = mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f;
-                const float nu_d     = fminf(fmaxf(mat.poissons_ratio, 0.01f), 0.49f);
-                const float K_parent = E_mod_d / (3.0f * (1.0f - 2.0f * nu_d));
-                p_comp = K_parent * (1.0f - J) / fmaxf(0.01f, J);
-            }
-        }
-
-        store_particle_stress_isotropic(soa, p_idx, p_comp);
         return;
     }
 }
@@ -4843,27 +4257,18 @@ __global__ void kernel_compute_max_speed(MPMParticle3DSoA soa, int num_particles
     if (idx < num_particles && (!soa.state || soa.state[idx] != 2) && soa.m[idx] > 0.0f) {
         int obj_id = soa.object_id[idx];
         const MaterialTable3D& mat = d_mat_tables[obj_id];
-        float E = mat.youngs_modulus;
-        float rho = fabsf(mat.density) > 10.0f ? fabsf(mat.density) : 10.0f;
-        float nu = mat.poissons_ratio;
         float c_s = 0.0f;
-        if (mat.material_model == MPMMaterialModel::TaitWater) {
-            float J_val = soa.V[idx] / (soa.V0[idx] > 1.0e-20f ? soa.V0[idx] : 1.0e-20f);
-            float rho_p = mat.tait_rho0 / fmaxf(0.05f, J_val);
-            float p_p = -0.33333334f * (soa.sigma_voigt[0][idx] + soa.sigma_voigt[1][idx] + soa.sigma_voigt[2][idx]);
-            c_s = Blast::TaitEOSWater::compute_sound_speed_unified(rho_p, p_p, soa.e_int[idx], static_cast<Blast::TaitVariant>(mat.tait_variant), mat.tait_B, mat.tait_gamma, mat.tait_rho0, mat.tait_c0, mat.tait_gruneisen);
-        } else if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
-            float C0 = mat.mg_c0;
-            c_s = sqrtf(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
-        } else if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn ||
-                   mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
-                   mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
+        if (mat.material_model == MPMMaterialModel::CRESTReactiveBurn ||
+            mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
+            mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
             float C0 = (mat.solid_model == SolidReactantEOS::DavisSolid) ? mat.davis_c0 : (mat.mg_c0 > 100.0f ? mat.mg_c0 : 2500.0f);
             float c_det = (mat.product_model == DetonationProductEOS::DavisProduct) ? ((mat.davis_pc > 1.0e6f) ? 7500.0f : 6000.0f) : (mat.det_vel > 1000.0f ? mat.det_vel : 6930.0f);
             float lam = soa.lambda ? soa.lambda[idx] : 0.0f;
             if (lam >= 1.0f) {
                 float v_rel = fmaxf(soa.V[idx] / (soa.V0[idx] > 1.0e-20f ? soa.V0[idx] : 1.0e-20f), 0.02f);
-                float p_p = -0.33333334f * (soa.sigma_voigt[0][idx] + soa.sigma_voigt[1][idx] + soa.sigma_voigt[2][idx]);
+                float p_p = soa.sigma_voigt[0]
+                    ? -0.33333334f * (soa.sigma_voigt[0][idx] + soa.sigma_voigt[1][idx] + soa.sigma_voigt[2][idx])
+                    : (soa.sigma[0][0] ? -0.33333334f * (soa.sigma[0][0][idx] + soa.sigma[1][1][idx] + soa.sigma[2][2][idx]) : 0.0f);
                 p_p = fmaxf(1.0f, p_p);
                 bool use_davis_solid = (mat.solid_model == SolidReactantEOS::DavisSolid) || (mat.material_model == MPMMaterialModel::CRESTReactiveBurn);
                 bool use_davis_prod = (mat.product_model == DetonationProductEOS::DavisProduct) || (mat.material_model == MPMMaterialModel::CRESTReactiveBurn);
@@ -4880,18 +4285,14 @@ __global__ void kernel_compute_max_speed(MPMParticle3DSoA soa, int num_particles
             } else {
                 c_s = C0;
             }
-        } else if (mat.material_model == MPMMaterialModel::RHTConcrete || mat.material_model == MPMMaterialModel::KCConcrete || mat.material_model == MPMMaterialModel::CSCMConcrete) {
-            float G = E / (2.0f * (1.0f + nu));
-            float K = 1.6f * (E / (3.0f * fmaxf(0.02f, 1.0f - 2.0f * nu)));
-            c_s = sqrtf((K + 4.0f / 3.0f * G) / rho);
         } else {
-            if (nu >= 0.0f && nu < 0.5f) {
-                float denom = (1.0f + nu) * fmaxf(0.02f, 1.0f - 2.0f * nu);
-                float factor = (1.0f - nu) / denom;
-                c_s = sqrtf(E * factor / rho);
-            } else {
-                c_s = sqrtf(E / rho);
-            }
+            float V0_val = (soa.V0 && soa.V0[idx] > 1.0e-20f) ? soa.V0[idx] : 1.0e-20f;
+            float J_val = soa.V ? (soa.V[idx] / V0_val) : 1.0f;
+            float p_p = soa.sigma_voigt[0]
+                ? -0.33333334f * (soa.sigma_voigt[0][idx] + soa.sigma_voigt[1][idx] + soa.sigma_voigt[2][idx])
+                : (soa.sigma[0][0] ? -0.33333334f * (soa.sigma[0][0][idx] + soa.sigma[1][1][idx] + soa.sigma[2][2][idx]) : 0.0f);
+            float e_val = soa.e_int ? soa.e_int[idx] : 0.0f;
+            c_s = Blast::Materials::computeInstantaneousSoundSpeed<float>(mat, J_val, p_p, e_val);
         }
         if (isnan(c_s) || isinf(c_s)) c_s = 5000.0f;
         float vx = soa.v[0][idx], vy = soa.v[1][idx], vz = soa.v[2][idx];
@@ -4960,6 +4361,12 @@ __device__ inline void copy_particle_soa(MPMParticle3DSoA soa, int dst, int src)
     if (soa.state) soa.state[dst] = soa.state[src];
     if (soa.cluster_id) soa.cluster_id[dst] = soa.cluster_id[src];
     if (soa.material_id) soa.material_id[dst] = soa.material_id[src];
+    for (int k = 0; k < 9; ++k) {
+        if (soa.F_total[k]) soa.F_total[k][dst] = soa.F_total[k][src];
+    }
+    for (int k = 0; k < 6; ++k) {
+        if (soa.hill_axes[k]) soa.hill_axes[k][dst] = soa.hill_axes[k][src];
+    }
 }
 
 __global__ void kernel_count_active_particles(MPMParticle3DSoA soa, int num_particles, int* d_active_count) {
@@ -5369,9 +4776,12 @@ void MPMSolver3DCUDA::setSparseGridMode(bool sparse) {
 }
 
 void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
-    // 3(x) + 3(v) + 6(sigma_voigt) + 9(B) + 1(lp) + 13(m..contact_radius) = 35 floats
-    // + 5 ints = 35 * 4 + 20 = 160 bytes per particle
-    size_t required_bytes = count * (35 * sizeof(float) + 5 * sizeof(int));
+    m_soa_has_F_total = hasHyperelasticMaterial();
+    m_soa_has_hill_axes = hasHill48Material();
+    const size_t extra_floats = (m_soa_has_F_total ? 9ULL : 0ULL) + (m_soa_has_hill_axes ? 6ULL : 0ULL);
+    // 3(x) + 3(v) + 6(sigma_voigt) + 9(B) + 1(lp) + 13(m..contact_radius) = 35 base floats (+ optional F_total/hill_axes)
+    // + 5 ints = 160 base bytes per particle
+    size_t required_bytes = count * ((35ULL + extra_floats) * sizeof(float) + 5ULL * sizeof(int));
     if (required_bytes > m_allocated_soa_bytes) {
         if (d_soa_buffer) cudaFree(d_soa_buffer);
         CUDA_CHECK_ALLOC(cudaMalloc(&d_soa_buffer, required_bytes), "Allocating d_soa_buffer (" + std::to_string(required_bytes) + " bytes)");
@@ -5433,6 +4843,22 @@ void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
     d_soa.state = iptr; iptr += count;
     d_soa.cluster_id = iptr; iptr += count;
     d_soa.material_id = iptr; iptr += count;
+
+    for (int k = 0; k < 9; ++k) d_soa.F_total[k] = nullptr;
+    for (int k = 0; k < 6; ++k) d_soa.hill_axes[k] = nullptr;
+    float* aux_fptr = reinterpret_cast<float*>(iptr);
+    if (m_soa_has_F_total) {
+        for (int k = 0; k < 9; ++k) {
+            d_soa.F_total[k] = aux_fptr;
+            aux_fptr += count;
+        }
+    }
+    if (m_soa_has_hill_axes) {
+        for (int k = 0; k < 6; ++k) {
+            d_soa.hill_axes[k] = aux_fptr;
+            aux_fptr += count;
+        }
+    }
 }
 
 void MPMSolver3DCUDA::freeSoABuffer() {
@@ -5442,12 +4868,62 @@ void MPMSolver3DCUDA::freeSoABuffer() {
     }
     d_soa = MPMParticle3DSoA{};
     m_allocated_soa_bytes = 0;
+    m_soa_has_F_total = false;
+    m_soa_has_hill_axes = false;
 }
 
 void MPMSolver3DCUDA::uploadAoS2SoA() {
     size_t count = m_host_particles.size();
     if (count == 0) return;
     allocateDeviceMemory();
+
+    MPMParticleAux3D* d_aux_staging = nullptr;
+    int aux_count = 0;
+    if (m_soa_has_F_total || m_soa_has_hill_axes) {
+        for (auto& p : m_host_particles) {
+            const MaterialTable3D& mat = (p.object_id >= 0 && p.object_id < static_cast<int>(m_material_tables.size()))
+                ? m_material_tables[p.object_id]
+                : (m_material_tables.empty() ? MaterialTable3D{} : m_material_tables[0]);
+            if ((isHyperelasticModel(mat.material_model) ||
+                 mat.material_model == MPMMaterialModel::Hill48Orthotropic) &&
+                p.aux_state_idx < 0) {
+                MPMParticleAux3D aux{};
+                float ax = mat.anisotropy_dir[0], ay = mat.anisotropy_dir[1], az = mat.anisotropy_dir[2];
+                float an = std::sqrt(ax * ax + ay * ay + az * az);
+                if (an > 1.0e-6f) {
+                    aux.hill_a1[0] = ax / an;
+                    aux.hill_a1[1] = ay / an;
+                    aux.hill_a1[2] = az / an;
+                    if (std::abs(aux.hill_a1[0]) < 0.9f) {
+                        aux.hill_a2[0] = 0.0f;
+                        aux.hill_a2[1] = -aux.hill_a1[2];
+                        aux.hill_a2[2] = aux.hill_a1[1];
+                    } else {
+                        aux.hill_a2[0] = aux.hill_a1[2];
+                        aux.hill_a2[1] = 0.0f;
+                        aux.hill_a2[2] = -aux.hill_a1[0];
+                    }
+                    float bn = std::sqrt(aux.hill_a2[0] * aux.hill_a2[0] +
+                                         aux.hill_a2[1] * aux.hill_a2[1] +
+                                         aux.hill_a2[2] * aux.hill_a2[2]);
+                    if (bn > 1.0e-6f) {
+                        aux.hill_a2[0] /= bn;
+                        aux.hill_a2[1] /= bn;
+                        aux.hill_a2[2] /= bn;
+                    }
+                }
+                p.aux_state_idx = static_cast<int>(m_host_aux_states.size());
+                m_host_aux_states.push_back(aux);
+            }
+        }
+        if (!m_host_aux_states.empty()) {
+            aux_count = static_cast<int>(m_host_aux_states.size());
+            CUDA_CHECK_ALLOC(cudaMalloc(&d_aux_staging, m_host_aux_states.size() * sizeof(MPMParticleAux3D)),
+                             "Allocating d_aux_staging for upload");
+            cudaMemcpy(d_aux_staging, m_host_aux_states.data(),
+                       m_host_aux_states.size() * sizeof(MPMParticleAux3D), cudaMemcpyHostToDevice);
+        }
+    }
 
     // Bound staging buffer to 65536 particles (~14 MB max) to prevent unbounded GPU memory allocations
     constexpr size_t MAX_AOS_CHUNK_SIZE = 65536;
@@ -5464,9 +4940,10 @@ void MPMSolver3DCUDA::uploadAoS2SoA() {
         size_t cur_chunk = std::min(chunk_capacity, count - offset);
         cudaMemcpy(d_temp_aos_particles, m_host_particles.data() + offset, cur_chunk * sizeof(MPMParticle3D), cudaMemcpyHostToDevice);
         int blocks = (static_cast<int>(cur_chunk) + threads - 1) / threads;
-        kernel_pack_aos_to_soa<<<blocks, threads>>>(d_temp_aos_particles, d_soa, static_cast<int>(cur_chunk), static_cast<int>(offset));
+        kernel_pack_aos_to_soa<<<blocks, threads>>>(d_temp_aos_particles, d_soa, static_cast<int>(cur_chunk), static_cast<int>(offset), d_aux_staging, aux_count);
     }
     cudaDeviceSynchronize();
+    if (d_aux_staging) cudaFree(d_aux_staging);
     m_num_active_particles = count;
 }
 
@@ -5496,6 +4973,7 @@ int MPMSolver3DCUDA::compactTerminatedParticlesDevice() {
     if (active_target == 0) {
         m_num_active_particles = 0;
         m_host_particles.clear();
+        m_host_aux_states.clear();
         return 0;
     }
 
@@ -5530,7 +5008,19 @@ void MPMSolver3DCUDA::downloadSoA2AoS() {
     count = m_num_active_particles;
     if (count == 0) {
         m_host_particles.clear();
+        m_host_aux_states.clear();
         return;
+    }
+
+    MPMParticleAux3D* d_aux_staging = nullptr;
+    int aux_count = 0;
+    if (m_soa_has_F_total || m_soa_has_hill_axes) {
+        aux_count = static_cast<int>(count);
+        CUDA_CHECK_ALLOC(cudaMalloc(&d_aux_staging, count * sizeof(MPMParticleAux3D)),
+                         "Allocating d_aux_staging for download");
+        m_host_aux_states.resize(count);
+    } else {
+        m_host_aux_states.clear();
     }
 
     // Bound staging buffer to 65536 particles (~14 MB max) to prevent unbounded GPU memory allocations
@@ -5547,9 +5037,13 @@ void MPMSolver3DCUDA::downloadSoA2AoS() {
     for (size_t offset = 0; offset < count; offset += chunk_capacity) {
         size_t cur_chunk = std::min(chunk_capacity, count - offset);
         int blocks = (static_cast<int>(cur_chunk) + threads - 1) / threads;
-        kernel_unpack_soa_to_aos<<<blocks, threads>>>(d_temp_aos_particles, d_soa, static_cast<int>(cur_chunk), static_cast<int>(offset));
+        kernel_unpack_soa_to_aos<<<blocks, threads>>>(d_temp_aos_particles, d_soa, static_cast<int>(cur_chunk), static_cast<int>(offset), d_aux_staging, aux_count);
         cudaDeviceSynchronize();
         cudaMemcpy(m_host_particles.data() + offset, d_temp_aos_particles, cur_chunk * sizeof(MPMParticle3D), cudaMemcpyDeviceToHost);
+    }
+    if (d_aux_staging) {
+        cudaMemcpy(m_host_aux_states.data(), d_aux_staging, count * sizeof(MPMParticleAux3D), cudaMemcpyDeviceToHost);
+        cudaFree(d_aux_staging);
     }
     m_host_particles.resize(count);
 }
@@ -5617,9 +5111,13 @@ void MPMSolver3DCUDA::allocateDeviceMemory() {
         m_allocated_grid_nodes = num_grid_nodes;
     }
 
-    if (num_particles > m_allocated_particles) {
-        allocateSoABuffer(num_particles);
-        m_allocated_particles = num_particles;
+    const bool need_F_total = hasHyperelasticMaterial();
+    const bool need_hill_axes = hasHill48Material();
+    if (num_particles > m_allocated_particles ||
+        (num_particles > 0 && (need_F_total != m_soa_has_F_total || need_hill_axes != m_soa_has_hill_axes))) {
+        const size_t target_cap = std::max(num_particles, m_allocated_particles);
+        allocateSoABuffer(target_cap);
+        m_allocated_particles = target_cap;
     }
 
     if (num_particles * 2 > m_allocated_compaction_indices) {
@@ -5865,6 +5363,7 @@ void MPMSolver3DCUDA::initializeGrid(int nx, int ny, int nz, float dx, float dy,
 
     m_host_grid.clear(); // Lazy host grid allocation: only allocate when syncGridToHost or CPU FSI is called
     m_host_particles.clear();
+    m_host_aux_states.clear();
     m_num_active_particles = 0;
     m_num_active_tiles = 0;
     m_terminated = false;

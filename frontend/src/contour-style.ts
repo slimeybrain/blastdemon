@@ -684,7 +684,7 @@ export function normalizeScalarToT(val: number, minVal: number, maxVal: number, 
     return t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
 }
 
-export function quantizeContourT(t: number, contourLevels: number, smoothContours: boolean): number {
+export function quantizeContourT(t: number, contourLevels: number, smoothContours: boolean = false): number {
     const clamped = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
     if (smoothContours || !(contourLevels >= 2)) return clamped;
     const n = Math.floor(contourLevels);
@@ -692,12 +692,16 @@ export function quantizeContourT(t: number, contourLevels: number, smoothContour
     return (band + 0.5) / n;
 }
 
-export function evaluateColormapRGB(t: number, cmapName?: string | null): [number, number, number] {
+export function evaluateColormapRGB(t: number, cmapName?: string | null, out?: [number, number, number]): [number, number, number] {
     const clamped = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
     const id = normalizeColormapId(cmapName);
     if (id === 'materials') {
         const matIdx = Math.max(0, Math.min(5, Math.floor(clamped * 5.0 + 0.5)));
         const c = MATERIALS_STOPS[matIdx];
+        if (out) {
+            out[0] = c[0]; out[1] = c[1]; out[2] = c[2];
+            return out;
+        }
         return [c[0], c[1], c[2]];
     }
     const stops = CONTINUOUS_COLORMAP_STOPS[id];
@@ -706,11 +710,14 @@ export function evaluateColormapRGB(t: number, cmapName?: string | null): [numbe
     const frac = scaled - idx;
     const c0 = stops[idx];
     const c1 = stops[idx + 1];
-    return [
-        c0[0] + (c1[0] - c0[0]) * frac,
-        c0[1] + (c1[1] - c0[1]) * frac,
-        c0[2] + (c1[2] - c0[2]) * frac
-    ];
+    const r = c0[0] + (c1[0] - c0[0]) * frac;
+    const g = c0[1] + (c1[1] - c0[1]) * frac;
+    const b = c0[2] + (c1[2] - c0[2]) * frac;
+    if (out) {
+        out[0] = r; out[1] = g; out[2] = b;
+        return out;
+    }
+    return [r, g, b];
 }
 
 export function sampleQuantityColorRGB(

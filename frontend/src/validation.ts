@@ -1,5 +1,15 @@
 import { SimulationState, Node, Connection, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { estimateNodeMemory } from './memory-validator.js';
+import {
+    isIdealGasAirMaterial,
+    isIdealGasChargeMaterial as isIdealGasChargeModel,
+    isJWLGasMaterial,
+    isAnyExplosiveMaterial,
+    isWaterMaterialModel,
+    isHyperelasticModel,
+    isGeomaterialModel,
+} from './mpm-presets.js';
+import { getParamKeysForNode } from './parameter-definitions.js';
 
 export interface NodeStatus {
     state: 'error' | 'warning' | 'valid';
@@ -16,28 +26,28 @@ export function isAirMaterial(node: Node | undefined): boolean {
     if (!node || node.type !== 'Material') return false;
     const model = node.parameters?.material_model;
     const type = node.parameters?.material_type;
-    return model === 'Ideal Gas' || type === 'Air';
+    return isIdealGasAirMaterial(model) || type === 'Air';
 }
 
 export function isJWLMaterial(node: Node | undefined): boolean {
     if (!node || node.type !== 'Material') return false;
     const model = node.parameters?.material_model;
     const type = node.parameters?.material_type;
-    return model === 'JWL Detonation Gas' || type === 'JWL Charge';
+    return isJWLGasMaterial(model) || type === 'JWL Charge';
 }
 
 export function isIdealGasChargeMaterial(node: Node | undefined): boolean {
     if (!node || node.type !== 'Material') return false;
     const model = node.parameters?.material_model;
     const type = node.parameters?.material_type;
-    return model === 'Ideal Gas' || type === 'Ideal Gas Charge';
+    return isIdealGasChargeModel(model) || type === 'Ideal Gas Charge';
 }
 
 export function isExplosiveMaterialNode(node: Node | undefined): boolean {
     if (!node || node.type !== 'Material') return false;
     const model = node.parameters?.material_model;
     const type = node.parameters?.material_type;
-    return model === 'JWL Detonation Gas' || type === 'JWL Charge' || model === 'Ideal Gas Charge' || type === 'Ideal Gas Charge' || model === 'CREST Reactive Burn';
+    return isAnyExplosiveMaterial(model) || type === 'JWL Charge' || type === 'Ideal Gas Charge';
 }
 
 export function isParameterRelevant(node: Node, key: string): boolean {
@@ -95,34 +105,10 @@ export function isParameterRelevant(node: Node, key: string): boolean {
         }
     } else if (node.type === 'Material') {
         if (key === 'ambient_air_target') return false;
-        const matModel = node.parameters['material_model'] || 'Hypoelastic';
-        const airKeys = ['gamma', 'atm_pressure', 'atm_temperature', 'ambient_o2_fraction'];
-        const jwlKeys = ['composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_gamma', 'ideal_rho_0', 'ideal_e_0'];
-        const jcKeys = ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp', 'mg_gamma0', 'mg_c0', 'mg_s'];
-        const concreteBaseKeys = ['fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension'];
-        const rhtKeys = ['rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2', 'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat'];
-        const kcKeys = ['kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'];
-        const cscmKeys = ['cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'];
-        const crestKeys = ['davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0', 'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det', 'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13'];
-
-        if (matModel === 'Ideal Gas') {
-            if (['youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'failure_strain', 'tensile_failure_stress'].includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
-        } else if (matModel === 'JWL Detonation Gas') {
-            if (airKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
-        } else if (matModel === 'Linear Elastic') {
-            if (['yield_stress', 'hardening_modulus'].includes(key) || airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
-        } else if (matModel === 'Hypoelastic') {
-            if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
-        } else if (matModel === 'Johnson-Cook + Mie-Grüneisen') {
-            if (airKeys.includes(key) || jwlKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
-        } else if (matModel === 'RHT Concrete') {
-            if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || kcKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
-        } else if (matModel === 'Karagozian & Case (K&C)' || matModel === 'Karagozian & Case') {
-            if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || rhtKeys.includes(key) || cscmKeys.includes(key) || crestKeys.includes(key)) return false;
-        } else if (matModel === 'CSCM Concrete') {
-            if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || ['yield_stress', 'hardening_modulus'].includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || crestKeys.includes(key)) return false;
-        } else if (matModel === 'CREST Reactive Burn') {
-            if (airKeys.includes(key) || jwlKeys.includes(key) || jcKeys.includes(key) || concreteBaseKeys.includes(key) || rhtKeys.includes(key) || kcKeys.includes(key) || cscmKeys.includes(key)) return false;
+        const activeKeys = getParamKeysForNode('Material', node.parameters);
+        const metaKeys = ['preset', 'name', 'visible', 'hidden', 'charge_target', 'seabed_target', 'provenance', 'reference', 'test_method'];
+        if (!activeKeys.includes(key) && !metaKeys.includes(key)) {
+            return false;
         }
     } else if (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') {
         if (['stl_file', 'geometry_hash', 'mesh_type', 'amr_max_levels', 'amr_threshold', 'amr_coarsen_ratio', 'amr_tile_size', 'ambient_air_material', 'explosive_charge', 'remap'].includes(key)) return false;
@@ -485,7 +471,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                             addMessage(igNode.id, 'error', "Only Material node can be connected to the Material input of Charge.");
                         } else {
                             if (!isIdealGasChargeMaterial(matNode)) {
-                                addMessage(igNode.id, 'error', "CFD Solver 2D in Ideal Gas mode requires an 'Ideal Gas' material connected to the Charge node.");
+                                addMessage(igNode.id, 'error', "CFD Solver 2D in Ideal Gas mode requires an 'Ideal Gas Charge' material connected to the Charge node.");
                             }
                         }
                     }
@@ -785,7 +771,7 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     addMessage(chargeNode3D.id, 'error', "Only Material node can be connected to the Material input of Charge 3D.");
                 } else {
                     if (!isIdealGasChargeMaterial(matNode)) {
-                        addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in Ideal Gas mode requires an 'Ideal Gas' material connected to the Charge node.");
+                        addMessage(chargeNode3D.id, 'error', "CFD Solver 3D in Ideal Gas mode requires an 'Ideal Gas Charge' material connected to the Charge node.");
                     }
                 }
             }
@@ -1167,13 +1153,17 @@ export function validateSimulationState(state: SimulationState): ValidationResul
         if (node.type === 'Material') {
             const matModel = node.parameters?.material_model;
             const matType = node.parameters?.material_type;
-            if (matModel === 'Ideal Gas' || matType === 'Air') {
+            if (isAirMaterial(node)) {
                 const gamma = Number(node.parameters?.gamma ?? 1.4);
+                const ideal_R = Number(node.parameters?.ideal_R ?? 287.058);
                 const atm_pressure = Number(node.parameters?.atm_pressure ?? 101325);
                 const atm_temperature = Number(node.parameters?.atm_temperature ?? 288.0);
 
                 if (isNaN(gamma) || gamma <= 1.0) {
                     addMessage(node.id, 'error', "Gas adiabatic index (gamma) must be greater than 1.0.");
+                }
+                if (isNaN(ideal_R) || ideal_R <= 0) {
+                    addMessage(node.id, 'error', "Specific gas constant (ideal_R) must be greater than 0.");
                 }
                 if (isNaN(atm_pressure) || atm_pressure <= 0) {
                     addMessage(node.id, 'error', "Atmospheric / Static Pressure must be greater than 0.");
@@ -1234,12 +1224,16 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 if (!hasDetonator) {
                     addMessage(node.id, 'warning', "Lee-Tarver Ignition & Growth requires at least one Detonator node in the model to initiate detonation wavefront.");
                 }
-            } else if (matType === 'Ideal Gas Charge') {
+            } else if (matModel === 'Ideal Gas Charge' || matType === 'Ideal Gas Charge') {
                 const ideal_gamma = Number(node.parameters?.ideal_gamma ?? 1.4);
+                const ideal_R = Number(node.parameters?.ideal_R ?? 287.058);
                 const ideal_rho_0 = Number(node.parameters?.ideal_rho_0 ?? 1630.0);
                 const ideal_e_0 = Number(node.parameters?.ideal_e_0 ?? 4290000);
                 if (isNaN(ideal_gamma) || ideal_gamma <= 1.0) {
                     addMessage(node.id, 'error', "Ideal Gas Charge adiabatic index (gamma) must be greater than 1.0.");
+                }
+                if (isNaN(ideal_R) || ideal_R <= 0) {
+                    addMessage(node.id, 'error', "Ideal Gas Charge specific gas constant (ideal_R) must be greater than 0.");
                 }
                 if (isNaN(ideal_rho_0) || ideal_rho_0 <= 0) {
                     addMessage(node.id, 'error', "Ideal Gas Charge density (rho) must be greater than 0.");
@@ -1247,8 +1241,21 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                 if (isNaN(ideal_e_0) || ideal_e_0 <= 0) {
                     addMessage(node.id, 'error', "Ideal Gas Charge specific energy must be greater than 0.");
                 }
+            } else if (isWaterMaterialModel(matModel)) {
+                const tait_rho0 = Number(node.parameters?.tait_rho0 ?? node.parameters?.density ?? 1000.0);
+                const tait_c0 = Number(node.parameters?.tait_c0 ?? 1482.0);
+                const tait_gamma = Number(node.parameters?.tait_gamma ?? 7.15);
+                if (isNaN(tait_rho0) || tait_rho0 <= 0) {
+                    addMessage(node.id, 'error', "Tait Water reference density (tait_rho0) must be greater than 0.");
+                }
+                if (isNaN(tait_c0) || tait_c0 <= 0) {
+                    addMessage(node.id, 'error', "Tait Water sound speed (tait_c0) must be greater than 0.");
+                }
+                if (isNaN(tait_gamma) || tait_gamma <= 0) {
+                    addMessage(node.id, 'error', "Tait Water exponent (tait_gamma) must be greater than 0.");
+                }
             } else {
-                // Solid mechanics models (Linear Elastic, Hypoelastic, Johnson-Cook, Concrete models, CREST)
+                // Solid & Geomaterial continuum mechanics models
                 const density = Number(node.parameters?.density ?? 7850);
                 if (isNaN(density) || density <= 0) {
                     addMessage(node.id, 'error', "Material density must be greater than 0.");
@@ -1263,6 +1270,23 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     if (!hasDetonator) {
                         addMessage(node.id, 'warning', "CREST Reactive Burn requires at least one Detonator node in the model to initiate detonation wavefront.");
                     }
+                } else if (isHyperelasticModel(matModel)) {
+                    const kBulk = Number(node.parameters?.k_bulk ?? 1.0e9);
+                    if (isNaN(kBulk) || kBulk <= 0) {
+                        addMessage(node.id, 'error', "Hyperelastic bulk modulus (k_bulk) must be greater than 0.");
+                    }
+                    if (matModel === 'Hyperelastic (Yeoh)') {
+                        const c10 = Number(node.parameters?.yeoh_c10 ?? 0.5e6);
+                        if (isNaN(c10) || c10 <= 0) {
+                            addMessage(node.id, 'error', "Yeoh C10 parameter must be greater than 0.");
+                        }
+                    } else {
+                        const c10 = Number(node.parameters?.mr_c10 ?? 0.3e6);
+                        const c01 = Number(node.parameters?.mr_c01 ?? 0.1e6);
+                        if (isNaN(c10) || isNaN(c01) || (c10 + c01) <= 0) {
+                            addMessage(node.id, 'error', "Mooney-Rivlin initial shear stiffness (C10 + C01) must be greater than 0.");
+                        }
+                    }
                 } else if (matModel !== 'RHT Concrete' && matModel !== 'Karagozian & Case (K&C)' && matModel !== 'CSCM Concrete') {
                     const E = Number(node.parameters?.youngs_modulus ?? 200e9);
                     const nu = Number(node.parameters?.poissons_ratio ?? 0.3);
@@ -1271,6 +1295,48 @@ export function validateSimulationState(state: SimulationState): ValidationResul
                     }
                     if (isNaN(nu) || nu < 0 || nu >= 0.5) {
                         addMessage(node.id, 'error', "Poisson's ratio must be in the range [0.0, 0.5).");
+                    }
+                    if (matModel === 'Crushable Foam') {
+                        const sigP = Number(node.parameters?.foam_plateau_stress ?? 1.9e6);
+                        const epsD = Number(node.parameters?.foam_densification_strain ?? 0.65);
+                        if (isNaN(sigP) || sigP <= 0) {
+                            addMessage(node.id, 'error', "Foam plateau stress must be greater than 0.");
+                        }
+                        if (isNaN(epsD) || epsD <= 0 || epsD >= 1.0) {
+                            addMessage(node.id, 'error', "Foam densification strain must be in (0.0, 1.0).");
+                        }
+                    } else if (matModel === 'Johnson-Holmquist JH-2') {
+                        const k1 = Number(node.parameters?.jh2_K1 ?? 220.0e9);
+                        const sigHel = Number(node.parameters?.jh2_sigma_hel ?? 9.08e9);
+                        if (isNaN(k1) || k1 <= 0 || isNaN(sigHel) || sigHel <= 0) {
+                            addMessage(node.id, 'error', "JH-2 bulk modulus (K1) and Hugoniot elastic limit (sigma_hel) must be greater than 0.");
+                        }
+                    } else if (matModel === 'Geological Cap (MAT_025)' || matModel === 'Geological Cap') {
+                        const x0 = Number(node.parameters?.cap_X0 ?? 1.0e5);
+                        const capR = Number(node.parameters?.cap_R ?? 2.5);
+                        const capW = Number(node.parameters?.cap_W ?? 0.20);
+                        if (isNaN(x0) || x0 <= 0 || isNaN(capR) || capR <= 0 || isNaN(capW) || capW <= 0) {
+                            addMessage(node.id, 'error', "Geological Cap parameters (cap_X0, cap_R, cap_W) must be greater than 0.");
+                        }
+                    } else if (matModel === 'Hoek-Brown Rock') {
+                        const sigCi = Number(node.parameters?.hb_sigma_ci ?? 200.0e6);
+                        const gsi = Number(node.parameters?.hb_gsi ?? 90.0);
+                        const hbD = Number(node.parameters?.hb_D ?? 0.0);
+                        if (isNaN(sigCi) || sigCi <= 0) {
+                            addMessage(node.id, 'error', "Hoek-Brown intact rock UCS (hb_sigma_ci) must be greater than 0.");
+                        }
+                        if (isNaN(gsi) || gsi < 0 || gsi > 100) {
+                            addMessage(node.id, 'error', "Hoek-Brown GSI must be between 0 and 100.");
+                        }
+                        if (isNaN(hbD) || hbD < 0 || hbD > 1) {
+                            addMessage(node.id, 'error', "Hoek-Brown disturbance factor (hb_D) must be between 0 and 1.");
+                        }
+                    } else if (matModel === 'Steinberg-Guinan') {
+                        const y0 = Number(node.parameters?.sg_Y0 ?? 0.12e9);
+                        const ymax = Number(node.parameters?.sg_Ymax ?? 0.64e9);
+                        if (isNaN(y0) || y0 <= 0 || isNaN(ymax) || ymax < y0) {
+                            addMessage(node.id, 'error', "Steinberg-Guinan Y0 must be > 0 and Ymax >= Y0.");
+                        }
                     }
                 }
             }

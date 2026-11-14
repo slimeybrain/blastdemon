@@ -106,8 +106,15 @@ HD_LT_FUNC T advanceLeeTarver(
 ) {
     if (static_cast<double>(lambda_curr) >= kLambdaComplete) return static_cast<T>(1.0);
 
-    constexpr int    kMaxSubsteps = 32;
+    constexpr int    kMaxSubsteps = 64;
     constexpr double kMaxDLambda  = 0.02;
+    // The rate law is piecewise in lambda (ignition < Fig, growth < FG1, completion > FG2). A Heun
+    // substep must never straddle a switch, otherwise the discontinuity is integrated at first order
+    // and dt-dependently. Substeps are therefore clipped to land exactly on each cutoff.
+    const double cut_ig = static_cast<double>(ig_max);
+    const double cut_g1 = static_cast<double>(growth_max);
+    const double cut_g2 = static_cast<double>(comp_min);
+    constexpr double kLandEps = 1.0e-9; // completion regime is lam > comp_min (strict), so land just above
 
     double lam = static_cast<double>(lambda_curr);
     double t_rem = static_cast<double>(dt);
@@ -120,11 +127,23 @@ HD_LT_FUNC T advanceLeeTarver(
         // Last allowed substep consumes all remaining time so the step is never truncated.
         double h = (step == kMaxSubsteps - 1) ? t_rem : std::min(t_rem, kMaxDLambda / r1);
 
+        double land = -1.0; // lambda value to snap to when a cutoff limits this substep
+        auto clip = [&](double cut, double snap) {
+            if (cut > lam && cut < 1.0) {
+                const double hc = (cut - lam) / r1;
+                if (hc < h) { h = hc; land = snap; }
+            }
+        };
+        clip(cut_ig, cut_ig);
+        clip(cut_g1, cut_g1);
+        clip(cut_g2, cut_g2 + kLandEps);
+
         const double lam_pred = std::min(1.0, lam + h * r1);
         const double r2 = static_cast<double>(evalLeeTarverRate<T>(static_cast<T>(lam_pred), v_rel, p_current,
             I, a, b, x, ig_max, G1, c, d, y, growth_max, G2, e, g, z, comp_min));
 
         double lam_new = lam + 0.5 * h * (r1 + r2);
+        if (land >= 0.0) lam_new = land;
         if (lam_new < lam) lam_new = lam; // reaction is irreversible
         lam = lam_new;
         t_rem -= h;

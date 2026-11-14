@@ -1,5 +1,15 @@
 import { SimulationState, SimulationStatus, LayoutNode, PanelNode, SplitNode, LayoutDirection, PanelType, Model, Workspace, AppState, Node, Connection, NodeType, Port, ModelViewConfig, ModelViewCamera, ModelViewSlice, ModelViewToggles, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
-import { MPM_MATERIAL_PRESETS, getPresetsForConstitutiveModel, getDefaultPresetForModel } from './mpm-presets.js';
+import {
+    MPM_MATERIAL_PRESETS,
+    getPresetsForConstitutiveModel,
+    getDefaultPresetForModel,
+    isIdealGasAirMaterial,
+    isIdealGasChargeMaterial as isIdealGasChargeModel,
+    isAnyExplosiveMaterial,
+    isWaterMaterialModel,
+    isGeomaterialModel,
+    isFluidOrGasModel,
+} from './mpm-presets.js';
 import { isAirMaterialNode } from './serialization.js';
 import { classifyError, ModelErrorEntry } from './error-diagnostics.js';
 import { canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, getQuantityStyle } from './contour-style.js';
@@ -130,6 +140,15 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         if (parameters['atm_temperature'] === undefined) parameters['atm_temperature'] = 288.15;
         if (parameters['initial_temperature'] === undefined) parameters['initial_temperature'] = parameters['atm_temperature'];
         if (parameters['gamma'] === undefined) parameters['gamma'] = 1.4;
+        if (parameters['ideal_R'] === undefined) parameters['ideal_R'] = 287.058;
+
+        if (updatedKey === 'gamma') {
+            parameters['ideal_gamma'] = parameters['gamma'];
+        } else if (updatedKey === 'ideal_gamma') {
+            parameters['gamma'] = parameters['ideal_gamma'];
+        } else if (parameters['ideal_gamma'] === undefined) {
+            parameters['ideal_gamma'] = parameters['gamma'];
+        }
 
         if (updatedKey === 'initial_temperature') {
             parameters['atm_temperature'] = parameters['initial_temperature'];
@@ -138,13 +157,20 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         }
 
         const curT = Number(parameters['initial_temperature'] ?? parameters['atm_temperature'] ?? 288.15);
-        if (updatedKey === 'atm_pressure' || updatedKey === 'atm_temperature' || updatedKey === 'initial_temperature' || parameters['density'] === undefined) {
-            parameters['density'] = parameters['atm_pressure'] / (287.058 * curT);
+        const curR = Number(parameters['ideal_R'] ?? 287.058);
+        if (
+            updatedKey === 'atm_pressure' ||
+            updatedKey === 'atm_temperature' ||
+            updatedKey === 'initial_temperature' ||
+            updatedKey === 'ideal_R' ||
+            parameters['density'] === undefined
+        ) {
+            parameters['density'] = Number(parameters['atm_pressure']) / (Math.max(1.0, curR) * Math.max(1.0, curT));
         }
         parameters['ambient_p'] = parameters['atm_pressure'];
         parameters['ambient_rho'] = parameters['density'];
 
-        const airKeys = ['atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'density'];
+        const airKeys = ['atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'ideal_gamma', 'ideal_R', 'density'];
         if (updatedKey && airKeys.includes(updatedKey)) {
             parameters['preset'] = 'Custom';
         }
@@ -175,10 +201,12 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         if (parameters['ideal_rho_0'] === undefined) parameters['ideal_rho_0'] = 1630.0;
         if (parameters['ideal_e_0'] === undefined) parameters['ideal_e_0'] = 4.29e6;
         if (parameters['ideal_gamma'] === undefined) parameters['ideal_gamma'] = 1.4;
+        if (parameters['ideal_R'] === undefined) parameters['ideal_R'] = 287.058;
         if (!parameters['composition']) parameters['composition'] = 'TNT';
 
         const gammaVal = Number(parameters['ideal_gamma'] ?? 1.4);
-        const cv = 287.058 / Math.max(0.01, gammaVal - 1.0);
+        const gasR = Number(parameters['ideal_R'] ?? 287.058);
+        const cv = gasR / Math.max(0.01, gammaVal - 1.0);
 
         if (parameters['initial_temperature'] === undefined) {
             parameters['initial_temperature'] = Number(parameters['ideal_e_0']) / cv;
@@ -193,11 +221,12 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             const T = Number(parameters['initial_temperature']);
             parameters['ideal_e_0'] = cv * T;
             parameters['detonation_energy'] = parameters['ideal_e_0'];
-        } else if (updatedKey === 'ideal_gamma') {
+        } else if (updatedKey === 'ideal_gamma' || updatedKey === 'ideal_R') {
             parameters['initial_temperature'] = Number(parameters['ideal_e_0']) / cv;
+            if (updatedKey === 'ideal_gamma') parameters['gamma'] = gammaVal;
         }
 
-        const igKeys = ['ideal_rho_0', 'ideal_e_0', 'initial_temperature', 'ideal_gamma'];
+        const igKeys = ['ideal_rho_0', 'ideal_e_0', 'initial_temperature', 'ideal_gamma', 'ideal_R'];
         if (updatedKey && igKeys.includes(updatedKey)) {
             parameters['preset'] = 'Custom';
         }
@@ -238,9 +267,17 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         const materialKeys = [
             'transfer_scheme', 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
             'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
-            'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+            'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'cs_C', 'cs_P',
+            'yeoh_c10', 'yeoh_c20', 'yeoh_c30', 'mr_c10', 'mr_c01', 'k_bulk',
             'soil_friction_angle', 'soil_cohesion', 'k0_earth_pressure',
             'friction_angle', 'cohesion', 'dilation_angle', 'tensile_cutoff',
+            'dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus',
+            'cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R',
+            'hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D',
+            'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening',
+            'jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max', 'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C',
+            'jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta',
+            'sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT',
             'cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch',
             'hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0',
             'failure_strain', 'tensile_failure_stress',
@@ -249,9 +286,10 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio', 'erode_to_fv_grid',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
             'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'initial_temperature', 'Cp',
+            'mg_gamma0', 'mg_c0', 'mg_s',
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
-            'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+            'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat', 'rht_f_el_c',
             'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
             'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
             'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
@@ -265,6 +303,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_G2', 'lt_e', 'lt_g', 'lt_z',
             'lt_F_ig_max', 'lt_F_G1_max', 'lt_F_G2_min', 'jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0',
             'directional_crack_band', 'nonlocal_radius',
+            'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str',
             'solid_model', 'burn_model', 'product_model'
         ];
         if (updatedKey && materialKeys.includes(updatedKey)) {
@@ -760,17 +799,13 @@ export function isExplosiveMaterialNode(node: Node | undefined): boolean {
     if (!node || node.type !== 'Material') return false;
     const type = node.parameters?.material_type;
     const model = node.parameters?.material_model;
-    if (type === 'JWL Charge' || type === 'Ideal Gas Charge') return true;
-    if (model === 'JWL Detonation Gas' || model === 'Ideal Gas Charge' || model === 'CREST Reactive High Explosive' || model === 'CREST Reactive Burn' || model === 'CREST' || model === 'JWL Programmed Burn' || model === 'Lee-Tarver Ignition & Growth') return true;
-    if (type === 'Air' || model === 'Ideal Gas') return false;
+    if (isIdealGasAirMaterial(model) || type === 'Air') return false;
+    if (type === 'JWL Charge' || type === 'Ideal Gas Charge' || isAnyExplosiveMaterial(model)) return true;
     const comp = String(node.parameters?.composition || '').toLowerCase();
     const preset = String(node.parameters?.preset || '').toLowerCase();
     const name = String((node as any).name || node.parameters?.name || node.id || '').toLowerCase();
     const explosiveNames = ['tnt', 'c-4', 'c4', 'comp b', 'composition b', 'petn', 'hmx', 'rdx', 'pbx', 'anfo', 'ammonal', 'tritonal', 'pentolite', 'semtex', 'tetryl', 'emulsion', 'nitromethane', 'nm', 'explosive', 'davis', 'crest', 'charge', 'jwl', 'detonation'];
-    if (explosiveNames.some(e => comp.includes(e) || preset.includes(e) || name.includes(e))) {
-        return true;
-    }
-    return false;
+    return explosiveNames.some(e => comp.includes(e) || preset.includes(e) || name.includes(e));
 }
 
 export function isWaterMaterialNode(node: Node | undefined): boolean {
@@ -779,16 +814,18 @@ export function isWaterMaterialNode(node: Node | undefined): boolean {
     const type = String(node.parameters?.material_type || '');
     const preset = String(node.parameters?.preset || '').toLowerCase();
     const name = String((node as any).name || node.parameters?.name || node.id || '').toLowerCase();
-    return model === 'Tait Water' || type === 'Fluid' || preset.includes('water') || preset.includes('seawater') || name.includes('water') || name.includes('seawater');
+    return isWaterMaterialModel(model) || type === 'Fluid' || preset.includes('water') || preset.includes('seawater') || name.includes('water') || name.includes('seawater');
 }
 
 export function isSeabedMaterialNode(node: Node | undefined): boolean {
     if (!node || node.type !== 'Material') return false;
     if (isAirMaterialNode(node) || isWaterMaterialNode(node) || isExplosiveMaterialNode(node)) return false;
-    const model = String(node.parameters?.material_model || '').toLowerCase();
+    const rawModel = String(node.parameters?.material_model || '');
+    if (isGeomaterialModel(rawModel)) return true;
+    const model = rawModel.toLowerCase();
     const preset = String(node.parameters?.preset || '').toLowerCase();
     const name = String((node as any).name || node.parameters?.name || node.id || '').toLowerCase();
-    const geoTerms = ['seabed', 'soil', 'sand', 'clay', 'silt', 'rock', 'basalt', 'granite', 'limestone', 'sandstone', 'shale', 'gravel', 'permafrost', 'sediment', 'geotechnical', 'foundation', 'drucker', 'coulomb'];
+    const geoTerms = ['seabed', 'soil', 'sand', 'clay', 'silt', 'rock', 'basalt', 'granite', 'limestone', 'sandstone', 'shale', 'gravel', 'permafrost', 'sediment', 'geotechnical', 'foundation', 'drucker', 'coulomb', 'hoek', 'cap'];
     return geoTerms.some(t => model.includes(t) || preset.includes(t) || name.includes(t));
 }
 
@@ -797,7 +834,7 @@ export function isSolidMaterialNode(node: Node | undefined): boolean {
     const type = node.parameters?.material_type;
     const model = node.parameters?.material_model;
     if (type === 'Air' || type === 'JWL Charge' || type === 'Ideal Gas Charge' || type === 'Fluid') return false;
-    if (model === 'Ideal Gas' || model === 'JWL Detonation Gas' || model === 'Ideal Gas Charge' || model === 'Tait Water') return false;
+    if (isFluidOrGasModel(model)) return false;
     return true;
 }
 
@@ -1192,6 +1229,64 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         poissons_ratio: 0.26,
         yield_stress: 250.0e6,
         hardening_modulus: 1.0e9,
+        cs_C: 0.0,
+        cs_P: 5.0,
+        yeoh_c10: 0.5e6,
+        yeoh_c20: 0.0,
+        yeoh_c30: 0.0,
+        mr_c10: 0.3e6,
+        mr_c01: 0.1e6,
+        k_bulk: 1.0e9,
+        cdp_f_t0: 3.2e6,
+        cdp_f_c0: 35.0e6,
+        cdp_g_f: 150.0,
+        cdp_l_ch: 0.05,
+        hill_F: 0.5,
+        hill_G: 0.5,
+        hill_H: 0.5,
+        hill_L: 1.5,
+        hill_M: 1.5,
+        hill_N: 1.5,
+        hill_sigma_y0: 250.0e6,
+        foam_plateau_stress: 1.9e6,
+        foam_densification_strain: 0.65,
+        foam_alpha: 2.121,
+        foam_hardening: 0.8e6,
+        jh2_sigma_hel: 9.08e9,
+        jh2_p_hel: 5.65e9,
+        jh2_t_max: 0.37e9,
+        jh2_A: 0.96,
+        jh2_N: 0.65,
+        jh2_B: 0.35,
+        jh2_M: 1.00,
+        jh2_C: 0.009,
+        jh2_D1: 0.48,
+        jh2_D2: 0.48,
+        jh2_K1: 220.0e9,
+        jh2_K2: 361.0e9,
+        jh2_K3: 0.0,
+        jh2_beta: 1.0,
+        dp_cohesion: 1.0e4,
+        dp_friction_angle: 30.0,
+        dp_dilatancy_angle: 0.0,
+        dp_tensile_cutoff: 0.0,
+        dp_hardening_modulus: 0.0,
+        k0_earth_pressure: 0.5,
+        cap_X0: 1.0e5,
+        cap_W: 0.20,
+        cap_D1: 5.0e-7,
+        cap_D2: 1.0e-13,
+        cap_R: 2.5,
+        hb_sigma_ci: 200.0e6,
+        hb_mi: 32.0,
+        hb_gsi: 90.0,
+        hb_D: 0.0,
+        sg_Y0: 0.12e9,
+        sg_Ymax: 0.64e9,
+        sg_beta: 36.0,
+        sg_n: 0.45,
+        sg_bp: 2.8e-11,
+        sg_bT: 3.8e-4,
         failure_strain: 0.20,
         tensile_failure_stress: 400.0e6,
         enable_strain_erosion: false,
@@ -1296,6 +1391,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         rht_n_comp: 3.0,
         rht_betac: 0.032,
         rht_deltat: 0.036,
+        rht_f_el_c: 0.53,
         // K&C
         kc_auto_generate: true,
         kc_a0: 11.6e6,
@@ -1335,6 +1431,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         atm_pressure: 101325.0,
         atm_temperature: 288.15,
         gamma: 1.4,
+        ideal_R: 287.058,
         ambient_p: 101325.0,
         ambient_rho: 1.225,
         ambient_o2_fraction: 0.233,
@@ -7105,7 +7202,7 @@ export class StateManager {
                     const matNode = conn ? model.nodes.find(n => n.id === conn.fromNode) : null;
                     if (matNode && matNode.type === 'Material') {
                         const matType = matNode.parameters?.material_type || 'Air';
-                        if (matType === 'Ideal Gas Charge') {
+                        if (isIdealGasChargeModel(matNode.parameters?.material_model) || matType === 'Ideal Gas Charge') {
                             rho = Number(matNode.parameters?.ideal_rho_0 ?? 1630.0);
                         } else {
                             rho = Number(matNode.parameters?.rho ?? 1630.0);
@@ -7647,7 +7744,7 @@ function syncExplosiveParameters(node: Node, parameters: Record<string, any>, st
         }
         if (matNode && matNode.type === 'Material') {
             const matType = matNode.parameters?.material_type || 'Air';
-            if (matType === 'Ideal Gas Charge') {
+            if (isIdealGasChargeModel(matNode.parameters?.material_model) || matType === 'Ideal Gas Charge') {
                 rho = Number(matNode.parameters?.density ?? matNode.parameters?.ideal_rho_0 ?? 1630.0);
             } else {
                 rho = Number(matNode.parameters?.rho ?? matNode.parameters?.density ?? 1630.0);

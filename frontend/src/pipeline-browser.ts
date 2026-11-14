@@ -13,7 +13,8 @@ import { GaugeManagerModal } from './gauge-manager-modal.js';
 import { PipelineConnectionModal } from './pipeline-connection-modal.js';
 import { FEMSetupModal } from './fem-setup-modal.js';
 import { syncModelFEMSetup, FEMSetupConfig, FEMPartConfig, FEMEntitySet, FEMBoundaryCondition, FEMContactConfig, FEMSectionType, getPartColor } from './fem-setup-types.js';
-import { isAirMaterialNode, isJWLMaterialNode, isIdealGasMaterialNode, resolveRemapInheritance } from './serialization.js';
+import { isAirMaterialNode, isJWLMaterialNode, resolveRemapInheritance } from './serialization.js';
+import { isIdealGasAirMaterial, isIdealGasChargeMaterial, isGeomaterialModel, isWaterMaterialModel } from './mpm-presets.js';
 import { showModelErrorModal, getErrorBadgeTooltip } from './model-error-modal.js';
 
 interface EntityCategory {
@@ -2485,7 +2486,7 @@ export class PipelineBrowser {
 
             // 1. Atmospheric Air
             const airConn = model.connections?.find(c => (c.toNode === node.id && (c.toPort === 'air' || c.toPort === 'ambient_air')) || (c.fromNode === node.id && (c.fromPort === 'air' || c.fromPort === 'ambient_air')));
-            const airMatNode = airConn ? model.nodes.find(n => n.id === (airConn.toNode === node.id ? airConn.fromNode : airConn.toNode)) : model.nodes.find(n => n.type === 'Material' && (n.parameters?.preset?.includes('Air') || n.parameters?.material_model === 'Ideal Gas'));
+            const airMatNode = airConn ? model.nodes.find(n => n.id === (airConn.toNode === node.id ? airConn.fromNode : airConn.toNode)) : model.nodes.find(n => n.type === 'Material' && isIdealGasAirMaterial(n.parameters));
 
             const airItem = this.createMarineLayerItem({
                 branch: '├──',
@@ -2537,7 +2538,7 @@ export class PipelineBrowser {
 
             // 2. Water Column
             const waterConn = model.connections?.find(c => (c.toNode === node.id && (c.toPort === 'water' || c.toPort === 'seawater')) || (c.fromNode === node.id && (c.fromPort === 'water' || c.fromPort === 'seawater')));
-            const waterMatNode = waterConn ? model.nodes.find(n => n.id === (waterConn.toNode === node.id ? waterConn.fromNode : waterConn.toNode)) : model.nodes.find(n => n.type === 'Material' && (n.parameters?.material_model === 'Tait Water' || n.parameters?.preset?.includes('Water') || n.parameters?.preset?.includes('Seawater')));
+            const waterMatNode = waterConn ? model.nodes.find(n => n.id === (waterConn.toNode === node.id ? waterConn.fromNode : waterConn.toNode)) : model.nodes.find(n => n.type === 'Material' && isWaterMaterialModel(n.parameters));
 
             const waterItem = this.createMarineLayerItem({
                 branch: '├──',
@@ -2743,7 +2744,7 @@ export class PipelineBrowser {
             } else if (isFullMPMBed) {
                 bedTagText = 'Full MPM Bed';
                 bedMethodTag = 'MPM Soil (Full)';
-                bedSubtitle = 'Full-Domain Lagrangian MPM Soil Bed (Drucker-Prager)';
+                bedSubtitle = `Full-Domain Lagrangian MPM Soil Bed (${seabedNode?.parameters?.material_model || 'Drucker-Prager'})`;
                 bedTagColor = '#e11d48';
             } else if (isLocalCraterBed) {
                 bedTagText = 'Local MPM Crater';
@@ -2805,7 +2806,7 @@ export class PipelineBrowser {
                 icon: isPureFVBed ? '🌊' : '💥',
                 title: 'Soil Scour Zone',
                 methodTag: isPureFVBed ? 'Pure Eulerian FV' : 'MPM Soil',
-                subtitle: isPureFVBed ? 'Eulerian Multiphase Sediment (Flux across z = seabed_surface_z)' : 'Lagrangian MPM Soil, Drucker-Prager',
+                subtitle: isPureFVBed ? 'Eulerian Multiphase Sediment (Flux across z = seabed_surface_z)' : `Lagrangian MPM Soil, ${seabedNode?.parameters?.material_model || 'Drucker-Prager'}`,
                 tagText: isPureFVBed ? 'Eulerian Mud' : 'MPM Crater',
                 tagColor: isPureFVBed ? '#06b6d4' : '#ef4444',
                 nodeId: node.id,
@@ -5638,7 +5639,14 @@ export class PipelineBrowser {
             if (matModel.includes('Johnson-Cook') && matModel.includes('Mie-Grüneisen')) return 'JC + MG';
             if (matModel.includes('Johnson-Cook')) return 'Johnson-Cook';
             if (matModel.includes('Mie-Grüneisen')) return 'Mie-Grüneisen';
+            if (matModel.includes('Steinberg')) return 'Steinberg-G';
+            if (matModel.includes('Johnson-Holmquist')) return 'JH-2';
+            if (matModel.includes('Geological Cap')) return 'Geo Cap';
+            if (matModel.includes('Hoek-Brown')) return 'Hoek-Brown';
+            if (matModel.includes('Crushable Foam') || matModel.includes('Deshpande-Fleck')) return 'Crush Foam';
             if (matModel.includes('Drucker-Prager')) return 'Drucker-Prager';
+            if (matModel.includes('Mohr-Coulomb')) return 'Mohr-Coulomb';
+            if (matModel.includes('Davis Reactive')) return 'Davis Burn';
             if (matModel.includes('Tait')) return 'Tait Water';
             if (matModel.includes('Ideal Gas')) return 'Ideal Gas';
             if (matModel.includes('Linear Elastic')) return 'Linear Elastic';
@@ -5980,10 +5988,10 @@ export class PipelineBrowser {
             const waterConns = state.connections.filter(c => (c.fromNode === node.id || c.toNode === node.id) && (c.toPort === 'water' || c.fromPort === 'water' || c.toPort === 'seawater' || c.fromPort === 'seawater'));
             const seabedConns = state.connections.filter(c => (c.fromNode === node.id || c.toNode === node.id) && (c.toPort === 'seabed' || c.fromPort === 'seabed'));
             const matConns = state.connections.filter(c => (c.fromNode === node.id || c.toNode === node.id) && (c.toPort === 'material' || c.fromPort === 'material' || c.toPort === 'mat' || c.fromPort === 'mat' || c.toPort === 'in' || c.fromPort === 'out'));
-            const isAir = isAirMaterialNode(node) || isIdealGasMaterialNode(node);
-            const isWater = isWaterMaterialNode(node);
+            const isAir = isAirMaterialNode(node) || isIdealGasAirMaterial(node.parameters?.material_model);
+            const isWater = isWaterMaterialNode(node) || isWaterMaterialModel(node.parameters?.material_model);
             const isEnergetic = isExplosiveMaterialNode(node) || isJWLMaterialNode(node);
-            const isSeabed = isSeabedMaterialNode(node) || node.parameters?.material_model === 'Drucker-Prager' || node.parameters?.material_model === 'Mohr-Coulomb';
+            const isSeabed = isSeabedMaterialNode(node) || isGeomaterialModel(node.parameters?.material_model);
 
             // Ambient Air Chip
             if (isAir || airConns.length > 0) {
@@ -8160,8 +8168,8 @@ export class PipelineBrowser {
 
         if (body.type === 'MarineHarbourDomain') {
             const matNode = model.nodes.find(n => n.id === newMatId);
-            const isWater = matNode && (matNode.parameters?.material_model === 'Tait Water' || matNode.parameters?.preset?.includes('Water') || matNode.parameters?.preset?.includes('Seawater'));
-            const isAir = matNode && (matNode.parameters?.material_model === 'Ideal Gas' || matNode.parameters?.preset?.includes('Air'));
+            const isWater = matNode && (isWaterMaterialNode(matNode) || isWaterMaterialModel(matNode.parameters?.material_model));
+            const isAir = matNode && (isAirMaterialNode(matNode) || isIdealGasAirMaterial(matNode.parameters?.material_model));
             if (isWater) {
                 this.assignWaterToSolver(body, newMatId, model);
                 return;

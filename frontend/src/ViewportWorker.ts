@@ -6541,7 +6541,7 @@ function getSliceStats(slice: any, rawQty?: string): { min: number, max: number,
     return slice._cachedStats;
 }
 
-function recomputeActiveRanges(caller?: 'fem' | 'mpm' | 'phase' | 'slice' | 'config') {
+function recomputeActiveRanges(caller?: 'fem' | 'mpm' | 'phase' | 'slice' | 'config' | 'scale') {
     const activeQuantities = new Set<string>(Object.keys(quantityStyles));
     const qtyDynamicExtents: Record<string, { min: number, max: number, posMin: number, hasData: boolean }> = {};
 
@@ -9194,7 +9194,7 @@ function render2D() {
         const slice = enabledSlices2D[0];
         const sIdx = activeSlices2D.indexOf(slice);
         const cfg = getSliceConfig(sIdx >= 0 ? sIdx : 0);
-        const sQty = canonicalizeQuantity(cfg?.quantity || activeQuantity || 'pressure');
+        const sQty = canonicalizeQuantity(cfg?.quantities?.[0] || cfg?.quantity || 'pressure');
         const sStyle = getWorkerQuantityStyle(sQty);
         const [sMin, sMax] = getResolvedQuantityBounds(sQty);
         const sLevels = (sStyle.smoothContours || sStyle.contourLevels <= 1) ? 0 : sStyle.contourLevels;

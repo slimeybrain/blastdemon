@@ -52,6 +52,7 @@ int main() {
     }
 
     MaterialTable3D mat{};
+    mat.material_model = MPMMaterialModel::JohnsonCookMieGruneisen;
     mat.density = 8960.0f; // Copper density
     mat.youngs_modulus = 117.0e9f;
     mat.poissons_ratio = 0.35f;

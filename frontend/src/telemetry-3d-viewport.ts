@@ -3288,14 +3288,14 @@ export class Telemetry3DViewport {
     public updateQuantityContourStyle(qty: string, patch: Partial<QuantityContourStyle>): void {
         const vpNode = this.getViewportNode();
         if (!vpNode) return;
-        const { style, paramUpdates } = applyQuantityStyleUpdate(vpNode.parameters, qty, patch);
+        const { canonicalQty, nextStyle: style, updates: paramUpdates } = applyQuantityStyleUpdate(vpNode.parameters, qty, patch);
         const mergedParams = { ...vpNode.parameters, ...paramUpdates };
 
         if (!style.autoScale) {
             if (!this.latestQuantityRanges) this.latestQuantityRanges = {};
-            this.latestQuantityRanges[style.quantity] = [style.minVal, style.maxVal];
+            this.latestQuantityRanges[canonicalQty] = [style.minVal, style.maxVal];
             this.latestQuantityRanges[qty] = [style.minVal, style.maxVal];
-            if (style.quantity === 'velocity') this.latestQuantityRanges['speed'] = [style.minVal, style.maxVal];
+            if (canonicalQty === 'velocity') this.latestQuantityRanges['speed'] = [style.minVal, style.maxVal];
         }
 
         this.stateManager.updateNodeParametersInPlace(vpNode.id, paramUpdates);
@@ -9299,7 +9299,7 @@ export class Telemetry3DViewport {
                 const hasSoilMpm = mpmObjects.some(o =>
                     (o.material_name && String(o.material_name).toLowerCase().includes('soil')) ||
                     (o.name && String(o.name).toLowerCase().includes('seabed')) ||
-                    (o.material_model === 'DruckerPrager' || o.material_model === 'MohrCoulomb' || o.material_model === 'Drucker-Prager' || o.material_model === 'Mohr-Coulomb')
+                    (o.material_model === 'DruckerPrager' || o.material_model === 'MohrCoulomb' || o.material_model === 'Drucker-Prager' || o.material_model === 'Mohr-Coulomb' || o.material_model === 'Geological Cap (MAT_025)' || o.material_model === 'Geological Cap' || o.material_model === 'Hoek-Brown Rock')
                 );
                 if (!hasSoilMpm) {
                     const isFullDomain = (bedType === 'Full_Domain_MPM' || bedType === 'Pure_MPM');

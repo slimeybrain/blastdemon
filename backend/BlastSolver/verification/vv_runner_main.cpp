@@ -7,6 +7,7 @@
 #include "vv_mpm_compact_contact.hpp"
 #include "vv_mpm_sparse_grid.hpp"
 #include "vv_lee_tarver.hpp"
+#include "vv_mat_audit.hpp"
 #include <iostream>
 #include <vector>
 #include <iomanip>
@@ -20,6 +21,10 @@ int main(int argc, char** argv) {
 
     std::vector<Blast::VV::BenchmarkResult> all_results;
 
+    if (argc > 4 && std::string(argv[1]) == "--lt-trace") {
+        Blast::VV::run_lee_tarver_trace(std::atoi(argv[2]), std::atof(argv[3]), std::atof(argv[4]));
+        return 0;
+    }
     if (argc > 1 && std::string(argv[1]) == "--lee-tarver") {
         for (const auto& b : Blast::VV::run_lee_tarver_benchmarks()) {
             std::cout << b.id << " " << (b.pending ? "PENDING" : (b.passed ? "PASS" : "FAIL")) << " | " << b.summary << "\n" << b.details << "\n";
@@ -27,10 +32,24 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (argc > 1 && std::string(argv[1]) == "--mat-audit") {
+        int mat_fail = 0;
+        for (const auto& b : Blast::VV::run_material_audit_benchmarks()) {
+            if (!b.pending && !b.passed) mat_fail++;
+            std::cout << b.id << " " << (b.pending ? "PENDING" : (b.passed ? "PASS" : "FAIL")) << " | " << b.summary << "\n" << b.details << "\n\n";
+        }
+        return (mat_fail == 0) ? 0 : 1;
+    }
+
     // Run Level 1
     std::cout << "[RUNNING] Level 1: Unit & Single-Element / Constitutive Benchmarks...\n";
     auto l1 = Blast::VV::run_level_1_benchmarks();
     all_results.insert(all_results.end(), l1.begin(), l1.end());
+
+    // Run Material & Constitutive Audit Suite (VV-MAT-01 .. VV-MAT-12)
+    std::cout << "[RUNNING] Material Constitutive & 5-Solver Parity Suite (VV-MAT-AUDIT)...\n";
+    auto ma = Blast::VV::run_material_audit_benchmarks();
+    all_results.insert(all_results.end(), ma.begin(), ma.end());
 
     // Run Level 2
     std::cout << "[RUNNING] Level 2: Canonical Mesoscale Benchmarks...\n";

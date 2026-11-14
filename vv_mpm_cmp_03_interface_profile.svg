@@ -38,10 +38,10 @@
   <text x="627" y="408" text-anchor="middle" class="tick">0.435</text>
   <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
   <text x="765" y="408" text-anchor="middle" class="tick">0.455</text>
-  <path class="corridor-yellow" d="M 75 365 L 144 317 L 213 254 L 282 202 L 351 175 L 420 118 L 489 67.4 L 558 76.3 L 627 78 L 696 74.2 L 765 297 L 765 297 L 696 95.4 L 627 98.8 L 558 97.3 L 489 89.3 L 420 135 L 351 187 L 282 211 L 213 258 L 144 315 L 75 358 Z"/>
-  <path class="corridor-green" d="M 75 362 L 144 316 L 213 255 L 282 206 L 351 180 L 420 124 L 489 76.1 L 558 84.7 L 627 86.3 L 696 82.7 L 765 297 L 765 297 L 696 86.9 L 627 90.5 L 558 88.9 L 489 80.5 L 420 128 L 351 182 L 282 208 L 213 256 L 144 316 L 75 361 Z"/>
-  <path class="exact-curve" d="M 75 362 L 144 316 L 213 256 L 282 207 L 351 181 L 420 126 L 489 78.3 L 558 86.8 L 627 88.4 L 696 84.8 L 765 297 "/>
-  <path class="num-curve" d="M 75 362 L 144 316 L 213 256 L 282 207 L 351 181 L 420 126 L 489 78.3 L 558 86.8 L 627 88.4 L 696 84.8 L 765 297 "/>
+  <path class="corridor-yellow" d="M 75 365 L 144 317 L 213 254 L 282 202 L 351 175 L 420 118 L 489 67.4 L 558 76.2 L 627 77.9 L 696 74.1 L 765 297 L 765 297 L 696 95.3 L 627 98.8 L 558 97.3 L 489 89.3 L 420 135 L 351 187 L 282 211 L 213 258 L 144 315 L 75 358 Z"/>
+  <path class="corridor-green" d="M 75 362 L 144 316 L 213 256 L 282 206 L 351 180 L 420 125 L 489 76.1 L 558 84.6 L 627 86.2 L 696 82.6 L 765 297 L 765 297 L 696 86.8 L 627 90.4 L 558 88.9 L 489 80.5 L 420 128 L 351 182 L 282 208 L 213 256 L 144 316 L 75 361 Z"/>
+  <path class="exact-curve" d="M 75 362 L 144 316 L 213 256 L 282 207 L 351 181 L 420 126 L 489 78.3 L 558 86.7 L 627 88.3 L 696 84.7 L 765 297 "/>
+  <path class="num-curve" d="M 75 362 L 144 316 L 213 256 L 282 207 L 351 181 L 420 126 L 489 78.3 L 558 86.7 L 627 88.3 L 696 84.7 L 765 297 "/>
   <circle cx="75" cy="362" r="3.5" fill="#f0883e"/>
   <circle cx="144" cy="316" r="3.5" fill="#f0883e"/>
   <circle cx="213" cy="256" r="3.5" fill="#f0883e"/>
@@ -49,9 +49,9 @@
   <circle cx="351" cy="181" r="3.5" fill="#f0883e"/>
   <circle cx="420" cy="126" r="3.5" fill="#f0883e"/>
   <circle cx="489" cy="78.3" r="3.5" fill="#f0883e"/>
-  <circle cx="558" cy="86.8" r="3.5" fill="#f0883e"/>
-  <circle cx="627" cy="88.4" r="3.5" fill="#f0883e"/>
-  <circle cx="696" cy="84.8" r="3.5" fill="#f0883e"/>
+  <circle cx="558" cy="86.7" r="3.5" fill="#f0883e"/>
+  <circle cx="627" cy="88.3" r="3.5" fill="#f0883e"/>
+  <circle cx="696" cy="84.7" r="3.5" fill="#f0883e"/>
   <circle cx="765" cy="297" r="3.5" fill="#f0883e"/>
   <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
   <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>

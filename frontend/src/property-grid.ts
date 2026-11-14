@@ -62,9 +62,22 @@ const NUMERIC_KEYS = new Set([
     'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
     'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
-    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat', 'rht_f_el_c',
     'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
     'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
+    'cs_C', 'cs_P', 'ideal_R',
+    'yeoh_c10', 'yeoh_c20', 'yeoh_c30', 'mr_c10', 'mr_c01', 'k_bulk',
+    'cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch',
+    'hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0',
+    'cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R',
+    'hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D',
+    'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening',
+    'jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max', 'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C',
+    'jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta',
+    'sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT',
+    'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant',
+    'dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus',
+    'soil_density', 'soil_friction_angle', 'soil_cohesion', 'k0_earth_pressure', 'friction_angle', 'cohesion', 'dilation_angle', 'tensile_cutoff',
     'davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0',
     'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det',
     'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13',
@@ -5961,10 +5974,12 @@ export class PropertyGrid {
                 if (presetData.category === 'Ideal Gas Presets') {
                     updates['material_type'] = 'Air';
                     updates['material_model'] = 'Ideal Gas';
+                    const rSpec = presetData.ideal_R ?? 287.058;
+                    updates['ideal_R'] = rSpec;
                     if (presetData.atm_pressure !== undefined) {
                         updates['ambient_p'] = presetData.atm_pressure;
                         const t = presetData.atm_temperature || 288.15;
-                        const rho = presetData.density ?? (presetData.atm_pressure / (287.058 * t));
+                        const rho = presetData.density ?? (presetData.atm_pressure / (rSpec * t));
                         updates['density'] = rho;
                         updates['ambient_rho'] = rho;
                     }
@@ -5999,6 +6014,10 @@ export class PropertyGrid {
             if (value === 'Ideal Gas') {
                 updates['material_model'] = 'Ideal Gas';
                 updates['material_type'] = 'Air';
+                delete updates['composition'];
+                delete updates['solid_model'];
+                delete updates['burn_model'];
+                delete updates['product_model'];
                 const defPreset = 'Air (Standard STP, gamma=1.4)';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
@@ -6006,15 +6025,36 @@ export class PropertyGrid {
                     Object.assign(updates, presetData);
                     const p = presetData.atm_pressure ?? 101325.0;
                     const t = presetData.atm_temperature || 288.15;
-                    const rho = presetData.density ?? (p / (287.058 * t));
+                    const rSpec = presetData.ideal_R ?? 287.058;
+                    const rho = presetData.density ?? (p / (rSpec * t));
+                    updates['ideal_R'] = rSpec;
                     updates['density'] = rho;
                     updates['ambient_rho'] = rho;
                     updates['ambient_p'] = p;
+                }
+            } else if (value === 'Tait Water') {
+                updates['material_model'] = 'Tait Water';
+                updates['material_type'] = 'Fluid';
+                delete updates['composition'];
+                delete updates['solid_model'];
+                delete updates['burn_model'];
+                delete updates['product_model'];
+                const defPreset = 'Liquid Water (Isentropic Modified Tait)';
+                updates['preset'] = defPreset;
+                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                if (presetData) {
+                    Object.assign(updates, presetData);
+                    updates['density'] = presetData.density ?? 1000.0;
+                    updates['ambient_rho'] = presetData.density ?? 1000.0;
+                    updates['ambient_p'] = 101325.0;
                 }
             } else if (value === 'JWL Detonation Gas') {
                 updates['material_model'] = 'JWL Detonation Gas';
                 updates['material_type'] = 'JWL Charge';
                 updates['composition'] = 'TNT';
+                delete updates['solid_model'];
+                delete updates['burn_model'];
+                delete updates['product_model'];
                 const defPreset = 'TNT (Trinitrotoluene)';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
@@ -6023,6 +6063,9 @@ export class PropertyGrid {
                 updates['material_model'] = 'Ideal Gas Charge';
                 updates['material_type'] = 'Ideal Gas Charge';
                 updates['composition'] = 'TNT';
+                delete updates['solid_model'];
+                delete updates['burn_model'];
+                delete updates['product_model'];
                 const defPreset = 'TNT (Ideal Gas Equivalent)';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
@@ -6049,17 +6092,30 @@ export class PropertyGrid {
                 updates['product_model'] = presetData?.product_model || 'JWL Product Gas';
             } else if (value === 'CREST Reactive Burn') {
                 updates['material_model'] = 'CREST Reactive Burn';
-                delete updates['material_type'];
-                const defPreset = 'Custom';
+                updates['material_type'] = 'JWL Charge';
+                const defPreset = getDefaultPresetForModel(value) || 'Custom';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
                 if (presetData) Object.assign(updates, presetData);
                 updates['solid_model'] = presetData?.solid_model || 'Davis Solid Reactant';
                 updates['burn_model'] = presetData?.burn_model || 'CREST Shock Entropy Kinetics';
                 updates['product_model'] = presetData?.product_model || 'Davis Detonation Product';
+            } else if (value === 'Davis Reactive Burn') {
+                updates['material_model'] = 'Davis Reactive Burn';
+                updates['material_type'] = 'JWL Charge';
+                const defPreset = getDefaultPresetForModel(value) || 'Custom';
+                updates['preset'] = defPreset;
+                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                if (presetData) Object.assign(updates, presetData);
+                updates['solid_model'] = presetData?.solid_model || 'Davis Solid Reactant';
+                updates['burn_model'] = presetData?.burn_model || 'Davis Single-Term Arrhenius Burn';
+                updates['product_model'] = presetData?.product_model || 'Davis Detonation Product';
             } else {
                 delete updates['material_type'];
                 delete updates['composition'];
+                delete updates['solid_model'];
+                delete updates['burn_model'];
+                delete updates['product_model'];
                 const defPreset = getDefaultPresetForModel(value);
                 if (defPreset) {
                     updates['preset'] = defPreset;
@@ -6069,22 +6125,30 @@ export class PropertyGrid {
                     }
                 }
             }
-        } else if (node.type === 'Material' && (key === 'atm_pressure' || key === 'atm_temperature' || key === 'initial_temperature')) {
+        } else if (node.type === 'Material' && (key === 'atm_pressure' || key === 'atm_temperature' || key === 'initial_temperature' || key === 'ideal_R' || key === 'gamma')) {
             const p = Number(key === 'atm_pressure' ? value : (node.parameters['atm_pressure'] ?? 101325.0));
             const t = Number((key === 'atm_temperature' || key === 'initial_temperature') ? value : (node.parameters['initial_temperature'] ?? node.parameters['atm_temperature'] ?? 288.15));
+            const rSpec = Math.max(1.0, Number(key === 'ideal_R' ? value : (node.parameters['ideal_R'] ?? 287.058)));
             updates['initial_temperature'] = t;
             updates['atm_temperature'] = t;
             if (node.parameters['material_model'] === 'Ideal Gas' || node.parameters['material_type'] === 'Air') {
-                const rho = p / (287.058 * t);
+                if (key === 'gamma') updates['ideal_gamma'] = Number(value);
+                const rho = p / (rSpec * Math.max(1.0, t));
                 updates['density'] = rho;
                 updates['ambient_rho'] = rho;
                 updates['ambient_p'] = p;
             } else if (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge') {
-                const gamma = Number(node.parameters['ideal_gamma'] ?? 1.4);
-                const cv = 287.058 / Math.max(0.01, gamma - 1.0);
-                const e0 = cv * t;
-                updates['ideal_e_0'] = e0;
-                updates['detonation_energy'] = e0;
+                const gamma = Number(key === 'gamma' ? value : (node.parameters['ideal_gamma'] ?? 1.4));
+                if (key === 'gamma') updates['ideal_gamma'] = gamma;
+                const cv = rSpec / Math.max(0.01, gamma - 1.0);
+                if (key === 'ideal_R') {
+                    const e0 = Number(node.parameters['ideal_e_0'] ?? node.parameters['detonation_energy'] ?? 4.29e6);
+                    updates['initial_temperature'] = e0 / cv;
+                } else {
+                    const e0 = cv * t;
+                    updates['ideal_e_0'] = e0;
+                    updates['detonation_energy'] = e0;
+                }
             } else {
                 updates['T_room'] = t;
                 if (node.parameters['davis_t0'] !== undefined) updates['davis_t0'] = t;
@@ -6092,17 +6156,21 @@ export class PropertyGrid {
             updates['preset'] = 'Custom';
         } else if (node.type === 'Material' && (key === 'ideal_e_0' || key === 'detonation_energy') && (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge')) {
             const e0 = Number(value);
-            const gamma = Number(node.parameters['ideal_gamma'] ?? 1.4);
-            const cv = 287.058 / Math.max(0.01, gamma - 1.0);
+            const gamma = Number(node.parameters['ideal_gamma'] ?? node.parameters['gamma'] ?? 1.4);
+            const rSpec = Math.max(1.0, Number(node.parameters['ideal_R'] ?? 287.058));
+            const cv = rSpec / Math.max(0.01, gamma - 1.0);
             const t = e0 / cv;
             updates['ideal_e_0'] = e0;
             updates['detonation_energy'] = e0;
             updates['initial_temperature'] = t;
             updates['preset'] = 'Custom';
-        } else if (node.type === 'Material' && key === 'ideal_gamma' && (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge')) {
+        } else if (node.type === 'Material' && (key === 'ideal_gamma' || key === 'gamma') && (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge')) {
             const gamma = Number(value);
-            const cv = 287.058 / Math.max(0.01, gamma - 1.0);
-            const e0 = Number(node.parameters['ideal_e_0'] ?? 4.29e6);
+            const rSpec = Math.max(1.0, Number(node.parameters['ideal_R'] ?? 287.058));
+            const cv = rSpec / Math.max(0.01, gamma - 1.0);
+            const e0 = Number(node.parameters['ideal_e_0'] ?? node.parameters['detonation_energy'] ?? 4.29e6);
+            updates['ideal_gamma'] = gamma;
+            updates['gamma'] = gamma;
             updates['initial_temperature'] = e0 / cv;
             updates['preset'] = 'Custom';
         } else if (node.type === 'Material' && key === 'density' && node.parameters['material_model'] === 'Ideal Gas') {
@@ -6495,7 +6563,7 @@ export class PropertyGrid {
             const matModel = node.parameters['material_model'] || 'Hypoelastic';
 
             if (matModel === 'Ideal Gas') {
-                return ['ambient_air_target', 'material_model', 'preset', 'density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma'];
+                return ['ambient_air_target', 'material_model', 'preset', 'density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'ideal_R'];
             } else if (matModel === 'JWL Detonation Gas') {
                 return [
                     'material_model', 'preset', 'composition', 'rho', 'detonation_energy', 'det_vel', 'initial_temperature',
@@ -6505,7 +6573,7 @@ export class PropertyGrid {
                     'afterburn_ambient_o2_fraction'
                 ];
             } else if (matModel === 'Ideal Gas Charge') {
-                return ['material_model', 'preset', 'composition', 'ideal_rho_0', 'ideal_e_0', 'initial_temperature', 'ideal_gamma'];
+                return ['material_model', 'preset', 'composition', 'ideal_rho_0', 'ideal_e_0', 'initial_temperature', 'ideal_gamma', 'ideal_R'];
             }
 
             if (!node.parameters['material_model']) {
@@ -6568,6 +6636,15 @@ export class PropertyGrid {
                 ];
             }
 
+            const commonErosionFlawsAniso = [
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+            ];
+
             if (matModelResolved === 'Concrete Damage Plasticity (CDP)') {
                 return [
                     'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch',
@@ -6579,8 +6656,25 @@ export class PropertyGrid {
             if (matModelResolved === 'Hill48 Orthotropic') {
                 return [
                     'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0',
+                    'failure_strain', 'tensile_failure_stress',
                     'enable_strain_erosion', 'erosion_strain',
                     'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
+                ];
+            }
+
+            if (matModelResolved === 'Yeoh Hyperelastic') {
+                return [
+                    'material_model', 'preset', 'transfer_scheme', 'density', 'yeoh_c10', 'yeoh_c20', 'yeoh_c30', 'k_bulk',
+                    'failure_strain', 'tensile_failure_stress',
+                    ...commonErosionFlawsAniso
+                ];
+            }
+
+            if (matModelResolved === 'Mooney-Rivlin Hyperelastic') {
+                return [
+                    'material_model', 'preset', 'transfer_scheme', 'density', 'mr_c10', 'mr_c01', 'k_bulk',
+                    'failure_strain', 'tensile_failure_stress',
+                    ...commonErosionFlawsAniso
                 ];
             }
 
@@ -6599,14 +6693,21 @@ export class PropertyGrid {
                     'failure_strain', 'tensile_failure_stress',
                     'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m',
                     'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
-                    'T_melt', 'T_room', 'Cp',
+                    'T_melt', 'T_room', 'initial_temperature', 'Cp',
                     'mg_gamma0', 'mg_c0', 'mg_s',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                    ...commonErosionFlawsAniso
+                ];
+            }
+
+            if (matModelResolved === 'Steinberg-Guinan') {
+                return [
+                    'material_model', 'preset', 'transfer_scheme',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT',
+                    'T_melt', 'T_room', 'initial_temperature', 'Cp',
+                    'mg_gamma0', 'mg_c0', 'mg_s',
+                    'failure_strain', 'tensile_failure_stress',
+                    ...commonErosionFlawsAniso
                 ];
             }
 
@@ -6618,13 +6719,8 @@ export class PropertyGrid {
                     'directional_crack_band', 'nonlocal_radius',
                     'failure_strain', 'tensile_failure_stress',
                     'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
-                    'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                    'rht_f_el_c', 'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+                    ...commonErosionFlawsAniso
                 ];
             }
 
@@ -6640,14 +6736,7 @@ export class PropertyGrid {
                 if (node.parameters['kc_auto_generate'] === false) {
                     keys.push('kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega');
                 }
-                keys.push(
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-                );
+                keys.push(...commonErosionFlawsAniso);
                 return keys;
             }
 
@@ -6659,22 +6748,62 @@ export class PropertyGrid {
                     'directional_crack_band', 'nonlocal_radius',
                     'failure_strain', 'tensile_failure_stress',
                     'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_stress_erosion', 'erosion_stress',
-                    'enable_timestep_erosion', 'timestep_erosion_factor',
-                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                    ...commonErosionFlawsAniso
                 ];
             }
 
-            if (matModelResolved === 'Deshpande-Fleck Foam') {
+            if (matModelResolved === 'Crushable Foam' || matModelResolved === 'Deshpande-Fleck Foam') {
                 return [
                     'material_model', 'preset', 'transfer_scheme',
                     'density', 'youngs_modulus', 'poissons_ratio',
+                    'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening',
                     'yield_stress', 'hardening_modulus',
                     'failure_strain', 'tensile_failure_stress',
+                    'enable_strain_erosion', 'erosion_strain',
                     'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
+                ];
+            }
+
+            if (matModelResolved === 'Johnson-Holmquist JH-2') {
+                return [
+                    'material_model', 'preset', 'transfer_scheme',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max',
+                    'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C',
+                    'jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta',
+                    'failure_strain', 'tensile_failure_stress',
+                    ...commonErosionFlawsAniso
+                ];
+            }
+
+            if (['Drucker-Prager', 'DruckerPrager', 'Mohr-Coulomb', 'MohrCoulomb', 'Mohr-Coulomb Geotech'].includes(matModelResolved)) {
+                return [
+                    'material_model', 'preset', 'transfer_scheme',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus',
+                    'failure_strain', 'tensile_failure_stress',
+                    ...commonErosionFlawsAniso
+                ];
+            }
+
+            if (matModelResolved === 'Geological Cap (MAT_025)' || matModelResolved === 'Geological Cap') {
+                return [
+                    'material_model', 'preset', 'transfer_scheme',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff',
+                    'cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R',
+                    'failure_strain', 'tensile_failure_stress',
+                    ...commonErosionFlawsAniso
+                ];
+            }
+
+            if (matModelResolved === 'Hoek-Brown Rock') {
+                return [
+                    'material_model', 'preset', 'transfer_scheme',
+                    'density', 'youngs_modulus', 'poissons_ratio',
+                    'hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D', 'dp_dilatancy_angle',
+                    'failure_strain', 'tensile_failure_stress',
+                    ...commonErosionFlawsAniso
                 ];
             }
 
@@ -6682,15 +6811,10 @@ export class PropertyGrid {
             return [
                 'material_model', 'preset', 'transfer_scheme',
                 'density', 'youngs_modulus', 'poissons_ratio',
-                'yield_stress', 'hardening_modulus',
+                'yield_stress', 'hardening_modulus', 'cs_C', 'cs_P',
                 'failure_strain', 'tensile_failure_stress',
                 'directional_crack_band', 'nonlocal_radius',
-                'enable_strain_erosion', 'erosion_strain',
-                'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor',
-                'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
-                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                ...commonErosionFlawsAniso
             ];
         }
 
@@ -7143,7 +7267,7 @@ export class PropertyGrid {
                 addGroup('mat_ambient', 'Atmospheric & Ambient EOS', [
                     'ambient_air_target',
                     'material_model', 'preset',
-                    'density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma'
+                    'density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'ideal_R'
                 ]);
                 return groups;
             }
@@ -7165,8 +7289,62 @@ export class PropertyGrid {
             if (matModel === 'Ideal Gas Charge') {
                 addGroup('mat_idealgas', 'Ideal Gas Blast EOS', [
                     'material_model', 'preset',
-                    'composition', 'ideal_rho_0', 'ideal_e_0', 'initial_temperature', 'ideal_gamma'
+                    'composition', 'ideal_rho_0', 'ideal_e_0', 'initial_temperature', 'ideal_gamma', 'ideal_R'
                 ]);
+                return groups;
+            }
+
+            if (matModel === 'Tait Water') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_tait', 'Modified Tait Fluid EOS', [
+                    'density', 'initial_temperature',
+                    'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str',
+                    'bulk_viscosity_b1', 'bulk_viscosity_b2'
+                ]);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                return groups;
+            }
+
+            if (matModel === 'Concrete Damage Plasticity (CDP)') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+                addGroup('mat_cdp', 'Concrete Damage Plasticity (CDP)', ['cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                return groups;
+            }
+
+            if (matModel === 'Hill48 Orthotropic') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+                addGroup('mat_hill48', 'Hill48 Anisotropic Yield Tensor', ['hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0']);
+                addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                return groups;
+            }
+
+            if (matModel === 'Yeoh Hyperelastic' || matModel === 'Mooney-Rivlin Hyperelastic') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                if (matModel === 'Yeoh Hyperelastic') {
+                    addGroup('mat_hyperelastic', 'Yeoh Hyperelastic Strain Energy', ['density', 'yeoh_c10', 'yeoh_c20', 'yeoh_c30', 'k_bulk']);
+                } else {
+                    addGroup('mat_hyperelastic', 'Mooney-Rivlin Strain Energy', ['density', 'mr_c10', 'mr_c01', 'k_bulk']);
+                }
+                addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
+                    addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
+                }
+                if (visibleKeys.some(k => k === 'enable_anisotropy' || k.startsWith('anisotropy_'))) {
+                    addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', ['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z']);
+                }
                 return groups;
             }
 
@@ -7200,6 +7378,24 @@ export class PropertyGrid {
                 return groups;
             }
 
+            if (matModel === 'Steinberg-Guinan') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+                addGroup('mat_sg_plasticity', 'Steinberg-Guinan High-Rate Plasticity', ['sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT', 'T_melt', 'T_room', 'initial_temperature', 'Cp']);
+                addGroup('mat_shock_eos', 'Mie-Grüneisen Shock EOS', ['mg_gamma0', 'mg_c0', 'mg_s']);
+                addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
+                    addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
+                }
+                if (visibleKeys.some(k => k === 'enable_anisotropy' || k.startsWith('anisotropy_'))) {
+                    addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', ['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z']);
+                }
+                return groups;
+            }
+
             if (['RHT Concrete', 'Karagozian & Case (K&C)', 'K&C Concrete', 'CSCM Concrete'].includes(matModel)) {
                 addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
                 addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
@@ -7221,10 +7417,91 @@ export class PropertyGrid {
                 return groups;
             }
 
+            if (matModel === 'Crushable Foam' || matModel === 'Deshpande-Fleck Foam') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+                addGroup('mat_foam', 'Crushable Foam Compaction (*MAT_063)', ['foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening', 'yield_stress', 'hardening_modulus']);
+                addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                return groups;
+            }
+
+            if (matModel === 'Johnson-Holmquist JH-2') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+                addGroup('mat_jh2_strength', 'JH-2 Strength & HEL Envelope (*MAT_110)', ['jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max', 'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C']);
+                addGroup('mat_jh2_eos', 'JH-2 Polynomial EOS & Damage', ['jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta']);
+                addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
+                    addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
+                }
+                if (visibleKeys.some(k => k === 'enable_anisotropy' || k.startsWith('anisotropy_'))) {
+                    addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', ['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z']);
+                }
+                return groups;
+            }
+
+            if (['Drucker-Prager', 'DruckerPrager', 'Mohr-Coulomb', 'MohrCoulomb', 'Mohr-Coulomb Geotech'].includes(matModel)) {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+                addGroup('mat_geotech', 'Geotechnical Friction & Cohesion (*MAT_173)', ['dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus']);
+                addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
+                    addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
+                }
+                if (visibleKeys.some(k => k === 'enable_anisotropy' || k.startsWith('anisotropy_'))) {
+                    addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', ['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z']);
+                }
+                return groups;
+            }
+
+            if (matModel === 'Geological Cap (MAT_025)' || matModel === 'Geological Cap') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+                addGroup('mat_geotech', 'Shear Failure Envelope', ['dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff']);
+                addGroup('mat_cap', 'Elliptic Volumetric Hardening Cap (*MAT_025)', ['cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R']);
+                addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
+                    addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
+                }
+                if (visibleKeys.some(k => k === 'enable_anisotropy' || k.startsWith('anisotropy_'))) {
+                    addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', ['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z']);
+                }
+                return groups;
+            }
+
+            if (matModel === 'Hoek-Brown Rock') {
+                addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
+                addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
+                addGroup('mat_hoekbrown', 'Hoek-Brown Generalized Rock Mass', ['hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D', 'dp_dilatancy_angle']);
+                addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
+                if (visibleKeys.some(k => k.includes('erosion'))) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                }
+                if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
+                    addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
+                }
+                if (visibleKeys.some(k => k === 'enable_anisotropy' || k.startsWith('anisotropy_'))) {
+                    addGroup('mat_aniso', 'Directional Anisotropy & Orthotropy', ['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z']);
+                }
+                return groups;
+            }
+
             // Default Hypoelastic / General Solid
             addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
             addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
-            addGroup('mat_strength', 'Plastic Yield & Hardening', ['yield_stress', 'hardening_modulus']);
+            addGroup('mat_strength', 'Plastic Yield, Hardening & Cowper-Symonds Rate (*MAT_024)', ['yield_stress', 'hardening_modulus', 'cs_C', 'cs_P']);
             addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius']);
             if (visibleKeys.some(k => k.includes('erosion'))) {
                 addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));

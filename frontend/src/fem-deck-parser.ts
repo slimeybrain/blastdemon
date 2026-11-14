@@ -243,15 +243,75 @@ export class FEMDeckParser {
                 const pr = parseFloat(fields[3] || '0.30');
                 rawMaterials.set(mid, {
                     mat_id: mid,
-                    name: `Elastic_MAT_${mid}`,
+                    name: `LinearElastic_MAT_${mid}`,
                     source: 'deck',
-                    model_type: 'Hypoelastic',
+                    model_type: 'Linear Elastic',
                     density: ro,
                     youngs_modulus: e,
                     poissons_ratio: pr,
-                    yield_stress: 400e6,
-                    parameters: { density: ro, youngs_modulus: e, poissons_ratio: pr }
+                    yield_stress: 0,
+                    parameters: { material_model: 'Linear Elastic', density: ro, youngs_modulus: e, poissons_ratio: pr, yield_stress: 0 }
                 });
+            }
+            else if (currentKeyword.startsWith('*MAT_PLASTIC_KINEMATIC') || currentKeyword.startsWith('*MAT_003') || currentKeyword.startsWith('*MAT_PIECEWISE_LINEAR_PLASTICITY') || currentKeyword.startsWith('*MAT_024')) {
+                const isMat024 = currentKeyword.startsWith('*MAT_PIECEWISE') || currentKeyword.startsWith('*MAT_024');
+                const fields = this.splitFields(rawLine);
+                if (fields.length > 0 && !isNaN(parseInt(fields[0], 10))) {
+                    const mid = parseInt(fields[0] || '1', 10);
+                    const ro = parseFloat(fields[1] || '7850');
+                    const e = parseFloat(fields[2] || '210e9');
+                    const pr = parseFloat(fields[3] || '0.30');
+                    const sigy = parseFloat(fields[4] || '250e6');
+                    const etan = parseFloat(fields[5] || '1.0e9');
+                    const csC = isMat024 ? parseFloat(fields[6] || '0') : 0;
+                    const csP = isMat024 ? parseFloat(fields[7] || '5') : 5;
+                    rawMaterials.set(mid, {
+                        mat_id: mid,
+                        name: `${isMat024 ? 'MAT024' : 'MAT003'}_MAT_${mid}`,
+                        source: 'deck',
+                        model_type: 'Hypoelastic',
+                        density: ro,
+                        youngs_modulus: e,
+                        poissons_ratio: pr,
+                        yield_stress: sigy,
+                        hardening_modulus: etan,
+                        parameters: {
+                            material_model: 'Hypoelastic',
+                            density: ro, youngs_modulus: e, poissons_ratio: pr,
+                            yield_stress: sigy, hardening_modulus: etan,
+                            cs_C: csC, cs_P: csP
+                        }
+                    });
+                }
+            }
+            else if (currentKeyword.startsWith('*MAT_STEINBERG') || currentKeyword.startsWith('*MAT_011')) {
+                const fields = this.splitFields(rawLine);
+                const mid = parseInt(fields[0] || '1', 10);
+                if (!rawMaterials.has(mid) && fields.length >= 4 && !isNaN(mid)) {
+                    const ro = parseFloat(fields[1] || '8930');
+                    const g0 = parseFloat(fields[2] || '47.7e9');
+                    const sig0 = parseFloat(fields[3] || '120e6');
+                    const beta = parseFloat(fields[4] || '36.0');
+                    const n = parseFloat(fields[5] || '0.45');
+                    const ymax = parseFloat(fields[7] || '640e6');
+                    const nu = 0.34;
+                    const e = 2.0 * g0 * (1.0 + nu);
+                    rawMaterials.set(mid, {
+                        mat_id: mid,
+                        name: `SteinbergGuinan_MAT_${mid}`,
+                        source: 'deck',
+                        model_type: 'Steinberg-Guinan',
+                        density: ro,
+                        youngs_modulus: e,
+                        poissons_ratio: nu,
+                        yield_stress: sig0,
+                        parameters: {
+                            material_model: 'Steinberg-Guinan',
+                            density: ro, youngs_modulus: e, poissons_ratio: nu,
+                            sg_Y0: sig0, sg_Ymax: ymax, sg_beta: beta, sg_n: n, sg_bp: 2.8e-11, sg_bT: 3.8e-4
+                        }
+                    });
+                }
             }
             else if (currentKeyword.startsWith('*MAT_JOHNSON_COOK') || currentKeyword.startsWith('*MAT_015')) {
                 const fields = this.splitFields(rawLine);
@@ -267,16 +327,191 @@ export class FEMDeckParser {
                     mat_id: mid,
                     name: `JohnsonCook_MAT_${mid}`,
                     source: 'deck',
-                    model_type: 'JohnsonCook',
+                    model_type: 'Johnson-Cook + Mie-Grüneisen',
                     density: ro,
                     youngs_modulus: e,
                     poissons_ratio: pr,
                     yield_stress: A,
                     parameters: {
+                        material_model: 'Johnson-Cook + Mie-Grüneisen',
                         density: ro, youngs_modulus: e, poissons_ratio: pr,
                         jc_A: A, jc_B: B, jc_n: n, jc_C: C
                     }
                 });
+            }
+            else if (currentKeyword.startsWith('*MAT_GEOLOGIC_CAP') || currentKeyword.startsWith('*MAT_025')) {
+                const fields = this.splitFields(rawLine);
+                const mid = parseInt(fields[0] || '1', 10);
+                if (!rawMaterials.has(mid) && fields.length >= 4 && !isNaN(mid)) {
+                    const ro = parseFloat(fields[1] || '2000');
+                    const bulk = parseFloat(fields[2] || '500e6');
+                    const shear = parseFloat(fields[3] || '230e6');
+                    const e = (9.0 * bulk * shear) / Math.max(1.0, 3.0 * bulk + shear);
+                    const pr = Math.max(0.0, Math.min(0.49, (3.0 * bulk - 2.0 * shear) / Math.max(1.0, 6.0 * bulk + 2.0 * shear)));
+                    rawMaterials.set(mid, {
+                        mat_id: mid,
+                        name: `GeoCap_MAT_${mid}`,
+                        source: 'deck',
+                        model_type: 'Geological Cap (MAT_025)',
+                        density: ro,
+                        youngs_modulus: e,
+                        poissons_ratio: pr,
+                        parameters: {
+                            material_model: 'Geological Cap (MAT_025)',
+                            density: ro, youngs_modulus: e, poissons_ratio: pr,
+                            cap_X0: 1.0e5, cap_W: 0.20, cap_D1: 5.0e-7, cap_D2: 1.0e-13, cap_R: 2.5
+                        }
+                    });
+                }
+            }
+            else if (currentKeyword.startsWith('*MAT_MOONEY') || currentKeyword.startsWith('*MAT_027')) {
+                const fields = this.splitFields(rawLine);
+                const mid = parseInt(fields[0] || '1', 10);
+                if (!rawMaterials.has(mid) && fields.length >= 5 && !isNaN(mid)) {
+                    const ro = parseFloat(fields[1] || '1100');
+                    const pr = parseFloat(fields[2] || '0.495');
+                    const c10 = parseFloat(fields[3] || '0.3e6');
+                    const c01 = parseFloat(fields[4] || '0.1e6');
+                    const g0 = 2.0 * (c10 + c01);
+                    const kBulk = Math.max(1e6, (2.0 * g0 * (1.0 + pr)) / Math.max(1e-4, 3.0 * (1.0 - 2.0 * pr)));
+                    rawMaterials.set(mid, {
+                        mat_id: mid,
+                        name: `MooneyRivlin_MAT_${mid}`,
+                        source: 'deck',
+                        model_type: 'Hyperelastic (Mooney-Rivlin)',
+                        density: ro,
+                        youngs_modulus: 3.0 * g0,
+                        poissons_ratio: pr,
+                        parameters: {
+                            material_model: 'Hyperelastic (Mooney-Rivlin)',
+                            density: ro, mr_c10: c10, mr_c01: c01, k_bulk: kBulk, poissons_ratio: pr
+                        }
+                    });
+                }
+            }
+            else if (currentKeyword.startsWith('*MAT_SIMPLIFIED_RUBBER') || currentKeyword.startsWith('*MAT_181')) {
+                const fields = this.splitFields(rawLine);
+                const mid = parseInt(fields[0] || '1', 10);
+                if (!rawMaterials.has(mid) && fields.length >= 3 && !isNaN(mid)) {
+                    const ro = parseFloat(fields[1] || '1100');
+                    const kBulk = parseFloat(fields[2] || '2.0e9');
+                    rawMaterials.set(mid, {
+                        mat_id: mid,
+                        name: `YeohHyper_MAT_${mid}`,
+                        source: 'deck',
+                        model_type: 'Hyperelastic (Yeoh)',
+                        density: ro,
+                        youngs_modulus: 3.0e6,
+                        poissons_ratio: 0.495,
+                        parameters: {
+                            material_model: 'Hyperelastic (Yeoh)',
+                            density: ro, yeoh_c10: 0.5e6, yeoh_c20: 0.0, yeoh_c30: 0.0, k_bulk: kBulk
+                        }
+                    });
+                }
+            }
+            else if (currentKeyword.startsWith('*MAT_CRUSHABLE_FOAM') || currentKeyword.startsWith('*MAT_063')) {
+                const fields = this.splitFields(rawLine);
+                const mid = parseInt(fields[0] || '1', 10);
+                if (!rawMaterials.has(mid) && fields.length >= 4 && !isNaN(mid)) {
+                    const ro = parseFloat(fields[1] || '150');
+                    const e = parseFloat(fields[2] || '45e6');
+                    const pr = parseFloat(fields[3] || '0.0');
+                    const tsc = parseFloat(fields[5] || '1.9e6');
+                    rawMaterials.set(mid, {
+                        mat_id: mid,
+                        name: `CrushableFoam_MAT_${mid}`,
+                        source: 'deck',
+                        model_type: 'Crushable Foam',
+                        density: ro,
+                        youngs_modulus: e,
+                        poissons_ratio: pr,
+                        parameters: {
+                            material_model: 'Crushable Foam',
+                            density: ro, youngs_modulus: e, poissons_ratio: pr,
+                            foam_plateau_stress: tsc > 0 ? tsc : 1.9e6, foam_densification_strain: 0.65, foam_alpha: 2.121, foam_hardening: 0.8e6
+                        }
+                    });
+                }
+            }
+            else if (currentKeyword.startsWith('*MAT_CONCRETE_DAMAGE') || currentKeyword.startsWith('*MAT_072')) {
+                const fields = this.splitFields(rawLine);
+                const mid = parseInt(fields[0] || '1', 10);
+                if (!rawMaterials.has(mid) && fields.length >= 3 && !isNaN(mid)) {
+                    const ro = parseFloat(fields[1] || '2400');
+                    const pr = parseFloat(fields[2] || '0.20');
+                    const fc = Math.abs(parseFloat(fields[7] || '35e6')) || 35e6;
+                    rawMaterials.set(mid, {
+                        mat_id: mid,
+                        name: `KC_Concrete_MAT_${mid}`,
+                        source: 'deck',
+                        model_type: 'Karagozian & Case (K&C)',
+                        density: ro,
+                        youngs_modulus: 30e9,
+                        poissons_ratio: pr,
+                        parameters: {
+                            material_model: 'Karagozian & Case (K&C)',
+                            density: ro, youngs_modulus: 30e9, poissons_ratio: pr,
+                            fc, ft: 0.1 * fc, kc_auto_generate: true
+                        }
+                    });
+                }
+            }
+            else if (currentKeyword.startsWith('*MAT_JOHNSON_HOLMQUIST_CERAMICS') || currentKeyword.startsWith('*MAT_110')) {
+                const fields = this.splitFields(rawLine);
+                const mid = parseInt(fields[0] || '1', 10);
+                if (!rawMaterials.has(mid) && fields.length >= 6 && !isNaN(mid)) {
+                    const ro = parseFloat(fields[1] || '3215');
+                    const g = parseFloat(fields[2] || '193e9');
+                    const A = parseFloat(fields[3] || '0.96');
+                    const B = parseFloat(fields[4] || '0.35');
+                    const C = parseFloat(fields[5] || '0.009');
+                    const M = parseFloat(fields[6] || '1.0');
+                    const N = parseFloat(fields[7] || '0.65');
+                    const nu = 0.16;
+                    const e = 2.0 * g * (1.0 + nu);
+                    rawMaterials.set(mid, {
+                        mat_id: mid,
+                        name: `JH2_Ceramic_MAT_${mid}`,
+                        source: 'deck',
+                        model_type: 'Johnson-Holmquist JH-2',
+                        density: ro,
+                        youngs_modulus: e,
+                        poissons_ratio: nu,
+                        parameters: {
+                            material_model: 'Johnson-Holmquist JH-2',
+                            density: ro, youngs_modulus: e, poissons_ratio: nu,
+                            jh2_A: A, jh2_B: B, jh2_C: C, jh2_M: M, jh2_N: N
+                        }
+                    });
+                }
+            }
+            else if (currentKeyword.startsWith('*MAT_MOHR_COULOMB') || currentKeyword.startsWith('*MAT_173')) {
+                const fields = this.splitFields(rawLine);
+                const mid = parseInt(fields[0] || '1', 10);
+                if (!rawMaterials.has(mid) && fields.length >= 6 && !isNaN(mid)) {
+                    const ro = parseFloat(fields[1] || '1850');
+                    const g = parseFloat(fields[2] || '30e6');
+                    const pr = parseFloat(fields[3] || '0.30');
+                    const phiDeg = parseFloat(fields[5] || '32.0');
+                    const coh = parseFloat(fields[6] || '5000.0');
+                    const psiDeg = parseFloat(fields[7] || '0.0');
+                    const e = 2.0 * g * (1.0 + pr);
+                    rawMaterials.set(mid, {
+                        mat_id: mid,
+                        name: `MohrCoulomb_MAT_${mid}`,
+                        source: 'deck',
+                        model_type: 'Mohr-Coulomb',
+                        density: ro,
+                        youngs_modulus: e,
+                        poissons_ratio: pr,
+                        parameters: {
+                            material_model: 'Mohr-Coulomb',
+                            density: ro, youngs_modulus: e, poissons_ratio: pr,
+                            dp_friction_angle: phiDeg, dp_cohesion: coh, dp_dilatancy_angle: psiDeg
+                        }
+                    });
+                }
             }
             else if (currentKeyword.startsWith('*SET_NODE')) {
                 if (currentKeyword.includes('TITLE')) {

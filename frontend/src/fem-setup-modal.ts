@@ -2503,23 +2503,41 @@ export class FEMSetupModal {
         // Constitutive Model Dropdown
         const modelSelect = document.createElement('select');
         modelSelect.className = 'fem-select';
-        const models: { value: string; label: string }[] = [
-            { value: 'LinearElastic', label: 'Elastic (*MAT_001 / *MAT_ELASTIC)' },
-            { value: 'PiecewiseLinearPlasticity', label: 'Piecewise Linear Plasticity (*MAT_024 / von Mises)' },
-            { value: 'JohnsonCook', label: 'Johnson-Cook Viscoplasticity (*MAT_015)' },
-            { value: 'ConcreteRHT', label: 'Concrete Damage Plasticity (*MAT_CDP / RHT)' },
-            { value: 'Hyperelastic', label: 'Hyperelastic (Yeoh / Mooney-Rivlin)' },
+        const legacyAliases: { value: string; label: string }[] = [
+            { value: 'Linear Elastic', label: 'Linear Elastic (*MAT_001 / *MAT_ELASTIC)' },
+            { value: 'Hypoelastic', label: 'Hypoelastic / J2 Plasticity (*MAT_024)' },
+            { value: 'Johnson-Cook + Mie-Grüneisen', label: 'Johnson-Cook + Mie-Grüneisen (*MAT_015)' },
+            { value: 'Steinberg-Guinan', label: 'Steinberg-Guinan (*MAT_011)' },
+            { value: 'Hill48 Anisotropic', label: 'Hill48 Anisotropic Plasticity' },
+            { value: 'Crushable Foam', label: 'Crushable Foam (*MAT_063)' },
+            { value: 'Hyperelastic (Yeoh)', label: 'Hyperelastic (Yeoh / *MAT_181)' },
+            { value: 'Hyperelastic (Mooney-Rivlin)', label: 'Hyperelastic (Mooney-Rivlin / *MAT_027)' },
+            { value: 'Johnson-Holmquist JH-2', label: 'Johnson-Holmquist JH-2 Ceramic (*MAT_110)' },
+            { value: 'RHT Concrete', label: 'RHT Concrete' },
+            { value: 'Karagozian & Case (K&C)', label: 'Karagozian & Case K&C (*MAT_072)' },
+            { value: 'CSCM Concrete', label: 'CSCM Concrete (*MAT_159)' },
+            { value: 'Concrete Damage Plasticity (CDP)', label: 'Concrete Damage Plasticity (CDP)' },
+            { value: 'Drucker-Prager', label: 'Drucker-Prager Soil/Rock' },
+            { value: 'Mohr-Coulomb', label: 'Mohr-Coulomb (*MAT_173)' },
+            { value: 'Geological Cap (MAT_025)', label: 'Geological Cap (*MAT_025)' },
+            { value: 'Hoek-Brown Rock', label: 'Hoek-Brown Rock' },
+            { value: 'LinearElastic', label: 'Elastic (Legacy *MAT_001)' },
+            { value: 'PiecewiseLinearPlasticity', label: 'Piecewise Linear Plasticity (Legacy *MAT_024)' },
+            { value: 'JohnsonCook', label: 'Johnson-Cook (Legacy *MAT_015)' },
+            { value: 'ConcreteRHT', label: 'RHT Concrete (Legacy)' },
+            { value: 'Hyperelastic', label: 'Hyperelastic (Legacy)' },
             { value: 'RigidBody', label: 'Rigid Body (*MAT_020 / *MAT_RIGID)' }
         ];
-        models.forEach(m => {
+        legacyAliases.forEach(m => {
             const opt = document.createElement('option');
             opt.value = m.value;
             opt.textContent = m.label;
             modelSelect.appendChild(opt);
         });
-        modelSelect.value = mat.model_type || 'LinearElastic';
+        modelSelect.value = mat.model_type || 'Linear Elastic';
         modelSelect.onchange = () => {
             mat.model_type = modelSelect.value;
+            mat.parameters = { ...(mat.parameters || {}), material_model: modelSelect.value };
             this.isDirty = true;
             this.renderTabsAndList();
             this.renderInspector();
@@ -2597,6 +2615,72 @@ export class FEMSetupModal {
             this.isDirty = true;
         };
         addRow('Plastic Failure Strain', failInput);
+
+        // Model-specific constitutive parameters stored in mat.parameters
+        if (!mat.parameters) mat.parameters = {};
+        const addParamNumRow = (label: string, key: string, defaultVal: number, step: string = 'any', scale: number = 1.0) => {
+            const inp = document.createElement('input');
+            inp.type = 'number';
+            inp.step = step;
+            const rawVal = mat.parameters![key] !== undefined ? Number(mat.parameters![key]) : defaultVal;
+            inp.value = String(rawVal / scale);
+            inp.className = 'fem-num-input';
+            inp.onchange = () => {
+                mat.parameters![key] = Number(inp.value) * scale;
+                this.isDirty = true;
+            };
+            addRow(label, inp);
+        };
+
+        const mType = mat.model_type || 'Linear Elastic';
+        if (mType === 'Hypoelastic' || mType === 'PiecewiseLinearPlasticity') {
+            addParamNumRow('Cowper-Symonds C (1/s)', 'cs_C', 0.0);
+            addParamNumRow('Cowper-Symonds P', 'cs_P', 5.0, '0.1');
+        } else if (mType === 'Steinberg-Guinan') {
+            addParamNumRow('Initial Yield Y0 (MPa)', 'sg_Y0', 120e6, '1', 1e6);
+            addParamNumRow('Max Yield Ymax (MPa)', 'sg_Ymax', 640e6, '1', 1e6);
+            addParamNumRow('Work Hardening Beta', 'sg_beta', 36.0);
+            addParamNumRow('Hardening Exponent n', 'sg_n', 0.45);
+            addParamNumRow('Pressure Softening b_p (1/Pa)', 'sg_bp', 2.8e-11);
+            addParamNumRow('Thermal Softening b_T (1/K)', 'sg_bT', 3.8e-4);
+        } else if (mType === 'Crushable Foam') {
+            addParamNumRow('Plateau Stress (MPa)', 'foam_plateau_stress', 1.9e6, '0.1', 1e6);
+            addParamNumRow('Densification Strain', 'foam_densification_strain', 0.65, '0.01');
+            addParamNumRow('Shape Parameter Alpha', 'foam_alpha', 2.121, '0.01');
+            addParamNumRow('Densification Modulus (MPa)', 'foam_hardening', 0.8e6, '0.1', 1e6);
+        } else if (mType === 'Johnson-Holmquist JH-2') {
+            addParamNumRow('HEL Stress (GPa)', 'jh2_sigma_hel', 9.08e9, '0.1', 1e9);
+            addParamNumRow('Intact Strength A', 'jh2_A', 0.96, '0.01');
+            addParamNumRow('Intact Exponent N', 'jh2_N', 0.65, '0.01');
+            addParamNumRow('Fractured Strength B', 'jh2_B', 0.35, '0.01');
+            addParamNumRow('Strain Rate C', 'jh2_C', 0.009, '0.001');
+            addParamNumRow('Damage D1', 'jh2_D1', 0.48, '0.01');
+            addParamNumRow('Damage D2', 'jh2_D2', 0.48, '0.01');
+        } else if (mType === 'Geological Cap (MAT_025)' || mType === 'Mohr-Coulomb' || mType === 'Drucker-Prager' || mType === 'Hoek-Brown Rock') {
+            addParamNumRow('Friction Angle (deg)', 'dp_friction_angle', 30.0, '0.5');
+            addParamNumRow('Cohesion (kPa)', 'dp_cohesion', 10e3, '1', 1e3);
+            addParamNumRow('Dilatancy Angle (deg)', 'dp_dilatancy_angle', 0.0, '0.5');
+            if (mType === 'Geological Cap (MAT_025)') {
+                addParamNumRow('Initial Cap X0 (kPa)', 'cap_X0', 100e3, '10', 1e3);
+                addParamNumRow('Max Volumetric Strain W', 'cap_W', 0.20, '0.01');
+                addParamNumRow('Cap Aspect Ratio R', 'cap_R', 2.5, '0.1');
+            } else if (mType === 'Hoek-Brown Rock') {
+                addParamNumRow('Intact Rock UCS (MPa)', 'hb_sigma_ci', 200e6, '1', 1e6);
+                addParamNumRow('Hoek-Brown mi', 'hb_mi', 32.0, '0.5');
+                addParamNumRow('GSI Index (0-100)', 'hb_gsi', 90.0, '1');
+                addParamNumRow('Disturbance D (0-1)', 'hb_D', 0.0, '0.05');
+            }
+        } else if (mType.includes('Concrete')) {
+            addParamNumRow('Compressive Strength fc (MPa)', 'fc', 35e6, '1', 1e6);
+            addParamNumRow('Tensile Strength ft (MPa)', 'ft', 3.2e6, '0.1', 1e6);
+        } else if (mType === 'Hyperelastic (Yeoh)') {
+            addParamNumRow('Yeoh C10 (MPa)', 'yeoh_c10', 0.5e6, '0.05', 1e6);
+            addParamNumRow('Bulk Modulus K (GPa)', 'k_bulk', 2.0e9, '0.1', 1e9);
+        } else if (mType === 'Hyperelastic (Mooney-Rivlin)') {
+            addParamNumRow('Mooney-Rivlin C10 (MPa)', 'mr_c10', 0.3e6, '0.05', 1e6);
+            addParamNumRow('Mooney-Rivlin C01 (MPa)', 'mr_c01', 0.1e6, '0.05', 1e6);
+            addParamNumRow('Bulk Modulus K (GPa)', 'k_bulk', 2.0e9, '0.1', 1e9);
+        }
 
         // Action buttons
         const actionBox = document.createElement('div');

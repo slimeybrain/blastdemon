@@ -1642,7 +1642,8 @@ function tryRemapFrom1D(targetModelId: string, pipe: any, allowAutoRun: boolean 
         const charge_radius = cp?.charge_radius ?? 0.05;
         const atm_p = ap?.atm_pressure ?? 101325.0;
         const atm_t = ap?.atm_temperature ?? 288.15;
-        const ambient_rho = ap?.ambient_rho ?? (atm_p / (287.058 * atm_t));
+        const ideal_R = ap?.ideal_R ?? 287.058;
+        const ambient_rho = ap?.ambient_rho ?? (atm_p / (ideal_R * atm_t));
         const ambient_p = ap?.ambient_p ?? atm_p;
         const effGamma = ap?.gamma ?? gamma;
 
@@ -1931,7 +1932,8 @@ function tryRemapFrom2D(targetModelId: string, pipe: any, allowAutoRun: boolean 
         const gamma = ap?.gamma ?? 1.4;
         const atm_p = ap?.atm_pressure ?? 101325.0;
         const atm_t = ap?.atm_temperature ?? 288.15;
-        const ambient_rho = ap?.ambient_rho ?? (atm_p / (287.058 * atm_t));
+        const ideal_R = ap?.ideal_R ?? 287.058;
+        const ambient_rho = ap?.ambient_rho ?? (atm_p / (ideal_R * atm_t));
 
         const matType = cp?.material_type ?? 'JWL Charge';
         const is_ideal_gas = cp?.is_ideal_gas ?? false;

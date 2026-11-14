@@ -62,6 +62,7 @@ std::vector<BenchmarkResult> run_level_3_benchmarks() {
         FEMSolver3D<float> solver;
 
         MaterialTable3D mat{};
+        mat.material_model = MPMMaterialModel::JohnsonCookMieGruneisen;
         mat.density = 8960.0f; // OFHC Copper: 8960 kg/m^3
         mat.youngs_modulus = 117.0e9f; // 117 GPa
         mat.poissons_ratio = 0.35f;
@@ -77,7 +78,7 @@ std::vector<BenchmarkResult> run_level_3_benchmarks() {
         mat.Cp = 385.0f;
 
         solver.setHourglassModel(FEMHourglassModel::FlanaganBelytschkoViscous);
-        solver.setHourglassCoeff(0.03f);
+        solver.setHourglassCoeff(0.10f);
 
         // Cylinder dimensions: L0 = 25.4 mm, R0 = 3.8 mm (D0 = 7.6 mm)
         float L0 = 0.0254f;
@@ -98,7 +99,7 @@ std::vector<BenchmarkResult> run_level_3_benchmarks() {
         // Run explicit dynamic integration loop (Courant CFL = 0.40)
         // Advance with frictionless rigid floor contact (z >= 0) until plastic arrest
         int total_steps = 0;
-        for (int step = 0; step < 1500; ++step) {
+        for (int step = 0; step < 10000; ++step) {
             float dt = solver.computeStepSize(0.40f);
             solver.stepWithDt(dt);
             total_steps++;
@@ -152,7 +153,30 @@ std::vector<BenchmarkResult> run_level_3_benchmarks() {
         res.tolerance_l2 = 6.0e-2; // 6.0% tolerance for 3D Hex8 explicit dynamics
         res.passed = (res.error_l2 <= res.tolerance_l2);
 
-        // Extract genuine diameter profile along axial height directly from deformed solver nodes
+        // Extract genuine diameter profile along axial height from deformed axial node layers
+        const int nz_layers = 12;
+        double dz0_layer = static_cast<double>(L0) / static_cast<double>(nz_layers);
+        std::vector<double> layer_z_m(nz_layers + 1, 0.0);
+        std::vector<double> layer_d_mm(nz_layers + 1, 7.6);
+        for (int k = 0; k <= nz_layers; ++k) {
+            double z_sum = 0.0;
+            int cnt_z = 0;
+            float max_r_layer = 0.0f;
+            for (const auto& n : nodes) {
+                if (std::abs(static_cast<double>(n.x0[2]) - k * dz0_layer) <= 0.1 * dz0_layer) {
+                    z_sum += static_cast<double>(n.x[2]);
+                    cnt_z++;
+                    float r = std::sqrt(n.x[0]*n.x[0] + n.x[1]*n.x[1]);
+                    if (r > max_r_layer) max_r_layer = r;
+                }
+            }
+            layer_z_m[k] = (cnt_z > 0) ? (z_sum / cnt_z) : (k * dz0_layer * Lf_sim / (L0 * 1000.0));
+            layer_d_mm[k] = static_cast<double>(max_r_layer * 2.0f) * 1000.0;
+        }
+        for (int k = 1; k <= nz_layers; ++k) {
+            if (layer_z_m[k] < layer_z_m[k - 1]) layer_z_m[k] = layer_z_m[k - 1];
+        }
+
         std::vector<double> z_prof;
         std::vector<double> diam_exp;
         std::vector<double> diam_sim;
@@ -169,15 +193,21 @@ std::vector<BenchmarkResult> run_level_3_benchmarks() {
             double d_val = 7.6 + (Df_exp - 7.6) * std::exp(-z_mm / 4.5);
             diam_exp.push_back(d_val);
 
-            // Extract maximum radial distance among actual solver nodes within this z slice
-            float max_r_bin = 0.0038f; // baseline R0
-            for (const auto& n : nodes) {
-                if (std::abs(n.x[2] - z_m) <= static_cast<float>(dz_bin * 0.75)) {
-                    float r = std::sqrt(n.x[0]*n.x[0] + n.x[1]*n.x[1]);
-                    if (r > max_r_bin) max_r_bin = r;
+            // Piecewise-linear evaluation on the deformed outer-surface node layers
+            double d_interp = layer_d_mm.back();
+            if (z_m <= layer_z_m.front()) {
+                d_interp = layer_d_mm.front();
+            } else {
+                for (int k = 0; k < nz_layers; ++k) {
+                    if (z_m <= layer_z_m[k + 1] || k == nz_layers - 1) {
+                        double span = layer_z_m[k + 1] - layer_z_m[k];
+                        double frac = (span > 1.0e-12) ? std::clamp((z_m - layer_z_m[k]) / span, 0.0, 1.0) : 0.0;
+                        d_interp = layer_d_mm[k] + frac * (layer_d_mm[k + 1] - layer_d_mm[k]);
+                        break;
+                    }
                 }
             }
-            diam_sim.push_back(static_cast<double>(max_r_bin * 2.0f) * 1000.0); // mm
+            diam_sim.push_back(d_interp);
         }
 
         std::string svg_file = "vv_l3_03_taylor_anvil.svg";

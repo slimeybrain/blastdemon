@@ -102,20 +102,20 @@ struct MaterialTable3D {
     float cscm_D1{2.5e-9f};              // Cap hardening evolution parameter D1 (1/Pa)
     float cscm_D2{3.0e-17f};             // Cap hardening evolution parameter D2 (1/Pa^2)
 
-    // Johnson-Cook Plasticity & Thermal Softening Parameters
-    float jc_A{792.0e6f};        // Initial yield stress (Pa)
-    float jc_B{510.0e6f};        // Strain hardening constant (Pa)
-    float jc_n{0.26f};           // Strain hardening exponent
-    float jc_C{0.014f};          // Strain rate constant
-    float jc_m{1.03f};           // Thermal softening exponent
+    // Johnson-Cook Plasticity & Thermal Softening Parameters (zero-initialized unless JC model configured)
+    float jc_A{0.0f};            // Initial yield stress (Pa)
+    float jc_B{0.0f};            // Strain hardening constant (Pa)
+    float jc_n{0.0f};            // Strain hardening exponent
+    float jc_C{0.0f};            // Strain rate constant
+    float jc_m{0.0f};            // Thermal softening exponent
     float T_melt{1793.0f};       // Melting temperature (K)
     float T_room{293.0f};        // Room reference temperature (K)
     float Cp{477.0f};            // Specific heat capacity (J/(kg K))
 
-    // Mie-Grüneisen Shock EOS Parameters
-    float mg_gamma0{1.81f};      // Grüneisen gamma parameter
-    float mg_c0{4570.0f};        // Bulk sound speed (m/s)
-    float mg_s{1.49f};           // Hugoniot Us-Up slope
+    // Mie-Grüneisen Shock EOS Parameters (zero-initialized unless explicitly configured)
+    float mg_gamma0{0.0f};       // Grüneisen gamma parameter
+    float mg_c0{0.0f};           // Bulk sound speed (m/s)
+    float mg_s{0.0f};            // Hugoniot Us-Up slope
 
     // Davis Solid Reactant EOS Parameters
     float davis_c0{2050.0f};             // Bulk sound speed (m/s)
@@ -251,11 +251,11 @@ struct MaterialTable3D {
     bool enable_anisotropy{false};        // Enable directional material anisotropy (false = isotropic)
     float anisotropy_ratio{1.0f};         // Transverse-to-longitudinal yield strength ratio (0.5 to 2.0, 1.0 = isotropic)
     float anisotropy_dir[3]{1.0f, 0.0f, 0.0f}; // Primary material orientation / rolling / fiber axis vector
-    float jc_d1{0.05f};                   // Johnson-Cook damage parameter D1
-    float jc_d2{3.44f};                   // Johnson-Cook damage parameter D2
-    float jc_d3{-2.12f};                  // Johnson-Cook damage parameter D3
-    float jc_d4{0.002f};                  // Johnson-Cook damage parameter D4
-    float jc_d5{0.61f};                   // Johnson-Cook damage parameter D5
+    float jc_d1{0.0f};                   // Johnson-Cook damage parameter D1 (0 = fall back to failure_strain)
+    float jc_d2{0.0f};                   // Johnson-Cook damage parameter D2
+    float jc_d3{0.0f};                   // Johnson-Cook damage parameter D3
+    float jc_d4{0.0f};                   // Johnson-Cook damage parameter D4
+    float jc_d5{0.0f};                   // Johnson-Cook damage parameter D5
 
     // Tait Water / Fluid Parameters
     float tait_gamma{7.15f};             // Tait adiabatic exponent
@@ -267,13 +267,65 @@ struct MaterialTable3D {
     float tait_viscosity{1.002e-3f};     // Dynamic shear viscosity (Pa s)
     int   tait_variant{0};               // 0 = Isentropic, 1 = Caloric Gruneisen, 2 = Shock Hugoniot
     float tait_gruneisen{0.28f};         // Gruneisen parameter Gamma
+    float ideal_gamma{1.4f};             // Ideal gas adiabatic exponent gamma = cp/cv
+    float ideal_R{287.058f};             // Specific gas constant R (J/(kg*K))
 
-    // Drucker-Prager Soil & Geomaterial Parameters
+    // Drucker-Prager, Mohr-Coulomb & Geological Cap Geomaterial Parameters
     float dp_cohesion{20.0e3f};          // Cohesion c (Pa)
     float dp_friction_angle{30.0f};      // Friction angle phi (degrees)
     float dp_dilatancy_angle{0.0f};      // Dilatancy angle psi (degrees)
     float dp_tensile_cutoff{10.0e3f};    // Tensile stress cutoff (Pa)
     float dp_hardening_modulus{0.0f};    // Plastic hardening modulus H (Pa)
+
+    // Cowper-Symonds Viscoplastic Strain-Rate Scaling (Hypoelastic / *MAT_024)
+    float cs_C{0.0f};                    // Strain rate parameter C (1/s; <= 0 disables rate scaling)
+    float cs_P{0.0f};                    // Strain rate exponent P (dim; <= 0 disables rate scaling)
+
+    // Geological Elliptical Pore-Crush Cap (*MAT_025 / Soils & Porous Rock)
+    float cap_X0{0.0f};                  // Initial hydrostatic crush intercept X0 (Pa)
+    float cap_W{0.0f};                   // Maximum plastic volumetric compaction porosity W (dim)
+    float cap_D1{0.0f};                  // Cap hardening compressibility D1 (1/Pa)
+    float cap_D2{0.0f};                  // Secondary quadratic cap compressibility D2 (1/Pa^2)
+    float cap_R{2.0f};                   // Cap ellipse aspect ratio R (semi-major / semi-minor)
+
+    // Johnson-Holmquist JH-2 Brittle Ceramics & Glass (*MAT_110)
+    float jh2_sigma_hel{0.0f};           // Equivalent strength at HEL sigma_HEL (Pa)
+    float jh2_p_hel{0.0f};               // Hydrostatic pressure at HEL P_HEL (Pa)
+    float jh2_t_max{0.0f};               // Maximum tensile hydrostatic strength T (Pa)
+    float jh2_A{0.0f};                   // Intact strength coefficient A
+    float jh2_N{0.6f};                   // Intact strength pressure exponent N
+    float jh2_B{0.0f};                   // Fractured strength coefficient B
+    float jh2_M{0.6f};                   // Fractured strength pressure exponent M
+    float jh2_C{0.0f};                   // Strain rate sensitivity C
+    float jh2_D1{0.0f};                  // Fracture strain coefficient D1
+    float jh2_D2{1.0f};                  // Fracture strain exponent D2
+    float jh2_K1{0.0f};                  // Polynomial EOS bulk modulus K1 (Pa)
+    float jh2_K2{0.0f};                  // Polynomial EOS quadratic constant K2 (Pa)
+    float jh2_K3{0.0f};                  // Polynomial EOS cubic constant K3 (Pa)
+    float jh2_beta{1.0f};                // Elastic shear energy to bulking pressure fraction [0, 1]
+
+    // Hoek-Brown Generalized Rock Mass (*MAT_HOEK_BROWN)
+    float hb_sigma_ci{0.0f};             // Intact rock uniaxial compressive strength sigma_ci (Pa)
+    float hb_mi{10.0f};                  // Intact rock petrographic constant m_i (dim)
+    float hb_gsi{100.0f};                // Geological Strength Index GSI in [0, 100] (100 = intact)
+    float hb_D{0.0f};                    // Blast / excavation disturbance factor D in [0, 1]
+
+    // Deshpande-Fleck Crushable Foam (*MAT_063 / Cellular Attenuators)
+    float foam_plateau_stress{0.0f};       // Plateau crushing stress sigma_p (Pa)
+    float foam_densification_strain{0.5f}; // Lock-up volumetric strain eps_lock (dim)
+    float foam_alpha{1.5f};                // Yield ellipse shape parameter alpha_foam (dim)
+    float foam_hardening{0.0f};            // Linear plateau tangent modulus H_foam (Pa)
+
+    // Steinberg-Guinan High-Pressure Shock Metal (*MAT_011)
+    float sg_Y0{0.0f};                   // Initial yield stress Y0 (Pa)
+    float sg_Ymax{0.0f};                 // Saturated work-hardened yield ceiling Y_max (Pa)
+    float sg_beta{0.0f};                 // Work-hardening coefficient beta (dim)
+    float sg_n{0.0f};                    // Work-hardening exponent n (dim)
+    float sg_bp{0.0f};                   // Pressure derivative b' = (dG/dP)/G0 = (dY/dP)/Y0 (1/Pa)
+    float sg_bT{0.0f};                   // Thermal softening magnitude h = -(dG/dT)/G0 > 0 (1/K)
+
+    // RHT Elastic Shear Strength Ratio
+    float rht_f_el_c{0.53f};             // Elastic compressive strength ratio f_e = Y_elastic / fc
 
     HD_MPM_FUNC void synchronizePillars() {
         if (material_model == MPMMaterialModel::CRESTReactiveBurn) {
@@ -444,6 +496,13 @@ struct MPMParticle3D {
     int object_id{0};            // Object / Material Table ID
     int material_id{0};          // Material Multi-Velocity Field ID
     int transfer_scheme{-1};     // -1 = Inherit domain default, otherwise MPMTransferScheme
+    int aux_state_idx{-1};       // Lazy index into MPMSolver3D::m_aux_states (hyperelastic F / Hill48 triad)
+};
+
+struct MPMParticleAux3D {
+    float F[3][3]{{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+    float hill_a1[3]{1.0f, 0.0f, 0.0f};
+    float hill_a2[3]{0.0f, 1.0f, 0.0f};
 };
 
 struct alignas(32) MPMGridNode3D {
@@ -932,8 +991,10 @@ private:
     std::vector<MaterialTable3D> m_material_tables;
     mutable std::vector<MPMGridNode3D> m_grid;
     std::vector<MPMParticle3D> m_particles;
+    std::vector<MPMParticleAux3D> m_aux_states;
     std::vector<float> m_f_ext_fsi;
     std::vector<MPMDetonator3D> m_detonators;
+    void ensureAuxParticleStates();
 
     float m_last_dt{0.0f};
     float m_last_cfl{0.3f};

@@ -3195,7 +3195,7 @@ export class NodeViewer {
             'charge_r', 'charge_z', 'charge_radius', 'charge_height', 'charge_aspect_ratio',
             'detonator_r', 'detonator_z', 'detonator_radius', 'detonator_x', 'detonator_y', 'time_delay', 'detonator_time',
             'trigger_r', 'trigger_z', 'trigger_radius', 'trigger_x', 'trigger_y',
-            'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
+            'ideal_gamma', 'ideal_R', 'ideal_rho_0', 'ideal_e_0', 'high_rho', 'ambient_rho', 'ambient_p',
             // 3D CFD keys
             'nx', 'ny', 'nz', 'xmax', 'ymax', 'zmax',
             'charge_x', 'charge_y', 'charge_z', 'charge_lx', 'charge_ly', 'charge_lz',
@@ -3214,7 +3214,7 @@ export class NodeViewer {
             'clip_z_min', 'clip_z_max',
             'stl_scale_x', 'stl_scale_y', 'stl_scale_z', 'stl_pos_x', 'stl_pos_y', 'stl_pos_z', 'stl_rot_x', 'stl_rot_y', 'stl_rot_z',
             'angular_vel', 'angular_vel_x', 'angular_vel_y', 'angular_vel_z',
-            'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+            'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus', 'cs_C', 'cs_P',
             'failure_strain', 'tensile_failure_stress', 'erosion_strain', 'erosion_stress', 'erosion_min_density', 'erosion_min_density_ratio',
             'mpm_cell_size', 'mpm_xmin', 'mpm_xmax', 'mpm_ymin', 'mpm_ymax', 'mpm_zmin', 'mpm_zmax',
             'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp',
@@ -3234,13 +3234,17 @@ export class NodeViewer {
             // Concrete Core & Models (RHT, K&C, CSCM)
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
-            'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+            'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat', 'rht_f_el_c',
             'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
             'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
-            // Hyperelastic, CDP, and Hill48 Keys
+            // Hyperelastic, CDP, Hill48, Foam, JH-2, Steinberg-Guinan Keys
             'yeoh_c10', 'yeoh_c20', 'yeoh_c30', 'mr_c10', 'mr_c01', 'k_bulk',
             'cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch',
             'hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0',
+            'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening',
+            'jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max', 'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C',
+            'jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta',
+            'sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT',
             // Tait Water & Shock Fluid Keys
             'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant',
             // Davis & CREST Reactive Burn
@@ -3281,7 +3285,9 @@ export class NodeViewer {
             'soil_density', 'soil_friction_angle', 'soil_cohesion', 'crater_bed_width', 'crater_bed_depth',
             'friction_angle', 'cohesion', 'dilation_angle', 'tensile_cutoff',
             'soil_c0', 'seabed_c0', 'soil_gamma', 'seabed_gamma', 'soil_s', 'seabed_s', 'soil_gruneisen', 'seabed_gruneisen', 'soil_p_cav', 'seabed_p_cav', 'soil_eos_variant',
-            'dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus'
+            'dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus',
+            'cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R',
+            'hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D'
         ];
 
         const chargeShapeOptions = node.type === 'Charge3D' ? ['Sphere', 'Cylinder', 'Block'] : ['Sphere', 'Cylinder'];
@@ -3291,7 +3297,7 @@ export class NodeViewer {
             const matType = node.parameters['material_type'];
             if (matType === 'Air') currentMatModel = 'Ideal Gas';
             else if (matType === 'JWL Charge') currentMatModel = 'JWL Detonation Gas';
-            else if (matType === 'Ideal Gas Charge') currentMatModel = 'Ideal Gas';
+            else if (matType === 'Ideal Gas Charge') currentMatModel = 'Ideal Gas Charge';
             else currentMatModel = 'Hypoelastic';
         }
         const dynamicPresets = (node.type === 'Material')
@@ -4523,7 +4529,9 @@ export class NodeViewer {
                 if (matType === 'Ideal Gas Charge') {
                     updates['ideal_rho_0'] = preset.rho;
                     updates['ideal_e_0'] = preset.detonation_energy;
+                    updates['detonation_energy'] = preset.detonation_energy;
                     updates['ideal_gamma'] = 1.4;
+                    updates['gamma'] = 1.4;
                 } else {
                     Object.assign(updates, preset);
                 }
@@ -4544,7 +4552,9 @@ export class NodeViewer {
                     if (presetData.atm_pressure !== undefined) {
                         updates['ambient_p'] = presetData.atm_pressure;
                         const t = presetData.atm_temperature || 288.15;
-                        const rho = presetData.density ?? (presetData.atm_pressure / (287.058 * t));
+                        const rSpec = presetData.ideal_R ?? 287.058;
+                        const rho = presetData.density ?? (presetData.atm_pressure / (rSpec * t));
+                        updates['ideal_R'] = rSpec;
                         updates['density'] = rho;
                         updates['ambient_rho'] = rho;
                     }
@@ -4556,12 +4566,34 @@ export class NodeViewer {
                     updates['material_type'] = 'Ideal Gas Charge';
                     updates['material_model'] = 'Ideal Gas Charge';
                     if (presetData.composition) updates['composition'] = presetData.composition;
+                } else if (presetData.category === 'Tait Water & Hydrodynamic Fluids') {
+                    updates['material_type'] = 'Fluid';
+                    updates['material_model'] = 'Tait Water';
+                    if (presetData.density !== undefined) {
+                        updates['density'] = presetData.density;
+                        updates['ambient_rho'] = presetData.density;
+                        updates['ambient_p'] = 101325.0;
+                    }
+                } else if (presetData.category === 'Energetic Solids & Unreacted Explosives' ||
+                           presetData.category === 'CREST Reactive Burn Presets') {
+                    updates['material_type'] = 'JWL Charge';
+                    updates['material_model'] = 'CREST Reactive Burn';
+                } else if (presetData.category === 'JWL Programmed Burn Presets') {
+                    updates['material_type'] = 'JWL Charge';
+                    updates['material_model'] = 'JWL Programmed Burn';
+                } else if (presetData.category === 'Lee-Tarver Ignition & Growth Presets') {
+                    updates['material_type'] = 'JWL Charge';
+                    updates['material_model'] = 'Lee-Tarver Ignition & Growth';
                 }
             }
         } else if (node.type === 'Material' && key === 'material_model') {
             if (value === 'Ideal Gas') {
                 updates['material_model'] = 'Ideal Gas';
                 updates['material_type'] = 'Air';
+                delete updates['composition'];
+                delete updates['solid_model'];
+                delete updates['burn_model'];
+                delete updates['product_model'];
                 const defPreset = 'Air (Standard STP, gamma=1.4)';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
@@ -4569,15 +4601,36 @@ export class NodeViewer {
                     Object.assign(updates, presetData);
                     const p = presetData.atm_pressure ?? 101325.0;
                     const t = presetData.atm_temperature || 288.15;
-                    const rho = presetData.density ?? (p / (287.058 * t));
+                    const rSpec = presetData.ideal_R ?? 287.058;
+                    const rho = presetData.density ?? (p / (rSpec * t));
+                    updates['ideal_R'] = rSpec;
                     updates['density'] = rho;
                     updates['ambient_rho'] = rho;
                     updates['ambient_p'] = p;
+                }
+            } else if (value === 'Tait Water') {
+                updates['material_model'] = 'Tait Water';
+                updates['material_type'] = 'Fluid';
+                delete updates['composition'];
+                delete updates['solid_model'];
+                delete updates['burn_model'];
+                delete updates['product_model'];
+                const defPreset = 'Liquid Water (Isentropic Modified Tait)';
+                updates['preset'] = defPreset;
+                const presetData = MPM_MATERIAL_PRESETS[defPreset];
+                if (presetData) {
+                    Object.assign(updates, presetData);
+                    updates['density'] = presetData.density ?? 1000.0;
+                    updates['ambient_rho'] = presetData.density ?? 1000.0;
+                    updates['ambient_p'] = 101325.0;
                 }
             } else if (value === 'JWL Detonation Gas') {
                 updates['material_model'] = 'JWL Detonation Gas';
                 updates['material_type'] = 'JWL Charge';
                 updates['composition'] = 'TNT';
+                delete updates['solid_model'];
+                delete updates['burn_model'];
+                delete updates['product_model'];
                 const defPreset = 'TNT (Trinitrotoluene)';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
@@ -4586,29 +4639,17 @@ export class NodeViewer {
                 updates['material_model'] = 'Ideal Gas Charge';
                 updates['material_type'] = 'Ideal Gas Charge';
                 updates['composition'] = 'TNT';
+                delete updates['solid_model'];
+                delete updates['burn_model'];
+                delete updates['product_model'];
                 const defPreset = 'TNT (Ideal Gas Equivalent)';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
                 if (presetData) Object.assign(updates, presetData);
-            } else if (value === 'JWL Programmed Burn') {
-                updates['material_model'] = 'JWL Programmed Burn';
+            } else if (value === 'JWL Programmed Burn' || value === 'Lee-Tarver Ignition & Growth' || value === 'CREST Reactive Burn' || value === 'Davis Reactive Burn') {
+                updates['material_model'] = value;
                 updates['material_type'] = 'JWL Charge';
-                const defPreset = getDefaultPresetForModel(value) || 'C-4 (Composition 4) - Programmed Burn';
-                updates['preset'] = defPreset;
-                const presetData = MPM_MATERIAL_PRESETS[defPreset];
-                if (presetData) {
-                    Object.assign(updates, presetData);
-                    if (presetData.provenance) updates['provenance'] = presetData.provenance;
-                    if (presetData.reference) updates['reference'] = presetData.reference;
-                    if (presetData.test_method) updates['test_method'] = presetData.test_method;
-                    if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
-                    if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
-                    if (presetData.product_model) updates['product_model'] = presetData.product_model;
-                }
-            } else if (value === 'Lee-Tarver Ignition & Growth') {
-                updates['material_model'] = 'Lee-Tarver Ignition & Growth';
-                updates['material_type'] = 'JWL Charge';
-                const defPreset = getDefaultPresetForModel(value) || 'LX-17 (Lee-Tarver Calibrated)';
+                const defPreset = getDefaultPresetForModel(value) || 'C-4 (Composition C-4) - JWL Programmed Burn';
                 updates['preset'] = defPreset;
                 const presetData = MPM_MATERIAL_PRESETS[defPreset];
                 if (presetData) {
@@ -4623,6 +4664,9 @@ export class NodeViewer {
             } else {
                 delete updates['material_type'];
                 delete updates['composition'];
+                delete updates['solid_model'];
+                delete updates['burn_model'];
+                delete updates['product_model'];
                 const defPreset = getDefaultPresetForModel(value);
                 if (defPreset) {
                     updates['preset'] = defPreset;
@@ -4632,20 +4676,56 @@ export class NodeViewer {
                         if (presetData.provenance) updates['provenance'] = presetData.provenance;
                         if (presetData.reference) updates['reference'] = presetData.reference;
                         if (presetData.test_method) updates['test_method'] = presetData.test_method;
-                        if (presetData.solid_model) updates['solid_model'] = presetData.solid_model;
-                        if (presetData.burn_model) updates['burn_model'] = presetData.burn_model;
-                        if (presetData.product_model) updates['product_model'] = presetData.product_model;
                     }
                 }
             }
-        } else if (node.type === 'Material' && (key === 'atm_pressure' || key === 'atm_temperature')) {
+        } else if (node.type === 'Material' && (key === 'atm_pressure' || key === 'atm_temperature' || key === 'initial_temperature' || key === 'ideal_R' || key === 'gamma')) {
             const p = Number(key === 'atm_pressure' ? value : (node.parameters['atm_pressure'] ?? 101325.0));
-            const t = Number(key === 'atm_temperature' ? value : (node.parameters['atm_temperature'] ?? 288.15));
-            const rho = p / (287.058 * t);
-            updates['density'] = rho;
-            updates['ambient_rho'] = rho;
-            updates['ambient_p'] = p;
+            const t = Number((key === 'atm_temperature' || key === 'initial_temperature') ? value : (node.parameters['initial_temperature'] ?? node.parameters['atm_temperature'] ?? 288.15));
+            const rSpec = Math.max(1.0, Number(key === 'ideal_R' ? value : (node.parameters['ideal_R'] ?? 287.058)));
+            updates['initial_temperature'] = t;
+            updates['atm_temperature'] = t;
+            if (node.parameters['material_model'] === 'Ideal Gas' || node.parameters['material_type'] === 'Air') {
+                if (key === 'gamma') updates['ideal_gamma'] = Number(value);
+                const rho = p / (rSpec * Math.max(1.0, t));
+                updates['density'] = rho;
+                updates['ambient_rho'] = rho;
+                updates['ambient_p'] = p;
+            } else if (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge') {
+                const gamma = Number(key === 'gamma' ? value : (node.parameters['ideal_gamma'] ?? 1.4));
+                if (key === 'gamma') updates['ideal_gamma'] = gamma;
+                const cv = rSpec / Math.max(0.01, gamma - 1.0);
+                if (key === 'ideal_R') {
+                    const e0 = Number(node.parameters['ideal_e_0'] ?? node.parameters['detonation_energy'] ?? 4.29e6);
+                    updates['initial_temperature'] = e0 / cv;
+                } else {
+                    const e0 = cv * t;
+                    updates['ideal_e_0'] = e0;
+                    updates['detonation_energy'] = e0;
+                }
+            }
             updates['preset'] = 'Custom';
+            updates['provenance'] = 'user';
+        } else if (node.type === 'Material' && (key === 'ideal_e_0' || key === 'detonation_energy') && (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge')) {
+            const e0 = Number(value);
+            const gamma = Number(node.parameters['ideal_gamma'] ?? 1.4);
+            const rSpec = Math.max(1.0, Number(node.parameters['ideal_R'] ?? 287.058));
+            const cv = rSpec / Math.max(0.01, gamma - 1.0);
+            updates['ideal_e_0'] = e0;
+            updates['detonation_energy'] = e0;
+            updates['initial_temperature'] = e0 / cv;
+            updates['preset'] = 'Custom';
+            updates['provenance'] = 'user';
+        } else if (node.type === 'Material' && (key === 'ideal_gamma' || key === 'gamma') && (node.parameters['material_model'] === 'Ideal Gas Charge' || node.parameters['material_type'] === 'Ideal Gas Charge')) {
+            const gamma = Number(value);
+            const rSpec = Math.max(1.0, Number(node.parameters['ideal_R'] ?? 287.058));
+            const cv = rSpec / Math.max(0.01, gamma - 1.0);
+            const e0 = Number(node.parameters['ideal_e_0'] ?? node.parameters['detonation_energy'] ?? 4.29e6);
+            updates['ideal_gamma'] = gamma;
+            updates['gamma'] = gamma;
+            updates['initial_temperature'] = e0 / cv;
+            updates['preset'] = 'Custom';
+            updates['provenance'] = 'user';
         } else if (node.type === 'Material' && key === 'density' && node.parameters['material_model'] === 'Ideal Gas') {
             updates['ambient_rho'] = Number(value);
             updates['preset'] = 'Custom';
@@ -4657,8 +4737,9 @@ export class NodeViewer {
                 updates['shape_type'] = value === 'Cylinder Generator' ? 'Cylinder' : (value === 'STL File' ? 'STL' : (value === 'Plate Generator' ? 'Plate' : (value === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
                 if (value === 'STL File') updates['element_topology'] = 'Tet4_ANP';
             }
-        } else if (node.type === 'Material' && ['rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega', 'ideal_rho_0', 'ideal_e_0', 'ideal_gamma', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus'].includes(key)) {
+        } else if (node.type === 'Material' && !['preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
             updates['preset'] = 'Custom';
+            updates['provenance'] = 'user';
         } else if (key === 'stl_file' || key === 'k_file' || key === 'output_dir' || key === 'vtk_dir' || key === 'external_file_path' || key === 'file_path') {
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
             const rawStr = String(value || '').trim();

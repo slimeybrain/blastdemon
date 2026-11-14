@@ -210,10 +210,11 @@ double particleVelocityForPressure(const Reactant& r, double P) {
 }
 
 struct PopCase { int expl; double P_gpa, run_mm; };
+bool g_trace = false;
 
-struct PopResult { double run_mm, p_in_gpa, t_end_us; bool detonated; int np; int nz; double dt_last; };
+struct PopResult { double run_mm, p_in_gpa, t_end_us; bool detonated; int np; int nz; double dt_last; double p_plateau_gpa; };
 
-PopResult runPopCase(const Explosive& ex, double P_in_pa, double run_exp_mm, double dz) {
+PopResult runPopCase(const Explosive& ex, double P_in_pa, double run_exp_mm, double dz, bool reactive = true) {
     using namespace Blast;
     const double flyer_len = 0.020;                              // m
     const double target_len = std::max(0.020, 1.4 * run_exp_mm * 1.0e-3 + 0.010);
@@ -254,9 +255,10 @@ PopResult runPopCase(const Explosive& ex, double P_in_pa, double run_exp_mm, dou
     mpm.addBoxObject(1, nlat * dz * 0.5, nlat * dz * 0.5, z_if + 0.5 * target_len, nlat * dz, nlat * dz, target_len,
                      0, 0, 0, 0, 0, 0, (float)ex.r.rho0, mat.youngs_modulus, (float)ex.nu, (float)ex.yield, 0.0f, 0.25f, 600.0e6f, 8);
     mpm.setMaterialTable(0, inert);
-    mpm.setMaterialTable(1, mat);
+    mpm.setMaterialTable(1, reactive ? mat : inert);
 
-    PopResult res{0.0, 0.0, 0.0, false, (int)mpm.getParticles().size(), nz, 0.0};
+    PopResult res{0.0, 0.0, 0.0, false, (int)mpm.getParticles().size(), nz, 0.0, 0.0};
+    double plat_sum = 0.0; int plat_n = 0;
     struct Sample { double t, z; };
     std::vector<Sample> front;
     const double t_max = 60.0e-6;
@@ -275,6 +277,26 @@ PopResult runPopCase(const Explosive& ex, double P_in_pa, double run_exp_mm, dou
         }
         // Input pressure is sampled only while the lead wave is still in the first 5 mm (before reaction can matter)
         if (zf > 0.0 && zf < 0.005) res.p_in_gpa = std::max(res.p_in_gpa, pmax_in * 1.0e-9);
+        if (zf > 0.004 && zf < 0.008) {   // plateau: mean pressure in the band 1-3 mm behind the interface while the front is at 4-8 mm
+            double sum = 0.0; int n = 0;
+            for (const auto& p : mpm.getParticles()) {
+                if (p.m <= 0.0f) continue;
+                const double depth = p.x[2] - z_if;
+                if (depth > 0.001 && depth < 0.003) { sum += -(p.sigma.data[0] + p.sigma.data[1] + p.sigma.data[2]) / 3.0; ++n; }
+            }
+            if (n > 0) { plat_sum += sum / n; ++plat_n; }
+        }
+        if (g_trace) {
+            double pmax = 0.0, lmax = 0.0, pz = 0.0;
+            for (const auto& p : mpm.getParticles()) {
+                if (p.m <= 0.0f || p.x[2] < z_if) continue;
+                const double pr = -(p.sigma.data[0] + p.sigma.data[1] + p.sigma.data[2]) / 3.0;
+                if (pr > pmax) { pmax = pr; pz = p.x[2] - z_if; }
+                lmax = std::max(lmax, (double)p.lambda);
+            }
+            std::cout << "TRACE t_us=" << mpm.getSimTime() * 1e6 << " front_mm=" << zf * 1e3 << " pmax_GPa=" << pmax * 1e-9
+                      << " at_mm=" << pz * 1e3 << " lam_max=" << lmax << "\n";
+        }
         if (zf > 0.0) front.push_back({mpm.getSimTime(), zf});
         // lead-wave speed over a 2 mm window
         for (int i = (int)front.size() - 1; i > 0; --i) {
@@ -286,9 +308,65 @@ PopResult runPopCase(const Explosive& ex, double P_in_pa, double run_exp_mm, dou
         }
         if (!front.empty() && front.back().z > target_len - 0.002) break;
     }
+    res.p_plateau_gpa = (plat_n > 0) ? 1.0e-9 * plat_sum / plat_n : 0.0;
     res.t_end_us = mpm.getSimTime() * 1.0e6; res.dt_last = mpm.getLastDt();
     if (!res.detonated) res.run_mm = -1.0;
     return res;
+}
+
+// Reaction OFF: validates the harness itself. The plateau pressure produced by the production solver in the
+// inert target must equal the Hugoniot pressure that the flyer speed was derived from (same EOS).
+BenchmarkResult test_inert_input_pressure() {
+    BenchmarkResult r;
+    r.id = "VV-L2-LT-INERT"; r.level = 2;
+    r.title = "Pop-plot harness validation: inert-target plateau pressure vs unreacted Hugoniot (production MPMSolver3D)";
+    r.tolerance_linf = 0.10;
+    const PopCase cases[] = {{0, 1.45, 72.2}, {0, 2.56, 16.9}, {1, 2.2, 25.0}, {1, 4.2, 9.0}, {2, 3.78, 14.0}, {2, 6.84, 5.0}};
+    const double dz = 0.5e-3;
+    std::ostringstream d;
+    d << "Discretization: 4 x 4 x Nz cells, dz = 0.5 mm, 8 particles/cell, free-slip walls, all Lee-Tarver rates zero in the target. "
+         "Plateau = mean pressure 1-3 mm behind the interface while the front is at 4-8 mm depth.\n"
+         "case: explosive, P_target [GPa], P_plateau [GPa], rel err\n";
+    double worst = 0.0;
+    for (const auto& c : cases) {
+        const Explosive ex = makeExplosive(c.expl);
+        const PopResult pr = runPopCase(ex, c.P_gpa * 1.0e9, c.run_mm, dz, false);
+        const double rel = std::abs(pr.p_plateau_gpa - c.P_gpa) / c.P_gpa;
+        worst = std::max(worst, rel);
+        d << "  " << ex.name << ", " << c.P_gpa << ", " << pr.p_plateau_gpa << ", " << rel << "\n";
+    }
+    r.error_linf = worst; r.passed = worst <= r.tolerance_linf;
+    r.summary = "worst plateau-pressure error vs Hugoniot = " + std::to_string(worst) + " (tolerance " + std::to_string(r.tolerance_linf) + ")";
+    r.details = d.str();
+    return r;
+}
+
+// Grid convergence of the run distance for two representative cases.
+BenchmarkResult test_pop_convergence() {
+    BenchmarkResult r;
+    r.id = "VV-L2-LT-POP-CONV"; r.level = 2;
+    r.title = "Pop-plot grid convergence (C-4 4.2 GPa, PBX 9501 2.56 GPa): dz = 1.0, 0.5, 0.25 mm";
+    r.tolerance_linf = 0.15;
+    const PopCase cases[] = {{1, 4.2, 9.0}, {0, 2.56, 16.9}};
+    const double dzs[3] = {1.0e-3, 0.5e-3, 0.25e-3};
+    std::ostringstream d;
+    d << "4 x 4 x Nz cells, 8 particles/cell. Metric: |run(0.25mm) - run(0.5mm)| / run(0.25mm).\ncase: dz [mm], run [mm], Np, Nz\n";
+    double worst = 0.0;
+    for (const auto& c : cases) {
+        const Explosive ex = makeExplosive(c.expl);
+        double run[3];
+        for (int i = 0; i < 3; ++i) {
+            const PopResult pr = runPopCase(ex, c.P_gpa * 1.0e9, c.run_mm, dzs[i]);
+            run[i] = pr.detonated ? pr.run_mm : -1.0;
+            d << "  " << ex.name << " " << c.P_gpa << " GPa: " << dzs[i] * 1.0e3 << ", " << (pr.detonated ? std::to_string(pr.run_mm) : std::string("NO DET")) << ", " << pr.np << ", " << pr.nz << "\n";
+        }
+        const double rel = (run[2] > 0.0 && run[1] > 0.0) ? std::abs(run[2] - run[1]) / run[2] : 1.0;
+        worst = std::max(worst, rel);
+    }
+    r.error_linf = worst; r.passed = worst <= r.tolerance_linf;
+    r.summary = "fine-pair run-distance change = " + std::to_string(worst) + " (tolerance " + std::to_string(r.tolerance_linf) + ")";
+    r.details = d.str();
+    return r;
 }
 
 BenchmarkResult test_pop_plot() {
@@ -326,6 +404,14 @@ BenchmarkResult test_pop_plot() {
 
 } // namespace
 
+void run_lee_tarver_trace(int expl, double P_gpa, double dz_mm) {
+    g_trace = true;
+    const Explosive ex = makeExplosive(expl);
+    const PopResult pr = runPopCase(ex, P_gpa * 1.0e9, 20.0, dz_mm * 1.0e-3);
+    g_trace = false;
+    std::cout << "RESULT detonated=" << pr.detonated << " run_mm=" << pr.run_mm << " np=" << pr.np << "\n";
+}
+
 std::vector<BenchmarkResult> run_lee_tarver_benchmarks() {
     std::vector<BenchmarkResult> out;
     out.push_back(test_cold_curve_zero_pressure());
@@ -333,7 +419,9 @@ std::vector<BenchmarkResult> run_lee_tarver_benchmarks() {
     out.push_back(test_rate_hand_value());
     out.push_back(test_mixture_equilibrium());
     out.push_back(test_rate_integrator_convergence());
+    out.push_back(test_inert_input_pressure());
     out.push_back(test_pop_plot());
+    out.push_back(test_pop_convergence());
     out.push_back(pending("VV-L2-LT-HUG",
         "Unreacted-JWL principal Hugoniot vs published Us-up relations", 2,
         "Reference relations exist (LX-17 Us=1.99+1.76 up; PBX 9502 Us=1.90+3.00 up) but the matching reactant EOS calibrations lack published cutoffs, so no shippable preset exists to test against."));

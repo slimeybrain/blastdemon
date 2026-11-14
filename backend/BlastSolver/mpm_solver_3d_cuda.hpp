@@ -33,6 +33,8 @@ struct MPMParticle3DSoA {
     int* state{nullptr};
     int* cluster_id{nullptr};
     int* material_id{nullptr};
+    float* F_total[9]{};     // Lazy finite-strain deformation gradient (36B/particle only when hyperelastic material exists)
+    float* hill_axes[6]{};   // Lazy orthonormal corotational axes a1[3], a2[3] (24B/particle only when Hill48 exists)
 };
 
 // 3D MPM Tile structure matching TILE_SIZE_3D = 8 (512 nodes per block) for CFD-MPM alignment
@@ -414,7 +416,21 @@ private:
 
     std::vector<MPMGridNode3D> m_host_grid;
     std::vector<MPMParticle3D> m_host_particles;
+    std::vector<MPMParticleAux3D> m_host_aux_states;
     std::vector<MaterialTable3D> m_material_tables;
+
+    bool hasHyperelasticMaterial() const {
+        for (const auto& mat : m_material_tables) {
+            if (isHyperelasticModel(mat.material_model)) return true;
+        }
+        return false;
+    }
+    bool hasHill48Material() const {
+        for (const auto& mat : m_material_tables) {
+            if (mat.material_model == MPMMaterialModel::Hill48Orthotropic) return true;
+        }
+        return false;
+    }
 
     MPMGridNode3D* d_grid{nullptr};
     float* d_grid_n{nullptr};
@@ -422,6 +438,8 @@ private:
     MPMParticle3DSoA d_soa{};
     void* d_soa_buffer{nullptr};
     size_t m_allocated_soa_bytes{0};
+    bool m_soa_has_F_total{false};
+    bool m_soa_has_hill_axes{false};
     MaterialTable3D* d_material_tables{nullptr};
     size_t m_allocated_material_tables{0};
     float* d_max_v_buf{nullptr};

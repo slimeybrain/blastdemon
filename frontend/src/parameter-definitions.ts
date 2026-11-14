@@ -4432,6 +4432,339 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Maximum sustainable tensile stress before spalling / cracking',
         detailedDesc: 'Limits hydrostatic tension in geomaterials and brittle solids. Exceedance caps principal tensile stress and initiates damage.',
         defaultVal: 0.0
+    },
+    'ideal_R': {
+        key: 'ideal_R',
+        label: 'Specific Gas Constant (R)',
+        unit: 'J/(kg·K)',
+        category: 'Equations of State (EOS)',
+        shortDesc: 'Ideal gas constant R = R_u / M linking pressure, density, and temperature',
+        detailedDesc: 'Specific gas constant R (J/(kg·K)) in p = ρ · R · T and internal energy e = c_v · T = R · T / (γ - 1). Air ≈ 287.058 J/(kg·K), Helium ≈ 2077.1 J/(kg·K), Hydrogen ≈ 4124.2 J/(kg·K).',
+        defaultVal: 287.058
+    },
+    'rht_f_el_c': {
+        key: 'rht_f_el_c',
+        label: 'RHT Elastic Limit Ratio (g_c* = f_el / f_c)',
+        unit: 'ratio',
+        category: 'Concrete RHT Model',
+        shortDesc: 'Elastic-to-failure compressive strength ratio in RHT pre-hardening envelope',
+        detailedDesc: 'Dimensionless ratio f_el / f_c (typically 0.50–0.60) defining onset of plastic strain hardening inside the Riedel-Hiermaier-Thoma (RHT) triaxial failure surface before peak compressive strength is reached.',
+        defaultVal: 0.53
+    },
+    'cs_C': {
+        key: 'cs_C',
+        label: 'Cowper-Symonds Rate Constant (C)',
+        unit: '1/s',
+        category: 'Elastoplasticity & Strain Rate',
+        shortDesc: 'Strain-rate scaling constant C (*MAT_024) in dynamic yield factor 1 + (ε̇_p / C)^(1/P)',
+        detailedDesc: 'Cowper-Symonds rate sensitivity parameter C (1/s) governing dynamic yield amplification σ_d / σ_y = 1 + (ε̇_p / C)^(1/P). Set C ≤ 0 to disable rate sensitivity for quasi-static Hypoelastic J2 runs.',
+        defaultVal: 0.0
+    },
+    'cs_P': {
+        key: 'cs_P',
+        label: 'Cowper-Symonds Exponent (P)',
+        unit: '-',
+        category: 'Elastoplasticity & Strain Rate',
+        shortDesc: 'Strain-rate hardening exponent P (*MAT_024) in dynamic yield factor 1 + (ε̇_p / C)^(1/P)',
+        detailedDesc: 'Cowper-Symonds inverse exponent P controlling curvature of yield amplification with equivalent plastic strain rate ε̇_p. Classic mild steel calibration: C = 40.4 1/s, P = 5.0; aluminum alloys: C = 6500 1/s, P = 4.0.',
+        defaultVal: 5.0
+    },
+    'cap_X0': {
+        key: 'cap_X0',
+        label: 'Initial Cap Preconsolidation (X₀)',
+        unit: 'Pa',
+        category: 'Geotechnical & Seabed',
+        shortDesc: 'Initial hydrostatic pressure intercept X₀ on the DiMaggio-Sandler elliptical cap (*MAT_025)',
+        detailedDesc: 'Mean compressive pressure X₀ (Pa) separating elastic volumetric response from plastic pore collapse / compaction along the elliptical cap surface.',
+        defaultVal: 1.0e5
+    },
+    'cap_W': {
+        key: 'cap_W',
+        label: 'Maximum Volumetric Compaction (W)',
+        unit: 'strain',
+        category: 'Geotechnical & Seabed',
+        shortDesc: 'Asymptotic maximum plastic volumetric compaction strain W in ε_v^p = W · (1 - exp(-D₁·ΔX - D₂·ΔX²))',
+        detailedDesc: 'Maximum locked plastic volumetric strain capacity W (dimensionless porosity collapse fraction, e.g. 0.10–0.45 for soils and porous rocks) at complete pore closure (*MAT_025).',
+        defaultVal: 0.20
+    },
+    'cap_D1': {
+        key: 'cap_D1',
+        label: 'Cap Linear Hardening (D₁)',
+        unit: '1/Pa',
+        category: 'Geotechnical & Seabed',
+        shortDesc: 'Linear exponential compaction coefficient D₁ controlling cap hardening stiffness',
+        detailedDesc: 'First coefficient D₁ (1/Pa) in the DiMaggio-Sandler cap hardening law ε_v^p(X) = W · (1 - exp(-D₁·(X - X₀) - D₂·(X - X₀)²)).',
+        defaultVal: 5.0e-7
+    },
+    'cap_D2': {
+        key: 'cap_D2',
+        label: 'Cap Quadratic Hardening (D₂)',
+        unit: '1/Pa²',
+        category: 'Geotechnical & Seabed',
+        shortDesc: 'Quadratic compaction stiffening coefficient D₂ in the DiMaggio-Sandler cap law',
+        detailedDesc: 'Second-order coefficient D₂ (1/Pa²) accelerating cap expansion X(ε_v^p) at high overburden or shock compression pressures (*MAT_025).',
+        defaultVal: 1.0e-13
+    },
+    'cap_R': {
+        key: 'cap_R',
+        label: 'Cap Ellipticity Ratio (R)',
+        unit: 'ratio',
+        category: 'Geotechnical & Seabed',
+        shortDesc: 'Ratio R of semi-major (p) to semi-minor (√J₂) axes of the elliptical cap (*MAT_025)',
+        detailedDesc: 'Controls the shape aspect ratio R of the elliptical volumetric compaction cap intersecting the Drucker-Prager failure cone at (p_a, √J₂). Larger R produces steeper shear-induced compaction.',
+        defaultVal: 2.5
+    },
+    'jh2_sigma_hel': {
+        key: 'jh2_sigma_hel',
+        label: 'JH-2 Deviatoric HEL Stress (σ_HEL)',
+        unit: 'Pa',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Equivalent von Mises stress σ_HEL at the Hugoniot Elastic Limit (*MAT_110)',
+        detailedDesc: 'Reference deviatoric strength σ_HEL (Pa) used to normalize intact and fractured JH-2 failure envelopes: σ* = σ_i / σ_HEL = A · (P* + T*)^N · (1 + C · ln(ε̇*)).',
+        defaultVal: 9.08e9
+    },
+    'jh2_p_hel': {
+        key: 'jh2_p_hel',
+        label: 'JH-2 Hydrostatic HEL Pressure (P_HEL)',
+        unit: 'Pa',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Hydrostatic pressure P_HEL at the Hugoniot Elastic Limit (*MAT_110)',
+        detailedDesc: 'Normalizing mean pressure P_HEL (Pa) defining dimensionless pressure P* = p / P_HEL and dimensionless spall threshold T* = T_max / P_HEL in the JH-2 ceramic strength law.',
+        defaultVal: 5.65e9
+    },
+    'jh2_t_max': {
+        key: 'jh2_t_max',
+        label: 'JH-2 Hydrostatic Tensile Limit (T)',
+        unit: 'Pa',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Maximum hydrostatic tensile strength T_max sustained before brittle spall damage',
+        detailedDesc: 'Intact hydrostatic spall tension limit T_max (Pa) in JH-2 (*MAT_110); degrades continuously as T_eff = T_max · (1 - D) with accumulated brittle damage D ∈ [0, 1].',
+        defaultVal: 0.37e9
+    },
+    'jh2_A': {
+        key: 'jh2_A',
+        label: 'JH-2 Intact Strength Coefficient (A)',
+        unit: '-',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Normalized intact deviatoric strength coefficient A at P* = 1',
+        detailedDesc: 'Dimensionless intact ceramic strength factor A in σ*_i = A · (P* + T*)^N · (1 + C · ln(ε̇*)) for *MAT_110.',
+        defaultVal: 0.96
+    },
+    'jh2_N': {
+        key: 'jh2_N',
+        label: 'JH-2 Intact Pressure Exponent (N)',
+        unit: '-',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Pressure-hardening exponent N for intact ceramic yield strength',
+        detailedDesc: 'Power-law pressure exponent N governing confining pressure strengthening of uncracked ceramic in JH-2.',
+        defaultVal: 0.65
+    },
+    'jh2_B': {
+        key: 'jh2_B',
+        label: 'JH-2 Fractured Strength Coefficient (B)',
+        unit: '-',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Normalized comminuted/fractured ceramic strength coefficient B',
+        detailedDesc: 'Dimensionless residual strength coefficient B for fully damaged (D = 1) ceramic rubble in σ*_f = B · (P*)^M · (1 + C · ln(ε̇*)).',
+        defaultVal: 0.35
+    },
+    'jh2_M': {
+        key: 'jh2_M',
+        label: 'JH-2 Fractured Pressure Exponent (M)',
+        unit: '-',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Pressure-friction exponent M for damaged ceramic rubble',
+        detailedDesc: 'Exponent M governing pressure dependence of comminuted ceramic rubble shear resistance in JH-2.',
+        defaultVal: 1.00
+    },
+    'jh2_C': {
+        key: 'jh2_C',
+        label: 'JH-2 Strain-Rate Coefficient (C)',
+        unit: '-',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Logarithmic strain-rate strengthening factor C in (1 + C · ln(ε̇_p))',
+        detailedDesc: 'Dimensionless strain-rate sensitivity constant C amplifying intact and fractured ceramic strength under hypervelocity ballistic impact.',
+        defaultVal: 0.009
+    },
+    'jh2_D1': {
+        key: 'jh2_D1',
+        label: 'JH-2 Damage Fracture Constant (D₁)',
+        unit: '-',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'First Johnson-Holmquist fracture strain coefficient D₁ in ε_f^p = D₁ · (P* + T*)^D₂',
+        detailedDesc: 'Controls overall plastic strain capacity prior to complete comminution (D = 1) in JH-2 damage accumulation D = Σ Δε_p / ε_f^p.',
+        defaultVal: 0.48
+    },
+    'jh2_D2': {
+        key: 'jh2_D2',
+        label: 'JH-2 Damage Pressure Exponent (D₂)',
+        unit: '-',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Confining-pressure ductility exponent D₂ in ε_f^p = D₁ · (P* + T*)^D₂',
+        detailedDesc: 'Exponent D₂ controlling suppression of brittle microcracking under high confining pressure P* in JH-2.',
+        defaultVal: 0.48
+    },
+    'jh2_K1': {
+        key: 'jh2_K1',
+        label: 'JH-2 Polynomial EOS Bulk Modulus (K₁)',
+        unit: 'Pa',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Linear elastic bulk modulus K₁ (Pa) in JH-2 cubic polynomial EOS',
+        detailedDesc: 'Initial bulk modulus K₁ (Pa) in P_EOS = K₁·μ + K₂·μ² + K₃·μ³ where μ = ρ/ρ₀ - 1 = 1/J - 1 (*MAT_110).',
+        defaultVal: 220.0e9
+    },
+    'jh2_K2': {
+        key: 'jh2_K2',
+        label: 'JH-2 Polynomial EOS Quadratic (K₂)',
+        unit: 'Pa',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Quadratic volumetric stiffening/phase-transition coefficient K₂ (Pa)',
+        detailedDesc: 'Second-order volumetric EOS coefficient K₂ (Pa) multiplying μ² in compression (negative values model polymorphic phase collapse, e.g. B₄C).',
+        defaultVal: 361.0e9
+    },
+    'jh2_K3': {
+        key: 'jh2_K3',
+        label: 'JH-2 Polynomial EOS Cubic (K₃)',
+        unit: 'Pa',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Cubic high-pressure stiffening coefficient K₃ (Pa)',
+        detailedDesc: 'Third-order volumetric EOS coefficient K₃ (Pa) multiplying μ³ at multi-megabar shock compression.',
+        defaultVal: 0.0
+    },
+    'jh2_beta': {
+        key: 'jh2_beta',
+        label: 'JH-2 Bulking Energy Conversion Fraction (β)',
+        unit: '0–1',
+        category: 'Ceramics & Brittle Armor (JH-2)',
+        shortDesc: 'Fraction β ∈ [0, 1] of lost elastic shear energy converted into dilatational bulking pressure ΔP',
+        detailedDesc: 'Converts incremental elastic deviatoric strain energy released during brittle damage softening into irreversible hydrostatic bulking pressure ΔP inside confined ceramic armor.',
+        defaultVal: 1.0
+    },
+    'hb_sigma_ci': {
+        key: 'hb_sigma_ci',
+        label: 'Hoek-Brown Intact Rock UCS (σ_ci)',
+        unit: 'Pa',
+        category: 'Geotechnical & Seabed',
+        shortDesc: 'Uniaxial compressive strength σ_ci (Pa) of intact unjointed rock blocks',
+        detailedDesc: 'Reference intact rock compressive strength σ_ci (Pa) in the Generalized Hoek-Brown criterion σ₁ = σ₃ + σ_ci · (m_b · σ₃ / σ_ci + s)^a.',
+        defaultVal: 200.0e6
+    },
+    'hb_mi': {
+        key: 'hb_mi',
+        label: 'Hoek-Brown Intact Petrographic Constant (m_i)',
+        unit: '-',
+        category: 'Geotechnical & Seabed',
+        shortDesc: 'Intact rock frictional constant m_i (~5 shale, ~10 limestone, ~17 sandstone, ~25 basalt, ~32 granite)',
+        detailedDesc: 'Lithological parameter m_i controlling slope and curvature of the intact rock failure envelope before joint-mass downscaling.',
+        defaultVal: 32.0
+    },
+    'hb_gsi': {
+        key: 'hb_gsi',
+        label: 'Geological Strength Index (GSI)',
+        unit: '5–100',
+        category: 'Geotechnical & Seabed',
+        shortDesc: 'Rock mass interlocking & discontinuity rating GSI (100 = intact rock core; lower = jointed)',
+        detailedDesc: 'Hoek-Carranza-Torres-Corkum (2002) index GSI ∈ [5, 100] downscaling rock mass parameters m_b, s, and exponent a from intact core properties.',
+        defaultVal: 90.0
+    },
+    'hb_D': {
+        key: 'hb_D',
+        label: 'Hoek-Brown Blast Disturbance Factor (D)',
+        unit: '0–1',
+        category: 'Geotechnical & Seabed',
+        shortDesc: 'Initial rock-mass blast/excavation disturbance factor D ∈ [0, 1] (0 = undisturbed)',
+        detailedDesc: 'Damage disturbance factor D (0 for undisturbed in-situ rock mass to 1 for heavily blasted quarry rock) modulating m_b and s decay.',
+        defaultVal: 0.0
+    },
+    'foam_plateau_stress': {
+        key: 'foam_plateau_stress',
+        label: 'Crushable Foam Plateau Stress (σ_p)',
+        unit: 'Pa',
+        category: 'Cellular Foams & Energy Absorbers',
+        shortDesc: 'Constant cell-wall collapse plateau stress σ_p (Pa) prior to densification (*MAT_063)',
+        detailedDesc: 'Characteristic yield stress σ_p (Pa) at which metallic, polymeric, or honeycomb cells buckle under compression with near-constant energy absorption.',
+        defaultVal: 1.9e6
+    },
+    'foam_densification_strain': {
+        key: 'foam_densification_strain',
+        label: 'Foam Densification Strain (ε_D)',
+        unit: 'strain',
+        category: 'Cellular Foams & Energy Absorbers',
+        shortDesc: 'Compressive volumetric strain ε_D at which all voids collapse and solid cell walls lock up',
+        detailedDesc: 'Threshold compressive volumetric strain ε_D (e.g. 0.50–0.85) beyond which plateau stiffness rises sharply due to cell-wall impingement lock-up.',
+        defaultVal: 0.65
+    },
+    'foam_alpha': {
+        key: 'foam_alpha',
+        label: 'Deshpande-Fleck Yield Shape Factor (α)',
+        unit: '-',
+        category: 'Cellular Foams & Energy Absorbers',
+        shortDesc: 'Shape factor α = 3·√((1 - 2·ν_p)/(2·(1 + ν_p))) relating shear to hydrostatic foam yield',
+        detailedDesc: 'Governs the elliptical yield surface ratio σ_eq² + α²·σ_m² = (1 + (α/3)²)·σ_y² in Deshpande-Fleck foam plasticity (α ≈ 2.121 corresponds to plastic Poisson ratio ν_p = 0).',
+        defaultVal: 2.121
+    },
+    'foam_hardening': {
+        key: 'foam_hardening',
+        label: 'Foam Post-Plateau Hardening Modulus',
+        unit: 'Pa',
+        category: 'Cellular Foams & Energy Absorbers',
+        shortDesc: 'Linear tangent hardening slope E_t (Pa) prior to asymptotic lock-up stiffening',
+        detailedDesc: 'Controls gentle upward slope of the foam stress-strain plateau prior to exponential/hyperbolic densification near ε_D.',
+        defaultVal: 0.8e6
+    },
+    'sg_Y0': {
+        key: 'sg_Y0',
+        label: 'Steinberg-Guinan Initial Yield Stress (Y₀)',
+        unit: 'Pa',
+        category: 'High-Rate Metals (Steinberg-Guinan)',
+        shortDesc: 'Initial high-strain-rate yield stress Y₀ (Pa) at ambient temperature and zero pressure (*MAT_011)',
+        detailedDesc: 'Base yield strength Y₀ (Pa) in the Steinberg-Guinan constitutive model (1980) for shockwave metal plasticity.',
+        defaultVal: 0.12e9
+    },
+    'sg_Ymax': {
+        key: 'sg_Ymax',
+        label: 'Steinberg-Guinan Saturation Yield (Y_max)',
+        unit: 'Pa',
+        category: 'High-Rate Metals (Steinberg-Guinan)',
+        shortDesc: 'Work-hardening saturation cap Y_max (Pa) capping Y₀·(1 + β·ε_p)^n',
+        detailedDesc: 'Maximum work-hardened flow stress Y_max (Pa) before pressure hardening G(P)/G₀ and thermal softening G(T)/G₀ scaling in *MAT_011.',
+        defaultVal: 0.64e9
+    },
+    'sg_beta': {
+        key: 'sg_beta',
+        label: 'Steinberg-Guinan Work-Hardening Factor (β)',
+        unit: '-',
+        category: 'High-Rate Metals (Steinberg-Guinan)',
+        shortDesc: 'Dimensionless work-hardening multiplier β in (1 + β · ε_p)^n',
+        detailedDesc: 'Controls how rapidly plastic strain ε_p drives metal strength from Y₀ toward saturation cap Y_max under Taylor impact and shaped-charge liner collapse.',
+        defaultVal: 36.0
+    },
+    'sg_n': {
+        key: 'sg_n',
+        label: 'Steinberg-Guinan Hardening Exponent (n)',
+        unit: '-',
+        category: 'High-Rate Metals (Steinberg-Guinan)',
+        shortDesc: 'Power-law strain-hardening exponent n in (1 + β · ε_p)^n',
+        detailedDesc: 'Exponent n shaping work-hardening curvature between Y₀ and Y_max in Steinberg-Guinan (*MAT_011).',
+        defaultVal: 0.45
+    },
+    'sg_bp': {
+        key: 'sg_bp',
+        label: 'Steinberg-Guinan Pressure Derivative (G\'_p / G₀)',
+        unit: '1/Pa',
+        category: 'High-Rate Metals (Steinberg-Guinan)',
+        shortDesc: 'Normalized pressure derivative of shear modulus b_p = (1/G₀)·(∂G/∂p) in 1/Pa (*MAT_011)',
+        detailedDesc: 'Multiplies compression pressure p · J^(1/3) in the Steinberg-Guinan shear modulus and yield pressure-hardening term (typically 1.0e-11 to 6.5e-11 Pa⁻¹ for metals).',
+        defaultVal: 2.8e-11
+    },
+    'sg_bT': {
+        key: 'sg_bT',
+        label: 'Steinberg-Guinan Thermal Derivative (-G\'_T / G₀)',
+        unit: '1/K',
+        category: 'High-Rate Metals (Steinberg-Guinan)',
+        shortDesc: 'Normalized thermal softening rate b_T = -(1/G₀)·(∂G/∂T) in 1/K (*MAT_011)',
+        detailedDesc: 'Reduces shear modulus and flow stress linearly with temperature rise (T - T₀), driving thermal softening toward zero shear strength at Lindemann melt temperature T_melt (typically 1.3e-4 to 6.5e-4 K⁻¹).',
+        defaultVal: 3.8e-4
     }
 };
 
@@ -4481,30 +4814,26 @@ export const NODE_DEFINITIONS: Record<string, NodeDefinition> = {
         type: 'Material',
         title: 'Universal Material & Constitutive Model',
         category: 'Material & Thermodynamic Equations of State',
-        shortDesc: 'Universal material node supporting Linear Elastic, Hypoelastic, Johnson-Cook, CREST-Davis Reactive Burn, Concrete (RHT/K&C/CSCM), Ideal Gas, and JWL Detonation Gas models across all solvers.',
+        shortDesc: 'Universal constitutive and EOS specification node covering all 24 solid, geomaterial, ceramic, foam, fluid, and energetic formulations across CFD, MPM (2D/3D), and FEM.',
         fullDescHtml: `
             <div class="node-doc-section">
                 <div class="node-doc-heading">Overview & Role</div>
-                <p>The <strong>Material</strong> node is the universal constitutive and Equation of State (EOS) specification node for all solvers (CFD, MPM, and FEM). Selecting a constitutive model dynamically filters the available material presets and configures appropriate physical parameters.</p>
+                <p>The <strong>Material</strong> node is the single source of truth for constitutive behavior and Equations of State (EOS) across FV CFD, 2D/3D MPM, and 3D FEM. Selecting a constitutive model filters the validated preset library and exposes only the physically active parameters.</p>
             </div>
             <div class="node-doc-section">
                 <div class="node-doc-heading">Supported Constitutive & EOS Models</div>
                 <ul>
-                    <li><strong>Linear Elastic (Baseline):</strong> Hookean isotropic elasticity for structural solids (Steel, Aluminum, Titanium, Glass, Concrete).</li>
-                    <li><strong>CREST Reactive Burn (MPM):</strong> Davis solid reactant + Davis product gas EOS with shock entropy-driven hot-spot ignition and grain growth reaction kinetics for autonomous shock-to-detonation transition (SDT).</li>
-                    <li><strong>Hypoelastic (Solid):</strong> Jaumann rate-integrated linear elasticity with von Mises J2 plastic yield and isotropic linear hardening.</li>
-                    <li><strong>Johnson-Cook + Mie-Grüneisen:</strong> Viscoplastic strain-rate and thermal softening yield model coupled with Mie-Grüneisen shock Hugoniot EOS for armor metals and hypervelocity penetration.</li>
-                    <li><strong>RHT Concrete:</strong> Riedel-Hiermaier-Thoma 3-invariant compressive, tensile, and shear yield envelopes with porous P-alpha compaction and shear damage softening.</li>
-                    <li><strong>Karagozian & Case (K&C):</strong> 3-surface plasticity model with damage evolution, shear dilation, and tensile softening for concrete structures under blast loading.</li>
-                    <li><strong>CSCM Concrete:</strong> Continuous Smooth Cap Model with invariant yield surface and damage softening.</li>
-                    <li><strong>Ideal Gas (CFD):</strong> Gamma-law equation of state for ambient air and blast propagation.</li>
-                    <li><strong>JWL Detonation Gas (CFD):</strong> Jones-Wilkins-Lee expansion equation of state for programmed burn high explosives.</li>
+                    <li><strong>Elastic &amp; Metal Plasticity:</strong> <code>Linear Elastic</code> (*MAT_001), <code>Hypoelastic</code> (J2 + optional Cowper-Symonds rate sensitivity *MAT_024), <code>Johnson-Cook + Mie-Grüneisen</code> (*MAT_015), <code>Steinberg-Guinan</code> (*MAT_011), and corotational <code>Hill48 Orthotropic</code>.</li>
+                    <li><strong>Polymers, Foams &amp; Ceramics:</strong> <code>Hyperelastic (Yeoh)</code>, <code>Hyperelastic (Mooney-Rivlin)</code> (*MAT_027), <code>Crushable Foam</code> (Deshpande-Fleck / *MAT_063), and <code>Johnson-Holmquist JH-2</code> (*MAT_110) brittle armor ceramics with pressure-bulking damage.</li>
+                    <li><strong>Concrete Formulations:</strong> <code>RHT Concrete</code> (with elastic limit ratio <code>rht_f_el_c</code>), <code>Karagozian &amp; Case (K&amp;C)</code> (*MAT_072R3), <code>CSCM Concrete</code> (*MAT_159), and <code>Concrete Damage Plasticity (CDP)</code> with Bažant crack-band regularization.</li>
+                    <li><strong>Geomaterials &amp; Rock Mass:</strong> <code>Drucker-Prager</code>, 3D principal-stress <code>Mohr-Coulomb</code> (*MAT_173), <code>Geological Cap (MAT_025)</code> with DiMaggio-Sandler elliptical compaction, and <code>Hoek-Brown Rock</code> jointed mass plasticity.</li>
+                    <li><strong>Fluids &amp; Energetics:</strong> Configurable <code>Ideal Gas</code> (arbitrary γ, R), <code>Tait Water</code>, <code>JWL Detonation Gas</code>, <code>Ideal Gas Charge</code>, <code>JWL Programmed Burn</code>, <code>Lee-Tarver Ignition &amp; Growth</code>, and <code>CREST Reactive Burn</code>.</li>
                 </ul>
             </div>
             <div class="node-doc-section">
                 <div class="node-doc-heading">Inputs & Upstream Connections</div>
                 <ul>
-                    <li>Connects to <strong>ThePainter</strong>, <strong>Charge1D</strong>, <strong>Charge2D</strong>, <strong>Charge3D</strong>, <strong>MPMObject2D</strong>, <strong>MPMObject3D</strong>, <strong>FEMObject3D</strong>, and Solvers as the single source of truth for material physics.</li>
+                    <li>Connects to <strong>ThePainter</strong>, <strong>Charge1D/2D/3D</strong>, <strong>MPMObject2D/3D</strong>, <strong>FEMObject3D</strong>, <strong>MarineHarbourDomain</strong>, and Solvers.</li>
                 </ul>
             </div>
         `
@@ -5586,7 +5915,7 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
         'composition', 'rho', 'detonation_energy', 'det_vel', 'jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega',
         'afterburn_enabled', 'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio', 'afterburn_ignition_temp', 'afterburn_tau_chem',
         'afterburn_c_edc', 'afterburn_tau_expansion', 'afterburn_ambient_o2_fraction',
-        'ideal_gamma', 'ideal_rho_0', 'ideal_e_0', 'material_type'
+        'ideal_gamma', 'ideal_R', 'ideal_rho_0', 'ideal_e_0', 'material_type'
     ];
     if (fvOnlyKeys.includes(key)) return 'FV';
 
@@ -5604,14 +5933,25 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
 
     const mpmFemKeys = [
         'density', 'youngs_modulus', 'poissons_ratio', 'yield_stress', 'hardening_modulus',
+        'cs_C', 'cs_P',
         'failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius',
         'enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress',
         'jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'Cp',
         'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5',
         'mg_gamma0', 'mg_c0', 'mg_s',
+        'sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT',
+        'yeoh_c10', 'yeoh_c20', 'yeoh_c30', 'mr_c10', 'mr_c01', 'k_bulk',
+        'cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch',
+        'hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0',
+        'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening',
+        'jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max', 'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C',
+        'jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta',
+        'dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus', 'k0_earth_pressure',
+        'cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R',
+        'hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D',
         'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
         'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
-        'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+        'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat', 'rht_f_el_c',
         'kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega',
         'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'
     ];
@@ -5889,8 +6229,8 @@ export function getParamKeysForNode(
         const matModel = parameters['material_model'] || 'Hypoelastic';
         const isEnergetic = ['JWL Programmed Burn', 'Lee-Tarver Ignition & Growth', 'CREST Reactive Burn', 'Davis Reactive Burn'].includes(matModel);
 
-        if (matModel === 'Ideal Gas') {
-            keys = ['ambient_air_target', 'material_model', 'preset', 'density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'ambient_o2_fraction'];
+        if (matModel === 'Ideal Gas' || matModel === 'Air') {
+            keys = ['ambient_air_target', 'material_model', 'preset', 'density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'ideal_gamma', 'ideal_R', 'ambient_o2_fraction'];
         } else if (matModel === 'JWL Detonation Gas' || matModel === 'JWL Charge') {
             keys = [
                 'charge_target', 'material_model', 'preset', 'composition', 'rho', 'density', 'detonation_energy', 'det_vel', 'initial_temperature',
@@ -5900,18 +6240,64 @@ export function getParamKeysForNode(
                 'afterburn_ambient_o2_fraction'
             ];
         } else if (matModel === 'Ideal Gas Charge') {
-            keys = ['charge_target', 'material_model', 'preset', 'composition', 'ideal_rho_0', 'density', 'ideal_e_0', 'detonation_energy', 'initial_temperature', 'ideal_gamma'];
+            keys = ['charge_target', 'material_model', 'preset', 'composition', 'ideal_rho_0', 'density', 'ideal_e_0', 'detonation_energy', 'initial_temperature', 'ideal_gamma', 'ideal_R'];
         } else if (matModel === 'Drucker-Prager' || matModel === 'Mohr-Coulomb') {
             keys = [
                 'seabed_target', 'material_model', 'preset', 'transfer_scheme',
                 'density', 'youngs_modulus', 'poissons_ratio',
-                'yield_stress', 'hardening_modulus',
-                'soil_friction_angle', 'soil_cohesion', 'k0_earth_pressure',
+                'dp_friction_angle', 'dp_cohesion', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus', 'k0_earth_pressure',
                 'failure_strain', 'tensile_failure_stress',
                 'directional_crack_band', 'nonlocal_radius',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor'
+            ];
+        } else if (matModel === 'Geological Cap (MAT_025)' || matModel === 'Geological Cap') {
+            keys = [
+                'seabed_target', 'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'dp_friction_angle', 'dp_cohesion', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus', 'k0_earth_pressure',
+                'cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R',
+                'failure_strain', 'tensile_failure_stress',
+                'directional_crack_band', 'nonlocal_radius',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor'
+            ];
+        } else if (matModel === 'Hoek-Brown Rock') {
+            keys = [
+                'seabed_target', 'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D',
+                'dp_dilatancy_angle', 'dp_tensile_cutoff', 'k0_earth_pressure',
+                'failure_strain', 'tensile_failure_stress',
+                'directional_crack_band', 'nonlocal_radius',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor'
+            ];
+        } else if (matModel === 'Crushable Foam') {
+            keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening',
+                'dp_tensile_cutoff', 'failure_strain',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor'
+            ];
+        } else if (matModel === 'Johnson-Holmquist JH-2') {
+            keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max',
+                'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C',
+                'jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta',
+                'failure_strain', 'tensile_failure_stress',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume'
             ];
         } else if (isEnergetic) {
             keys = ['material_model', 'preset', 'transfer_scheme', 'solid_model', 'burn_model', 'product_model'];
@@ -5993,6 +6379,20 @@ export function getParamKeysForNode(
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
+        } else if (matModel === 'Steinberg-Guinan') {
+            keys = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT',
+                'T_melt', 'T_room', 'initial_temperature', 'Cp',
+                'mg_gamma0', 'mg_c0', 'mg_s',
+                'failure_strain', 'tensile_failure_stress',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+            ];
         } else if (matModel === 'RHT Concrete') {
             keys = [
                 'material_model', 'preset', 'transfer_scheme',
@@ -6001,7 +6401,7 @@ export function getParamKeysForNode(
                 'directional_crack_band', 'nonlocal_radius',
                 'failure_strain', 'tensile_failure_stress',
                 'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
-                'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat',
+                'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat', 'rht_f_el_c',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
@@ -6042,11 +6442,11 @@ export function getParamKeysForNode(
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
         } else {
-            // Default Hypoelastic
+            // Default Hypoelastic (+ optional Cowper-Symonds *MAT_024 strain-rate amplification)
             keys = [
                 'material_model', 'preset', 'transfer_scheme',
                 'density', 'youngs_modulus', 'poissons_ratio',
-                'yield_stress', 'hardening_modulus',
+                'yield_stress', 'hardening_modulus', 'cs_C', 'cs_P',
                 'failure_strain', 'tensile_failure_stress',
                 'directional_crack_band', 'nonlocal_radius',
                 'enable_strain_erosion', 'erosion_strain',
@@ -6367,8 +6767,8 @@ export function shouldSkipNodeParameter(
         const matModel = parameters['material_model'] || 'Hypoelastic';
         const isEnergetic = ['JWL Programmed Burn', 'Lee-Tarver Ignition & Growth', 'CREST Reactive Burn', 'Davis Reactive Burn'].includes(matModel);
 
-        if (matModel === 'Ideal Gas') {
-            if (['density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'ambient_o2_fraction', 'ambient_air_target', 'material_model', 'preset'].includes(key)) {
+        if (matModel === 'Ideal Gas' || matModel === 'Air') {
+            if (['density', 'atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'ideal_gamma', 'ideal_R', 'ambient_o2_fraction', 'ambient_air_target', 'material_model', 'preset'].includes(key)) {
                 return false;
             }
             return true;
@@ -6404,17 +6804,16 @@ export function shouldSkipNodeParameter(
 
         if (matModel === 'Ideal Gas Charge') {
             const idealGasChargeAllowed = [
-                'charge_target', 'material_model', 'preset', 'composition', 'ideal_rho_0', 'density', 'ideal_e_0', 'detonation_energy', 'initial_temperature', 'ideal_gamma'
+                'charge_target', 'material_model', 'preset', 'composition', 'ideal_rho_0', 'density', 'ideal_e_0', 'detonation_energy', 'initial_temperature', 'ideal_gamma', 'ideal_R'
             ];
             return !idealGasChargeAllowed.includes(key);
         }
 
-        if (matModel === 'Drucker-Prager' || matModel === 'Mohr-Coulomb') {
+        if (matModel === 'Drucker-Prager' || matModel === 'Mohr-Coulomb' || matModel === 'Geological Cap (MAT_025)' || matModel === 'Geological Cap' || matModel === 'Hoek-Brown Rock') {
             const dpAllowed = [
                 'seabed_target', 'material_model', 'preset', 'transfer_scheme',
                 'density', 'youngs_modulus', 'poissons_ratio',
-                'yield_stress', 'hardening_modulus',
-                'soil_friction_angle', 'soil_cohesion', 'k0_earth_pressure',
+                'k0_earth_pressure',
                 'failure_strain', 'tensile_failure_stress',
                 'directional_crack_band', 'nonlocal_radius',
                 'enable_strain_erosion', 'erosion_strain',
@@ -6422,12 +6821,84 @@ export function shouldSkipNodeParameter(
                 'enable_timestep_erosion', 'timestep_erosion_factor',
                 'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
             ];
+            if (matModel === 'Hoek-Brown Rock') {
+                dpAllowed.push('hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D', 'dp_dilatancy_angle', 'dp_tensile_cutoff');
+            } else {
+                dpAllowed.push('dp_friction_angle', 'dp_cohesion', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus');
+                if (matModel === 'Geological Cap (MAT_025)' || matModel === 'Geological Cap') {
+                    dpAllowed.push('cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R');
+                }
+            }
             if (!dpAllowed.includes(key)) return true;
             if (key === 'erosion_strain' && !parameters['enable_strain_erosion']) return true;
             if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
             if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
             if ((key === 'erosion_min_density' || key === 'erosion_min_density_ratio') && !parameters['enable_density_erosion']) return true;
             if (key === 'nonlocal_radius' && !parameters['directional_crack_band']) return true;
+            return false;
+        }
+
+        if (matModel === 'Crushable Foam') {
+            const foamAllowed = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening',
+                'dp_tensile_cutoff', 'failure_strain',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
+            ];
+            if (!foamAllowed.includes(key)) return true;
+            if (key === 'erosion_strain' && !parameters['enable_strain_erosion']) return true;
+            if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
+            if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
+            if ((key === 'erosion_min_density' || key === 'erosion_min_density_ratio') && !parameters['enable_density_erosion']) return true;
+            return false;
+        }
+
+        if (matModel === 'Johnson-Holmquist JH-2') {
+            const jh2Allowed = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max',
+                'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C',
+                'jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta',
+                'failure_strain', 'tensile_failure_stress',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume'
+            ];
+            if (!jh2Allowed.includes(key)) return true;
+            if (key === 'erosion_strain' && !parameters['enable_strain_erosion']) return true;
+            if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
+            if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
+            if ((key === 'weibull_modulus' || key === 'weibull_scale' || key === 'weibull_ref_volume') && !parameters['enable_heterogeneity']) return true;
+            return false;
+        }
+
+        if (matModel === 'Steinberg-Guinan') {
+            const sgAllowed = [
+                'material_model', 'preset', 'transfer_scheme',
+                'density', 'youngs_modulus', 'poissons_ratio',
+                'sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT',
+                'T_melt', 'T_room', 'initial_temperature', 'Cp',
+                'mg_gamma0', 'mg_c0', 'mg_s',
+                'failure_strain', 'tensile_failure_stress',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
+                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+            ];
+            if (!sgAllowed.includes(key)) return true;
+            if (key === 'erosion_strain' && !parameters['enable_strain_erosion']) return true;
+            if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
+            if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
+            if ((key === 'weibull_modulus' || key === 'weibull_scale' || key === 'weibull_ref_volume') && !parameters['enable_heterogeneity']) return true;
+            if ((key === 'anisotropy_ratio' || key === 'anisotropy_axis' || key === 'anisotropy_dir_x' || key === 'anisotropy_dir_y' || key === 'anisotropy_dir_z') && !parameters['enable_anisotropy']) return true;
+            if ((key === 'anisotropy_dir_x' || key === 'anisotropy_dir_y' || key === 'anisotropy_dir_z') && parameters['anisotropy_axis'] !== 'Custom') return true;
             return false;
         }
 
@@ -6450,12 +6921,13 @@ export function shouldSkipNodeParameter(
             if (['jwl_A', 'jwl_B', 'jwl_R1', 'jwl_R2', 'jwl_omega'].includes(key) && prodModel.includes('Davis')) return true;
 
             // Energetic models do not expose strain hardening / failure / solid strain erosion / heterogeneity / anisotropy
-            if (['hardening_modulus', 'failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius'].includes(key)) return true;
+            if (['hardening_modulus', 'failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius', 'cs_C', 'cs_P'].includes(key)) return true;
             if (['fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension'].includes(key)) return true;
             if (['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5', 'T_melt', 'T_room', 'Cp'].includes(key)) return true;
-            if (['rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2', 'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat'].includes(key)) return true;
+            if (['rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2', 'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat', 'rht_f_el_c'].includes(key)) return true;
             if (['kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'].includes(key)) return true;
             if (['cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'].includes(key)) return true;
+            if (['sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT', 'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening', 'jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max', 'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C', 'jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta', 'hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D', 'cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R'].includes(key)) return true;
             if (['enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress', 'enable_timestep_erosion', 'timestep_erosion_factor'].includes(key)) return true;
             if (['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume'].includes(key)) return true;
             if (['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'].includes(key)) return true;
@@ -6465,6 +6937,9 @@ export function shouldSkipNodeParameter(
             if (['burn_zone_cells', 'tau_burn_min', 'lt_I', 'lt_a', 'lt_b', 'lt_x', 'lt_F_ig_max', 'lt_G1', 'lt_c', 'lt_d', 'lt_y', 'lt_F_G1_max', 'lt_G2', 'lt_e', 'lt_g', 'lt_z', 'lt_F_G2_min', 'jwlr_A', 'jwlr_B', 'jwlr_R1', 'jwlr_R2', 'jwlr_omega', 'jwlr_Cv', 'jwlr_T0', 'mixture_rule', 'crest_b1', 'crest_c1', 'crest_m1', 'crest_b2', 'crest_c2', 'crest_c3', 'crest_m2', 'crest_s0', 'crest_s_threshold', 'crest_awe_K0s', 'crest_awe_A1', 'crest_awe_A2', 'crest_awe_A3', 'crest_awe_B1', 'crest_awe_B2', 'crest_awe_B3', 'crest_awe_fc', 'crest_awe_delta', 'crest_awe_Gamma1', 'crest_awe_Gamma2', 'crest_awe_gamma00', 'crest_awe_m', 'crest_awe_c0', 'crest_awe_c1', 'crest_awe_c2', 'crest_awe_c3', 'crest_awe_c6', 'crest_awe_c8', 'crest_awe_c9', 'crest_awe_c10', 'crest_awe_c11', 'crest_awe_c12', 'crest_awe_c13'].includes(key)) return true;
             if (['davis_c0', 'davis_s1', 'davis_gamma0', 'davis_cv', 'davis_t0', 'davis_rho0', 'davis_a', 'davis_b', 'davis_k', 'davis_vc', 'davis_pc', 'davis_q_det'].includes(key)) return true;
             if (key === 'erode_to_fv_grid') return true;
+            if (['ideal_R', 'sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT', 'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening', 'jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max', 'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C', 'jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta', 'hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D', 'cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R'].includes(key)) return true;
+            if (key === 'rht_f_el_c' && matModel !== 'RHT Concrete') return true;
+            if ((key === 'cs_C' || key === 'cs_P') && matModel !== 'Hypoelastic') return true;
         }
 
         if (['afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio', 'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion', 'afterburn_ambient_o2_fraction'].includes(key) && !parameters['afterburn_enabled']) return true;

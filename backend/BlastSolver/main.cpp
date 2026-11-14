@@ -223,11 +223,11 @@ inline Blast::MPMMaterialModel parseMPMMaterialModel(const std::string& mat_mode
     } else if (mat_model_str == "CREST Reactive Burn" || mat_model_str == "CRESTReactiveBurn" || mat_model_str == "CREST" || mat_model_str == "Davis" || mat_model_str == "CREST (Davis EOS)" ||
                mat_model_str == "CREST Reactive High Explosive" || mat_model_str == "Ideal Gas Charge" || mat_model_str == "High Explosive" || mat_model_str == "Explosive") {
         return Blast::MPMMaterialModel::CRESTReactiveBurn;
-    } else if (mat_model_str == "RHT Concrete" || mat_model_str == "RHT") {
+    } else if (mat_model_str == "RHT Concrete" || mat_model_str == "RHT" || mat_model_str == "RHTConcrete") {
         return Blast::MPMMaterialModel::RHTConcrete;
-    } else if (mat_model_str == "Karagozian & Case (K&C)" || mat_model_str == "K&C" || mat_model_str == "KC Concrete" || mat_model_str == "Karagozian & Case") {
+    } else if (mat_model_str == "Karagozian & Case (K&C)" || mat_model_str == "K&C" || mat_model_str == "KC Concrete" || mat_model_str == "Karagozian & Case" || mat_model_str == "KCConcrete") {
         return Blast::MPMMaterialModel::KCConcrete;
-    } else if (mat_model_str == "CSCM Concrete" || mat_model_str == "CSCM") {
+    } else if (mat_model_str == "CSCM Concrete" || mat_model_str == "CSCM" || mat_model_str == "CSCMConcrete") {
         return Blast::MPMMaterialModel::CSCMConcrete;
     } else if (mat_model_str == "Hyperelastic (Yeoh)" || mat_model_str == "Yeoh" || mat_model_str == "HyperelasticYeoh" || mat_model_str == "Hyperelastic") {
         return Blast::MPMMaterialModel::HyperelasticYeoh;
@@ -240,10 +240,27 @@ inline Blast::MPMMaterialModel parseMPMMaterialModel(const std::string& mat_mode
     } else if (mat_model_str == "Tait Water" || mat_model_str == "TaitWater" || mat_model_str == "Tait" || mat_model_str == "Water (Tait)" || mat_model_str == "Water") {
         return Blast::MPMMaterialModel::TaitWater;
     } else if (mat_model_str == "Drucker-Prager" || mat_model_str == "DruckerPrager" ||
-               mat_model_str == "Mohr-Coulomb" || mat_model_str == "MohrCoulomb" ||
                mat_model_str == "Drucker-Prager Soil" || mat_model_str == "DruckerPragerSoil" ||
-               mat_model_str == "Soil" || mat_model_str == "Rock" || mat_model_str == "Geomaterial") {
+               mat_model_str == "Soil" || mat_model_str == "Geomaterial") {
         return Blast::MPMMaterialModel::DruckerPragerSoil;
+    } else if (mat_model_str == "Mohr-Coulomb" || mat_model_str == "MohrCoulomb") {
+        return Blast::MPMMaterialModel::MohrCoulomb;
+    } else if (mat_model_str == "Geological Cap (MAT_025)" || mat_model_str == "Geological Cap" || mat_model_str == "GeologicalCap" || mat_model_str == "Cap Plasticity" || mat_model_str == "Cap") {
+        return Blast::MPMMaterialModel::GeologicalCap;
+    } else if (mat_model_str == "Johnson-Holmquist II" || mat_model_str == "Johnson-Holmquist JH-2" ||
+               mat_model_str == "JohnsonHolmquistJH2" || mat_model_str == "JH-2" || mat_model_str == "JH2" || mat_model_str == "Ceramic") {
+        return Blast::MPMMaterialModel::JohnsonHolmquistJH2;
+    } else if (mat_model_str == "Hoek-Brown Rock" || mat_model_str == "Hoek-Brown" ||
+               mat_model_str == "HoekBrownRock" || mat_model_str == "HoekBrown" || mat_model_str == "Rock") {
+        return Blast::MPMMaterialModel::HoekBrownRock;
+    } else if (mat_model_str == "Crushable Foam" || mat_model_str == "CrushableFoam" ||
+               mat_model_str == "Deshpande-Fleck" || mat_model_str == "Foam") {
+        return Blast::MPMMaterialModel::CrushableFoam;
+    } else if (mat_model_str == "Steinberg-Guinan" || mat_model_str == "SteinbergGuinan" || mat_model_str == "Steinberg Guinan") {
+        return Blast::MPMMaterialModel::SteinbergGuinan;
+    } else if (mat_model_str == "Ideal Gas" || mat_model_str == "IdealGas" ||
+               mat_model_str == "Ideal Gas EOS" || mat_model_str == "Air" || mat_model_str == "Gas") {
+        return Blast::MPMMaterialModel::IdealGas;
     } else {
         return Blast::MPMMaterialModel::Hypoelastic;
     }
@@ -253,8 +270,8 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     Blast::MaterialTable3D mat;
     std::string mat_model_str = obj.value("material_model", "Hypoelastic");
     mat.material_model = parseMPMMaterialModel(mat_model_str);
-    // Fail-safe: if model is still Hypoelastic but the preset/category indicates an energetic solid,
-    // auto-promote to CRESTReactiveBurn to prevent silent inert detonation failure.
+    // Fail-safe: if model is still Hypoelastic but the preset/category indicates an energetic solid or fluid,
+    // auto-promote cleanly so legacy configs continue to operate as expected.
     if (mat.material_model == Blast::MPMMaterialModel::Hypoelastic) {
         std::string preset_name = obj.value("preset", "");
         std::string category    = obj.value("category", "");
@@ -286,9 +303,12 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
                       << "' / category='" << category << "' indicates an energetic solid. "
                       << "Auto-promoted to 'CREST Reactive Burn'. Please set material_model explicitly in the UI." << std::endl;
         } else {
-            bool is_water = contains_ci(category, "water") || contains_ci(category, "fluid") ||
-                            contains_ci(preset_name, "water") || contains_ci(preset_name, "seawater");
-            if (is_water) {
+            bool is_gas = contains_ci(category, "gas") || contains_ci(preset_name, "air") || contains_ci(preset_name, "ideal gas");
+            bool is_water = !is_gas && (contains_ci(category, "water") || contains_ci(category, "fluid") ||
+                            contains_ci(preset_name, "water") || contains_ci(preset_name, "seawater"));
+            if (is_gas) {
+                mat.material_model = Blast::MPMMaterialModel::IdealGas;
+            } else if (is_water) {
                 mat.material_model = Blast::MPMMaterialModel::TaitWater;
                 std::cout << "[BlastSolver] Detected water/fluid preset '" << preset_name
                           << "': assigned MPMMaterialModel::TaitWater." << std::endl;
@@ -335,10 +355,18 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
         mat.material_model = Blast::MPMMaterialModel::JWLProgrammedBurn;
     }
 
-    mat.density = static_cast<float>(get_json_double(obj, "density", 7850.0));
-    if ((mat.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn ||
-         mat.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn ||
-         mat.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth) && mat.density < 100.0f) {
+    double default_rho = 7850.0;
+    if (mat.material_model == Blast::MPMMaterialModel::TaitWater) {
+        default_rho = get_json_double(obj, "tait_rho0", 1000.0);
+    } else if (mat.material_model == Blast::MPMMaterialModel::IdealGas) {
+        double p0_ig = get_json_double(obj, "tait_p0", get_json_double(obj, "p0", get_json_double(obj, "ideal_p0", get_json_double(obj, "ambient_p", 101325.0))));
+        double R_ig  = get_json_double(obj, "ideal_R", get_json_double(obj, "R_specific", 287.058));
+        double T0_ig = get_json_double(obj, "ideal_T0", get_json_double(obj, "T_room", 288.15));
+        double rho_eos = (p0_ig > 0.0 && R_ig > 0.0 && T0_ig > 0.0) ? (p0_ig / (R_ig * T0_ig)) : 1.225;
+        default_rho = get_json_double(obj, "ideal_rho_0", get_json_double(obj, "rho", rho_eos));
+    }
+    mat.density = static_cast<float>(get_json_double(obj, "density", default_rho));
+    if (Blast::isEnergeticModel(mat.material_model) && mat.density < 100.0f) {
         float fallback_rho = static_cast<float>(get_json_double(obj, "rho", 0.0));
         if (fallback_rho < 100.0f) fallback_rho = static_cast<float>(get_json_double(obj, "ideal_rho_0", 1630.0));
         if (fallback_rho < 100.0f) fallback_rho = 1630.0f;
@@ -361,19 +389,20 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.erosion_min_density = static_cast<float>(get_json_double(obj, "erosion_min_density", 0.0));
     mat.erosion_min_density_ratio = static_cast<float>(get_json_double(obj, "erosion_min_density_ratio", 0.0));
     mat.erode_to_fv_grid = get_json_bool(obj, "erode_to_fv_grid", true);
-    
-    // JC
-    mat.jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
-    mat.jc_B = static_cast<float>(get_json_double(obj, "jc_B", 510.0e6));
-    mat.jc_n = static_cast<float>(get_json_double(obj, "jc_n", 0.26));
-    mat.jc_C = static_cast<float>(get_json_double(obj, "jc_C", 0.014));
-    mat.jc_m = static_cast<float>(get_json_double(obj, "jc_m", 1.03));
+
+    // Zero-sentinel Johnson-Cook & Mie-Gruneisen defaults (steel defaults apply only to JohnsonCookMieGruneisen unless explicitly passed)
+    const bool is_jc = (mat.material_model == Blast::MPMMaterialModel::JohnsonCookMieGruneisen);
+    mat.jc_A = static_cast<float>(get_json_double(obj, "jc_A", is_jc ? 792.0e6 : 0.0));
+    mat.jc_B = static_cast<float>(get_json_double(obj, "jc_B", is_jc ? 510.0e6 : 0.0));
+    mat.jc_n = static_cast<float>(get_json_double(obj, "jc_n", is_jc ? 0.26 : 0.0));
+    mat.jc_C = static_cast<float>(get_json_double(obj, "jc_C", is_jc ? 0.014 : 0.0));
+    mat.jc_m = static_cast<float>(get_json_double(obj, "jc_m", is_jc ? 1.03 : 0.0));
     mat.T_melt = static_cast<float>(get_json_double(obj, "T_melt", 1793.0));
     mat.T_room = static_cast<float>(get_json_double(obj, "initial_temperature", get_json_double(obj, "T_room", 293.0)));
     mat.Cp = static_cast<float>(get_json_double(obj, "Cp", 477.0));
-    mat.mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", 1.81));
-    mat.mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
-    mat.mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
+    mat.mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", is_jc ? 1.81 : 0.0));
+    mat.mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", is_jc ? 4570.0 : 0.0));
+    mat.mg_s = static_cast<float>(get_json_double(obj, "mg_s", is_jc ? 1.49 : 0.0));
     mat.bulk_viscosity_b1 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b1", 0.06));
     mat.bulk_viscosity_b2 = static_cast<float>(get_json_double(obj, "bulk_viscosity_b2", 1.20));
 
@@ -466,9 +495,13 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.rht_n_comp = static_cast<float>(get_json_double(obj, "rht_n_comp", 3.0));
     mat.rht_betac = static_cast<float>(get_json_double(obj, "rht_betac", 0.032));
     mat.rht_deltat = static_cast<float>(get_json_double(obj, "rht_deltat", 0.036));
+    mat.rht_f_el_c = static_cast<float>(get_json_double(obj, "rht_f_el_c", 0.53));
 
-    // K&C
-    mat.kc_auto_generate = get_json_bool(obj, "kc_auto_generate", true);
+    // K&C (preserve explicit Malvar surface coefficients if present unless kc_auto_generate is explicitly true)
+    const bool has_explicit_kc = obj.contains("kc_a0") || obj.contains("kc_a1") || obj.contains("kc_a2") ||
+                                 obj.contains("kc_a0y") || obj.contains("kc_a1y") || obj.contains("kc_a2y") ||
+                                 obj.contains("kc_a1r") || obj.contains("kc_a2r");
+    mat.kc_auto_generate = get_json_bool(obj, "kc_auto_generate", !has_explicit_kc);
     mat.kc_a0 = static_cast<float>(get_json_double(obj, "kc_a0", 11.67e6));
     mat.kc_a1 = static_cast<float>(get_json_double(obj, "kc_a1", 0.44));
     mat.kc_a2 = static_cast<float>(get_json_double(obj, "kc_a2", 0.77e-9));
@@ -497,7 +530,12 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.yeoh_c30 = static_cast<float>(get_json_double(obj, "yeoh_c30", 0.0033e6));
     mat.mr_c10 = static_cast<float>(get_json_double(obj, "mr_c10", 0.40e6));
     mat.mr_c01 = static_cast<float>(get_json_double(obj, "mr_c01", 0.10e6));
-    mat.k_bulk = static_cast<float>(get_json_double(obj, "k_bulk", 1.0e8));
+    double default_k_bulk = 1.0e8;
+    if (Blast::isHyperelasticModel(mat.material_model) && obj.contains("youngs_modulus")) {
+        default_k_bulk = static_cast<double>(mat.youngs_modulus) /
+                         (3.0 * std::max(0.002, 1.0 - 2.0 * static_cast<double>(mat.poissons_ratio)));
+    }
+    mat.k_bulk = static_cast<float>(get_json_double(obj, "k_bulk", default_k_bulk));
 
     // Concrete Damage Plasticity (CDP)
     mat.cdp_f_t0 = static_cast<float>(get_json_double(obj, "cdp_f_t0", 3.5e6));
@@ -514,15 +552,18 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.hill_N = static_cast<float>(get_json_double(obj, "hill_N", 1.60));
     mat.hill_sigma_y0 = static_cast<float>(get_json_double(obj, "hill_sigma_y0", mat.yield_stress));
 
-    // Tait Water & Shock Fluid
+    // Tait Water & Shock Fluid / Ideal Gas
     mat.tait_B = static_cast<float>(get_json_double(obj, "tait_B", 3.039e8));
     mat.tait_gamma = static_cast<float>(get_json_double(obj, "tait_gamma", 7.15));
-    mat.tait_rho0 = static_cast<float>(get_json_double(obj, "tait_rho0", 1000.0));
+    mat.tait_rho0 = static_cast<float>(get_json_double(obj, "tait_rho0", (mat.material_model == Blast::MPMMaterialModel::TaitWater) ? static_cast<double>(mat.density) : 1000.0));
     mat.tait_c0 = static_cast<float>(get_json_double(obj, "tait_c0", 1482.0));
     mat.tait_p_cav = static_cast<float>(get_json_double(obj, "tait_p_cav", 0.0));
-    mat.tait_p0 = static_cast<float>(get_json_double(obj, "tait_p0", get_json_double(obj, "p0", 0.0)));
-    mat.tait_viscosity = static_cast<float>(get_json_double(obj, "tait_viscosity", 1.0e-3));
+    const double default_p0 = (mat.material_model == Blast::MPMMaterialModel::IdealGas) ? 101325.0 : 0.0;
+    mat.tait_p0 = static_cast<float>(get_json_double(obj, "tait_p0", get_json_double(obj, "p0", get_json_double(obj, "ideal_p0", get_json_double(obj, "ambient_p", default_p0)))));
+    mat.tait_viscosity = static_cast<float>(get_json_double(obj, "tait_viscosity", get_json_double(obj, "mu_visc", 1.0e-3)));
     mat.tait_gruneisen = static_cast<float>(get_json_double(obj, "tait_gruneisen", 0.28));
+    mat.ideal_gamma = static_cast<float>(get_json_double(obj, "ideal_gamma", get_json_double(obj, "gamma", 1.4)));
+    mat.ideal_R = static_cast<float>(get_json_double(obj, "ideal_R", get_json_double(obj, "R_specific", 287.058)));
     mat.tait_variant = get_json_int(obj, "tait_variant", 0);
     if (obj.contains("tait_variant_str")) {
         std::string vstr = obj.value("tait_variant_str", "");
@@ -531,13 +572,11 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
         else mat.tait_variant = 0;
     }
 
-    bool is_concrete = (mat.material_model == Blast::MPMMaterialModel::RHTConcrete || 
-                        mat.material_model == Blast::MPMMaterialModel::KCConcrete || 
-                        mat.material_model == Blast::MPMMaterialModel::CSCMConcrete);
-    if (is_concrete) {
+    const bool is_concrete = Blast::isConcreteModel(mat.material_model);
+    if (is_concrete && mat.enable_strain_erosion) {
         // Decouple concrete erosion strain cutoff from compressive yield microstrain fc (mat.failure_strain ~ 0.0035).
         // Concrete element erosion represents physical rubble/mass ejection and must never trigger at microstrains < 2%.
-        if (!obj.contains("erosion_strain") || mat.erosion_strain < 0.02f) {
+        if (!obj.contains("erosion_strain") && mat.erosion_strain < 0.02f) {
             mat.erosion_strain = 0.10f;
         }
     }
@@ -583,21 +622,254 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
         mat.anisotropy_dir[0] = 1.0f; mat.anisotropy_dir[1] = 0.0f; mat.anisotropy_dir[2] = 0.0f;
     }
 
-    mat.jc_d1 = static_cast<float>(get_json_double(obj, "jc_d1", 0.05));
-    mat.jc_d2 = static_cast<float>(get_json_double(obj, "jc_d2", 3.44));
-    mat.jc_d3 = static_cast<float>(get_json_double(obj, "jc_d3", -2.12));
-    mat.jc_d4 = static_cast<float>(get_json_double(obj, "jc_d4", 0.002));
-    mat.jc_d5 = static_cast<float>(get_json_double(obj, "jc_d5", 0.61));
+    mat.jc_d1 = static_cast<float>(get_json_double(obj, "jc_d1", is_jc ? 0.05 : 0.0));
+    mat.jc_d2 = static_cast<float>(get_json_double(obj, "jc_d2", is_jc ? 3.44 : 0.0));
+    mat.jc_d3 = static_cast<float>(get_json_double(obj, "jc_d3", is_jc ? -2.12 : 0.0));
+    mat.jc_d4 = static_cast<float>(get_json_double(obj, "jc_d4", is_jc ? 0.002 : 0.0));
+    mat.jc_d5 = static_cast<float>(get_json_double(obj, "jc_d5", is_jc ? 0.61 : 0.0));
 
     // Drucker-Prager & Mohr-Coulomb Soil / Geomaterial Parameters
     mat.dp_cohesion = static_cast<float>(get_json_double(obj, "dp_cohesion", get_json_double(obj, "cohesion", 20.0e3)));
     mat.dp_friction_angle = static_cast<float>(get_json_double(obj, "dp_friction_angle", get_json_double(obj, "friction_angle", 30.0)));
-    mat.dp_dilatancy_angle = static_cast<float>(get_json_double(obj, "dp_dilatancy_angle", get_json_double(obj, "dilatancy_angle", 0.0)));
+    mat.dp_dilatancy_angle = static_cast<float>(get_json_double(obj, "dp_dilatancy_angle", get_json_double(obj, "dilatancy_angle", get_json_double(obj, "dilation_angle", 0.0))));
     mat.dp_tensile_cutoff = static_cast<float>(get_json_double(obj, "dp_tensile_cutoff", get_json_double(obj, "tensile_cutoff", 10.0e3)));
     mat.dp_hardening_modulus = static_cast<float>(get_json_double(obj, "dp_hardening_modulus", get_json_double(obj, "hardening_modulus", 0.0)));
 
-    // Statistical Fragment Size Distribution & DEM Parameters Parsing
+    // Cowper-Symonds Viscoplastic Strain-Rate Scaling
+    mat.cs_C = static_cast<float>(get_json_double(obj, "cs_C", get_json_double(obj, "cowper_symonds_C", 0.0)));
+    mat.cs_P = static_cast<float>(get_json_double(obj, "cs_P", get_json_double(obj, "cowper_symonds_P", 0.0)));
+
+    // Geological Elliptical Pore-Crush Cap
+    mat.cap_X0 = static_cast<float>(get_json_double(obj, "cap_X0", 0.0));
+    mat.cap_W  = static_cast<float>(get_json_double(obj, "cap_W",  0.0));
+    mat.cap_D1 = static_cast<float>(get_json_double(obj, "cap_D1", 0.0));
+    mat.cap_D2 = static_cast<float>(get_json_double(obj, "cap_D2", 0.0));
+    mat.cap_R  = static_cast<float>(get_json_double(obj, "cap_R",  2.0));
+
+    // Johnson-Holmquist JH-2 Ceramics & Brittle Glass
+    mat.jh2_sigma_hel = static_cast<float>(get_json_double(obj, "jh2_sigma_hel", 0.0));
+    mat.jh2_p_hel     = static_cast<float>(get_json_double(obj, "jh2_p_hel",     0.0));
+    mat.jh2_t_max     = static_cast<float>(get_json_double(obj, "jh2_t_max",     0.0));
+    mat.jh2_A         = static_cast<float>(get_json_double(obj, "jh2_A",         0.0));
+    mat.jh2_N         = static_cast<float>(get_json_double(obj, "jh2_N",         0.6));
+    mat.jh2_B         = static_cast<float>(get_json_double(obj, "jh2_B",         0.0));
+    mat.jh2_M         = static_cast<float>(get_json_double(obj, "jh2_M",         0.6));
+    mat.jh2_C         = static_cast<float>(get_json_double(obj, "jh2_C",         0.0));
+    mat.jh2_D1        = static_cast<float>(get_json_double(obj, "jh2_D1",        0.0));
+    mat.jh2_D2        = static_cast<float>(get_json_double(obj, "jh2_D2",        1.0));
+    mat.jh2_K1        = static_cast<float>(get_json_double(obj, "jh2_K1",        0.0));
+    mat.jh2_K2        = static_cast<float>(get_json_double(obj, "jh2_K2",        0.0));
+    mat.jh2_K3        = static_cast<float>(get_json_double(obj, "jh2_K3",        0.0));
+    mat.jh2_beta      = static_cast<float>(get_json_double(obj, "jh2_beta",      1.0));
+
+    // Hoek-Brown Generalized Rock Mass
+    mat.hb_sigma_ci = static_cast<float>(get_json_double(obj, "hb_sigma_ci", 0.0));
+    mat.hb_mi       = static_cast<float>(get_json_double(obj, "hb_mi",       10.0));
+    mat.hb_gsi      = static_cast<float>(get_json_double(obj, "hb_gsi",      100.0));
+    mat.hb_D        = static_cast<float>(get_json_double(obj, "hb_D",        0.0));
+
+    // Deshpande-Fleck Crushable Foam
+    mat.foam_plateau_stress       = static_cast<float>(get_json_double(obj, "foam_plateau_stress",       0.0));
+    mat.foam_densification_strain = static_cast<float>(get_json_double(obj, "foam_densification_strain", 0.5));
+    mat.foam_alpha                = static_cast<float>(get_json_double(obj, "foam_alpha",                1.5));
+    mat.foam_hardening            = static_cast<float>(get_json_double(obj, "foam_hardening",            0.0));
+
+    // Steinberg-Guinan High-Pressure Shock Metal
+    mat.sg_Y0   = static_cast<float>(get_json_double(obj, "sg_Y0",   0.0));
+    mat.sg_Ymax = static_cast<float>(get_json_double(obj, "sg_Ymax", 0.0));
+    mat.sg_beta = static_cast<float>(get_json_double(obj, "sg_beta", 0.0));
+    mat.sg_n    = static_cast<float>(get_json_double(obj, "sg_n",    0.0));
+    mat.sg_bp   = static_cast<float>(get_json_double(obj, "sg_bp",   0.0));
+    mat.sg_bT   = static_cast<float>(get_json_double(obj, "sg_bT",   0.0));
+
     return mat;
+}
+
+inline void setupMPM2DObjectFromJson(
+    Blast::MPMSolver2D& solver,
+    int obj_idx,
+    const nlohmann::json& obj,
+    const nlohmann::json& msg,
+    int domain_ppc,
+    const std::string& domain_p_dist_str,
+    const std::string& domain_b_fill_str
+) {
+    std::string shape = obj.value("shape_type", "Rectangle");
+    float pos_x = static_cast<float>(get_json_double(obj, "pos_x", 0.5));
+    float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.5));
+    float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
+    float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
+    float angular_vel = static_cast<float>(get_json_double(obj, "angular_vel", 0.0));
+    int ppc = std::max(1, get_json_int(obj, "ppc", domain_ppc));
+
+    std::string p_dist_str = obj.value("particle_distribution", domain_p_dist_str);
+    Blast::MPMParticleDistribution particle_dist = (p_dist_str == "Hexagonal")
+        ? Blast::MPMParticleDistribution::Hexagonal
+        : Blast::MPMParticleDistribution::Cartesian;
+
+    std::string b_fill_str = obj.value("boundary_filling", domain_b_fill_str);
+    Blast::MPMBoundaryFilling boundary_fill = (b_fill_str == "Partial")
+        ? Blast::MPMBoundaryFilling::Partial
+        : Blast::MPMBoundaryFilling::Stairstepped;
+
+    Blast::MaterialTable3D parsed_mat = parseMaterialTable3D(obj);
+    if (!obj.contains("enable_density_erosion") && msg.contains("enable_density_erosion")) {
+        parsed_mat.enable_density_erosion = get_json_bool(msg, "enable_density_erosion", false);
+    }
+    if (!obj.contains("erosion_min_density") && msg.contains("erosion_min_density")) {
+        parsed_mat.erosion_min_density = static_cast<float>(get_json_double(msg, "erosion_min_density", 0.0));
+    }
+    if (!obj.contains("erosion_min_density_ratio") && msg.contains("erosion_min_density_ratio")) {
+        parsed_mat.erosion_min_density_ratio = static_cast<float>(get_json_double(msg, "erosion_min_density_ratio", 0.0));
+    }
+    if (!obj.contains("erode_to_fv_grid") && msg.contains("erode_to_fv_grid")) {
+        parsed_mat.erode_to_fv_grid = get_json_bool(msg, "erode_to_fv_grid", true);
+    }
+
+    solver.setMaterialTable(obj_idx, parsed_mat);
+
+    if (shape == "Circle") {
+        float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
+        solver.addCircleObject(
+            obj_idx, pos_x, pos_y, radius, vel_x, vel_y, angular_vel,
+            parsed_mat.density, parsed_mat.youngs_modulus, parsed_mat.poissons_ratio,
+            parsed_mat.yield_stress, parsed_mat.hardening_modulus, parsed_mat.failure_strain,
+            parsed_mat.tensile_failure_stress, ppc, particle_dist, boundary_fill
+        );
+    } else {
+        float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
+        float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
+        solver.addRectangleObject(
+            obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, angular_vel,
+            parsed_mat.density, parsed_mat.youngs_modulus, parsed_mat.poissons_ratio,
+            parsed_mat.yield_stress, parsed_mat.hardening_modulus, parsed_mat.failure_strain,
+            parsed_mat.tensile_failure_stress, ppc, particle_dist, boundary_fill
+        );
+    }
+
+    const Blast::ReactiveJson::LeeTarverParams ltp = Blast::ReactiveJson::readLeeTarverParams(
+        obj, parsed_mat.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth ||
+             parsed_mat.burn_model == Blast::ReactionKinetics::LeeTarverODE
+    );
+
+    float det_x = static_cast<float>(get_json_double(obj, "detonator_x", get_json_double(msg, "detonator_x", get_json_double(obj, "trigger_x", get_json_double(msg, "trigger_x", 0.5)))));
+    float det_y = static_cast<float>(get_json_double(obj, "detonator_y", get_json_double(msg, "detonator_y", get_json_double(obj, "trigger_y", get_json_double(msg, "trigger_y", 0.5)))));
+    float det_r = static_cast<float>(get_json_double(obj, "detonator_radius", get_json_double(msg, "detonator_radius", 0.02)));
+    float det_t = static_cast<float>(get_json_double(obj, "start_time", get_json_double(msg, "start_time", 0.0)));
+
+    for (auto& p : solver.getParticles()) {
+        if (p.object_id != obj_idx) continue;
+        p.material_model = parsed_mat.material_model;
+        p.solid_model = parsed_mat.solid_model;
+        p.burn_model = parsed_mat.burn_model;
+        p.product_model = parsed_mat.product_model;
+        p.jc_A = parsed_mat.jc_A;
+        p.jc_B = parsed_mat.jc_B;
+        p.jc_n = parsed_mat.jc_n;
+        p.jc_C = parsed_mat.jc_C;
+        p.jc_m = parsed_mat.jc_m;
+        p.T_melt = parsed_mat.T_melt;
+        p.T_room = parsed_mat.T_room;
+        p.Cp = parsed_mat.Cp;
+        p.mg_gamma0 = parsed_mat.mg_gamma0;
+        p.mg_c0 = parsed_mat.mg_c0;
+        p.mg_s = parsed_mat.mg_s;
+        p.jwl_A = parsed_mat.jwl_A;
+        p.jwl_B = parsed_mat.jwl_B;
+        p.jwl_R1 = parsed_mat.jwl_R1;
+        p.jwl_R2 = parsed_mat.jwl_R2;
+        p.jwl_omega = parsed_mat.jwl_omega;
+        p.det_vel = parsed_mat.det_vel;
+        p.detonation_energy = parsed_mat.detonation_energy;
+        p.burn_zone_cells = parsed_mat.burn_zone_cells;
+        p.tau_burn_min = parsed_mat.tau_burn_min;
+        ltp.apply(p);
+        p.davis_c0 = parsed_mat.davis_c0;
+        p.davis_s1 = parsed_mat.davis_s1;
+        p.davis_gamma0 = parsed_mat.davis_gamma0;
+        p.davis_cv = parsed_mat.davis_cv;
+        p.davis_t0 = parsed_mat.davis_t0;
+        p.davis_rho0 = parsed_mat.davis_rho0;
+        p.davis_a = parsed_mat.davis_a;
+        p.davis_b = parsed_mat.davis_b;
+        p.davis_k = parsed_mat.davis_k;
+        p.davis_vc = parsed_mat.davis_vc;
+        p.davis_pc = parsed_mat.davis_pc;
+        p.davis_q_det = parsed_mat.davis_q_det;
+        p.crest_b1 = parsed_mat.crest_b1;
+        p.crest_c1 = parsed_mat.crest_c1;
+        p.crest_m1 = parsed_mat.crest_m1;
+        p.crest_b2 = parsed_mat.crest_b2;
+        p.crest_c2 = parsed_mat.crest_c2;
+        p.crest_c3 = parsed_mat.crest_c3;
+        p.crest_m2 = parsed_mat.crest_m2;
+        p.crest_s0 = parsed_mat.crest_s0;
+        p.crest_s_threshold = parsed_mat.crest_s_threshold;
+        p.crest_awe_K0s = parsed_mat.crest_awe_K0s;
+        p.crest_awe_A1 = parsed_mat.crest_awe_A1;
+        p.crest_awe_A2 = parsed_mat.crest_awe_A2;
+        p.crest_awe_A3 = parsed_mat.crest_awe_A3;
+        p.crest_awe_B1 = parsed_mat.crest_awe_B1;
+        p.crest_awe_B2 = parsed_mat.crest_awe_B2;
+        p.crest_awe_B3 = parsed_mat.crest_awe_B3;
+        p.crest_awe_fc = parsed_mat.crest_awe_fc;
+        p.crest_awe_delta = parsed_mat.crest_awe_delta;
+        p.crest_awe_Gamma1 = parsed_mat.crest_awe_Gamma1;
+        p.crest_awe_Gamma2 = parsed_mat.crest_awe_Gamma2;
+        p.crest_awe_gamma00 = parsed_mat.crest_awe_gamma00;
+        p.crest_awe_m = parsed_mat.crest_awe_m;
+        p.crest_awe_c0 = parsed_mat.crest_awe_c0;
+        p.crest_awe_c1 = parsed_mat.crest_awe_c1;
+        p.crest_awe_c2 = parsed_mat.crest_awe_c2;
+        p.crest_awe_c3 = parsed_mat.crest_awe_c3;
+        p.crest_awe_c6 = parsed_mat.crest_awe_c6;
+        p.crest_awe_c8 = parsed_mat.crest_awe_c8;
+        p.crest_awe_c9 = parsed_mat.crest_awe_c9;
+        p.crest_awe_c10 = parsed_mat.crest_awe_c10;
+        p.crest_awe_c11 = parsed_mat.crest_awe_c11;
+        p.crest_awe_c12 = parsed_mat.crest_awe_c12;
+        p.crest_awe_c13 = parsed_mat.crest_awe_c13;
+        p.temperature = parsed_mat.T_room;
+        p.e_int = 0.0f;
+
+        if (parsed_mat.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn) {
+            float dist = std::sqrt((p.x[0] - det_x) * (p.x[0] - det_x) + (p.x[1] - det_y) * (p.x[1] - det_y));
+            float eff_dist = std::max(0.0f, dist - det_r);
+            p.t_arrival = det_t + eff_dist / std::max(parsed_mat.det_vel, 100.0f);
+            if (p.t_arrival <= 0.0f) {
+                p.lambda = 1.0f;
+                p.e_int = parsed_mat.detonation_energy;
+            }
+        }
+
+        p.enable_heterogeneity = parsed_mat.enable_heterogeneity;
+        p.weibull_modulus = parsed_mat.weibull_modulus;
+        p.weibull_scale = parsed_mat.weibull_scale;
+        p.weibull_ref_volume = parsed_mat.weibull_ref_volume;
+        if (parsed_mat.enable_heterogeneity && parsed_mat.weibull_modulus > 0.001f) {
+            p.weibull_factor = Blast::computeWeibullFactor2D(p.x[0], p.x[1], p.V0, parsed_mat.weibull_modulus, parsed_mat.weibull_scale, parsed_mat.weibull_ref_volume);
+        } else {
+            p.weibull_factor = 1.0f;
+        }
+        p.enable_anisotropy = parsed_mat.enable_anisotropy;
+        p.anisotropy_ratio = parsed_mat.anisotropy_ratio;
+        p.anisotropy_dir[0] = parsed_mat.anisotropy_dir[0];
+        p.anisotropy_dir[1] = parsed_mat.anisotropy_dir[1];
+        p.hill_dir[0] = 0.0f;
+        p.hill_dir[1] = 0.0f;
+        p.enable_density_erosion = parsed_mat.enable_density_erosion;
+        p.erosion_min_density = parsed_mat.erosion_min_density;
+        p.erosion_min_density_ratio = parsed_mat.erosion_min_density_ratio;
+        p.erode_to_fv_grid = parsed_mat.erode_to_fv_grid;
+        p.tait_rho0 = parsed_mat.tait_rho0;
+        p.tait_B = parsed_mat.tait_B;
+        p.tait_gamma = parsed_mat.tait_gamma;
+        p.tait_p0 = parsed_mat.tait_p0;
+        p.mu_visc = parsed_mat.tait_viscosity;
+        p.ideal_gamma = parsed_mat.ideal_gamma;
+        p.ideal_R = parsed_mat.ideal_R;
+        p.transfer_scheme = parsed_mat.transfer_scheme;
+    }
 }
 
 template <typename T>
@@ -6743,257 +7015,7 @@ int main() {
                         int obj_idx = 0;
                         for (const auto& obj : msg["mpm_objects"]) {
                             obj_idx++;
-                            std::string shape = obj.value("shape_type", "Rectangle");
-                            float pos_x = static_cast<float>(get_json_double(obj, "pos_x", 0.5));
-                            float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.5));
-                            float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
-                            float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
-                            float angular_vel = static_cast<float>(get_json_double(obj, "angular_vel", 0.0));
-                            float density = static_cast<float>(get_json_double(obj, "density", 7850.0));
-                            float E = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
-                            float nu = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
-                            float yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
-                            float hardening = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
-                            float failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.25));
-                            float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
-                            int ppc = std::max(1, get_json_int(obj, "ppc", domain_ppc));
-
-                            std::string p_dist_str = obj.value("particle_distribution", domain_p_dist_str);
-                            Blast::MPMParticleDistribution particle_dist = Blast::MPMParticleDistribution::Cartesian;
-                            if (p_dist_str == "Hexagonal") {
-                                particle_dist = Blast::MPMParticleDistribution::Hexagonal;
-                            }
-
-                            std::string b_fill_str = obj.value("boundary_filling", domain_b_fill_str);
-                            Blast::MPMBoundaryFilling boundary_fill = Blast::MPMBoundaryFilling::Stairstepped;
-                            if (b_fill_str == "Partial") {
-                                boundary_fill = Blast::MPMBoundaryFilling::Partial;
-                            }
-
-                            std::string mat_model_str = obj.value("material_model", "Hypoelastic");
-                            Blast::MPMMaterialModel mat_model = parseMPMMaterialModel(mat_model_str);
-
-                            float jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
-                            float jc_B = static_cast<float>(get_json_double(obj, "jc_B", 510.0e6));
-                            float jc_n = static_cast<float>(get_json_double(obj, "jc_n", 0.26));
-                            float jc_C = static_cast<float>(get_json_double(obj, "jc_C", 0.014));
-                            float jc_m = static_cast<float>(get_json_double(obj, "jc_m", 1.03));
-                            float T_melt = static_cast<float>(get_json_double(obj, "T_melt", 1793.0));
-                            float T_room = static_cast<float>(get_json_double(obj, "T_room", 293.0));
-                            float Cp = static_cast<float>(get_json_double(obj, "Cp", 477.0));
-                            float mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", 1.81));
-                            float mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
-                            float mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
-
-                            std::string solid_str = obj.value("solid_model", "");
-                            std::string burn_str = obj.value("burn_model", "");
-                            std::string prod_str = obj.value("product_model", "");
-                            Blast::SolidReactantEOS solid_model = Blast::SolidReactantEOS::MieGruneisen;
-                            Blast::ReactionKinetics burn_model = Blast::ReactionKinetics::ProgrammedBurn;
-                            Blast::DetonationProductEOS product_model = Blast::DetonationProductEOS::JWLProductGas;
-                            if (mat_model == Blast::MPMMaterialModel::CRESTReactiveBurn) {
-                                solid_model = Blast::SolidReactantEOS::DavisSolid;
-                                burn_model = Blast::ReactionKinetics::CRESTEntropy;
-                                product_model = Blast::DetonationProductEOS::DavisProduct;
-                            } else if (mat_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth) {
-                                solid_model = Blast::SolidReactantEOS::JWLReactant;
-                                burn_model = Blast::ReactionKinetics::LeeTarverODE;
-                                product_model = Blast::DetonationProductEOS::JWLProductGas;
-                            }
-                            if (!solid_str.empty()) {
-                                if (solid_str.find("Davis") != std::string::npos) solid_model = Blast::SolidReactantEOS::DavisSolid;
-                                else if (solid_str.find("Mie") != std::string::npos || solid_str.find("Gruneisen") != std::string::npos || solid_str.find("Grüneisen") != std::string::npos) solid_model = Blast::SolidReactantEOS::MieGruneisen;
-                                else if (solid_str.find("JWL") != std::string::npos) solid_model = Blast::SolidReactantEOS::JWLReactant;
-                            }
-                            if (!burn_str.empty()) {
-                                if (burn_str.find("CREST") != std::string::npos) burn_model = Blast::ReactionKinetics::CRESTEntropy;
-                                else if (burn_str.find("Lee-Tarver") != std::string::npos || burn_str.find("LeeTarver") != std::string::npos || burn_str.find("ODE") != std::string::npos) burn_model = Blast::ReactionKinetics::LeeTarverODE;
-                                else if (burn_str.find("Programmed") != std::string::npos || burn_str.find("Wavefront") != std::string::npos) burn_model = Blast::ReactionKinetics::ProgrammedBurn;
-                            }
-                            if (!prod_str.empty()) {
-                                if (prod_str.find("Davis") != std::string::npos) product_model = Blast::DetonationProductEOS::DavisProduct;
-                                else if (prod_str.find("JWL") != std::string::npos) product_model = Blast::DetonationProductEOS::JWLProductGas;
-                            }
-
-                            float jwl_A = static_cast<float>(get_json_double(obj, "jwl_A", 373.77e9));
-                            float jwl_B = static_cast<float>(get_json_double(obj, "jwl_B", 3.747e9));
-                            float jwl_R1 = static_cast<float>(get_json_double(obj, "jwl_R1", 4.15));
-                            float jwl_R2 = static_cast<float>(get_json_double(obj, "jwl_R2", 0.90));
-                            float jwl_omega = static_cast<float>(get_json_double(obj, "jwl_omega", 0.35));
-                            float det_vel = static_cast<float>(get_json_double(obj, "det_vel", 6930.0));
-                            float detonation_energy = static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6));
-                            int burn_zone_cells = get_json_int(obj, "burn_zone_cells", 4);
-                            float tau_burn_min = static_cast<float>(get_json_double(obj, "tau_burn_min", 1.0e-7));
-
-                            const Blast::ReactiveJson::LeeTarverParams ltp = Blast::ReactiveJson::readLeeTarverParams(obj,
-                                mat_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth || burn_model == Blast::ReactionKinetics::LeeTarverODE);
-
-                            float davis_c0 = static_cast<float>(get_json_double(obj, "davis_c0", 2050.0));
-                            float davis_s1 = static_cast<float>(get_json_double(obj, "davis_s1", 2.12));
-                            float davis_gamma0 = static_cast<float>(get_json_double(obj, "davis_gamma0", 0.65));
-                            float davis_cv = static_cast<float>(get_json_double(obj, "davis_cv", 1000.0));
-                            float davis_t0 = static_cast<float>(get_json_double(obj, "davis_t0", 293.0));
-                            float davis_rho0 = static_cast<float>(get_json_double(obj, "davis_rho0", 1895.0));
-
-                            float davis_a = static_cast<float>(get_json_double(obj, "davis_a", 2.85));
-                            float davis_b = static_cast<float>(get_json_double(obj, "davis_b", 1.10));
-                            float davis_k = static_cast<float>(get_json_double(obj, "davis_k", 1.35));
-                            float davis_vc = static_cast<float>(get_json_double(obj, "davis_vc", 0.65));
-                            float davis_pc = static_cast<float>(get_json_double(obj, "davis_pc", 12.5e9));
-                            float davis_q_det = static_cast<float>(get_json_double(obj, "davis_q_det", 3.90e6));
-
-                            float crest_b1 = static_cast<float>(get_json_double(obj, "crest_b1", 1.2e7));
-                            float crest_c1 = static_cast<float>(get_json_double(obj, "crest_c1", 0.67));
-                            float crest_m1 = static_cast<float>(get_json_double(obj, "crest_m1", 2.5));
-                            float crest_b2 = static_cast<float>(get_json_double(obj, "crest_b2", 3.5e6));
-                            float crest_c2 = static_cast<float>(get_json_double(obj, "crest_c2", 0.50));
-                            float crest_c3 = static_cast<float>(get_json_double(obj, "crest_c3", 0.67));
-                            float crest_m2 = static_cast<float>(get_json_double(obj, "crest_m2", 1.5));
-                            float crest_s0 = static_cast<float>(get_json_double(obj, "crest_s0", 100.0));
-                            float crest_s_threshold = static_cast<float>(get_json_double(obj, "crest_s_threshold", 45.0));
-                            float crest_awe_K0s = static_cast<float>(get_json_double(obj, "crest_awe_K0s", 14245250000.0));
-                            float crest_awe_A1 = static_cast<float>(get_json_double(obj, "crest_awe_A1", 2.417494));
-                            float crest_awe_A2 = static_cast<float>(get_json_double(obj, "crest_awe_A2", 2.208027));
-                            float crest_awe_A3 = static_cast<float>(get_json_double(obj, "crest_awe_A3", 0.0));
-                            float crest_awe_B1 = static_cast<float>(get_json_double(obj, "crest_awe_B1", 0.0));
-                            float crest_awe_B2 = static_cast<float>(get_json_double(obj, "crest_awe_B2", 0.0));
-                            float crest_awe_B3 = static_cast<float>(get_json_double(obj, "crest_awe_B3", 0.0));
-                            float crest_awe_fc = static_cast<float>(get_json_double(obj, "crest_awe_fc", 0.0));
-                            float crest_awe_delta = static_cast<float>(get_json_double(obj, "crest_awe_delta", 0.0));
-                            float crest_awe_Gamma1 = static_cast<float>(get_json_double(obj, "crest_awe_Gamma1", 32.33557));
-                            float crest_awe_Gamma2 = static_cast<float>(get_json_double(obj, "crest_awe_Gamma2", 3.596933));
-                            float crest_awe_gamma00 = static_cast<float>(get_json_double(obj, "crest_awe_gamma00", 0.4));
-                            float crest_awe_m = static_cast<float>(get_json_double(obj, "crest_awe_m", 2.0));
-                            float crest_awe_c0 = static_cast<float>(get_json_double(obj, "crest_awe_c0", 0.0));
-                            float crest_awe_c1 = static_cast<float>(get_json_double(obj, "crest_awe_c1", 2.0));
-                            float crest_awe_c2 = static_cast<float>(get_json_double(obj, "crest_awe_c2", 220000000.0));
-                            float crest_awe_c3 = static_cast<float>(get_json_double(obj, "crest_awe_c3", 2.5));
-                            float crest_awe_c6 = static_cast<float>(get_json_double(obj, "crest_awe_c6", 0.0));
-                            float crest_awe_c8 = static_cast<float>(get_json_double(obj, "crest_awe_c8", 0.00016));
-                            float crest_awe_c9 = static_cast<float>(get_json_double(obj, "crest_awe_c9", 1.0));
-                            float crest_awe_c10 = static_cast<float>(get_json_double(obj, "crest_awe_c10", 400000.0));
-                            float crest_awe_c11 = static_cast<float>(get_json_double(obj, "crest_awe_c11", 1.8));
-                            float crest_awe_c12 = static_cast<float>(get_json_double(obj, "crest_awe_c12", 0.0));
-                            float crest_awe_c13 = static_cast<float>(get_json_double(obj, "crest_awe_c13", 0.0));
-
-                            bool enable_het = get_json_bool(obj, "enable_heterogeneity", false);
-                            float weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", 0.0));
-                            if (weibull_modulus > 0.001f) enable_het = true;
-                            float weibull_scale = static_cast<float>(get_json_double(obj, "weibull_scale", 1.0));
-                            float weibull_ref_volume = static_cast<float>(get_json_double(obj, "weibull_ref_volume", 1.0e-4));
-
-                            bool enable_aniso = get_json_bool(obj, "enable_anisotropy", false);
-                            float aniso_ratio = static_cast<float>(get_json_double(obj, "anisotropy_ratio", 1.0));
-                            float aniso_dir_x = static_cast<float>(get_json_double(obj, "anisotropy_dir_x", 1.0));
-                            float aniso_dir_y = static_cast<float>(get_json_double(obj, "anisotropy_dir_y", 0.0));
-
-                            if (shape == "Circle") {
-                                float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
-                            } else {
-                                float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
-                                float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
-                                global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
-                            }
-
-                            for (auto& p : global_solver_mpm_2d->getParticles()) {
-                                if (p.object_id == obj_idx) {
-                                    p.material_model = mat_model;
-                                    p.jc_A = jc_A;
-                                    p.jc_B = jc_B;
-                                    p.jc_n = jc_n;
-                                    p.jc_C = jc_C;
-                                    p.jc_m = jc_m;
-                                    p.T_melt = T_melt;
-                                    p.T_room = T_room;
-                                    p.Cp = Cp;
-                                    p.mg_gamma0 = mg_gamma0;
-                                    p.mg_c0 = mg_c0;
-                                    p.mg_s = mg_s;
-                                    p.solid_model = solid_model;
-                                    p.burn_model = burn_model;
-                                    p.product_model = product_model;
-                                    p.jwl_A = jwl_A;
-                                    p.jwl_B = jwl_B;
-                                    p.jwl_R1 = jwl_R1;
-                                    p.jwl_R2 = jwl_R2;
-                                    p.jwl_omega = jwl_omega;
-                                    p.det_vel = det_vel;
-                                    p.detonation_energy = detonation_energy;
-                                    p.burn_zone_cells = burn_zone_cells;
-                                    p.tau_burn_min = tau_burn_min;
-                                    ltp.apply(p);
-                                    p.davis_c0 = davis_c0;
-                                    p.davis_s1 = davis_s1;
-                                    p.davis_gamma0 = davis_gamma0;
-                                    p.davis_cv = davis_cv;
-                                    p.davis_t0 = davis_t0;
-                                    p.davis_rho0 = davis_rho0;
-                                    p.davis_a = davis_a;
-                                    p.davis_b = davis_b;
-                                    p.davis_k = davis_k;
-                                    p.davis_vc = davis_vc;
-                                    p.davis_pc = davis_pc;
-                                    p.davis_q_det = davis_q_det;
-                                    p.crest_b1 = crest_b1;
-                                    p.crest_c1 = crest_c1;
-                                    p.crest_m1 = crest_m1;
-                                    p.crest_b2 = crest_b2;
-                                    p.crest_c2 = crest_c2;
-                                    p.crest_c3 = crest_c3;
-                                    p.crest_m2 = crest_m2;
-                                    p.crest_s0 = crest_s0;
-                                    p.crest_s_threshold = crest_s_threshold;
-                                    p.crest_awe_K0s = crest_awe_K0s;
-                                    p.crest_awe_A1 = crest_awe_A1;
-                                    p.crest_awe_A2 = crest_awe_A2;
-                                    p.crest_awe_A3 = crest_awe_A3;
-                                    p.crest_awe_B1 = crest_awe_B1;
-                                    p.crest_awe_B2 = crest_awe_B2;
-                                    p.crest_awe_B3 = crest_awe_B3;
-                                    p.crest_awe_fc = crest_awe_fc;
-                                    p.crest_awe_delta = crest_awe_delta;
-                                    p.crest_awe_Gamma1 = crest_awe_Gamma1;
-                                    p.crest_awe_Gamma2 = crest_awe_Gamma2;
-                                    p.crest_awe_gamma00 = crest_awe_gamma00;
-                                    p.crest_awe_m = crest_awe_m;
-                                    p.crest_awe_c0 = crest_awe_c0;
-                                    p.crest_awe_c1 = crest_awe_c1;
-                                    p.crest_awe_c2 = crest_awe_c2;
-                                    p.crest_awe_c3 = crest_awe_c3;
-                                    p.crest_awe_c6 = crest_awe_c6;
-                                    p.crest_awe_c8 = crest_awe_c8;
-                                    p.crest_awe_c9 = crest_awe_c9;
-                                    p.crest_awe_c10 = crest_awe_c10;
-                                    p.crest_awe_c11 = crest_awe_c11;
-                                    p.crest_awe_c12 = crest_awe_c12;
-                                    p.crest_awe_c13 = crest_awe_c13;
-                                    p.temperature = T_room;
-                                    p.e_int = 0.0f;
-                                    p.enable_heterogeneity = enable_het;
-                                    p.weibull_modulus = weibull_modulus;
-                                    p.weibull_scale = weibull_scale;
-                                    p.weibull_ref_volume = weibull_ref_volume;
-                                    if (enable_het && weibull_modulus > 0.001f) {
-                                        p.weibull_factor = Blast::computeWeibullFactor2D(p.x[0], p.x[1], p.V0, weibull_modulus, weibull_scale, weibull_ref_volume);
-                                    } else {
-                                        p.weibull_factor = 1.0f;
-                                    }
-                                    p.enable_anisotropy = enable_aniso;
-                                    p.anisotropy_ratio = aniso_ratio;
-                                    p.anisotropy_dir[0] = aniso_dir_x;
-                                    p.anisotropy_dir[1] = aniso_dir_y;
-                                    p.enable_density_erosion = get_json_bool(obj, "enable_density_erosion", get_json_bool(msg, "enable_density_erosion", false));
-                                    p.erosion_min_density = static_cast<float>(get_json_double(obj, "erosion_min_density", get_json_double(msg, "erosion_min_density", 0.0)));
-                                    p.erosion_min_density_ratio = static_cast<float>(get_json_double(obj, "erosion_min_density_ratio", get_json_double(msg, "erosion_min_density_ratio", 0.0)));
-                                    p.erode_to_fv_grid = get_json_bool(obj, "erode_to_fv_grid", get_json_bool(msg, "erode_to_fv_grid", true));
-                                    p.tait_rho0 = static_cast<float>(get_json_double(obj, "tait_rho0", get_json_double(obj, "density", 1000.0)));
-                                    p.tait_B = static_cast<float>(get_json_double(obj, "tait_B", 300.0e6));
-                                    p.tait_gamma = static_cast<float>(get_json_double(obj, "tait_gamma", 7.15));
-                                    p.tait_p0 = static_cast<float>(get_json_double(obj, "tait_p0", 101325.0));
-                                    p.mu_visc = static_cast<float>(get_json_double(obj, "mu_visc", 1.0e-3));
-                                }
-                            }
+                            setupMPM2DObjectFromJson(*global_solver_mpm_2d, obj_idx, obj, msg, domain_ppc, domain_p_dist_str, domain_b_fill_str);
                         }
 
                     } else {
@@ -7887,272 +7909,7 @@ int main() {
                         int obj_idx = 0;
                         for (const auto& obj : msg["mpm_objects"]) {
                             obj_idx++;
-                            std::string shape = obj.value("shape_type", "Rectangle");
-                            float pos_x = static_cast<float>(get_json_double(obj, "pos_x", 0.5));
-                            float pos_y = static_cast<float>(get_json_double(obj, "pos_y", 0.5));
-                            float vel_x = static_cast<float>(get_json_double(obj, "vel_x", 0.0));
-                            float vel_y = static_cast<float>(get_json_double(obj, "vel_y", 0.0));
-                            float angular_vel = static_cast<float>(get_json_double(obj, "angular_vel", 0.0));
-                            float density = static_cast<float>(get_json_double(obj, "density", 7850.0));
-                            float E = static_cast<float>(get_json_double(obj, "youngs_modulus", 210.0e9));
-                            float nu = static_cast<float>(get_json_double(obj, "poissons_ratio", 0.3));
-                            float yield_stress = static_cast<float>(get_json_double(obj, "yield_stress", 400.0e6));
-                            float hardening = static_cast<float>(get_json_double(obj, "hardening_modulus", 1.0e9));
-                            float failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.25));
-                            float tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
-                            int ppc = std::max(1, get_json_int(obj, "ppc", domain_ppc));
-
-                            std::string p_dist_str = obj.value("particle_distribution", domain_p_dist_str);
-                            Blast::MPMParticleDistribution particle_dist = Blast::MPMParticleDistribution::Cartesian;
-                            if (p_dist_str == "Hexagonal") {
-                                particle_dist = Blast::MPMParticleDistribution::Hexagonal;
-                            }
-
-                            std::string b_fill_str = obj.value("boundary_filling", domain_b_fill_str);
-                            Blast::MPMBoundaryFilling boundary_fill = Blast::MPMBoundaryFilling::Stairstepped;
-                            if (b_fill_str == "Partial") {
-                                boundary_fill = Blast::MPMBoundaryFilling::Partial;
-                            }
-
-                            std::string mat_model_str = obj.value("material_model", "Hypoelastic");
-                            Blast::MPMMaterialModel mat_model = parseMPMMaterialModel(mat_model_str);
-
-                            float jc_A = static_cast<float>(get_json_double(obj, "jc_A", 792.0e6));
-                            float jc_B = static_cast<float>(get_json_double(obj, "jc_B", 510.0e6));
-                            float jc_n = static_cast<float>(get_json_double(obj, "jc_n", 0.26));
-                            float jc_C = static_cast<float>(get_json_double(obj, "jc_C", 0.014));
-                            float jc_m = static_cast<float>(get_json_double(obj, "jc_m", 1.03));
-                            float T_melt = static_cast<float>(get_json_double(obj, "T_melt", 1793.0));
-                            float T_room = static_cast<float>(get_json_double(obj, "T_room", 293.0));
-                            float Cp = static_cast<float>(get_json_double(obj, "Cp", 477.0));
-                            float mg_gamma0 = static_cast<float>(get_json_double(obj, "mg_gamma0", 1.81));
-                            float mg_c0 = static_cast<float>(get_json_double(obj, "mg_c0", 4570.0));
-                            float mg_s = static_cast<float>(get_json_double(obj, "mg_s", 1.49));
-
-                            std::string solid_str = obj.value("solid_model", "");
-                            std::string burn_str = obj.value("burn_model", "");
-                            std::string prod_str = obj.value("product_model", "");
-                            Blast::SolidReactantEOS solid_model = Blast::SolidReactantEOS::MieGruneisen;
-                            Blast::ReactionKinetics burn_model = Blast::ReactionKinetics::ProgrammedBurn;
-                            Blast::DetonationProductEOS product_model = Blast::DetonationProductEOS::JWLProductGas;
-                            if (mat_model == Blast::MPMMaterialModel::CRESTReactiveBurn) {
-                                solid_model = Blast::SolidReactantEOS::DavisSolid;
-                                burn_model = Blast::ReactionKinetics::CRESTEntropy;
-                                product_model = Blast::DetonationProductEOS::DavisProduct;
-                            } else if (mat_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth) {
-                                solid_model = Blast::SolidReactantEOS::JWLReactant;
-                                burn_model = Blast::ReactionKinetics::LeeTarverODE;
-                                product_model = Blast::DetonationProductEOS::JWLProductGas;
-                            }
-                            if (!solid_str.empty()) {
-                                if (solid_str.find("Davis") != std::string::npos) solid_model = Blast::SolidReactantEOS::DavisSolid;
-                                else if (solid_str.find("Mie") != std::string::npos || solid_str.find("Gruneisen") != std::string::npos || solid_str.find("Grüneisen") != std::string::npos) solid_model = Blast::SolidReactantEOS::MieGruneisen;
-                                else if (solid_str.find("JWL") != std::string::npos) solid_model = Blast::SolidReactantEOS::JWLReactant;
-                            }
-                            if (!burn_str.empty()) {
-                                if (burn_str.find("CREST") != std::string::npos) burn_model = Blast::ReactionKinetics::CRESTEntropy;
-                                else if (burn_str.find("Lee-Tarver") != std::string::npos || burn_str.find("LeeTarver") != std::string::npos || burn_str.find("ODE") != std::string::npos) burn_model = Blast::ReactionKinetics::LeeTarverODE;
-                                else if (burn_str.find("Programmed") != std::string::npos || burn_str.find("Wavefront") != std::string::npos) burn_model = Blast::ReactionKinetics::ProgrammedBurn;
-                            }
-                            if (!prod_str.empty()) {
-                                if (prod_str.find("Davis") != std::string::npos) product_model = Blast::DetonationProductEOS::DavisProduct;
-                                else if (prod_str.find("JWL") != std::string::npos) product_model = Blast::DetonationProductEOS::JWLProductGas;
-                            }
-
-                            float jwl_A = static_cast<float>(get_json_double(obj, "jwl_A", 373.77e9));
-                            float jwl_B = static_cast<float>(get_json_double(obj, "jwl_B", 3.747e9));
-                            float jwl_R1 = static_cast<float>(get_json_double(obj, "jwl_R1", 4.15));
-                            float jwl_R2 = static_cast<float>(get_json_double(obj, "jwl_R2", 0.90));
-                            float jwl_omega = static_cast<float>(get_json_double(obj, "jwl_omega", 0.35));
-                            float det_vel = static_cast<float>(get_json_double(obj, "det_vel", 6930.0));
-                            float detonation_energy = static_cast<float>(get_json_double(obj, "detonation_energy", 4.29e6));
-                            int burn_zone_cells = get_json_int(obj, "burn_zone_cells", 4);
-                            float tau_burn_min = static_cast<float>(get_json_double(obj, "tau_burn_min", 1.0e-7));
-
-                            const Blast::ReactiveJson::LeeTarverParams ltp = Blast::ReactiveJson::readLeeTarverParams(obj,
-                                mat_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth || burn_model == Blast::ReactionKinetics::LeeTarverODE);
-
-                            float davis_c0 = static_cast<float>(get_json_double(obj, "davis_c0", 2050.0));
-                            float davis_s1 = static_cast<float>(get_json_double(obj, "davis_s1", 2.12));
-                            float davis_gamma0 = static_cast<float>(get_json_double(obj, "davis_gamma0", 0.65));
-                            float davis_cv = static_cast<float>(get_json_double(obj, "davis_cv", 1000.0));
-                            float davis_t0 = static_cast<float>(get_json_double(obj, "davis_t0", 293.0));
-                            float davis_rho0 = static_cast<float>(get_json_double(obj, "davis_rho0", 1895.0));
-
-                            float davis_a = static_cast<float>(get_json_double(obj, "davis_a", 2.85));
-                            float davis_b = static_cast<float>(get_json_double(obj, "davis_b", 1.10));
-                            float davis_k = static_cast<float>(get_json_double(obj, "davis_k", 1.35));
-                            float davis_vc = static_cast<float>(get_json_double(obj, "davis_vc", 0.65));
-                            float davis_pc = static_cast<float>(get_json_double(obj, "davis_pc", 12.5e9));
-                            float davis_q_det = static_cast<float>(get_json_double(obj, "davis_q_det", 3.90e6));
-
-                            float crest_b1 = static_cast<float>(get_json_double(obj, "crest_b1", 1.2e7));
-                            float crest_c1 = static_cast<float>(get_json_double(obj, "crest_c1", 0.67));
-                            float crest_m1 = static_cast<float>(get_json_double(obj, "crest_m1", 2.5));
-                            float crest_b2 = static_cast<float>(get_json_double(obj, "crest_b2", 3.5e6));
-                            float crest_c2 = static_cast<float>(get_json_double(obj, "crest_c2", 0.50));
-                            float crest_c3 = static_cast<float>(get_json_double(obj, "crest_c3", 0.67));
-                            float crest_m2 = static_cast<float>(get_json_double(obj, "crest_m2", 1.5));
-                            float crest_s0 = static_cast<float>(get_json_double(obj, "crest_s0", 100.0));
-                            float crest_s_threshold = static_cast<float>(get_json_double(obj, "crest_s_threshold", 45.0));
-                            float crest_awe_K0s = static_cast<float>(get_json_double(obj, "crest_awe_K0s", 14245250000.0));
-                            float crest_awe_A1 = static_cast<float>(get_json_double(obj, "crest_awe_A1", 2.417494));
-                            float crest_awe_A2 = static_cast<float>(get_json_double(obj, "crest_awe_A2", 2.208027));
-                            float crest_awe_A3 = static_cast<float>(get_json_double(obj, "crest_awe_A3", 0.0));
-                            float crest_awe_B1 = static_cast<float>(get_json_double(obj, "crest_awe_B1", 0.0));
-                            float crest_awe_B2 = static_cast<float>(get_json_double(obj, "crest_awe_B2", 0.0));
-                            float crest_awe_B3 = static_cast<float>(get_json_double(obj, "crest_awe_B3", 0.0));
-                            float crest_awe_fc = static_cast<float>(get_json_double(obj, "crest_awe_fc", 0.0));
-                            float crest_awe_delta = static_cast<float>(get_json_double(obj, "crest_awe_delta", 0.0));
-                            float crest_awe_Gamma1 = static_cast<float>(get_json_double(obj, "crest_awe_Gamma1", 32.33557));
-                            float crest_awe_Gamma2 = static_cast<float>(get_json_double(obj, "crest_awe_Gamma2", 3.596933));
-                            float crest_awe_gamma00 = static_cast<float>(get_json_double(obj, "crest_awe_gamma00", 0.4));
-                            float crest_awe_m = static_cast<float>(get_json_double(obj, "crest_awe_m", 2.0));
-                            float crest_awe_c0 = static_cast<float>(get_json_double(obj, "crest_awe_c0", 0.0));
-                            float crest_awe_c1 = static_cast<float>(get_json_double(obj, "crest_awe_c1", 2.0));
-                            float crest_awe_c2 = static_cast<float>(get_json_double(obj, "crest_awe_c2", 220000000.0));
-                            float crest_awe_c3 = static_cast<float>(get_json_double(obj, "crest_awe_c3", 2.5));
-                            float crest_awe_c6 = static_cast<float>(get_json_double(obj, "crest_awe_c6", 0.0));
-                            float crest_awe_c8 = static_cast<float>(get_json_double(obj, "crest_awe_c8", 0.00016));
-                            float crest_awe_c9 = static_cast<float>(get_json_double(obj, "crest_awe_c9", 1.0));
-                            float crest_awe_c10 = static_cast<float>(get_json_double(obj, "crest_awe_c10", 400000.0));
-                            float crest_awe_c11 = static_cast<float>(get_json_double(obj, "crest_awe_c11", 1.8));
-                            float crest_awe_c12 = static_cast<float>(get_json_double(obj, "crest_awe_c12", 0.0));
-                            float crest_awe_c13 = static_cast<float>(get_json_double(obj, "crest_awe_c13", 0.0));
-
-                            bool enable_het = get_json_bool(obj, "enable_heterogeneity", false);
-                            float weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", 0.0));
-                            if (weibull_modulus > 0.001f) enable_het = true;
-                            float weibull_scale = static_cast<float>(get_json_double(obj, "weibull_scale", 1.0));
-                            float weibull_ref_volume = static_cast<float>(get_json_double(obj, "weibull_ref_volume", 1.0e-4));
-
-                            bool enable_aniso = get_json_bool(obj, "enable_anisotropy", false);
-                            float aniso_ratio = static_cast<float>(get_json_double(obj, "anisotropy_ratio", 1.0));
-                            float aniso_dir_x = static_cast<float>(get_json_double(obj, "anisotropy_dir_x", 1.0));
-                            float aniso_dir_y = static_cast<float>(get_json_double(obj, "anisotropy_dir_y", 0.0));
-
-                            if (shape == "Circle") {
-                                float radius = static_cast<float>(get_json_double(obj, "radius", 0.1));
-                                global_solver_mpm_2d->addCircleObject(obj_idx, pos_x, pos_y, radius, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
-                            } else {
-                                float size_x = static_cast<float>(get_json_double(obj, "size_x", 0.2));
-                                float size_y = static_cast<float>(get_json_double(obj, "size_y", 0.2));
-                                global_solver_mpm_2d->addRectangleObject(obj_idx, pos_x, pos_y, size_x, size_y, vel_x, vel_y, angular_vel, density, E, nu, yield_stress, hardening, failure_strain, tensile_failure_stress, ppc, particle_dist, boundary_fill);
-                            }
-
-                            for (auto& p : global_solver_mpm_2d->getParticles()) {
-                                if (p.object_id == obj_idx) {
-                                    p.material_model = mat_model;
-                                    p.jc_A = jc_A;
-                                    p.jc_B = jc_B;
-                                    p.jc_n = jc_n;
-                                    p.jc_C = jc_C;
-                                    p.jc_m = jc_m;
-                                    p.T_melt = T_melt;
-                                    p.T_room = T_room;
-                                    p.Cp = Cp;
-                                    p.mg_gamma0 = mg_gamma0;
-                                    p.mg_c0 = mg_c0;
-                                    p.mg_s = mg_s;
-                                    p.solid_model = solid_model;
-                                    p.burn_model = burn_model;
-                                    p.product_model = product_model;
-                                    p.jwl_A = jwl_A;
-                                    p.jwl_B = jwl_B;
-                                    p.jwl_R1 = jwl_R1;
-                                    p.jwl_R2 = jwl_R2;
-                                    p.jwl_omega = jwl_omega;
-                                    p.det_vel = det_vel;
-                                    p.detonation_energy = detonation_energy;
-                                    p.burn_zone_cells = burn_zone_cells;
-                                    p.tau_burn_min = tau_burn_min;
-                                    ltp.apply(p);
-                                    p.davis_c0 = davis_c0;
-                                    p.davis_s1 = davis_s1;
-                                    p.davis_gamma0 = davis_gamma0;
-                                    p.davis_cv = davis_cv;
-                                    p.davis_t0 = davis_t0;
-                                    p.davis_rho0 = davis_rho0;
-                                    p.davis_a = davis_a;
-                                    p.davis_b = davis_b;
-                                    p.davis_k = davis_k;
-                                    p.davis_vc = davis_vc;
-                                    p.davis_pc = davis_pc;
-                                    p.davis_q_det = davis_q_det;
-                                    p.crest_b1 = crest_b1;
-                                    p.crest_c1 = crest_c1;
-                                    p.crest_m1 = crest_m1;
-                                    p.crest_b2 = crest_b2;
-                                    p.crest_c2 = crest_c2;
-                                    p.crest_c3 = crest_c3;
-                                    p.crest_m2 = crest_m2;
-                                    p.crest_s0 = crest_s0;
-                                    p.crest_s_threshold = crest_s_threshold;
-                                    p.crest_awe_K0s = crest_awe_K0s;
-                                    p.crest_awe_A1 = crest_awe_A1;
-                                    p.crest_awe_A2 = crest_awe_A2;
-                                    p.crest_awe_A3 = crest_awe_A3;
-                                    p.crest_awe_B1 = crest_awe_B1;
-                                    p.crest_awe_B2 = crest_awe_B2;
-                                    p.crest_awe_B3 = crest_awe_B3;
-                                    p.crest_awe_fc = crest_awe_fc;
-                                    p.crest_awe_delta = crest_awe_delta;
-                                    p.crest_awe_Gamma1 = crest_awe_Gamma1;
-                                    p.crest_awe_Gamma2 = crest_awe_Gamma2;
-                                    p.crest_awe_gamma00 = crest_awe_gamma00;
-                                    p.crest_awe_m = crest_awe_m;
-                                    p.crest_awe_c0 = crest_awe_c0;
-                                    p.crest_awe_c1 = crest_awe_c1;
-                                    p.crest_awe_c2 = crest_awe_c2;
-                                    p.crest_awe_c3 = crest_awe_c3;
-                                    p.crest_awe_c6 = crest_awe_c6;
-                                    p.crest_awe_c8 = crest_awe_c8;
-                                    p.crest_awe_c9 = crest_awe_c9;
-                                    p.crest_awe_c10 = crest_awe_c10;
-                                    p.crest_awe_c11 = crest_awe_c11;
-                                    p.crest_awe_c12 = crest_awe_c12;
-                                    p.crest_awe_c13 = crest_awe_c13;
-                                    p.temperature = T_room;
-                                    p.e_int = 0.0f;
-
-                                    if (mat_model == Blast::MPMMaterialModel::JWLProgrammedBurn) {
-                                        float det_x = static_cast<float>(get_json_double(obj, "detonator_x", get_json_double(msg, "detonator_x", get_json_double(obj, "trigger_x", get_json_double(msg, "trigger_x", 0.5)))));
-                                        float det_y = static_cast<float>(get_json_double(obj, "detonator_y", get_json_double(msg, "detonator_y", get_json_double(obj, "trigger_y", get_json_double(msg, "trigger_y", 0.5)))));
-                                        float det_r = static_cast<float>(get_json_double(obj, "detonator_radius", get_json_double(msg, "detonator_radius", 0.02)));
-                                        float det_t = static_cast<float>(get_json_double(obj, "start_time", get_json_double(msg, "start_time", 0.0)));
-                                        float dist = std::sqrt((p.x[0] - det_x)*(p.x[0] - det_x) + (p.x[1] - det_y)*(p.x[1] - det_y));
-                                        float eff_dist = std::max(0.0f, dist - det_r);
-                                        p.t_arrival = det_t + eff_dist / std::max(det_vel, 100.0f);
-                                        if (p.t_arrival <= 0.0f) {
-                                            p.lambda = 1.0f;
-                                            p.e_int = detonation_energy;
-                                        }
-                                    }
-
-                                    p.enable_heterogeneity = enable_het;
-                                    p.weibull_modulus = weibull_modulus;
-                                    p.weibull_scale = weibull_scale;
-                                    p.weibull_ref_volume = weibull_ref_volume;
-                                    if (enable_het && weibull_modulus > 0.001f) {
-                                        p.weibull_factor = Blast::computeWeibullFactor2D(p.x[0], p.x[1], p.V0, weibull_modulus, weibull_scale, weibull_ref_volume);
-                                    } else {
-                                        p.weibull_factor = 1.0f;
-                                    }
-                                    p.enable_anisotropy = enable_aniso;
-                                    p.anisotropy_ratio = aniso_ratio;
-                                    p.anisotropy_dir[0] = aniso_dir_x;
-                                    p.anisotropy_dir[1] = aniso_dir_y;
-                                    p.enable_density_erosion = get_json_bool(obj, "enable_density_erosion", get_json_bool(msg, "enable_density_erosion", false));
-                                    p.erosion_min_density = static_cast<float>(get_json_double(obj, "erosion_min_density", get_json_double(msg, "erosion_min_density", 0.0)));
-                                    p.erosion_min_density_ratio = static_cast<float>(get_json_double(obj, "erosion_min_density_ratio", get_json_double(msg, "erosion_min_density_ratio", 0.0)));
-                                    p.erode_to_fv_grid = get_json_bool(obj, "erode_to_fv_grid", get_json_bool(msg, "erode_to_fv_grid", true));
-                                    p.tait_rho0 = static_cast<float>(get_json_double(obj, "tait_rho0", get_json_double(obj, "density", 1000.0)));
-                                    p.tait_B = static_cast<float>(get_json_double(obj, "tait_B", 300.0e6));
-                                    p.tait_gamma = static_cast<float>(get_json_double(obj, "tait_gamma", 7.15));
-                                    p.tait_p0 = static_cast<float>(get_json_double(obj, "tait_p0", 101325.0));
-                                    p.mu_visc = static_cast<float>(get_json_double(obj, "mu_visc", 1.0e-3));
-                                }
-                            }
+                            setupMPM2DObjectFromJson(*global_solver_mpm_2d, obj_idx, obj, msg, domain_ppc, domain_p_dist_str, domain_b_fill_str);
                         }
                     } else {
                         global_solver_mpm_2d->addRectangleObject(1, 0.7f, 0.5f, 0.2f, 0.4f, 0.0f, 0.0f, 0.0f, 7850.0f, 210.0e9f, 0.3f, 400.0e6f, 1.0e9f, 0.25f, 600.0e6f, domain_ppc);

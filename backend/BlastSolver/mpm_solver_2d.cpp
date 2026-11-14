@@ -1,13 +1,89 @@
 #include "mpm_solver_2d.hpp"
+#include "mpm_solver_3d.hpp"
+#include "materials/ConstitutiveDispatcher.hpp"
 #include "constitutive_jwl.hpp"
 #include "constitutive_lee_tarver.hpp"
 #include "constitutive_mixture.hpp"
 #include "constitutive_crest_davis.hpp"
 #include <cstring>
+#include <unordered_map>
 
 namespace Blast {
 
+struct MaterialTable2DHolder {
+    std::unordered_map<int, MaterialTable3D> tables;
+};
+
+static inline const MaterialTable3D& resolveMaterialTable2D(
+    const MPMSolver2D& solver,
+    const MPMParticle2D& p,
+    MaterialTable3D& scratch
+) {
+    if (const MaterialTable3D* reg = solver.getMaterialTable(p.object_id)) {
+        return *reg;
+    }
+    scratch.material_model = p.material_model;
+    scratch.solid_model = p.solid_model;
+    scratch.burn_model = p.burn_model;
+    scratch.product_model = p.product_model;
+    scratch.density = p.density;
+    scratch.youngs_modulus = p.youngs_modulus;
+    scratch.poissons_ratio = p.poissons_ratio;
+    scratch.yield_stress = p.yield_stress;
+    scratch.hardening_modulus = p.hardening_modulus;
+    scratch.failure_strain = p.failure_strain;
+    scratch.tensile_failure_stress = p.tensile_failure_stress;
+    scratch.jc_A = p.jc_A;
+    scratch.jc_B = p.jc_B;
+    scratch.jc_n = p.jc_n;
+    scratch.jc_C = p.jc_C;
+    scratch.jc_m = p.jc_m;
+    scratch.T_melt = p.T_melt;
+    scratch.T_room = p.T_room;
+    scratch.Cp = p.Cp;
+    scratch.mg_gamma0 = p.mg_gamma0;
+    scratch.mg_c0 = p.mg_c0;
+    scratch.mg_s = p.mg_s;
+    scratch.enable_heterogeneity = p.enable_heterogeneity;
+    scratch.weibull_modulus = p.weibull_modulus;
+    scratch.weibull_scale = p.weibull_scale;
+    scratch.weibull_ref_volume = p.weibull_ref_volume;
+    scratch.enable_anisotropy = p.enable_anisotropy;
+    scratch.anisotropy_ratio = p.anisotropy_ratio;
+    scratch.anisotropy_dir[0] = p.anisotropy_dir[0];
+    scratch.anisotropy_dir[1] = p.anisotropy_dir[1];
+    scratch.anisotropy_dir[2] = 0.0f;
+    scratch.tait_rho0 = p.tait_rho0;
+    scratch.tait_B = p.tait_B;
+    scratch.tait_gamma = p.tait_gamma;
+    scratch.tait_p0 = p.tait_p0;
+    scratch.tait_viscosity = p.mu_visc;
+    scratch.ideal_gamma = p.ideal_gamma;
+    scratch.ideal_R = p.ideal_R;
+    scratch.det_vel = p.det_vel;
+    scratch.enable_density_erosion = p.enable_density_erosion;
+    scratch.erosion_min_density = p.erosion_min_density;
+    scratch.erosion_min_density_ratio = p.erosion_min_density_ratio;
+    scratch.erode_to_fv_grid = p.erode_to_fv_grid;
+    return scratch;
+}
+
 MPMSolver2D::MPMSolver2D() {
+}
+
+MPMSolver2D::~MPMSolver2D() = default;
+
+void MPMSolver2D::setMaterialTable(int object_id, const MaterialTable3D& mat) {
+    if (!m_mat_holder) {
+        m_mat_holder = std::make_shared<MaterialTable2DHolder>();
+    }
+    m_mat_holder->tables[object_id] = mat;
+}
+
+const MaterialTable3D* MPMSolver2D::getMaterialTable(int object_id) const {
+    if (!m_mat_holder) return nullptr;
+    auto it = m_mat_holder->tables.find(object_id);
+    return (it != m_mat_holder->tables.end()) ? &it->second : nullptr;
 }
 
 void MPMSolver2D::initializeGrid(int nx, int ny, float dx, float dy) {
@@ -1168,16 +1244,17 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
         }
 
         // Density-Based Particle Erosion (2D)
-        if (p.enable_density_erosion && p.state != 2 && p.m > 0.0f) {
-            const bool is_energetic_p = (p.material_model == MPMMaterialModel::CRESTReactiveBurn) ||
-                                        (p.material_model == MPMMaterialModel::JWLProgrammedBurn) ||
-                                        (p.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth);
-            const bool is_fluid_or_energetic = (p.material_model == MPMMaterialModel::TaitWater) || is_energetic_p;
-            const bool defer_to_fv = m_defer_fv_erosion_to_coupler && p.erode_to_fv_grid && is_fluid_or_energetic;
+        MaterialTable3D mat_erode_scratch;
+        const MaterialTable3D& mat_erode = resolveMaterialTable2D(*this, p, mat_erode_scratch);
+        if (mat_erode.enable_density_erosion && p.state != 2 && p.m > 0.0f) {
+            const bool is_energetic_p = isEnergeticModel(mat_erode.material_model);
+            const bool is_fluid_or_energetic = isFluidModel(mat_erode.material_model) || is_energetic_p;
+            const bool defer_to_fv = m_defer_fv_erosion_to_coupler && mat_erode.erode_to_fv_grid && is_fluid_or_energetic;
             if (!defer_to_fv) {
                 const float rho_p = p.m / std::max(p.V, 1.0e-30f);
-                const float rho0 = (p.material_model == MPMMaterialModel::TaitWater && p.tait_rho0 > 0.0f) ? p.tait_rho0 : p.density;
-                const float rho_thresh = std::max(p.erosion_min_density, p.erosion_min_density_ratio * rho0);
+                const float rho0 = (mat_erode.material_model == MPMMaterialModel::TaitWater && mat_erode.tait_rho0 > 0.0f)
+                    ? mat_erode.tait_rho0 : mat_erode.density;
+                const float rho_thresh = std::max(mat_erode.erosion_min_density, mat_erode.erosion_min_density_ratio * rho0);
                 const bool burn_ready = !is_energetic_p || (p.lambda >= 0.5f || p.V > 1.05f * p.V0);
                 if (rho_thresh > 0.0f && burn_ready && rho_p < rho_thresh) {
                     p.state = 2;
@@ -1186,6 +1263,7 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                     p.B[0][0] = 0.0f; p.B[0][1] = 0.0f; p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
                     p.L_grad[0][0] = 0.0f; p.L_grad[0][1] = 0.0f; p.L_grad[1][0] = 0.0f; p.L_grad[1][1] = 0.0f;
                     p.sigma.setIsotropic(0.0f);
+                    p.sigma_zz = 0.0f;
                 }
             }
         }
@@ -1209,206 +1287,136 @@ void MPMSolver2D::gridToParticleAndStress(float dt) {
 }
 
 void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L[2][2]) {
-    // Strain rate D = 0.5 * (L + L^T)
-        float deps_xx = L[0][0] * dt;
-        float deps_yy = L[1][1] * dt;
-        float deps_xy = 0.5f * (L[0][1] + L[1][0]) * dt;
-        float tr_deps = deps_xx + deps_yy;
+    MaterialTable3D mat_scratch;
+    const MaterialTable3D& mat = resolveMaterialTable2D(*this, p, mat_scratch);
 
-        // --- Option B: Granular Coulomb Debris Model for Eroded/Failed Particles ---
-        if (p.has_failed) {
-            p.damage = 1.0f;
+    // Symmetric strain increment (plane strain: deps_zz = 0, L_zz = 0)
+    const float deps_xx = L[0][0] * dt;
+    const float deps_yy = L[1][1] * dt;
+    const float deps_xy = 0.5f * (L[0][1] + L[1][0]) * dt;
+    const float tr_deps = deps_xx + deps_yy;
+
+    const bool is_energetic_p = isEnergeticModel(mat.material_model);
+    const bool dispatch_energetic = is_energetic_p && !p.has_failed && (p.damage < 1.0f);
+
+    if (!dispatch_energetic) {
+        const bool is_fluid_or_gas = isFluidModel(mat.material_model);
+        const bool is_solid_mat = (!is_fluid_or_gas && !is_energetic_p);
+        const float V0_safe = (p.V0 > 1.0e-20f) ? p.V0 : 1.0e-20f;
+        const float V_prev = std::max(1.0e-20f, p.V);
+        const float V_min_limit = is_solid_mat ? (0.25f * V0_safe) : (1.0e-4f * V0_safe);
+        const float V_max_limit = is_solid_mat ? (3.0f * V0_safe)  : (1.0e4f * V0_safe);
+        if (!p.has_failed) {
+            p.V = std::clamp(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), V_min_limit, V_max_limit);
+        } else {
+            p.V = std::max(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), 1.0e-4f * V0_safe);
+        }
+
+        float w_factor = (mat.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
+        if (mat.enable_heterogeneity && p.weibull_factor <= 0.001f && mat.weibull_modulus > 0.001f) {
+            p.weibull_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.V0, mat.weibull_modulus, mat.weibull_scale, mat.weibull_ref_volume);
+            w_factor = p.weibull_factor;
+        }
+
+        const float W_xy = 0.5f * (L[0][1] - L[1][0]);
+        const float deps3[3][3] = {
+            {deps_xx, deps_xy, 0.0f},
+            {deps_xy, deps_yy, 0.0f},
+            {0.0f,    0.0f,    0.0f}
+        };
+        const float W3[3][3] = {
+            { 0.0f, W_xy, 0.0f},
+            {-W_xy, 0.0f, 0.0f},
+            { 0.0f, 0.0f, 0.0f}
+        };
+        const float L3[3][3] = {
+            {L[0][0], L[0][1], 0.0f},
+            {L[1][0], L[1][1], 0.0f},
+            {0.0f,    0.0f,    0.0f}
+        };
+
+        Blast::Materials::ConstitutiveState3D<float> st{};
+        st.sigma[0][0] = p.sigma[0][0];
+        st.sigma[0][1] = p.sigma[0][1];
+        st.sigma[1][0] = p.sigma[1][0];
+        st.sigma[1][1] = p.sigma[1][1];
+        st.sigma[2][2] = p.sigma_zz;
+
+        st.F_total[0][0] = p.F[0][0];
+        st.F_total[0][1] = p.F[0][1];
+        st.F_total[1][0] = p.F[1][0];
+        st.F_total[1][1] = p.F[1][1];
+        st.F_total[2][2] = 1.0f;
+
+        float ax = p.hill_dir[0], ay = p.hill_dir[1];
+        float an = std::sqrt(ax * ax + ay * ay);
+        if (an <= 1.0e-6f) {
+            ax = mat.anisotropy_dir[0];
+            ay = mat.anisotropy_dir[1];
+            an = std::sqrt(ax * ax + ay * ay);
+        }
+        if (an > 1.0e-6f) {
+            st.hill_a[0] = ax / an;
+            st.hill_a[1] = ay / an;
+        } else {
+            st.hill_a[0] = 1.0f;
+            st.hill_a[1] = 0.0f;
+        }
+        st.hill_a[2] = 0.0f;
+        st.hill_b[0] = -st.hill_a[1];
+        st.hill_b[1] = st.hill_a[0];
+        st.hill_b[2] = 0.0f;
+
+        st.ep_bar = p.ep_bar;
+        st.damage = p.damage;
+        st.lambda = p.lambda;
+        st.e_internal = p.e_int;
+        st.temperature = p.temperature;
+        st.has_failed = p.has_failed;
+        st.J = p.V / V0_safe;
+
+        const float h_elem = (mat.cell_dx > 0.0f)
+            ? mat.cell_dx
+            : ((m_dx > 0.0f && m_dy > 0.0f) ? std::sqrt(m_dx * m_dy) : std::sqrt(std::max(1.0e-18f, p.V0)));
+
+        Blast::Materials::ConstitutiveDispatcher3D<float>::step(
+            mat, st, deps3, W3, L3, dt, h_elem, w_factor, true
+        );
+
+        p.sigma.set(st.sigma[0][0], st.sigma[1][1], 0.5f * (st.sigma[0][1] + st.sigma[1][0]));
+        p.sigma_zz = st.sigma[2][2];
+        p.F[0][0] = st.F_total[0][0];
+        p.F[0][1] = st.F_total[0][1];
+        p.F[1][0] = st.F_total[1][0];
+        p.F[1][1] = st.F_total[1][1];
+        const float ha_norm = std::sqrt(st.hill_a[0] * st.hill_a[0] + st.hill_a[1] * st.hill_a[1]);
+        if (ha_norm > 1.0e-6f) {
+            p.hill_dir[0] = st.hill_a[0] / ha_norm;
+            p.hill_dir[1] = st.hill_a[1] / ha_norm;
+        }
+        p.ep_bar = st.ep_bar;
+        p.damage = st.damage;
+        p.lambda = st.lambda;
+        p.e_int = st.e_internal;
+        p.temperature = st.temperature;
+        p.has_failed = st.has_failed;
+
+        if (p.has_failed || (usesMieGruneisenEOS(mat.material_model) && mat.T_melt > mat.T_room && p.temperature >= mat.T_melt)) {
             p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
             p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
-
-            p.V = std::max(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), 1.0e-4f * p.V0);
-
-            // 1. Bulk Pressure from Volumetric Compression J = V / V0
-            const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
-            float p_comp = 0.0f;
-            if (J < 1.0f) {
-                const float E_mod    = p.youngs_modulus;
-                const float nu       = p.poissons_ratio;
-                const float K_intact = E_mod / (2.0f * std::max(1.0e-4f, 1.0f - nu)); // 2D bulk modulus
-                const float K_debris = 0.10f * K_intact;
-                p_comp = K_debris * (1.0f - J) / J;
-            }
-
-            // 2. Frictional Shear Resistance (Drucker-Prager cone limit: q <= M * p_comp)
-            // Hydrodynamic response for failed or melted metals: zero shear resistance (q_max = 0)
-            float M_friction = 0.0f;
-            if (p.material_model == MPMMaterialModel::RHTConcrete ||
-                p.material_model == MPMMaterialModel::KCConcrete ||
-                p.material_model == MPMMaterialModel::CSCMConcrete) {
-                M_friction = 1.0f;
-            } else if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen ||
-                       p.material_model == MPMMaterialModel::Hypoelastic ||
-                       p.material_model == MPMMaterialModel::LinearElastic) {
-                M_friction = 0.0f; // Pure hydrodynamic fluid response for failed or melted metals
-            }
-            const float q_max = M_friction * p_comp;
-
-            if (q_max <= 0.0f) {
-                p.sigma.setIsotropic(-p_comp);
-                return;
-            }
-
-            const float E_mod = p.youngs_modulus;
-            const float nu = p.poissons_ratio;
-            const float mu_debris = 0.05f * (E_mod / (2.0f * (1.0f + nu)));
-
-            float s_xx_trial = p.sigma[0][0] + 2.0f * mu_debris * (deps_xx - 0.5f * tr_deps);
-            float s_yy_trial = p.sigma[1][1] + 2.0f * mu_debris * (deps_yy - 0.5f * tr_deps);
-            float s_xy_trial = p.sigma[0][1] + 2.0f * mu_debris * deps_xy;
-
-            float press_s = -0.5f * (s_xx_trial + s_yy_trial);
-            s_xx_trial += press_s;
-            s_yy_trial += press_s;
-
-            float q_trial = std::sqrt(s_xx_trial * s_xx_trial + s_yy_trial * s_yy_trial + 2.0f * s_xy_trial * s_xy_trial);
-
-            if (q_trial > q_max && q_trial > 1.0e-7f) {
-                float scale = q_max / q_trial;
-                p.sigma.set(scale * s_xx_trial - p_comp, scale * s_yy_trial - p_comp, scale * s_xy_trial);
-            } else {
-                p.sigma.set(s_xx_trial - p_comp, s_yy_trial - p_comp, s_xy_trial);
-            }
-
-            return;
         }
-
-        // --- Johnson-Cook Plasticity + Mie-Grüneisen Shock EOS Model ---
-        if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
-            float w_factor = (p.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
-            if (p.enable_heterogeneity && w_factor <= 0.001f && p.weibull_modulus > 0.001f) {
-                p.weibull_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.V0, p.weibull_modulus, p.weibull_scale, p.weibull_ref_volume);
-                w_factor = p.weibull_factor;
-            }
-
-            p.V = std::max(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), 1.0e-4f * p.V0);
-            const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
-            const float mu_vol = (1.0f - J) / J;
-
-            // 1. Mie-Grüneisen Shock EOS Hydrostatic Pressure
-            float p_hydro = 0.0f;
-            if (mu_vol > 0.0f) {
-                float denom = 1.0f - (p.mg_s - 1.0f) * mu_vol;
-                if (denom < 0.1f) denom = 0.1f;
-                float p_H = (p.density * p.mg_c0 * p.mg_c0 * mu_vol * (1.0f + mu_vol)) / (denom * denom);
-                float e_H = (p_H * mu_vol) / (2.0f * p.density * (1.0f + mu_vol));
-                p_hydro = p_H + p.mg_gamma0 * p.density * (p.e_int - e_H);
-            } else {
-                p_hydro = p.density * p.mg_c0 * p.mg_c0 * mu_vol;
-            }
-
-            // 2. Jaumann Stress Rate Rotation
-            float W_xy = 0.5f * (L[0][1] - L[1][0]);
-            float rot_xx =  2.0f * W_xy * p.sigma[0][1] * dt;
-            float rot_yy = -2.0f * W_xy * p.sigma[0][1] * dt;
-            float rot_xy =  W_xy * (p.sigma[1][1] - p.sigma[0][0]) * dt;
-
-            float sig_xx_base = p.sigma[0][0] + rot_xx;
-            float sig_yy_base = p.sigma[1][1] + rot_yy;
-            float sig_xy_base = p.sigma[0][1] + rot_xy;
-
-            float E = p.youngs_modulus;
-            float nu = p.poissons_ratio;
-            float mu_shear = E / (2.0f * (1.0f + nu));
-
-            float deps_xx_dev = deps_xx - 0.5f * tr_deps;
-            float deps_yy_dev = deps_yy - 0.5f * tr_deps;
-            float deps_xy_dev = deps_xy;
-
-            float s_xx_trial = sig_xx_base + 2.0f * mu_shear * deps_xx_dev;
-            float s_yy_trial = sig_yy_base + 2.0f * mu_shear * deps_yy_dev;
-            float s_xy_trial = sig_xy_base + 2.0f * mu_shear * deps_xy_dev;
-
-            float p_s = -0.5f * (s_xx_trial + s_yy_trial);
-            s_xx_trial += p_s;
-            s_yy_trial += p_s;
-
-            float s_s = s_xx_trial * s_xx_trial + s_yy_trial * s_yy_trial + 2.0f * s_xy_trial * s_xy_trial;
-            const float q_trial = std::sqrt(1.5f * s_s);
-
-            // 3. Johnson-Cook Yield Stress with Weibull Flaw Scatter
-            float deps_eq = std::sqrt((2.0f / 3.0f) * (deps_xx_dev * deps_xx_dev + deps_yy_dev * deps_yy_dev + 2.0f * deps_xy_dev * deps_xy_dev));
-            float ep_dot_star = std::max(1.0f, deps_eq / (dt > 1e-12f ? dt : 1e-12f));
-            float T_star = std::clamp((p.temperature - p.T_room) / (p.T_melt > p.T_room ? p.T_melt - p.T_room : 1.0f), 0.0f, 1.0f);
-
-            float term_strain = (p.jc_A * w_factor) + p.jc_B * std::pow(std::max(0.0f, p.ep_bar), p.jc_n);
-            float term_rate   = 1.0f + p.jc_C * std::log(ep_dot_star);
-            float term_temp   = 1.0f - std::pow(T_star, p.jc_m);
-            if (term_temp < 0.0f) term_temp = 0.0f;
-
-            float jc_yield = term_strain * term_rate * term_temp;
-            if (T_star >= 1.0f) {
-                // Liquid / melted state behaves hydrodynamically: zero deviatoric shear and zero affine B
-                p.sigma.setIsotropic(-p_hydro);
-                p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
-                p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
-                return;
-            }
-
-            // 4. Radial Return Mapping & Plastic Work Dissipation
-            float delta_ep = 0.0f;
-            if (q_trial > 1.0e-5f && q_trial > jc_yield) {
-                delta_ep = (q_trial - jc_yield) / (2.0f * mu_shear + p.hardening_modulus);
-                float scale = (q_trial > 1e-12f) ? (jc_yield / q_trial) : 0.0f;
-                p.sigma.set(scale * s_xx_trial - p_hydro, scale * s_yy_trial - p_hydro, scale * s_xy_trial);
-                p.ep_bar += delta_ep;
-            } else {
-                p.sigma.set(s_xx_trial - p_hydro, s_yy_trial - p_hydro, s_xy_trial);
-            }
-
-            if (delta_ep > 0.0f && p.density > 0.0f && p.Cp > 0.0f) {
-                float dw_p = jc_yield * delta_ep;
-                float de_p = (0.90f * dw_p) / p.density;
-                p.e_int += de_p;
-                p.temperature = p.T_room + p.e_int / p.Cp;
-            }
-
-            // 5. Thermal Re-Welding / Healing Rule or Damage Accumulation
-            if (p.temperature >= 0.80f * p.T_melt && p_hydro > 0.0f) {
-                p.damage = 0.0f;
-                p.has_failed = false;
-            } else {
-                const float fail_strain_base = (p.failure_strain > 0.0f) ? p.failure_strain * w_factor : 0.0f;
-                const float tensile_fail_base = (p.tensile_failure_stress > 0.0f) ? p.tensile_failure_stress * w_factor : 0.0f;
-
-                float d_plastic = (fail_strain_base > 0.0f) ? std::clamp(p.ep_bar / fail_strain_base, 0.0f, 1.0f) : 0.0f;
-                float tensile_stress = -p_hydro;
-                float d_tensile = (tensile_stress > 0.0f && tensile_fail_base > 0.0f)
-                    ? std::clamp(tensile_stress / tensile_fail_base, 0.0f, 1.0f) : 0.0f;
-
-                p.damage = std::max(p.damage, std::max(d_plastic, d_tensile));
-                if (p.damage >= 1.0f) {
-                    p.has_failed = true;
-                    p.damage = 1.0f;
-                    p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
-                    p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
-
-                    float p_comp = 0.0f;
-                    if (J < 1.0f) {
-                        const float K_intact = E / (2.0f * std::max(1.0e-4f, 1.0f - nu));
-                        const float K_debris = 0.10f * K_intact;
-                        p_comp = K_debris * (1.0f - J) / J;
-                    }
-
-                    p.sigma.setIsotropic(-p_comp);
-
-                    return;
-                }
-            }
-
-            if (p.damage > 0.0f) {
-                float soft_factor = std::clamp(1.0f - p.damage, 0.0f, 1.0f);
-                p.sigma.data[0] *= soft_factor;
-                p.sigma.data[1] *= soft_factor;
-                p.sigma.data[2] *= soft_factor;
-            }
-
-            return;
+        if (isHyperelasticModel(mat.material_model)) {
+            p.V = std::clamp(st.J * V0_safe, V_min_limit, V_max_limit);
         }
+        if (m_transfer_scheme == MPMTransferScheme::GIMP &&
+            (is_fluid_or_gas || isHyperelasticModel(mat.material_model) || p.has_failed) &&
+            m_dx > 0.0f && m_dy > 0.0f) {
+            const float lp_scale = std::sqrt(std::max(0.25f, p.V / V_prev));
+            p.lp[0] = std::clamp(p.lp[0] * lp_scale, 0.1f * m_dx, 2.0f * m_dx);
+            p.lp[1] = std::clamp(p.lp[1] * lp_scale, 0.1f * m_dy, 2.0f * m_dy);
+        }
+        return;
+    }
 
         // --- Three-Pillar Energetic Material Architecture ---
         // Pillar 1: Solid Reactant EOS (Mie-Grüneisen / Davis Solid)
@@ -1517,14 +1525,14 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
                 [&](double v) { return static_cast<double>(solid_pressure_at(static_cast<float>(v))); },
                 [&](double v) { return static_cast<double>(product_pressure_at(static_cast<float>(v))); });
             float p_mix = static_cast<float>(mix.p);
-            if (p_mix < 1.0e-6f) p_mix = 1.0e-6f;
+            if (!std::isfinite(p_mix)) p_mix = 0.0f;   // numerical guard only; tension is physical and is not clipped
             // Phase pressures at the phase volumes chosen by the mixture rule (used by sound-speed/CFL closures)
             [[maybe_unused]] const float p_solid = solid_pressure_at(static_cast<float>(mix.v_s));
             [[maybe_unused]] const float p_prod = product_pressure_at(static_cast<float>(mix.v_p));
 
             // Energy conservation: compression work & chemical heat release
             float rho_eff = (p.density > 10.0f) ? p.density : ((p.solid_model == SolidReactantEOS::DavisSolid) ? p.davis_rho0 : 1630.0f);
-            float de_comp = (tr_deps < 0.0f) ? -(p_mix / rho_eff) * tr_deps : 0.0f;
+            float de_comp = -(p_mix / rho_eff) * tr_deps * v_rel;   // PdV work in BOTH directions, current-volume weighted
             float de_chem = d_lam * q_heat;
             p.e_int += de_comp + de_chem;
 
@@ -1545,15 +1553,16 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
 
             const float E_mod    = p.youngs_modulus;
             const float nu_val   = p.poissons_ratio;
-            const float mu_shear = (1.0f - lam_new) * (E_mod / (2.0f * (1.0f + nu_val)));
+            const float mu_shear = E_mod / (2.0f * (1.0f + nu_val));   // solid-phase shear modulus (unscaled)
+            const float solid_ratio = (1.0f - lam_new) / std::max(1.0f - lam_curr, 1.0e-6f);
 
             float deps_xx_dev = deps_xx - 0.5f * tr_deps;
             float deps_yy_dev = deps_yy - 0.5f * tr_deps;
             float deps_xy_dev = deps_xy;
 
-            float s_xx_trial = (1.0f - lam_new) * (sig_xx_base + 2.0f * mu_shear * deps_xx_dev);
-            float s_yy_trial = (1.0f - lam_new) * (sig_yy_base + 2.0f * mu_shear * deps_yy_dev);
-            float s_xy_trial = (1.0f - lam_new) * (sig_xy_base + 2.0f * mu_shear * deps_xy_dev);
+            float s_xx_trial = solid_ratio * sig_xx_base + (1.0f - lam_new) * 2.0f * mu_shear * deps_xx_dev;
+            float s_yy_trial = solid_ratio * sig_yy_base + (1.0f - lam_new) * 2.0f * mu_shear * deps_yy_dev;
+            float s_xy_trial = solid_ratio * sig_xy_base + (1.0f - lam_new) * 2.0f * mu_shear * deps_xy_dev;
 
             float press_s = -0.5f * (s_xx_trial + s_yy_trial);
             s_xx_trial += press_s;
@@ -1571,112 +1580,9 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
             }
 
             p.sigma.set(s_xx_trial - p_mix, s_yy_trial - p_mix, s_xy_trial);
+            p.sigma_zz = -p_mix;
             return;
         }
-
-
-        // Vorticity W = 0.5 * (L - L^T)
-        float W_xy = 0.5f * (L[0][1] - L[1][0]);
-
-        // Jaumann objective stress rate rotation: dSigma_rot = (W * Sigma - Sigma * W) * dt
-        float rot_xx =  2.0f * W_xy * p.sigma[0][1] * dt;
-        float rot_yy = -2.0f * W_xy * p.sigma[0][1] * dt;
-        float rot_xy =  W_xy * (p.sigma[1][1] - p.sigma[0][0]) * dt;
-
-        float sig_xx_base = p.sigma[0][0] + rot_xx;
-        float sig_yy_base = p.sigma[1][1] + rot_yy;
-        float sig_xy_base = p.sigma[0][1] + rot_xy;
-
-        float w_factor = (p.enable_heterogeneity && p.weibull_factor > 0.001f) ? p.weibull_factor : 1.0f;
-        if (p.enable_heterogeneity && w_factor <= 0.001f && p.weibull_modulus > 0.001f) {
-            p.weibull_factor = computeWeibullFactor2D(p.x[0], p.x[1], p.V0, p.weibull_modulus, p.weibull_scale, p.weibull_ref_volume);
-            w_factor = p.weibull_factor;
-        }
-
-        // Lame Elastic Parameters
-        float E = p.youngs_modulus;
-        float nu = p.poissons_ratio;
-        float mu = E / (2.0f * (1.0f + nu));
-        float lambda = (E * nu) / ((1.0f + nu) * (1.0f - 2.0f * nu));
-
-        // Trial Elastic Stress Update
-        float sig_xx_trial = sig_xx_base + lambda * tr_deps + 2.0f * mu * deps_xx;
-        float sig_yy_trial = sig_yy_base + lambda * tr_deps + 2.0f * mu * deps_yy;
-        float sig_xy_trial = sig_xy_base + 2.0f * mu * deps_xy;
-
-        if (p.material_model == MPMMaterialModel::LinearElastic) {
-            p.sigma[0][0] = sig_xx_trial;
-            p.sigma[1][1] = sig_yy_trial;
-            p.sigma[0][1] = sig_xy_trial;
-            p.sigma[1][0] = sig_xy_trial;
-            return;
-        }
-
-        // Hydrostatic Pressure & Deviatoric Stress
-        float press = -0.5f * (sig_xx_trial + sig_yy_trial);
-        float s_xx = sig_xx_trial + press;
-        float s_yy = sig_yy_trial + press;
-        float s_xy = sig_xy_trial;
-
-        // Von Mises Equivalent Stress
-        float q_trial = std::sqrt(s_xx * s_xx + s_yy * s_yy + 2.0f * s_xy * s_xy);
-        float yield_base = p.yield_stress * w_factor;
-        float yield_surf = q_trial - (yield_base + p.hardening_modulus * p.ep_bar);
-
-        if (q_trial > 1.0e-5f && yield_surf > 0.0f) {
-            // Radial Return Plastic Correction
-            float delta_ep = yield_surf / (2.0f * mu + p.hardening_modulus);
-            float scale = 1.0f - (2.0f * mu * delta_ep) / q_trial;
-            if (scale < 0.0f) scale = 0.0f;
-
-            p.sigma.set(scale * s_xx - press, scale * s_yy - press, scale * s_xy);
-
-            p.ep_bar += delta_ep;
-        } else {
-            p.sigma.set(sig_xx_trial, sig_yy_trial, sig_xy_trial);
-        }
-
-        // Evaluate Material Damage & Failure Criteria with Weibull Scatter
-        float fail_strain_base = (p.failure_strain > 0.0f) ? p.failure_strain * w_factor : 0.0f;
-        float tensile_fail_base = (p.tensile_failure_stress > 0.0f) ? p.tensile_failure_stress * w_factor : 0.0f;
-
-        float d_plastic = (fail_strain_base > 0.0f) ? std::clamp(p.ep_bar / fail_strain_base, 0.0f, 1.0f) : 0.0f;
-        float curr_press = -0.5f * (p.sigma[0][0] + p.sigma[1][1]);
-        float tensile_stress = -curr_press; // Hydrostatic tension (negative pressure)
-        float d_tensile = (tensile_stress > 0.0f && tensile_fail_base > 0.0f)
-            ? std::clamp(tensile_stress / tensile_fail_base, 0.0f, 1.0f) : 0.0f;
-
-        float target_damage = std::max(d_plastic, d_tensile);
-        p.damage = std::max(p.damage, target_damage);
-        if (p.damage >= 1.0f) {
-            p.has_failed = true;
-            p.damage = 1.0f;
-            p.B[0][0] = 0.0f; p.B[0][1] = 0.0f;
-            p.B[1][0] = 0.0f; p.B[1][1] = 0.0f;
-
-            p.V = std::max(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), 1.0e-4f * p.V0);
-
-            const float J = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
-            float p_comp = 0.0f;
-            if (J < 1.0f) {
-                const float K_intact = E / (2.0f * std::max(1.0e-4f, 1.0f - nu));
-                const float K_debris = 0.10f * K_intact;
-                p_comp = K_debris * (1.0f - J) / J;
-            }
-
-            p.sigma.setIsotropic(p_comp);
-
-            return;
-        }
-
-        // Stress Tensor Softening & Degradation
-        float soft_factor = std::clamp(1.0f - p.damage, 0.0f, 1.0f);
-        if (soft_factor < 0.0f) soft_factor = 0.0f;
-
-        p.sigma *= soft_factor;
-
-        // Update Volume incrementally using det(F) = 1 + tr(deps)
-        p.V = std::max(p.V * std::exp(std::clamp(tr_deps, -0.5f, 0.5f)), 1.0e-4f * p.V0);
 }
 
 void MPMSolver2D::updateStressState(float dt) {
@@ -1704,26 +1610,21 @@ float MPMSolver2D::computeStepSize(float cfl) const {
         const auto& p = m_particles[p_idx];
         if (p.m <= 0.0f) continue;
         if (std::isnan(p.v[0]) || std::isnan(p.v[1]) || std::isinf(p.v[0]) || std::isinf(p.v[1])) continue;
-        float E = p.youngs_modulus;
-        float rho = std::max(10.0f, p.density);
-        float nu = p.poissons_ratio;
+        MaterialTable3D mat_scratch;
+        const MaterialTable3D& mat = resolveMaterialTable2D(*this, p, mat_scratch);
         float c_s = 0.0f;
-        if (p.material_model == MPMMaterialModel::JohnsonCookMieGruneisen) {
-            float C0 = p.mg_c0;
-            c_s = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
-        } else if (p.material_model == MPMMaterialModel::JWLProgrammedBurn || p.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth) {
-            float C0 = p.mg_c0 > 100.0f ? p.mg_c0 : 2500.0f;
+        if (isEnergeticModel(mat.material_model)) {
+            float E = mat.youngs_modulus;
+            float rho = std::max(10.0f, mat.density);
+            float nu = mat.poissons_ratio;
+            float C0 = mat.mg_c0 > 100.0f ? mat.mg_c0 : 2500.0f;
             float c_solid = std::sqrt(C0 * C0 + (2.0f / 3.0f) * E / (rho * (1.0f + nu)));
-            float c_det = p.det_vel > 1000.0f ? p.det_vel : 7000.0f;
+            float c_det = mat.det_vel > 1000.0f ? mat.det_vel : 7000.0f;
             c_s = std::max(c_solid, c_det);
         } else {
-            if (nu >= 0.0f && nu < 0.5f) {
-                float denom = (1.0f + nu) * std::max(0.02f, 1.0f - 2.0f * nu);
-                float factor = (1.0f - nu) / denom;
-                c_s = std::sqrt(E * factor / rho);
-            } else {
-                c_s = std::sqrt(E / rho);
-            }
+            float J_val = p.V / (p.V0 > 1.0e-20f ? p.V0 : 1.0e-20f);
+            float p_hydro = -0.33333334f * (p.sigma[0][0] + p.sigma[1][1] + p.sigma_zz);
+            c_s = Blast::Materials::computeInstantaneousSoundSpeed<float>(mat, J_val, p_hydro, p.e_int);
         }
         if (std::isnan(c_s) || std::isinf(c_s)) continue;
         float v_mag = std::sqrt(p.v[0] * p.v[0] + p.v[1] * p.v[1]);

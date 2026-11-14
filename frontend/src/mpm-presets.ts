@@ -228,8 +228,51 @@ export interface MPMMaterialParams {
     burn_model?: string;
     product_model?: string;
     ideal_gamma?: number;
+    ideal_R?: number;
     ideal_rho_0?: number;
     ideal_e_0?: number;
+    rht_f_el_c?: number;
+    cs_C?: number;
+    cs_P?: number;
+    dp_cohesion?: number;
+    dp_friction_angle?: number;
+    dp_dilatancy_angle?: number;
+    dp_tensile_cutoff?: number;
+    dp_hardening_modulus?: number;
+    k0_earth_pressure?: number;
+    cap_X0?: number;
+    cap_W?: number;
+    cap_D1?: number;
+    cap_D2?: number;
+    cap_R?: number;
+    jh2_sigma_hel?: number;
+    jh2_p_hel?: number;
+    jh2_t_max?: number;
+    jh2_A?: number;
+    jh2_N?: number;
+    jh2_B?: number;
+    jh2_M?: number;
+    jh2_C?: number;
+    jh2_D1?: number;
+    jh2_D2?: number;
+    jh2_K1?: number;
+    jh2_K2?: number;
+    jh2_K3?: number;
+    jh2_beta?: number;
+    hb_sigma_ci?: number;
+    hb_mi?: number;
+    hb_gsi?: number;
+    hb_D?: number;
+    foam_plateau_stress?: number;
+    foam_densification_strain?: number;
+    foam_alpha?: number;
+    foam_hardening?: number;
+    sg_Y0?: number;
+    sg_Ymax?: number;
+    sg_beta?: number;
+    sg_n?: number;
+    sg_bp?: number;
+    sg_bT?: number;
     reference: string;
     category: string;
 }
@@ -241,7 +284,7 @@ export interface MPMMaterialParamInfo {
     label: string;
     shortDesc: string;
     unit?: string;
-    section: 'model' | 'elasticity' | 'plasticity' | 'failure' | 'erosion' | 'johnson_cook' | 'mie_gruneisen' | 'davis_reactant' | 'davis_product' | 'crest_kinetics' | 'concrete_base' | 'rht' | 'kc' | 'cscm' | 'ideal_gas' | 'jwl' | 'programmed_burn' | 'lee_tarver' | 'hyperelastic' | 'cdp' | 'hill48' | 'afterburn' | 'tait_water';
+    section: 'model' | 'elasticity' | 'plasticity' | 'failure' | 'erosion' | 'johnson_cook' | 'mie_gruneisen' | 'davis_reactant' | 'davis_product' | 'crest_kinetics' | 'concrete_base' | 'rht' | 'kc' | 'cscm' | 'ideal_gas' | 'jwl' | 'programmed_burn' | 'lee_tarver' | 'hyperelastic' | 'cdp' | 'hill48' | 'afterburn' | 'tait_water' | 'cowper_symonds' | 'geomaterial' | 'geological_cap' | 'jh2_ceramic' | 'hoek_brown' | 'crushable_foam' | 'steinberg_guinan';
     solverScope?: SolverScope;
     tooltip: string;
 }
@@ -1917,6 +1960,402 @@ export const MPM_MATERIAL_PARAM_INFO: Record<string, MPMMaterialParamInfo> = {
         section: 'tait_water',
         solverScope: 'ALL',
         tooltip: 'Selects the water EOS formulation: 0 = Isentropic barotropic p(rho) (Cole 1948); 1 = Caloric energy-coupled p(rho, e) with Grüneisen thermal coupling (Kirkwood-Bethe); 2 = Linear shock Hugoniot reference curve Us = c0 + s*up.'
+    },
+    'rht_f_el_c': {
+        key: 'rht_f_el_c',
+        label: 'RHT Elastic-to-Compressive Ratio (f_el / f_c)',
+        shortDesc: 'Initial elastic limit cap ratio in RHT concrete',
+        unit: 'dim',
+        section: 'rht',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Ratio between initial compressive elastic yield limit f_el and uniaxial compressive strength f_c (typically 0.53 for normal-strength concrete per Riedel-Hiermaier-Thoma 1999).'
+    },
+    'cs_C': {
+        key: 'cs_C',
+        label: 'Cowper-Symonds Strain Rate Constant (C)',
+        shortDesc: 'Viscoplastic reference strain rate denominator C',
+        unit: '1/s',
+        section: 'cowper_symonds',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Cowper-Symonds viscoplastic strain-rate parameter C in sigma_y,dyn = sigma_y,stat * (1 + (eps_dot / C)^(1/P)). Set 0 to disable rate scaling (40.4 /s for structural mild steel).'
+    },
+    'cs_P': {
+        key: 'cs_P',
+        label: 'Cowper-Symonds Exponent (P)',
+        shortDesc: 'Strain-rate sensitivity power exponent P',
+        unit: 'dim',
+        section: 'cowper_symonds',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Cowper-Symonds strain-rate power exponent P (5.0 for mild steel, 4.0 for Al 6061-T6). Dynamic enhancement scales with (eps_dot / C)^(1 / P).'
+    },
+    'dp_cohesion': {
+        key: 'dp_cohesion',
+        label: 'Cohesion Intercept (c)',
+        shortDesc: 'Zero-confining shear cohesion strength',
+        unit: 'Pa',
+        section: 'geomaterial',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Geomaterial cohesion intercept c (Pa) at zero normal stress for Drucker-Prager, Mohr-Coulomb (*MAT_173), and Geological Cap (*MAT_025) yield surfaces.'
+    },
+    'dp_friction_angle': {
+        key: 'dp_friction_angle',
+        label: 'Internal Friction Angle (φ)',
+        shortDesc: 'Shear friction angle in degrees',
+        unit: 'deg',
+        section: 'geomaterial',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Internal friction angle phi (degrees, 0-55 deg) governing pressure-dependent shear strength tau = c + sigma_n * tan(phi) in Drucker-Prager and Mohr-Coulomb models.'
+    },
+    'dp_dilatancy_angle': {
+        key: 'dp_dilatancy_angle',
+        label: 'Dilatancy Angle (ψ)',
+        shortDesc: 'Plastic volumetric expansion flow angle',
+        unit: 'deg',
+        section: 'geomaterial',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Non-associated plastic flow dilatancy angle psi (degrees, 0 <= psi <= phi) controlling volumetric expansion under shear distortion.'
+    },
+    'dp_tensile_cutoff': {
+        key: 'dp_tensile_cutoff',
+        label: 'Geomaterial Tensile Cutoff (σ_t)',
+        shortDesc: 'Maximum hydrostatic or Rankine tensile capacity',
+        unit: 'Pa',
+        section: 'geomaterial',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Maximum allowable tensile stress limit (Pa) capping the conical Drucker-Prager / Mohr-Coulomb / Hoek-Brown / Crushable Foam tensile envelope.'
+    },
+    'dp_hardening_modulus': {
+        key: 'dp_hardening_modulus',
+        label: 'Cohesion Hardening Modulus (H_p)',
+        shortDesc: 'Linear cohesive hardening slope with plastic strain',
+        unit: 'Pa',
+        section: 'geomaterial',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Slope H_p (Pa) updating effective cohesion c_eff = c + H_p * eps_p in Drucker-Prager, Mohr-Coulomb, and Geological Cap shear cones.'
+    },
+    'k0_earth_pressure': {
+        key: 'k0_earth_pressure',
+        label: 'At-Rest Earth Pressure Coeff (K₀)',
+        shortDesc: 'Lateral-to-vertical geostatic stress ratio sigma_h / sigma_v',
+        unit: 'dim',
+        section: 'geomaterial',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Jaky at-rest earth pressure coefficient K0 = 1 - sin(phi) used to initialize depth-dependent overburden geostatic stress fields.'
+    },
+    'cap_X0': {
+        key: 'cap_X0',
+        label: 'Initial Cap Apex Pressure (X₀)',
+        shortDesc: 'Initial hydrostatic pore-collapse yield pressure',
+        unit: 'Pa',
+        section: 'geological_cap',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Initial hydrostatic cap apex X0 (Pa) marking the onset of irreversible volumetric pore compaction in the DiMaggio-Sandler Geological Cap (*MAT_025) model.'
+    },
+    'cap_W': {
+        key: 'cap_W',
+        label: 'Maximum Plastic Volumetric Strain (W)',
+        shortDesc: 'Asymptotic pore compaction capacity',
+        unit: 'dim',
+        section: 'geological_cap',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Maximum irreversible plastic volumetric compaction strain W (solid porosity minus bound limit, e.g. 0.08-0.25 for sands and clays).'
+    },
+    'cap_D1': {
+        key: 'cap_D1',
+        label: 'Cap Hardening Linear Coeff (D₁)',
+        shortDesc: 'First-order pressure exponent in compaction law',
+        unit: '1/Pa',
+        section: 'geological_cap',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Linear cap hardening coefficient D1 (Pa^-1) in eps_v^p = W * (1 - exp(-D1*(X - X0) - D2*(X - X0)^2)).'
+    },
+    'cap_D2': {
+        key: 'cap_D2',
+        label: 'Cap Hardening Quadratic Coeff (D₂)',
+        shortDesc: 'Second-order compaction stiffness coefficient',
+        unit: '1/Pa²',
+        section: 'geological_cap',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Quadratic cap hardening coefficient D2 (Pa^-2) controlling high-pressure lock-up stiffening during strong shock compaction.'
+    },
+    'cap_R': {
+        key: 'cap_R',
+        label: 'Cap Ellipticity Aspect Ratio (R)',
+        shortDesc: 'Ratio of hydrostatic axis to deviatoric cap semi-axis',
+        unit: 'dim',
+        section: 'geological_cap',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Ratio R (typically 1.5-4.0) between horizontal hydrostatic cap extent (X - p_a) and vertical deviatoric shear intercept on the p-q ellipse.'
+    },
+    'jh2_sigma_hel': {
+        key: 'jh2_sigma_hel',
+        label: 'JH-2 Hugoniot Elastic Limit Stress (σ_HEL)',
+        shortDesc: 'Axial shock stress at the Hugoniot Elastic Limit',
+        unit: 'Pa',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Uniaxial strain axial stress sigma_HEL (Pa) at the Hugoniot Elastic Limit, used to normalize ceramic deviatoric strength sigma_star = sigma_eq / sigma_HEL.'
+    },
+    'jh2_p_hel': {
+        key: 'jh2_p_hel',
+        label: 'JH-2 Pressure at HEL (P_HEL)',
+        shortDesc: 'Hydrostatic pressure component at the HEL',
+        unit: 'Pa',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Hydrostatic pressure P_HEL (Pa) at the Hugoniot Elastic Limit, normalizing P* = P / P_HEL and T* = T_max / P_HEL.'
+    },
+    'jh2_t_max': {
+        key: 'jh2_t_max',
+        label: 'JH-2 Spall Tensile Strength (T_max)',
+        shortDesc: 'Maximum hydrostatic tensile strength',
+        unit: 'Pa',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Maximum intact hydrostatic tensile stress T_max (Pa) before spall/tensile damage softening.'
+    },
+    'jh2_A': {
+        key: 'jh2_A',
+        label: 'JH-2 Intact Strength Coeff (A)',
+        shortDesc: 'Intact ceramic strength prefactor A',
+        unit: 'dim',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Dimensionless intact normalized strength coefficient A in sigma_i* = A * (P* + T*)^N * (1 + C * ln(eps_dot*)).'
+    },
+    'jh2_N': {
+        key: 'jh2_N',
+        label: 'JH-2 Intact Pressure Exponent (N)',
+        shortDesc: 'Intact normalized pressure power N',
+        unit: 'dim',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Dimensionless pressure-hardening exponent N for intact ceramic strength envelope.'
+    },
+    'jh2_B': {
+        key: 'jh2_B',
+        label: 'JH-2 Fractured Strength Coeff (B)',
+        shortDesc: 'Fully damaged granular ceramic strength prefactor B',
+        unit: 'dim',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Dimensionless fractured ceramic strength coefficient B in sigma_f* = B * (P*)^M * (1 + C * ln(eps_dot*)) at D = 1.'
+    },
+    'jh2_M': {
+        key: 'jh2_M',
+        label: 'JH-2 Fractured Pressure Exponent (M)',
+        shortDesc: 'Fractured pressure-friction exponent M',
+        unit: 'dim',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Dimensionless pressure exponent M controlling frictional strength of pulverized ceramic rubble.'
+    },
+    'jh2_C': {
+        key: 'jh2_C',
+        label: 'JH-2 Strain Rate Constant (C)',
+        shortDesc: 'Logarithmic strain-rate hardening coefficient',
+        unit: 'dim',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Logarithmic strain-rate multiplier C in (1 + C * ln(max(1, eps_dot))). Typically 0.005-0.015 for armor ceramics.'
+    },
+    'jh2_D1': {
+        key: 'jh2_D1',
+        label: 'JH-2 Damage Coeff (D₁)',
+        shortDesc: 'Plastic failure strain prefactor D1',
+        unit: 'dim',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'First fracture strain parameter D1 in eps_p,f = D1 * (P* + T*)^D2 governing brittle ceramic damage accumulation.'
+    },
+    'jh2_D2': {
+        key: 'jh2_D2',
+        label: 'JH-2 Damage Exponent (D₂)',
+        shortDesc: 'Pressure-confinement ductility exponent D2',
+        unit: 'dim',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Pressure sensitivity exponent D2 increasing fracture strain under confined hydrostatic pressure.'
+    },
+    'jh2_K1': {
+        key: 'jh2_K1',
+        label: 'JH-2 Bulk Modulus (K₁)',
+        shortDesc: 'Linear polynomial EOS bulk modulus K1',
+        unit: 'Pa',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Linear bulk modulus K1 (Pa) in JH-2 polynomial EOS P = K1*mu + K2*mu^2 + K3*mu^3 + delta_P.'
+    },
+    'jh2_K2': {
+        key: 'jh2_K2',
+        label: 'JH-2 Quadratic EOS Coeff (K₂)',
+        shortDesc: 'Second-order volumetric compression modulus K2',
+        unit: 'Pa',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Quadratic volumetric compression stiffening modulus K2 (Pa) for mu >= 0.'
+    },
+    'jh2_K3': {
+        key: 'jh2_K3',
+        label: 'JH-2 Cubic EOS Coeff (K₃)',
+        shortDesc: 'Third-order volumetric compression modulus K3',
+        unit: 'Pa',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Cubic volumetric compression EOS modulus K3 (Pa) for extreme shock compression.'
+    },
+    'jh2_beta': {
+        key: 'jh2_beta',
+        label: 'JH-2 Dilatancy Bulking Factor (β)',
+        shortDesc: 'Fraction of deviatoric strain energy converted to bulking pressure',
+        unit: 'dim',
+        section: 'jh2_ceramic',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Fraction beta (0.0-1.0) of lost elastic shear energy converted into irreversible dilatational pressure delta_P upon fracture.'
+    },
+    'hb_sigma_ci': {
+        key: 'hb_sigma_ci',
+        label: 'Hoek-Brown Intact Rock UCS (σ_ci)',
+        shortDesc: 'Unconfined compressive strength of intact rock cores',
+        unit: 'Pa',
+        section: 'hoek_brown',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Uniaxial compressive strength sigma_ci (Pa) of intact unjointed rock core specimens (Hoek-Brown 2002).'
+    },
+    'hb_mi': {
+        key: 'hb_mi',
+        label: 'Hoek-Brown Intact Rock Constant (m_i)',
+        shortDesc: 'Petrology friction/interlock constant (7-33)',
+        unit: 'dim',
+        section: 'hoek_brown',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Material constant m_i reflecting intact rock grain interlocking (~7 shale, 12 limestone, 17 sandstone, 25 basalt, 32 granite).'
+    },
+    'hb_gsi': {
+        key: 'hb_gsi',
+        label: 'Geological Strength Index (GSI)',
+        shortDesc: 'Rock-mass jointing & weathering quality index (5-100)',
+        unit: 'dim',
+        section: 'hoek_brown',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Rock mass quality rating GSI (5 = heavily sheared fault gouge, 100 = massive unjointed intact rock) scaling mb, s, and a.'
+    },
+    'hb_D': {
+        key: 'hb_D',
+        label: 'Blast Disturbance Factor (D)',
+        shortDesc: 'Blast-induced rock mass fracture disturbance (0.0-1.0)',
+        unit: 'dim',
+        section: 'hoek_brown',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Rock-mass disturbance factor D (0.0 = undisturbed excavation/in-situ, 1.0 = severe surface blast damage).'
+    },
+    'foam_plateau_stress': {
+        key: 'foam_plateau_stress',
+        label: 'Foam Plateau Crushing Stress (σ_p)',
+        shortDesc: 'Constant cell-buckling plateau crush stress',
+        unit: 'Pa',
+        section: 'crushable_foam',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Constant plateau yield strength sigma_p (Pa) during cellular pore collapse prior to densification lock-up (*MAT_063 / Deshpande-Fleck).'
+    },
+    'foam_densification_strain': {
+        key: 'foam_densification_strain',
+        label: 'Foam Lock-Up Strain (ε_D)',
+        shortDesc: 'Volumetric compaction strain triggering solid lock-up',
+        unit: 'dim',
+        section: 'crushable_foam',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Characteristic volumetric lock-up strain eps_D (typically 0.45-0.80) beyond which exponential densification stiffening engages.'
+    },
+    'foam_alpha': {
+        key: 'foam_alpha',
+        label: 'Deshpande-Fleck Yield Shape Factor (α)',
+        shortDesc: 'Ratio governing deviatoric-to-hydrostatic ellipse shape',
+        unit: 'dim',
+        section: 'crushable_foam',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Shape factor alpha in beta^2*(q^2 + alpha^2 * p^2) <= sigma_c^2. Set alpha = 2.121 (3/sqrt(2)) for plastic Poisson ratio nu_p = 0.'
+    },
+    'foam_hardening': {
+        key: 'foam_hardening',
+        label: 'Foam Linear Hardening Slope (H_foam)',
+        shortDesc: 'Linear plateau slope during progressive crushing',
+        unit: 'Pa',
+        section: 'crushable_foam',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Linear tangent hardening modulus H_foam (Pa) prior to exponential cell-wall contact densification.'
+    },
+    'sg_Y0': {
+        key: 'sg_Y0',
+        label: 'Steinberg-Guinan Initial Yield (Y₀)',
+        shortDesc: 'Initial quasi-static reference yield stress Y0',
+        unit: 'Pa',
+        section: 'steinberg_guinan',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Initial reference yield strength Y0 (Pa) in Steinberg-Guinan (*MAT_011) metal viscoplasticity.'
+    },
+    'sg_Ymax': {
+        key: 'sg_Ymax',
+        label: 'Steinberg-Guinan Work-Hardened Cap (Y_max)',
+        shortDesc: 'Upper saturation cap on work hardening before P/T scaling',
+        unit: 'Pa',
+        section: 'steinberg_guinan',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Maximum saturated athermal work-hardened yield stress Y_max (Pa) before multiplying by pressure-temperature factor G(P,T)/G0.'
+    },
+    'sg_beta': {
+        key: 'sg_beta',
+        label: 'Steinberg-Guinan Hardening Coeff (β)',
+        shortDesc: 'Dimensionless plastic work-hardening factor beta',
+        unit: 'dim',
+        section: 'steinberg_guinan',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Work-hardening factor beta in Y_work = min(Y_max, Y0 * (1 + beta * eps_p)^n).'
+    },
+    'sg_n': {
+        key: 'sg_n',
+        label: 'Steinberg-Guinan Hardening Exponent (n)',
+        shortDesc: 'Work-hardening power exponent n',
+        unit: 'dim',
+        section: 'steinberg_guinan',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Power-law strain-hardening exponent n (0.10-0.50) in Steinberg-Guinan work hardening.'
+    },
+    'sg_bp': {
+        key: 'sg_bp',
+        label: 'Pressure Hardening Slope (b_p = G\'_p / G₀)',
+        shortDesc: 'Normalized shear modulus sensitivity to pressure',
+        unit: '1/Pa',
+        section: 'steinberg_guinan',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Pressure derivative b_p = (1/G0)*(dG/dP) (Pa^-1, typically 1e-11 to 6.5e-11 Pa^-1) stiffening G and Y under megabar shock.'
+    },
+    'sg_bT': {
+        key: 'sg_bT',
+        label: 'Thermal Softening Slope (b_T = -G\'_T / G₀)',
+        shortDesc: 'Normalized shear modulus thermal softening magnitude',
+        unit: '1/K',
+        section: 'steinberg_guinan',
+        solverScope: 'MPM+FEM',
+        tooltip: 'Thermal softening magnitude b_T = |G\'_T / G0| (K^-1, typically 1e-4 to 6.5e-4 K^-1) reducing shear stiffness toward T_melt.'
+    },
+    'ideal_gamma': {
+        key: 'ideal_gamma',
+        label: 'Adiabatic Ratio (γ = Cp/Cv)',
+        shortDesc: 'Specific heat ratio gamma for Ideal Gas EOS',
+        unit: 'dim',
+        section: 'ideal_gas',
+        solverScope: 'ALL',
+        tooltip: 'Specific heat ratio gamma = Cp / Cv used by MPM/FEM/FV Ideal Gas EOS: p = (gamma - 1) * rho * e (1.40 diatomic air, 1.667 noble monatomic).'
+    },
+    'ideal_R': {
+        key: 'ideal_R',
+        label: 'Specific Gas Constant (R_specific)',
+        shortDesc: 'Specific ideal gas constant R_u / M_molar',
+        unit: 'J/(kg·K)',
+        section: 'ideal_gas',
+        solverScope: 'ALL',
+        tooltip: 'Specific gas constant R_specific (J/(kg K)) in p = rho * R_specific * T (287.058 for dry air, 2077.1 for Helium, 188.92 for CO2).'
     }
 };
 
@@ -2170,6 +2609,15 @@ export const MPM_MATERIAL_CATEGORIES: MPMCategoryGroup[] = [
         ]
     },
     {
+        category: 'Crushable Foams & Cellular Absorbers',
+        presets: [
+            'Alporas Aluminum Foam (400 kg/m³)',
+            'Duocel Aluminum Foam (210 kg/m³)',
+            'Rigid Polyurethane Foam (FR-3708)',
+            'Nomex Honeycomb Core (48 kg/m³)'
+        ]
+    },
+    {
         category: 'Hyperelastic Elastomers & Rubbers',
         presets: [
             'Silicone Rubber (Yeoh)',
@@ -2203,15 +2651,17 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Structural Steel (A36)': {
         density: 7850.0, youngs_modulus: 200.0e9, poissons_ratio: 0.26, yield_stress: 250.0e6, hardening_modulus: 1.0e9, failure_strain: 0.20, tensile_failure_stress: 400.0e6,
         jc_A: 250.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        cs_C: 40.4, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1793.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
         hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 250.0e6,
-        category: 'Structural & Military Steels', reference: 'ASTM A36 Standard / LLNL Explosives Handbook'
+        category: 'Structural & Military Steels', reference: 'ASTM A36 Standard / Cowper & Symonds (1957)'
     },
     'Steel S275': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 275.0e6, hardening_modulus: 900.0e6, failure_strain: 0.23, tensile_failure_stress: 430.0e6,
         jc_A: 275.0e6, jc_B: 450.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        cs_C: 40.4, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
@@ -2221,6 +2671,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Steel S355': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 355.0e6, hardening_modulus: 1.0e9, failure_strain: 0.22, tensile_failure_stress: 510.0e6,
         jc_A: 355.0e6, jc_B: 480.0e6, jc_n: 0.27, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        cs_C: 40.4, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
@@ -2230,6 +2681,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Steel S460': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 460.0e6, hardening_modulus: 1.1e9, failure_strain: 0.19, tensile_failure_stress: 600.0e6,
         jc_A: 460.0e6, jc_B: 520.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        cs_C: 100.0, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
@@ -2239,6 +2691,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Steel 1006': {
         density: 7890.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 350.0e6, hardening_modulus: 800.0e6, failure_strain: 0.30, tensile_failure_stress: 450.0e6,
         jc_A: 350.0e6, jc_B: 275.0e6, jc_n: 0.36, jc_C: 0.022, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        cs_C: 40.4, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1811.0, T_room: 293.0, Cp: 452.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
@@ -2248,6 +2701,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Steel 1020': {
         density: 7870.0, youngs_modulus: 200.0e9, poissons_ratio: 0.29, yield_stress: 330.0e6, hardening_modulus: 900.0e6, failure_strain: 0.28, tensile_failure_stress: 420.0e6,
         jc_A: 330.0e6, jc_B: 410.0e6, jc_n: 0.32, jc_C: 0.019, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        cs_C: 40.4, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1790.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
@@ -2281,6 +2735,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'AISI 4340 Steel': {
         density: 7830.0, youngs_modulus: 207.0e9, poissons_ratio: 0.29, yield_stress: 792.0e6, hardening_modulus: 1.2e9, failure_strain: 0.25, tensile_failure_stress: 1000.0e6,
         jc_A: 792.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        sg_Y0: 1500.0e6, sg_Ymax: 2500.0e6, sg_beta: 2.0, sg_n: 0.50, sg_bp: 2.06e-11, sg_bT: 3.15e-4,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1793.0, T_room: 293.0, Cp: 477.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         provenance: 'experimental',
@@ -2288,7 +2743,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         solid_model: 'Mie-Grüneisen Shock Reactant',
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
         hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 792.0e6,
-        category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics / MIL-HDBK-5J'
+        category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics / Steinberg (1980)'
     },
     'AISI 4340': {
         density: 7830.0, youngs_modulus: 207.0e9, poissons_ratio: 0.29, yield_stress: 792.0e6, hardening_modulus: 1.2e9, failure_strain: 0.25, tensile_failure_stress: 1000.0e6,
@@ -2620,11 +3075,12 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Stainless Steel 304': {
         density: 7900.0, youngs_modulus: 193.0e9, poissons_ratio: 0.29, yield_stress: 310.0e6, hardening_modulus: 1.0e9, failure_strain: 0.40, tensile_failure_stress: 620.0e6,
         jc_A: 310.0e6, jc_B: 1000.0e6, jc_n: 0.65, jc_C: 0.070, jc_m: 1.00, jc_d1: 0.10, jc_d2: 2.00, jc_d3: -1.50, jc_d4: 0.005, jc_d5: 1.00,
+        sg_Y0: 340.0e6, sg_Ymax: 2500.0e6, sg_beta: 43.0, sg_n: 0.35, sg_bp: 2.26e-11, sg_bT: 4.55e-4,
         weibull_modulus: 11.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1673.0, T_room: 293.0, Cp: 500.0, mg_gamma0: 1.93, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
         hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 310.0e6,
-        category: 'Structural & Military Steels', reference: 'Lee et al., J. Mater. Process. Technol. (2002)'
+        category: 'Structural & Military Steels', reference: 'Lee et al. (2002) / Steinberg (1980) UCRL-MA-106439'
     },
     'Stainless Steel 316L': {
         density: 7980.0, youngs_modulus: 193.0e9, poissons_ratio: 0.30, yield_stress: 290.0e6, hardening_modulus: 950.0e6, failure_strain: 0.45, tensile_failure_stress: 580.0e6,
@@ -2647,9 +3103,11 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Aluminum 6061-T6': {
         density: 2700.0, youngs_modulus: 68.9e9, poissons_ratio: 0.33, yield_stress: 324.0e6, hardening_modulus: 400.0e6, failure_strain: 0.17, tensile_failure_stress: 310.0e6,
         jc_A: 324.0e6, jc_B: 114.0e6, jc_n: 0.42, jc_C: 0.002, jc_m: 1.34, jc_d1: 0.07, jc_d2: 1.25, jc_d3: -1.50, jc_d4: 0.005, jc_d5: 1.60,
+        cs_C: 6500.0, cs_P: 4.0,
+        sg_Y0: 290.0e6, sg_Ymax: 680.0e6, sg_beta: 125.0, sg_n: 0.10, sg_bp: 6.52e-11, sg_bT: 6.16e-4,
         weibull_modulus: 8.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 925.0, T_room: 293.0, Cp: 896.0, mg_gamma0: 1.97, mg_c0: 5240.0, mg_s: 1.40,
-        category: 'Light Alloys & Refractory Metals', reference: 'Lesuer, LLNL Report UCRL-ID-138054 (2000)'
+        category: 'Light Alloys & Refractory Metals', reference: 'Lesuer LLNL UCRL-ID-138054 / Steinberg (1980)'
     },
     'Aluminum 7075-T6': {
         density: 2810.0, youngs_modulus: 71.7e9, poissons_ratio: 0.33, yield_stress: 520.0e6, hardening_modulus: 600.0e6, failure_strain: 0.11, tensile_failure_stress: 570.0e6,
@@ -2668,13 +3126,15 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Aluminum 5083-H116': {
         density: 2660.0, youngs_modulus: 70.3e9, poissons_ratio: 0.33, yield_stress: 215.0e6, hardening_modulus: 350.0e6, failure_strain: 0.16, tensile_failure_stress: 315.0e6,
-        jc_A: 215.0e6, jc_B: 390.0e6, jc_n: 0.45, jc_C: 0.005, jc_m: 1.20, T_melt: 864.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.97, mg_c0: 5240.0, mg_s: 1.40,
+        jc_A: 215.0e6, jc_B: 390.0e6, jc_n: 0.45, jc_C: 0.005, jc_m: 1.20, cs_C: 6500.0, cs_P: 4.0,
+        T_melt: 864.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.97, mg_c0: 5240.0, mg_s: 1.40,
         category: 'Light Alloys & Refractory Metals', reference: 'Clausen et al., Int. J. Impact Eng. (2004)'
     },
     'Copper (OFHC)': {
         density: 8960.0, youngs_modulus: 124.0e9, poissons_ratio: 0.34, yield_stress: 90.0e6, hardening_modulus: 292.0e6, failure_strain: 0.54, tensile_failure_stress: 230.0e6,
         jc_A: 90.0e6, jc_B: 292.0e6, jc_n: 0.31, jc_C: 0.025, jc_m: 1.09, T_melt: 1356.0, T_room: 293.0, Cp: 383.0, mg_gamma0: 2.02, mg_c0: 3940.0, mg_s: 1.49,
-        category: 'Light Alloys & Refractory Metals', reference: 'Johnson & Cook (1983) 7th Int. Symp. Ballistics'
+        sg_Y0: 120.0e6, sg_Ymax: 640.0e6, sg_beta: 36.0, sg_n: 0.45, sg_bp: 2.83e-11, sg_bT: 3.77e-4,
+        category: 'Light Alloys & Refractory Metals', reference: 'Johnson & Cook (1983) / Steinberg-Cochran-Guinan (1980)'
     },
     'Copper (C11000)': {
         density: 8890.0, youngs_modulus: 117.0e9, poissons_ratio: 0.34, yield_stress: 70.0e6, hardening_modulus: 280.0e6, failure_strain: 0.45, tensile_failure_stress: 220.0e6,
@@ -2694,7 +3154,8 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Titanium Ti-6Al-4V': {
         density: 4430.0, youngs_modulus: 113.8e9, poissons_ratio: 0.342, yield_stress: 1098.0e6, hardening_modulus: 1092.0e6, failure_strain: 0.14, tensile_failure_stress: 1170.0e6,
         jc_A: 1098.0e6, jc_B: 1092.0e6, jc_n: 0.93, jc_C: 0.014, jc_m: 1.10, T_melt: 1878.0, T_room: 293.0, Cp: 526.0, mg_gamma0: 1.23, mg_c0: 5130.0, mg_s: 1.028,
-        category: 'Light Alloys & Refractory Metals', reference: 'Kay, LLNL Report UCRL-ID-146715 (2002)'
+        sg_Y0: 1330.0e6, sg_Ymax: 2120.0e6, sg_beta: 12.0, sg_n: 0.10, sg_bp: 1.15e-11, sg_bT: 6.44e-4,
+        category: 'Light Alloys & Refractory Metals', reference: 'Kay LLNL UCRL-ID-146715 / Steinberg (1980)'
     },
     'Titanium CP (Grade 2)': {
         density: 4510.0, youngs_modulus: 105.0e9, poissons_ratio: 0.34, yield_stress: 275.0e6, hardening_modulus: 500.0e6, failure_strain: 0.20, tensile_failure_stress: 345.0e6,
@@ -2704,12 +3165,14 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Tantalum (Pure)': {
         density: 16650.0, youngs_modulus: 186.0e9, poissons_ratio: 0.34, yield_stress: 175.0e6, hardening_modulus: 540.0e6, failure_strain: 0.40, tensile_failure_stress: 205.0e6,
         jc_A: 175.0e6, jc_B: 540.0e6, jc_n: 0.32, jc_C: 0.045, jc_m: 0.50, T_melt: 3290.0, T_room: 293.0, Cp: 140.0, mg_gamma0: 1.60, mg_c0: 3410.0, mg_s: 1.20,
-        category: 'Light Alloys & Refractory Metals', reference: 'Meyers et al., Metall. Mater. Trans. A (1995)'
+        sg_Y0: 770.0e6, sg_Ymax: 1100.0e6, sg_beta: 10.0, sg_n: 0.10, sg_bp: 1.45e-11, sg_bT: 1.30e-4,
+        category: 'Light Alloys & Refractory Metals', reference: 'Meyers et al. (1995) / Steinberg (1980)'
     },
     'Tungsten (Pure)': {
         density: 19300.0, youngs_modulus: 411.0e9, poissons_ratio: 0.28, yield_stress: 1500.0e6, hardening_modulus: 800.0e6, failure_strain: 0.05, tensile_failure_stress: 1700.0e6,
         jc_A: 1500.0e6, jc_B: 500.0e6, jc_n: 0.25, jc_C: 0.016, jc_m: 1.00, T_melt: 3695.0, T_room: 293.0, Cp: 134.0, mg_gamma0: 1.67, mg_c0: 4030.0, mg_s: 1.237,
-        category: 'Light Alloys & Refractory Metals', reference: 'Marsh, LASL Shock Hugoniot Data (1980)'
+        sg_Y0: 2200.0e6, sg_Ymax: 4000.0e6, sg_beta: 7.7, sg_n: 0.13, sg_bp: 9.38e-12, sg_bT: 1.38e-4,
+        category: 'Light Alloys & Refractory Metals', reference: 'Marsh LASL (1980) / Steinberg (1980)'
     },
     'Tungsten Heavy Alloy (W-Ni-Fe)': {
         density: 17600.0, youngs_modulus: 360.0e9, poissons_ratio: 0.29, yield_stress: 670.0e6, hardening_modulus: 700.0e6, failure_strain: 0.15, tensile_failure_stress: 960.0e6,
@@ -2746,105 +3209,105 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     // 3. Concrete & Masonry Strength Grades
     // ---------------------------------------------------------
     'Normal-Strength Concrete C20/25 (20 MPa)': {
-        density: 2300.0, youngs_modulus: 30.0e9, poissons_ratio: 0.20, yield_stress: 20.0e6, hardening_modulus: 200.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 2.2e6,
+        density: 2300.0, youngs_modulus: 30.0e9, poissons_ratio: 0.20, yield_stress: 20.0e6, hardening_modulus: 200.0e6, failure_strain: 0.0035, erosion_strain: 0.10, tensile_failure_stress: 2.2e6,
         fc: 20.0e6, ft: 2.2e6, G_f: 75.0, moisture_content: 0.04, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
-        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 6.67e6, rht_p_lock: 6.0e9, rht_alpha0: 1.28, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
-        kc_auto_generate: true, kc_a0: 6.67e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 5.33e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
+        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 6.67e6, rht_p_lock: 6.0e9, rht_alpha0: 1.28, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036, rht_f_el_c: 0.53,
+        kc_auto_generate: true, kc_a0: 6.67e6, kc_a1: 0.45, kc_a2: 7.50e-9, kc_a0y: 3.00e6, kc_a1y: 0.45, kc_a2y: 7.50e-9, kc_a1r: 0.75, kc_a2r: 1.00e-8, kc_b1: 1.60, kc_omega: 0.50,
         cscm_alpha: 7.0e6, cscm_theta: 0.38, cscm_lambda: 5.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 60.0e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 20.0e6, jc_B: 150.0e6, jc_n: 0.40, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.00, mg_c0: 3000.0, mg_s: 1.20,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
-        friction_angle: 35.0, cohesion: 5.21e6, dilation_angle: 15.0, tensile_cutoff: 2.2e6, provenance: 'hybrid',
+        // Drucker-Prager / Mohr-Coulomb strength derived from UCS = fc and phi = 35 deg
+        dp_friction_angle: 35.0, dp_cohesion: 5.21e6, dp_dilatancy_angle: 15.0, dp_tensile_cutoff: 2.2e6, provenance: 'hybrid',
         // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
         cdp_f_t0: 2.2e6, cdp_f_c0: 20.0e6, cdp_g_f: 75.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Eurocode 2 EN 1992-1-1 / Riedel-Hiermaier-Thoma (RHT) Model'
     },
     'Standard Structural Concrete C30/37 (30 MPa)': {
-        density: 2350.0, youngs_modulus: 33.0e9, poissons_ratio: 0.20, yield_stress: 30.0e6, hardening_modulus: 250.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 2.9e6,
+        density: 2350.0, youngs_modulus: 33.0e9, poissons_ratio: 0.20, yield_stress: 30.0e6, hardening_modulus: 250.0e6, failure_strain: 0.0035, erosion_strain: 0.10, tensile_failure_stress: 2.9e6,
         fc: 30.0e6, ft: 2.9e6, G_f: 90.0, moisture_content: 0.04, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
-        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 10.0e6, rht_p_lock: 6.0e9, rht_alpha0: 1.25, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
-        kc_auto_generate: true, kc_a0: 10.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 8.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
+        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 10.0e6, rht_p_lock: 6.0e9, rht_alpha0: 1.25, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036, rht_f_el_c: 0.53,
+        kc_auto_generate: true, kc_a0: 10.0e6, kc_a1: 0.45, kc_a2: 5.00e-9, kc_a0y: 4.50e6, kc_a1y: 0.45, kc_a2y: 5.00e-9, kc_a1r: 0.75, kc_a2r: 6.67e-9, kc_b1: 1.60, kc_omega: 0.50,
         cscm_alpha: 10.5e6, cscm_theta: 0.40, cscm_lambda: 7.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 85.0e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 30.0e6, jc_B: 180.0e6, jc_n: 0.40, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.00, mg_c0: 3100.0, mg_s: 1.25,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
-        friction_angle: 35.0, cohesion: 7.81e6, dilation_angle: 15.0, tensile_cutoff: 2.9e6, provenance: 'hybrid',
+        // Drucker-Prager / Mohr-Coulomb strength derived from UCS = fc and phi = 35 deg
+        dp_friction_angle: 35.0, dp_cohesion: 7.81e6, dp_dilatancy_angle: 15.0, dp_tensile_cutoff: 2.9e6, provenance: 'hybrid',
         // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
         cdp_f_t0: 2.9e6, cdp_f_c0: 30.0e6, cdp_g_f: 90.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Eurocode 2 C30/37 Standard / RHT Benchmark'
     },
     'High-Strength Concrete C50/60 (50 MPa)': {
-        density: 2400.0, youngs_modulus: 37.0e9, poissons_ratio: 0.20, yield_stress: 50.0e6, hardening_modulus: 350.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 4.1e6,
+        density: 2400.0, youngs_modulus: 37.0e9, poissons_ratio: 0.20, yield_stress: 50.0e6, hardening_modulus: 350.0e6, failure_strain: 0.0032, erosion_strain: 0.10, tensile_failure_stress: 4.1e6,
         fc: 50.0e6, ft: 4.1e6, G_f: 120.0, moisture_content: 0.04, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
-        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 16.67e6, rht_p_lock: 6.0e9, rht_alpha0: 1.20, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
-        kc_auto_generate: true, kc_a0: 16.67e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 13.33e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
+        rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 16.67e6, rht_p_lock: 6.0e9, rht_alpha0: 1.20, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036, rht_f_el_c: 0.55,
+        kc_auto_generate: true, kc_a0: 16.67e6, kc_a1: 0.45, kc_a2: 3.00e-9, kc_a0y: 7.50e6, kc_a1y: 0.45, kc_a2y: 3.00e-9, kc_a1r: 0.75, kc_a2r: 4.00e-9, kc_b1: 1.60, kc_omega: 0.50,
         cscm_alpha: 17.5e6, cscm_theta: 0.42, cscm_lambda: 12.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 140.0e6, cscm_W: 0.05, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 50.0e6, jc_B: 220.0e6, jc_n: 0.38, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.00, mg_c0: 3300.0, mg_s: 1.30,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
-        friction_angle: 35.0, cohesion: 1.30e7, dilation_angle: 15.0, tensile_cutoff: 4.1e6, provenance: 'hybrid',
+        // Drucker-Prager / Mohr-Coulomb strength derived from UCS = fc and phi = 35 deg
+        dp_friction_angle: 35.0, dp_cohesion: 1.30e7, dp_dilatancy_angle: 15.0, dp_tensile_cutoff: 4.1e6, provenance: 'hybrid',
         // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
         cdp_f_t0: 4.1e6, cdp_f_c0: 50.0e6, cdp_g_f: 120.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Riedel et al., Int. J. Impact Eng. (1999)'
     },
     'Ultra-High Performance Concrete C100/115 (100 MPa)': {
-        density: 2500.0, youngs_modulus: 45.0e9, poissons_ratio: 0.20, yield_stress: 100.0e6, hardening_modulus: 500.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 7.0e6,
+        density: 2500.0, youngs_modulus: 45.0e9, poissons_ratio: 0.20, yield_stress: 100.0e6, hardening_modulus: 500.0e6, failure_strain: 0.0030, erosion_strain: 0.12, tensile_failure_stress: 7.0e6,
         fc: 100.0e6, ft: 7.0e6, G_f: 180.0, moisture_content: 0.02, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
-        rht_A: 1.65, rht_N: 0.60, rht_B: 0.75, rht_M: 0.80, rht_Q0: 0.70, rht_BQ: 0.0105, rht_D1: 0.035, rht_D2: 1.0, rht_p_crush: 33.33e6, rht_p_lock: 7.0e9, rht_alpha0: 1.12, rht_n_comp: 3.0, rht_betac: 0.030, rht_deltat: 0.034,
-        kc_auto_generate: true, kc_a0: 33.33e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 26.67e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
+        rht_A: 1.65, rht_N: 0.60, rht_B: 0.75, rht_M: 0.80, rht_Q0: 0.70, rht_BQ: 0.0105, rht_D1: 0.035, rht_D2: 1.0, rht_p_crush: 33.33e6, rht_p_lock: 7.0e9, rht_alpha0: 1.12, rht_n_comp: 3.0, rht_betac: 0.030, rht_deltat: 0.034, rht_f_el_c: 0.58,
+        kc_auto_generate: true, kc_a0: 33.33e6, kc_a1: 0.45, kc_a2: 1.50e-9, kc_a0y: 15.0e6, kc_a1y: 0.45, kc_a2y: 1.50e-9, kc_a1r: 0.75, kc_a2r: 2.00e-9, kc_b1: 1.60, kc_omega: 0.50,
         cscm_alpha: 35.0e6, cscm_theta: 0.45, cscm_lambda: 24.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 280.0e6, cscm_W: 0.04, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 100.0e6, jc_B: 300.0e6, jc_n: 0.35, jc_C: 0.006, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.10, mg_c0: 3600.0, mg_s: 1.35,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
-        friction_angle: 35.0, cohesion: 2.60e7, dilation_angle: 15.0, tensile_cutoff: 7.0e6, provenance: 'hybrid',
+        // Drucker-Prager / Mohr-Coulomb strength derived from UCS = fc and phi = 35 deg
+        dp_friction_angle: 35.0, dp_cohesion: 2.60e7, dp_dilatancy_angle: 15.0, dp_tensile_cutoff: 7.0e6, provenance: 'hybrid',
         // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
         cdp_f_t0: 7.0e6, cdp_f_c0: 100.0e6, cdp_g_f: 180.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Forquin et al., Int. J. Impact Eng. (2010)'
     },
     'UHPC / Ductal (150 MPa)': {
-        density: 2550.0, youngs_modulus: 55.0e9, poissons_ratio: 0.21, yield_stress: 150.0e6, hardening_modulus: 700.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 12.0e6,
+        density: 2550.0, youngs_modulus: 55.0e9, poissons_ratio: 0.21, yield_stress: 150.0e6, hardening_modulus: 700.0e6, failure_strain: 0.0028, erosion_strain: 0.15, tensile_failure_stress: 12.0e6,
         fc: 150.0e6, ft: 12.0e6, G_f: 300.0, moisture_content: 0.01, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
-        rht_A: 1.70, rht_N: 0.58, rht_B: 0.80, rht_M: 0.80, rht_Q0: 0.72, rht_BQ: 0.0105, rht_D1: 0.030, rht_D2: 1.0, rht_p_crush: 50.0e6, rht_p_lock: 8.0e9, rht_alpha0: 1.08, rht_n_comp: 3.0, rht_betac: 0.028, rht_deltat: 0.032,
-        kc_auto_generate: true, kc_a0: 50.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 40.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.60, kc_omega: 0.50,
+        rht_A: 1.70, rht_N: 0.58, rht_B: 0.80, rht_M: 0.80, rht_Q0: 0.72, rht_BQ: 0.0105, rht_D1: 0.030, rht_D2: 1.0, rht_p_crush: 50.0e6, rht_p_lock: 8.0e9, rht_alpha0: 1.08, rht_n_comp: 3.0, rht_betac: 0.028, rht_deltat: 0.032, rht_f_el_c: 0.60,
+        kc_auto_generate: true, kc_a0: 50.0e6, kc_a1: 0.45, kc_a2: 1.00e-9, kc_a0y: 22.5e6, kc_a1y: 0.45, kc_a2y: 1.00e-9, kc_a1r: 0.75, kc_a2r: 1.33e-9, kc_b1: 1.60, kc_omega: 0.50,
         cscm_alpha: 52.5e6, cscm_theta: 0.48, cscm_lambda: 36.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 420.0e6, cscm_W: 0.03, cscm_D1: 2.5e-9, cscm_D2: 1.0,
         jc_A: 150.0e6, jc_B: 400.0e6, jc_n: 0.30, jc_C: 0.007, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.15, mg_c0: 3800.0, mg_s: 1.38,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
-        friction_angle: 35.0, cohesion: 3.90e7, dilation_angle: 15.0, tensile_cutoff: 12.0e6, provenance: 'hybrid',
+        // Drucker-Prager / Mohr-Coulomb strength derived from UCS = fc and phi = 35 deg
+        dp_friction_angle: 35.0, dp_cohesion: 3.90e7, dp_dilatancy_angle: 15.0, dp_tensile_cutoff: 12.0e6, provenance: 'hybrid',
         // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
         cdp_f_t0: 12.0e6, cdp_f_c0: 150.0e6, cdp_g_f: 300.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Lafarge Holcim Ductal Technical Manual'
     },
     'Fiber-Reinforced Concrete (FRC 60 MPa)': {
-        density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.20, yield_stress: 60.0e6, hardening_modulus: 450.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 8.5e6,
+        density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.20, yield_stress: 60.0e6, hardening_modulus: 450.0e6, failure_strain: 0.0045, erosion_strain: 0.15, tensile_failure_stress: 8.5e6,
         fc: 60.0e6, ft: 8.5e6, G_f: 500.0, moisture_content: 0.03, dif_cap_compression: 2.5, dif_cap_tension: 5.0,
-        rht_A: 1.62, rht_N: 0.61, rht_B: 0.72, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 20.0e6, rht_p_lock: 6.0e9, rht_alpha0: 1.18, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
-        kc_auto_generate: true, kc_a0: 20.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 16.0e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.40, kc_omega: 0.50,
+        rht_A: 1.62, rht_N: 0.61, rht_B: 0.72, rht_M: 0.80, rht_Q0: 0.68, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0, rht_p_crush: 20.0e6, rht_p_lock: 6.0e9, rht_alpha0: 1.18, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036, rht_f_el_c: 0.55,
+        kc_auto_generate: true, kc_a0: 20.0e6, kc_a1: 0.45, kc_a2: 2.50e-9, kc_a0y: 9.00e6, kc_a1y: 0.45, kc_a2y: 2.50e-9, kc_a1r: 0.75, kc_a2r: 3.33e-9, kc_b1: 1.40, kc_omega: 0.50,
         cscm_alpha: 21.0e6, cscm_theta: 0.43, cscm_lambda: 14.5e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 170.0e6, cscm_W: 0.05, cscm_D1: 2.0e-9, cscm_D2: 1.0,
         jc_A: 60.0e6, jc_B: 280.0e6, jc_n: 0.35, jc_C: 0.006, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 920.0, mg_gamma0: 1.05, mg_c0: 3400.0, mg_s: 1.32,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
-        friction_angle: 35.0, cohesion: 1.56e7, dilation_angle: 15.0, tensile_cutoff: 8.5e6, provenance: 'hybrid',
+        // Drucker-Prager / Mohr-Coulomb strength derived from UCS = fc and phi = 35 deg
+        dp_friction_angle: 35.0, dp_cohesion: 1.56e7, dp_dilatancy_angle: 15.0, dp_tensile_cutoff: 8.5e6, provenance: 'hybrid',
         // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
         cdp_f_t0: 8.5e6, cdp_f_c0: 60.0e6, cdp_g_f: 500.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Nold, ACI Materials Journal (2012)'
     },
     'Clay Brick Masonry': {
-        density: 1800.0, youngs_modulus: 10.0e9, poissons_ratio: 0.18, yield_stress: 12.0e6, hardening_modulus: 80.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 1.2e6,
+        density: 1800.0, youngs_modulus: 10.0e9, poissons_ratio: 0.18, yield_stress: 12.0e6, hardening_modulus: 80.0e6, failure_strain: 0.0035, erosion_strain: 0.08, tensile_failure_stress: 1.2e6,
         fc: 12.0e6, ft: 1.2e6, G_f: 40.0, moisture_content: 0.05, dif_cap_compression: 2.0, dif_cap_tension: 4.0,
-        rht_A: 1.50, rht_N: 0.65, rht_B: 0.65, rht_M: 0.80, rht_Q0: 0.65, rht_BQ: 0.0105, rht_D1: 0.05, rht_D2: 1.0, rht_p_crush: 4.0e6, rht_p_lock: 4.0e9, rht_alpha0: 1.35, rht_n_comp: 3.0, rht_betac: 0.035, rht_deltat: 0.040,
-        kc_auto_generate: true, kc_a0: 4.0e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 3.2e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 1.80, kc_omega: 0.50,
+        rht_A: 1.50, rht_N: 0.65, rht_B: 0.65, rht_M: 0.80, rht_Q0: 0.65, rht_BQ: 0.0105, rht_D1: 0.05, rht_D2: 1.0, rht_p_crush: 4.0e6, rht_p_lock: 4.0e9, rht_alpha0: 1.35, rht_n_comp: 3.0, rht_betac: 0.035, rht_deltat: 0.040, rht_f_el_c: 0.50,
+        kc_auto_generate: true, kc_a0: 4.00e6, kc_a1: 0.45, kc_a2: 1.25e-8, kc_a0y: 1.80e6, kc_a1y: 0.45, kc_a2y: 1.25e-8, kc_a1r: 0.75, kc_a2r: 1.67e-8, kc_b1: 1.80, kc_omega: 0.50,
         cscm_alpha: 4.2e6, cscm_theta: 0.35, cscm_lambda: 3.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 35.0e6, cscm_W: 0.06, cscm_D1: 3.0e-9, cscm_D2: 1.0,
         jc_A: 12.0e6, jc_B: 50.0e6, jc_n: 0.45, jc_C: 0.003, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 840.0, mg_gamma0: 0.85, mg_c0: 2200.0, mg_s: 1.15,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
-        friction_angle: 30.0, cohesion: 3.46e6, dilation_angle: 10.0, tensile_cutoff: 1.2e6, provenance: 'hybrid',
+        // Drucker-Prager / Mohr-Coulomb strength derived from UCS = fc and phi = 30 deg
+        dp_friction_angle: 30.0, dp_cohesion: 3.46e6, dp_dilatancy_angle: 10.0, dp_tensile_cutoff: 1.2e6, provenance: 'hybrid',
         // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
         cdp_f_t0: 1.2e6, cdp_f_c0: 12.0e6, cdp_g_f: 40.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Lourenco, PhD Thesis TU Delft'
     },
     'Aerated Autoclaved Concrete (AAC)': {
-        density: 600.0, youngs_modulus: 2.0e9, poissons_ratio: 0.15, yield_stress: 4.0e6, hardening_modulus: 20.0e6, failure_strain: 0.85, erosion_strain: 0.85, tensile_failure_stress: 0.5e6,
+        density: 600.0, youngs_modulus: 2.0e9, poissons_ratio: 0.15, yield_stress: 4.0e6, hardening_modulus: 20.0e6, failure_strain: 0.0040, erosion_strain: 0.08, tensile_failure_stress: 0.5e6,
         fc: 4.0e6, ft: 0.5e6, G_f: 15.0, moisture_content: 0.06, dif_cap_compression: 2.0, dif_cap_tension: 4.0,
-        rht_A: 1.40, rht_N: 0.70, rht_B: 0.60, rht_M: 0.80, rht_Q0: 0.60, rht_BQ: 0.0105, rht_D1: 0.06, rht_D2: 1.0, rht_p_crush: 1.33e6, rht_p_lock: 2.0e9, rht_alpha0: 1.50, rht_n_comp: 3.0, rht_betac: 0.040, rht_deltat: 0.045,
-        kc_auto_generate: true, kc_a0: 1.33e6, kc_a1: 0.44, kc_a2: 0.77e-9, kc_a0y: 1.07e6, kc_a1y: 0.35, kc_a2y: 0.62e-9, kc_a1r: 0.25, kc_a2r: 0.50e-9, kc_b1: 2.00, kc_omega: 0.50,
+        rht_A: 1.40, rht_N: 0.70, rht_B: 0.60, rht_M: 0.80, rht_Q0: 0.60, rht_BQ: 0.0105, rht_D1: 0.06, rht_D2: 1.0, rht_p_crush: 1.33e6, rht_p_lock: 2.0e9, rht_alpha0: 1.50, rht_n_comp: 3.0, rht_betac: 0.040, rht_deltat: 0.045, rht_f_el_c: 0.50,
+        kc_auto_generate: true, kc_a0: 1.33e6, kc_a1: 0.45, kc_a2: 3.75e-8, kc_a0y: 0.60e6, kc_a1y: 0.45, kc_a2y: 3.75e-8, kc_a1r: 0.75, kc_a2r: 5.00e-8, kc_b1: 2.00, kc_omega: 0.50,
         cscm_alpha: 1.4e6, cscm_theta: 0.30, cscm_lambda: 1.0e6, cscm_beta: 1.5e-8, cscm_R: 4.0, cscm_X0: 12.0e6, cscm_W: 0.08, cscm_D1: 4.0e-9, cscm_D2: 1.0,
         jc_A: 4.0e6, jc_B: 15.0e6, jc_n: 0.50, jc_C: 0.002, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 1000.0, mg_gamma0: 0.50, mg_c0: 1200.0, mg_s: 1.10,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (concrete/masonry; c from UCS = fc)
-        friction_angle: 30.0, cohesion: 1.15e6, dilation_angle: 10.0, tensile_cutoff: 0.5e6, provenance: 'hybrid',
+        // Drucker-Prager / Mohr-Coulomb strength derived from UCS = fc and phi = 30 deg
+        dp_friction_angle: 30.0, dp_cohesion: 1.15e6, dp_dilatancy_angle: 10.0, dp_tensile_cutoff: 0.5e6, provenance: 'hybrid',
         // CDP: derived from this grade's fc, ft, G_f (same convention as the C30 CDP preset); l_ch = 0.05 m reference
         cdp_f_t0: 0.5e6, cdp_f_c0: 4.0e6, cdp_g_f: 15.0, cdp_l_ch: 0.05,
         category: 'Concrete & Masonry Strength Grades', reference: 'Autoclaved Aerated Concrete Handbook'
@@ -2856,85 +3319,89 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Soft Marine Clay (Cu = 25 kPa)': {
         density: 1600.0, youngs_modulus: 15.0e6, poissons_ratio: 0.45, yield_stress: 0.025e6, hardening_modulus: 0.1e6, failure_strain: 0.20, tensile_failure_stress: 0.005e6,
         jc_A: 0.025e6, jc_B: 0.10e6, jc_n: 0.50, jc_C: 0.050, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 1200.0, mg_gamma0: 0.50, mg_c0: 1500.0, mg_s: 1.40,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (undrained: phi_u = 0, c = Cu)
-        friction_angle: 0.0, cohesion: 2.50e4, dilation_angle: 0.0, tensile_cutoff: 0.005e6, provenance: 'hybrid',
+        // Undrained clay (phi_u = 0, c = Cu) + DiMaggio-Sandler consolidation cap; strength & cap parameters are typical literature ranges
+        dp_friction_angle: 0.0, dp_cohesion: 2.50e4, dp_dilatancy_angle: 0.0, dp_tensile_cutoff: 0.005e6, k0_earth_pressure: 0.65,
+        cap_X0: 6.0e4, cap_W: 0.35, cap_D1: 2.0e-6, cap_D2: 1.0e-12, cap_R: 2.5, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Wood, Soil Behaviour & Critical State Mechanics'
     },
     'Stiff Silty Clay (Cu = 100 kPa)': {
         density: 1850.0, youngs_modulus: 50.0e6, poissons_ratio: 0.40, yield_stress: 0.10e6, hardening_modulus: 0.5e6, failure_strain: 0.15, tensile_failure_stress: 0.02e6,
         jc_A: 0.10e6, jc_B: 0.30e6, jc_n: 0.45, jc_C: 0.030, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 1100.0, mg_gamma0: 0.65, mg_c0: 1600.0, mg_s: 1.45,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (undrained: phi_u = 0, c = Cu)
-        friction_angle: 0.0, cohesion: 1.00e5, dilation_angle: 0.0, tensile_cutoff: 0.02e6, provenance: 'hybrid',
+        dp_friction_angle: 0.0, dp_cohesion: 1.00e5, dp_dilatancy_angle: 0.0, dp_tensile_cutoff: 0.02e6, k0_earth_pressure: 0.80,
+        cap_X0: 2.5e5, cap_W: 0.25, cap_D1: 8.0e-7, cap_D2: 5.0e-13, cap_R: 2.2, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Terzaghi & Peck Soil Mechanics'
     },
     'Saturated Mud / Slurry (Geotechnical Soil)': {
         density: 1500.0, youngs_modulus: 2.5e6, poissons_ratio: 0.48, yield_stress: 0.010e6, hardening_modulus: 0.05e6, failure_strain: 0.80, tensile_failure_stress: 0.001e6,
         jc_A: 0.010e6, jc_B: 0.05e6, jc_n: 0.50, jc_C: 0.080, jc_m: 1.00, T_melt: 1400.0, T_room: 293.0, Cp: 2400.0, mg_gamma0: 0.35, mg_c0: 1520.0, mg_s: 1.60,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (undrained slurry: phi_u = 0, c = yield_stress)
-        friction_angle: 0.0, cohesion: 1.00e4, dilation_angle: 0.0, tensile_cutoff: 0.001e6, provenance: 'hybrid',
+        dp_friction_angle: 0.0, dp_cohesion: 1.00e4, dp_dilatancy_angle: 0.0, dp_tensile_cutoff: 0.001e6, k0_earth_pressure: 0.90,
+        cap_X0: 2.0e4, cap_W: 0.45, cap_D1: 5.0e-6, cap_D2: 1.0e-12, cap_R: 3.0, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Mitchell & Soga, Fundamentals of Soil Behavior'
     },
     'Loose Dry Sand (Dr = 30%)': {
         density: 1550.0, youngs_modulus: 30.0e6, poissons_ratio: 0.30, yield_stress: 0.05e6, hardening_modulus: 0.2e6, failure_strain: 0.15, tensile_failure_stress: 0.001e6,
         jc_A: 0.05e6, jc_B: 0.20e6, jc_n: 0.50, jc_C: 0.010, jc_m: 1.00, T_melt: 1700.0, T_room: 293.0, Cp: 800.0, mg_gamma0: 0.45, mg_c0: 1450.0, mg_s: 1.35,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (cohesionless; 1 kPa apparent cohesion for numerical regularization)
-        friction_angle: 30.0, cohesion: 1.00e3, dilation_angle: 0.0, tensile_cutoff: 0.001e6, provenance: 'hybrid',
-        category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Lade & Duncan Granular Soil Benchmark'
+        dp_friction_angle: 30.0, dp_cohesion: 1.00e3, dp_dilatancy_angle: 0.0, dp_tensile_cutoff: 0.001e6, k0_earth_pressure: 0.50,
+        cap_X0: 1.0e5, cap_W: 0.30, cap_D1: 1.5e-6, cap_D2: 5.0e-13, cap_R: 2.5, provenance: 'hybrid',
+        category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Lade & Duncan / DiMaggio-Sandler Granular Soil Benchmark'
     },
     'Dense Compacted Sand (Dr = 85%)': {
         density: 1800.0, youngs_modulus: 100.0e6, poissons_ratio: 0.30, yield_stress: 0.25e6, hardening_modulus: 1.0e6, failure_strain: 0.10, tensile_failure_stress: 0.005e6,
         jc_A: 0.25e6, jc_B: 0.80e6, jc_n: 0.40, jc_C: 0.015, jc_m: 1.00, T_melt: 1700.0, T_room: 293.0, Cp: 800.0, mg_gamma0: 0.60, mg_c0: 1650.0, mg_s: 1.40,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (cohesionless; 2 kPa apparent cohesion; psi ~ phi - 30)
-        friction_angle: 41.0, cohesion: 2.00e3, dilation_angle: 10.0, tensile_cutoff: 0.005e6, provenance: 'hybrid',
-        category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Lade & Nelson Granular Media Model'
+        dp_friction_angle: 41.0, dp_cohesion: 2.00e3, dp_dilatancy_angle: 10.0, dp_tensile_cutoff: 0.005e6, k0_earth_pressure: 0.35,
+        cap_X0: 5.0e5, cap_W: 0.18, cap_D1: 4.0e-7, cap_D2: 1.0e-13, cap_R: 2.2, provenance: 'hybrid',
+        category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Lade & Nelson Granular Media Model / Sandler-Rubin Cap'
     },
     'Compacted Gravel Subgrade': {
         density: 2100.0, youngs_modulus: 200.0e6, poissons_ratio: 0.28, yield_stress: 0.50e6, hardening_modulus: 2.0e6, failure_strain: 0.08, tensile_failure_stress: 0.01e6,
         jc_A: 0.50e6, jc_B: 1.50e6, jc_n: 0.35, jc_C: 0.015, jc_m: 1.00, T_melt: 1700.0, T_room: 293.0, Cp: 850.0, mg_gamma0: 0.75, mg_c0: 1850.0, mg_s: 1.42,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (cohesionless; 3 kPa apparent cohesion)
-        friction_angle: 40.0, cohesion: 3.00e3, dilation_angle: 8.0, tensile_cutoff: 0.01e6, provenance: 'hybrid',
+        dp_friction_angle: 40.0, dp_cohesion: 3.00e3, dp_dilatancy_angle: 8.0, dp_tensile_cutoff: 0.01e6, k0_earth_pressure: 0.36,
+        cap_X0: 1.0e6, cap_W: 0.15, cap_D1: 2.5e-7, cap_D2: 5.0e-14, cap_R: 2.0, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'AASHTO Pavement Design Subgrade Manual'
     },
     'Westerly Granite': {
         density: 2640.0, youngs_modulus: 60.0e9, poissons_ratio: 0.25, yield_stress: 200.0e6, hardening_modulus: 5.0e9, failure_strain: 0.015, tensile_failure_stress: 15.0e6,
         jc_A: 200.0e6, jc_B: 800.0e6, jc_n: 0.30, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 790.0, mg_gamma0: 1.50, mg_c0: 3950.0, mg_s: 1.40,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (intact rock; c from UCS = yield_stress)
-        friction_angle: 50.0, cohesion: 3.64e7, dilation_angle: 10.0, tensile_cutoff: 15.0e6, provenance: 'hybrid',
-        category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Marsh, LASL Shock Hugoniot Data (1980)'
+        dp_friction_angle: 50.0, dp_cohesion: 3.64e7, dp_dilatancy_angle: 10.0, dp_tensile_cutoff: 15.0e6, k0_earth_pressure: 0.50,
+        hb_sigma_ci: 200.0e6, hb_mi: 32.0, hb_gsi: 90.0, hb_D: 0.0, provenance: 'hybrid',
+        category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Marsh, LASL Shock Hugoniot Data (1980); Hoek (2007) mi=32'
     },
     'Basalt (Hard Igneous Rock)': {
         density: 2900.0, youngs_modulus: 75.0e9, poissons_ratio: 0.24, yield_stress: 250.0e6, hardening_modulus: 6.0e9, failure_strain: 0.012, tensile_failure_stress: 18.0e6,
         jc_A: 250.0e6, jc_B: 900.0e6, jc_n: 0.28, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 840.0, mg_gamma0: 1.45, mg_c0: 4800.0, mg_s: 1.35,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (intact rock; c from UCS = yield_stress)
-        friction_angle: 50.0, cohesion: 4.55e7, dilation_angle: 10.0, tensile_cutoff: 18.0e6, provenance: 'hybrid',
+        dp_friction_angle: 50.0, dp_cohesion: 4.55e7, dp_dilatancy_angle: 10.0, dp_tensile_cutoff: 18.0e6, k0_earth_pressure: 0.50,
+        hb_sigma_ci: 250.0e6, hb_mi: 25.0, hb_gsi: 88.0, hb_D: 0.0, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Jaeger, Cook, & Zimmerman, Fundamentals of Rock Mechanics (2007)'
     },
     'Berea Sandstone': {
         density: 2150.0, youngs_modulus: 18.0e9, poissons_ratio: 0.20, yield_stress: 50.0e6, hardening_modulus: 1.5e9, failure_strain: 0.020, tensile_failure_stress: 4.0e6,
         jc_A: 50.0e6, jc_B: 250.0e6, jc_n: 0.35, jc_C: 0.005, jc_m: 1.00, T_melt: 1600.0, T_room: 293.0, Cp: 850.0, mg_gamma0: 1.10, mg_c0: 2800.0, mg_s: 1.30,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (intact rock; c from UCS = yield_stress)
-        friction_angle: 32.0, cohesion: 1.39e7, dilation_angle: 8.0, tensile_cutoff: 4.0e6, provenance: 'hybrid',
+        dp_friction_angle: 32.0, dp_cohesion: 1.39e7, dp_dilatancy_angle: 8.0, dp_tensile_cutoff: 4.0e6, k0_earth_pressure: 0.47,
+        cap_X0: 1.2e8, cap_W: 0.14, cap_D1: 2.5e-9, cap_D2: 0.0, cap_R: 3.0,
+        hb_sigma_ci: 50.0e6, hb_mi: 17.0, hb_gsi: 80.0, hb_D: 0.0, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Zhang et al., Int. J. Rock Mech. Min. Sci. (2000)'
     },
     'Limestone (Solnhofen)': {
         density: 2600.0, youngs_modulus: 50.0e9, poissons_ratio: 0.28, yield_stress: 120.0e6, hardening_modulus: 3.5e9, failure_strain: 0.015, tensile_failure_stress: 8.0e6,
         jc_A: 120.0e6, jc_B: 500.0e6, jc_n: 0.32, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 820.0, mg_gamma0: 1.40, mg_c0: 3700.0, mg_s: 1.38,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (intact rock; c from UCS = yield_stress)
-        friction_angle: 35.0, cohesion: 3.12e7, dilation_angle: 8.0, tensile_cutoff: 8.0e6, provenance: 'hybrid',
+        dp_friction_angle: 35.0, dp_cohesion: 3.12e7, dp_dilatancy_angle: 8.0, dp_tensile_cutoff: 8.0e6, k0_earth_pressure: 0.43,
+        cap_X0: 2.0e8, cap_W: 0.10, cap_D1: 1.5e-9, cap_D2: 0.0, cap_R: 3.0,
+        hb_sigma_ci: 120.0e6, hb_mi: 10.0, hb_gsi: 85.0, hb_D: 0.0, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Ahrens & Gregson, J. Geophys. Res. (1964)'
     },
     'Shale (Sedimentary Rock)': {
         density: 2400.0, youngs_modulus: 25.0e9, poissons_ratio: 0.22, yield_stress: 80.0e6, hardening_modulus: 2.0e9, failure_strain: 0.018, tensile_failure_stress: 6.0e6,
         jc_A: 80.0e6, jc_B: 350.0e6, jc_n: 0.32, jc_C: 0.005, jc_m: 1.00, T_melt: 1500.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 1.20, mg_c0: 3200.0, mg_s: 1.35,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (intact rock; c from UCS = yield_stress)
-        friction_angle: 25.0, cohesion: 2.55e7, dilation_angle: 5.0, tensile_cutoff: 6.0e6, provenance: 'hybrid',
+        dp_friction_angle: 25.0, dp_cohesion: 2.55e7, dp_dilatancy_angle: 5.0, dp_tensile_cutoff: 6.0e6, k0_earth_pressure: 0.58,
+        cap_X0: 1.5e8, cap_W: 0.12, cap_D1: 2.0e-9, cap_D2: 0.0, cap_R: 2.8,
+        hb_sigma_ci: 80.0e6, hb_mi: 6.0, hb_gsi: 75.0, hb_D: 0.0, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Horsrud, J. Pet. Sci. Eng. (2001) Mechanical properties of shale'
     },
     'Ice / Permafrost (-5°C)': {
         density: 917.0, youngs_modulus: 9.0e9, poissons_ratio: 0.33, yield_stress: 5.0e6, hardening_modulus: 100.0e6, failure_strain: 0.050, tensile_failure_stress: 1.5e6,
         jc_A: 5.0e6, jc_B: 20.0e6, jc_n: 0.50, jc_C: 0.020, jc_m: 1.00, T_melt: 273.15, T_room: 268.15, Cp: 2050.0, mg_gamma0: 1.00, mg_c0: 2950.0, mg_s: 1.30,
-        // Drucker-Prager / Mohr-Coulomb strength ESTIMATED from standard geotechnical ranges (c from UCS = yield_stress)
-        friction_angle: 15.0, cohesion: 1.92e6, dilation_angle: 0.0, tensile_cutoff: 1.5e6, provenance: 'hybrid',
+        dp_friction_angle: 15.0, dp_cohesion: 1.92e6, dp_dilatancy_angle: 0.0, dp_tensile_cutoff: 1.5e6, k0_earth_pressure: 0.75,
+        hb_sigma_ci: 5.0e6, hb_mi: 7.0, hb_gsi: 95.0, hb_D: 0.0, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Schulson, JOM (1999) Physics of Ice'
     },
 
@@ -3152,32 +3619,44 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Boron Carbide (B4C)': {
         density: 2510.0, youngs_modulus: 460.0e9, poissons_ratio: 0.17, yield_stress: 15.0e9, hardening_modulus: 10.0e9, failure_strain: 0.008, tensile_failure_stress: 400.0e6,
         jc_A: 15.0e9, jc_B: 5.0e9, jc_n: 0.20, jc_C: 0.005, jc_m: 1.00, T_melt: 3036.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.50, mg_c0: 9710.0, mg_s: 1.15,
-        category: 'Technical Ceramics & Armor Glasses', reference: 'Holmquist & Johnson, J. Appl. Phys. (2006)'
+        jh2_sigma_hel: 15.4e9, jh2_p_hel: 8.71e9, jh2_t_max: 0.26e9, jh2_A: 0.927, jh2_N: 0.67, jh2_B: 0.70, jh2_M: 0.85, jh2_C: 0.005,
+        jh2_D1: 0.001, jh2_D2: 0.50, jh2_K1: 233.0e9, jh2_K2: -593.0e9, jh2_K3: 2800.0e9, jh2_beta: 1.0,
+        category: 'Technical Ceramics & Armor Glasses', reference: 'Holmquist & Johnson, J. Appl. Phys. 85 (1999) / (2006)'
     },
     'Silicon Carbide (SiC)': {
         density: 3210.0, youngs_modulus: 410.0e9, poissons_ratio: 0.16, yield_stress: 11.7e9, hardening_modulus: 8.0e9, failure_strain: 0.010, tensile_failure_stress: 370.0e6,
         jc_A: 11.7e9, jc_B: 4.0e9, jc_n: 0.20, jc_C: 0.005, jc_m: 1.00, T_melt: 3000.0, T_room: 293.0, Cp: 670.0, mg_gamma0: 1.40, mg_c0: 8190.0, mg_s: 1.17,
-        category: 'Technical Ceramics & Armor Glasses', reference: 'JH-1 Ceramic Model / Holmquist et al. (1999)'
+        jh2_sigma_hel: 9.08e9, jh2_p_hel: 5.65e9, jh2_t_max: 0.37e9, jh2_A: 0.96, jh2_N: 0.65, jh2_B: 0.35, jh2_M: 1.00, jh2_C: 0.009,
+        jh2_D1: 0.48, jh2_D2: 0.48, jh2_K1: 220.0e9, jh2_K2: 361.0e9, jh2_K3: 0.0, jh2_beta: 1.0,
+        category: 'Technical Ceramics & Armor Glasses', reference: 'JH-2 SiC Model / Holmquist et al. (1999) & Cronin et al. (2003)'
     },
     'Alumina (Al2O3 - 99.5%)': {
         density: 3890.0, youngs_modulus: 370.0e9, poissons_ratio: 0.22, yield_stress: 3.5e9, hardening_modulus: 5.0e9, failure_strain: 0.012, tensile_failure_stress: 260.0e6,
         jc_A: 3.5e9, jc_B: 2.0e9, jc_n: 0.25, jc_C: 0.005, jc_m: 1.00, T_melt: 2345.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 1.33, mg_c0: 7820.0, mg_s: 1.27,
-        category: 'Technical Ceramics & Armor Glasses', reference: 'Johnson & Holmquist, J. Appl. Phys. (1990)'
+        jh2_sigma_hel: 4.59e9, jh2_p_hel: 3.51e9, jh2_t_max: 0.26e9, jh2_A: 0.93, jh2_N: 0.60, jh2_B: 0.31, jh2_M: 0.60, jh2_C: 0.0,
+        jh2_D1: 0.005, jh2_D2: 1.00, jh2_K1: 231.0e9, jh2_K2: -160.0e9, jh2_K3: 2774.0e9, jh2_beta: 1.0,
+        category: 'Technical Ceramics & Armor Glasses', reference: 'Anderson, Johnson & Holmquist (1995) AD-995 Alumina'
     },
     'Soda-Lime Glass': {
         density: 2500.0, youngs_modulus: 70.0e9, poissons_ratio: 0.23, yield_stress: 2.0e9, hardening_modulus: 1.0e9, failure_strain: 0.005, tensile_failure_stress: 80.0e6,
         jc_A: 2.0e9, jc_B: 1.0e9, jc_n: 0.30, jc_C: 0.005, jc_m: 1.00, T_melt: 1473.0, T_room: 293.0, Cp: 840.0, mg_gamma0: 0.40, mg_c0: 3860.0, mg_s: 1.40,
-        category: 'Technical Ceramics & Armor Glasses', reference: 'Holmquist et al., 15th Int. Symp. Ballistics'
+        jh2_sigma_hel: 4.54e9, jh2_p_hel: 2.92e9, jh2_t_max: 0.15e9, jh2_A: 0.93, jh2_N: 0.77, jh2_B: 0.088, jh2_M: 0.35, jh2_C: 0.003,
+        jh2_D1: 0.053, jh2_D2: 0.85, jh2_K1: 45.4e9, jh2_K2: -138.0e9, jh2_K3: 290.0e9, jh2_beta: 1.0,
+        category: 'Technical Ceramics & Armor Glasses', reference: 'Holmquist et al., 15th Int. Symp. Ballistics (1995) Float Glass'
     },
     'Fused Silica Glass': {
         density: 2200.0, youngs_modulus: 72.0e9, poissons_ratio: 0.17, yield_stress: 3.0e9, hardening_modulus: 1.5e9, failure_strain: 0.006, tensile_failure_stress: 110.0e6,
         jc_A: 3.0e9, jc_B: 1.2e9, jc_n: 0.30, jc_C: 0.005, jc_m: 1.00, T_melt: 1983.0, T_room: 293.0, Cp: 740.0, mg_gamma0: 0.30, mg_c0: 5970.0, mg_s: 0.40,
-        category: 'Technical Ceramics & Armor Glasses', reference: 'Marsh LASL Shock Data / Corning Glass Tech'
+        jh2_sigma_hel: 7.24e9, jh2_p_hel: 3.87e9, jh2_t_max: 0.11e9, jh2_A: 0.90, jh2_N: 0.75, jh2_B: 0.15, jh2_M: 0.45, jh2_C: 0.003,
+        jh2_D1: 0.050, jh2_D2: 0.85, jh2_K1: 36.9e9, jh2_K2: -93.0e9, jh2_K3: 240.0e9, jh2_beta: 1.0,
+        category: 'Technical Ceramics & Armor Glasses', reference: 'Marsh LASL Shock Data / Alexander et al. (2008) Fused Silica'
     },
     'Titanium Diboride (TiB2)': {
         density: 4520.0, youngs_modulus: 560.0e9, poissons_ratio: 0.11, yield_stress: 14.0e9, hardening_modulus: 9.0e9, failure_strain: 0.008, tensile_failure_stress: 450.0e6,
         jc_A: 14.0e9, jc_B: 5.0e9, jc_n: 0.20, jc_C: 0.005, jc_m: 1.00, T_melt: 3498.0, T_room: 293.0, Cp: 620.0, mg_gamma0: 1.60, mg_c0: 8900.0, mg_s: 1.15,
-        category: 'Technical Ceramics & Armor Glasses', reference: 'Grady, Mech. Mater. (1998) Shock Wave Physics'
+        jh2_sigma_hel: 14.85e9, jh2_p_hel: 7.10e9, jh2_t_max: 0.45e9, jh2_A: 0.93, jh2_N: 0.65, jh2_B: 0.40, jh2_M: 0.85, jh2_C: 0.005,
+        jh2_D1: 0.015, jh2_D2: 0.70, jh2_K1: 239.3e9, jh2_K2: 300.0e9, jh2_K3: 0.0, jh2_beta: 1.0,
+        category: 'Technical Ceramics & Armor Glasses', reference: 'Grady, Mech. Mater. (1998) / Dandekar TiB2 Shock Data'
     },
 
     // ---------------------------------------------------------
@@ -3422,6 +3901,34 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
 
 
     // ---------------------------------------------------------
+    // 10b. Crushable Foams & Cellular Absorbers (*MAT_063 / Deshpande-Fleck)
+    // ---------------------------------------------------------
+    'Alporas Aluminum Foam (400 kg/m³)': {
+        density: 400.0, youngs_modulus: 0.45e9, poissons_ratio: 0.05, yield_stress: 1.9e6, hardening_modulus: 0.8e6, failure_strain: 0.85, tensile_failure_stress: 1.9e6,
+        jc_A: 1.9e6, jc_B: 0.8e6, jc_n: 0.50, jc_C: 0.005, jc_m: 1.00, T_melt: 933.0, T_room: 293.0, Cp: 896.0, mg_gamma0: 1.00, mg_c0: 1200.0, mg_s: 1.30,
+        foam_plateau_stress: 1.9e6, foam_densification_strain: 0.65, foam_alpha: 2.121, foam_hardening: 0.8e6, dp_tensile_cutoff: 1.9e6,
+        category: 'Crushable Foams & Cellular Absorbers', reference: 'Deshpande & Fleck (2000) J. Mech. Phys. Solids 48 / Metal Foams Design Guide'
+    },
+    'Duocel Aluminum Foam (210 kg/m³)': {
+        density: 210.0, youngs_modulus: 0.12e9, poissons_ratio: 0.05, yield_stress: 0.85e6, hardening_modulus: 0.35e6, failure_strain: 0.90, tensile_failure_stress: 0.85e6,
+        jc_A: 0.85e6, jc_B: 0.35e6, jc_n: 0.50, jc_C: 0.005, jc_m: 1.00, T_melt: 933.0, T_room: 293.0, Cp: 896.0, mg_gamma0: 1.00, mg_c0: 900.0, mg_s: 1.25,
+        foam_plateau_stress: 0.85e6, foam_densification_strain: 0.72, foam_alpha: 2.121, foam_hardening: 0.35e6, dp_tensile_cutoff: 0.85e6,
+        category: 'Crushable Foams & Cellular Absorbers', reference: 'Deshpande & Fleck (2000) Duocel Open-Cell 6101-T6 Al Foam'
+    },
+    'Rigid Polyurethane Foam (FR-3708)': {
+        density: 128.0, youngs_modulus: 48.0e6, poissons_ratio: 0.05, yield_stress: 1.15e6, hardening_modulus: 0.45e6, failure_strain: 0.85, tensile_failure_stress: 0.90e6,
+        jc_A: 1.15e6, jc_B: 0.45e6, jc_n: 0.50, jc_C: 0.010, jc_m: 1.00, T_melt: 450.0, T_room: 293.0, Cp: 1400.0, mg_gamma0: 0.70, mg_c0: 650.0, mg_s: 1.20,
+        foam_plateau_stress: 1.15e6, foam_densification_strain: 0.68, foam_alpha: 1.80, foam_hardening: 0.45e6, dp_tensile_cutoff: 0.90e6,
+        category: 'Crushable Foams & Cellular Absorbers', reference: 'General Plastics LAST-A-FOAM FR-3708 / Sandia *MAT_063 Benchmark'
+    },
+    'Nomex Honeycomb Core (48 kg/m³)': {
+        density: 48.0, youngs_modulus: 138.0e6, poissons_ratio: 0.01, yield_stress: 1.45e6, hardening_modulus: 0.25e6, failure_strain: 0.90, tensile_failure_stress: 0.95e6,
+        jc_A: 1.45e6, jc_B: 0.25e6, jc_n: 0.50, jc_C: 0.005, jc_m: 1.00, T_melt: 670.0, T_room: 293.0, Cp: 1200.0, mg_gamma0: 0.70, mg_c0: 1700.0, mg_s: 1.20,
+        foam_plateau_stress: 1.45e6, foam_densification_strain: 0.78, foam_alpha: 1.50, foam_hardening: 0.25e6, dp_tensile_cutoff: 0.95e6,
+        category: 'Crushable Foams & Cellular Absorbers', reference: 'Hexcel HexWeb HRH-10-1/8-3.0 Aramid Honeycomb Specification'
+    },
+
+    // ---------------------------------------------------------
     // 11. Concrete Damage Models (RHT, K&C, CSCM)
     // ---------------------------------------------------------
     'Normal-Strength Concrete C35/45 (RHT Default)': {
@@ -3429,7 +3936,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 35.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2500.0, mg_s: 1.25,
         fc: 35.0e6, ft: 3.2e6, G_f: 150.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
         rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.680, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0,
-        rht_p_crush: 17.0e6, rht_p_lock: 600.0e6, rht_alpha0: 1.22, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
+        rht_p_crush: 17.0e6, rht_p_lock: 600.0e6, rht_alpha0: 1.22, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036, rht_f_el_c: 0.53,
         category: 'Concrete & Geomaterial Formulations', reference: 'Riedel, Hiermaier, Thoma (1999) Int. J. Impact Eng.'
     },
     'Standard Structural Concrete C30/37 (RHT)': {
@@ -3437,7 +3944,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 30.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2450.0, mg_s: 1.25,
         fc: 30.0e6, ft: 2.8e6, G_f: 140.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
         rht_A: 1.60, rht_N: 0.61, rht_B: 0.70, rht_M: 0.80, rht_Q0: 0.680, rht_BQ: 0.0105, rht_D1: 0.04, rht_D2: 1.0,
-        rht_p_crush: 15.0e6, rht_p_lock: 550.0e6, rht_alpha0: 1.25, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036,
+        rht_p_crush: 15.0e6, rht_p_lock: 550.0e6, rht_alpha0: 1.25, rht_n_comp: 3.0, rht_betac: 0.032, rht_deltat: 0.036, rht_f_el_c: 0.53,
         category: 'Concrete & Geomaterial Formulations', reference: 'Riedel (2000) Shock Wave Physics in Concrete'
     },
     'High-Strength Concrete C60/75 (RHT)': {
@@ -3445,7 +3952,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 60.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 0.90, mg_c0: 2600.0, mg_s: 1.28,
         fc: 60.0e6, ft: 4.4e6, G_f: 180.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
         rht_A: 1.55, rht_N: 0.63, rht_B: 0.72, rht_M: 0.78, rht_Q0: 0.700, rht_BQ: 0.0100, rht_D1: 0.035, rht_D2: 1.0,
-        rht_p_crush: 30.0e6, rht_p_lock: 800.0e6, rht_alpha0: 1.18, rht_n_comp: 3.0, rht_betac: 0.030, rht_deltat: 0.034,
+        rht_p_crush: 30.0e6, rht_p_lock: 800.0e6, rht_alpha0: 1.18, rht_n_comp: 3.0, rht_betac: 0.030, rht_deltat: 0.034, rht_f_el_c: 0.55,
         category: 'Concrete & Geomaterial Formulations', reference: 'Riedel et al. (2009) High-Strength Armor Concrete'
     },
     'High-Performance Concrete C80/95 (RHT)': {
@@ -3453,7 +3960,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 80.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 920.0, mg_gamma0: 0.95, mg_c0: 2700.0, mg_s: 1.30,
         fc: 80.0e6, ft: 5.2e6, G_f: 210.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
         rht_A: 1.50, rht_N: 0.65, rht_B: 0.75, rht_M: 0.75, rht_Q0: 0.720, rht_BQ: 0.0095, rht_D1: 0.030, rht_D2: 1.0,
-        rht_p_crush: 40.0e6, rht_p_lock: 1000.0e6, rht_alpha0: 1.15, rht_n_comp: 3.0, rht_betac: 0.028, rht_deltat: 0.032,
+        rht_p_crush: 40.0e6, rht_p_lock: 1000.0e6, rht_alpha0: 1.15, rht_n_comp: 3.0, rht_betac: 0.028, rht_deltat: 0.032, rht_f_el_c: 0.58,
         category: 'Concrete & Geomaterial Formulations', reference: 'Tu & Lu (2010) High Performance Concrete'
     },
     'Ultra-High Performance Concrete UHPC 140 (RHT)': {
@@ -3461,7 +3968,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 140.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.00, mg_c0: 2850.0, mg_s: 1.32,
         fc: 140.0e6, ft: 9.5e6, G_f: 350.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
         rht_A: 1.45, rht_N: 0.68, rht_B: 0.80, rht_M: 0.72, rht_Q0: 0.750, rht_BQ: 0.0090, rht_D1: 0.020, rht_D2: 1.0,
-        rht_p_crush: 70.0e6, rht_p_lock: 1500.0e6, rht_alpha0: 1.10, rht_n_comp: 3.0, rht_betac: 0.025, rht_deltat: 0.028,
+        rht_p_crush: 70.0e6, rht_p_lock: 1500.0e6, rht_alpha0: 1.10, rht_n_comp: 3.0, rht_betac: 0.025, rht_deltat: 0.028, rht_f_el_c: 0.60,
         category: 'Concrete & Geomaterial Formulations', reference: 'Ductal UHPC Penetration Studies'
     },
     'Low-Strength Blast Berm Concrete C20/25 (RHT)': {
@@ -3469,7 +3976,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         jc_A: 20.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 850.0, mg_gamma0: 0.80, mg_c0: 2350.0, mg_s: 1.22,
         fc: 20.0e6, ft: 2.0e6, G_f: 120.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
         rht_A: 1.65, rht_N: 0.60, rht_B: 0.68, rht_M: 0.82, rht_Q0: 0.660, rht_BQ: 0.0110, rht_D1: 0.05, rht_D2: 1.0,
-        rht_p_crush: 10.0e6, rht_p_lock: 450.0e6, rht_alpha0: 1.30, rht_n_comp: 3.0, rht_betac: 0.035, rht_deltat: 0.040,
+        rht_p_crush: 10.0e6, rht_p_lock: 450.0e6, rht_alpha0: 1.30, rht_n_comp: 3.0, rht_betac: 0.035, rht_deltat: 0.040, rht_f_el_c: 0.50,
         category: 'Concrete & Geomaterial Formulations', reference: 'Low-Strength Concrete Blast Berm Calibration'
     },
 
@@ -3478,35 +3985,35 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         density: 2400.0, youngs_modulus: 34.0e9, poissons_ratio: 0.18, yield_stress: 35.0e6, hardening_modulus: 0.0, failure_strain: 0.0035, erosion_strain: 0.10, tensile_failure_stress: 3.2e6,
         jc_A: 35.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2500.0, mg_s: 1.25,
         fc: 35.0e6, ft: 3.2e6, G_f: 150.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
-        kc_auto_generate: true, kc_a0: 11.6e6, kc_a1: 0.45, kc_a2: 4.28e-9, kc_a0y: 5.2e6, kc_a1y: 0.45, kc_a2y: 4.28e-9, kc_a1r: 0.75, kc_a2r: 5.71e-9, kc_b1: 1.60, kc_omega: 0.50,
+        kc_auto_generate: true, kc_a0: 11.67e6, kc_a1: 0.45, kc_a2: 4.286e-9, kc_a0y: 5.25e6, kc_a1y: 0.45, kc_a2y: 4.286e-9, kc_a1r: 0.75, kc_a2r: 5.714e-9, kc_b1: 1.60, kc_omega: 0.50,
         category: 'Concrete & Geomaterial Formulations', reference: 'Malvar et al., Karagozian & Case Concrete Model (MAT_072R3)'
     },
     'Standard Structural Concrete C30/37 (K&C Auto)': {
         density: 2380.0, youngs_modulus: 32.0e9, poissons_ratio: 0.18, yield_stress: 30.0e6, hardening_modulus: 0.0, failure_strain: 0.0035, erosion_strain: 0.10, tensile_failure_stress: 2.8e6,
         jc_A: 30.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 880.0, mg_gamma0: 0.85, mg_c0: 2450.0, mg_s: 1.25,
         fc: 30.0e6, ft: 2.8e6, G_f: 140.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
-        kc_auto_generate: true, kc_a0: 10.0e6, kc_a1: 0.45, kc_a2: 4.28e-9, kc_a0y: 4.5e6, kc_a1y: 0.45, kc_a2y: 4.28e-9, kc_a1r: 0.75, kc_a2r: 5.71e-9, kc_b1: 1.60, kc_omega: 0.50,
+        kc_auto_generate: true, kc_a0: 10.0e6, kc_a1: 0.45, kc_a2: 5.00e-9, kc_a0y: 4.50e6, kc_a1y: 0.45, kc_a2y: 5.00e-9, kc_a1r: 0.75, kc_a2r: 6.67e-9, kc_b1: 1.60, kc_omega: 0.50,
         category: 'Concrete & Geomaterial Formulations', reference: 'K&C MAT_072R3 Standard Concrete'
     },
     'High-Strength Concrete C60/75 (K&C Auto)': {
         density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.19, yield_stress: 60.0e6, hardening_modulus: 0.0, failure_strain: 0.0030, erosion_strain: 0.10, tensile_failure_stress: 4.4e6,
         jc_A: 60.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 0.90, mg_c0: 2600.0, mg_s: 1.28,
         fc: 60.0e6, ft: 4.4e6, G_f: 180.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
-        kc_auto_generate: true, kc_a0: 20.0e6, kc_a1: 0.43, kc_a2: 4.00e-9, kc_a0y: 9.0e6, kc_a1y: 0.43, kc_a2y: 4.00e-9, kc_a1r: 0.72, kc_a2r: 5.50e-9, kc_b1: 1.55, kc_omega: 0.50,
+        kc_auto_generate: true, kc_a0: 20.0e6, kc_a1: 0.45, kc_a2: 2.50e-9, kc_a0y: 9.00e6, kc_a1y: 0.45, kc_a2y: 2.50e-9, kc_a1r: 0.75, kc_a2r: 3.33e-9, kc_b1: 1.60, kc_omega: 0.50,
         category: 'Concrete & Geomaterial Formulations', reference: 'K&C MAT_072R3 High Strength Concrete'
     },
     'High-Performance Concrete C80/95 (K&C Auto)': {
         density: 2500.0, youngs_modulus: 44.0e9, poissons_ratio: 0.20, yield_stress: 80.0e6, hardening_modulus: 0.0, failure_strain: 0.0028, erosion_strain: 0.12, tensile_failure_stress: 5.2e6,
         jc_A: 80.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 920.0, mg_gamma0: 0.95, mg_c0: 2700.0, mg_s: 1.30,
         fc: 80.0e6, ft: 5.2e6, G_f: 210.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
-        kc_auto_generate: true, kc_a0: 26.5e6, kc_a1: 0.42, kc_a2: 3.80e-9, kc_a0y: 12.0e6, kc_a1y: 0.42, kc_a2y: 3.80e-9, kc_a1r: 0.70, kc_a2r: 5.20e-9, kc_b1: 1.50, kc_omega: 0.50,
+        kc_auto_generate: true, kc_a0: 26.67e6, kc_a1: 0.45, kc_a2: 1.875e-9, kc_a0y: 12.0e6, kc_a1y: 0.45, kc_a2y: 1.875e-9, kc_a1r: 0.75, kc_a2r: 2.50e-9, kc_b1: 1.60, kc_omega: 0.50,
         category: 'Concrete & Geomaterial Formulations', reference: 'K&C MAT_072R3 High Performance Concrete'
     },
     'Ultra-High Performance Concrete UHPC 140 (K&C Auto)': {
         density: 2550.0, youngs_modulus: 52.0e9, poissons_ratio: 0.21, yield_stress: 140.0e6, hardening_modulus: 0.0, failure_strain: 0.0040, erosion_strain: 0.15, tensile_failure_stress: 9.5e6,
         jc_A: 140.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.00, mg_c0: 2850.0, mg_s: 1.32,
         fc: 140.0e6, ft: 9.5e6, G_f: 350.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
-        kc_auto_generate: true, kc_a0: 46.0e6, kc_a1: 0.40, kc_a2: 3.50e-9, kc_a0y: 21.0e6, kc_a1y: 0.40, kc_a2y: 3.50e-9, kc_a1r: 0.68, kc_a2r: 4.80e-9, kc_b1: 1.40, kc_omega: 0.50,
+        kc_auto_generate: true, kc_a0: 46.67e6, kc_a1: 0.45, kc_a2: 1.07e-9, kc_a0y: 21.0e6, kc_a1y: 0.45, kc_a2y: 1.07e-9, kc_a1r: 0.75, kc_a2r: 1.43e-9, kc_b1: 1.60, kc_omega: 0.50,
         category: 'Concrete & Geomaterial Formulations', reference: 'K&C MAT_072R3 UHPC Calibration'
     },
 
@@ -3526,21 +4033,21 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
         category: 'Concrete & Geomaterial Formulations', reference: 'FHWA-HRT-05-062 CSCM Concrete Calibration'
     },
     'High-Strength Concrete C60/75 (CSCM)': {
-        density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.19, yield_stress: 60.0e6, hardening_modulus: 0.0, failure_strain: 0.0030, tensile_failure_stress: 4.4e6,
+        density: 2450.0, youngs_modulus: 39.0e9, poissons_ratio: 0.19, yield_stress: 60.0e6, hardening_modulus: 0.0, failure_strain: 0.0030, erosion_strain: 0.10, tensile_failure_stress: 4.4e6,
         jc_A: 60.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 0.90, mg_c0: 2600.0, mg_s: 1.28,
         fc: 60.0e6, ft: 4.4e6, G_f: 180.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
         cscm_alpha: 24.0e6, cscm_theta: 0.14, cscm_lambda: 18.0e6, cscm_beta: 2.70e-9, cscm_R: 5.0, cscm_X0: 150.0e6, cscm_W: 0.045, cscm_D1: 2.2e-9, cscm_D2: 3.0e-17,
         category: 'Concrete & Geomaterial Formulations', reference: 'CSCM High-Strength Concrete Testing'
     },
     'High-Performance Concrete C80/95 (CSCM)': {
-        density: 2500.0, youngs_modulus: 44.0e9, poissons_ratio: 0.20, yield_stress: 80.0e6, hardening_modulus: 0.0, failure_strain: 0.0028, tensile_failure_stress: 5.2e6,
+        density: 2500.0, youngs_modulus: 44.0e9, poissons_ratio: 0.20, yield_stress: 80.0e6, hardening_modulus: 0.0, failure_strain: 0.0028, erosion_strain: 0.12, tensile_failure_stress: 5.2e6,
         jc_A: 80.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 920.0, mg_gamma0: 0.95, mg_c0: 2700.0, mg_s: 1.30,
         fc: 80.0e6, ft: 5.2e6, G_f: 210.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
         cscm_alpha: 32.0e6, cscm_theta: 0.13, cscm_lambda: 24.0e6, cscm_beta: 2.60e-9, cscm_R: 5.0, cscm_X0: 200.0e6, cscm_W: 0.040, cscm_D1: 2.0e-9, cscm_D2: 3.0e-17,
         category: 'Concrete & Geomaterial Formulations', reference: 'CSCM High Performance Concrete Parameters'
     },
     'Ultra-High Performance Concrete UHPC 140 (CSCM)': {
-        density: 2550.0, youngs_modulus: 52.0e9, poissons_ratio: 0.21, yield_stress: 140.0e6, hardening_modulus: 0.0, failure_strain: 0.0040, tensile_failure_stress: 9.5e6,
+        density: 2550.0, youngs_modulus: 52.0e9, poissons_ratio: 0.21, yield_stress: 140.0e6, hardening_modulus: 0.0, failure_strain: 0.0040, erosion_strain: 0.15, tensile_failure_stress: 9.5e6,
         jc_A: 140.0e6, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 1800.0, T_room: 293.0, Cp: 950.0, mg_gamma0: 1.00, mg_c0: 2850.0, mg_s: 1.32,
         fc: 140.0e6, ft: 9.5e6, G_f: 350.0, moisture_content: 0.0, dif_cap_compression: 2.5, dif_cap_tension: 8.0,
         cscm_alpha: 56.0e6, cscm_theta: 0.12, cscm_lambda: 42.0e6, cscm_beta: 2.50e-9, cscm_R: 5.0, cscm_X0: 350.0e6, cscm_W: 0.035, cscm_D1: 1.8e-9, cscm_D2: 3.0e-17,
@@ -3553,139 +4060,139 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Air (Standard STP, gamma=1.4)': {
         density: 1.225, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 1005.0, mg_gamma0: 0.40, mg_c0: 340.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.40,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.40, ideal_gamma: 1.40, ideal_R: 287.058,
         category: 'Ideal Gas Presets', reference: 'Standard Atmosphere (ISO 2533 / NASA)'
     },
     'Air (Dry Sea-Level STP)': {
         density: 1.204, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1006.0, mg_gamma0: 0.40, mg_c0: 343.2, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40, ideal_gamma: 1.40, ideal_R: 287.058,
         category: 'Ideal Gas Presets', reference: 'ISO Standard Atmosphere Sea-Level 20°C'
     },
     'Air (Stratosphere 20km)': {
         density: 0.0889, youngs_modulus: 7.74e3, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 216.65, Cp: 1005.0, mg_gamma0: 0.40, mg_c0: 295.0, mg_s: 1.00,
-        atm_pressure: 5529.0, atm_temperature: 216.65, gamma: 1.40,
+        atm_pressure: 5529.0, atm_temperature: 216.65, gamma: 1.40, ideal_gamma: 1.40, ideal_R: 287.058,
         category: 'Ideal Gas Presets', reference: 'US Standard Atmosphere 1976 (20 km altitude)'
     },
     'Air (High-Temperature Shock 1000K)': {
-        density: 0.352, youngs_modulus: 1.37e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 0.353, youngs_modulus: 1.37e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.0, Cp: 1142.0, mg_gamma0: 0.35, mg_c0: 624.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 1000.0, gamma: 1.35,
+        atm_pressure: 101325.0, atm_temperature: 1000.0, gamma: 1.35, ideal_gamma: 1.35, ideal_R: 287.058,
         category: 'Ideal Gas Presets', reference: 'NIST High-Temperature Air Tables (1000 K)'
     },
     'Nitrogen (N2, gamma=1.40)': {
         density: 1.165, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1040.0, mg_gamma0: 0.40, mg_c0: 349.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40, ideal_gamma: 1.40, ideal_R: 296.80,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Nitrogen Gas)'
     },
     'Oxygen (O2, gamma=1.40)': {
-        density: 1.331, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 1.330, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 918.0, mg_gamma0: 0.40, mg_c0: 326.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40, ideal_gamma: 1.40, ideal_R: 259.84,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Oxygen Gas)'
     },
     'Helium (Noble, gamma=1.667)': {
-        density: 0.1786, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 0.1693, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 5193.0, mg_gamma0: 0.667, mg_c0: 1007.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.667,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.667, ideal_gamma: 1.667, ideal_R: 2077.1,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Helium Thermophysical Properties)'
     },
     'Argon (Noble, gamma=1.667)': {
-        density: 1.784, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 1.690, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 520.0, mg_gamma0: 0.667, mg_c0: 319.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.667,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.667, ideal_gamma: 1.667, ideal_R: 208.13,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Argon Thermophysical Properties)'
     },
     'Neon (Noble, gamma=1.667)': {
-        density: 0.838, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 0.8390, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1030.0, mg_gamma0: 0.667, mg_c0: 449.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.667,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.667, ideal_gamma: 1.667, ideal_R: 411.95,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Neon Gas)'
     },
     'Krypton (Noble, gamma=1.667)': {
-        density: 3.486, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 3.484, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 248.0, mg_gamma0: 0.667, mg_c0: 221.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.667,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.667, ideal_gamma: 1.667, ideal_R: 99.22,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Krypton Gas)'
     },
     'Xenon (Noble, gamma=1.667)': {
-        density: 5.464, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 5.458, youngs_modulus: 1.69e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 158.0, mg_gamma0: 0.667, mg_c0: 176.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.667,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.667, ideal_gamma: 1.667, ideal_R: 63.33,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Xenon Gas)'
     },
     'Hydrogen (H2, gamma=1.41)': {
-        density: 0.0899, youngs_modulus: 1.43e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 0.0853, youngs_modulus: 1.43e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 14300.0, mg_gamma0: 0.41, mg_c0: 1290.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.41,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.41, ideal_gamma: 1.41, ideal_R: 4124.2,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Hydrogen Properties)'
     },
     'Methane (CH4, gamma=1.32)': {
-        density: 0.717, youngs_modulus: 1.34e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 0.6785, youngs_modulus: 1.34e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 2220.0, mg_gamma0: 0.32, mg_c0: 430.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.32,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.32, ideal_gamma: 1.32, ideal_R: 518.28,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Methane Properties)'
     },
     'Propane (C3H8, gamma=1.13)': {
-        density: 1.868, youngs_modulus: 1.14e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 1.833, youngs_modulus: 1.14e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1670.0, mg_gamma0: 0.13, mg_c0: 247.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.13,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.13, ideal_gamma: 1.13, ideal_R: 188.56,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Propane Gas)'
     },
     'Ethylene (C2H4, gamma=1.24)': {
-        density: 1.178, youngs_modulus: 1.26e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 1.166, youngs_modulus: 1.26e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1540.0, mg_gamma0: 0.24, mg_c0: 327.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.24,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.24, ideal_gamma: 1.24, ideal_R: 296.38,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Ethylene Gas)'
     },
     'Acetylene (C2H2, gamma=1.23)': {
-        density: 1.097, youngs_modulus: 1.25e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 1.082, youngs_modulus: 1.25e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1690.0, mg_gamma0: 0.23, mg_c0: 340.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.23,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.23, ideal_gamma: 1.23, ideal_R: 319.33,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Acetylene Gas)'
     },
     'Carbon Monoxide (CO, gamma=1.40)': {
-        density: 1.165, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 1.164, youngs_modulus: 1.42e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 1040.0, mg_gamma0: 0.40, mg_c0: 349.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.40, ideal_gamma: 1.40, ideal_R: 296.84,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Carbon Monoxide)'
     },
     'Carbon Dioxide (CO2, gamma=1.30)': {
-        density: 1.977, youngs_modulus: 1.32e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 1.861, youngs_modulus: 1.32e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 288.15, Cp: 844.0, mg_gamma0: 0.30, mg_c0: 258.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.30,
+        atm_pressure: 101325.0, atm_temperature: 288.15, gamma: 1.30, ideal_gamma: 1.30, ideal_R: 188.92,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Carbon Dioxide Properties)'
     },
     'Sulfur Hexafluoride (SF6, gamma=1.09)': {
-        density: 6.130, youngs_modulus: 1.10e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 6.072, youngs_modulus: 1.10e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 665.0, mg_gamma0: 0.09, mg_c0: 152.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.09,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.09, ideal_gamma: 1.09, ideal_R: 56.927,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Sulfur Hexafluoride)'
     },
     'Ammonia (NH3, gamma=1.31)': {
-        density: 0.730, youngs_modulus: 1.33e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 0.7080, youngs_modulus: 1.33e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 2170.0, mg_gamma0: 0.31, mg_c0: 430.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.31,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.31, ideal_gamma: 1.31, ideal_R: 488.21,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Ammonia Gas)'
     },
     'Nitrous Oxide (N2O, gamma=1.30)': {
-        density: 1.870, youngs_modulus: 1.32e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 1.830, youngs_modulus: 1.32e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 880.0, mg_gamma0: 0.30, mg_c0: 263.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.30,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.30, ideal_gamma: 1.30, ideal_R: 188.91,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Nitrous Oxide)'
     },
     'Water Vapor / Steam (H2O, gamma=1.33)': {
-        density: 0.598, youngs_modulus: 1.35e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 0.5884, youngs_modulus: 1.35e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 373.15, Cp: 2080.0, mg_gamma0: 0.33, mg_c0: 478.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 373.15, gamma: 1.33,
+        atm_pressure: 101325.0, atm_temperature: 373.15, gamma: 1.33, ideal_gamma: 1.33, ideal_R: 461.52,
         category: 'Ideal Gas Presets', reference: 'IAPWS-IF97 Steam Tables (100°C saturated vapor)'
     },
     'Chlorine (Cl2, gamma=1.34)': {
-        density: 2.980, youngs_modulus: 1.36e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
+        density: 2.948, youngs_modulus: 1.36e5, poissons_ratio: 0.0, yield_stress: 0.0, hardening_modulus: 0.0, failure_strain: 100.0, tensile_failure_stress: 0.0,
         jc_A: 0.0, jc_B: 0.0, jc_n: 1.00, jc_C: 0.0, jc_m: 1.00, T_melt: 10000.0, T_room: 293.15, Cp: 480.0, mg_gamma0: 0.34, mg_c0: 215.0, mg_s: 1.00,
-        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.34,
+        atm_pressure: 101325.0, atm_temperature: 293.15, gamma: 1.34, ideal_gamma: 1.34, ideal_R: 117.26,
         category: 'Ideal Gas Presets', reference: 'NIST Chemistry WebBook (Chlorine Gas)'
     },
 
@@ -4172,20 +4679,25 @@ export function getConstitutiveModels(): string[] {
     return [
         'Hypoelastic',
         'Johnson-Cook + Mie-Grüneisen',
+        'Steinberg-Guinan',
         'Linear Elastic',
         'Hyperelastic (Yeoh)',
         'Hyperelastic (Mooney-Rivlin)',
-        'Concrete Damage Plasticity (CDP)',
         'Hill48 Orthotropic',
-        'Tait Water',
-        'CREST Reactive Burn',
-        'JWL Programmed Burn',
-        'Lee-Tarver Ignition & Growth',
+        'Crushable Foam',
+        'Johnson-Holmquist JH-2',
+        'Concrete Damage Plasticity (CDP)',
         'RHT Concrete',
         'Karagozian & Case (K&C)',
         'CSCM Concrete',
         'Drucker-Prager',
         'Mohr-Coulomb',
+        'Geological Cap (MAT_025)',
+        'Hoek-Brown Rock',
+        'Tait Water',
+        'CREST Reactive Burn',
+        'JWL Programmed Burn',
+        'Lee-Tarver Ignition & Growth',
         'Ideal Gas',
         'JWL Detonation Gas',
         'Ideal Gas Charge'
@@ -4202,7 +4714,8 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
         'Polymers & High-Performance Thermoplastics',
         'Technical Ceramics & Armor Glasses',
         'Energetic Solids & Unreacted Explosives',
-        'Hyperelastic Elastomers & Rubbers'
+        'Hyperelastic Elastomers & Rubbers',
+        'Crushable Foams & Cellular Absorbers'
     ];
 
     const getSolidPresets = () => {
@@ -4228,6 +4741,29 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
                 'Nitrile Rubber (Mooney-Rivlin)',
                 'Chloroprene Rubber (Mooney-Rivlin)'
             ].concat(['Custom']);
+
+        case 'Crushable Foam':
+            return (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Crushable Foams & Cellular Absorbers')?.presets || [])
+                .concat(['Custom']);
+
+        case 'Johnson-Holmquist JH-2':
+            return (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Technical Ceramics & Armor Glasses')?.presets || [])
+                .concat(['Custom']);
+
+        case 'Steinberg-Guinan': {
+            const sgPrimary = [
+                'AISI 4340 Steel',
+                'Stainless Steel 304',
+                'Aluminum 6061-T6',
+                'Copper (OFHC)',
+                'Titanium Ti-6Al-4V',
+                'Tantalum (Pure)',
+                'Tungsten (Pure)'
+            ];
+            const metals = (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Structural & Military Steels')?.presets || [])
+                .concat(MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Light Alloys & Refractory Metals')?.presets || []);
+            return Array.from(new Set([...sgPrimary, ...metals, 'Custom']));
+        }
 
         case 'Concrete Damage Plasticity (CDP)':
             return [
@@ -4318,9 +4854,23 @@ export function getPresetsForConstitutiveModel(modelName: string): string[] {
 
         case 'Drucker-Prager':
         case 'Mohr-Coulomb':
+        case 'Geological Cap (MAT_025)':
+        case 'Geological Cap':
             return (MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Soils, Rocks & Geomaterial Strengths')?.presets || [])
                 .concat(MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Concrete & Masonry Strength Grades')?.presets || [])
                 .concat(['Custom']);
+
+        case 'Hoek-Brown Rock':
+            return [
+                'Westerly Granite',
+                'Basalt (Hard Igneous Rock)',
+                'Berea Sandstone',
+                'Limestone (Solnhofen)',
+                'Shale (Sedimentary Rock)',
+                'Ice / Permafrost (-5°C)'
+            ].concat(
+                MPM_MATERIAL_CATEGORIES.find(c => c.category === 'Soils, Rocks & Geomaterial Strengths')?.presets || []
+            ).concat(['Custom']);
 
         case 'Ideal Gas':
         case 'Air':
@@ -4447,6 +4997,22 @@ export function getCategorizedPresetsForModel(modelName: string): CategorizedPre
                 presets: elasticPresets
             });
         }
+    } else if (modelName === 'Steinberg-Guinan') {
+        const sgCalibrated = [
+            'AISI 4340 Steel',
+            'Stainless Steel 304',
+            'Aluminum 6061-T6',
+            'Copper (OFHC)',
+            'Titanium Ti-6Al-4V',
+            'Tantalum (Pure)',
+            'Tungsten (Pure)'
+        ].filter(p => validPresets.has(p));
+        if (sgCalibrated.length > 0) {
+            result.push({
+                category: 'Steinberg-Guinan High-Rate LLNL Calibrations',
+                presets: sgCalibrated
+            });
+        }
     }
 
     // Iterate master categories and add matching presets
@@ -4492,10 +5058,13 @@ export function getCategorizedPresetsForModel(modelName: string): CategorizedPre
 
 export function getDefaultPresetForModel(modelName: string): string {
     if (modelName === 'Johnson-Cook + Mie-Grüneisen' || modelName === 'Johnson-Cook') return 'Structural Steel (A36)';
+    if (modelName === 'Steinberg-Guinan') return 'Copper (OFHC)';
     if (modelName === 'Hypoelastic') return 'Structural Steel (A36)';
     if (modelName === 'Linear Elastic') return 'Structural Steel (A36)';
     if (modelName === 'Hyperelastic (Yeoh)') return 'Silicone Rubber (Yeoh)';
     if (modelName === 'Hyperelastic (Mooney-Rivlin)') return 'Nitrile Rubber (Mooney-Rivlin)';
+    if (modelName === 'Crushable Foam') return 'Alporas Aluminum Foam (400 kg/m³)';
+    if (modelName === 'Johnson-Holmquist JH-2') return 'Silicon Carbide (SiC)';
     if (modelName === 'Concrete Damage Plasticity (CDP)') return 'Structural Concrete C30 (CDP)';
     if (modelName === 'Hill48 Orthotropic') return 'Rolled Armor Steel (Hill48)';
     if (modelName === 'Tait Water') return 'Liquid Water (Isentropic Modified Tait)';
@@ -4505,7 +5074,10 @@ export function getDefaultPresetForModel(modelName: string): string {
     if (modelName === 'RHT Concrete') return 'Normal-Strength Concrete C35/45 (RHT Default)';
     if (modelName === 'Karagozian & Case (K&C)') return 'Normal-Strength Concrete C35/45 (K&C Auto MAT_072R3)';
     if (modelName === 'CSCM Concrete') return 'Normal-Strength Concrete C35/45 (CSCM MAT_159 Standard)';
-    if (modelName === 'Drucker-Prager' || modelName === 'Mohr-Coulomb') return 'Dense Compacted Sand (Dr = 85%)';
+    if (modelName === 'Drucker-Prager' || modelName === 'Mohr-Coulomb' || modelName === 'Geological Cap (MAT_025)' || modelName === 'Geological Cap') {
+        return 'Dense Compacted Sand (Dr = 85%)';
+    }
+    if (modelName === 'Hoek-Brown Rock') return 'Westerly Granite';
     if (modelName === 'Ideal Gas' || modelName === 'Air') return 'Air (Standard STP, gamma=1.4)';
     if (modelName === 'Ideal Gas Charge') return 'TNT (Ideal Gas Equivalent)';
     if (modelName === 'JWL Detonation Gas' || modelName === 'JWL Charge') return 'TNT (Trinitrotoluene)';
@@ -4513,7 +5085,72 @@ export function getDefaultPresetForModel(modelName: string): string {
     return list.length > 0 ? list[0] : 'Custom';
 }
 
+// =========================================================================
+// Centralized Constitutive Model Semantic Predicates (Single Source of Truth)
+// =========================================================================
 
+export function isIdealGasAirMaterial(modelName: unknown): boolean {
+    const m = String(modelName || '').trim();
+    return m === 'Ideal Gas' || m === 'Air';
+}
+
+export function isIdealGasChargeMaterial(modelName: unknown): boolean {
+    return String(modelName || '').trim() === 'Ideal Gas Charge';
+}
+
+export function isJWLGasMaterial(modelName: unknown): boolean {
+    const m = String(modelName || '').trim();
+    return m === 'JWL Detonation Gas' || m === 'JWL Charge';
+}
+
+export function isEnergeticSolidMaterial(modelName: unknown): boolean {
+    const m = String(modelName || '').trim();
+    return m === 'CREST Reactive Burn' || m === 'JWL Programmed Burn' || m === 'Lee-Tarver Ignition & Growth';
+}
+
+export function isAnyExplosiveMaterial(modelName: unknown): boolean {
+    return isJWLGasMaterial(modelName) || isIdealGasChargeMaterial(modelName) || isEnergeticSolidMaterial(modelName);
+}
+
+export function isConcreteMaterialModel(modelName: unknown): boolean {
+    const m = String(modelName || '').trim();
+    return (
+        m === 'RHT Concrete' ||
+        m === 'Karagozian & Case (K&C)' ||
+        m === 'CSCM Concrete' ||
+        m === 'Concrete Damage Plasticity (CDP)'
+    );
+}
+
+export function isGeomaterialModel(modelName: unknown): boolean {
+    const m = String(modelName || '').trim();
+    return (
+        m === 'Drucker-Prager' ||
+        m === 'Mohr-Coulomb' ||
+        m === 'Geological Cap (MAT_025)' ||
+        m === 'Geological Cap' ||
+        m === 'Hoek-Brown Rock'
+    );
+}
+
+export function isHyperelasticModel(modelName: unknown): boolean {
+    const m = String(modelName || '').trim();
+    return m === 'Hyperelastic (Yeoh)' || m === 'Hyperelastic (Mooney-Rivlin)';
+}
+
+export function isWaterMaterialModel(modelName: unknown): boolean {
+    const m = String(modelName || '').trim();
+    return m === 'Tait Water' || m === 'Water';
+}
+
+export function isFluidOrGasModel(modelName: unknown): boolean {
+    return (
+        isIdealGasAirMaterial(modelName) ||
+        isJWLGasMaterial(modelName) ||
+        isIdealGasChargeMaterial(modelName) ||
+        isWaterMaterialModel(modelName)
+    );
+}
 
 /**
  * Single source of truth for the 'composition' dropdown of JWL Detonation Gas charges.

@@ -57,8 +57,66 @@ enum class MPMMaterialModel {
     ConcreteDamagePlasticity = 11,
     Hill48Orthotropic = 12,
     TaitWater = 13,
-    DruckerPragerSoil = 14
+    DruckerPragerSoil = 14,
+    MohrCoulomb = 15,
+    GeologicalCap = 16,
+    JohnsonHolmquistJH2 = 17,
+    HoekBrownRock = 18,
+    CrushableFoam = 19,
+    SteinbergGuinan = 20,
+    IdealGas = 21
 };
+
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#define HD_MAT_CLASS_FUNC __host__ __device__ inline
+#else
+#define HD_MAT_CLASS_FUNC inline
+#endif
+
+HD_MAT_CLASS_FUNC bool isEnergeticModel(MPMMaterialModel m) {
+    return m == MPMMaterialModel::CRESTReactiveBurn ||
+           m == MPMMaterialModel::JWLProgrammedBurn ||
+           m == MPMMaterialModel::LeeTarverIgnitionGrowth;
+}
+
+HD_MAT_CLASS_FUNC bool isFluidModel(MPMMaterialModel m) {
+    return m == MPMMaterialModel::TaitWater ||
+           m == MPMMaterialModel::IdealGas;
+}
+
+HD_MAT_CLASS_FUNC bool isConcreteModel(MPMMaterialModel m) {
+    return m == MPMMaterialModel::RHTConcrete ||
+           m == MPMMaterialModel::KCConcrete ||
+           m == MPMMaterialModel::CSCMConcrete ||
+           m == MPMMaterialModel::ConcreteDamagePlasticity;
+}
+
+HD_MAT_CLASS_FUNC bool usesMieGruneisenEOS(MPMMaterialModel m) {
+    return m == MPMMaterialModel::JohnsonCookMieGruneisen ||
+           m == MPMMaterialModel::SteinbergGuinan;
+}
+
+HD_MAT_CLASS_FUNC bool isGeomaterialModel(MPMMaterialModel m) {
+    return m == MPMMaterialModel::DruckerPragerSoil ||
+           m == MPMMaterialModel::MohrCoulomb ||
+           m == MPMMaterialModel::GeologicalCap ||
+           m == MPMMaterialModel::HoekBrownRock;
+}
+
+HD_MAT_CLASS_FUNC bool isHyperelasticModel(MPMMaterialModel m) {
+    return m == MPMMaterialModel::HyperelasticYeoh ||
+           m == MPMMaterialModel::HyperelasticMooneyRivlin;
+}
+
+HD_MAT_CLASS_FUNC bool isBrittleCeramicModel(MPMMaterialModel m) {
+    return m == MPMMaterialModel::JohnsonHolmquistJH2;
+}
+
+HD_MAT_CLASS_FUNC bool isFoamModel(MPMMaterialModel m) {
+    return m == MPMMaterialModel::CrushableFoam;
+}
+
+#undef HD_MAT_CLASS_FUNC
 
 enum class SolidReactantEOS : int {
     MieGruneisen = 0,
@@ -107,20 +165,20 @@ struct MPMParticle2D {
     float failure_strain{0.25f};        // Critical equivalent plastic strain (e.g. 0.25)
     float tensile_failure_stress{600.0e6f};// Critical tensile stress cutoff Pa (e.g. 600e6)
 
-    // Johnson-Cook Plasticity & Thermal Softening Parameters
-    float jc_A{792.0e6f};        // Initial yield stress (Pa)
-    float jc_B{510.0e6f};        // Strain hardening constant (Pa)
-    float jc_n{0.26f};           // Strain hardening exponent
-    float jc_C{0.014f};          // Strain rate constant
-    float jc_m{1.03f};           // Thermal softening exponent
+    // Johnson-Cook Plasticity & Thermal Softening Parameters (zero-initialized unless explicitly configured)
+    float jc_A{0.0f};            // Initial yield stress (Pa)
+    float jc_B{0.0f};            // Strain hardening constant (Pa)
+    float jc_n{0.0f};            // Strain hardening exponent
+    float jc_C{0.0f};            // Strain rate constant
+    float jc_m{0.0f};            // Thermal softening exponent
     float T_melt{1793.0f};       // Melting temperature (K)
     float T_room{293.0f};        // Room reference temperature (K)
     float Cp{477.0f};            // Specific heat capacity (J/(kg K))
 
-    // Mie-Grüneisen Shock EOS Parameters
-    float mg_gamma0{1.81f};      // Grüneisen gamma parameter
-    float mg_c0{4570.0f};        // Bulk sound speed (m/s)
-    float mg_s{1.49f};           // Hugoniot Us-Up slope
+    // Mie-Grüneisen Shock EOS Parameters (zero-initialized unless explicitly configured)
+    float mg_gamma0{0.0f};       // Grüneisen gamma parameter
+    float mg_c0{0.0f};           // Bulk sound speed (m/s)
+    float mg_s{0.0f};            // Hugoniot Us-Up slope
 
     // Weibull Flaw Scatter Parameters
     bool enable_heterogeneity{false}; // Enable spatial Weibull flaw scatter (false = homogeneous)
@@ -283,6 +341,8 @@ struct MPMParticle2D {
     float tait_gamma{7.0f};               // Tait exponent gamma
     float tait_p0{101325.0f};             // Reference pressure (Pa)
     float mu_visc{1.0e-3f};               // Dynamic viscosity (Pa s)
+    float ideal_gamma{1.4f};              // Ideal gas adiabatic exponent gamma = cp/cv
+    float ideal_R{287.058f};              // Specific gas constant R (J/(kg*K))
 
     // Density-Based Particle Erosion & FV Grid Handoff
     bool enable_density_erosion{false};
@@ -290,11 +350,17 @@ struct MPMParticle2D {
     float erosion_min_density_ratio{0.0f};// Minimum relative density ratio rho / rho0
     bool erode_to_fv_grid{true};          // Inject eroded fluid/explosive particle into FV grid when coupled
 
+    float sigma_zz{0.0f};        // Out-of-plane plane-strain stress (Pa)
+    float F[2][2]{{1.0f, 0.0f}, {0.0f, 1.0f}}; // Total 2D in-plane deformation gradient (F_zz = 1)
+    float hill_dir[2]{0.0f, 0.0f}; // Corotational primary anisotropy axis (0 sentinel resolves mat.anisotropy_dir on first step)
     bool has_failed{false};      // Total failure status flag
     int state{0};                // 0 = active, 2 = terminated/eroded
     int object_id{0};
     int transfer_scheme{-1};    // -1 = Inherit domain default, otherwise MPMTransferScheme cast
 };
+
+struct MaterialTable3D;
+struct MaterialTable2DHolder;
 
 struct MPMGridNode2D {
     float m;            // Mass
@@ -391,7 +457,10 @@ enum class MPMBoundaryCondition2D {
 class MPMSolver2D {
 public:
     MPMSolver2D();
-    ~MPMSolver2D() = default;
+    ~MPMSolver2D();
+
+    void setMaterialTable(int object_id, const MaterialTable3D& mat);
+    const MaterialTable3D* getMaterialTable(int object_id) const;
 
     // Initialization & Grid Setup
     void initializeGrid(int nx, int ny, float dx, float dy);
@@ -515,6 +584,7 @@ private:
 
     std::vector<MPMGridNode2D> m_grid;
     std::vector<MPMParticle2D> m_particles;
+    std::shared_ptr<MaterialTable2DHolder> m_mat_holder;
 
     float m_last_dt{0.0f};
     float m_last_cfl{0.3f};

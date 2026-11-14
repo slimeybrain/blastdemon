@@ -441,7 +441,8 @@ std::vector<BenchmarkResult> run_level_1_benchmarks() {
 
             // Analytical Lubliner/Lee-Fenves 1D stress
             double sig_trial = 2.0 * G0 * (eps - (1.0/3.0)*eps) + K0 * eps;
-            double dt_exact = (eps > f_t0 / E0) ? std::min(0.99, (eps - f_t0 / E0) / eps_t_max) : 0.0;
+            double eps_t_span = std::max(0.2 * (f_t0 / E0), eps_t_max - (f_t0 / E0));
+            double dt_exact = (eps > f_t0 / E0) ? std::min(0.99, (eps - f_t0 / E0) / eps_t_span) : 0.0;
             double sig_exact = sig_trial * (1.0 - dt_exact);
             exact_stress.push_back(sig_exact / 1.0e6);
         }
@@ -761,13 +762,11 @@ std::vector<BenchmarkResult> run_level_1_benchmarks() {
             const double rate = (epsdot > 1.0) ? (1.0 + mat.jc_C * std::log(epsdot)) : 1.0;
             return (mat.jc_A + mat.jc_B * std::pow(std::max(0.0, ep), (double)mat.jc_n)) * rate * (1.0 - std::pow(Ts, (double)mat.jc_m));
         };
-        auto jc_locus_ref = [&](double sstar) {
-            return mat.jc_d1 + mat.jc_d2 * std::exp(mat.jc_d3 * sstar);
-        };
         auto jc_eps_f_ref = [&](double sstar, double epsdot, double T) {
             const double Ts = std::clamp((T - mat.T_room) / (mat.T_melt - mat.T_room), 0.0, 1.0);
-            const double ratio = std::max(0.15, std::max(0.02, jc_locus_ref(sstar)) / std::max(0.05, jc_locus_ref(1.0 / 3.0)));
-            return std::max(0.01, mat.failure_strain * w_flaw * ratio *
+            const double exp_arg = std::clamp((double)mat.jc_d3 * sstar, -30.0, 30.0);
+            const double jc_triax = std::max(1.0e-4, (double)mat.jc_d1 + (double)mat.jc_d2 * std::exp(exp_arg));
+            return std::max(1.0e-4, jc_triax * w_flaw *
                                   std::max(0.1, 1.0 + mat.jc_d4 * std::log(std::max(1.0, epsdot))) *
                                   std::max(0.1, 1.0 + mat.jc_d5 * Ts));
         };
@@ -830,25 +829,33 @@ std::vector<BenchmarkResult> run_level_1_benchmarks() {
         const double eB_inf = compute_Linf_norm(qB_num, qB_ref);
         const bool B_ok = (!B_failed) && (D_B_num < 0.05) && (std::abs(D_B_num - D_B_ref) <= 1.0e-3 + 0.01 * D_B_ref);
 
-        // ---- Part C: isochoric pure shear (sigma* = 0) — uniaxial-anchored fracture strain (S2 anchor, S4)
+        // ---- Part C: isochoric pure shear (sigma* = 0) — unnormalized JC fracture strain (S2, S4)
         double epf_C_num = -1.0, epf_C_ref = -1.0;
         {
             MPMParticle3D p = make_particle();
-            const int nC = 20000;
-            const float gdot = static_cast<float>(1.0 / (nC * dt));
+            const int nC = 200000;
+            const float gdot = 5000.0f;
             const float L[3][3] = {{0, gdot, 0}, {0, 0, 0}, {0, 0, 0}};
             const double epsdot = gdot / std::sqrt(3.0);
-            double D_ref = 0.0;
-            for (int i = 0; i < nC && !p.has_failed; ++i) {
-                const double ep0 = p.ep_bar, T0 = p.temperature;
-                mpm.driveMaterialPoint(p, dt, L, mat);
-                const double dep = p.ep_bar - ep0;
-                if (dep > 0.0 && epf_C_ref < 0.0) {
-                    const double epsf = jc_eps_f_ref(0.0, epsdot, T0);
-                    if (D_ref + dep / epsf >= 1.0) epf_C_ref = ep0 + (1.0 - D_ref) * epsf;
-                    D_ref += dep / epsf;
+            double D_ref = 0.0, last_epsf = -1.0, ep_ref_end = 0.0;
+            for (int i = 0; i < nC && (!p.has_failed || epf_C_ref < 0.0); ++i) {
+                if (!p.has_failed) {
+                    const double ep0 = p.ep_bar, T0 = p.temperature;
+                    mpm.driveMaterialPoint(p, dt, L, mat);
+                    const double dep = p.ep_bar - ep0;
+                    if (dep > 0.0 && epf_C_ref < 0.0) {
+                        const double epsf = jc_eps_f_ref(0.0, epsdot, T0);
+                        last_epsf = epsf;
+                        if (D_ref + dep / epsf >= 1.0) epf_C_ref = ep0 + (1.0 - D_ref) * epsf;
+                        D_ref += dep / epsf;
+                        ep_ref_end = p.ep_bar;
+                    }
+                    if (p.has_failed) epf_C_num = p.ep_bar;
+                } else if (last_epsf > 0.0) {
+                    epf_C_ref = ep_ref_end + (1.0 - D_ref) * last_epsf;
+                } else {
+                    break;
                 }
-                if (p.has_failed) epf_C_num = p.ep_bar;
             }
         }
         const double eC = (epf_C_ref > 0.0 && epf_C_num > 0.0) ? std::abs(epf_C_num - epf_C_ref) / epf_C_ref : 1.0;
@@ -1023,7 +1030,7 @@ std::vector<BenchmarkResult> run_level_1_benchmarks() {
             er_crit.max_damage = 1.0;
 
             MaterialTable3D mat_casing{};
-            mat_casing.material_model = MPMMaterialModel::Hypoelastic;
+            mat_casing.material_model = MPMMaterialModel::JohnsonCookMieGruneisen;
             mat_casing.density = 7850.0f;
             mat_casing.youngs_modulus = 210.0e9f;
             mat_casing.poissons_ratio = 0.30f;

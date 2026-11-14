@@ -16,6 +16,7 @@ int main() {
 
     // 1. Configure High-Strength Steel Target Plate Material (Johnson-Cook + Mie-Grüneisen EOS)
     MaterialTable3D target_mat{};
+    target_mat.material_model = MPMMaterialModel::JohnsonCookMieGruneisen;
     target_mat.density = 7850.0f;           // 7850 kg/m^3
     target_mat.youngs_modulus = 210.0e9f;   // 210 GPa
     target_mat.poissons_ratio = 0.30f;
@@ -44,6 +45,7 @@ int main() {
 
     // 2. Configure High-Velocity Projectile Material (Tungsten Alloy / Hardened Steel)
     MaterialTable3D proj_mat{};
+    proj_mat.material_model = MPMMaterialModel::JohnsonCookMieGruneisen;
     proj_mat.density = 17800.0f;           // 17,800 kg/m^3 heavy tungsten penetrator
     proj_mat.youngs_modulus = 360.0e9f;   // 360 GPa
     proj_mat.poissons_ratio = 0.28f;

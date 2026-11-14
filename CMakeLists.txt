@@ -197,6 +197,7 @@ add_executable(blast_verify
     backend/BlastSolver/verification/vv_mpm_compact_contact.cpp
     backend/BlastSolver/verification/vv_mpm_sparse_grid.cpp
     backend/BlastSolver/verification/vv_lee_tarver.cpp
+    backend/BlastSolver/verification/vv_mat_audit.cpp
 )
 target_include_directories(blast_verify PRIVATE
     backend/BlastSolver

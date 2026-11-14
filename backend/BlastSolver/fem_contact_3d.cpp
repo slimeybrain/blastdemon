@@ -393,15 +393,9 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
                 p_elem_master = std::max(static_cast<T>(0.0f), -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f));
                 if (elem.mat_id >= 0 && elem.mat_id < static_cast<int>(materials.size())) {
                     const auto& mat = materials[elem.mat_id];
-                    T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
-                    T nu = static_cast<T>(mat.poissons_ratio);
-                    T denom = static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu;
-                    if (std::abs(denom) > static_cast<T>(1.0e-4f)) {
-                        K_master = E / (static_cast<T>(3.0f) * denom);
-                    }
-                    if (mat.density > 0.0f && mat.mg_c0 > 0.0f) {
-                        K_master = std::max(K_master, static_cast<T>(mat.density * mat.mg_c0 * mat.mg_c0));
-                    }
+                    T v_rel = (elem.V0 > static_cast<T>(1.0e-18f) && elem.V > static_cast<T>(0.0f))
+                        ? (elem.V / elem.V0) : static_cast<T>(1.0f);
+                    K_master = Blast::Materials::getEffectiveBulkModulus<T>(mat, v_rel);
                 }
                 K_master = std::max(K_master, static_cast<T>(3.0f) * p_elem_master);
             }
@@ -413,15 +407,9 @@ void FEMContact3D<T>::applyPenaltyForces(FEMSolver3D<T>& solver, T dt) {
                 if (elem.part_id == slave_part) {
                     if (elem.mat_id >= 0 && elem.mat_id < static_cast<int>(materials.size())) {
                         const auto& mat = materials[elem.mat_id];
-                        T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
-                        T nu = static_cast<T>(mat.poissons_ratio);
-                        T denom = static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu;
-                        if (std::abs(denom) > static_cast<T>(1.0e-4f)) {
-                            K_slave = E / (static_cast<T>(3.0f) * denom);
-                        }
-                        if (mat.density > 0.0f && mat.mg_c0 > 0.0f) {
-                            K_slave = std::max(K_slave, static_cast<T>(mat.density * mat.mg_c0 * mat.mg_c0));
-                        }
+                        T v_rel = (elem.V0 > static_cast<T>(1.0e-18f) && elem.V > static_cast<T>(0.0f))
+                            ? (elem.V / elem.V0) : static_cast<T>(1.0f);
+                        K_slave = Blast::Materials::getEffectiveBulkModulus<T>(mat, v_rel);
                     }
                     break;
                 }
@@ -887,15 +875,9 @@ void FEMContact3D<T>::solveMPMFacetContact(FEMSolver3D<T>& fem_solver, MPMSolver
                                 p_elem_master = std::max(static_cast<T>(0.0f), -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f));
                                 if (elem.mat_id >= 0 && elem.mat_id < static_cast<int>(materials.size())) {
                                     const auto& mat = materials[elem.mat_id];
-                                    T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 210.0e9f);
-                                    T nu = static_cast<T>(mat.poissons_ratio);
-                                    T denom = static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu;
-                                    if (std::abs(denom) > static_cast<T>(1.0e-4f)) {
-                                        K_master = E / (static_cast<T>(3.0f) * denom);
-                                    }
-                                    if (mat.density > 0.0f && mat.mg_c0 > 0.0f) {
-                                        K_master = std::max(K_master, static_cast<T>(mat.density * mat.mg_c0 * mat.mg_c0));
-                                    }
+                                    T v_rel = (elem.V0 > static_cast<T>(1.0e-18f) && elem.V > static_cast<T>(0.0f))
+                                        ? (elem.V / elem.V0) : static_cast<T>(1.0f);
+                                    K_master = Blast::Materials::getEffectiveBulkModulus<T>(mat, v_rel);
                                 }
                                 K_master = std::max(K_master, static_cast<T>(3.0f) * p_elem_master);
                             }
