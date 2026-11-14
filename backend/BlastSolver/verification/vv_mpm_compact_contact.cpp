@@ -14,6 +14,8 @@
 
 #include "vv_mpm_compact_contact.hpp"
 #include "mpm_solver_3d_cuda.hpp"
+#include "mpm_solver_2d.hpp"
+#include "mpm_solver_3d.hpp"
 
 #include <functional>
 #include <memory>
@@ -1564,6 +1566,391 @@ std::vector<BenchmarkResult> run_mpm_compact_contact_benchmarks() {
                 << ", dt = " << fmt(on.dt) << " s, Standard transfer + APIC + Leapfrog, Bardenhagen mu = 0.1, e = 0. "
                 << "Release/closing sub-tests: 60 x 20 x 20 grid, dx = 2 mm, dt = 1e-7 s, 50 + 150 steps (release) and 200 steps (closing impact). "
                 << "Scale-free free-face ringing sub-test: 16 x 16 x 12 grid, dx = 7 mm (macro) and dx = 7 um (micro, m_p = 3.4e-13 kg), 250 steps, CPU & GPU.";
+            res.details = det.str();
+        } catch (const std::exception& e) {
+            res.passed = false;
+            res.summary = std::string("FAILED with exception: ") + e.what();
+        }
+        results.push_back(res);
+    }
+
+    // =========================================================================
+    // VV-L2-CMP-09: 2D MPM Transfer Scheme Integrity Suite
+    // Covers: RadialMLS P2G internal stress sign (+=), shifted-ref free-surface
+    // spin/translation, CubicBSpline 5-node [-2, +2] stencil, GIMP/Standard
+    // angular momentum conservation, and per-material GIMP lp update.
+    // =========================================================================
+    {
+        BenchmarkResult res;
+        res.id = "VV-L2-CMP-09";
+        res.title = "2D MPM transfer scheme integrity: RadialMLS sign/free-surface, CubicBSpline 5-node stencil, GIMP/Standard spin";
+        res.level = 2;
+        res.tolerance_l2 = 1.0e-3;
+        res.tolerance_linf = 1.0e-4;
+        res.tolerance_momentum = 1.0e-5;
+        res.tolerance_energy = 1.0e-2;
+        try {
+            // --- 9a: RadialMLS compressed free-surface block expansion (sign check) ---
+            MPMSolver2D rmls_exp;
+            rmls_exp.initializeGrid(32, 32, 0.01f, 0.01f);
+            rmls_exp.setTransferScheme(MPMTransferScheme::RadialMLS);
+            rmls_exp.setVelocityScheme(MPMVelocityScheme::APIC);
+            rmls_exp.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+            rmls_exp.setBoundaryConditions(MPMBoundaryCondition2D::FreeSlip, MPMBoundaryCondition2D::FreeSlip,
+                                           MPMBoundaryCondition2D::FreeSlip, MPMBoundaryCondition2D::FreeSlip);
+            rmls_exp.addRectangleObject(0, 0.16f, 0.16f, 0.12f, 0.12f, 0.0f, 0.0f, 0.0f,
+                                        1000.0f, 1.0e7f, 0.3f, 1.0e12f, 0.0f, 10.0f, 1.0e12f, 4);
+            double rms_init = 0.0;
+            for (auto& p : rmls_exp.getParticles()) {
+                p.sigma.set(-5.0e6f, -5.0e6f, 0.0f);
+                p.sigma_zz = -3.0e6f;
+                rms_init += (p.x[0] - 0.16) * (p.x[0] - 0.16) + (p.x[1] - 0.16) * (p.x[1] - 0.16);
+            }
+            rms_init = std::sqrt(rms_init / rmls_exp.getParticles().size());
+            for (int step = 0; step < 20; ++step) {
+                rmls_exp.stepWithDt(2.0e-6f);
+            }
+            double rms_end = 0.0, vx_right_sum = 0.0, vx_left_sum = 0.0;
+            int n_right = 0, n_left = 0;
+            for (const auto& p : rmls_exp.getParticles()) {
+                rms_end += (p.x[0] - 0.16) * (p.x[0] - 0.16) + (p.x[1] - 0.16) * (p.x[1] - 0.16);
+                if (p.x[0] > 0.20f) { vx_right_sum += p.v[0]; n_right++; }
+                if (p.x[0] < 0.12f) { vx_left_sum += p.v[0]; n_left++; }
+            }
+            rms_end = std::sqrt(rms_end / rmls_exp.getParticles().size());
+            const double vx_right = (n_right > 0) ? (vx_right_sum / n_right) : 0.0;
+            const double vx_left = (n_left > 0) ? (vx_left_sum / n_left) : 0.0;
+            const bool expanded_outward = (rms_end > rms_init) && (vx_right > 1.0) && (vx_left < -1.0);
+
+            // --- 9b/c/d: Spinning & translating elastic bar (dx = 0.01, dy = 0.015 anisotropic) ---
+            auto run_2d_spin = [&](MPMTransferScheme scheme, float dx_2d, float dy_2d,
+                                   double& mom_err_out, double& ang_err_out, double& max_ep_out) {
+                MPMSolver2D s2;
+                s2.initializeGrid(32, 24, dx_2d, dy_2d);
+                s2.setTransferScheme(scheme);
+                s2.setVelocityScheme(MPMVelocityScheme::APIC);
+                s2.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+                s2.setBoundaryConditions(MPMBoundaryCondition2D::FreeSlip, MPMBoundaryCondition2D::FreeSlip,
+                                         MPMBoundaryCondition2D::FreeSlip, MPMBoundaryCondition2D::FreeSlip);
+                const float cx = 16.0f * dx_2d, cy = 12.0f * dy_2d;
+                s2.addRectangleObject(0, cx, cy, 0.10f, 0.06f, 25.0f, -15.0f, 150.0f,
+                                      1000.0f, 5.0e7f, 0.3f, 1.0e12f, 0.0f, 10.0f, 1.0e12f, 4);
+                double P0[2] = {0.0, 0.0}, m_tot = 0.0, Lz0 = 0.0, Pnorm0 = 0.0;
+                for (const auto& p : s2.getParticles()) {
+                    m_tot += p.m;
+                    P0[0] += p.m * p.v[0];
+                    P0[1] += p.m * p.v[1];
+                }
+                Pnorm0 = std::hypot(P0[0], P0[1]);
+                const double vx_cm0 = P0[0] / m_tot, vy_cm0 = P0[1] / m_tot;
+                for (const auto& p : s2.getParticles()) {
+                    Lz0 += p.m * ((p.x[0] - cx) * (p.v[1] - vy_cm0) - (p.x[1] - cy) * (p.v[0] - vx_cm0));
+                }
+                for (int step = 0; step < 40; ++step) {
+                    s2.stepWithDt(1.0e-6f);
+                }
+                double Pt[2] = {0.0, 0.0}, cx_t = 0.0, cy_t = 0.0, Lzt = 0.0;
+                max_ep_out = 0.0;
+                for (const auto& p : s2.getParticles()) {
+                    Pt[0] += p.m * p.v[0];
+                    Pt[1] += p.m * p.v[1];
+                    cx_t += p.m * p.x[0];
+                    cy_t += p.m * p.x[1];
+                    max_ep_out = std::max(max_ep_out, static_cast<double>(p.ep_bar));
+                }
+                cx_t /= m_tot; cy_t /= m_tot;
+                const double vx_cmt = Pt[0] / m_tot, vy_cmt = Pt[1] / m_tot;
+                for (const auto& p : s2.getParticles()) {
+                    Lzt += p.m * ((p.x[0] - cx_t) * (p.v[1] - vy_cmt) - (p.x[1] - cy_t) * (p.v[0] - vx_cmt));
+                }
+                mom_err_out = std::hypot(Pt[0] - P0[0], Pt[1] - P0[1]) / std::max(Pnorm0, 1.0e-30);
+                ang_err_out = std::abs(Lzt - Lz0) / std::max(std::abs(Lz0), 1.0e-30);
+            };
+
+            double mom_rmls = 1.0, ang_rmls = 1.0, ep_rmls = 1.0;
+            double mom_cbs  = 1.0, ang_cbs  = 1.0, ep_cbs  = 1.0;
+            double mom_gimp = 1.0, ang_gimp = 1.0, ep_gimp = 1.0;
+            double mom_std  = 1.0, ang_std  = 1.0, ep_std  = 1.0;
+            run_2d_spin(MPMTransferScheme::RadialMLS,    0.01f, 0.015f, mom_rmls, ang_rmls, ep_rmls);
+            run_2d_spin(MPMTransferScheme::CubicBSpline, 0.01f, 0.010f, mom_cbs,  ang_cbs,  ep_cbs);
+            run_2d_spin(MPMTransferScheme::GIMP,         0.01f, 0.015f, mom_gimp, ang_gimp, ep_gimp);
+            run_2d_spin(MPMTransferScheme::Standard,     0.01f, 0.010f, mom_std,  ang_std,  ep_std);
+
+            // --- 9e: Per-material GIMP lp override in 2D ---
+            MPMSolver2D s2_lp;
+            s2_lp.initializeGrid(16, 16, 0.01f, 0.02f);
+            s2_lp.setTransferScheme(MPMTransferScheme::Standard); // Domain default is Standard
+            s2_lp.setVelocityScheme(MPMVelocityScheme::APIC);
+            s2_lp.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+            s2_lp.addRectangleObject(0, 0.08f, 0.16f, 0.06f, 0.06f, 0.0f, 0.0f, 0.0f,
+                                     1050.0f, 1.0e7f, 0.3f, 1.0e12f, 0.0f, 10.0f, 1.0e12f, 4);
+            MaterialTable3D mat_fluid{};
+            mat_fluid.material_model = MPMMaterialModel::TaitWater;
+            mat_fluid.density = 1050.0f;
+            mat_fluid.tait_rho0 = 1000.0f;
+            mat_fluid.tait_B = 3.0e8f;
+            mat_fluid.tait_gamma = 7.15f;
+            mat_fluid.transfer_scheme = static_cast<int>(MPMTransferScheme::GIMP);
+            s2_lp.setMaterialTable(0, mat_fluid);
+            const double lp0_x_init = s2_lp.getParticles()[0].lp[0];
+            const double lp0_y_init = s2_lp.getParticles()[0].lp[1];
+            const double lp_ratio_init = lp0_y_init / std::max(lp0_x_init, 1.0e-12);
+            for (auto& p : s2_lp.getParticles()) {
+                p.v[0] = 50.0f * (p.x[0] - 0.08f);
+                p.v[1] = 50.0f * (p.x[1] - 0.16f);
+            }
+            for (int step = 0; step < 5; ++step) s2_lp.stepWithDt(1.0e-6f);
+            const double lp0_x_end = s2_lp.getParticles()[0].lp[0];
+            const double lp0_y_end = s2_lp.getParticles()[0].lp[1];
+            const double lp_ratio_err = std::abs((lp0_y_end / std::max(lp0_x_end, 1.0e-12)) - lp_ratio_init) / lp_ratio_init;
+            const bool lp_mutated = std::abs(lp0_x_end - lp0_x_init) > 1.0e-5 * lp0_x_init;
+
+            res.momentum_drift = std::max({mom_rmls, mom_cbs, mom_gimp, mom_std});
+            res.error_l2 = std::max({ang_rmls, ang_cbs, ang_gimp, ang_std});
+            res.error_linf = std::max({ep_rmls, ep_cbs, ep_gimp, ep_std, lp_ratio_err});
+            res.energy_drift = lp_ratio_err;
+            res.passed = expanded_outward && lp_mutated &&
+                         (res.momentum_drift <= res.tolerance_momentum) &&
+                         (res.error_l2 <= 5.0e-3) &&
+                         (res.error_linf <= 1.0e-3);
+
+            std::vector<double> xs{1.0, 2.0, 3.0, 4.0};
+            std::vector<double> ref_zero{0.0, 0.0, 0.0, 0.0};
+            std::vector<double> ang_vals{ang_rmls, ang_cbs, ang_gimp, ang_std};
+            std::string svg_file = "vv_mpm_cmp_09_2d_transfer_integrity.svg";
+            generate_svg_plot(svg_file,
+                              "VV-L2-CMP-09: 2D spin angular momentum error (1=RMLS, 2=CubicBSpline, 3=GIMP, 4=Standard)",
+                              "Scheme Index (-)", "Relative |dLz/Lz0| (-)", xs, ref_zero, ang_vals, 1.0, 5.0);
+            res.svg_path = svg_file;
+
+            std::ostringstream sum;
+            sum << "2D compressed RadialMLS expansion: rms " << fmt(rms_init) << " -> " << fmt(rms_end)
+                << " m (v_left=" << std::fixed << std::setprecision(2) << vx_left << ", v_right=" << vx_right << " m/s)"
+                << "; spin |dLz/Lz0| RMLS/CubicBS/GIMP/Std = "
+                << fmt(ang_rmls) << " / " << fmt(ang_cbs) << " / " << fmt(ang_gimp) << " / " << fmt(ang_std)
+                << "; mom drift max = " << fmt(res.momentum_drift)
+                << "; per-mat GIMP lp ratio err = " << fmt(lp_ratio_err) << " (mutated=" << (lp_mutated ? "yes" : "no") << ").";
+            res.summary = sum.str();
+            res.details = "Discretisation: RadialMLS expansion 32x32 (dx=dy=0.01 m, Np=576, 20 steps dt=2e-6 s); spin tests 32x24 (dx=0.01 m, dy=0.01 or 0.015 m, Np=240, 40 steps dt=1e-6 s, omega=150 rad/s); per-material GIMP lp check 16x16 (dx=0.01 m, dy=0.02 m, 5 steps).";
+        } catch (const std::exception& e) {
+            res.passed = false;
+            res.summary = std::string("FAILED with exception: ") + e.what();
+        }
+        results.push_back(res);
+    }
+
+    // =========================================================================
+    // VV-L2-CMP-10: 3D CPU vs GPU Transfer Fixes (RadialMLS Reflecting Wall,
+    // Anisotropic dx != dy != dz, Anisotropic GIMP lp[0..2], Sparse Override)
+    // =========================================================================
+    {
+        BenchmarkResult res;
+        res.id = "VV-L2-CMP-10";
+        res.title = "3D CPU/GPU transfer fixes: RadialMLS wall impulse, anisotropic grid, GIMP lp[3], sparse per-mat halo";
+        res.level = 2;
+        res.tolerance_l2 = 1.0e-3;
+        res.tolerance_linf = 5.0e-3;
+        res.tolerance_momentum = 1.0e-5;
+        res.tolerance_energy = 5.0e-3;
+        try {
+            // --- 10a: RadialMLS Reflecting Wall Bounce CPU vs CUDA ---
+            auto setup_wall = [&](auto& s) {
+                s.initializeGrid(16, 12, 12, 0.01f, 0.01f, 0.01f);
+                s.setTransferScheme(MPMTransferScheme::RadialMLS);
+                s.setVelocityScheme(MPMVelocityScheme::APIC);
+                s.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+                s.setBoundaryConditions(MPMBoundaryCondition3D::Reflecting, MPMBoundaryCondition3D::FreeSlip,
+                                        MPMBoundaryCondition3D::FreeSlip,   MPMBoundaryCondition3D::FreeSlip,
+                                        MPMBoundaryCondition3D::FreeSlip,   MPMBoundaryCondition3D::FreeSlip);
+                s.addBoxObject(0, 0.025f, 0.06f, 0.06f, 0.04f, 0.04f, 0.04f,
+                               -25.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                               1000.0f, 2.0e8f, 0.3f, 1.0e12f, 0.0f, 10.0f, 1.0e12f, 8);
+            };
+            MPMSolver3D cpu_wall;
+            MPMSolver3DCUDA gpu_wall;
+            setup_wall(cpu_wall);
+            setup_wall(gpu_wall);
+            gpu_wall.syncToDevice();
+            for (int step = 0; step < 180; ++step) {
+                cpu_wall.stepWithDt(2.0e-6f, true);
+                gpu_wall.stepWithDt(2.0e-6f, true);
+            }
+            gpu_wall.syncParticlesToHost();
+            const auto& pw_c = cpu_wall.getParticles();
+            const auto& pw_g = gpu_wall.getParticles();
+            std::vector<double> vw_c, vw_g;
+            double vx_cm_c = 0.0, vx_cm_g = 0.0, mw_tot = 0.0;
+            for (size_t i = 0; i < pw_c.size(); ++i) {
+                vw_c.push_back(pw_c[i].v[0]); vw_c.push_back(pw_c[i].v[1]); vw_c.push_back(pw_c[i].v[2]);
+                vw_g.push_back(pw_g[i].v[0]); vw_g.push_back(pw_g[i].v[1]); vw_g.push_back(pw_g[i].v[2]);
+                vx_cm_c += pw_c[i].m * pw_c[i].v[0];
+                vx_cm_g += pw_g[i].m * pw_g[i].v[0];
+                mw_tot += pw_c[i].m;
+            }
+            vx_cm_c /= mw_tot; vx_cm_g /= mw_tot;
+            const double wall_parity_l2 = compute_L2_norm(vw_g, vw_c);
+            const bool wall_rebounded = (vx_cm_c > 5.0) && (vx_cm_g > 5.0);
+
+            // --- 10b: RadialMLS Anisotropic Grid (dx=0.01, dy=0.02, dz=0.04) CPU vs GPU Spin ---
+            auto setup_aniso = [&](auto& s) {
+                s.initializeGrid(16, 16, 16, 0.01f, 0.02f, 0.04f);
+                s.setTransferScheme(MPMTransferScheme::RadialMLS);
+                s.setVelocityScheme(MPMVelocityScheme::APIC);
+                s.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+                s.setBoundaryConditions(MPMBoundaryCondition3D::FreeSlip, MPMBoundaryCondition3D::FreeSlip,
+                                        MPMBoundaryCondition3D::FreeSlip, MPMBoundaryCondition3D::FreeSlip,
+                                        MPMBoundaryCondition3D::FreeSlip, MPMBoundaryCondition3D::FreeSlip);
+                s.addBoxObject(0, 0.08f, 0.16f, 0.32f, 0.06f, 0.08f, 0.16f,
+                               20.0f, -10.0f, 5.0f, 0.0f, 0.0f, 150.0f,
+                               1000.0f, 5.0e7f, 0.3f, 1.0e12f, 0.0f, 10.0f, 1.0e12f, 8);
+            };
+            MPMSolver3D cpu_aniso;
+            MPMSolver3DCUDA gpu_aniso;
+            setup_aniso(cpu_aniso);
+            setup_aniso(gpu_aniso);
+            double P0[3] = {0,0,0}, Lz0 = 0.0, ma_tot = 0.0;
+            for (const auto& p : cpu_aniso.getParticles()) {
+                ma_tot += p.m;
+                P0[0] += p.m * p.v[0]; P0[1] += p.m * p.v[1]; P0[2] += p.m * p.v[2];
+            }
+            const double P0_norm = std::sqrt(P0[0]*P0[0] + P0[1]*P0[1] + P0[2]*P0[2]);
+            for (const auto& p : cpu_aniso.getParticles()) {
+                Lz0 += p.m * ((p.x[0] - 0.08) * (p.v[1] + 10.0) - (p.x[1] - 0.16) * (p.v[0] - 20.0));
+            }
+            gpu_aniso.syncToDevice();
+            for (int step = 0; step < 40; ++step) {
+                cpu_aniso.stepWithDt(1.0e-6f, true);
+                gpu_aniso.stepWithDt(1.0e-6f, true);
+            }
+            gpu_aniso.syncParticlesToHost();
+            const auto& pa_c = cpu_aniso.getParticles();
+            const auto& pa_g = gpu_aniso.getParticles();
+            std::vector<double> va_c, va_g;
+            double Pt_g[3] = {0,0,0}, cm_g[3] = {0,0,0}, Lzt_g = 0.0;
+            for (size_t i = 0; i < pa_c.size(); ++i) {
+                va_c.push_back(pa_c[i].v[0]); va_c.push_back(pa_c[i].v[1]); va_c.push_back(pa_c[i].v[2]);
+                va_g.push_back(pa_g[i].v[0]); va_g.push_back(pa_g[i].v[1]); va_g.push_back(pa_g[i].v[2]);
+                for (int d = 0; d < 3; ++d) {
+                    Pt_g[d] += pa_g[i].m * pa_g[i].v[d];
+                    cm_g[d] += pa_g[i].m * pa_g[i].x[d];
+                }
+            }
+            for (int d = 0; d < 3; ++d) cm_g[d] /= ma_tot;
+            const double vc_gx = Pt_g[0] / ma_tot, vc_gy = Pt_g[1] / ma_tot;
+            for (const auto& p : pa_g) {
+                Lzt_g += p.m * ((p.x[0] - cm_g[0]) * (p.v[1] - vc_gy) - (p.x[1] - cm_g[1]) * (p.v[0] - vc_gx));
+            }
+            const double aniso_parity_l2 = compute_L2_norm(va_g, va_c);
+            const double aniso_mom_err = std::sqrt((Pt_g[0]-P0[0])*(Pt_g[0]-P0[0]) + (Pt_g[1]-P0[1])*(Pt_g[1]-P0[1]) + (Pt_g[2]-P0[2])*(Pt_g[2]-P0[2])) / P0_norm;
+            const double aniso_ang_err = std::abs(Lzt_g - Lz0) / std::abs(Lz0);
+
+            // --- 10c: Anisotropic GIMP lp[0..2] Preservation on GPU ---
+            MPMSolver3DCUDA gpu_lp;
+            gpu_lp.initializeGrid(12, 12, 12, 0.01f, 0.02f, 0.04f);
+            gpu_lp.setTransferScheme(MPMTransferScheme::Standard); // Overridden per-material to GIMP
+            gpu_lp.setVelocityScheme(MPMVelocityScheme::APIC);
+            gpu_lp.setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+            gpu_lp.addBoxObject(0, 0.06f, 0.12f, 0.24f, 0.04f, 0.08f, 0.16f,
+                                0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                1050.0f, 1.0e7f, 0.3f, 1.0e12f, 0.0f, 10.0f, 1.0e12f, 8);
+            MaterialTable3D mat_lp{};
+            mat_lp.material_model = MPMMaterialModel::TaitWater;
+            mat_lp.density = 1050.0f;
+            mat_lp.tait_rho0 = 1000.0f;
+            mat_lp.tait_B = 3.0e8f;
+            mat_lp.tait_gamma = 7.15f;
+            mat_lp.transfer_scheme = static_cast<int>(MPMTransferScheme::GIMP);
+            gpu_lp.setMaterialTable(0, mat_lp);
+            for (auto& p : gpu_lp.getParticles()) {
+                p.v[0] = 20.0f * (p.x[0] - 0.06f);
+                p.v[1] = 20.0f * (p.x[1] - 0.12f);
+                p.v[2] = 20.0f * (p.x[2] - 0.24f);
+            }
+            const double lp3d_0_init = gpu_lp.getParticles()[0].lp[0];
+            const double lp3d_2_init = gpu_lp.getParticles()[0].lp[2];
+            const double ratio_3d_init = lp3d_2_init / std::max(lp3d_0_init, 1.0e-12);
+            gpu_lp.syncToDevice();
+            for (int step = 0; step < 10; ++step) gpu_lp.stepWithDt(2.0e-6f, true);
+            gpu_lp.syncParticlesToHost();
+            const double lp3d_0_end = gpu_lp.getParticles()[0].lp[0];
+            const double lp3d_2_end = gpu_lp.getParticles()[0].lp[2];
+            const double lp3d_ratio_err = std::abs((lp3d_2_end / std::max(lp3d_0_end, 1.0e-12)) - ratio_3d_init) / ratio_3d_init;
+            const bool lp3d_mutated = std::abs(lp3d_0_end - lp3d_0_init) > 1.0e-5 * lp3d_0_init;
+
+            // --- 10d: Sparse-Grid Per-Material CubicBSpline Halo Activation across Tile Boundary ---
+            auto build_sparse_mat = [&](bool sparse) {
+                auto s = std::make_unique<MPMSolver3DCUDA>();
+                s->setSparseGridMode(sparse);
+                s->initializeGrid(24, 24, 24, 0.01f, 0.01f, 0.01f);
+                s->setTransferScheme(MPMTransferScheme::Standard); // Default pad would be 1 if overrides ignored!
+                s->setVelocityScheme(MPMVelocityScheme::APIC);
+                s->setTimeScheme(MPMTimeIntegrationScheme::Leapfrog);
+                // Center near x = 0.085 (across tile x=0/1 boundary at 0.08) so Cubic [-2, +2] spans into neighbor tile 0
+                s->addBoxObject(0, 0.095f, 0.095f, 0.095f, 0.03f, 0.03f, 0.03f,
+                                -10.0f, 5.0f, 5.0f, 0.0f, 0.0f, 100.0f,
+                                1000.0f, 5.0e7f, 0.3f, 1.0e12f, 0.0f, 10.0f, 1.0e12f, 8);
+                MaterialTable3D mat_c{};
+                mat_c.material_model = MPMMaterialModel::Hypoelastic;
+                mat_c.density = 1000.0f;
+                mat_c.youngs_modulus = 5.0e7f;
+                mat_c.poissons_ratio = 0.3f;
+                mat_c.yield_stress = 1.0e12f;
+                mat_c.transfer_scheme = static_cast<int>(MPMTransferScheme::CubicBSpline);
+                s->setMaterialTable(0, mat_c);
+                s->syncToDevice();
+                return s;
+            };
+            auto sp_dense = build_sparse_mat(false);
+            auto sp_sparse = build_sparse_mat(true);
+            for (int step = 0; step < 20; ++step) {
+                sp_dense->stepWithDt(2.0e-6f, true);
+                sp_sparse->stepWithDt(2.0e-6f, true);
+            }
+            sp_dense->syncParticlesToHost();
+            sp_sparse->syncParticlesToHost();
+            const auto& psd = sp_dense->getParticles();
+            const auto& pss = sp_sparse->getParticles();
+            std::vector<double> vsd, vss;
+            for (size_t i = 0; i < psd.size(); ++i) {
+                vsd.push_back(psd[i].v[0]); vsd.push_back(psd[i].v[1]); vsd.push_back(psd[i].v[2]);
+                vss.push_back(pss[i].v[0]); vss.push_back(pss[i].v[1]); vss.push_back(pss[i].v[2]);
+            }
+            const double sparse_override_l2 = compute_L2_norm(vss, vsd);
+
+            res.error_l2 = std::max({wall_parity_l2, aniso_parity_l2, sparse_override_l2});
+            res.error_linf = std::max(aniso_ang_err, lp3d_ratio_err);
+            res.momentum_drift = aniso_mom_err;
+            res.energy_drift = aniso_ang_err;
+            res.passed = wall_rebounded && lp3d_mutated &&
+                         (res.error_l2 <= 1.0e-3) &&
+                         (res.error_linf <= 5.0e-3) &&
+                         (res.momentum_drift <= 1.0e-5) &&
+                         (sparse_override_l2 <= 1.0e-4);
+
+            std::vector<double> idx_x{1.0, 2.0, 3.0, 4.0};
+            std::vector<double> zero_y{0.0, 0.0, 0.0, 0.0};
+            std::vector<double> err_y{wall_parity_l2, aniso_parity_l2, lp3d_ratio_err, sparse_override_l2};
+            std::string svg_file = "vv_mpm_cmp_10_3d_transfer_fixes.svg";
+            generate_svg_plot(svg_file,
+                              "VV-L2-CMP-10: 3D CPU/GPU parity & invariant errors (1=Wall, 2=Aniso, 3=lp3D, 4=SparseOverride)",
+                              "Sub-test (-)", "Relative Error (-)", idx_x, zero_y, err_y, 1.0, 5.0);
+            res.svg_path = svg_file;
+
+            std::ostringstream sum;
+            sum << "3D RadialMLS wall rebound vx_cm CPU/GPU = " << std::fixed << std::setprecision(2)
+                << vx_cm_c << " / " << vx_cm_g << " m/s (L2 parity=" << fmt(wall_parity_l2) << ")"
+                << "; aniso 1:2:4 RMLS CPU/GPU parity=" << fmt(aniso_parity_l2)
+                << ", mom=" << fmt(aniso_mom_err) << ", |dLz/Lz0|=" << fmt(aniso_ang_err)
+                << "; GPU aniso GIMP lp[2]/lp[0] init=" << std::setprecision(3) << ratio_3d_init
+                << " ratio_err=" << fmt(lp3d_ratio_err) << " (mutated=" << (lp3d_mutated ? "yes" : "no") << ")"
+                << "; sparse CubicBSpline mat-override L2=" << fmt(sparse_override_l2) << ".";
+            res.summary = sum.str();
+            std::ostringstream det;
+            det << "Discretisation: Wall 16x12x12 dx=0.01 m (Np=" << pw_c.size()
+                << ", 180 steps dt=2e-6 s); Aniso 16x16x16 dx=0.01, dy=0.02, dz=0.04 m (Np=" << pa_c.size()
+                << ", 40 steps dt=1e-6 s); lp3D 12x12x12 (Np=" << gpu_lp.getParticles().size()
+                << ", 10 steps); Sparse override 24x24x24 dx=0.01 m across tile boundary x=0.08 m (Np=" << psd.size()
+                << ", 20 steps dt=2e-6 s).";
             res.details = det.str();
         } catch (const std::exception& e) {
             res.passed = false;

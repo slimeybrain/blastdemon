@@ -65,6 +65,7 @@ static inline const MaterialTable3D& resolveMaterialTable2D(
     scratch.erosion_min_density = p.erosion_min_density;
     scratch.erosion_min_density_ratio = p.erosion_min_density_ratio;
     scratch.erode_to_fv_grid = p.erode_to_fv_grid;
+    scratch.transfer_scheme = p.transfer_scheme;
     return scratch;
 }
 
@@ -461,11 +462,14 @@ void MPMSolver2D::particleToGrid() {
         float dev_yy = s_yy + press;
         float vm_stress = std::sqrt(dev_xx * dev_xx + dev_yy * dev_yy + 2.0f * s_xy * s_xy);
 
-        int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme : static_cast<int>(m_transfer_scheme);
+        const MaterialTable3D* mat_ptr = getMaterialTable(p.object_id);
+        int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme
+                       : ((mat_ptr && mat_ptr->transfer_scheme >= 0) ? mat_ptr->transfer_scheme : static_cast<int>(m_transfer_scheme));
 
         if (eff_scheme == static_cast<int>(MPMTransferScheme::RadialMLS)) {
-            // Radial Moving Least Squares MPM (Wendland C2 kernel with Centroid-Centered Linear Completeness)
-            float R_supp = 2.0f * std::max(m_dx, m_dy);
+            // Radial Moving Least Squares MPM (Wendland C2 ellipsoidal per-axis normalized kernel with Centroid-Centered Linear Completeness)
+            const float inv_dx = 1.0f / m_dx;
+            const float inv_dy = 1.0f / m_dy;
             // Pass 1: Local partition of unity sum, centroid displacement, and 2nd-moment tensor via Parallel-Axis Theorem
             float weight_sum = 0.0f;
             float sum_wx = 0.0f, sum_wy = 0.0f;
@@ -483,10 +487,12 @@ void MPMSolver2D::particleToGrid() {
 
                     float dist_x = node_x - p.x[0];
                     float dist_y = node_y - p.x[1];
-                    float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
-                    if (r >= R_supp) continue;
+                    float rxn = dist_x * inv_dx;
+                    float ryn = dist_y * inv_dy;
+                    float r_norm = std::sqrt(rxn * rxn + ryn * ryn);
+                    if (r_norm >= 2.0f) continue;
 
-                    float w = evalWendland_C2(r, R_supp);
+                    float w = evalWendland_C2(r_norm, 2.0f);
                     if (w < 1.0e-7f) continue;
 
                     weight_sum += w;
@@ -514,18 +520,21 @@ void MPMSolver2D::particleToGrid() {
             D[1][0] = D[0][1];
             D[1][1] = sum_wyy * inv_w_sum - delta_y * delta_y;
 
+            float Dn00 = D[0][0] * inv_dx * inv_dx;
+            float Dn01 = D[0][1] * inv_dx * inv_dy;
+            float Dn11 = D[1][1] * inv_dy * inv_dy;
+
             float D_inv[2][2];
-            float det = D[0][0] * D[1][1] - D[0][1] * D[0][1];
-            if (det > 1.0e-18f) {
-                float inv_det = 1.0f / det;
-                D_inv[0][0] =  D[1][1] * inv_det;
-                D_inv[0][1] = -D[0][1] * inv_det;
+            float det_norm = Dn00 * Dn11 - Dn01 * Dn01;
+            if (det_norm > 1.0e-5f) {
+                float inv_det = 1.0f / det_norm;
+                D_inv[0][0] =  Dn11 * inv_det * inv_dx * inv_dx;
+                D_inv[0][1] = -Dn01 * inv_det * inv_dx * inv_dy;
                 D_inv[1][0] =  D_inv[0][1];
-                D_inv[1][1] =  D[0][0] * inv_det;
+                D_inv[1][1] =  Dn00 * inv_det * inv_dy * inv_dy;
             } else {
-                float d_iso = 3.6f / (m_dx * m_dx);
-                D_inv[0][0] = d_iso; D_inv[0][1] = 0.0f;
-                D_inv[1][0] = 0.0f;  D_inv[1][1] = d_iso;
+                D_inv[0][0] = 5.5f * inv_dx * inv_dx; D_inv[0][1] = 0.0f;
+                D_inv[1][0] = 0.0f;                   D_inv[1][1] = 5.5f * inv_dy * inv_dy;
             }
 
             float s_Dinv[2][2];
@@ -546,10 +555,12 @@ void MPMSolver2D::particleToGrid() {
 
                     float dist_x = node_x - p.x[0];
                     float dist_y = node_y - p.x[1];
-                    float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
-                    if (r >= R_supp) continue;
+                    float rxn = dist_x * inv_dx;
+                    float ryn = dist_y * inv_dy;
+                    float r_norm = std::sqrt(rxn * rxn + ryn * ryn);
+                    if (r_norm >= 2.0f) continue;
 
-                    float w = evalWendland_C2(r, R_supp);
+                    float w = evalWendland_C2(r_norm, 2.0f);
                     if (w < 1.0e-7f) continue;
 
                     float weight = w * inv_w_sum;
@@ -568,9 +579,9 @@ void MPMSolver2D::particleToGrid() {
                     node.p[0] += p.m * weight * v_apic_x;
                     node.p[1] += p.m * weight * v_apic_y;
 
-                    // Affine Internal Stress Force: f_int += -V * weight * (s_Dinv · dc)
-                    node.f_int[0] -= p.V * weight * (s_Dinv[0][0] * dc_x + s_Dinv[0][1] * dc_y);
-                    node.f_int[1] -= p.V * weight * (s_Dinv[1][0] * dc_x + s_Dinv[1][1] * dc_y);
+                    // Internal Stress Force scatter (total_f = -f_int): matches tensor-product sign convention
+                    node.f_int[0] += p.V * weight * (s_Dinv[0][0] * dc_x + s_Dinv[0][1] * dc_y);
+                    node.f_int[1] += p.V * weight * (s_Dinv[1][0] * dc_x + s_Dinv[1][1] * dc_y);
 
                     node.von_mises += p.m * weight * vm_stress;
                     node.plastic_strain += p.m * weight * p.ep_bar;
@@ -581,10 +592,12 @@ void MPMSolver2D::particleToGrid() {
             }
         } else {
             // Standard / GIMP / BSpline / CubicBSpline
-            float Sx_arr[4], dSx_arr[4], Sy_arr[4], dSy_arr[4];
+            const int min_offset = (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) ? -2 : -1;
+            const int max_offset = 2;
+            float Sx_arr[5] = {}, dSx_arr[5] = {}, Sy_arr[5] = {}, dSy_arr[5] = {};
             if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
-                for (int offset = -1; offset <= 2; ++offset) {
-                    int idx = offset + 1;
+                for (int offset = min_offset; offset <= max_offset; ++offset) {
+                    int idx = offset - min_offset;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
                     Sx_arr[idx] = evalGIMP_S(p.x[0], nx_val, m_dx, p.lp[0]);
                     dSx_arr[idx] = evalGIMP_dS(p.x[0], nx_val, m_dx, p.lp[0]);
@@ -594,8 +607,8 @@ void MPMSolver2D::particleToGrid() {
                     dSy_arr[idx] = evalGIMP_dS(p.x[1], ny_val, m_dy, p.lp[1]);
                 }
             } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
-                for (int offset = -1; offset <= 2; ++offset) {
-                    int idx = offset + 1;
+                for (int offset = min_offset; offset <= max_offset; ++offset) {
+                    int idx = offset - min_offset;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
                     Sx_arr[idx] = evalBSpline_S(p.x[0], nx_val, m_dx);
                     dSx_arr[idx] = evalBSpline_dS(p.x[0], nx_val, m_dx);
@@ -605,8 +618,8 @@ void MPMSolver2D::particleToGrid() {
                     dSy_arr[idx] = evalBSpline_dS(p.x[1], ny_val, m_dy);
                 }
             } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
-                for (int offset = -1; offset <= 2; ++offset) {
-                    int idx = offset + 1;
+                for (int offset = min_offset; offset <= max_offset; ++offset) {
+                    int idx = offset - min_offset;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
                     Sx_arr[idx] = evalCubicBSpline_S(p.x[0], nx_val, m_dx);
                     dSx_arr[idx] = evalCubicBSpline_dS(p.x[0], nx_val, m_dx);
@@ -616,8 +629,8 @@ void MPMSolver2D::particleToGrid() {
                     dSy_arr[idx] = evalCubicBSpline_dS(p.x[1], ny_val, m_dy);
                 }
             } else {
-                for (int offset = -1; offset <= 2; ++offset) {
-                    int idx = offset + 1;
+                for (int offset = min_offset; offset <= max_offset; ++offset) {
+                    int idx = offset - min_offset;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
                     Sx_arr[idx] = evalLinear_S(p.x[0], nx_val, m_dx);
                     dSx_arr[idx] = evalLinear_dS(p.x[0], nx_val, m_dx);
@@ -628,19 +641,19 @@ void MPMSolver2D::particleToGrid() {
                 }
             }
 
-            for (int offset_i = -1; offset_i <= 2; ++offset_i) {
+            for (int offset_i = min_offset; offset_i <= max_offset; ++offset_i) {
                 int i = base_i + offset_i;
                 if (i < 0 || i >= m_nx) continue;
-                int i_idx = offset_i + 1;
+                int i_idx = offset_i - min_offset;
                 float Sx = Sx_arr[i_idx];
                 if (std::abs(Sx) < 1.0e-7f) continue;
                 float dSx = dSx_arr[i_idx];
                 float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
 
-                for (int offset_j = -1; offset_j <= 2; ++offset_j) {
+                for (int offset_j = min_offset; offset_j <= max_offset; ++offset_j) {
                     int j = base_j + offset_j;
                     if (j < 0 || j >= m_ny) continue;
-                    int j_idx = offset_j + 1;
+                    int j_idx = offset_j - min_offset;
                     float Sy = Sy_arr[j_idx];
                     if (std::abs(Sy) < 1.0e-7f) continue;
                     float dSy = dSy_arr[j_idx];
@@ -865,13 +878,21 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
         float B_new[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
         float L_new[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
 
-        int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme : static_cast<int>(m_transfer_scheme);
+        const MaterialTable3D* mat_ptr = getMaterialTable(p.object_id);
+        int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme
+                       : ((mat_ptr && mat_ptr->transfer_scheme >= 0) ? mat_ptr->transfer_scheme : static_cast<int>(m_transfer_scheme));
         if (eff_scheme == static_cast<int>(MPMTransferScheme::RadialMLS)) {
-            float R_supp = 2.0f * std::max(m_dx, m_dy);
-            // Pass 1: Local partition of unity sum, centroid displacement, and 2nd-moment tensor via Parallel-Axis Theorem
-            float weight_sum_local = 0.0f;
-            float sum_wx = 0.0f, sum_wy = 0.0f;
+            const float inv_dx = 1.0f / m_dx;
+            const float inv_dy = 1.0f / m_dy;
+
+            float geom_w_sum = 0.0f;
+            float geom_wx = 0.0f, geom_wy = 0.0f;
+            float sum_wdx = 0.0f, sum_wdy = 0.0f;
             float sum_wxx = 0.0f, sum_wxy = 0.0f, sum_wyy = 0.0f;
+            float sum_wdvx = 0.0f, sum_wdvy = 0.0f;
+            float A_raw[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
+            bool has_v_ref = false;
+            float v_ref_x = 0.0f, v_ref_y = 0.0f;
 
             for (int offset_i = -2; offset_i <= 2; ++offset_i) {
                 int i = base_i + offset_i;
@@ -885,112 +906,124 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
 
                     float dist_x = node_x - p.x[0];
                     float dist_y = node_y - p.x[1];
-                    float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
-                    if (r >= R_supp) continue;
+                    float rxn = dist_x * inv_dx;
+                    float ryn = dist_y * inv_dy;
+                    float r_norm = std::sqrt(rxn * rxn + ryn * ryn);
+                    if (r_norm >= 2.0f) continue;
 
-                    float w = evalWendland_C2(r, R_supp);
+                    float w = evalWendland_C2(r_norm, 2.0f);
                     if (w < 1.0e-7f) continue;
 
-                    weight_sum_local += w;
-                    sum_wx += w * dist_x;
-                    sum_wy += w * dist_y;
+                    geom_w_sum += w;
+                    geom_wx += w * dist_x;
+                    geom_wy += w * dist_y;
 
-                    sum_wxx += w * dist_x * dist_x;
-                    sum_wxy += w * dist_x * dist_y;
-                    sum_wyy += w * dist_y * dist_y;
-                }
-            }
+                    long long node_idx = gv.slotIndex(i, j);
+                    if (node_idx < 0) continue;
+                    const auto& node = m_grid[node_idx];
 
-            if (weight_sum_local <= 1.0e-7f) {
-                v_pic_x = p.v[0]; v_pic_y = p.v[1];
-            } else {
-                float inv_w_sum = 1.0f / weight_sum_local;
-                float delta_x = sum_wx * inv_w_sum;
-                float delta_y = sum_wy * inv_w_sum;
-                float xc = p.x[0] + delta_x;
-                float yc = p.x[1] + delta_y;
-
-                // Parallel-Axis Moment Tensor: D = sum(w * (x - xc)(x - xc)^T) / w_sum
-                //                                = sum(w * (x - p)(x - p)^T) / w_sum - delta * delta^T
-                float D[2][2];
-                D[0][0] = sum_wxx * inv_w_sum - delta_x * delta_x;
-                D[0][1] = sum_wxy * inv_w_sum - delta_x * delta_y;
-                D[1][0] = D[0][1];
-                D[1][1] = sum_wyy * inv_w_sum - delta_y * delta_y;
-
-                float D_inv[2][2];
-                float det = D[0][0] * D[1][1] - D[0][1] * D[0][1];
-                if (det > 1.0e-18f) {
-                    float inv_det = 1.0f / det;
-                    D_inv[0][0] =  D[1][1] * inv_det;
-                    D_inv[0][1] = -D[0][1] * inv_det;
-                    D_inv[1][0] =  D_inv[0][1];
-                    D_inv[1][1] =  D[0][0] * inv_det;
-                } else {
-                    float d_iso = 3.6f / (m_dx * m_dx);
-                    D_inv[0][0] = d_iso; D_inv[0][1] = 0.0f;
-                    D_inv[1][0] = 0.0f;  D_inv[1][1] = d_iso;
-                }
-
-                for (int offset_i = -2; offset_i <= 2; ++offset_i) {
-                    int i = base_i + offset_i;
-                    if (i < 0 || i >= m_nx) continue;
-                    float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
-
-                    for (int offset_j = -2; offset_j <= 2; ++offset_j) {
-                        int j = base_j + offset_j;
-                        if (j < 0 || j >= m_ny) continue;
-                        float node_y = (static_cast<float>(j) + 0.5f) * m_dy;
-
-                        float dist_x = node_x - p.x[0];
-                        float dist_y = node_y - p.x[1];
-                        float r = std::sqrt(dist_x * dist_x + dist_y * dist_y);
-                        if (r >= R_supp) continue;
-
-                        float w = evalWendland_C2(r, R_supp);
-                        if (w < 1.0e-7f) continue;
-
-                        float weight = w * inv_w_sum;
-                        long long node_idx = gv.slotIndex(i, j);
-                        if (node_idx < 0) continue;
-                        const auto& node = m_grid[node_idx];
-
-                        if (node.m > 1.0e-14f) {
-                            v_pic_x += weight * node.v[0];
-                            v_pic_y += weight * node.v[1];
-                            delta_v_grid_x += weight * (node.v[0] - node.v_old[0]);
-                            delta_v_grid_y += weight * (node.v[1] - node.v_old[1]);
-                            weight_sum += weight;
-
-                            float dc_x = node_x - xc;
-                            float dc_y = node_y - yc;
-
-                            float d_dinv_x = D_inv[0][0] * dc_x + D_inv[0][1] * dc_y;
-                            float d_dinv_y = D_inv[1][0] * dc_x + D_inv[1][1] * dc_y;
-
-                            B_new[0][0] += weight * node.v[0] * d_dinv_x;
-                            B_new[0][1] += weight * node.v[0] * d_dinv_y;
-                            B_new[1][0] += weight * node.v[1] * d_dinv_x;
-                            B_new[1][1] += weight * node.v[1] * d_dinv_y;
-
-                            L_new[0][0] += node.v[0] * weight * d_dinv_x;
-                            L_new[0][1] += node.v[0] * weight * d_dinv_y;
-                            L_new[1][0] += node.v[1] * weight * d_dinv_x;
-                            L_new[1][1] += node.v[1] * weight * d_dinv_y;
+                    if (node.m > 1.0e-14f) {
+                        if (!has_v_ref) {
+                            v_ref_x = node.v[0];
+                            v_ref_y = node.v[1];
+                            has_v_ref = true;
                         }
+                        v_pic_x += w * node.v[0];
+                        v_pic_y += w * node.v[1];
+                        delta_v_grid_x += w * (node.v[0] - node.v_old[0]);
+                        delta_v_grid_y += w * (node.v[1] - node.v_old[1]);
+                        weight_sum += w;
+
+                        float dv_x = node.v[0] - v_ref_x;
+                        float dv_y = node.v[1] - v_ref_y;
+                        sum_wdx += w * dist_x;
+                        sum_wdy += w * dist_y;
+                        sum_wxx += w * dist_x * dist_x;
+                        sum_wxy += w * dist_x * dist_y;
+                        sum_wyy += w * dist_y * dist_y;
+                        sum_wdvx += w * dv_x;
+                        sum_wdvy += w * dv_y;
+
+                        A_raw[0][0] += dv_x * w * dist_x;
+                        A_raw[0][1] += dv_x * w * dist_y;
+                        A_raw[1][0] += dv_y * w * dist_x;
+                        A_raw[1][1] += dv_y * w * dist_y;
                     }
                 }
             }
-        } else {
-            float d_scale = (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) ? 4.0f : 3.0f;
-            float D_inv_x = d_scale / (m_dx * m_dx);
-            float D_inv_y = d_scale / (m_dy * m_dy);
-            const bool is_standard = (eff_scheme == static_cast<int>(MPMTransferScheme::Standard));
 
-            float Sx_arr[4], dSx_arr[4], Sy_arr[4], dSy_arr[4];
+            if (weight_sum > 1.0e-7f) {
+                float inv_w = 1.0f / weight_sum;
+                float delta_act_x = sum_wdx * inv_w;
+                float delta_act_y = sum_wdy * inv_w;
+                float dv_mean_x = sum_wdvx * inv_w;
+                float dv_mean_y = sum_wdvy * inv_w;
+
+                float A_c[2][2];
+                A_c[0][0] = A_raw[0][0] * inv_w - dv_mean_x * delta_act_x;
+                A_c[0][1] = A_raw[0][1] * inv_w - dv_mean_x * delta_act_y;
+                A_c[1][0] = A_raw[1][0] * inv_w - dv_mean_y * delta_act_x;
+                A_c[1][1] = A_raw[1][1] * inv_w - dv_mean_y * delta_act_y;
+
+                float D00 = sum_wxx * inv_w - delta_act_x * delta_act_x;
+                float D01 = sum_wxy * inv_w - delta_act_x * delta_act_y;
+                float D11 = sum_wyy * inv_w - delta_act_y * delta_act_y;
+
+                float Dn00 = D00 * inv_dx * inv_dx;
+                float Dn01 = D01 * inv_dx * inv_dy;
+                float Dn11 = D11 * inv_dy * inv_dy;
+                float det_norm = Dn00 * Dn11 - Dn01 * Dn01;
+                float Dn_min = std::min(Dn00, Dn11);
+                float Dn_max = std::max(Dn00, Dn11);
+
+                if (det_norm > 1.0e-3f * 0.0625f && Dn_min > 0.05f * 0.25f && Dn_min > 0.12f * Dn_max) {
+                    float inv_det = 1.0f / det_norm;
+                    float D_inv[2][2];
+                    D_inv[0][0] =  Dn11 * inv_det * inv_dx * inv_dx;
+                    D_inv[0][1] = -Dn01 * inv_det * inv_dx * inv_dy;
+                    D_inv[1][0] =  D_inv[0][1];
+                    D_inv[1][1] =  Dn00 * inv_det * inv_dy * inv_dy;
+                    B_new[0][0] = A_c[0][0] * D_inv[0][0] + A_c[0][1] * D_inv[1][0];
+                    B_new[0][1] = A_c[0][0] * D_inv[0][1] + A_c[0][1] * D_inv[1][1];
+                    B_new[1][0] = A_c[1][0] * D_inv[0][0] + A_c[1][1] * D_inv[1][0];
+                    B_new[1][1] = A_c[1][0] * D_inv[0][1] + A_c[1][1] * D_inv[1][1];
+                    L_new[0][0] = B_new[0][0]; L_new[0][1] = B_new[0][1];
+                    L_new[1][0] = B_new[1][0]; L_new[1][1] = B_new[1][1];
+                } else {
+                    float tr_Dn = Dn00 + Dn11;
+                    if (tr_Dn > 0.0125f) {
+                        // Rank-1 collinear fallback: exact orthogonal Moore-Penrose pseudoinverse Dn+ = Dn / tr(Dn)^2
+                        float inv_tr2 = 1.0f / (tr_Dn * tr_Dn);
+                        float D_pinv[2][2];
+                        D_pinv[0][0] = Dn00 * inv_tr2 * inv_dx * inv_dx;
+                        D_pinv[0][1] = Dn01 * inv_tr2 * inv_dx * inv_dy;
+                        D_pinv[1][0] = D_pinv[0][1];
+                        D_pinv[1][1] = Dn11 * inv_tr2 * inv_dy * inv_dy;
+                        B_new[0][0] = A_c[0][0] * D_pinv[0][0] + A_c[0][1] * D_pinv[1][0];
+                        B_new[0][1] = A_c[0][0] * D_pinv[0][1] + A_c[0][1] * D_pinv[1][1];
+                        B_new[1][0] = A_c[1][0] * D_pinv[0][0] + A_c[1][1] * D_pinv[1][0];
+                        B_new[1][1] = A_c[1][0] * D_pinv[0][1] + A_c[1][1] * D_pinv[1][1];
+                        L_new[0][0] = B_new[0][0]; L_new[0][1] = B_new[0][1];
+                        L_new[1][0] = B_new[1][0]; L_new[1][1] = B_new[1][1];
+                    }
+                }
+
+                // Linearly complete particle velocity reconstruction accounting for geometric P2G center offset
+                float inv_geom_w = (geom_w_sum > 1.0e-7f) ? (1.0f / geom_w_sum) : 0.0f;
+                float shift_x = delta_act_x - geom_wx * inv_geom_w;
+                float shift_y = delta_act_y - geom_wy * inv_geom_w;
+                v_pic_x -= weight_sum * (B_new[0][0] * shift_x + B_new[0][1] * shift_y);
+                v_pic_y -= weight_sum * (B_new[1][0] * shift_x + B_new[1][1] * shift_y);
+            }
+        } else {
+            const bool is_standard = (eff_scheme == static_cast<int>(MPMTransferScheme::Standard));
+            const int min_offset = (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) ? -2 : -1;
+            const int max_offset = 2;
+
+            float Sx_arr[5] = {}, dSx_arr[5] = {}, Sy_arr[5] = {}, dSy_arr[5] = {};
             if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP)) {
-                for (int offset = -1; offset <= 2; ++offset) {
-                    int idx = offset + 1;
+                for (int offset = min_offset; offset <= max_offset; ++offset) {
+                    int idx = offset - min_offset;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
                     Sx_arr[idx] = evalGIMP_S(p.x[0], nx_val, m_dx, p.lp[0]);
                     dSx_arr[idx] = evalGIMP_dS(p.x[0], nx_val, m_dx, p.lp[0]);
@@ -1000,8 +1033,8 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                     dSy_arr[idx] = evalGIMP_dS(p.x[1], ny_val, m_dy, p.lp[1]);
                 }
             } else if (eff_scheme == static_cast<int>(MPMTransferScheme::BSpline)) {
-                for (int offset = -1; offset <= 2; ++offset) {
-                    int idx = offset + 1;
+                for (int offset = min_offset; offset <= max_offset; ++offset) {
+                    int idx = offset - min_offset;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
                     Sx_arr[idx] = evalBSpline_S(p.x[0], nx_val, m_dx);
                     dSx_arr[idx] = evalBSpline_dS(p.x[0], nx_val, m_dx);
@@ -1011,8 +1044,8 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                     dSy_arr[idx] = evalBSpline_dS(p.x[1], ny_val, m_dy);
                 }
             } else if (eff_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
-                for (int offset = -1; offset <= 2; ++offset) {
-                    int idx = offset + 1;
+                for (int offset = min_offset; offset <= max_offset; ++offset) {
+                    int idx = offset - min_offset;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
                     Sx_arr[idx] = evalCubicBSpline_S(p.x[0], nx_val, m_dx);
                     dSx_arr[idx] = evalCubicBSpline_dS(p.x[0], nx_val, m_dx);
@@ -1022,8 +1055,8 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                     dSy_arr[idx] = evalCubicBSpline_dS(p.x[1], ny_val, m_dy);
                 }
             } else {
-                for (int offset = -1; offset <= 2; ++offset) {
-                    int idx = offset + 1;
+                for (int offset = min_offset; offset <= max_offset; ++offset) {
+                    int idx = offset - min_offset;
                     float nx_val = (static_cast<float>(base_i + offset) + 0.5f) * m_dx;
                     Sx_arr[idx] = evalLinear_S(p.x[0], nx_val, m_dx);
                     dSx_arr[idx] = evalLinear_dS(p.x[0], nx_val, m_dx);
@@ -1034,19 +1067,27 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                 }
             }
 
-            for (int offset_i = -1; offset_i <= 2; ++offset_i) {
+            float sum_wdx = 0.0f, sum_wdy = 0.0f;
+            float sum_wxx = 0.0f, sum_wxy = 0.0f, sum_wyy = 0.0f;
+            float sum_wdvx = 0.0f, sum_wdvy = 0.0f;
+            float A_raw[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
+            float L_raw[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
+            bool has_v_ref = false;
+            float v_ref_x = 0.0f, v_ref_y = 0.0f;
+
+            for (int offset_i = min_offset; offset_i <= max_offset; ++offset_i) {
                 int i = base_i + offset_i;
                 if (i < 0 || i >= m_nx) continue;
-                int i_idx = offset_i + 1;
+                int i_idx = offset_i - min_offset;
                 float Sx = Sx_arr[i_idx];
                 if (std::abs(Sx) < 1.0e-7f) continue;
                 float dSx = dSx_arr[i_idx];
                 float node_x = (static_cast<float>(i) + 0.5f) * m_dx;
 
-                for (int offset_j = -1; offset_j <= 2; ++offset_j) {
+                for (int offset_j = min_offset; offset_j <= max_offset; ++offset_j) {
                     int j = base_j + offset_j;
                     if (j < 0 || j >= m_ny) continue;
-                    int j_idx = offset_j + 1;
+                    int j_idx = offset_j - min_offset;
                     float Sy = Sy_arr[j_idx];
                     if (std::abs(Sy) < 1.0e-7f) continue;
                     float dSy = dSy_arr[j_idx];
@@ -1077,6 +1118,12 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
                             eff_vy = v_old_y + eff_dvy;
                         }
 
+                        if (!has_v_ref) {
+                            v_ref_x = eff_vx;
+                            v_ref_y = eff_vy;
+                            has_v_ref = true;
+                        }
+
                         v_pic_x += weight * eff_vx;
                         v_pic_y += weight * eff_vy;
                         delta_v_grid_x += weight * eff_dvx;
@@ -1085,22 +1132,102 @@ void MPMSolver2D::gridToParticleInternal(float dt) {
 
                         float dist_x = node_x - p.x[0];
                         float dist_y = node_y - p.x[1];
+                        float dv_x = eff_vx - v_ref_x;
+                        float dv_y = eff_vy - v_ref_y;
 
-                        float diff_vx = eff_vx - p.v[0];
-                        float diff_vy = eff_vy - p.v[1];
+                        sum_wdx += weight * dist_x;
+                        sum_wdy += weight * dist_y;
+                        sum_wxx += weight * dist_x * dist_x;
+                        sum_wxy += weight * dist_x * dist_y;
+                        sum_wyy += weight * dist_y * dist_y;
+                        sum_wdvx += weight * dv_x;
+                        sum_wdvy += weight * dv_y;
 
-                        float b_grad_x = is_standard ? dN_dx : (weight * dist_x * D_inv_x);
-                        float b_grad_y = is_standard ? dN_dy : (weight * dist_y * D_inv_y);
+                        A_raw[0][0] += dv_x * weight * dist_x;
+                        A_raw[0][1] += dv_x * weight * dist_y;
+                        A_raw[1][0] += dv_y * weight * dist_x;
+                        A_raw[1][1] += dv_y * weight * dist_y;
 
-                        B_new[0][0] += diff_vx * b_grad_x;
-                        B_new[0][1] += diff_vx * b_grad_y;
-                        B_new[1][0] += diff_vy * b_grad_x;
-                        B_new[1][1] += diff_vy * b_grad_y;
+                        L_raw[0][0] += dv_x * dN_dx;
+                        L_raw[0][1] += dv_x * dN_dy;
+                        L_raw[1][0] += dv_y * dN_dx;
+                        L_raw[1][1] += dv_y * dN_dy;
+                    }
+                }
+            }
 
-                        L_new[0][0] += diff_vx * dN_dx;
-                        L_new[0][1] += diff_vx * dN_dy;
-                        L_new[1][0] += diff_vy * dN_dx;
-                        L_new[1][1] += diff_vy * dN_dy;
+            if (weight_sum > 1.0e-7f) {
+                const float inv_dx = 1.0f / m_dx;
+                const float inv_dy = 1.0f / m_dy;
+                float inv_w = 1.0f / weight_sum;
+                float dx_c = sum_wdx * inv_w;
+                float dy_c = sum_wdy * inv_w;
+                float dv_mean_x = sum_wdvx * inv_w;
+                float dv_mean_y = sum_wdvy * inv_w;
+
+                float A_c[2][2];
+                A_c[0][0] = A_raw[0][0] * inv_w - dv_mean_x * dx_c;
+                A_c[0][1] = A_raw[0][1] * inv_w - dv_mean_x * dy_c;
+                A_c[1][0] = A_raw[1][0] * inv_w - dv_mean_y * dx_c;
+                A_c[1][1] = A_raw[1][1] * inv_w - dv_mean_y * dy_c;
+
+                float D00 = sum_wxx * inv_w - dx_c * dx_c;
+                float D01 = sum_wxy * inv_w - dx_c * dy_c;
+                float D11 = sum_wyy * inv_w - dy_c * dy_c;
+
+                float Dn00 = D00 * inv_dx * inv_dx;
+                float Dn01 = D01 * inv_dx * inv_dy;
+                float Dn11 = D11 * inv_dy * inv_dy;
+                float det_norm = Dn00 * Dn11 - Dn01 * Dn01;
+                float Dn_min = std::min(Dn00, Dn11);
+                float Dn_max = std::max(Dn00, Dn11);
+
+                bool is_well_conditioned = (weight_sum > 0.25f) &&
+                                           (det_norm > 1.0e-3f * 0.0625f) &&
+                                           (Dn_min > 0.05f * 0.25f) &&
+                                           (Dn_min > 0.12f * Dn_max);
+
+                if (is_well_conditioned) {
+                    float inv_det = 1.0f / det_norm;
+                    float D_inv[2][2];
+                    D_inv[0][0] =  Dn11 * inv_det * inv_dx * inv_dx;
+                    D_inv[0][1] = -Dn01 * inv_det * inv_dx * inv_dy;
+                    D_inv[1][0] =  D_inv[0][1];
+                    D_inv[1][1] =  Dn00 * inv_det * inv_dy * inv_dy;
+                    B_new[0][0] = A_c[0][0] * D_inv[0][0] + A_c[0][1] * D_inv[1][0];
+                    B_new[0][1] = A_c[0][0] * D_inv[0][1] + A_c[0][1] * D_inv[1][1];
+                    B_new[1][0] = A_c[1][0] * D_inv[0][0] + A_c[1][1] * D_inv[1][0];
+                    B_new[1][1] = A_c[1][0] * D_inv[0][1] + A_c[1][1] * D_inv[1][1];
+                    if (is_standard && weight_sum > 0.99f) {
+                        L_new[0][0] = L_raw[0][0]; L_new[0][1] = L_raw[0][1];
+                        L_new[1][0] = L_raw[1][0]; L_new[1][1] = L_raw[1][1];
+                    } else {
+                        L_new[0][0] = B_new[0][0]; L_new[0][1] = B_new[0][1];
+                        L_new[1][0] = B_new[1][0]; L_new[1][1] = B_new[1][1];
+                    }
+                } else if (is_standard && weight_sum > 0.99f) {
+                    B_new[0][0] = L_raw[0][0]; B_new[0][1] = L_raw[0][1];
+                    B_new[1][0] = L_raw[1][0]; B_new[1][1] = L_raw[1][1];
+                    L_new[0][0] = L_raw[0][0]; L_new[0][1] = L_raw[0][1];
+                    L_new[1][0] = L_raw[1][0]; L_new[1][1] = L_raw[1][1];
+                } else {
+                    float tr_Dn = Dn00 + Dn11;
+                    if (tr_Dn > 0.0125f && weight_sum > 0.25f) {
+                        float inv_tr2 = 1.0f / (tr_Dn * tr_Dn);
+                        float D_pinv[2][2];
+                        D_pinv[0][0] = Dn00 * inv_tr2 * inv_dx * inv_dx;
+                        D_pinv[0][1] = Dn01 * inv_tr2 * inv_dx * inv_dy;
+                        D_pinv[1][0] = D_pinv[0][1];
+                        D_pinv[1][1] = Dn11 * inv_tr2 * inv_dy * inv_dy;
+                        B_new[0][0] = A_c[0][0] * D_pinv[0][0] + A_c[0][1] * D_pinv[1][0];
+                        B_new[0][1] = A_c[0][0] * D_pinv[0][1] + A_c[0][1] * D_pinv[1][1];
+                        B_new[1][0] = A_c[1][0] * D_pinv[0][0] + A_c[1][1] * D_pinv[1][0];
+                        B_new[1][1] = A_c[1][0] * D_pinv[0][1] + A_c[1][1] * D_pinv[1][1];
+                        L_new[0][0] = B_new[0][0]; L_new[0][1] = B_new[0][1];
+                        L_new[1][0] = B_new[1][0]; L_new[1][1] = B_new[1][1];
+                    } else if (is_standard) {
+                        B_new[0][0] = 0.9f * p.B[0][0]; B_new[0][1] = 0.9f * p.B[0][1];
+                        B_new[1][0] = 0.9f * p.B[1][0]; B_new[1][1] = 0.9f * p.B[1][1];
                     }
                 }
             }
@@ -1408,7 +1535,9 @@ void MPMSolver2D::updateParticleStress(MPMParticle2D& p, float dt, const float L
         if (isHyperelasticModel(mat.material_model)) {
             p.V = std::clamp(st.J * V0_safe, V_min_limit, V_max_limit);
         }
-        if (m_transfer_scheme == MPMTransferScheme::GIMP &&
+        const int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme
+                             : ((mat.transfer_scheme >= 0) ? mat.transfer_scheme : static_cast<int>(m_transfer_scheme));
+        if (eff_scheme == static_cast<int>(MPMTransferScheme::GIMP) &&
             (is_fluid_or_gas || isHyperelasticModel(mat.material_model) || p.has_failed) &&
             m_dx > 0.0f && m_dy > 0.0f) {
             const float lp_scale = std::sqrt(std::max(0.25f, p.V / V_prev));

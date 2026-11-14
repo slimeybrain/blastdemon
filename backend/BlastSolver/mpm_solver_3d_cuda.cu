@@ -482,6 +482,8 @@ __global__ void kernel_pack_aos_to_soa(const MPMParticle3D* aos, MPMParticle3DSo
     }
 
     soa.lp[0][idx] = p.lp[0];
+    soa.lp[1][idx] = p.lp[1];
+    soa.lp[2][idx] = p.lp[2];
     soa.m[idx] = p.m;
     soa.V0[idx] = p.V0;
     soa.V[idx] = p.V;
@@ -558,7 +560,7 @@ __global__ void kernel_unpack_soa_to_aos(MPMParticle3D* aos, MPMParticle3DSoA so
         }
     }
 
-    p.lp[0] = soa.lp[0][idx]; p.lp[1] = soa.lp[0][idx]; p.lp[2] = soa.lp[0][idx];
+    p.lp[0] = soa.lp[0][idx]; p.lp[1] = soa.lp[1][idx]; p.lp[2] = soa.lp[2][idx];
     p.m = soa.m[idx];
     p.V0 = soa.V0[idx];
     p.V = soa.V[idx];
@@ -878,8 +880,10 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                             3.0f * (s_xy * s_xy + s_yz * s_yz + s_zx * s_zx));
 
     if (eff_transfer_scheme == 3) {
-        // Radial Moving Least Squares MPM (Wendland C2 radial kernel with Centroid-Centered Linear Completeness)
-        float R_supp = 2.0f * fmaxf(fmaxf(dx, dy), dz);
+        // Radial Moving Least Squares MPM (Wendland C2 ellipsoidal per-axis normalized kernel with Centroid-Centered Linear Completeness)
+        float inv_dx = 1.0f / dx;
+        float inv_dy = 1.0f / dy;
+        float inv_dz = 1.0f / dz;
 
         // Pass 1: Local partition of unity sum, centroid displacement, and 2nd-moment tensor via Parallel-Axis Theorem
         float local_w_sum = 0.0f;
@@ -888,27 +892,36 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
         float sum_wyy = 0.0f, sum_wyz = 0.0f, sum_wzz = 0.0f;
 
         for (int offset_i = -2; offset_i <= 2; ++offset_i) {
-            int i = base_i + offset_i;
-            if (i < 0 || i >= nx) continue;
-            float node_x = (static_cast<float>(i) + 0.5f) * dx;
+            int raw_i = base_i + offset_i;
+            int i = raw_i;
+            float sign_x = 1.0f;
+            if (!resolve_ghost_node_3d(i, sign_x, nx, bc_x_min, bc_x_max)) continue;
+            float node_x = (static_cast<float>(raw_i) + 0.5f) * dx;
 
             for (int offset_j = -2; offset_j <= 2; ++offset_j) {
-                int j = base_j + offset_j;
-                if (j < 0 || j >= ny) continue;
-                float node_y = (static_cast<float>(j) + 0.5f) * dy;
+                int raw_j = base_j + offset_j;
+                int j = raw_j;
+                float sign_y = 1.0f;
+                if (!resolve_ghost_node_3d(j, sign_y, ny, bc_y_min, bc_y_max)) continue;
+                float node_y = (static_cast<float>(raw_j) + 0.5f) * dy;
 
                 for (int offset_k = -2; offset_k <= 2; ++offset_k) {
-                    int k = base_k + offset_k;
-                    if (k < 0 || k >= nz) continue;
-                    float node_z = (static_cast<float>(k) + 0.5f) * dz;
+                    int raw_k = base_k + offset_k;
+                    int k = raw_k;
+                    float sign_z = 1.0f;
+                    if (!resolve_ghost_node_3d(k, sign_z, nz, bc_z_min, bc_z_max)) continue;
+                    float node_z = (static_cast<float>(raw_k) + 0.5f) * dz;
 
                     float dist_x = node_x - px;
                     float dist_y = node_y - py;
                     float dist_z = node_z - pz;
-                    float r = sqrtf(dist_x * dist_x + dist_y * dist_y + dist_z * dist_z);
-                    if (r >= R_supp) continue;
+                    float rxn = dist_x * inv_dx;
+                    float ryn = dist_y * inv_dy;
+                    float rzn = dist_z * inv_dz;
+                    float r_norm = sqrtf(rxn * rxn + ryn * ryn + rzn * rzn);
+                    if (r_norm >= 2.0f) continue;
 
-                    float w = evalWendland_C2_dev(r, R_supp);
+                    float w = evalWendland_C2_dev(r_norm, 2.0f);
                     if (w < 1.0e-7f) continue;
 
                     local_w_sum += w;
@@ -948,10 +961,12 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
             D[2][1] = D[1][2];
             D[2][2] = sum_wzz * inv_w_sum - delta_z * delta_z;
 
-            float h2 = (dx * dx + dy * dy + dz * dz) / 3.0f;
-            float inv_h2 = 1.0f / fmaxf(h2, 1.0e-16f);
-            float D00 = D[0][0] * inv_h2, D01 = D[0][1] * inv_h2, D02 = D[0][2] * inv_h2;
-            float D11 = D[1][1] * inv_h2, D12 = D[1][2] * inv_h2, D22 = D[2][2] * inv_h2;
+            float D00 = D[0][0] * inv_dx * inv_dx;
+            float D01 = D[0][1] * inv_dx * inv_dy;
+            float D02 = D[0][2] * inv_dx * inv_dz;
+            float D11 = D[1][1] * inv_dy * inv_dy;
+            float D12 = D[1][2] * inv_dy * inv_dz;
+            float D22 = D[2][2] * inv_dz * inv_dz;
 
             float D_inv[3][3];
             float det_norm = D00 * (D11 * D22 - D12 * D12) -
@@ -959,21 +974,20 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                              D02 * (D01 * D12 - D11 * D02);
 
             if (det_norm > 1.0e-5f) {
-                float inv_det = inv_h2 / det_norm;
-                D_inv[0][0] =  (D11 * D22 - D12 * D12) * inv_det;
-                D_inv[0][1] = -(D01 * D22 - D12 * D02) * inv_det;
-                D_inv[0][2] =  (D01 * D12 - D11 * D02) * inv_det;
+                float inv_det = 1.0f / det_norm;
+                D_inv[0][0] =  (D11 * D22 - D12 * D12) * inv_det * inv_dx * inv_dx;
+                D_inv[0][1] = -(D01 * D22 - D12 * D02) * inv_det * inv_dx * inv_dy;
+                D_inv[0][2] =  (D01 * D12 - D11 * D02) * inv_det * inv_dx * inv_dz;
                 D_inv[1][0] = D_inv[0][1];
-                D_inv[1][1] =  (D00 * D22 - D02 * D02) * inv_det;
-                D_inv[1][2] = -(D00 * D12 - D01 * D02) * inv_det;
+                D_inv[1][1] =  (D00 * D22 - D02 * D02) * inv_det * inv_dy * inv_dy;
+                D_inv[1][2] = -(D00 * D12 - D01 * D02) * inv_det * inv_dy * inv_dz;
                 D_inv[2][0] = D_inv[0][2];
                 D_inv[2][1] = D_inv[1][2];
-                D_inv[2][2] =  (D00 * D11 - D01 * D01) * inv_det;
+                D_inv[2][2] =  (D00 * D11 - D01 * D01) * inv_det * inv_dz * inv_dz;
             } else {
-                float d_iso = 5.5f * inv_h2;
-                D_inv[0][0] = d_iso; D_inv[0][1] = 0.0f;  D_inv[0][2] = 0.0f;
-                D_inv[1][0] = 0.0f;  D_inv[1][1] = d_iso; D_inv[1][2] = 0.0f;
-                D_inv[2][0] = 0.0f;  D_inv[2][1] = 0.0f;  D_inv[2][2] = d_iso;
+                D_inv[0][0] = 5.5f * inv_dx * inv_dx; D_inv[0][1] = 0.0f;                 D_inv[0][2] = 0.0f;
+                D_inv[1][0] = 0.0f;                 D_inv[1][1] = 5.5f * inv_dy * inv_dy; D_inv[1][2] = 0.0f;
+                D_inv[2][0] = 0.0f;                 D_inv[2][1] = 0.0f;                 D_inv[2][2] = 5.5f * inv_dz * inv_dz;
             }
 
             float s_Dinv[3][3];
@@ -990,27 +1004,36 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
             s_Dinv[2][2] = s_zx * D_inv[0][2] + s_yz * D_inv[1][2] + s_zz * D_inv[2][2];
 
             for (int offset_i = -2; offset_i <= 2; ++offset_i) {
-                int i = base_i + offset_i;
-                if (i < 0 || i >= nx) continue;
-                float node_x = (static_cast<float>(i) + 0.5f) * dx;
+                int raw_i = base_i + offset_i;
+                int i = raw_i;
+                float sign_x = 1.0f;
+                if (!resolve_ghost_node_3d(i, sign_x, nx, bc_x_min, bc_x_max)) continue;
+                float node_x = (static_cast<float>(raw_i) + 0.5f) * dx;
 
                 for (int offset_j = -2; offset_j <= 2; ++offset_j) {
-                    int j = base_j + offset_j;
-                    if (j < 0 || j >= ny) continue;
-                    float node_y = (static_cast<float>(j) + 0.5f) * dy;
+                    int raw_j = base_j + offset_j;
+                    int j = raw_j;
+                    float sign_y = 1.0f;
+                    if (!resolve_ghost_node_3d(j, sign_y, ny, bc_y_min, bc_y_max)) continue;
+                    float node_y = (static_cast<float>(raw_j) + 0.5f) * dy;
 
                     for (int offset_k = -2; offset_k <= 2; ++offset_k) {
-                        int k = base_k + offset_k;
-                        if (k < 0 || k >= nz) continue;
-                        float node_z = (static_cast<float>(k) + 0.5f) * dz;
+                        int raw_k = base_k + offset_k;
+                        int k = raw_k;
+                        float sign_z = 1.0f;
+                        if (!resolve_ghost_node_3d(k, sign_z, nz, bc_z_min, bc_z_max)) continue;
+                        float node_z = (static_cast<float>(raw_k) + 0.5f) * dz;
 
                         float dist_x = node_x - px;
                         float dist_y = node_y - py;
                         float dist_z = node_z - pz;
-                        float r = sqrtf(dist_x * dist_x + dist_y * dist_y + dist_z * dist_z);
-                        if (r >= R_supp) continue;
+                        float rxn = dist_x * inv_dx;
+                        float ryn = dist_y * inv_dy;
+                        float rzn = dist_z * inv_dz;
+                        float r_norm = sqrtf(rxn * rxn + ryn * ryn + rzn * rzn);
+                        if (r_norm >= 2.0f) continue;
 
-                        float w = evalWendland_C2_dev(r, R_supp);
+                        float w = evalWendland_C2_dev(r_norm, 2.0f);
                         if (w < s_cutoff) continue;
 
                         float weight = w * inv_w_sum;
@@ -1050,17 +1073,17 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                         float v_apic_y = v_y + (B_10 * dc_x + B_11 * dc_y + B_12 * dc_z);
                         float v_apic_z = v_z + (B_20 * dc_x + B_21 * dc_y + B_22 * dc_z);
 
-                        atomicAdd(&node->p[0], p_m * weight * v_apic_x);
-                        atomicAdd(&node->p[1], p_m * weight * v_apic_y);
-                        atomicAdd(&node->p[2], p_m * weight * v_apic_z);
+                        atomicAdd(&node->p[0], sign_x * p_m * weight * v_apic_x);
+                        atomicAdd(&node->p[1], sign_y * p_m * weight * v_apic_y);
+                        atomicAdd(&node->p[2], sign_z * p_m * weight * v_apic_z);
 
                         float f_stress_x = -p_V * weight * (s_Dinv[0][0] * dc_x + s_Dinv[0][1] * dc_y + s_Dinv[0][2] * dc_z);
                         float f_stress_y = -p_V * weight * (s_Dinv[1][0] * dc_x + s_Dinv[1][1] * dc_y + s_Dinv[1][2] * dc_z);
                         float f_stress_z = -p_V * weight * (s_Dinv[2][0] * dc_x + s_Dinv[2][1] * dc_y + s_Dinv[2][2] * dc_z);
 
-                        atomicAdd(&node->f_int[0], f_stress_x);
-                        atomicAdd(&node->f_int[1], f_stress_y);
-                        atomicAdd(&node->f_int[2], f_stress_z);
+                        atomicAdd(&node->f_int[0], sign_x * f_stress_x);
+                        atomicAdd(&node->f_int[1], sign_y * f_stress_y);
+                        atomicAdd(&node->f_int[2], sign_z * f_stress_z);
 
                         atomicAdd(&node->pressure, p_m * weight * press);
                         atomicAdd(&node->temperature, p_m * weight * p_temp);
@@ -1072,19 +1095,19 @@ __global__ void kernel_p2g_3d(MPMParticle3DSoA soa, int num_particles,
                         }
 
                         long long mn_row = d_mat_m ? mpm_mat_row(d_mat_tag, num_materials, num_nodes_total, p_mat_id, node_idx) : -1;
-                        if (d_mat_m && mn_row < 0 && d_mat_counters && d_mat_tag[node_idx] != p_mat_id) {
+                        if (d_mat_m && mn_row < 0 && d_mat_tag[node_idx] != p_mat_id) {
                             // Tag pass and scatter pass disagree: fail loudly on the host (never silently drop mass)
-                            atomicAdd(&d_mat_counters[1], 1);
+                            if (d_mat_counters) atomicAdd(&d_mat_counters[1], 1);
                         }
                         if (mn_row >= 0) {
                             size_t mn_idx = static_cast<size_t>(mn_row);
                             atomicAdd(&d_mat_m[mn_idx], p_m * weight);
-                            atomicAdd(&d_mat_p[mn_idx * 3 + 0], p_m * weight * v_apic_x);
-                            atomicAdd(&d_mat_p[mn_idx * 3 + 1], p_m * weight * v_apic_y);
-                            atomicAdd(&d_mat_p[mn_idx * 3 + 2], p_m * weight * v_apic_z);
-                            atomicAdd(&d_mat_f[mn_idx * 3 + 0], f_stress_x);
-                            atomicAdd(&d_mat_f[mn_idx * 3 + 1], f_stress_y);
-                            atomicAdd(&d_mat_f[mn_idx * 3 + 2], f_stress_z);
+                            atomicAdd(&d_mat_p[mn_idx * 3 + 0], sign_x * p_m * weight * v_apic_x);
+                            atomicAdd(&d_mat_p[mn_idx * 3 + 1], sign_y * p_m * weight * v_apic_y);
+                            atomicAdd(&d_mat_p[mn_idx * 3 + 2], sign_z * p_m * weight * v_apic_z);
+                            atomicAdd(&d_mat_f[mn_idx * 3 + 0], sign_x * f_stress_x);
+                            atomicAdd(&d_mat_f[mn_idx * 3 + 1], sign_y * f_stress_y);
+                            atomicAdd(&d_mat_f[mn_idx * 3 + 2], sign_z * f_stress_z);
                         }
                     }
                 }
@@ -2322,7 +2345,7 @@ __global__ void kernel_thermal_conduction_3d(MPMGridNode3D* grid, int nx, int ny
 }
 
 // Forward declaration of constitutive stress update
-__device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat, float ep_smoothed = 0.0f, bool enable_impact_welding = false, float dx_elem = 0.0f);
+__device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat, float ep_smoothed = 0.0f, bool enable_impact_welding = false, float dx_elem = 0.0f, bool is_gimp = false);
 
 // Device helper: integrate particle position and enforce domain boundary conditions
 __device__ inline void integrate_particle_position_and_bc(
@@ -2567,6 +2590,7 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
     float sum_wyy = 0.0f, sum_wyz = 0.0f, sum_wzz = 0.0f;
     float sum_b_grad_x = 0.0f, sum_b_grad_y = 0.0f, sum_b_grad_z = 0.0f;
     float sum_l_grad_x = 0.0f, sum_l_grad_y = 0.0f, sum_l_grad_z = 0.0f;
+    float geom_delta_x = 0.0f, geom_delta_y = 0.0f, geom_delta_z = 0.0f;
     bool truncated_open_bc = false;
     float sum_wgd_x = 0.0f, sum_wgd_y = 0.0f, sum_wgd_z = 0.0f;
     float sum_wgxx = 0.0f, sum_wgxy = 0.0f, sum_wgxz = 0.0f;
@@ -2578,8 +2602,10 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
     float face_sup_z[2] = {0.0f, 0.0f};
 
     if (eff_transfer_scheme == 3) {
-        // Radial Moving Least Squares MPM (Wendland C2 radial kernel with Centroid-Centered Linear Completeness)
-        float R_supp = 2.0f * fmaxf(fmaxf(dx, dy), dz);
+        // Radial Moving Least Squares MPM (Wendland C2 ellipsoidal per-axis normalized kernel with Centroid-Centered Linear Completeness)
+        float inv_dx = 1.0f / dx;
+        float inv_dy = 1.0f / dy;
+        float inv_dz = 1.0f / dz;
 
         // Pass 1: Local partition of unity sum, centroid displacement, and 2nd-moment tensor via Parallel-Axis Theorem
         float local_w_sum = 0.0f;
@@ -2611,10 +2637,13 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                     float dist_x = node_x - px;
                     float dist_y = node_y - py;
                     float dist_z = node_z - pz;
-                    float r = sqrtf(dist_x * dist_x + dist_y * dist_y + dist_z * dist_z);
-                    if (r >= R_supp) continue;
+                    float rxn = dist_x * inv_dx;
+                    float ryn = dist_y * inv_dy;
+                    float rzn = dist_z * inv_dz;
+                    float r_norm = sqrtf(rxn * rxn + ryn * ryn + rzn * rzn);
+                    if (r_norm >= 2.0f) continue;
 
-                    float w = evalWendland_C2_dev(r, R_supp);
+                    float w = evalWendland_C2_dev(r_norm, 2.0f);
                     if (w < 1.0e-7f) continue;
 
                     local_w_sum += w;
@@ -2637,6 +2666,9 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
             float delta_x = sum_wx * inv_w_sum;
             float delta_y = sum_wy * inv_w_sum;
             float delta_z = sum_wz * inv_w_sum;
+            geom_delta_x = delta_x;
+            geom_delta_y = delta_y;
+            geom_delta_z = delta_z;
             float xc = px + delta_x;
             float yc = py + delta_y;
             float zc = pz + delta_z;
@@ -2654,10 +2686,12 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
             D[2][1] = D[1][2];
             D[2][2] = r_wzz * inv_w_sum - delta_z * delta_z;
 
-            float h2 = (dx * dx + dy * dy + dz * dz) / 3.0f;
-            float inv_h2 = 1.0f / fmaxf(h2, 1.0e-16f);
-            float D00 = D[0][0] * inv_h2, D01 = D[0][1] * inv_h2, D02 = D[0][2] * inv_h2;
-            float D11 = D[1][1] * inv_h2, D12 = D[1][2] * inv_h2, D22 = D[2][2] * inv_h2;
+            float D00 = D[0][0] * inv_dx * inv_dx;
+            float D01 = D[0][1] * inv_dx * inv_dy;
+            float D02 = D[0][2] * inv_dx * inv_dz;
+            float D11 = D[1][1] * inv_dy * inv_dy;
+            float D12 = D[1][2] * inv_dy * inv_dz;
+            float D22 = D[2][2] * inv_dz * inv_dz;
 
             float D_inv[3][3];
             float det_norm = D00 * (D11 * D22 - D12 * D12) -
@@ -2665,21 +2699,20 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                              D02 * (D01 * D12 - D11 * D02);
 
             if (det_norm > 1.0e-5f) {
-                float inv_det = inv_h2 / det_norm;
-                D_inv[0][0] =  (D11 * D22 - D12 * D12) * inv_det;
-                D_inv[0][1] = -(D01 * D22 - D12 * D02) * inv_det;
-                D_inv[0][2] =  (D01 * D12 - D11 * D02) * inv_det;
+                float inv_det = 1.0f / det_norm;
+                D_inv[0][0] =  (D11 * D22 - D12 * D12) * inv_det * inv_dx * inv_dx;
+                D_inv[0][1] = -(D01 * D22 - D12 * D02) * inv_det * inv_dx * inv_dy;
+                D_inv[0][2] =  (D01 * D12 - D11 * D02) * inv_det * inv_dx * inv_dz;
                 D_inv[1][0] = D_inv[0][1];
-                D_inv[1][1] =  (D00 * D22 - D02 * D02) * inv_det;
-                D_inv[1][2] = -(D00 * D12 - D01 * D02) * inv_det;
+                D_inv[1][1] =  (D00 * D22 - D02 * D02) * inv_det * inv_dy * inv_dy;
+                D_inv[1][2] = -(D00 * D12 - D01 * D02) * inv_det * inv_dy * inv_dz;
                 D_inv[2][0] = D_inv[0][2];
                 D_inv[2][1] = D_inv[1][2];
-                D_inv[2][2] =  (D00 * D11 - D01 * D01) * inv_det;
+                D_inv[2][2] =  (D00 * D11 - D01 * D01) * inv_det * inv_dz * inv_dz;
             } else {
-                float d_iso = 5.5f * inv_h2;
-                D_inv[0][0] = d_iso; D_inv[0][1] = 0.0f;  D_inv[0][2] = 0.0f;
-                D_inv[1][0] = 0.0f;  D_inv[1][1] = d_iso; D_inv[1][2] = 0.0f;
-                D_inv[2][0] = 0.0f;  D_inv[2][1] = 0.0f;  D_inv[2][2] = d_iso;
+                D_inv[0][0] = 5.5f * inv_dx * inv_dx; D_inv[0][1] = 0.0f;                 D_inv[0][2] = 0.0f;
+                D_inv[1][0] = 0.0f;                 D_inv[1][1] = 5.5f * inv_dy * inv_dy; D_inv[1][2] = 0.0f;
+                D_inv[2][0] = 0.0f;                 D_inv[2][1] = 0.0f;                 D_inv[2][2] = 5.5f * inv_dz * inv_dz;
             }
 
             for (int offset_i = -2; offset_i <= 2; ++offset_i) {
@@ -2706,10 +2739,13 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                         float dist_x = node_x - px;
                         float dist_y = node_y - py;
                         float dist_z = node_z - pz;
-                        float r = sqrtf(dist_x * dist_x + dist_y * dist_y + dist_z * dist_z);
-                        if (r >= R_supp) continue;
+                        float rxn = dist_x * inv_dx;
+                        float ryn = dist_y * inv_dy;
+                        float rzn = dist_z * inv_dz;
+                        float r_norm = sqrtf(rxn * rxn + ryn * ryn + rzn * rzn);
+                        if (r_norm >= 2.0f) continue;
 
-                        float w = evalWendland_C2_dev(r, R_supp);
+                        float w = evalWendland_C2_dev(r_norm, 2.0f);
                         if (w < 1.0e-7f) continue;
 
                         float weight = w * inv_w_sum;
@@ -3477,15 +3513,18 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
         float delta_x = sum_wd_x * inv_w;
         float delta_y = sum_wd_y * inv_w;
         float delta_z = sum_wd_z * inv_w;
+        float shift_x = delta_x - geom_delta_x;
+        float shift_y = delta_y - geom_delta_y;
+        float shift_z = delta_z - geom_delta_z;
 
         if (truncated_open_bc) {
             // Stencil overhangs an open (Transmitting / Lysmer / Terminate) boundary:
-            // shift v_pic back from the truncated stencil centroid to the particle position x_p
+            // shift v_pic back from the active centroid to the P2G scatter center (x_p + geom_delta)
             // using the particle's affine gradient B_p, and preserve B_p with zero artificial boundary strain.
             if (velocity_scheme == 0) {
-                v_pic_x -= soa.B[0][0][p_idx] * delta_x + soa.B[0][1][p_idx] * delta_y + soa.B[0][2][p_idx] * delta_z;
-                v_pic_y -= soa.B[1][0][p_idx] * delta_x + soa.B[1][1][p_idx] * delta_y + soa.B[1][2][p_idx] * delta_z;
-                v_pic_z -= soa.B[2][0][p_idx] * delta_x + soa.B[2][1][p_idx] * delta_y + soa.B[2][2][p_idx] * delta_z;
+                v_pic_x -= soa.B[0][0][p_idx] * shift_x + soa.B[0][1][p_idx] * shift_y + soa.B[0][2][p_idx] * shift_z;
+                v_pic_y -= soa.B[1][0][p_idx] * shift_x + soa.B[1][1][p_idx] * shift_y + soa.B[1][2][p_idx] * shift_z;
+                v_pic_z -= soa.B[2][0][p_idx] * shift_x + soa.B[2][1][p_idx] * shift_y + soa.B[2][2][p_idx] * shift_z;
             }
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
@@ -3511,9 +3550,9 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
             // or GIMP transfer scheme where D is non-constant across cell.
             // Note: Standard trilinear already evaluates exact B_new = L_new = sum v_i * dN_i on interior 2x2x2 stencils.
             bool is_boundary_stencil = (weight_sum < 0.999f ||
-                                        fabsf(delta_x) > 1.0e-4f * dx ||
-                                        fabsf(delta_y) > 1.0e-4f * dy ||
-                                        fabsf(delta_z) > 1.0e-4f * dz);
+                                        fabsf(shift_x) > 1.0e-4f * dx ||
+                                        fabsf(shift_y) > 1.0e-4f * dy ||
+                                        fabsf(shift_z) > 1.0e-4f * dz);
             if (is_boundary_stencil || eff_transfer_scheme == 1) {
                 float D00 = sum_wxx - weight_sum * delta_x * delta_x;
                 float D01 = sum_wxy - weight_sum * delta_x * delta_y;
@@ -3524,13 +3563,15 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
 
                 float det_D = D00 * (D11 * D22 - D12 * D12) - D01 * (D01 * D22 - D12 * D02) + D02 * (D01 * D12 - D11 * D02);
                 float det_ref_abs = (1.0f / 64.0f) * (dx * dx) * (dy * dy) * (dz * dz);
-                float diag_ref_abs = 0.25f * (dx * dx);
-                float D_min_diag = fminf(D00, fminf(D11, D22));
-                float D_max_diag = fmaxf(D00, fmaxf(D11, D22));
+                float Dn00 = D00 / (dx * dx);
+                float Dn11 = D11 / (dy * dy);
+                float Dn22 = D22 / (dz * dz);
+                float Dn_min_diag = fminf(Dn00, fminf(Dn11, Dn22));
+                float Dn_max_diag = fmaxf(Dn00, fmaxf(Dn11, Dn22));
                 bool is_well_conditioned = (weight_sum > 0.25f) &&
                                            (det_D > 1.0e-3f * det_ref_abs) &&
-                                           (D_min_diag > 0.05f * diag_ref_abs) &&
-                                           (D_min_diag > 0.12f * D_max_diag);
+                                           (Dn_min_diag > 0.05f * 0.25f) &&
+                                           (Dn_min_diag > 0.12f * Dn_max_diag);
 
                 if (is_well_conditioned) {
                     float inv_det = 1.0f / det_D;
@@ -3584,10 +3625,12 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                 float D22 = sum_wgzz - weight_grad_sum * dgz * dgz;
                 float det_D = D00 * (D11 * D22 - D12 * D12) - D01 * (D01 * D22 - D12 * D02) + D02 * (D01 * D12 - D11 * D02);
                 float det_ref_abs = (1.0f / 64.0f) * (dx * dx) * (dy * dy) * (dz * dz);
-                float diag_ref_abs = 0.25f * (dx * dx);
-                float D_min_diag = fminf(D00, fminf(D11, D22));
-                float D_max_diag = fmaxf(D00, fmaxf(D11, D22));
-                if (det_D > 1.0e-3f * det_ref_abs && D_min_diag > 0.05f * diag_ref_abs && D_min_diag > 0.12f * D_max_diag) {
+                float Dn00 = D00 / (dx * dx);
+                float Dn11 = D11 / (dy * dy);
+                float Dn22 = D22 / (dz * dz);
+                float Dn_min_diag = fminf(Dn00, fminf(Dn11, Dn22));
+                float Dn_max_diag = fmaxf(Dn00, fmaxf(Dn11, Dn22));
+                if (det_D > 1.0e-3f * det_ref_abs && Dn_min_diag > 0.05f * 0.25f && Dn_min_diag > 0.12f * Dn_max_diag) {
                     float inv_det = 1.0f / det_D;
                     float D_inv_mat[3][3];
                     D_inv_mat[0][0] =  (D11 * D22 - D12 * D12) * inv_det;
@@ -3656,11 +3699,11 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
                 }
             }
 
-            // Shift v_pic from stencil centroid back to particle position x_p to eliminate boundary centroid velocity error
+            // Shift v_pic from active stencil centroid back to P2G scatter center (x_p + geom_delta) to eliminate boundary centroid velocity error
             if (velocity_scheme == 0) {
-                v_pic_x -= (B_new[0][0] * delta_x + B_new[0][1] * delta_y + B_new[0][2] * delta_z);
-                v_pic_y -= (B_new[1][0] * delta_x + B_new[1][1] * delta_y + B_new[1][2] * delta_z);
-                v_pic_z -= (B_new[2][0] * delta_x + B_new[2][1] * delta_y + B_new[2][2] * delta_z);
+                v_pic_x -= (B_new[0][0] * shift_x + B_new[0][1] * shift_y + B_new[0][2] * shift_z);
+                v_pic_y -= (B_new[1][0] * shift_x + B_new[1][1] * shift_y + B_new[1][2] * shift_z);
+                v_pic_z -= (B_new[2][0] * shift_x + B_new[2][1] * shift_y + B_new[2][2] * shift_z);
             }
         }
     }
@@ -3706,7 +3749,9 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
             soa.B[r][c][p_idx] = (velocity_scheme == 0) ? b_val : 0.0f;
             float l_val = fminf(fmaxf(L_new[r][c], -max_B), max_B);
             if constexpr (!FUSE_STRESS) {
-                soa.L_grad[r][c][p_idx] = l_val;
+                if (soa.L_grad[r][c] && soa.L_grad[r][c] != soa.B[r][c]) {
+                    soa.L_grad[r][c][p_idx] = l_val;
+                }
             } else {
                 L_eff[r][c] = l_val;
             }
@@ -3743,7 +3788,7 @@ __device__ inline void g2p_device_impl(MPMParticle3DSoA soa, int num_particles,
     }
 
     if constexpr (FUSE_STRESS) {
-        update_particle_stress_constitutive(p_idx, dt, L_eff, soa, mat, ep_smoothed, enable_impact_welding, fminf(dx, fminf(dy, dz)));
+        update_particle_stress_constitutive(p_idx, dt, L_eff, soa, mat, ep_smoothed, enable_impact_welding, fminf(dx, fminf(dy, dz)), (eff_transfer_scheme == 1));
     }
 
     // Density-Based Particle Erosion (Standalone MPM or when not deferred to FV Coupler)
@@ -3840,7 +3885,7 @@ __global__ void kernel_g2p_stress_update_3d(MPMParticle3DSoA soa, int num_partic
 }
 
 // 4. Stress Update Constitutive Routine (Shared by Fused G2P-Stress and Standalone Stress Update)
-__device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat, float ep_smoothed, bool enable_impact_welding, float dx_elem) {
+__device__ inline void update_particle_stress_constitutive(int p_idx, float dt, const float L[3][3], MPMParticle3DSoA soa, const MaterialTable3D& mat, float ep_smoothed, bool enable_impact_welding, float dx_elem, bool is_gimp) {
     if ((soa.state && soa.state[p_idx] == 2) || soa.m[p_idx] <= 0.0f) return;
 
     float deps[3][3], W[3][3];
@@ -3854,6 +3899,7 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
 
     float V0_p = soa.V0[p_idx];
     float V_p = soa.V[p_idx];
+    const float V_prev_step = V_p;
     // Physical logarithmic strain volume evolution with scale-isolated realizability bounds (Directive 19)
     const bool is_fluid_water = (mat.material_model == MPMMaterialModel::TaitWater);
     const bool is_energetic_p = (mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
@@ -3868,8 +3914,15 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         soa.V[p_idx] = V_p;
     }
 
-    float lp_val = 0.5f * cbrtf(V_p);
-    soa.lp[0][p_idx] = lp_val; soa.lp[1][p_idx] = lp_val; soa.lp[2][p_idx] = lp_val;
+    if (is_gimp && fabsf(tr_deps) > 1.0e-12f) {
+        if (soa.lp[0][p_idx] > 0.0f && soa.lp[1][p_idx] > 0.0f && soa.lp[2][p_idx] > 0.0f && V_prev_step > 1.0e-30f) {
+            float lp_scale = cbrtf(V_p / V_prev_step);
+            soa.lp[0][p_idx] *= lp_scale; soa.lp[1][p_idx] *= lp_scale; soa.lp[2][p_idx] *= lp_scale;
+        } else {
+            float lp_val = 0.5f * cbrtf(V_p);
+            soa.lp[0][p_idx] = lp_val; soa.lp[1][p_idx] = lp_val; soa.lp[2][p_idx] = lp_val;
+        }
+    }
 
     float sigma_p[3][3];
     load_particle_stress_matrix(soa, p_idx, sigma_p);
@@ -3975,13 +4028,28 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
         soa.has_failed[p_idx] = st.has_failed ? 1 : 0;
 
         if (isHyperelasticModel(mat.material_model)) {
+            float V_before_hyper = V_p;
             float V_hyper = fminf(fmaxf(st.J * V0_p, V_min_limit), V_max_limit);
             soa.V[p_idx] = V_hyper;
-            float lp_h = 0.5f * cbrtf(V_hyper);
-            soa.lp[0][p_idx] = lp_h; soa.lp[1][p_idx] = lp_h; soa.lp[2][p_idx] = lp_h;
+            if (is_gimp) {
+                if (soa.lp[0][p_idx] > 0.0f && soa.lp[1][p_idx] > 0.0f && soa.lp[2][p_idx] > 0.0f && V_before_hyper > 1.0e-30f) {
+                    float lp_scale = cbrtf(V_hyper / V_before_hyper);
+                    soa.lp[0][p_idx] *= lp_scale; soa.lp[1][p_idx] *= lp_scale; soa.lp[2][p_idx] *= lp_scale;
+                } else {
+                    float lp_h = 0.5f * cbrtf(V_hyper);
+                    soa.lp[0][p_idx] = lp_h; soa.lp[1][p_idx] = lp_h; soa.lp[2][p_idx] = lp_h;
+                }
+            }
         } else if (st.has_failed && is_solid_mat && !isConcreteModel(mat.material_model) && V_p > V0_p) {
-            float lp_f = 0.5f * cbrtf(V0_p);
-            soa.lp[0][p_idx] = lp_f; soa.lp[1][p_idx] = lp_f; soa.lp[2][p_idx] = lp_f;
+            if (is_gimp) {
+                if (soa.lp[0][p_idx] > 0.0f && soa.lp[1][p_idx] > 0.0f && soa.lp[2][p_idx] > 0.0f && V_p > 1.0e-30f) {
+                    float lp_scale = cbrtf(V0_p / V_p);
+                    soa.lp[0][p_idx] *= lp_scale; soa.lp[1][p_idx] *= lp_scale; soa.lp[2][p_idx] *= lp_scale;
+                } else {
+                    float lp_f = 0.5f * cbrtf(V0_p);
+                    soa.lp[0][p_idx] = lp_f; soa.lp[1][p_idx] = lp_f; soa.lp[2][p_idx] = lp_f;
+                }
+            }
         }
 
         if (soa.F_total[0]) {
@@ -4245,7 +4313,8 @@ __global__ void kernel_stress_update_3d(MPMParticle3DSoA soa, int num_particles,
         }
     }
 
-    update_particle_stress_constitutive(p_idx, dt, L, soa, mat);
+    bool is_gimp = (mat.transfer_scheme < 0 || mat.transfer_scheme == 1);
+    update_particle_stress_constitutive(p_idx, dt, L, soa, mat, 0.0f, false, 0.01f, is_gimp);
 }
 
 __global__ void kernel_compute_max_speed(MPMParticle3DSoA soa, int num_particles, float* d_max_speed, const MaterialTable3D* d_mat_tables) {
@@ -4473,9 +4542,8 @@ __global__ void kernel_sample_grid_velocity_single(
     float weight_sum = 0.0f;
 
     if (transfer_scheme == 3) {
-        // RadialMLS (Wendland C2 kernel, 5-point stencil per axis)
-        float max_h = fmaxf(dx, fmaxf(dy, dz));
-        float R_supp = 2.0f * max_h;
+        // RadialMLS (Wendland C2 kernel with per-axis cell-metric normalization, 5-point stencil per axis)
+        float inv_dx = 1.0f / dx, inv_dy = 1.0f / dy, inv_dz = 1.0f / dz;
         for (int offset_i = -2; offset_i <= 2; ++offset_i) {
             int i = base_i + offset_i;
             float sign_x = 1.0f;
@@ -4494,13 +4562,13 @@ __global__ void kernel_sample_grid_velocity_single(
                     if (!resolve_ghost_node_3d(k, sign_z, nz, bc_z_min, bc_z_max)) continue;
                     float node_z = (static_cast<float>(base_k + offset_k) + 0.5f) * dz;
 
-                    float dist_x = node_x - px;
-                    float dist_y = node_y - py;
-                    float dist_z = node_z - pz;
-                    float r = sqrtf(dist_x * dist_x + dist_y * dist_y + dist_z * dist_z);
-                    if (r >= R_supp) continue;
+                    float dist_x = (node_x - px) * inv_dx;
+                    float dist_y = (node_y - py) * inv_dy;
+                    float dist_z = (node_z - pz) * inv_dz;
+                    float r_norm = sqrtf(dist_x * dist_x + dist_y * dist_y + dist_z * dist_z);
+                    if (r_norm >= 2.0f) continue;
 
-                    float weight = evalWendland_C2_dev(r, R_supp);
+                    float weight = evalWendland_C2_dev(r_norm, 2.0f);
                     if (weight < 1.0e-7f) continue;
 
                     const long long slot_ll = (gv.nx > 0) ? gv.slotIndex(i, j, k)
@@ -4779,9 +4847,9 @@ void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
     m_soa_has_F_total = hasHyperelasticMaterial();
     m_soa_has_hill_axes = hasHill48Material();
     const size_t extra_floats = (m_soa_has_F_total ? 9ULL : 0ULL) + (m_soa_has_hill_axes ? 6ULL : 0ULL);
-    // 3(x) + 3(v) + 6(sigma_voigt) + 9(B) + 1(lp) + 13(m..contact_radius) = 35 base floats (+ optional F_total/hill_axes)
-    // + 5 ints = 160 base bytes per particle
-    size_t required_bytes = count * ((35ULL + extra_floats) * sizeof(float) + 5ULL * sizeof(int));
+    // 3(x) + 3(v) + 6(sigma_voigt) + 9(B) + 3(lp) + 13(m..contact_radius) = 37 base floats (+ optional F_total/hill_axes)
+    // + 5 ints = 168 base bytes per particle
+    size_t required_bytes = count * ((37ULL + extra_floats) * sizeof(float) + 5ULL * sizeof(int));
     if (required_bytes > m_allocated_soa_bytes) {
         if (d_soa_buffer) cudaFree(d_soa_buffer);
         CUDA_CHECK_ALLOC(cudaMalloc(&d_soa_buffer, required_bytes), "Allocating d_soa_buffer (" + std::to_string(required_bytes) + " bytes)");
@@ -4820,8 +4888,10 @@ void MPMSolver3DCUDA::allocateSoABuffer(size_t count) {
         }
     }
 
-    // Isotropic lp: single buffer aliased to all 3 axes
-    d_soa.lp[0] = d_soa.lp[1] = d_soa.lp[2] = fptr; fptr += count;
+    // Per-axis particle half-extents lp[0..2] (supports anisotropic boxes and aspect ratios)
+    d_soa.lp[0] = fptr; fptr += count;
+    d_soa.lp[1] = fptr; fptr += count;
+    d_soa.lp[2] = fptr; fptr += count;
 
     d_soa.m = fptr; fptr += count;
     d_soa.V0 = fptr; fptr += count;
@@ -5167,8 +5237,18 @@ void MPMSolver3DCUDA::activateSparseTilesDevice(int num_particles, bool preserve
 
     const int threads = 256;
     const int blocks_p = (num_particles + threads - 1) / threads;
-    const int stencil_pad = (m_transfer_scheme == MPMTransferScheme::RadialMLS ||
-                             m_transfer_scheme == MPMTransferScheme::CubicBSpline) ? 3 : 2;
+    bool needs_extended_stencil = (m_transfer_scheme == MPMTransferScheme::RadialMLS ||
+                                   m_transfer_scheme == MPMTransferScheme::CubicBSpline);
+    if (!needs_extended_stencil) {
+        for (const auto& mt : m_material_tables) {
+            if (mt.transfer_scheme == static_cast<int>(MPMTransferScheme::RadialMLS) ||
+                mt.transfer_scheme == static_cast<int>(MPMTransferScheme::CubicBSpline)) {
+                needs_extended_stencil = true;
+                break;
+            }
+        }
+    }
+    const int stencil_pad = needs_extended_stencil ? 3 : 2;
     const size_t total_tiles = static_cast<size_t>(m_ntx) * m_nty * m_ntz;
 
     if (!preserve_existing_tiles) {
@@ -6360,8 +6440,8 @@ __device__ inline void zonal_ghost_scatter_force(
     int base_k = static_cast<int>(floorf(pz / dz));
 
     if (scheme == 3) {
-        // Radial MLS (Wendland C2), identical to kernel_p2g_3d scheme 3
-        float R_supp = 2.0f * fmaxf(fmaxf(dx, dy), dz);
+        // Radial MLS (Wendland C2 with ellipsoidal cell-metric normalization), matching kernel_p2g_3d scheme 3
+        float inv_dx = 1.0f / dx, inv_dy = 1.0f / dy, inv_dz = 1.0f / dz;
         float w_sum = 0.0f, sx = 0.0f, sy = 0.0f, sz = 0.0f;
         float sxx = 0.0f, sxy = 0.0f, sxz = 0.0f, syy = 0.0f, syz = 0.0f, szz = 0.0f;
         for (int oi = -2; oi <= 2; ++oi) {
@@ -6373,9 +6453,10 @@ __device__ inline void zonal_ghost_scatter_force(
                 for (int ok = -2; ok <= 2; ++ok) {
                     int k = base_k + ok; if (k < 0 || k >= nz) continue;
                     float ddz = (static_cast<float>(k) + 0.5f) * dz - pz;
-                    float r = sqrtf(ddx * ddx + ddy * ddy + ddz * ddz);
-                    if (r >= R_supp) continue;
-                    float w = evalWendland_C2_dev(r, R_supp);
+                    float rxn = ddx * inv_dx, ryn = ddy * inv_dy, rzn = ddz * inv_dz;
+                    float r_norm = sqrtf(rxn * rxn + ryn * ryn + rzn * rzn);
+                    if (r_norm >= 2.0f) continue;
+                    float w = evalWendland_C2_dev(r_norm, 2.0f);
                     if (w < 1.0e-7f) continue;
                     w_sum += w; sx += w * ddx; sy += w * ddy; sz += w * ddz;
                     sxx += w * ddx * ddx; sxy += w * ddx * ddy; sxz += w * ddx * ddz;
@@ -6386,20 +6467,27 @@ __device__ inline void zonal_ghost_scatter_force(
         if (w_sum <= 1.0e-7f) return;
         float iw = 1.0f / w_sum;
         float ddxc = sx * iw, ddyc = sy * iw, ddzc = sz * iw;
-        float D00 = sxx * iw - ddxc * ddxc, D01 = sxy * iw - ddxc * ddyc, D02 = sxz * iw - ddxc * ddzc;
-        float D11 = syy * iw - ddyc * ddyc, D12 = syz * iw - ddyc * ddzc, D22 = szz * iw - ddzc * ddzc;
+        float D00_raw = sxx * iw - ddxc * ddxc, D01_raw = sxy * iw - ddxc * ddyc, D02_raw = sxz * iw - ddxc * ddzc;
+        float D11_raw = syy * iw - ddyc * ddyc, D12_raw = syz * iw - ddyc * ddzc, D22_raw = szz * iw - ddzc * ddzc;
+        float D00 = D00_raw * inv_dx * inv_dx, D01 = D01_raw * inv_dx * inv_dy, D02 = D02_raw * inv_dx * inv_dz;
+        float D11 = D11_raw * inv_dy * inv_dy, D12 = D12_raw * inv_dy * inv_dz, D22 = D22_raw * inv_dz * inv_dz;
         float Di[3][3];
-        float det = D00 * (D11 * D22 - D12 * D12) - D01 * (D01 * D22 - D12 * D02) + D02 * (D01 * D12 - D11 * D02);
-        if (det > 1.0e-18f) {
-            float id = 1.0f / det;
-            Di[0][0] = (D11 * D22 - D12 * D12) * id; Di[0][1] = -(D01 * D22 - D12 * D02) * id; Di[0][2] = (D01 * D12 - D11 * D02) * id;
-            Di[1][0] = Di[0][1]; Di[1][1] = (D00 * D22 - D02 * D02) * id; Di[1][2] = -(D00 * D12 - D01 * D02) * id;
-            Di[2][0] = Di[0][2]; Di[2][1] = Di[1][2]; Di[2][2] = (D00 * D11 - D01 * D01) * id;
+        float det_norm = D00 * (D11 * D22 - D12 * D12) - D01 * (D01 * D22 - D12 * D02) + D02 * (D01 * D12 - D11 * D02);
+        if (det_norm > 1.0e-5f) {
+            float id = 1.0f / det_norm;
+            Di[0][0] =  (D11 * D22 - D12 * D12) * id * inv_dx * inv_dx;
+            Di[0][1] = -(D01 * D22 - D12 * D02) * id * inv_dx * inv_dy;
+            Di[0][2] =  (D01 * D12 - D11 * D02) * id * inv_dx * inv_dz;
+            Di[1][0] = Di[0][1];
+            Di[1][1] =  (D00 * D22 - D02 * D02) * id * inv_dy * inv_dy;
+            Di[1][2] = -(D00 * D12 - D01 * D02) * id * inv_dy * inv_dz;
+            Di[2][0] = Di[0][2];
+            Di[2][1] = Di[1][2];
+            Di[2][2] =  (D00 * D11 - D01 * D01) * id * inv_dz * inv_dz;
         } else {
-            float d_iso = 3.75f / (dx * dx);
-            Di[0][0] = d_iso; Di[0][1] = 0.0f; Di[0][2] = 0.0f;
-            Di[1][0] = 0.0f; Di[1][1] = d_iso; Di[1][2] = 0.0f;
-            Di[2][0] = 0.0f; Di[2][1] = 0.0f; Di[2][2] = d_iso;
+            Di[0][0] = 5.5f * inv_dx * inv_dx; Di[0][1] = 0.0f;                  Di[0][2] = 0.0f;
+            Di[1][0] = 0.0f;                    Di[1][1] = 5.5f * inv_dy * inv_dy; Di[1][2] = 0.0f;
+            Di[2][0] = 0.0f;                    Di[2][1] = 0.0f;                  Di[2][2] = 5.5f * inv_dz * inv_dz;
         }
         float xc = px + ddxc, yc = py + ddyc, zc = pz + ddzc;
         for (int oi = -2; oi <= 2; ++oi) {
@@ -6412,9 +6500,10 @@ __device__ inline void zonal_ghost_scatter_force(
                     int k = base_k + ok; if (k < 0 || k >= nz) continue;
                     float nzp = (static_cast<float>(k) + 0.5f) * dz;
                     float ddx = nxp - px, ddy = nyp - py, ddz = nzp - pz;
-                    float r = sqrtf(ddx * ddx + ddy * ddy + ddz * ddz);
-                    if (r >= R_supp) continue;
-                    float w = evalWendland_C2_dev(r, R_supp);
+                    float rxn = ddx * inv_dx, ryn = ddy * inv_dy, rzn = ddz * inv_dz;
+                    float r_norm = sqrtf(rxn * rxn + ryn * ryn + rzn * rzn);
+                    if (r_norm >= 2.0f) continue;
+                    float w = evalWendland_C2_dev(r_norm, 2.0f);
                     if (w < 1.0e-7f) continue;
                     const long long slot_ll = (gv.nx > 0)
                         ? gv.slotIndex(i, j, k)
@@ -6443,11 +6532,13 @@ __device__ inline void zonal_ghost_scatter_force(
         return;
     }
 
-    // Tensor-product schemes, identical stencils to kernel_p2g_3d
+    // Tensor-product schemes, identical stencils & gradient operators to kernel_p2g_3d
     const bool cubic = (scheme == 4);
     const int o_lo = cubic ? -2 : -1;
     const int o_hi = 2;
-    const float lp = 0.25f * dx; // GIMP half-length of a dx/2 ghost sub-point
+    const float lpx = 0.25f * dx, lpy = 0.25f * dy, lpz = 0.25f * dz; // GIMP half-length of a sub-point
+    const float D_inv_x_b = 4.0f / (dx * dx), D_inv_y_b = 4.0f / (dy * dy), D_inv_z_b = 4.0f / (dz * dz);
+    const float D_inv_x_c = 3.0f / (dx * dx), D_inv_y_c = 3.0f / (dy * dy), D_inv_z_c = 3.0f / (dz * dz);
     float Sx[5], dSx[5], Sy[5], dSy[5], Sz[5], dSz[5];
     for (int o = o_lo; o <= o_hi; ++o) {
         int a = o - o_lo;
@@ -6455,17 +6546,17 @@ __device__ inline void zonal_ghost_scatter_force(
         float yi = (static_cast<float>(base_j + o) + 0.5f) * dy;
         float zi = (static_cast<float>(base_k + o) + 0.5f) * dz;
         if (cubic) {
-            Sx[a] = evalCubicBSpline_S_dev(px, xi, dx); dSx[a] = evalCubicBSpline_dS_dev(px, xi, dx);
-            Sy[a] = evalCubicBSpline_S_dev(py, yi, dy); dSy[a] = evalCubicBSpline_dS_dev(py, yi, dy);
-            Sz[a] = evalCubicBSpline_S_dev(pz, zi, dz); dSz[a] = evalCubicBSpline_dS_dev(pz, zi, dz);
+            Sx[a] = evalCubicBSpline_S_dev(px, xi, dx); dSx[a] = Sx[a] * D_inv_x_c * (xi - px);
+            Sy[a] = evalCubicBSpline_S_dev(py, yi, dy); dSy[a] = Sy[a] * D_inv_y_c * (yi - py);
+            Sz[a] = evalCubicBSpline_S_dev(pz, zi, dz); dSz[a] = Sz[a] * D_inv_z_c * (zi - pz);
         } else if (scheme == 2) {
-            Sx[a] = evalBSpline_S_dev(px, xi, dx); dSx[a] = evalBSpline_dS_dev(px, xi, dx);
-            Sy[a] = evalBSpline_S_dev(py, yi, dy); dSy[a] = evalBSpline_dS_dev(py, yi, dy);
-            Sz[a] = evalBSpline_S_dev(pz, zi, dz); dSz[a] = evalBSpline_dS_dev(pz, zi, dz);
+            Sx[a] = evalBSpline_S_dev(px, xi, dx); dSx[a] = Sx[a] * D_inv_x_b * (xi - px);
+            Sy[a] = evalBSpline_S_dev(py, yi, dy); dSy[a] = Sy[a] * D_inv_y_b * (yi - py);
+            Sz[a] = evalBSpline_S_dev(pz, zi, dz); dSz[a] = Sz[a] * D_inv_z_b * (zi - pz);
         } else if (scheme == 1) {
-            Sx[a] = evalGIMP_S_dev(px, xi, dx, lp); dSx[a] = evalGIMP_dS_dev(px, xi, dx, lp);
-            Sy[a] = evalGIMP_S_dev(py, yi, dy, lp); dSy[a] = evalGIMP_dS_dev(py, yi, dy, lp);
-            Sz[a] = evalGIMP_S_dev(pz, zi, dz, lp); dSz[a] = evalGIMP_dS_dev(pz, zi, dz, lp);
+            Sx[a] = evalGIMP_S_dev(px, xi, dx, lpx); dSx[a] = evalGIMP_dS_dev(px, xi, dx, lpx);
+            Sy[a] = evalGIMP_S_dev(py, yi, dy, lpy); dSy[a] = evalGIMP_dS_dev(py, yi, dy, lpy);
+            Sz[a] = evalGIMP_S_dev(pz, zi, dz, lpz); dSz[a] = evalGIMP_dS_dev(pz, zi, dz, lpz);
         } else {
             Sx[a] = evalLinear_S_dev(px, xi, dx); dSx[a] = evalLinear_dS_dev(px, xi, dx);
             Sy[a] = evalLinear_S_dev(py, yi, dy); dSy[a] = evalLinear_dS_dev(py, yi, dy);
