@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -25,14 +26,14 @@ public:
 
     void reserve(size_t max_constraints, size_t max_nodes = 128) {
         constraints_.reserve(max_constraints);
-        F_mpm_node_.assign(max_nodes, static_cast<T>(0.0));
+        F_mpm_node_.assign(max_nodes, {static_cast<T>(0.0), static_cast<T>(0.0), static_cast<T>(0.0)});
         M_mpm_node_.assign(max_nodes, static_cast<T>(0.0));
         active_nodes_.reserve(max_nodes);
     }
 
     void clear() {
         constraints_.clear();
-        std::fill(F_mpm_node_.begin(), F_mpm_node_.end(), static_cast<T>(0.0));
+        std::fill(F_mpm_node_.begin(), F_mpm_node_.end(), std::array<T, 3>{static_cast<T>(0.0), static_cast<T>(0.0), static_cast<T>(0.0)});
         std::fill(M_mpm_node_.begin(), M_mpm_node_.end(), static_cast<T>(0.0));
         active_nodes_.clear();
     }
@@ -126,45 +127,54 @@ public:
         const auto& mpm_particles = mpm.getParticles();
 
         if (F_mpm_node_.size() < fem_nodes.size()) {
-            F_mpm_node_.assign(fem_nodes.size(), static_cast<T>(0.0));
+            F_mpm_node_.assign(fem_nodes.size(), {static_cast<T>(0.0), static_cast<T>(0.0), static_cast<T>(0.0)});
         } else {
             for (int nid : active_nodes_) {
                 if (nid >= 0 && nid < static_cast<int>(fem_nodes.size())) {
-                    F_mpm_node_[nid] = static_cast<T>(0.0);
+                    F_mpm_node_[nid] = {static_cast<T>(0.0), static_cast<T>(0.0), static_cast<T>(0.0)};
                 }
             }
         }
 
-        // 1. Accumulate MPM boundary particle driving force
+        // 1. Accumulate 3D MPM boundary particle driving force (-sigma * n * A_p)
         for (const auto& c : constraints_) {
             if (c.particle_idx < 0 || c.particle_idx >= static_cast<int>(mpm_particles.size())) continue;
             const auto& p = mpm_particles[c.particle_idx];
             if (p.state == 2 || p.m <= static_cast<T>(0.0)) continue;
 
             T A_p = std::pow(p.V, static_cast<T>(2.0 / 3.0));
-            // Compressive traction: - sigma · n · A_p
-            T f_p_x = - static_cast<T>(p.sigma.data[0]) * c.normal[0] * A_p;
+            // Full 3D Cauchy traction vector t_i = sum_j sigma_{ij} * n_j, compressive driving force f_p = -t * A_p
+            T f_p[3] = {static_cast<T>(0.0), static_cast<T>(0.0), static_cast<T>(0.0)};
+            for (int i = 0; i < 3; ++i) {
+                T t_i = static_cast<T>(0.0);
+                for (int j = 0; j < 3; ++j) {
+                    t_i += static_cast<T>(p.sigma[i][j]) * c.normal[j];
+                }
+                f_p[i] = -t_i * A_p;
+            }
 
             for (int a = 0; a < 8; ++a) {
                 int nid = c.node_ids[a];
                 if (nid >= 0 && nid < static_cast<int>(fem_nodes.size())) {
                     T w = c.shape_weights[a];
-                    F_mpm_node_[nid] += w * f_p_x;
+                    F_mpm_node_[nid][0] += w * f_p[0];
+                    F_mpm_node_[nid][1] += w * f_p[1];
+                    F_mpm_node_[nid][2] += w * f_p[2];
                 }
             }
         }
 
-        // 2. Set driving force on interface FEM nodes
+        // 2. Set 3D driving force on interface FEM nodes
         for (int nid : active_nodes_) {
             if (nid >= 0 && nid < static_cast<int>(fem_nodes.size())) {
-                fem_nodes[nid].f_ext[0] = F_mpm_node_[nid];
-                fem_nodes[nid].f_ext[1] = static_cast<T>(0.0);
-                fem_nodes[nid].f_ext[2] = static_cast<T>(0.0);
+                fem_nodes[nid].f_ext[0] = F_mpm_node_[nid][0];
+                fem_nodes[nid].f_ext[1] = F_mpm_node_[nid][1];
+                fem_nodes[nid].f_ext[2] = F_mpm_node_[nid][2];
             }
         }
     }
 
-    // Enforce kinematic continuity: u_p = sum_a N_a * u_node_a and v_p = sum_a N_a * v_node_a
+    // Enforce 3D kinematic continuity: u_p = sum_a N_a * u_node_a and v_p = sum_a N_a * v_node_a
     template <typename FEMSolverType, typename MPMSolverType>
     void enforce_tied_kinematics(FEMSolverType& fem, MPMSolverType& mpm, T dt) {
         (void)dt;
@@ -176,25 +186,31 @@ public:
             auto& p = mpm_particles[c.particle_idx];
             if (p.state == 2 || p.m <= static_cast<T>(0.0)) continue;
 
-            T v_fem_x = static_cast<T>(0.0);
-            T u_fem_x = static_cast<T>(0.0);
+            T v_fem[3] = {static_cast<T>(0.0), static_cast<T>(0.0), static_cast<T>(0.0)};
+            T u_fem[3] = {static_cast<T>(0.0), static_cast<T>(0.0), static_cast<T>(0.0)};
             for (int a = 0; a < 8; ++a) {
                 int nid = c.node_ids[a];
                 if (nid >= 0 && nid < static_cast<int>(fem_nodes.size())) {
                     T w = c.shape_weights[a];
-                    v_fem_x += w * fem_nodes[nid].v[0];
-                    u_fem_x += w * (fem_nodes[nid].x[0] - fem_nodes[nid].x0[0]);
+                    for (int d = 0; d < 3; ++d) {
+                        v_fem[d] += w * fem_nodes[nid].v[d];
+                        u_fem[d] += w * (fem_nodes[nid].x[d] - fem_nodes[nid].x0[d]);
+                    }
                 }
             }
 
-            p.v[0] = static_cast<float>(v_fem_x);
-            p.v[1] = 0.0f;
-            p.v[2] = 0.0f;
-            p.x[0] = static_cast<float>(c.initial_gap[0] + u_fem_x);
+            for (int d = 0; d < 3; ++d) {
+                p.v[d] = static_cast<float>(v_fem[d]);
+                if (c.initial_gap[d] != static_cast<T>(0.0) || d == 0) {
+                    p.x[d] = static_cast<float>(c.initial_gap[d] + u_fem[d]);
+                } else {
+                    p.x[d] += static_cast<float>(v_fem[d] * dt);
+                }
+            }
         }
     }
 
-    // Synchronize interface boundary grid nodes with FEM interface velocity
+    // Synchronize interface boundary grid nodes with 3D FEM interface velocity
     template <typename FEMSolverType, typename MPMSolverType>
     void synchronize_mpm_grid_boundary(
         FEMSolverType& fem, MPMSolverType& mpm,
@@ -215,8 +231,10 @@ public:
                 if (grid_j >= 0 && grid_j < mpm_ny && grid_k >= 0 && grid_k < mpm_nz) {
                     size_t grid_idx = (static_cast<size_t>(grid_i_interface) * mpm_ny + grid_j) * mpm_nz + grid_k;
                     if (fem_nid < static_cast<int>(fem_nodes.size())) {
-                        float v_fem = static_cast<float>(fem_nodes[fem_nid].v[0]);
-                        mpm.setGridNodeVelocity(grid_idx, v_fem, 0.0f, 0.0f);
+                        float vx_fem = static_cast<float>(fem_nodes[fem_nid].v[0]);
+                        float vy_fem = static_cast<float>(fem_nodes[fem_nid].v[1]);
+                        float vz_fem = static_cast<float>(fem_nodes[fem_nid].v[2]);
+                        mpm.setGridNodeVelocity(grid_idx, vx_fem, vy_fem, vz_fem);
                     }
                 }
             }
@@ -243,7 +261,7 @@ public:
 private:
     std::vector<TiedParticleConstraint<T>> constraints_;
     std::vector<int> active_nodes_;
-    std::vector<T> F_mpm_node_;
+    std::vector<std::array<T, 3>> F_mpm_node_;
     std::vector<T> M_mpm_node_;
     T E_incident_{static_cast<T>(0.0)};
     T E_transmitted_{static_cast<T>(0.0)};

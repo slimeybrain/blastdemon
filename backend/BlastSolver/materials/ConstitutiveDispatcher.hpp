@@ -814,9 +814,15 @@ struct ConstitutiveDispatcher3D {
             const T m = static_cast<T>(mat.jc_m);
 
             const T eps_dot_star = std::max(static_cast<T>(1.0e-5), eps_dot_eq);
-            const T strain_term = A + B * std::pow(std::max(static_cast<T>(0.0), state.ep_bar), n);
+            const T ep_pos = std::max(static_cast<T>(0.0), state.ep_bar);
+            const T hard_term = (B > static_cast<T>(0.0) && ep_pos > static_cast<T>(0.0))
+                ? (B * (n > static_cast<T>(0.0) ? std::pow(ep_pos, n) : static_cast<T>(1.0)))
+                : static_cast<T>(0.0);
+            const T strain_term = A + hard_term;
             const T rate_term = (eps_dot_star > static_cast<T>(1.0)) ? (static_cast<T>(1.0) + C * std::log(eps_dot_star)) : static_cast<T>(1.0);
-            const T temp_term = static_cast<T>(1.0) - std::pow(T_star, m);
+            const T temp_term = (m > static_cast<T>(0.0) && T_star > static_cast<T>(0.0))
+                ? (static_cast<T>(1.0) - std::pow(T_star, m))
+                : static_cast<T>(1.0);
             const T jc_yield = strain_term * rate_term * temp_term * aniso_factor;
 
             const T fail_strain_base = ((mat.enable_strain_erosion && mat.erosion_strain > 0.0f) ? static_cast<T>(mat.erosion_strain) : static_cast<T>(mat.failure_strain)) * w_factor * aniso_factor;
@@ -845,7 +851,16 @@ struct ConstitutiveDispatcher3D {
                 state.temperature = static_cast<T>(mat.T_room) + state.e_internal / static_cast<T>(mat.Cp);
             }
 
-            // True JC fracture locus without artificial d1 <= 0.20 branch cliff
+            // Johnson-Cook fracture strain eps_f. Predictable hierarchy (documented in parameter-definitions.ts):
+            //   1. failure_strain (or erosion_strain when strain erosion is enabled) > 0  -> it IS the fracture
+            //      strain at uniaxial-tension triaxiality (sigma* = 1/3). D1-D3 only supply the *shape* across
+            //      stress states (ratio D(sigma*)/D(1/3)); D4/D5 supply the rate / temperature factors.
+            //        eps_f = failure_strain * [D(sigma*)/D(1/3)] * (1 + D4 ln eps_dot*) * (1 + D5 T*)
+            //   2. failure_strain == 0 and D1/D2 given -> absolute JC locus
+            //        eps_f = (D1 + D2 exp(D3 sigma*)) * (1 + D4 ln eps_dot*) * (1 + D5 T*)
+            //   3. no D-values and strain erosion enabled -> failure_strain with a simple triaxiality multiplier.
+            // This guarantees the failure strain the user types in is the one the solver uses, regardless of
+            // whether a preset also carries D-values.
             const bool has_jc_damage = (std::abs(mat.jc_d1) > 0.0f || std::abs(mat.jc_d2) > 0.0f);
             const T jc_flow_undam = std::max(jc_yield, static_cast<T>(1.0e6));
             const T sigma_star = std::max(static_cast<T>(-2.5), std::min(static_cast<T>(2.5), -p_hydro_raw / jc_flow_undam));
@@ -853,7 +868,12 @@ struct ConstitutiveDispatcher3D {
             const T jc_temp_f = std::max(static_cast<T>(0.1), static_cast<T>(1.0) + static_cast<T>(mat.jc_d5) * T_star);
 
             T eps_f = static_cast<T>(0.0);
-            if (has_jc_damage) {
+            if (has_jc_damage && fail_strain_base > static_cast<T>(0.0)) {
+                // fail_strain_base already carries the Weibull / anisotropy scatter factors.
+                const T triax_ratio = jc_fracture_triaxiality_ratio<T>(
+                    static_cast<T>(mat.jc_d1), static_cast<T>(mat.jc_d2), static_cast<T>(mat.jc_d3), sigma_star);
+                eps_f = std::max(static_cast<T>(1.0e-4), fail_strain_base * triax_ratio * jc_rate_f * jc_temp_f);
+            } else if (has_jc_damage) {
                 const T exp_arg = std::max(static_cast<T>(-30.0), std::min(static_cast<T>(30.0), static_cast<T>(mat.jc_d3) * sigma_star));
                 const T jc_triax = std::max(static_cast<T>(1.0e-4), static_cast<T>(mat.jc_d1) + static_cast<T>(mat.jc_d2) * std::exp(exp_arg));
                 eps_f = std::max(static_cast<T>(1.0e-4), jc_triax * jc_rate_f * jc_temp_f * w_factor * aniso_factor);
@@ -962,6 +982,8 @@ struct ConstitutiveDispatcher3D {
         if (model == MPMMaterialModel::CSCMConcrete) {
             Blast::ConcreteModels::CSCMStateVariables<T> cscm_state;
             cscm_state.damage = state.damage;
+            cscm_state.damage_brittle = state.damage;
+            cscm_state.damage_ductile = state.damage;
             cscm_state.kappa = state.lambda;
             cscm_state.ep_bar = state.ep_bar;
             cscm_state.p_hydro = press;

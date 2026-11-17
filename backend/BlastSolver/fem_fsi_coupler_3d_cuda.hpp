@@ -40,6 +40,12 @@ public:
 
     void setVacuumState(T rho_vac, T p_vac) { m_rho_vac = rho_vac; m_p_vac = p_vac; }
     void setPressureIntegration(FSIPressureIntegration integ) { m_pressure_integ = integ; }
+    void setMethod(FSIMethod3D method) { m_method = method; }
+    void setUncoveringMethod(FSIUncoveringMethod uncov) { m_uncovering_method = uncov; }
+    void setMaxSubcycles(int max_sub) { m_max_subcycles = (max_sub > 1) ? max_sub : 1; }
+
+    FEMSolver3DCUDA<T>* getFEMSolver() const { return m_fem_solver; }
+    CFDSolver3D* getFVSolver() const { return m_fv_solver; }
 
     void resetCoupledDt() { m_cfl_subcycle_counter = 0; }
 
@@ -49,7 +55,10 @@ private:
     CFDSolver3D* m_fv_solver{nullptr};
     FEMSolver3DCUDA<T>* m_fem_solver{nullptr};
 
+    FSIMethod3D m_method{FSIMethod3D::TwoWayStaggered};
     FSIPressureIntegration m_pressure_integ{FSIPressureIntegration::Gauss2x2};
+    FSIUncoveringMethod m_uncovering_method{FSIUncoveringMethod::ConservativeIDW_VacuumCavity};
+    int m_max_subcycles{16};
     T m_rho_vac{static_cast<T>(1.0e-6f)};
     T m_p_vac{static_cast<T>(1.0e-2f)};
 
@@ -115,7 +124,11 @@ void launch_integrate_cfd_pressure_to_fem_nodes_3d(
     float dx, float dy, float dz,
     float xmin, float ymin, float zmin,
     float ambient_p = 101325.0f,
-    cudaStream_t stream = 0
+    cudaStream_t stream = 0,
+    FSIPressureIntegration pressure_integ = FSIPressureIntegration::Gauss2x2,
+    T p_vac = static_cast<T>(1.0e-2f),
+    T dt = static_cast<T>(0.0f),
+    T* d_fsi_work = nullptr
 );
 
 } // namespace Blast

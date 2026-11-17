@@ -762,11 +762,15 @@ std::vector<BenchmarkResult> run_level_1_benchmarks() {
             const double rate = (epsdot > 1.0) ? (1.0 + mat.jc_C * std::log(epsdot)) : 1.0;
             return (mat.jc_A + mat.jc_B * std::pow(std::max(0.0, ep), (double)mat.jc_n)) * rate * (1.0 - std::pow(Ts, (double)mat.jc_m));
         };
+        // Independent closed-form reference. failure_strain is the fracture strain at sigma* = 1/3; D1-D3 give only
+        // the shape D(sigma*)/D(1/3); D4/D5 give rate and temperature factors; Weibull factor scales the magnitude.
         auto jc_eps_f_ref = [&](double sstar, double epsdot, double T) {
             const double Ts = std::clamp((T - mat.T_room) / (mat.T_melt - mat.T_room), 0.0, 1.0);
-            const double exp_arg = std::clamp((double)mat.jc_d3 * sstar, -30.0, 30.0);
-            const double jc_triax = std::max(1.0e-4, (double)mat.jc_d1 + (double)mat.jc_d2 * std::exp(exp_arg));
-            return std::max(1.0e-4, jc_triax * w_flaw *
+            auto D_locus = [&](double s) {
+                return (double)mat.jc_d1 + (double)mat.jc_d2 * std::exp(std::clamp((double)mat.jc_d3 * s, -30.0, 30.0));
+            };
+            const double ratio = std::max(0.15, std::max(0.02, D_locus(sstar)) / std::max(0.05, D_locus(1.0 / 3.0)));
+            return std::max(1.0e-4, (double)mat.failure_strain * w_flaw * ratio *
                                   std::max(0.1, 1.0 + mat.jc_d4 * std::log(std::max(1.0, epsdot))) *
                                   std::max(0.1, 1.0 + mat.jc_d5 * Ts));
         };

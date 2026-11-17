@@ -50,15 +50,21 @@ int main() {
 
         // Verify that no active or eroded node coordinates explode or become NaN/Inf
         for (const auto& node : solver.getNodes()) {
-            assert(!std::isnan(node.x[0]) && !std::isinf(node.x[0]));
-            assert(!std::isnan(node.x[1]) && !std::isinf(node.x[1]));
-            assert(!std::isnan(node.x[2]) && !std::isinf(node.x[2]));
-            assert(std::abs(node.x[0]) < 10.0f);
-            assert(std::abs(node.x[1]) < 10.0f);
-            assert(std::abs(node.x[2]) < 10.0f);
+            if (std::isnan(node.x[0]) || std::isinf(node.x[0]) ||
+                std::isnan(node.x[1]) || std::isinf(node.x[1]) ||
+                std::isnan(node.x[2]) || std::isinf(node.x[2]) ||
+                std::abs(node.x[0]) >= 10.0f ||
+                std::abs(node.x[1]) >= 10.0f ||
+                std::abs(node.x[2]) >= 10.0f) {
+                std::cerr << "[FAIL] Node coordinate instability at step " << step << std::endl;
+                return 1;
+            }
             
             float v_mag = std::sqrt(node.v[0]*node.v[0] + node.v[1]*node.v[1] + node.v[2]*node.v[2]);
-            assert(v_mag <= 10000.1f);
+            if (!(v_mag <= 10000.1f)) {
+                std::cerr << "[FAIL] Excessive node velocity v_mag=" << v_mag << " at step " << step << std::endl;
+                return 1;
+            }
         }
     }
 
@@ -78,9 +84,11 @@ int main() {
     const auto& surface_facets = solver.getSurfaceFacets();
     std::cout << "  Uncovered surface facets count: " << surface_facets.size() << std::endl;
 
-    // Assert that erosion occurred, node erosion was tracked, and mesh bounds remained stable
-    assert(eroded_elem_count > 0);
-    assert(eroded_node_count >= 0);
+    // Check that erosion occurred and node erosion tracking is non-negative
+    if (eroded_elem_count <= 0 || eroded_node_count < 0) {
+        std::cerr << "[FAIL] Expected > 0 eroded elements, got " << eroded_elem_count << std::endl;
+        return 1;
+    }
 
     std::cout << "[PASS] test_fem_3d_erosion_stability PASSED successfully." << std::endl;
     return 0;

@@ -51,8 +51,24 @@ int main() {
     contact.solveContact(solver, 1.0e-5f);
 
     const auto& nodes_out = solver.getNodes();
+    double sum_cube1_fz = 0.0;
+    double sum_cube2_fz = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        sum_cube1_fz += nodes_out[i].f_contact[2];
+        sum_cube2_fz += nodes_out[i + 8].f_contact[2];
+    }
     std::cout << "  Contact test evaluated." << std::endl;
     std::cout << "  Node 8 (Cube 2 bottom corner) contact force f_z = " << nodes_out[8].f_contact[2] << " N" << std::endl;
+    std::cout << "  Sum Cube 1 f_z = " << sum_cube1_fz << " N, Sum Cube 2 f_z = " << sum_cube2_fz << " N" << std::endl;
+
+    if (!(nodes_out[8].f_contact[2] > 0.0f && sum_cube2_fz > 1.0 && sum_cube1_fz < -1.0)) {
+        std::cerr << "[FAIL] Expected opposing Z contact forces on penetrated cubes" << std::endl;
+        return 1;
+    }
+    if (std::abs(sum_cube1_fz + sum_cube2_fz) > 1.0e-3 * std::abs(sum_cube2_fz)) {
+        std::cerr << "[FAIL] Action-reaction imbalance in FEM contact forces" << std::endl;
+        return 1;
+    }
 
     std::cout << "[PASS] test_fem_3d_contact PASSED successfully." << std::endl;
     return 0;

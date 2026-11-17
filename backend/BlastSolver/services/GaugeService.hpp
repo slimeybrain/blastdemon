@@ -55,6 +55,7 @@ void sync_gauges_after_remap(const nlohmann::json& remap_msg, double start_time)
 void record_gauges_1d(double t);
 void record_gauges_2d(double t);
 void record_gauges_3d(double t);
+void record_gauges_fem_3d(double t);
 void flush_solver_gauges_locked();
 void flush_solver_gauges();
 void write_gauge_files();

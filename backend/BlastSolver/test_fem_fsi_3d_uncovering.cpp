@@ -43,7 +43,10 @@ int main() {
     coupler.stepWithDt(1.0e-6f);
 
     std::cout << "  FSI Step completed. Step count = " << coupler.getStepCount() << std::endl;
-    assert(coupler.getStepCount() == 1);
+    if (coupler.getStepCount() != 1) {
+        std::cerr << "[FAIL] Expected FSI step count 1, got " << coupler.getStepCount() << std::endl;
+        return 1;
+    }
 
     std::cout << "[PASS] test_fem_fsi_3d_uncovering PASSED successfully." << std::endl;
     return 0;

@@ -58,13 +58,22 @@ void LSDynaReader3D<T>::tokenizeLine(const std::string& line, TokenBuffer& tb) c
             start = comma + 1;
         }
     } else {
-        // Whitespace free-format
+        // Whitespace / fixed-width free-format (also split touching numbers like -1.23E+02-4.56E+01)
         size_t i = 0;
         while (i < len && tb.count < 16) {
             while (i < len && (line[i] == ' ' || line[i] == '\t' || line[i] == '\r')) i++;
             if (i >= len) break;
             size_t start = i;
-            while (i < len && line[i] != ' ' && line[i] != '\t' && line[i] != '\r') i++;
+            i++;
+            while (i < len && line[i] != ' ' && line[i] != '\t' && line[i] != '\r') {
+                if ((line[i] == '-' || line[i] == '+') && i > start) {
+                    char prev = line[i - 1];
+                    if (prev != 'e' && prev != 'E' && prev != 'd' && prev != 'D') {
+                        break;
+                    }
+                }
+                i++;
+            }
             tb.tokens[tb.count++] = std::string_view(line.data() + start, i - start);
         }
     }
@@ -139,10 +148,19 @@ bool LSDynaReader3D<T>::parseStream(
         return false;
     }
 
+    std::string dir_prefix;
+    {
+        size_t sep = filepath.find_last_of("/\\");
+        if (sep != std::string::npos) {
+            dir_prefix = filepath.substr(0, sep + 1);
+        }
+    }
+
     std::string line;
     std::string current_keyword = "";
     std::string pending_part_title = "";
     std::string pending_set_title = "";
+    int active_set_id = 0;
     TokenBuffer tb;
 
     while (std::getline(file, line)) {
@@ -153,6 +171,7 @@ bool LSDynaReader3D<T>::parseStream(
             // Transform keyword to uppercase
             current_keyword = trimmed;
             std::transform(current_keyword.begin(), current_keyword.end(), current_keyword.begin(), ::toupper);
+            active_set_id = 0;
             continue;
         }
 
@@ -194,27 +213,53 @@ bool LSDynaReader3D<T>::parseStream(
             int part_id = static_cast<int>(getFieldVal(tb, line, 1, 1.0f));
             if (elem_id <= 0) continue;
 
-            int64_t n1 = static_cast<int64_t>(getFieldVal(tb, line, 2, 0.0f));
-            int64_t n2 = static_cast<int64_t>(getFieldVal(tb, line, 3, 0.0f));
-            int64_t n3 = static_cast<int64_t>(getFieldVal(tb, line, 4, 0.0f));
-            int64_t n4 = static_cast<int64_t>(getFieldVal(tb, line, 5, 0.0f));
-            int64_t n5 = static_cast<int64_t>(getFieldVal(tb, line, 6, 0.0f));
-            int64_t n6 = static_cast<int64_t>(getFieldVal(tb, line, 7, 0.0f));
-            int64_t n7 = static_cast<int64_t>(getFieldVal(tb, line, 8, 0.0f));
-            int64_t n8 = static_cast<int64_t>(getFieldVal(tb, line, 9, 0.0f));
+            int64_t n1 = 0, n2 = 0, n3 = 0, n4 = 0, n5 = 0, n6 = 0, n7 = 0, n8 = 0;
+            if (tb.count <= 2) {
+                // 2-card LS-DYNA *ELEMENT_SOLID format: Card 1 = EID, PID; Card 2 = N1..N8(, N9, N10)
+                std::streampos pos = file.tellg();
+                std::string line2;
+                while (std::getline(file, line2)) {
+                    std::string trimmed2 = trim(line2);
+                    if (trimmed2.empty() || trimmed2[0] == '$') continue;
+                    if (trimmed2[0] == '*') {
+                        file.seekg(pos);
+                        break;
+                    }
+                    TokenBuffer tb2;
+                    tokenizeLine(line2, tb2);
+                    n1 = static_cast<int64_t>(getFieldVal(tb2, line2, 0, 0.0f));
+                    n2 = static_cast<int64_t>(getFieldVal(tb2, line2, 1, 0.0f));
+                    n3 = static_cast<int64_t>(getFieldVal(tb2, line2, 2, 0.0f));
+                    n4 = static_cast<int64_t>(getFieldVal(tb2, line2, 3, 0.0f));
+                    n5 = static_cast<int64_t>(getFieldVal(tb2, line2, 4, 0.0f));
+                    n6 = static_cast<int64_t>(getFieldVal(tb2, line2, 5, 0.0f));
+                    n7 = static_cast<int64_t>(getFieldVal(tb2, line2, 6, 0.0f));
+                    n8 = static_cast<int64_t>(getFieldVal(tb2, line2, 7, 0.0f));
+                    break;
+                }
+            } else {
+                n1 = static_cast<int64_t>(getFieldVal(tb, line, 2, 0.0f));
+                n2 = static_cast<int64_t>(getFieldVal(tb, line, 3, 0.0f));
+                n3 = static_cast<int64_t>(getFieldVal(tb, line, 4, 0.0f));
+                n4 = static_cast<int64_t>(getFieldVal(tb, line, 5, 0.0f));
+                n5 = static_cast<int64_t>(getFieldVal(tb, line, 6, 0.0f));
+                n6 = static_cast<int64_t>(getFieldVal(tb, line, 7, 0.0f));
+                n7 = static_cast<int64_t>(getFieldVal(tb, line, 8, 0.0f));
+                n8 = static_cast<int64_t>(getFieldVal(tb, line, 9, 0.0f));
+            }
 
             if (m_id_to_node_index.count(n1) && m_id_to_node_index.count(n2) &&
                 m_id_to_node_index.count(n3) && m_id_to_node_index.count(n4)) {
 
                 FEMElement3D<T> elem{};
-                elem.node_ids[0] = m_id_to_node_index[n1];
-                elem.node_ids[1] = m_id_to_node_index[n2];
-                elem.node_ids[2] = m_id_to_node_index[n3];
-                elem.node_ids[3] = m_id_to_node_index[n4];
-                elem.node_ids[4] = m_id_to_node_index[n5 > 0 ? n5 : n4];
-                elem.node_ids[5] = m_id_to_node_index[n6 > 0 ? n6 : n4];
-                elem.node_ids[6] = m_id_to_node_index[n7 > 0 ? n7 : n4];
-                elem.node_ids[7] = m_id_to_node_index[n8 > 0 ? n8 : n4];
+                elem.node_ids[0] = m_id_to_node_index.at(n1);
+                elem.node_ids[1] = m_id_to_node_index.at(n2);
+                elem.node_ids[2] = m_id_to_node_index.at(n3);
+                elem.node_ids[3] = m_id_to_node_index.at(n4);
+                elem.node_ids[4] = (n5 > 0 && m_id_to_node_index.count(n5)) ? m_id_to_node_index.at(n5) : elem.node_ids[3];
+                elem.node_ids[5] = (n6 > 0 && m_id_to_node_index.count(n6)) ? m_id_to_node_index.at(n6) : elem.node_ids[3];
+                elem.node_ids[6] = (n7 > 0 && m_id_to_node_index.count(n7)) ? m_id_to_node_index.at(n7) : elem.node_ids[3];
+                elem.node_ids[7] = (n8 > 0 && m_id_to_node_index.count(n8)) ? m_id_to_node_index.at(n8) : elem.node_ids[3];
 
                 elem.lsdyna_id = elem_id;
                 elem.part_id = part_id;
@@ -227,11 +272,11 @@ bool LSDynaReader3D<T>::parseStream(
                 m_id_to_elem_index[elem_id] = static_cast<int>(out_elements.size());
                 out_elements.push_back(elem);
 
-                m_parts[part_id].num_solids++;
                 if (!m_parts.count(part_id)) {
                     m_parts[part_id].part_id = part_id;
                     m_parts[part_id].name = "Part_" + std::to_string(part_id);
                 }
+                m_parts[part_id].num_solids++;
             }
         } else if ((current_keyword.rfind("*MAT_", 0) == 0 || current_keyword.rfind("*EOS_", 0) == 0) &&
                    current_keyword.find("_TITLE") != std::string::npos) {
@@ -558,16 +603,24 @@ bool LSDynaReader3D<T>::parseStream(
             if (f4 > 0.0f && f4 <= 10.0f) fail_eps = static_cast<float>(f4);
             else if (exf > 0.0f && exf <= 10.0f) fail_eps = static_cast<float>(exf);
 
-            if (fail_eps > 0.0f && m_imported_materials.count(mid)) {
-                m_imported_materials[mid].failure_strain = fail_eps;
-                m_imported_materials[mid].erosion_strain = fail_eps;
-                m_imported_materials[mid].enable_strain_erosion = true;
+            if (fail_eps > 0.0f) {
+                if (m_imported_materials.count(mid)) {
+                    m_imported_materials[mid].failure_strain = fail_eps;
+                    m_imported_materials[mid].erosion_strain = fail_eps;
+                    m_imported_materials[mid].enable_strain_erosion = true;
+                } else {
+                    m_pending_erosions.push_back({mid, fail_eps, 0.0f});
+                }
             }
 
-            if (f4 > 1.0e5f && m_imported_materials.count(mid)) {
-                m_imported_materials[mid].tensile_failure_stress = static_cast<float>(f4);
-                m_imported_materials[mid].erosion_stress = static_cast<float>(f4);
-                m_imported_materials[mid].enable_stress_erosion = true;
+            if (f4 > 1.0e5f) {
+                if (m_imported_materials.count(mid)) {
+                    m_imported_materials[mid].tensile_failure_stress = static_cast<float>(f4);
+                    m_imported_materials[mid].erosion_stress = static_cast<float>(f4);
+                    m_imported_materials[mid].enable_stress_erosion = true;
+                } else {
+                    m_pending_erosions.push_back({mid, 0.0f, static_cast<float>(f4)});
+                }
             }
 
             // Optional Card 2: MNPRES, SIGP1, SIGVM, ...
@@ -581,10 +634,14 @@ bool LSDynaReader3D<T>::parseStream(
                     break;
                 }
                 T sigp1_c2 = parseFieldVal(line2, 1, 0.0f);
-                if (sigp1_c2 > 1.0e5f && m_imported_materials.count(mid)) {
-                    m_imported_materials[mid].tensile_failure_stress = static_cast<float>(sigp1_c2);
-                    m_imported_materials[mid].erosion_stress = static_cast<float>(sigp1_c2);
-                    m_imported_materials[mid].enable_stress_erosion = true;
+                if (sigp1_c2 > 1.0e5f) {
+                    if (m_imported_materials.count(mid)) {
+                        m_imported_materials[mid].tensile_failure_stress = static_cast<float>(sigp1_c2);
+                        m_imported_materials[mid].erosion_stress = static_cast<float>(sigp1_c2);
+                        m_imported_materials[mid].enable_stress_erosion = true;
+                    } else {
+                        m_pending_erosions.push_back({mid, 0.0f, static_cast<float>(sigp1_c2)});
+                    }
                 }
                 break;
             }
@@ -683,20 +740,32 @@ bool LSDynaReader3D<T>::parseStream(
             }
             auto tokens = splitLine(line);
             if (!tokens.empty()) {
-                int sid = 0;
-                try { sid = std::stoi(tokens[0]); } catch (...) {}
-                if (sid > 0 && !m_sets.count(sid)) {
-                    SetInfo& s = m_sets[sid];
-                    s.set_id = sid;
-                    s.name = pending_set_title.empty() ? ("Node_Set_" + std::to_string(sid)) : pending_set_title;
-                    s.type = "NODE";
-                    pending_set_title.clear();
-                    for (size_t k = 1; k < tokens.size(); ++k) {
-                        try { int64_t nid = std::stoll(tokens[k]); if (nid > 0) s.ids.push_back(nid); } catch (...) {}
+                if (active_set_id <= 0) {
+                    int sid = 0;
+                    try { sid = std::stoi(tokens[0]); } catch (...) {}
+                    if (sid > 0) {
+                        active_set_id = sid;
+                        if (!m_sets.count(sid)) {
+                            SetInfo& s = m_sets[sid];
+                            s.set_id = sid;
+                            s.name = pending_set_title.empty() ? ("Node_Set_" + std::to_string(sid)) : pending_set_title;
+                            s.type = "NODE";
+                        }
+                        pending_set_title.clear();
+                        // Support compact test syntax where Card 1 already lists node IDs after SID
+                        bool card1_has_inline_ids = true;
+                        if (tokens.size() >= 2 && tokens[1].find('.') != std::string::npos) {
+                            card1_has_inline_ids = false; // Standard LS-DYNA Card 1 has DA1..DA4 floats
+                        }
+                        if (card1_has_inline_ids) {
+                            for (size_t k = 1; k < tokens.size(); ++k) {
+                                try { int64_t nid = std::stoll(tokens[k]); if (nid > 0) m_sets[active_set_id].ids.push_back(nid); } catch (...) {}
+                            }
+                        }
                     }
-                } else if (sid > 0) {
+                } else {
                     for (const auto& t : tokens) {
-                        try { int64_t nid = std::stoll(t); if (nid > 0) m_sets[sid].ids.push_back(nid); } catch (...) {}
+                        try { int64_t nid = std::stoll(t); if (nid > 0) m_sets[active_set_id].ids.push_back(nid); } catch (...) {}
                     }
                 }
             }
@@ -709,20 +778,31 @@ bool LSDynaReader3D<T>::parseStream(
             }
             auto tokens = splitLine(line);
             if (!tokens.empty()) {
-                int sid = 0;
-                try { sid = std::stoi(tokens[0]); } catch (...) {}
-                if (sid > 0 && !m_sets.count(sid)) {
-                    SetInfo& s = m_sets[sid];
-                    s.set_id = sid;
-                    s.name = pending_set_title.empty() ? ("Part_Set_" + std::to_string(sid)) : pending_set_title;
-                    s.type = "PART";
-                    pending_set_title.clear();
-                    for (size_t k = 1; k < tokens.size(); ++k) {
-                        try { int64_t pid = std::stoll(tokens[k]); if (pid > 0) s.ids.push_back(pid); } catch (...) {}
+                if (active_set_id <= 0) {
+                    int sid = 0;
+                    try { sid = std::stoi(tokens[0]); } catch (...) {}
+                    if (sid > 0) {
+                        active_set_id = sid;
+                        if (!m_sets.count(sid)) {
+                            SetInfo& s = m_sets[sid];
+                            s.set_id = sid;
+                            s.name = pending_set_title.empty() ? ("Part_Set_" + std::to_string(sid)) : pending_set_title;
+                            s.type = "PART";
+                        }
+                        pending_set_title.clear();
+                        bool card1_has_inline_ids = true;
+                        if (tokens.size() >= 2 && tokens[1].find('.') != std::string::npos) {
+                            card1_has_inline_ids = false;
+                        }
+                        if (card1_has_inline_ids) {
+                            for (size_t k = 1; k < tokens.size(); ++k) {
+                                try { int64_t pid = std::stoll(tokens[k]); if (pid > 0) m_sets[active_set_id].ids.push_back(pid); } catch (...) {}
+                            }
+                        }
                     }
-                } else if (sid > 0) {
+                } else {
                     for (const auto& t : tokens) {
-                        try { int64_t pid = std::stoll(t); if (pid > 0) m_sets[sid].ids.push_back(pid); } catch (...) {}
+                        try { int64_t pid = std::stoll(t); if (pid > 0) m_sets[active_set_id].ids.push_back(pid); } catch (...) {}
                     }
                 }
             }
@@ -855,6 +935,10 @@ bool LSDynaReader3D<T>::parseStream(
 
                     m_id_to_beam_index[elem_id] = static_cast<int>(out_trusses.size());
                     out_trusses.push_back(truss);
+                    if (!m_parts.count(part_id)) {
+                        m_parts[part_id].part_id = part_id;
+                        m_parts[part_id].name = "Part_" + std::to_string(part_id);
+                    }
                     m_parts[part_id].num_trusses++;
                 } else {
                     // Instantiate full 3D Timoshenko Beam
@@ -904,6 +988,10 @@ bool LSDynaReader3D<T>::parseStream(
 
                     m_id_to_beam_index[elem_id] = static_cast<int>(out_beams.size());
                     out_beams.push_back(beam);
+                    if (!m_parts.count(part_id)) {
+                        m_parts[part_id].part_id = part_id;
+                        m_parts[part_id].name = "Part_" + std::to_string(part_id);
+                    }
                     m_parts[part_id].num_beams++;
                 }
             }
@@ -1015,16 +1103,30 @@ bool LSDynaReader3D<T>::parseStream(
 
                 m_id_to_shell_index[elem_id] = static_cast<int>(out_shells.size());
                 out_shells.push_back(shell);
-                m_parts[part_id].num_shells++;
                 if (!m_parts.count(part_id)) {
                     m_parts[part_id].part_id = part_id;
                     m_parts[part_id].name = "Part_" + std::to_string(part_id);
                 }
+                m_parts[part_id].num_shells++;
             }
         } else if (current_keyword.rfind("*INCLUDE", 0) == 0) {
             std::string inc_file = trim(line);
+            if (inc_file.size() >= 2 &&
+                ((inc_file.front() == '"' && inc_file.back() == '"') ||
+                 (inc_file.front() == '\'' && inc_file.back() == '\''))) {
+                inc_file = inc_file.substr(1, inc_file.size() - 2);
+            }
             if (!inc_file.empty()) {
-                parseStream(inc_file, out_nodes, out_elements, out_trusses, out_beams, out_shells, out_default_mat, out_materials, depth + 1);
+                std::string resolved = inc_file;
+                bool is_abs = (inc_file[0] == '/' || inc_file[0] == '\\' || (inc_file.size() >= 2 && inc_file[1] == ':'));
+                if (!is_abs && !dir_prefix.empty()) {
+                    std::string candidate = dir_prefix + inc_file;
+                    std::ifstream probe(candidate);
+                    if (probe.good()) {
+                        resolved = candidate;
+                    }
+                }
+                parseStream(resolved, out_nodes, out_elements, out_trusses, out_beams, out_shells, out_default_mat, out_materials, depth + 1);
             }
         }
     }
@@ -1100,6 +1202,7 @@ bool LSDynaReader3D<T>::parseFile(
     m_imported_eos.clear();
     m_pending_spc_nodes.clear();
     m_pending_spc_sets.clear();
+    m_pending_erosions.clear();
 
     std::ifstream check_file(filepath, std::ios::binary | std::ios::ate);
     if (check_file.is_open()) {
@@ -1120,6 +1223,55 @@ bool LSDynaReader3D<T>::parseFile(
     const bool caller_ts_erode = out_default_mat.enable_timestep_erosion;
     bool ok = parseStream(filepath, out_nodes, out_elements, out_trusses, out_beams, out_shells, out_default_mat, out_materials, 0);
     if (ok) {
+        for (const auto& pe : m_pending_erosions) {
+            if (m_imported_materials.count(pe.mid)) {
+                if (pe.fail_eps > 0.0f) {
+                    m_imported_materials[pe.mid].failure_strain = pe.fail_eps;
+                    m_imported_materials[pe.mid].erosion_strain = pe.fail_eps;
+                    m_imported_materials[pe.mid].enable_strain_erosion = true;
+                }
+                if (pe.fail_stress > 1.0e5f) {
+                    m_imported_materials[pe.mid].tensile_failure_stress = pe.fail_stress;
+                    m_imported_materials[pe.mid].erosion_stress = pe.fail_stress;
+                    m_imported_materials[pe.mid].enable_stress_erosion = true;
+                }
+            }
+        }
+        // Re-resolve part->mat_id and section props if *ELEMENT_* appeared before *PART or *SECTION_*
+        for (auto& el : out_elements) {
+            if (m_part_to_matid.count(el.part_id)) {
+                el.mat_id = m_part_to_matid[el.part_id];
+            }
+        }
+        for (auto& tr : out_trusses) {
+            if (m_part_to_matid.count(tr.part_id)) {
+                tr.mat_id = m_part_to_matid[tr.part_id];
+            }
+            if (m_imported_materials.count(tr.mat_id) && m_imported_materials[tr.mat_id].failure_strain > 0.01f) {
+                tr.failure_strain = static_cast<T>(m_imported_materials[tr.mat_id].failure_strain);
+            }
+        }
+        for (auto& bm : out_beams) {
+            if (m_part_to_matid.count(bm.part_id)) {
+                bm.mat_id = m_part_to_matid[bm.part_id];
+            }
+            if (m_imported_materials.count(bm.mat_id) && m_imported_materials[bm.mat_id].failure_strain > 0.01f) {
+                bm.failure_strain = static_cast<T>(m_imported_materials[bm.mat_id].failure_strain);
+            }
+        }
+        for (auto& sh : out_shells) {
+            if (m_part_to_matid.count(sh.part_id)) {
+                sh.mat_id = m_part_to_matid[sh.part_id];
+            }
+            int sec_id = m_part_to_secid.count(sh.part_id) ? m_part_to_secid[sh.part_id] : sh.part_id;
+            if (m_secid_to_shell_props.count(sec_id)) {
+                sh.thickness = m_secid_to_shell_props[sec_id].thickness;
+            }
+            if (m_imported_materials.count(sh.mat_id) && m_imported_materials[sh.mat_id].failure_strain > 0.01f) {
+                sh.failure_strain = static_cast<T>(m_imported_materials[sh.mat_id].failure_strain);
+            }
+        }
+
         for (const auto& spc : m_pending_spc_nodes) {
             auto it = m_id_to_node_index.find(spc.node_id);
             if (it != m_id_to_node_index.end()) {

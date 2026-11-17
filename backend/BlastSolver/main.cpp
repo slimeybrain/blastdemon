@@ -351,8 +351,17 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
         else if (prod_str.find("JWL") != std::string::npos) mat.product_model = Blast::DetonationProductEOS::JWLProductGas;
     }
 
-    if (mat.material_model == Blast::MPMMaterialModel::Hypoelastic && (!solid_str.empty() || !burn_str.empty() || !prod_str.empty())) {
-        mat.material_model = Blast::MPMMaterialModel::JWLProgrammedBurn;
+    const bool has_explicit_mat_model = obj.contains("material_model") && obj["material_model"].is_string() &&
+                                        !obj["material_model"].template get<std::string>().empty();
+    if (!has_explicit_mat_model && mat.material_model == Blast::MPMMaterialModel::Hypoelastic &&
+        (!solid_str.empty() || !burn_str.empty() || !prod_str.empty())) {
+        if (burn_str.find("CREST") != std::string::npos || solid_str.find("Davis") != std::string::npos || prod_str.find("Davis") != std::string::npos) {
+            mat.material_model = Blast::MPMMaterialModel::CRESTReactiveBurn;
+        } else if (burn_str.find("Lee-Tarver") != std::string::npos || burn_str.find("LeeTarver") != std::string::npos || burn_str.find("ODE") != std::string::npos) {
+            mat.material_model = Blast::MPMMaterialModel::LeeTarverIgnitionGrowth;
+        } else {
+            mat.material_model = Blast::MPMMaterialModel::JWLProgrammedBurn;
+        }
     }
 
     double default_rho = 7850.0;
@@ -379,16 +388,22 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
     mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", 0.50));
     mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", 600.0e6));
     mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", false);
-    float default_erosion_strain = (mat.failure_strain >= 0.02f) ? mat.failure_strain : 0.10f;
+    float default_erosion_strain = (mat.failure_strain > 0.0f) ? mat.failure_strain : 0.10f;
     mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", default_erosion_strain));
     mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", false);
     mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", mat.tensile_failure_stress));
     mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", false);
     mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", 0.10));
+    mat.enable_damage_erosion = get_json_bool(obj, "enable_damage_erosion", false);
+    mat.max_damage = static_cast<float>(get_json_double(obj, "max_damage", 1.0));
+    mat.min_volume_ratio = static_cast<float>(get_json_double(obj, "min_volume_ratio", 0.02));
+    mat.max_volume_ratio = static_cast<float>(get_json_double(obj, "max_volume_ratio", 5.00));
     mat.enable_density_erosion = get_json_bool(obj, "enable_density_erosion", false);
     mat.erosion_min_density = static_cast<float>(get_json_double(obj, "erosion_min_density", 0.0));
     mat.erosion_min_density_ratio = static_cast<float>(get_json_double(obj, "erosion_min_density_ratio", 0.0));
     mat.erode_to_fv_grid = get_json_bool(obj, "erode_to_fv_grid", true);
+    mat.enable_cohesive_splitting = get_json_bool(obj, "enable_cohesive_splitting", false);
+    mat.cohesive_fracture_energy = static_cast<float>(get_json_double(obj, "cohesive_fracture_energy", 1000.0));
 
     // Zero-sentinel Johnson-Cook & Mie-Gruneisen defaults (steel defaults apply only to JohnsonCookMieGruneisen unless explicitly passed)
     const bool is_jc = (mat.material_model == Blast::MPMMaterialModel::JohnsonCookMieGruneisen);
@@ -574,9 +589,7 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
 
     const bool is_concrete = Blast::isConcreteModel(mat.material_model);
     if (is_concrete && mat.enable_strain_erosion) {
-        // Decouple concrete erosion strain cutoff from compressive yield microstrain fc (mat.failure_strain ~ 0.0035).
-        // Concrete element erosion represents physical rubble/mass ejection and must never trigger at microstrains < 2%.
-        if (!obj.contains("erosion_strain") && mat.erosion_strain < 0.02f) {
+        if (!obj.contains("erosion_strain") && mat.erosion_strain <= 0.0f) {
             mat.erosion_strain = 0.10f;
         }
     }
@@ -594,10 +607,6 @@ inline Blast::MaterialTable3D parseMaterialTable3D(const nlohmann::json& obj) {
 
     // Realistic Fragmentation & Heterogeneity Parameters Parsing
     bool enable_het = get_json_bool(obj, "enable_heterogeneity", false);
-    if (!enable_het && obj.contains("weibull_modulus")) {
-        double w_m = get_json_double(obj, "weibull_modulus", 0.0);
-        if (w_m > 0.001) enable_het = true;
-    }
     mat.enable_heterogeneity = enable_het;
     mat.weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", enable_het ? 8.0 : 0.0));
     if (!enable_het) mat.weibull_modulus = 0.0f;
@@ -872,6 +881,128 @@ inline void setupMPM2DObjectFromJson(
     }
 }
 
+inline Blast::FEMElementFormulation parseFEMElementFormulationStr(const std::string& s) {
+    if (s == "Tet4" || s == "Tet4_Standard" || s == "Tetrahedral" || s == "Tet4_P1") {
+        return Blast::FEMElementFormulation::Tet4_Standard;
+    }
+    if (s == "Tet4_ANP" || s == "ANP") {
+        return Blast::FEMElementFormulation::Tet4_ANP;
+    }
+    if (s == "Hex8_SRI" || s == "SelectiveReduced" || s == "SRI") {
+        return Blast::FEMElementFormulation::Hex8_SRI;
+    }
+    if (s == "Hex8_FullGauss8" || s == "Hex8_Full" || s == "FullGauss8" || s == "FullIntegration8Pt") {
+        return Blast::FEMElementFormulation::Hex8_FullGauss8;
+    }
+    if (s == "Hex8" || s == "Hex8_OnePoint" || s == "OnePointFB" || s == "OnePointKF") {
+        return Blast::FEMElementFormulation::Hex8_OnePoint;
+    }
+    return Blast::FEMElementFormulation::Auto;
+}
+
+inline int8_t parseFEMHourglassModelInt(const std::string& hg_model_str) {
+    if (hg_model_str.empty() || hg_model_str == "Inherit" || hg_model_str == "Default") return -1;
+    if (hg_model_str == "FlanaganBelytschkoViscous") {
+        return static_cast<int8_t>(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
+    }
+    if (hg_model_str == "KosloffFrazier") {
+        return static_cast<int8_t>(Blast::FEMHourglassModel::KosloffFrazier);
+    }
+    if (hg_model_str == "FlanaganBelytschkoStiffness") {
+        return static_cast<int8_t>(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
+    }
+    return -1;
+}
+
+inline bool hasMaterialOverrideKeys(const nlohmann::json& j) {
+    static const char* kKeys[] = {
+        "enable_strain_erosion", "erosion_strain", "failure_strain",
+        "enable_stress_erosion", "erosion_stress", "tensile_failure_stress",
+        "enable_damage_erosion", "max_damage",
+        "enable_timestep_erosion", "timestep_erosion_factor",
+        "min_volume_ratio", "max_volume_ratio",
+        "enable_cohesive_splitting", "cohesive_fracture_energy",
+        "enable_heterogeneity", "weibull_modulus", "weibull_scale",
+        "enable_anisotropy", "anisotropy_ratio", "anisotropy_axis"
+    };
+    for (const char* k : kKeys) {
+        if (j.contains(k)) return true;
+    }
+    return false;
+}
+
+inline void applyMaterialErosionAndHeterogeneityOverrides(Blast::MaterialTable3D& mat, const nlohmann::json& obj) {
+    if (obj.contains("enable_cohesive_splitting")) {
+        mat.enable_cohesive_splitting = get_json_bool(obj, "enable_cohesive_splitting", mat.enable_cohesive_splitting);
+    }
+    if (obj.contains("cohesive_fracture_energy")) {
+        mat.cohesive_fracture_energy = static_cast<float>(get_json_double(obj, "cohesive_fracture_energy", mat.cohesive_fracture_energy));
+    }
+    if (obj.contains("failure_strain")) {
+        mat.failure_strain = static_cast<float>(get_json_double(obj, "failure_strain", mat.failure_strain));
+    }
+    if (obj.contains("tensile_failure_stress")) {
+        mat.tensile_failure_stress = static_cast<float>(get_json_double(obj, "tensile_failure_stress", mat.tensile_failure_stress));
+    }
+    if (obj.contains("enable_strain_erosion")) {
+        mat.enable_strain_erosion = get_json_bool(obj, "enable_strain_erosion", mat.enable_strain_erosion);
+    }
+    if (obj.contains("erosion_strain")) {
+        mat.erosion_strain = static_cast<float>(get_json_double(obj, "erosion_strain", mat.erosion_strain));
+    } else if (obj.contains("failure_strain")) {
+        mat.erosion_strain = mat.failure_strain;
+    }
+    if (obj.contains("enable_stress_erosion")) {
+        mat.enable_stress_erosion = get_json_bool(obj, "enable_stress_erosion", mat.enable_stress_erosion);
+    }
+    if (obj.contains("erosion_stress") || obj.contains("tensile_failure_stress")) {
+        mat.erosion_stress = static_cast<float>(get_json_double(obj, "erosion_stress", mat.tensile_failure_stress));
+    }
+    if (obj.contains("enable_damage_erosion")) {
+        mat.enable_damage_erosion = get_json_bool(obj, "enable_damage_erosion", mat.enable_damage_erosion);
+    }
+    if (obj.contains("max_damage")) {
+        mat.max_damage = static_cast<float>(get_json_double(obj, "max_damage", mat.max_damage));
+    }
+    if (obj.contains("enable_timestep_erosion")) {
+        mat.enable_timestep_erosion = get_json_bool(obj, "enable_timestep_erosion", mat.enable_timestep_erosion);
+    }
+    if (obj.contains("timestep_erosion_factor")) {
+        mat.timestep_erosion_factor = static_cast<float>(get_json_double(obj, "timestep_erosion_factor", mat.timestep_erosion_factor));
+    }
+    if (obj.contains("min_volume_ratio")) {
+        mat.min_volume_ratio = static_cast<float>(get_json_double(obj, "min_volume_ratio", mat.min_volume_ratio));
+    }
+    if (obj.contains("max_volume_ratio")) {
+        mat.max_volume_ratio = static_cast<float>(get_json_double(obj, "max_volume_ratio", mat.max_volume_ratio));
+    }
+    if (obj.contains("enable_heterogeneity") || obj.contains("weibull_modulus")) {
+        bool enable_het = get_json_bool(obj, "enable_heterogeneity", mat.enable_heterogeneity);
+        mat.enable_heterogeneity = enable_het;
+        mat.weibull_modulus = static_cast<float>(get_json_double(obj, "weibull_modulus", enable_het ? 8.0 : 0.0));
+        if (!enable_het) mat.weibull_modulus = 0.0f;
+    }
+    if (obj.contains("weibull_scale")) {
+        mat.weibull_scale = static_cast<float>(get_json_double(obj, "weibull_scale", mat.weibull_scale));
+    }
+    if (obj.contains("enable_anisotropy")) {
+        mat.enable_anisotropy = get_json_bool(obj, "enable_anisotropy", mat.enable_anisotropy);
+    }
+    if (obj.contains("anisotropy_ratio")) {
+        mat.anisotropy_ratio = static_cast<float>(get_json_double(obj, "anisotropy_ratio", mat.anisotropy_ratio));
+    }
+    if (obj.contains("anisotropy_axis")) {
+        std::string aniso_axis = obj.value("anisotropy_axis", "X");
+        if (aniso_axis == "Y") {
+            mat.anisotropy_dir[0] = 0.0f; mat.anisotropy_dir[1] = 1.0f; mat.anisotropy_dir[2] = 0.0f;
+        } else if (aniso_axis == "Z") {
+            mat.anisotropy_dir[0] = 0.0f; mat.anisotropy_dir[1] = 0.0f; mat.anisotropy_dir[2] = 1.0f;
+        } else if (aniso_axis == "X") {
+            mat.anisotropy_dir[0] = 1.0f; mat.anisotropy_dir[1] = 0.0f; mat.anisotropy_dir[2] = 0.0f;
+        }
+    }
+}
+
 template <typename T>
 inline void loadAndTransformLSDynaMesh(
     const std::string& k_file,
@@ -921,6 +1052,16 @@ inline void loadAndTransformLSDynaMesh(
     std::unordered_set<int> suppressed_part_ids;
     std::unordered_map<int, std::array<T, 3>> part_velocities;
     std::unordered_map<int, int> part_mat_remapping;
+    struct PartElementOverride {
+        bool has_formulation = false;
+        Blast::FEMElementFormulation formulation = Blast::FEMElementFormulation::Auto;
+        bool has_hg_model = false;
+        int8_t hourglass_model = -1;
+        bool has_hg_coeff = false;
+        float hourglass_coeff = -1.0f;
+    };
+    std::unordered_map<int, PartElementOverride> part_elem_overrides;
+    std::unordered_map<int, const nlohmann::json*> part_mat_overrides;
 
     if (obj_json && obj_json->is_object()) {
         if (obj_json->contains("fem_parts") && (*obj_json)["fem_parts"].is_array()) {
@@ -938,6 +1079,32 @@ inline void loadAndTransformLSDynaMesh(
                 }
                 if (p.contains("material_id")) {
                     part_mat_remapping[pid] = p["material_id"].template get<int>();
+                }
+                PartElementOverride pov;
+                std::string p_form_str = p.value("element_formulation", p.value("element_topology", p.value("integration_scheme", "")));
+                if (!p_form_str.empty() && p_form_str != "Inherit" && p_form_str != "Default") {
+                    pov.formulation = parseFEMElementFormulationStr(p_form_str);
+                    pov.has_formulation = (pov.formulation != Blast::FEMElementFormulation::Auto);
+                }
+                if (p.contains("hourglass_model")) {
+                    int8_t hm = parseFEMHourglassModelInt(p.value("hourglass_model", "Inherit"));
+                    if (hm >= 0) {
+                        pov.has_hg_model = true;
+                        pov.hourglass_model = hm;
+                    }
+                }
+                if (p.contains("hourglass_coeff")) {
+                    double hc = get_json_double(p, "hourglass_coeff", -1.0);
+                    if (hc >= 0.0) {
+                        pov.has_hg_coeff = true;
+                        pov.hourglass_coeff = static_cast<float>(hc);
+                    }
+                }
+                if (pov.has_formulation || pov.has_hg_model || pov.has_hg_coeff) {
+                    part_elem_overrides[pid] = pov;
+                }
+                if (hasMaterialOverrideKeys(p)) {
+                    part_mat_overrides[pid] = &p;
                 }
             }
         }
@@ -981,50 +1148,69 @@ inline void loadAndTransformLSDynaMesh(
         shells_ref = std::move(kept_shells);
     }
 
-    if (!part_mat_remapping.empty()) {
+    const int total_mats = static_cast<int>(out_mat_tables ? out_mat_tables->size() : 0);
+    const bool has_lsdyna_mat_offset = (out_mat_tables != nullptr && num_canvas_mats > 0 && !mat_list.empty());
+    auto resolve_mat_id = [&](int& mat_id, int part_id) {
+        auto remap_it = part_mat_remapping.find(part_id);
+        if (remap_it != part_mat_remapping.end()) {
+            mat_id = remap_it->second;
+        } else if (has_lsdyna_mat_offset) {
+            if (mat_id >= 0 && (num_canvas_mats + mat_id) < total_mats) {
+                mat_id += num_canvas_mats;
+            } else if (num_canvas_mats > 1) {
+                mat_id = 1;
+            }
+        }
+    };
+    if (!part_mat_remapping.empty() || has_lsdyna_mat_offset) {
+        for (auto& el : out_elements) resolve_mat_id(el.mat_id, el.part_id);
+        for (auto& tr : trusses_ref) resolve_mat_id(tr.mat_id, tr.part_id);
+        for (auto& bm : beams_ref) resolve_mat_id(bm.mat_id, bm.part_id);
+        for (auto& sh : shells_ref) resolve_mat_id(sh.mat_id, sh.part_id);
+    }
+    if (!part_mat_overrides.empty() && out_mat_tables != nullptr && !out_mat_tables->empty()) {
+        std::unordered_map<int, int> cloned_part_mat_id;
+        auto clone_override_mat = [&](int& mat_id, int part_id) {
+            auto ov_it = part_mat_overrides.find(part_id);
+            if (ov_it == part_mat_overrides.end()) return;
+            auto cl_it = cloned_part_mat_id.find(part_id);
+            if (cl_it == cloned_part_mat_id.end()) {
+                int src_idx = (mat_id >= 0 && mat_id < static_cast<int>(out_mat_tables->size())) ? mat_id : 0;
+                Blast::MaterialTable3D cloned = (*out_mat_tables)[src_idx];
+                applyMaterialErosionAndHeterogeneityOverrides(cloned, *(ov_it->second));
+                int new_idx = static_cast<int>(out_mat_tables->size());
+                out_mat_tables->push_back(cloned);
+                cloned_part_mat_id[part_id] = new_idx;
+                mat_id = new_idx;
+            } else {
+                mat_id = cl_it->second;
+            }
+        };
+        for (auto& el : out_elements) clone_override_mat(el.mat_id, el.part_id);
+        for (auto& tr : trusses_ref) clone_override_mat(tr.mat_id, tr.part_id);
+        for (auto& bm : beams_ref) clone_override_mat(bm.mat_id, bm.part_id);
+        for (auto& sh : shells_ref) clone_override_mat(sh.mat_id, sh.part_id);
+    }
+    if (!part_elem_overrides.empty()) {
         for (auto& el : out_elements) {
-            if (part_mat_remapping.count(el.part_id)) {
-                el.mat_id = part_mat_remapping[el.part_id];
+            auto ov_it = part_elem_overrides.find(el.part_id);
+            if (ov_it == part_elem_overrides.end()) continue;
+            const auto& pov = ov_it->second;
+            if (pov.has_formulation) {
+                el.element_formulation = static_cast<int8_t>(pov.formulation);
+            }
+            if (pov.has_hg_model) {
+                el.hourglass_model = pov.hourglass_model;
+            }
+            if (pov.has_hg_coeff) {
+                el.hourglass_coeff = pov.hourglass_coeff;
             }
         }
-        for (auto& tr : trusses_ref) {
-            if (part_mat_remapping.count(tr.part_id)) {
-                tr.mat_id = part_mat_remapping[tr.part_id];
-            }
-        }
-        for (auto& bm : beams_ref) {
-            if (part_mat_remapping.count(bm.part_id)) {
-                bm.mat_id = part_mat_remapping[bm.part_id];
-            }
-        }
-        for (auto& sh : shells_ref) {
-            if (part_mat_remapping.count(sh.part_id)) {
-                sh.mat_id = part_mat_remapping[sh.part_id];
-            }
-        }
-    } else if (num_canvas_mats > 0 && !mat_list.empty()) {
-        int total_mats = static_cast<int>(out_mat_tables ? out_mat_tables->size() : 0);
-        for (auto& tr : trusses_ref) {
-            if (tr.mat_id > 0 && (num_canvas_mats + tr.mat_id) < total_mats) {
-                tr.mat_id += num_canvas_mats;
-            } else if (num_canvas_mats > 1) {
-                tr.mat_id = 1;
-            }
-        }
-        for (auto& bm : beams_ref) {
-            if (bm.mat_id > 0 && (num_canvas_mats + bm.mat_id) < total_mats) {
-                bm.mat_id += num_canvas_mats;
-            } else if (num_canvas_mats > 1) {
-                bm.mat_id = 1;
-            }
-        }
-        for (auto& sh : shells_ref) {
-            if (sh.mat_id > 0 && (num_canvas_mats + sh.mat_id) < total_mats) {
-                sh.mat_id += num_canvas_mats;
-            } else if (num_canvas_mats > 1) {
-                sh.mat_id = 1;
-            }
-        }
+    }
+
+    if (!out_shells && !shells_ref.empty()) {
+        std::cerr << "[WARN] loadAndTransformLSDynaMesh (" << k_file << "): parsed " << shells_ref.size()
+                  << " *ELEMENT_SHELL elements, which are ignored when out_shells is null." << std::endl;
     }
 
     T rot_x_deg = static_cast<T>(0), rot_y_deg = static_cast<T>(0), rot_z_deg = static_cast<T>(0);
@@ -1114,11 +1300,16 @@ inline void loadAndTransformLSDynaMesh(
                 if (!bc.value("active", true)) continue;
                 std::string bc_type = bc.value("bc_type", "SPC");
                 std::string target_type = bc.value("target_type", "NODE_SET");
-                bool dofx = false, dofy = false, dofz = false;
+                const bool default_prescribed = (bc_type == "PRESCRIBED_VELOCITY");
+                bool dofx = default_prescribed, dofy = default_prescribed, dofz = default_prescribed;
                 if (bc.contains("dofs") && bc["dofs"].is_array() && bc["dofs"].size() >= 3) {
-                    dofx = bc["dofs"][0].template get<bool>();
-                    dofy = bc["dofs"][1].template get<bool>();
-                    dofz = bc["dofs"][2].template get<bool>();
+                    dofx = bc["dofs"][0].is_boolean() ? bc["dofs"][0].template get<bool>() : (bc["dofs"][0].template get<int>() != 0);
+                    dofy = bc["dofs"][1].is_boolean() ? bc["dofs"][1].template get<bool>() : (bc["dofs"][1].template get<int>() != 0);
+                    dofz = bc["dofs"][2].is_boolean() ? bc["dofs"][2].template get<bool>() : (bc["dofs"][2].template get<int>() != 0);
+                } else if (bc.contains("dofs") && bc["dofs"].is_object()) {
+                    dofx = bc["dofs"].value("tx", default_prescribed);
+                    dofy = bc["dofs"].value("ty", default_prescribed);
+                    dofz = bc["dofs"].value("tz", default_prescribed);
                 }
                 T bvx = static_cast<T>(0), bvy = static_cast<T>(0), bvz = static_cast<T>(0);
                 if (bc.contains("velocity") && bc["velocity"].is_array() && bc["velocity"].size() >= 3) {
@@ -1134,12 +1325,9 @@ inline void loadAndTransformLSDynaMesh(
                         out_nodes[idx].v[1] = bvy;
                         out_nodes[idx].v[2] = bvz;
                     } else if (bc_type == "PRESCRIBED_VELOCITY") {
-                        out_nodes[idx].v[0] = bvx;
-                        out_nodes[idx].v[1] = bvy;
-                        out_nodes[idx].v[2] = bvz;
-                        if (dofx) out_nodes[idx].is_fixed[0] = true;
-                        if (dofy) out_nodes[idx].is_fixed[1] = true;
-                        if (dofz) out_nodes[idx].is_fixed[2] = true;
+                        if (dofx) { out_nodes[idx].v[0] = bvx; out_nodes[idx].is_prescribed[0] = true; }
+                        if (dofy) { out_nodes[idx].v[1] = bvy; out_nodes[idx].is_prescribed[1] = true; }
+                        if (dofz) { out_nodes[idx].v[2] = bvz; out_nodes[idx].is_prescribed[2] = true; }
                     } else {
                         if (dofx) out_nodes[idx].is_fixed[0] = true;
                         if (dofy) out_nodes[idx].is_fixed[1] = true;
@@ -1189,15 +1377,12 @@ inline void populateFEMPhysicsParams(const nlohmann::json& msg, Blast::BlastPhys
     physics_params.mpm_particles_per_failed_element = get_json_int(msg, "mpm_particles_per_failed_element", 8);
 
     bool enable_het = get_json_bool(msg, "enable_heterogeneity", false);
-    if (!enable_het && msg.contains("material_heterogeneity") && get_json_double(msg, "material_heterogeneity", 0.0) > 1e-4) {
-        enable_het = true;
-    }
-    double w_mod = get_json_double(msg, "weibull_modulus", 0.0);
-    if (w_mod > 0.01) enable_het = true;
-
-    double het_val = (w_mod > 0.01) ? (1.0 / w_mod) : get_json_double(msg, "material_heterogeneity", enable_het ? 0.08 : 0.0);
+    double w_mod = enable_het ? get_json_double(msg, "weibull_modulus", 0.0) : 0.0;
+    double het_val = enable_het
+        ? ((w_mod > 0.01) ? (1.0 / w_mod) : get_json_double(msg, "material_heterogeneity", 0.08))
+        : 0.0;
     physics_params.enable_heterogeneity = enable_het;
-    physics_params.material_heterogeneity = static_cast<T>(enable_het ? het_val : 0.0);
+    physics_params.material_heterogeneity = static_cast<T>(het_val);
     physics_params.weibull_modulus = static_cast<T>(w_mod);
     physics_params.weibull_scale = static_cast<T>(get_json_double(msg, "weibull_scale", 1.0));
 
@@ -1229,41 +1414,32 @@ inline void populateFEMPhysicsParams(const nlohmann::json& msg, Blast::BlastPhys
     physics_params.enable_nonlocal_damage = get_json_bool(msg, "enable_nonlocal_damage", true);
     physics_params.enable_cohesive_splitting = get_json_bool(msg, "enable_cohesive_splitting", false);
     physics_params.cohesive_fracture_energy = static_cast<T>(get_json_double(msg, "cohesive_fracture_energy", 1000.0));
+    physics_params.bulk_viscosity_b1 = static_cast<T>(get_json_double(msg, "bulk_viscosity_b1", 0.06));
+    physics_params.bulk_viscosity_b2 = static_cast<T>(get_json_double(msg, "bulk_viscosity_b2", 1.20));
+    if (msg.contains("cowper_symonds_C")) {
+        physics_params.cowper_symonds_C = static_cast<T>(get_json_double(msg, "cowper_symonds_C", 40.0));
+    }
+    if (msg.contains("cowper_symonds_P")) {
+        physics_params.cowper_symonds_P = static_cast<T>(get_json_double(msg, "cowper_symonds_P", 5.0));
+    }
 }
 
 
 template <typename T>
 inline Blast::FEMErosionCriteria<T> populateFEMErosionCriteria(const nlohmann::json& msg) {
+    (void)msg;
     Blast::FEMErosionCriteria<T> erosion{};
-    const nlohmann::json* src = &msg;
-    const nlohmann::json* obj0 = (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty())
-        ? &msg["fem_objects"][0] : nullptr;
-
-    auto get_bool_val = [&](const std::string& k, bool def) -> bool {
-        if (src->contains(k)) return get_json_bool(*src, k, def);
-        if (obj0 && obj0->contains(k)) return get_json_bool(*obj0, k, def);
-        return def;
-    };
-    auto get_double_val = [&](const std::string& k, double def) -> double {
-        if (src->contains(k)) return get_json_double(*src, k, def);
-        if (obj0 && obj0->contains(k)) return get_json_double(*obj0, k, def);
-        return def;
-    };
-
-    erosion.enable_strain_erosion = get_bool_val("enable_strain_erosion", true);
-    erosion.enable_timestep_erosion = get_bool_val("enable_timestep_erosion", false);
-    erosion.enable_stress_erosion = get_bool_val("enable_stress_erosion", false);
-    double default_erosion = get_double_val("erosion_strain", -1.0);
-    if (default_erosion > 0.0) {
-        erosion.failure_strain = static_cast<T>(default_erosion);
-    } else {
-        double f_strain = get_double_val("failure_strain", 0.50);
-        erosion.failure_strain = static_cast<T>((f_strain >= 0.02) ? f_strain : 0.10);
-    }
-    erosion.timestep_erosion_factor = static_cast<T>(get_double_val("timestep_erosion_factor", 0.10));
-    erosion.min_volume_ratio = static_cast<T>(get_double_val("min_volume_ratio", 0.02));
-    erosion.tensile_failure_stress = static_cast<T>(get_double_val("tensile_failure_stress", 600.0e6));
-
+    // Erosion is configured per-Material and/or per-Object (MaterialTable3D), never globally forced from FEMDomain3D.
+    erosion.enable_strain_erosion = false;
+    erosion.enable_timestep_erosion = false;
+    erosion.enable_stress_erosion = false;
+    erosion.enable_damage_erosion = false;
+    erosion.failure_strain = static_cast<T>(0.50);
+    erosion.timestep_erosion_factor = static_cast<T>(0.10);
+    erosion.min_volume_ratio = static_cast<T>(0.02);
+    erosion.max_volume_ratio = static_cast<T>(5.00);
+    erosion.max_damage = static_cast<T>(1.0);
+    erosion.tensile_failure_stress = static_cast<T>(600.0e6);
     return erosion;
 }
 
@@ -1271,12 +1447,7 @@ inline Blast::LysmerBoundaryParams populateFEMLysmerParams(const nlohmann::json&
     Blast::LysmerBoundaryParams p;
     p.enabled = m.value("lysmer_enabled", false);
     std::string bc_fem = m.value("bc_fem", "");
-    if (bc_fem == "Lysmer" || bc_fem == "LysmerDashpot" || bc_fem == "Absorbing" || bc_fem == "NonReflecting" || bc_fem == "Transmitting" || bc_fem == "TRANSMISSIVE" ||
-        m.value("bc_x_min", "") == "Lysmer" || m.value("bc_x_max", "") == "Lysmer" ||
-        m.value("bc_y_min", "") == "Lysmer" || m.value("bc_y_max", "") == "Lysmer" ||
-        m.value("bc_z_min", "") == "Lysmer" || m.value("bc_z_max", "") == "Lysmer" ||
-        m.value("bc_x_min", "") == "Transmitting" || m.value("bc_x_max", "") == "Transmitting" ||
-        m.value("bc_y_min", "") == "Transmitting" || m.value("bc_y_max", "") == "Transmitting") {
+    if (bc_fem == "Lysmer" || bc_fem == "LysmerDashpot" || bc_fem == "Absorbing" || bc_fem == "NonReflecting" || bc_fem == "Transmitting" || bc_fem == "TRANSMISSIVE") {
         p.enabled = true;
     }
     p.rho = static_cast<float>(get_json_double(m, "lysmer_rho", get_json_double(m, "lysmer_density", 2000.0)));
@@ -1306,7 +1477,7 @@ inline void ingestFEMObjectsAndDetonators(SolverPtr& fem, const nlohmann::json& 
         det.radius = static_cast<float>(get_json_double(d, "trigger_radius", get_json_double(d, "detonator_radius", get_json_double(d, "initiation_radius", get_json_double(d, "radius", 0.02)))));
         det.time_delay = static_cast<float>(get_json_double(d, "time_delay", get_json_double(d, "start_time", get_json_double(d, "detonation_time", get_json_double(d, "delay", 0.0)))));
         det.target_part_id = get_json_int(d, "target_object_id", get_json_int(d, "object_id", default_part_id));
-        det.fired = (det.time_delay <= 0.0f);
+        det.fired = false; // delay 0 = ignite on first step
         return det;
     };
 
@@ -1335,6 +1506,9 @@ inline void ingestFEMObjectsAndDetonators(SolverPtr& fem, const nlohmann::json& 
             T pos_x = static_cast<T>(get_json_double(obj, "pos_x", 0.0));
             T pos_y = static_cast<T>(get_json_double(obj, "pos_y", 0.0));
             T pos_z = static_cast<T>(get_json_double(obj, "pos_z", 0.0));
+            T rot_x = static_cast<T>(get_json_double(obj, "rot_x", 0.0));
+            T rot_y = static_cast<T>(get_json_double(obj, "rot_y", 0.0));
+            T rot_z = static_cast<T>(get_json_double(obj, "rot_z", 0.0));
             T vel_x = static_cast<T>(get_json_double(obj, "vel_x", 0.0));
             T vel_y = static_cast<T>(get_json_double(obj, "vel_y", 0.0));
             T vel_z = static_cast<T>(get_json_double(obj, "vel_z", 0.0));
@@ -1346,8 +1520,75 @@ inline void ingestFEMObjectsAndDetonators(SolverPtr& fem, const nlohmann::json& 
             std::string shape_type = obj.value("shape_type", "Box");
             std::string origin_mode = obj.value("origin_mode", "Center");
             std::string bc_cond = obj.value("boundary_condition", "Free");
+
+            const nlohmann::json* single_part_cfg = nullptr;
+            if (obj.contains("fem_parts") && obj["fem_parts"].is_array() && !obj["fem_parts"].empty() &&
+                mesh_src != "LS-DYNA Keyword File" && shape_type != "LS-DYNA File" && k_file.empty()) {
+                for (const auto& p : obj["fem_parts"]) {
+                    int pid = p.value("part_id", 1);
+                    if (pid == obj_part_id || pid == 1 || single_part_cfg == nullptr) {
+                        single_part_cfg = &p;
+                        if (pid == obj_part_id || pid == 1) break;
+                    }
+                }
+            }
+            if (single_part_cfg) {
+                if (single_part_cfg->value("suppressed", false)) {
+                    obj_part_id++;
+                    continue;
+                }
+                if (single_part_cfg->contains("initial_velocity") && (*single_part_cfg)["initial_velocity"].is_array() &&
+                    (*single_part_cfg)["initial_velocity"].size() >= 3) {
+                    const T pvx = static_cast<T>((*single_part_cfg)["initial_velocity"][0].template get<double>());
+                    const T pvy = static_cast<T>((*single_part_cfg)["initial_velocity"][1].template get<double>());
+                    const T pvz = static_cast<T>((*single_part_cfg)["initial_velocity"][2].template get<double>());
+                    if (pvx != static_cast<T>(0) || pvy != static_cast<T>(0) || pvz != static_cast<T>(0)) {
+                        vel_x = pvx; vel_y = pvy; vel_z = pvz;
+                    }
+                }
+                if (hasMaterialOverrideKeys(*single_part_cfg)) {
+                    applyMaterialErosionAndHeterogeneityOverrides(obj_mat, *single_part_cfg);
+                }
+            }
+
             std::string elem_topo = obj.value("element_topology", msg.value("element_topology", "Hex8"));
-            bool use_tet4 = (elem_topo == "Tet4_ANP" || elem_topo == "Tet4" || elem_topo == "Tetrahedral");
+            Blast::FEMElementFormulation obj_form = parseFEMElementFormulationStr(elem_topo);
+            if (single_part_cfg) {
+                std::string p_form_str = single_part_cfg->value(
+                    "element_formulation",
+                    single_part_cfg->value("element_topology", single_part_cfg->value("integration_scheme", ""))
+                );
+                if (!p_form_str.empty() && p_form_str != "Inherit" && p_form_str != "Default") {
+                    Blast::FEMElementFormulation p_form = parseFEMElementFormulationStr(p_form_str);
+                    if (p_form != Blast::FEMElementFormulation::Auto) {
+                        obj_form = p_form;
+                    }
+                }
+            }
+            const std::string scheme_str = obj.value("integration_scheme", msg.value("integration_scheme", ""));
+            if (!scheme_str.empty() &&
+                (obj_form == Blast::FEMElementFormulation::Auto || obj_form == Blast::FEMElementFormulation::Hex8_OnePoint)) {
+                Blast::FEMElementFormulation s_form = parseFEMElementFormulationStr(scheme_str);
+                if (s_form != Blast::FEMElementFormulation::Auto) obj_form = s_form;
+            }
+            bool use_tet4 = (elem_topo == "Tet4_ANP" || elem_topo == "Tet4" || elem_topo == "Tetrahedral" ||
+                             obj_form == Blast::FEMElementFormulation::Tet4_Standard ||
+                             obj_form == Blast::FEMElementFormulation::Tet4_ANP);
+            int8_t obj_hg_model = obj.contains("hourglass_model")
+                ? parseFEMHourglassModelInt(obj.value("hourglass_model", "Inherit")) : -1;
+            float obj_hg_coeff = obj.contains("hourglass_coeff")
+                ? static_cast<float>(get_json_double(obj, "hourglass_coeff", -1.0)) : -1.0f;
+            if (single_part_cfg) {
+                if (single_part_cfg->contains("hourglass_model")) {
+                    int8_t hm = parseFEMHourglassModelInt(single_part_cfg->value("hourglass_model", "Inherit"));
+                    if (hm >= 0) obj_hg_model = hm;
+                }
+                if (single_part_cfg->contains("hourglass_coeff")) {
+                    double hc = get_json_double(*single_part_cfg, "hourglass_coeff", -1.0);
+                    if (hc >= 0.0) obj_hg_coeff = static_cast<float>(hc);
+                }
+            }
+            const size_t prev_elem_count = fem->getElements().size();
 
             if (mesh_src == "Cylinder Generator" || shape_type == "Cylinder") {
                 T radius = static_cast<T>(get_json_double(obj, "radius", 0.1));
@@ -1357,17 +1598,14 @@ inline void ingestFEMObjectsAndDetonators(SolverPtr& fem, const nlohmann::json& 
                 if (height <= static_cast<T>(0.0)) height = static_cast<T>(get_json_double(obj, "size_z", 0.2));
                 T cyl_start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - static_cast<T>(0.5) * height);
                 if (use_tet4) {
-                    fem->addStructuredTetCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                    fem->addStructuredTetCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond, rot_x, rot_y, rot_z);
                 } else {
-                    fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond);
+                    fem->addStructuredCylinderMesh(nx_fem, nz_fem, radius, height, pos_x, pos_y, cyl_start_z, obj_mat, vel_x, vel_y, vel_z, inner_radius, bc_cond, rot_x, rot_y, rot_z);
                 }
             } else if (mesh_src == "STL File" || shape_type == "STL" || !stl_file.empty()) {
                 T scale_x = static_cast<T>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                 T scale_y = static_cast<T>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                 T scale_z = static_cast<T>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                T rot_x = static_cast<T>(get_json_double(obj, "rot_x", 0.0));
-                T rot_y = static_cast<T>(get_json_double(obj, "rot_y", 0.0));
-                T rot_z = static_cast<T>(get_json_double(obj, "rot_z", 0.0));
                 fem->addSTLMesh(stl_file, nx_fem, ny_fem, nz_fem, pos_x, pos_y, pos_z, scale_x, scale_y, scale_z, rot_x, rot_y, rot_z, origin_mode, obj_mat, vel_x, vel_y, vel_z, use_tet4, bc_cond);
             } else if (mesh_src == "LS-DYNA Keyword File" || shape_type == "LS-DYNA File" || !k_file.empty()) {
                 std::vector<Blast::FEMNode3D<T>> nodes;
@@ -1375,12 +1613,17 @@ inline void ingestFEMObjectsAndDetonators(SolverPtr& fem, const nlohmann::json& 
                 std::vector<Blast::FEMTrussElement3D<T>> trusses;
                 std::vector<Blast::FEMBeam3DElement<T>> beams;
                 std::vector<Blast::MaterialTable3D> local_mats;
+                std::vector<Blast::FEMShell4BTElement<T>> shells;
                 int base_node_idx = static_cast<int>(fem->getNodes().size());
                 int mat_offset = static_cast<int>(fem->getMaterialTables().size());
                 T scale_x = static_cast<T>(get_json_double(obj, "scale_x", get_json_double(obj, "scale_factor", 1.0)));
                 T scale_y = static_cast<T>(get_json_double(obj, "scale_y", get_json_double(obj, "scale_factor", 1.0)));
                 T scale_z = static_cast<T>(get_json_double(obj, "scale_z", get_json_double(obj, "scale_factor", 1.0)));
-                loadAndTransformLSDynaMesh<T>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &local_mats);
+                loadAndTransformLSDynaMesh<T>(k_file, pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, scale_x, scale_y, scale_z, bc_cond, obj_mat, nodes, elements, &trusses, &beams, &obj, &local_mats, &shells);
+                if (!shells.empty()) {
+                    std::cerr << "[WARN] FEMObject3D (" << k_file << "): parsed " << shells.size()
+                              << " *ELEMENT_SHELL elements, which are not yet supported in FEMSolver3D and will be skipped." << std::endl;
+                }
                 fem->appendNodesAndElements(nodes, elements, local_mats);
                 const auto& mat_tables = fem->getMaterialTables();
                 std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
@@ -1413,9 +1656,29 @@ inline void ingestFEMObjectsAndDetonators(SolverPtr& fem, const nlohmann::json& 
                 T start_y = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_y : (pos_y - static_cast<T>(0.5) * ly);
                 T start_z = (origin_mode == "CAD Origin" || origin_mode == "Min Corner") ? pos_z : (pos_z - static_cast<T>(0.5) * lz);
                 if (use_tet4) {
-                    fem->addStructuredTetBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                    fem->addStructuredTetBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond, rot_x, rot_y, rot_z);
                 } else {
-                    fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond);
+                    fem->addStructuredBoxMesh(nx_fem, ny_fem, nz_fem, lx, ly, lz, start_x, start_y, start_z, obj_mat, vel_x, vel_y, vel_z, bc_cond, rot_x, rot_y, rot_z);
+                }
+            }
+
+            if (obj_form != Blast::FEMElementFormulation::Auto || obj_hg_model >= 0 || obj_hg_coeff >= 0.0f) {
+                auto& fem_elems = fem->getElements();
+                for (size_t ei = prev_elem_count; ei < fem_elems.size(); ++ei) {
+                    if (obj_form != Blast::FEMElementFormulation::Auto && fem_elems[ei].element_formulation < 0) {
+                        const bool is_tet = Blast::isTet4Element(fem_elems[ei]);
+                        const bool form_is_tet = (obj_form == Blast::FEMElementFormulation::Tet4_Standard ||
+                                                  obj_form == Blast::FEMElementFormulation::Tet4_ANP);
+                        if (is_tet == form_is_tet) {
+                            fem_elems[ei].element_formulation = static_cast<int8_t>(obj_form);
+                        }
+                    }
+                    if (obj_hg_model >= 0 && fem_elems[ei].hourglass_model < 0) {
+                        fem_elems[ei].hourglass_model = obj_hg_model;
+                    }
+                    if (obj_hg_coeff >= 0.0f && fem_elems[ei].hourglass_coeff < 0.0f) {
+                        fem_elems[ei].hourglass_coeff = obj_hg_coeff;
+                    }
                 }
             }
 
@@ -1462,7 +1725,8 @@ inline void ingestFEMObjectsAndDetonators(SolverPtr& fem, const nlohmann::json& 
     }
 
     // Evaluate top-level Entity Sets (fem_sets) and Boundary Conditions (boundary_conditions) across the entire assembled mesh
-    if (msg.contains("boundary_conditions") && msg["boundary_conditions"].is_array() && !msg["boundary_conditions"].empty()) {
+    if ((msg.contains("boundary_conditions") && msg["boundary_conditions"].is_array() && !msg["boundary_conditions"].empty()) ||
+        (msg.contains("fem_contacts") && msg["fem_contacts"].is_array() && !msg["fem_contacts"].empty())) {
         auto& all_nodes = fem->getNodes();
         auto& all_elems = fem->getElements();
         std::unordered_map<int, std::vector<int>> assembly_node_sets;
@@ -1591,50 +1855,86 @@ inline void ingestFEMObjectsAndDetonators(SolverPtr& fem, const nlohmann::json& 
             }
         }
 
-        for (const auto& bc : msg["boundary_conditions"]) {
-            std::string btype = bc.value("type", "");
-            int target_set = get_json_int(bc, "target_set_id", get_json_int(bc, "set_id", -1));
-            if (btype == "SPC") {
-                bool fx = false, fy = false, fz = false;
-                if (bc.contains("dofs") && bc["dofs"].is_array() && bc["dofs"].size() >= 3) {
-                    fx = bc["dofs"][0].is_boolean() ? bc["dofs"][0].get<bool>() : (bc["dofs"][0].get<int>() != 0);
-                    fy = bc["dofs"][1].is_boolean() ? bc["dofs"][1].get<bool>() : (bc["dofs"][1].get<int>() != 0);
-                    fz = bc["dofs"][2].is_boolean() ? bc["dofs"][2].get<bool>() : (bc["dofs"][2].get<int>() != 0);
-                } else if (bc.contains("dofs") && bc["dofs"].is_object()) {
-                    fx = bc["dofs"].value("tx", false);
-                    fy = bc["dofs"].value("ty", false);
-                    fz = bc["dofs"].value("tz", false);
-                }
-                auto it = assembly_node_sets.find(target_set);
-                if (it != assembly_node_sets.end()) {
-                    for (int ni : it->second) {
-                        if (ni >= 0 && ni < static_cast<int>(all_nodes.size())) {
-                            if (fx) { all_nodes[ni].is_fixed[0] = true; all_nodes[ni].v[0] = static_cast<T>(0); }
-                            if (fy) { all_nodes[ni].is_fixed[1] = true; all_nodes[ni].v[1] = static_cast<T>(0); }
-                            if (fz) { all_nodes[ni].is_fixed[2] = true; all_nodes[ni].v[2] = static_cast<T>(0); }
+        if (msg.contains("boundary_conditions") && msg["boundary_conditions"].is_array()) {
+            for (const auto& bc : msg["boundary_conditions"]) {
+                std::string btype = bc.value("type", "");
+                int target_set = get_json_int(bc, "target_set_id", get_json_int(bc, "set_id", -1));
+                if (btype == "SPC") {
+                    bool fx = false, fy = false, fz = false;
+                    if (bc.contains("dofs") && bc["dofs"].is_array() && bc["dofs"].size() >= 3) {
+                        fx = bc["dofs"][0].is_boolean() ? bc["dofs"][0].get<bool>() : (bc["dofs"][0].get<int>() != 0);
+                        fy = bc["dofs"][1].is_boolean() ? bc["dofs"][1].get<bool>() : (bc["dofs"][1].get<int>() != 0);
+                        fz = bc["dofs"][2].is_boolean() ? bc["dofs"][2].get<bool>() : (bc["dofs"][2].get<int>() != 0);
+                    } else if (bc.contains("dofs") && bc["dofs"].is_object()) {
+                        fx = bc["dofs"].value("tx", false);
+                        fy = bc["dofs"].value("ty", false);
+                        fz = bc["dofs"].value("tz", false);
+                    }
+                    auto it = assembly_node_sets.find(target_set);
+                    if (it != assembly_node_sets.end()) {
+                        for (int ni : it->second) {
+                            if (ni >= 0 && ni < static_cast<int>(all_nodes.size())) {
+                                if (fx) { all_nodes[ni].is_fixed[0] = true; all_nodes[ni].v[0] = static_cast<T>(0); }
+                                if (fy) { all_nodes[ni].is_fixed[1] = true; all_nodes[ni].v[1] = static_cast<T>(0); }
+                                if (fz) { all_nodes[ni].is_fixed[2] = true; all_nodes[ni].v[2] = static_cast<T>(0); }
+                            }
+                        }
+                    }
+                } else if (btype == "INITIAL_VELOCITY" || btype == "PRESCRIBED_VELOCITY") {
+                    T bvx = static_cast<T>(0), bvy = static_cast<T>(0), bvz = static_cast<T>(0);
+                    if (bc.contains("velocity") && bc["velocity"].is_array() && bc["velocity"].size() >= 3) {
+                        bvx = static_cast<T>(bc["velocity"][0].get<double>());
+                        bvy = static_cast<T>(bc["velocity"][1].get<double>());
+                        bvz = static_cast<T>(bc["velocity"][2].get<double>());
+                    } else if (bc.contains("values") && bc["values"].is_object()) {
+                        bvx = static_cast<T>(get_json_double(bc["values"], "vx", 0.0));
+                        bvy = static_cast<T>(get_json_double(bc["values"], "vy", 0.0));
+                        bvz = static_cast<T>(get_json_double(bc["values"], "vz", 0.0));
+                    }
+                    bool px = true, py = true, pz = true;
+                    if (bc.contains("dofs") && bc["dofs"].is_array() && bc["dofs"].size() >= 3) {
+                        px = bc["dofs"][0].is_boolean() ? bc["dofs"][0].get<bool>() : (bc["dofs"][0].get<int>() != 0);
+                        py = bc["dofs"][1].is_boolean() ? bc["dofs"][1].get<bool>() : (bc["dofs"][1].get<int>() != 0);
+                        pz = bc["dofs"][2].is_boolean() ? bc["dofs"][2].get<bool>() : (bc["dofs"][2].get<int>() != 0);
+                    } else if (bc.contains("dofs") && bc["dofs"].is_object()) {
+                        px = bc["dofs"].value("tx", true);
+                        py = bc["dofs"].value("ty", true);
+                        pz = bc["dofs"].value("tz", true);
+                    }
+                    auto it = assembly_node_sets.find(target_set);
+                    if (it != assembly_node_sets.end()) {
+                        for (int ni : it->second) {
+                            if (ni >= 0 && ni < static_cast<int>(all_nodes.size())) {
+                                if (btype == "PRESCRIBED_VELOCITY") {
+                                    if (px) { all_nodes[ni].v[0] = bvx; all_nodes[ni].is_prescribed[0] = true; }
+                                    if (py) { all_nodes[ni].v[1] = bvy; all_nodes[ni].is_prescribed[1] = true; }
+                                    if (pz) { all_nodes[ni].v[2] = bvz; all_nodes[ni].is_prescribed[2] = true; }
+                                } else {
+                                    all_nodes[ni].v[0] = bvx;
+                                    all_nodes[ni].v[1] = bvy;
+                                    all_nodes[ni].v[2] = bvz;
+                                }
+                            }
                         }
                     }
                 }
-            } else if (btype == "INITIAL_VELOCITY" || btype == "PRESCRIBED_VELOCITY") {
-                T bvx = static_cast<T>(0), bvy = static_cast<T>(0), bvz = static_cast<T>(0);
-                if (bc.contains("velocity") && bc["velocity"].is_array() && bc["velocity"].size() >= 3) {
-                    bvx = static_cast<T>(bc["velocity"][0].get<double>());
-                    bvy = static_cast<T>(bc["velocity"][1].get<double>());
-                    bvz = static_cast<T>(bc["velocity"][2].get<double>());
-                } else if (bc.contains("values") && bc["values"].is_object()) {
-                    bvx = static_cast<T>(get_json_double(bc["values"], "vx", 0.0));
-                    bvy = static_cast<T>(get_json_double(bc["values"], "vy", 0.0));
-                    bvz = static_cast<T>(get_json_double(bc["values"], "vz", 0.0));
+            }
+        }
+
+        if (msg.contains("fem_contacts") && msg["fem_contacts"].is_array()) {
+            for (const auto& c : msg["fem_contacts"]) {
+                std::string ctype = c.value("type", "");
+                if (c.contains("fs") || c.contains("fd")) {
+                    T fs_val = static_cast<T>(get_json_double(c, "fs", get_json_double(msg, "friction_static", 0.3)));
+                    T fd_val = static_cast<T>(get_json_double(c, "fd", get_json_double(msg, "friction_kinetic", 0.2)));
+                    fem->setFrictionCoefficients(fs_val, fd_val);
                 }
-                auto it = assembly_node_sets.find(target_set);
-                if (it != assembly_node_sets.end()) {
-                    for (int ni : it->second) {
-                        if (ni >= 0 && ni < static_cast<int>(all_nodes.size())) {
-                            all_nodes[ni].v[0] = bvx;
-                            all_nodes[ni].v[1] = bvy;
-                            all_nodes[ni].v[2] = bvz;
-                        }
-                    }
+                if (c.contains("penalty_scale")) {
+                    fem->setContactPenaltyScale(static_cast<T>(get_json_double(c, "penalty_scale", 1.0)));
+                }
+                if (ctype.find("TIED") != std::string::npos || ctype.find("Tied") != std::string::npos) {
+                    T merge_tol = static_cast<T>(get_json_double(c, "tolerance", get_json_double(msg, "node_merge_tolerance", 1.0e-3)));
+                    fem->mergeCoincidentNodes(merge_tol);
                 }
             }
         }
@@ -1687,13 +1987,102 @@ inline void ingestStandaloneBeams(SolverPtr& fem, const nlohmann::json& msg, con
     }
 }
 
+static void ensure_mpm_debris_solver(const nlohmann::json& msg_obj, bool use_gpu);
+
+template <bool IsCUDA, typename T, typename SolverPtr>
+inline void configureFEMSolverFromJson(
+    SolverPtr& fem,
+    const nlohmann::json& msg,
+    const Blast::LysmerBoundaryParams& fem_lysmer,
+    bool allow_init_mpm_debris
+) {
+    fem->setHourglassCoeff(static_cast<T>(get_json_double(msg, "hourglass_coeff", 0.1)));
+    fem->setContactPenaltyScale(static_cast<T>(get_json_double(msg, "contact_penalty_scale", 1.0)));
+    fem->setContactDamping(static_cast<T>(get_json_double(msg, "contact_damping", 0.20)));
+    fem->setFrictionCoefficients(
+        static_cast<T>(get_json_double(msg, "friction_static", 0.3)),
+        static_cast<T>(get_json_double(msg, "friction_kinetic", 0.2))
+    );
+    {
+        std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
+        if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
+            fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
+        } else {
+            fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
+        }
+    }
+
+    std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
+    if (hg_model_str == "FlanaganBelytschkoViscous") {
+        fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
+    } else if (hg_model_str == "KosloffFrazier") {
+        fem->setHourglassModel(Blast::FEMHourglassModel::KosloffFrazier);
+    } else {
+        fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
+    }
+
+    std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
+    if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
+        fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
+    } else if (scheme_str == "SelectiveReduced") {
+        fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
+    } else if (scheme_str == "OnePointKF") {
+        fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
+    } else {
+        fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
+    }
+
+    auto physics_params = fem->getPhysicsParams();
+    populateFEMPhysicsParams(msg, physics_params);
+    fem->setPhysicsParams(physics_params);
+
+    const bool has_mpm_objs = (msg.contains("mpm_objects") && msg["mpm_objects"].is_array() && !msg["mpm_objects"].empty());
+    if (allow_init_mpm_debris && (physics_params.convert_failed_elements_to_mpm || has_mpm_objs)) {
+        if (!global_solver_mpm_3d && !global_solver_mpm_3d_cuda) {
+            ensure_mpm_debris_solver(msg, IsCUDA);
+        }
+    }
+    if (global_solver_mpm_3d) {
+        fem->setMPMSolver(global_solver_mpm_3d.get());
+    }
+    if constexpr (IsCUDA) {
+        if (global_solver_mpm_3d_cuda) {
+            fem->setCUDAMPMSolver(global_solver_mpm_3d_cuda.get());
+        }
+    }
+
+    auto erosion = populateFEMErosionCriteria<T>(msg);
+    ingestFEMObjectsAndDetonators<SolverPtr, T>(fem, msg);
+    std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
+    ingestStandaloneBeams<SolverPtr, T>(fem, msg, rebar_form);
+    fem->setErosionCriteria(erosion);
+    fem->setLysmerParams(fem_lysmer);
+    if constexpr (IsCUDA) {
+        fem->syncToDevice();
+    } else {
+        fem->ensureGaussPointHistory();
+    }
+}
+
 template <typename CouplerPtr, typename T>
 inline void configureFEMFSICouplerCUDA(CouplerPtr& coupler, const nlohmann::json& msg) {
+    std::string method_str = msg.value("fsi_method", "TwoWayStaggered");
+    if (method_str == "SubCycling") {
+        coupler->setMethod(Blast::FSIMethod3D::SubCycling);
+    } else {
+        coupler->setMethod(Blast::FSIMethod3D::TwoWayStaggered);
+    }
     std::string integ_str = msg.value("pressure_integration", "Gauss2x2");
     if (integ_str == "Centroid1Pt") {
         coupler->setPressureIntegration(Blast::FSIPressureIntegration::Centroid1Pt);
     } else {
         coupler->setPressureIntegration(Blast::FSIPressureIntegration::Gauss2x2);
+    }
+    std::string uncov_str = msg.value("uncovering_method", "ConservativeIDW_VacuumCavity");
+    if (uncov_str == "StandardGhostFluid") {
+        coupler->setUncoveringMethod(Blast::FSIUncoveringMethod::StandardGhostFluid);
+    } else {
+        coupler->setUncoveringMethod(Blast::FSIUncoveringMethod::ConservativeIDW_VacuumCavity);
     }
     T rho_vac = static_cast<T>(get_json_double(msg, "fsi_rho_vac", 1.0e-6));
     T p_vac = static_cast<T>(get_json_double(msg, "fsi_p_vac", 1.0e-2));
@@ -4020,6 +4409,58 @@ void worker_mpm_3d_thread_func() {
     }
 }
 
+template <typename FemT, typename FemSolverPtr>
+inline void stepFEMWithCoupledMPM(FemSolverPtr* fem, float cfl, double& sim_time, double& last_dt) {
+    float mpm_cfl = global_cfl_mpm_3d.load();
+    if (mpm_cfl <= 0.0f) mpm_cfl = 0.3f;
+
+    const bool has_cuda_mpm = (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0);
+    const bool has_cpu_mpm = (!has_cuda_mpm && global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty());
+
+    FemT fem_dt = fem->computeStepSize(static_cast<FemT>(cfl));
+    if (has_cuda_mpm) {
+        float mpm_dt_est = global_solver_mpm_3d_cuda->computeStepSize(mpm_cfl);
+        if (mpm_dt_est > 0.0f) {
+            FemT cap = static_cast<FemT>(4.0) * static_cast<FemT>(mpm_dt_est);
+            if (fem_dt <= static_cast<FemT>(0.0) || cap < fem_dt) fem_dt = cap;
+        }
+    } else if (has_cpu_mpm) {
+        float mpm_dt_est = global_solver_mpm_3d->computeStepSize(mpm_cfl);
+        if (mpm_dt_est > 0.0f) {
+            FemT cap = static_cast<FemT>(4.0) * static_cast<FemT>(mpm_dt_est);
+            if (fem_dt <= static_cast<FemT>(0.0) || cap < fem_dt) fem_dt = cap;
+        }
+    }
+
+    if (fem_dt > static_cast<FemT>(0.0)) {
+        fem->stepWithDt(fem_dt);
+    } else {
+        fem->step(static_cast<FemT>(cfl));
+    }
+    sim_time = static_cast<double>(fem->getSimTime());
+    last_dt = static_cast<double>(fem->getLastDt());
+
+    if (has_cuda_mpm && last_dt > 1e-15) {
+        double remaining = last_dt;
+        while (remaining > 1e-15) {
+            float mpm_dt = std::min(static_cast<float>(remaining), global_solver_mpm_3d_cuda->computeStepSize(mpm_cfl));
+            if (mpm_dt <= 0.0f) break;
+            global_solver_mpm_3d_cuda->stepWithDt(mpm_dt);
+            fem->applyMPMContact(static_cast<FemT>(mpm_dt));
+            remaining -= static_cast<double>(mpm_dt);
+        }
+    } else if (has_cpu_mpm && last_dt > 1e-15) {
+        double remaining = last_dt;
+        while (remaining > 1e-15) {
+            float mpm_dt = std::min(static_cast<float>(remaining), global_solver_mpm_3d->computeStepSize(mpm_cfl));
+            if (mpm_dt <= 0.0f) break;
+            global_solver_mpm_3d->stepWithDt(mpm_dt);
+            fem->applyMPMContact(static_cast<FemT>(mpm_dt));
+            remaining -= static_cast<double>(mpm_dt);
+        }
+    }
+}
+
 void worker_fem_3d_thread_func() {
     try {
         int step_count = 0;
@@ -4082,53 +4523,23 @@ void worker_fem_3d_thread_func() {
             double e_int = 0.0;
 
             if (global_fem_solvers_cuda_float.count(m_id) && global_fem_solvers_cuda_float[m_id]) {
-                auto* fem = global_fem_solvers_cuda_float[m_id].get();
-                fem->step(cfl);
-                sim_time = static_cast<double>(fem->getSimTime());
-                last_dt = static_cast<double>(fem->getLastDt());
+                stepFEMWithCoupledMPM<float>(global_fem_solvers_cuda_float[m_id].get(), cfl, sim_time, last_dt);
             } else if (global_fem_solvers_cuda_double.count(m_id) && global_fem_solvers_cuda_double[m_id]) {
-                auto* fem = global_fem_solvers_cuda_double[m_id].get();
-                fem->step(static_cast<double>(cfl));
-                sim_time = fem->getSimTime();
-                last_dt = fem->getLastDt();
+                stepFEMWithCoupledMPM<double>(global_fem_solvers_cuda_double[m_id].get(), cfl, sim_time, last_dt);
             } else if (global_fem_solvers_float.count(m_id) && global_fem_solvers_float[m_id]) {
-                auto* fem = global_fem_solvers_float[m_id].get();
-                fem->step(cfl);
-                sim_time = static_cast<double>(fem->getSimTime());
-                last_dt = static_cast<double>(fem->getLastDt());
+                stepFEMWithCoupledMPM<float>(global_fem_solvers_float[m_id].get(), cfl, sim_time, last_dt);
             } else if (global_fem_solvers_double.count(m_id) && global_fem_solvers_double[m_id]) {
-                auto* fem = global_fem_solvers_double[m_id].get();
-                fem->step(static_cast<double>(cfl));
-                sim_time = fem->getSimTime();
-                last_dt = fem->getLastDt();
+                stepFEMWithCoupledMPM<double>(global_fem_solvers_double[m_id].get(), cfl, sim_time, last_dt);
             } else if (!global_fem_solvers_cuda_float.empty()) {
-                auto* fem = global_fem_solvers_cuda_float.begin()->second.get();
-                fem->step(cfl);
-                sim_time = static_cast<double>(fem->getSimTime());
-                last_dt = static_cast<double>(fem->getLastDt());
+                stepFEMWithCoupledMPM<float>(global_fem_solvers_cuda_float.begin()->second.get(), cfl, sim_time, last_dt);
             } else if (!global_fem_solvers_cuda_double.empty()) {
-                auto* fem = global_fem_solvers_cuda_double.begin()->second.get();
-                fem->step(static_cast<double>(cfl));
-                sim_time = fem->getSimTime();
-                last_dt = fem->getLastDt();
+                stepFEMWithCoupledMPM<double>(global_fem_solvers_cuda_double.begin()->second.get(), cfl, sim_time, last_dt);
             } else if (!global_fem_solvers_float.empty()) {
-                auto* fem = global_fem_solvers_float.begin()->second.get();
-                fem->step(cfl);
-                sim_time = static_cast<double>(fem->getSimTime());
-                last_dt = static_cast<double>(fem->getLastDt());
+                stepFEMWithCoupledMPM<float>(global_fem_solvers_float.begin()->second.get(), cfl, sim_time, last_dt);
             } else if (!global_fem_solvers_double.empty()) {
-                auto* fem = global_fem_solvers_double.begin()->second.get();
-                fem->step(static_cast<double>(cfl));
-                sim_time = fem->getSimTime();
-                last_dt = fem->getLastDt();
+                stepFEMWithCoupledMPM<double>(global_fem_solvers_double.begin()->second.get(), cfl, sim_time, last_dt);
             } else {
                 break;
-            }
-
-            if (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) {
-                global_solver_mpm_3d_cuda->stepWithDt(static_cast<float>(last_dt));
-            } else if (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty()) {
-                global_solver_mpm_3d->stepWithDt(static_cast<float>(last_dt));
             }
 
             auto step_end = std::chrono::steady_clock::now();
@@ -4260,8 +4671,14 @@ void worker_fem_3d_thread_func() {
                     e_int = fem->getEnergyTracker().E_int;
                 }
 
+                if (!global_gauges.empty()) record_gauges_fem_3d(sim_time);
                 auto comms_start = std::chrono::steady_clock::now();
-                emit_telemetry_fem_3d(sim_time, false, current_step);
+                const bool has_mpm = (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) ||
+                                     (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty());
+                emit_telemetry_fem_3d(sim_time, false, current_step, !has_mpm);
+                if (has_mpm) {
+                    emit_telemetry_mpm_3d(sim_time, false, current_step);
+                }
                 auto comms_end = std::chrono::steady_clock::now();
                 double comms_ms = std::chrono::duration<double, std::milli>(comms_end - comms_start).count();
                 global_last_comms_ms = comms_ms;
@@ -4328,10 +4745,18 @@ void worker_fem_3d_thread_func() {
             final_step = global_fem_solvers_double[m_id]->getStepCount();
         }
 
-        if (global_fem_solvers_float.count(m_id) && global_fem_solvers_float[m_id]) {
+        if (global_fem_solvers_cuda_float.count(m_id) && global_fem_solvers_cuda_float[m_id]) {
+            final_sim_time = static_cast<double>(global_fem_solvers_cuda_float[m_id]->getSimTime());
+        } else if (global_fem_solvers_cuda_double.count(m_id) && global_fem_solvers_cuda_double[m_id]) {
+            final_sim_time = global_fem_solvers_cuda_double[m_id]->getSimTime();
+        } else if (global_fem_solvers_float.count(m_id) && global_fem_solvers_float[m_id]) {
             final_sim_time = static_cast<double>(global_fem_solvers_float[m_id]->getSimTime());
         } else if (global_fem_solvers_double.count(m_id) && global_fem_solvers_double[m_id]) {
             final_sim_time = global_fem_solvers_double[m_id]->getSimTime();
+        } else if (!global_fem_solvers_cuda_float.empty()) {
+            final_sim_time = static_cast<double>(global_fem_solvers_cuda_float.begin()->second->getSimTime());
+        } else if (!global_fem_solvers_cuda_double.empty()) {
+            final_sim_time = global_fem_solvers_cuda_double.begin()->second->getSimTime();
         } else if (!global_fem_solvers_float.empty()) {
             final_sim_time = static_cast<double>(global_fem_solvers_float.begin()->second->getSimTime());
         } else if (!global_fem_solvers_double.empty()) {
@@ -4349,8 +4774,15 @@ void worker_fem_3d_thread_func() {
             global_last_compute_ms = interval_compute_ms / steps_in_interval;
             global_last_io_ms = interval_io_ms / steps_in_interval;
         }
-        emit_telemetry_fem_3d(final_sim_time, false, final_step);
+        if (!global_gauges.empty()) record_gauges_fem_3d(final_sim_time);
+        const bool has_mpm = (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) ||
+                             (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty());
+        emit_telemetry_fem_3d(final_sim_time, false, final_step, !has_mpm);
+        if (has_mpm) {
+            emit_telemetry_mpm_3d(final_sim_time, false, final_step);
+        }
         flush_async_telemetry();
+        write_gauge_files();
 
 
         if (reached_end) {
@@ -4379,9 +4811,25 @@ void worker_fem_3d_thread_func() {
         global_exec_until_end_fem_3d = false;
     } catch (const std::exception& e) {
         emit_kernel_log("ERROR", std::string("3D FEM worker thread error: ") + e.what(), 0.0, "fem_3d");
+        nlohmann::json status_msg;
+        status_msg["type"] = "status";
+        status_msg["status"] = "ERROR";
+        status_msg["message"] = std::string("3D FEM worker thread error: ") + e.what();
+        {
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << status_msg.dump() << std::endl;
+        }
         sim_fem_3d_running = false;
     } catch (...) {
         emit_kernel_log("ERROR", "3D FEM worker thread error: unknown exception", 0.0, "fem_3d");
+        nlohmann::json status_msg;
+        status_msg["type"] = "status";
+        status_msg["status"] = "ERROR";
+        status_msg["message"] = "3D FEM worker thread error: unknown exception";
+        {
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << status_msg.dump() << std::endl;
+        }
         sim_fem_3d_running = false;
     }
 }
@@ -5098,6 +5546,28 @@ void worker_fsi_3d_thread_func() {
                 global_t3d += dt_common;
             }
 
+            // Advance any active FEM solver (e.g. Marine Harbour FEM Seabed foundation) in coupled FSI
+            if (!global_fem_solvers_cuda_float.empty()) {
+                for (auto& kv : global_fem_solvers_cuda_float) {
+                    if (kv.second) kv.second->stepWithDt(static_cast<float>(dt_common));
+                }
+            }
+            if (!global_fem_solvers_cuda_double.empty()) {
+                for (auto& kv : global_fem_solvers_cuda_double) {
+                    if (kv.second) kv.second->stepWithDt(dt_common);
+                }
+            }
+            if (!global_fem_solvers_float.empty()) {
+                for (auto& kv : global_fem_solvers_float) {
+                    if (kv.second) kv.second->stepWithDt(static_cast<float>(dt_common));
+                }
+            }
+            if (!global_fem_solvers_double.empty()) {
+                for (auto& kv : global_fem_solvers_double) {
+                    if (kv.second) kv.second->stepWithDt(dt_common);
+                }
+            }
+
             // Synchronize MPM fluid sleeve particles with updated Eulerian fluid state
             if (global_solver_mpm_3d_cuda && global_solver_3d && global_solver_3d->isCUDA()) {
                 global_solver_3d->synchronizeFluidSleeveWithMPMGPU(global_solver_mpm_3d_cuda.get());
@@ -5529,26 +5999,39 @@ void worker_fem_fsi_3d_thread_func() {
             float cfl = global_cfl_fem_fsi_3d.load();
 
             // Run appropriate coupler instance
+            bool coupler_stepped_mpm = false;
             if (global_fem_fsi_couplers_cuda_float.count(m_id) && global_fem_fsi_couplers_cuda_float[m_id]) {
                 auto* coupler = global_fem_fsi_couplers_cuda_float[m_id].get();
                 coupler->step(cfl);
                 last_dt = static_cast<double>(coupler->getLastDt());
                 global_t3d = static_cast<double>(coupler->getSimTime());
+                if (coupler->getFEMSolver() && (coupler->getFEMSolver()->getCUDAMPMSolver() || coupler->getFEMSolver()->getMPMSolver())) {
+                    coupler_stepped_mpm = true;
+                }
             } else if (!global_fem_fsi_couplers_cuda_float.empty()) {
                 auto* coupler = global_fem_fsi_couplers_cuda_float.begin()->second.get();
                 coupler->step(cfl);
                 last_dt = static_cast<double>(coupler->getLastDt());
                 global_t3d = static_cast<double>(coupler->getSimTime());
+                if (coupler->getFEMSolver() && (coupler->getFEMSolver()->getCUDAMPMSolver() || coupler->getFEMSolver()->getMPMSolver())) {
+                    coupler_stepped_mpm = true;
+                }
             } else if (global_fem_fsi_couplers_cuda_double.count(m_id) && global_fem_fsi_couplers_cuda_double[m_id]) {
                 auto* coupler = global_fem_fsi_couplers_cuda_double[m_id].get();
                 coupler->step(static_cast<double>(cfl));
                 last_dt = coupler->getLastDt();
                 global_t3d = coupler->getSimTime();
+                if (coupler->getFEMSolver() && (coupler->getFEMSolver()->getCUDAMPMSolver() || coupler->getFEMSolver()->getMPMSolver())) {
+                    coupler_stepped_mpm = true;
+                }
             } else if (!global_fem_fsi_couplers_cuda_double.empty()) {
                 auto* coupler = global_fem_fsi_couplers_cuda_double.begin()->second.get();
                 coupler->step(static_cast<double>(cfl));
                 last_dt = coupler->getLastDt();
                 global_t3d = coupler->getSimTime();
+                if (coupler->getFEMSolver() && (coupler->getFEMSolver()->getCUDAMPMSolver() || coupler->getFEMSolver()->getMPMSolver())) {
+                    coupler_stepped_mpm = true;
+                }
             } else if (global_fem_fsi_couplers_float.count(m_id) && global_fem_fsi_couplers_float[m_id]) {
                 auto* coupler = global_fem_fsi_couplers_float[m_id].get();
                 coupler->step(cfl);
@@ -5577,11 +6060,13 @@ void worker_fem_fsi_3d_thread_func() {
                 step_phase_tracking_particles_3d(static_cast<float>(last_dt));
             }
 
-            // Advance MPM particles (nearfield water sleeve / soil / debris) in coupled multi-physics
-            if (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) {
-                global_solver_mpm_3d_cuda->stepWithDt(static_cast<float>(last_dt));
-            } else if (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty()) {
-                global_solver_mpm_3d->stepWithDt(static_cast<float>(last_dt));
+            // Advance MPM particles (nearfield water sleeve / soil / debris) only when coupler did not already step MPM
+            if (!coupler_stepped_mpm) {
+                if (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) {
+                    global_solver_mpm_3d_cuda->stepWithDt(static_cast<float>(last_dt));
+                } else if (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty()) {
+                    global_solver_mpm_3d->stepWithDt(static_cast<float>(last_dt));
+                }
             }
 
             auto step_end = std::chrono::steady_clock::now();
@@ -5649,12 +6134,15 @@ void worker_fem_fsi_3d_thread_func() {
                 interval_steps = 0;
 
                 auto comms_start = std::chrono::steady_clock::now();
+                bool mpm_emitted = false;
                 if (global_solver_3d) {
                     emit_telemetry_3d(global_t3d, false, current_step);
+                    mpm_emitted = true;
                 } else if ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) || (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty())) {
                     emit_telemetry_mpm_3d(global_t3d, false, current_step);
+                    mpm_emitted = true;
                 }
-                emit_telemetry_fem_3d(global_t3d, false, current_step);
+                emit_telemetry_fem_3d(global_t3d, false, current_step, !mpm_emitted);
                 auto comms_end = std::chrono::steady_clock::now();
                 double comms_ms = std::chrono::duration<double, std::milli>(comms_end - comms_start).count();
                 global_last_comms_ms = comms_ms;
@@ -5723,12 +6211,15 @@ void worker_fem_fsi_3d_thread_func() {
             global_last_compute_ms = interval_compute_ms / steps_in_interval;
             global_last_io_ms = interval_io_ms / steps_in_interval;
         }
+        bool mpm_emitted = false;
         if (global_solver_3d) {
             emit_telemetry_3d(global_t3d, term_fem_fsi_3d, final_step);
+            mpm_emitted = true;
         } else if ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) || (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty())) {
             emit_telemetry_mpm_3d(global_t3d, term_fem_fsi_3d, final_step);
+            mpm_emitted = true;
         }
-        emit_telemetry_fem_3d(final_sim_time, term_fem_fsi_3d, final_step);
+        emit_telemetry_fem_3d(final_sim_time, term_fem_fsi_3d, final_step, !mpm_emitted);
         flush_async_telemetry();
         write_gauge_files();
 
@@ -6157,13 +6648,18 @@ static void ensure_mpm_debris_solver(const nlohmann::json& msg_obj, bool use_gpu
 
         bool is_sparse_mpm = get_json_bool(msg_obj, "mpm_sparse_grid", get_json_bool(msg_obj, "sparse_grid", false));
 
-        if (!global_solver_mpm_3d) {
-            global_solver_mpm_3d = std::make_unique<Blast::MPMSolver3D>();
-            global_solver_mpm_3d->setSparseGridMode(is_sparse_mpm);
-            global_solver_mpm_3d->initializeGrid(nx, ny, nz, cs, cs, cs, xmin_d, ymin_d, zmin_d);
-            global_solver_mpm_3d->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
+        if (!use_gpu || convert_mpm) {
+            if (!global_solver_mpm_3d) {
+                global_solver_mpm_3d = std::make_unique<Blast::MPMSolver3D>();
+                // On GPU runs, CPU MPM only acts as a host staging buffer for eroded-element debris conversion; avoid dense host grid alloc.
+                global_solver_mpm_3d->setSparseGridMode(use_gpu ? true : is_sparse_mpm);
+                global_solver_mpm_3d->initializeGrid(nx, ny, nz, cs, cs, cs, xmin_d, ymin_d, zmin_d);
+                global_solver_mpm_3d->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
+            } else {
+                global_solver_mpm_3d->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
+            }
         } else {
-            global_solver_mpm_3d->setBoundaryConditions(mpm_bc1, mpm_bc2, mpm_bc3, mpm_bc4, mpm_bc5, mpm_bc6);
+            global_solver_mpm_3d.reset();
         }
 
         if (use_gpu && !global_solver_mpm_3d_cuda) {
@@ -6178,8 +6674,36 @@ static void ensure_mpm_debris_solver(const nlohmann::json& msg_obj, bool use_gpu
             emit_kernel_log("INFO", "Auto-initialized background CPU MPM solver for coupled multi-physics / debris.", 0.0, "fem_3d", 0);
         }
 
+        global_cfl_mpm_3d = static_cast<float>(get_json_double(msg_obj, "mpm_cfl", get_json_double(msg_obj, "cfl", 0.3)));
+
         if (has_mpm_objects) {
             populate_mpm_objects_from_json(msg_obj, use_gpu, "fem_3d");
+
+            auto add_det_from_json = [&](const nlohmann::json& d_json) {
+                Blast::MPMDetonator3D det;
+                det.x = static_cast<float>(get_json_double(d_json, "trigger_x", get_json_double(d_json, "detonator_x", get_json_double(d_json, "x", 0.5))));
+                det.y = static_cast<float>(get_json_double(d_json, "trigger_y", get_json_double(d_json, "detonator_y", get_json_double(d_json, "y", 0.5))));
+                det.z = static_cast<float>(get_json_double(d_json, "trigger_z", get_json_double(d_json, "detonator_z", get_json_double(d_json, "z", 0.5))));
+                det.radius = static_cast<float>(get_json_double(d_json, "trigger_radius", get_json_double(d_json, "detonator_radius", get_json_double(d_json, "initiation_radius", get_json_double(d_json, "radius", 0.02)))));
+                det.time_delay = static_cast<float>(get_json_double(d_json, "time_delay", get_json_double(d_json, "start_time", get_json_double(d_json, "detonation_time", get_json_double(d_json, "delay", 0.0)))));
+                det.track_mpm_velocity = get_json_bool(d_json, "track_mpm_velocity", false);
+                det.fired = false; // delay 0 = ignite on first step
+                det.target_object_id = get_json_int(d_json, "target_object_id", get_json_int(d_json, "object_id", -1));
+                if (global_solver_mpm_3d_cuda) global_solver_mpm_3d_cuda->addDetonator(det);
+                if (global_solver_mpm_3d) global_solver_mpm_3d->addDetonator(det);
+            };
+            bool added_det = false;
+            if (msg_obj.contains("triggers") && msg_obj["triggers"].is_array()) {
+                for (const auto& d_json : msg_obj["triggers"]) { add_det_from_json(d_json); added_det = true; }
+            } else if (msg_obj.contains("detonators") && msg_obj["detonators"].is_array()) {
+                for (const auto& d_json : msg_obj["detonators"]) { add_det_from_json(d_json); added_det = true; }
+            } else if (msg_obj.contains("trigger_x") || msg_obj.contains("detonator_x")) {
+                add_det_from_json(msg_obj);
+                added_det = true;
+            }
+            if (added_det && global_solver_mpm_3d_cuda) {
+                global_solver_mpm_3d_cuda->syncToDevice();
+            }
         }
     }
 }
@@ -7466,7 +7990,7 @@ int main() {
                             d.radius = trig.radius;
                             d.time_delay = trig.start_time;
                             d.track_mpm_velocity = trig.track_mpm_velocity;
-                            d.fired = (trig.start_time <= 0.0f);
+                            d.fired = false; // start_time 0 = ignite on first step
                             d.target_object_id = (trig.target_object_id >= 0) ? trig.target_object_id : obj_id;
                             if (global_solver_mpm_3d_cuda) global_solver_mpm_3d_cuda->addDetonator(d);
                             if (global_solver_mpm_3d) global_solver_mpm_3d->addDetonator(d);
@@ -8532,7 +9056,7 @@ int main() {
                             d.radius = trig.radius;
                             d.time_delay = trig.start_time;
                             d.track_mpm_velocity = trig.track_mpm_velocity;
-                            d.fired = (trig.start_time <= 0.0f);
+                            d.fired = false; // start_time 0 = ignite on first step
                             d.target_object_id = (trig.target_object_id >= 0) ? trig.target_object_id : obj_id;
                             if (global_solver_mpm_3d_cuda) global_solver_mpm_3d_cuda->addDetonator(d);
                             if (global_solver_mpm_3d) global_solver_mpm_3d->addDetonator(d);
@@ -8795,6 +9319,42 @@ int main() {
                         global_solver_mpm_3d->particleToGrid();
                     }
 
+                    // Optional FEM objects in hybrid FSI_3D (e.g., Marine Harbour FEM Seabed foundation)
+                    if (msg.contains("fem_objects") && msg["fem_objects"].is_array() && !msg["fem_objects"].empty()) {
+                        std::string fem_model_id = msg.value("modelId", msg.value("model_id", global_model_id.empty() ? "default_fem" : global_model_id));
+                        global_fem_solvers_float.erase(fem_model_id);
+                        global_fem_solvers_double.erase(fem_model_id);
+                        global_fem_solvers_cuda_float.erase(fem_model_id);
+                        global_fem_solvers_cuda_double.erase(fem_model_id);
+                        auto fem_lysmer = populateFEMLysmerParams(msg);
+                        std::string fem_dev = msg.value("device", "GPU");
+                        std::string fem_prec = msg.value("precision", "single");
+                        bool fem_double = (fem_prec == "double" || fem_prec == "Double" || fem_prec == "DOUBLE" || fem_prec == "fp64" || fem_prec == "FP64");
+                        bool fem_gpu = is_cuda_device(fem_dev) || fem_dev == "gpu" || fem_dev == "GPU" || fem_dev == "cuda" || fem_dev == "CUDA" ||
+                                       (!msg.contains("device") && global_solver_mpm_3d_cuda != nullptr);
+                        if (fem_gpu) {
+                            if (fem_double) {
+                                auto fem = std::make_unique<Blast::FEMSolver3DCUDA<double>>();
+                                configureFEMSolverFromJson<true, double>(fem, msg, fem_lysmer, true);
+                                global_fem_solvers_cuda_double[fem_model_id] = std::move(fem);
+                            } else {
+                                auto fem = std::make_unique<Blast::FEMSolver3DCUDA<float>>();
+                                configureFEMSolverFromJson<true, float>(fem, msg, fem_lysmer, true);
+                                global_fem_solvers_cuda_float[fem_model_id] = std::move(fem);
+                            }
+                        } else {
+                            if (fem_double) {
+                                auto fem = std::make_unique<Blast::FEMSolver3D<double>>();
+                                configureFEMSolverFromJson<false, double>(fem, msg, fem_lysmer, true);
+                                global_fem_solvers_double[fem_model_id] = std::move(fem);
+                            } else {
+                                auto fem = std::make_unique<Blast::FEMSolver3D<float>>();
+                                configureFEMSolverFromJson<false, float>(fem, msg, fem_lysmer, true);
+                                global_fem_solvers_float[fem_model_id] = std::move(fem);
+                            }
+                        }
+                    }
+
                     setup_phase_tracking_particles_3d(msg);
                     init_gauges(msg);
                     record_gauges_3d(global_t3d);
@@ -8835,235 +9395,53 @@ int main() {
                     global_model_id = model_id;
                     global_endtime_fem_3d = msg.value("endtime", 1.0);
                     std::string precision = msg.value("precision", "single");
+                    if (precision == "Double" || precision == "DOUBLE" || precision == "fp64" || precision == "FP64") {
+                        precision = "double";
+                    } else if (precision == "Single" || precision == "SINGLE" || precision == "fp32" || precision == "FP32" || precision == "float") {
+                        precision = "single";
+                    }
                     std::string device = msg.value("device", "cpu");
                     select_cuda_device(device);
-                    bool use_gpu = is_cuda_device(device) || device == "gpu" || device == "cuda";
+                    bool use_gpu = is_cuda_device(device) || device == "gpu" || device == "GPU" || device == "cuda" || device == "CUDA";
 
                     global_fem_solvers_float.erase(model_id);
                     global_fem_solvers_double.erase(model_id);
                     global_fem_solvers_cuda_float.erase(model_id);
                     global_fem_solvers_cuda_double.erase(model_id);
-
+                    global_solver_mpm_3d.reset();
+                    global_solver_mpm_3d_cuda.reset();
                     auto fem_lysmer = populateFEMLysmerParams(msg);
 
                     if (use_gpu) {
                         if (precision == "double") {
                             auto fem = std::make_unique<Blast::FEMSolver3DCUDA<double>>();
-                            fem->setHourglassCoeff(static_cast<double>(get_json_double(msg, "hourglass_coeff", 0.1)));
-                            fem->setContactPenaltyScale(static_cast<double>(get_json_double(msg, "contact_penalty_scale", 1.0)));
-                            fem->setContactDamping(static_cast<double>(get_json_double(msg, "contact_damping", 0.20)));
-                            fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
-                            {
-                                std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
-                                if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
-                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
-                                } else {
-                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
-                                }
-                            }
-
-                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
-                            if (hg_model_str == "FlanaganBelytschkoViscous") {
-                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
-                            } else {
-                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
-                            }
-
-                            std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
-                            if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
-                            } else if (scheme_str == "SelectiveReduced") {
-                            fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
-                            } else if (scheme_str == "OnePointKF") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
-                            } else {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
-                            }
-
-                            auto physics_params = fem->getPhysicsParams();
-                            populateFEMPhysicsParams(msg, physics_params);
-                            fem->setPhysicsParams(physics_params);
-                            if (physics_params.convert_failed_elements_to_mpm) {
-                                ensure_mpm_debris_solver(msg, true);
-                            }
-                            if (global_solver_mpm_3d) {
-                                fem->setMPMSolver(global_solver_mpm_3d.get());
-                            }
-                            if (global_solver_mpm_3d_cuda) {
-                                fem->setCUDAMPMSolver(global_solver_mpm_3d_cuda.get());
-                            }
-
-                            auto erosion = populateFEMErosionCriteria<double>(msg);
-                            ingestFEMObjectsAndDetonators<decltype(fem), double>(fem, msg);
-                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
-                            ingestStandaloneBeams<decltype(fem), double>(fem, msg, rebar_form);
-                            fem->setErosionCriteria(erosion);
-                            fem->setLysmerParams(fem_lysmer);
-                            fem->syncToDevice();
+                            configureFEMSolverFromJson<true, double>(fem, msg, fem_lysmer, true);
                             global_fem_solvers_cuda_double[model_id] = std::move(fem);
                         } else {
                             auto fem = std::make_unique<Blast::FEMSolver3DCUDA<float>>();
-                            fem->setHourglassCoeff(static_cast<float>(get_json_double(msg, "hourglass_coeff", 0.1)));
-                            fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
-                            fem->setContactDamping(static_cast<float>(get_json_double(msg, "contact_damping", 0.20)));
-                            fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
-                            {
-                                std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
-                                if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
-                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
-                                } else {
-                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
-                                }
-                            }
-
-                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
-                            if (hg_model_str == "FlanaganBelytschkoViscous") {
-                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
-                            } else if (hg_model_str == "KosloffFrazier") {
-                                fem->setHourglassModel(Blast::FEMHourglassModel::KosloffFrazier);
-                            } else {
-                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
-                            }
-
-                            std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
-                            if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
-                            } else if (scheme_str == "SelectiveReduced") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
-                            } else if (scheme_str == "OnePointKF") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
-                            } else {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
-                            }
-
-                            auto physics_params = fem->getPhysicsParams();
-                            populateFEMPhysicsParams(msg, physics_params);
-                            fem->setPhysicsParams(physics_params);
-                            if (physics_params.convert_failed_elements_to_mpm) {
-                                ensure_mpm_debris_solver(msg, true);
-                            }
-                            if (global_solver_mpm_3d) {
-                                fem->setMPMSolver(global_solver_mpm_3d.get());
-                            }
-                            if (global_solver_mpm_3d_cuda) {
-                                fem->setCUDAMPMSolver(global_solver_mpm_3d_cuda.get());
-                            }
-
-                            auto erosion = populateFEMErosionCriteria<float>(msg);
-                            ingestFEMObjectsAndDetonators<decltype(fem), float>(fem, msg);
-                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
-                            ingestStandaloneBeams<decltype(fem), float>(fem, msg, rebar_form);
-                            fem->setErosionCriteria(erosion);
-                            fem->setLysmerParams(fem_lysmer);
-                            fem->syncToDevice();
+                            configureFEMSolverFromJson<true, float>(fem, msg, fem_lysmer, true);
                             global_fem_solvers_cuda_float[model_id] = std::move(fem);
                         }
                     } else {
                         if (precision == "double") {
                             auto fem = std::make_unique<Blast::FEMSolver3D<double>>();
-                            fem->setHourglassCoeff(static_cast<double>(get_json_double(msg, "hourglass_coeff", 0.1)));
-                            fem->setContactPenaltyScale(static_cast<double>(get_json_double(msg, "contact_penalty_scale", 1.0)));
-                            fem->setContactDamping(static_cast<double>(get_json_double(msg, "contact_damping", 0.20)));
-                            fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
-                            {
-                                std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
-                                if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
-                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
-                                } else {
-                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
-                                }
-                            }
-
-                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
-                            if (hg_model_str == "FlanaganBelytschkoViscous") {
-                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
-                            } else {
-                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
-                            }
-
-                            std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
-                            if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
-                            } else if (scheme_str == "SelectiveReduced") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
-                            } else if (scheme_str == "OnePointKF") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
-                            } else {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
-                            }
-
-                            auto physics_params = fem->getPhysicsParams();
-                            populateFEMPhysicsParams(msg, physics_params);
-                            fem->setPhysicsParams(physics_params);
-                            if (physics_params.convert_failed_elements_to_mpm) {
-                                ensure_mpm_debris_solver(msg, true);
-                            }
-                            if (global_solver_mpm_3d) {
-                                fem->setMPMSolver(global_solver_mpm_3d.get());
-                            }
-
-                            auto erosion = populateFEMErosionCriteria<double>(msg);
-                            ingestFEMObjectsAndDetonators<decltype(fem), double>(fem, msg);
-                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
-                            ingestStandaloneBeams<decltype(fem), double>(fem, msg, rebar_form);
-                            fem->setErosionCriteria(erosion);
-                            fem->setLysmerParams(fem_lysmer);
+                            configureFEMSolverFromJson<false, double>(fem, msg, fem_lysmer, true);
                             global_fem_solvers_double[model_id] = std::move(fem);
                         } else {
                             auto fem = std::make_unique<Blast::FEMSolver3D<float>>();
-                            fem->setHourglassCoeff(static_cast<float>(get_json_double(msg, "hourglass_coeff", 0.1)));
-                            fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
-                            fem->setContactDamping(static_cast<float>(get_json_double(msg, "contact_damping", 0.20)));
-                            fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
-                            {
-                                std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
-                                if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
-                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
-                                } else {
-                                    fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
-                                }
-                            }
-
-                            std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
-                            if (hg_model_str == "FlanaganBelytschkoViscous") {
-                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
-                            } else {
-                                fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
-                            }
-
-                            std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
-                            if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
-                            } else if (scheme_str == "SelectiveReduced") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
-                            } else if (scheme_str == "OnePointKF") {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
-                            } else {
-                                fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
-                            }
-
-                            auto physics_params = fem->getPhysicsParams();
-                            populateFEMPhysicsParams(msg, physics_params);
-                            fem->setPhysicsParams(physics_params);
-                            if (physics_params.convert_failed_elements_to_mpm) {
-                                ensure_mpm_debris_solver(msg, true);
-                            }
-                            if (global_solver_mpm_3d) {
-                                fem->setMPMSolver(global_solver_mpm_3d.get());
-                            }
-
-                            auto erosion = populateFEMErosionCriteria<float>(msg);
-                            ingestFEMObjectsAndDetonators<decltype(fem), float>(fem, msg);
-                            std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
-                            ingestStandaloneBeams<decltype(fem), float>(fem, msg, rebar_form);
-                            fem->setErosionCriteria(erosion);
-                            fem->setLysmerParams(fem_lysmer);
+                            configureFEMSolverFromJson<false, float>(fem, msg, fem_lysmer, true);
                             global_fem_solvers_float[model_id] = std::move(fem);
                         }
                     }
                     init_gauges(msg);
+                    record_gauges_fem_3d(0.0);
                     emit_kernel_log("SYSTEM", "3D Hexahedral Explicit FEM Solver Initialized for model " + model_id, 0.0, "3d");
-                    emit_telemetry_fem_3d(0.0, false);
+                    const bool has_mpm = (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) ||
+                                         (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty());
+                    emit_telemetry_fem_3d(0.0, false, -1, !has_mpm);
+                    if (has_mpm) {
+                        emit_telemetry_mpm_3d(0.0, false, 0);
+                    }
                 } else if (command == "STEP_FEM_3D") {
                     if (msg.contains("modelId")) global_model_id = msg["modelId"].get<std::string>();
                     else if (msg.contains("model_id")) global_model_id = msg["model_id"].get<std::string>();
@@ -9257,6 +9635,11 @@ int main() {
                         if (nz <= 0) nz = default_nz;
                         std::string device = msg.value("device", "cpu");
                         std::string precision = msg.value("precision", "single");
+                        if (precision == "Double" || precision == "DOUBLE" || precision == "fp64" || precision == "FP64") {
+                            precision = "double";
+                        } else if (precision == "Single" || precision == "SINGLE" || precision == "fp32" || precision == "FP32" || precision == "float") {
+                            precision = "single";
+                        }
                         std::string init_mode = msg.value("init_mode", "Multi-Material JWL");
                         std::string explosive_type = msg.value("explosive_type", "");
                         std::string material_type = msg.value("material_type", "");
@@ -9264,7 +9647,7 @@ int main() {
                         bool is_multimat = !is_ideal_gas_3d;
 
                         select_cuda_device(device);
-                        bool use_gpu = is_cuda_device(device) || device == "gpu" || device == "cuda";
+                        bool use_gpu = is_cuda_device(device) || device == "gpu" || device == "GPU" || device == "cuda" || device == "CUDA";
 
                         if (use_gpu) {
                             if (precision == "single" || precision == "float") {
@@ -9376,59 +9759,7 @@ int main() {
                         if (use_gpu) {
                             if (precision == "double") {
                                 auto fem = std::make_unique<Blast::FEMSolver3DCUDA<double>>();
-                                fem->setHourglassCoeff(static_cast<double>(get_json_double(msg, "hourglass_coeff", 0.1)));
-                                fem->setContactPenaltyScale(static_cast<double>(get_json_double(msg, "contact_penalty_scale", 1.0)));
-                                fem->setContactDamping(static_cast<double>(get_json_double(msg, "contact_damping", 0.20)));
-                                fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
-                                {
-                                    std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
-                                    if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
-                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
-                                    } else {
-                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
-                                    }
-                                }
-
-                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
-                                if (hg_model_str == "FlanaganBelytschkoViscous") {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
-                                } else if (hg_model_str == "KosloffFrazier") {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::KosloffFrazier);
-                                } else {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
-                                }
-
-                                std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
-                                if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
-                                } else if (scheme_str == "SelectiveReduced") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
-                                } else if (scheme_str == "OnePointKF") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
-                                } else {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
-                                }
-
-                                auto physics_params = fem->getPhysicsParams();
-                                populateFEMPhysicsParams(msg, physics_params);
-                                fem->setPhysicsParams(physics_params);
-                                if (physics_params.convert_failed_elements_to_mpm || (msg.contains("mpm_objects") && msg["mpm_objects"].is_array() && !msg["mpm_objects"].empty())) {
-                                    ensure_mpm_debris_solver(msg, true);
-                                }
-                                if (global_solver_mpm_3d) {
-                                    fem->setMPMSolver(global_solver_mpm_3d.get());
-                                }
-                                if (global_solver_mpm_3d_cuda) {
-                                    fem->setCUDAMPMSolver(global_solver_mpm_3d_cuda.get());
-                                }
-
-                                auto erosion = populateFEMErosionCriteria<double>(msg);
-                                ingestFEMObjectsAndDetonators<decltype(fem), double>(fem, msg);
-                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
-                                ingestStandaloneBeams<decltype(fem), double>(fem, msg, rebar_form);
-                                fem->setErosionCriteria(erosion);
-                                fem->setLysmerParams(fem_lysmer);
-                                fem->syncToDevice();
+                                configureFEMSolverFromJson<true, double>(fem, msg, fem_lysmer, true);
 
                                 auto coupler = std::make_unique<Blast::FEMFSICoupler3DCUDA<double>>();
                                 coupler->attachSolvers(global_solver_3d.get(), fem.get());
@@ -9437,59 +9768,7 @@ int main() {
                                 global_fem_fsi_couplers_cuda_double[model_id] = std::move(coupler);
                             } else {
                                 auto fem = std::make_unique<Blast::FEMSolver3DCUDA<float>>();
-                                fem->setHourglassCoeff(static_cast<float>(get_json_double(msg, "hourglass_coeff", 0.1)));
-                                fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
-                                fem->setContactDamping(static_cast<float>(get_json_double(msg, "contact_damping", 0.20)));
-                                fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
-                                {
-                                    std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
-                                    if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
-                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
-                                    } else {
-                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
-                                    }
-                                }
-
-                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
-                                if (hg_model_str == "FlanaganBelytschkoViscous") {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
-                                } else if (hg_model_str == "KosloffFrazier") {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::KosloffFrazier);
-                                } else {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
-                                }
-
-                                std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
-                                if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
-                                } else if (scheme_str == "SelectiveReduced") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
-                                } else if (scheme_str == "OnePointKF") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
-                                } else {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
-                                }
-
-                                auto physics_params = fem->getPhysicsParams();
-                                populateFEMPhysicsParams(msg, physics_params);
-                                fem->setPhysicsParams(physics_params);
-                                if (physics_params.convert_failed_elements_to_mpm || (msg.contains("mpm_objects") && msg["mpm_objects"].is_array() && !msg["mpm_objects"].empty())) {
-                                    ensure_mpm_debris_solver(msg, true);
-                                }
-                                if (global_solver_mpm_3d) {
-                                    fem->setMPMSolver(global_solver_mpm_3d.get());
-                                }
-                                if (global_solver_mpm_3d_cuda) {
-                                    fem->setCUDAMPMSolver(global_solver_mpm_3d_cuda.get());
-                                }
-
-                                auto erosion = populateFEMErosionCriteria<float>(msg);
-                                ingestFEMObjectsAndDetonators<decltype(fem), float>(fem, msg);
-                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
-                                ingestStandaloneBeams<decltype(fem), float>(fem, msg, rebar_form);
-                                fem->setErosionCriteria(erosion);
-                                fem->setLysmerParams(fem_lysmer);
-                                fem->syncToDevice();
+                                configureFEMSolverFromJson<true, float>(fem, msg, fem_lysmer, true);
 
                                 auto coupler = std::make_unique<Blast::FEMFSICoupler3DCUDA<float>>();
                                 coupler->attachSolvers(global_solver_3d.get(), fem.get());
@@ -9500,55 +9779,7 @@ int main() {
                         } else {
                             if (precision == "double") {
                                 auto fem = std::make_unique<Blast::FEMSolver3D<double>>();
-                                fem->setHourglassCoeff(static_cast<double>(get_json_double(msg, "hourglass_coeff", 0.1)));
-                                fem->setContactPenaltyScale(static_cast<double>(get_json_double(msg, "contact_penalty_scale", 1.0)));
-                                fem->setContactDamping(static_cast<double>(get_json_double(msg, "contact_damping", 0.20)));
-                                fem->setFrictionCoefficients(static_cast<double>(get_json_double(msg, "friction_static", 0.3)), static_cast<double>(get_json_double(msg, "friction_kinetic", 0.2)));
-                                {
-                                    std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
-                                    if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
-                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
-                                    } else {
-                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
-                                    }
-                                }
-
-                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
-                                if (hg_model_str == "FlanaganBelytschkoViscous") {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
-                                } else if (hg_model_str == "KosloffFrazier") {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::KosloffFrazier);
-                                } else {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
-                                }
-
-                                std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
-                                if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
-                                } else if (scheme_str == "SelectiveReduced") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
-                                } else if (scheme_str == "OnePointKF") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
-                                } else {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
-                                }
-
-                                auto physics_params = fem->getPhysicsParams();
-                                populateFEMPhysicsParams(msg, physics_params);
-                                fem->setPhysicsParams(physics_params);
-                                if (physics_params.convert_failed_elements_to_mpm || (msg.contains("mpm_objects") && msg["mpm_objects"].is_array() && !msg["mpm_objects"].empty())) {
-                                    ensure_mpm_debris_solver(msg, false);
-                                }
-                                if (global_solver_mpm_3d) {
-                                    fem->setMPMSolver(global_solver_mpm_3d.get());
-                                }
-
-                                auto erosion = populateFEMErosionCriteria<double>(msg);
-                                ingestFEMObjectsAndDetonators<decltype(fem), double>(fem, msg);
-                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
-                                ingestStandaloneBeams<decltype(fem), double>(fem, msg, rebar_form);
-                                fem->setErosionCriteria(erosion);
-                                fem->setLysmerParams(fem_lysmer);
+                                configureFEMSolverFromJson<false, double>(fem, msg, fem_lysmer, true);
 
                                 auto coupler = std::make_unique<Blast::FEMFSICoupler3D<double>>();
                                 coupler->attachSolvers(global_solver_3d.get(), fem.get());
@@ -9557,55 +9788,7 @@ int main() {
                                 global_fem_fsi_couplers_double[model_id] = std::move(coupler);
                             } else {
                                 auto fem = std::make_unique<Blast::FEMSolver3D<float>>();
-                                fem->setHourglassCoeff(static_cast<float>(get_json_double(msg, "hourglass_coeff", 0.1)));
-                                fem->setContactPenaltyScale(static_cast<float>(get_json_double(msg, "contact_penalty_scale", 1.0)));
-                                fem->setContactDamping(static_cast<float>(get_json_double(msg, "contact_damping", 0.20)));
-                                fem->setFrictionCoefficients(static_cast<float>(get_json_double(msg, "friction_static", 0.3)), static_cast<float>(get_json_double(msg, "friction_kinetic", 0.2)));
-                                {
-                                    std::string search_str = msg.value("contact_search_method", "Hierarchical Octave Hash Grid");
-                                    if (search_str == "Linear BVH (Morton Code)" || search_str == "LinearBVH" || search_str == "LBVH") {
-                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::LinearBVH);
-                                    } else {
-                                        fem->setContactSearchMethod(Blast::FEMContactSearchMethod::HierarchicalOctaveGrid);
-                                    }
-                                }
-
-                                std::string hg_model_str = msg.value("hourglass_model", "FlanaganBelytschkoViscous");
-                                if (hg_model_str == "FlanaganBelytschkoViscous") {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoViscous);
-                                } else if (hg_model_str == "KosloffFrazier") {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::KosloffFrazier);
-                                } else {
-                                    fem->setHourglassModel(Blast::FEMHourglassModel::FlanaganBelytschkoStiffness);
-                                }
-
-                                std::string scheme_str = msg.value("integration_scheme", "OnePointFB");
-                                if (scheme_str == "FullGauss8" || scheme_str == "FullIntegration8Pt") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::FullGauss8);
-                                } else if (scheme_str == "SelectiveReduced") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::SelectiveReduced);
-                                } else if (scheme_str == "OnePointKF") {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointKF);
-                                } else {
-                                    fem->setIntegrationScheme(Blast::FEMIntegrationScheme::OnePointFB);
-                                }
-
-                                auto physics_params = fem->getPhysicsParams();
-                                populateFEMPhysicsParams(msg, physics_params);
-                                fem->setPhysicsParams(physics_params);
-                                if (physics_params.convert_failed_elements_to_mpm || (msg.contains("mpm_objects") && msg["mpm_objects"].is_array() && !msg["mpm_objects"].empty())) {
-                                    ensure_mpm_debris_solver(msg);
-                                }
-                                if (global_solver_mpm_3d) {
-                                    fem->setMPMSolver(global_solver_mpm_3d.get());
-                                }
-
-                                auto erosion = populateFEMErosionCriteria<float>(msg);
-                                ingestFEMObjectsAndDetonators<decltype(fem), float>(fem, msg);
-                                std::string rebar_form = msg.value("rebar_formulation", "TimoshenkoBeam3D");
-                                ingestStandaloneBeams<decltype(fem), float>(fem, msg, rebar_form);
-                                fem->setErosionCriteria(erosion);
-                                fem->setLysmerParams(fem_lysmer);
+                                configureFEMSolverFromJson<false, float>(fem, msg, fem_lysmer, true);
 
                                 auto coupler = std::make_unique<Blast::FEMFSICoupler3D<float>>();
                                 coupler->attachSolvers(global_solver_3d.get(), fem.get());
@@ -9630,6 +9813,16 @@ int main() {
                             global_fem_fsi_couplers_cuda_double[model_id]->primeInitialGeometry();
                         } else if (!global_fem_fsi_couplers_cuda_double.empty()) {
                             global_fem_fsi_couplers_cuda_double.begin()->second->primeInitialGeometry();
+                        } else if (global_fem_fsi_couplers_float.count(model_id) &&
+                                   global_fem_fsi_couplers_float[model_id]) {
+                            global_fem_fsi_couplers_float[model_id]->primeInitialGeometry();
+                        } else if (!global_fem_fsi_couplers_float.empty()) {
+                            global_fem_fsi_couplers_float.begin()->second->primeInitialGeometry();
+                        } else if (global_fem_fsi_couplers_double.count(model_id) &&
+                                   global_fem_fsi_couplers_double[model_id]) {
+                            global_fem_fsi_couplers_double[model_id]->primeInitialGeometry();
+                        } else if (!global_fem_fsi_couplers_double.empty()) {
+                            global_fem_fsi_couplers_double.begin()->second->primeInitialGeometry();
                         }
 
                         setup_phase_tracking_particles_3d(msg);
@@ -9637,7 +9830,7 @@ int main() {
                         record_gauges_3d(global_t3d);
                         emit_kernel_log("SYSTEM", "3D Coupled Multi-Physics Solver (CFD + MPM + FEM) Initialized", global_t3d, "3d");
                         emit_telemetry_3d(global_t3d, false, 0);
-                        emit_telemetry_fem_3d(global_t3d, false);
+                        emit_telemetry_fem_3d(global_t3d, false, -1, false);
 
                         nlohmann::json prog_report;
                         prog_report["type"] = "progress";
@@ -10048,13 +10241,16 @@ int main() {
                         if (global_solver_mpm_2d) {
                             emit_telemetry_mpm_2d(global_solver_mpm_2d->getSimTime(), false, global_step_fsi_2d.load());
                         }
+                        bool mpm_emitted = false;
                         if (global_solver_3d) {
                             emit_telemetry_3d(global_t3d, false, global_step_3d.load());
+                            mpm_emitted = true;
                         } else if (global_solver_mpm_3d || global_solver_mpm_3d_cuda) {
                             emit_telemetry_mpm_3d(global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getSimTime() : global_solver_mpm_3d->getSimTime(), false, global_step_fsi_3d.load());
+                            mpm_emitted = true;
                         }
                         if (!global_fem_solvers_cuda_float.empty() || !global_fem_solvers_cuda_double.empty() || !global_fem_solvers_float.empty() || !global_fem_solvers_double.empty()) {
-                            emit_telemetry_fem_3d(-1.0, false, global_step_fem_fsi_3d.load());
+                            emit_telemetry_fem_3d(-1.0, false, global_step_fem_fsi_3d.load(), !mpm_emitted);
                         }
                     }
                 } else if (command == "WRITE_VTK") {

@@ -4232,7 +4232,18 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             // equilibrium with volume additivity); all other reactive models keep the linear blend.
             const Mixture::Rule mix_rule = is_lt_kinetics
                 ? static_cast<Mixture::Rule>(mat.mixture_rule) : Mixture::Rule::LinearBlend;
+            // Full Lee-Tarver closure: common pressure AND temperature between phases (needs the product heat
+            // capacity jwlp_Cv); otherwise pressure-only equilibrium / linear blend.
+            const bool use_thermal = is_lt_kinetics && use_jwl_reactant && !awe && !use_davis_prod &&
+                                     mix_rule == Mixture::Rule::PressureEquilibrium && mat.jwlp_Cv > 0.0f;
+            Mixture::ThermalParams tp{};
+            if (use_thermal) {
+                tp = {mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_omega, mat.jwlr_Cv, mat.jwlr_T0,
+                      mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, mat.jwlp_Cv,
+                      static_cast<double>(mat.detonation_energy) * mat.density, mat.density};
+            }
             auto mixture_at = [&](float lam_mix) -> Mixture::Result {
+                if (use_thermal) return Mixture::thermalMixture(static_cast<double>(v_rel), static_cast<double>(lam_mix), static_cast<double>(e_th), tp);
                 return Mixture::mixturePressure(mix_rule, static_cast<double>(v_rel), static_cast<double>(lam_mix),
                     [&](double v) { return static_cast<double>(solid_pressure_at(static_cast<float>(v))); },
                     [&](double v) { return static_cast<double>(product_pressure_at(static_cast<float>(v))); });
@@ -4299,10 +4310,39 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             // with p_new = p_mix(e_th_new) closed by 3 fixed-point iterations. Work is applied in BOTH
             // compression and expansion (expanding gas must cool).
             Mixture::Result mix = mixture_at(lam_new);
+
+            // Artificial bulk viscosity (von Neumann-Richtmyer + Landshoff linear term), same form and
+            // coefficients as the GPU reactive path and the FEM solver; active only under compression:
+            //   q = rho * ( b1 * c * h * |tr D| + b2 * h^2 * (tr D)^2 ),  h = V_p^(1/3)
+            // It is a stress (not thermodynamic pressure): it enters sigma and the energy balance (it
+            // dissipates into heat) but NOT the reaction rate, which sees the thermodynamic pressure.
+            float q_visc = 0.0f;
+            {
+                const float tr_D = tr_deps / std::max(1.0e-12f, dt);
+                if (tr_D < 0.0f) {
+                    const float rho_cur = rho_ref / v_rel;
+                    const float h_elem = std::cbrt(p.V);
+                    const float p_prod_q = product_pressure_at(static_cast<float>(mix.v_p));
+                    float c_solid;
+                    if (use_jwl_reactant) c_solid = JWL::computeJWLReactantSoundSpeed(v_rel, e_th, mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_omega, mat.jwlr_Cv, mat.jwlr_T0, mat.density);
+                    else c_solid = use_davis_solid ? mat.davis_c0 : mat.mg_c0;
+                    const float c_prod = JWL::computeJWLSoundSpeed(v_rel, std::max(p_prod_q, 1.0f), mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, rho_ref);
+                    const float c_mix = (1.0f - lam_new) * std::max(c_solid, 0.0f) + lam_new * c_prod;
+                    const float b1 = mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : 0.06f;
+                    const float b2 = mat.bulk_viscosity_b2 > 0.0f ? mat.bulk_viscosity_b2 : 1.20f;
+                    const float M_comp = h_elem * std::fabs(tr_D) / std::max(1.0f, c_mix);
+                    const float b1_eff = (M_comp > 0.02f) ? b1 : (b1 * 50.0f * M_comp);
+                    const float b2_eff = (M_comp > 0.05f) ? b2 : (b2 * 20.0f * M_comp);
+                    q_visc = rho_cur * (b1_eff * c_mix * h_elem * std::fabs(tr_D) + b2_eff * h_elem * h_elem * tr_D * tr_D);
+                    const float q_max = 1.5f * rho_cur * c_mix * std::min(2500.0f, h_elem * std::fabs(tr_D));
+                    q_visc = std::min(q_max, q_visc);
+                }
+            }
             {
                 float p_prev = static_cast<float>(mix.p);
                 for (int it = 0; it < 3; ++it) {
-                    e_th = e_th_start - 0.5f * (p_old + p_prev) * dv_rel / rho_ref;
+                    // p_old is the previous TOTAL stress pressure (thermodynamic + viscous); the new total adds q_visc.
+                    e_th = e_th_start - 0.5f * (p_old + p_prev + q_visc) * dv_rel / rho_ref;
                     e_prod = e_th + q_heat;
                     mix = mixture_at(lam_new);
                     p_prev = static_cast<float>(mix.p);
@@ -4318,7 +4358,9 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             const float de_chem = d_lam * q_heat;
             p.e_int += de_work + de_chem;
 
-            if (use_jwl_reactant && !awe) {
+            if (use_thermal) {
+                p.temperature = static_cast<float>(mix.T);
+            } else if (use_jwl_reactant && !awe) {
                 p.temperature = JWL::computeJWLReactantTemperature(v_rel, e_th, mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_Cv, mat.jwlr_T0, mat.density);
             } else {
                 float cv_eff = use_davis_solid ? (mat.davis_cv > 1.0f ? mat.davis_cv : 1000.0f) : (mat.Cp > 1.0f ? mat.Cp : 1000.0f);
@@ -4368,7 +4410,7 @@ void MPMSolver3D::updateParticleStress(MPMParticle3D& p, float dt, const float L
             }
 
             for (int r = 0; r < 3; ++r)
-                s_trial[r][r] -= p_mix;
+                s_trial[r][r] -= (p_mix + q_visc);
             p.sigma = s_trial;
             return;
         }

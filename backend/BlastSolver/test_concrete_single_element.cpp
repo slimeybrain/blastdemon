@@ -1,14 +1,20 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
-#include <cassert>
 #include <iomanip>
 #include "constitutive_concrete_models.hpp"
 #include "mpm_solver_3d.hpp"
 
 using namespace Blast;
 
-void testUniaxialCompression() {
+#define CONCRETE_CHECK(cond) do { \
+    if (!(cond)) { \
+        std::cerr << "[FAIL] " << __FILE__ << ":" << __LINE__ << " Check failed: " << #cond << std::endl; \
+        return false; \
+    } \
+} while (0)
+
+bool testUniaxialCompression() {
     std::cout << "--- Test 1: Uniaxial Compression (RHT, K&C, CSCM) ---" << std::endl;
 
     MaterialTable3D mat;
@@ -47,7 +53,18 @@ void testUniaxialCompression() {
         float ep = 0.0f, D = 0.0f;
         float max_comp_stress = 0.0f;
         for (int step = 0; step < 1000; ++step) {
-            float de_l = (D == 0.0f) ? (-mat.poissons_ratio * d_eps) : (-0.5f * d_eps);
+            // Solve lateral strain increment de_l for unconfined uniaxial stress (sig[1] = sig[2] = 0)
+            float lo = 0.0f, hi = -5.0f * d_eps;
+            for (int iter = 0; iter < 24; ++iter) {
+                float mid = 0.5f * (lo + hi);
+                float sig_t[6] = { sig[0], sig[1], sig[2], sig[3], sig[4], sig[5] };
+                float ep_t = ep, D_t = D;
+                float de_t[6] = { d_eps, mid, mid, 0, 0, 0 };
+                ConcreteModels::updateRHTStress<float>(sig_t, de_t, ep_t, D_t, mat, dt, h_c);
+                if (sig_t[1] < 0.0f) lo = mid;
+                else hi = mid;
+            }
+            float de_l = 0.5f * (lo + hi);
             float de[6] = { d_eps, de_l, de_l, 0, 0, 0 };
             ConcreteModels::updateRHTStress<float>(sig, de, ep, D, mat, dt, h_c);
             float p_h = -(sig[0] + sig[1] + sig[2]) / 3.0f;
@@ -57,8 +74,8 @@ void testUniaxialCompression() {
             if (q_vm > max_comp_stress) max_comp_stress = q_vm;
         }
         std::cout << "  RHT Peak Compressive Stress: " << (max_comp_stress * 1e-6f) << " MPa (Target: ~" << (mat.fc * 1e-6f) << " MPa), Damage: " << D << std::endl;
-        assert(max_comp_stress >= 0.85f * mat.fc && max_comp_stress <= 1.35f * mat.fc);
-        assert(D > 0.0f);
+        CONCRETE_CHECK(max_comp_stress >= 0.85f * mat.fc && max_comp_stress <= 1.35f * mat.fc);
+        CONCRETE_CHECK(D > 0.0f);
     }
 
     // 2. K&C
@@ -77,8 +94,8 @@ void testUniaxialCompression() {
             if (q_vm > max_comp_stress) max_comp_stress = q_vm;
         }
         std::cout << "  K&C Peak Compressive Stress: " << (max_comp_stress * 1e-6f) << " MPa (Target: ~" << (mat.fc * 1e-6f) << " MPa), Damage: " << D << std::endl;
-        assert(max_comp_stress >= 0.85f * mat.fc && max_comp_stress <= 1.35f * mat.fc);
-        assert(D > 0.0f);
+        CONCRETE_CHECK(max_comp_stress >= 0.85f * mat.fc && max_comp_stress <= 1.35f * mat.fc);
+        CONCRETE_CHECK(D > 0.0f);
     }
 
     // 3. CSCM
@@ -97,13 +114,14 @@ void testUniaxialCompression() {
             if (q_vm > max_comp_stress) max_comp_stress = q_vm;
         }
         std::cout << "  CSCM Peak Compressive Stress: " << (max_comp_stress * 1e-6f) << " MPa (Target: ~" << (mat.fc * 1e-6f) << " MPa), Damage: " << D << std::endl;
-        assert(max_comp_stress >= 0.80f * mat.fc && max_comp_stress <= 1.35f * mat.fc);
-        assert(D > 0.0f);
+        CONCRETE_CHECK(max_comp_stress >= 0.80f * mat.fc && max_comp_stress <= 1.35f * mat.fc);
+        CONCRETE_CHECK(D > 0.0f);
     }
     std::cout << "  [PASS] Uniaxial Compression validation successful.\n" << std::endl;
+    return true;
 }
 
-void testTriaxialConfinement() {
+bool testTriaxialConfinement() {
     std::cout << "--- Test 2: Triaxial Confinement (RHT, K&C, CSCM) ---" << std::endl;
 
     MaterialTable3D mat;
@@ -142,7 +160,7 @@ void testTriaxialConfinement() {
         }
         float diff_stress = max_axial - p_conf;
         std::cout << "  RHT Confined Peak Axial: " << (max_axial * 1e-6f) << " MPa (Differential: " << (diff_stress * 1e-6f) << " MPa vs Unconfined fc = 30 MPa)" << std::endl;
-        assert(diff_stress > mat.fc); // Confinement hardening effect
+        CONCRETE_CHECK(diff_stress > mat.fc); // Confinement hardening effect
     }
 
     // 2. K&C Triaxial
@@ -157,7 +175,7 @@ void testTriaxialConfinement() {
         }
         float diff_stress = max_axial - p_conf;
         std::cout << "  K&C Confined Peak Axial: " << (max_axial * 1e-6f) << " MPa (Differential: " << (diff_stress * 1e-6f) << " MPa vs Unconfined fc = 30 MPa)" << std::endl;
-        assert(diff_stress > mat.fc);
+        CONCRETE_CHECK(diff_stress > mat.fc);
     }
 
     // 3. CSCM Triaxial
@@ -172,12 +190,13 @@ void testTriaxialConfinement() {
         }
         float diff_stress = max_axial - p_conf;
         std::cout << "  CSCM Confined Peak Axial: " << (max_axial * 1e-6f) << " MPa (Differential: " << (diff_stress * 1e-6f) << " MPa vs Unconfined fc = 30 MPa)" << std::endl;
-        assert(diff_stress > mat.fc);
+        CONCRETE_CHECK(diff_stress > mat.fc);
     }
     std::cout << "  [PASS] Triaxial Confinement shear enhancement verified.\n" << std::endl;
+    return true;
 }
 
-void testTensileSofteningAndFractureEnergy() {
+bool testTensileSofteningAndFractureEnergy() {
     std::cout << "--- Test 3: Uniaxial Tension & Mesh Regularization (G_f/h) ---" << std::endl;
 
     MaterialTable3D mat;
@@ -215,8 +234,8 @@ void testTensileSofteningAndFractureEnergy() {
             energy1 += sig[0] * d_eps * h1; // Dissipated energy per unit crack area (N/m)
         }
         std::cout << "  h = " << h1 << " m: Peak Tensile: " << (max_tensile * 1e-6f) << " MPa (ft = " << (mat.ft * 1e-6f) << " MPa), Dissipated Energy per Area: " << energy1 << " N/m" << std::endl;
-        assert(max_tensile >= 0.85f * mat.ft && max_tensile <= 2.0f * mat.ft);
-        assert(D >= 0.90f);
+        CONCRETE_CHECK(max_tensile >= 0.85f * mat.ft && max_tensile <= 2.0f * mat.ft);
+        CONCRETE_CHECK(D >= 0.90f);
     }
 
     // Element 2 (h2)
@@ -233,18 +252,19 @@ void testTensileSofteningAndFractureEnergy() {
             energy2 += sig[0] * d_eps * h2;
         }
         std::cout << "  h = " << h2 << " m: Peak Tensile: " << (max_tensile * 1e-6f) << " MPa (ft = " << (mat.ft * 1e-6f) << " MPa), Dissipated Energy per Area: " << energy2 << " N/m" << std::endl;
-        assert(max_tensile >= 0.85f * mat.ft && max_tensile <= 2.0f * mat.ft);
-        assert(D >= 0.90f);
+        CONCRETE_CHECK(max_tensile >= 0.85f * mat.ft && max_tensile <= 2.0f * mat.ft);
+        CONCRETE_CHECK(D >= 0.90f);
     }
 
     // Verify mesh objectivity: energy dissipated per unit crack area is preserved regardless of h
     float energy_ratio = energy1 / energy2;
     std::cout << "  Mesh Objectivity Energy Ratio (E_h1 / E_h2): " << energy_ratio << " (Target: ~1.0)" << std::endl;
-    assert(energy_ratio > 0.80f && energy_ratio < 1.25f);
+    CONCRETE_CHECK(energy_ratio > 0.80f && energy_ratio < 1.25f);
     std::cout << "  [PASS] Tensile softening and fracture energy regularization validated.\n" << std::endl;
+    return true;
 }
 
-void testDynamicIncreaseFactor() {
+bool testDynamicIncreaseFactor() {
     std::cout << "--- Test 4: Dynamic Increase Factor (DIF) Rate Sensitivity ---" << std::endl;
 
     MaterialTable3D mat;
@@ -270,18 +290,19 @@ void testDynamicIncreaseFactor() {
     std::cout << "  DIF Compression: Static = " << dif_c_static << ", Blast (100/s) = " << dif_c_blast << ", Extreme = " << dif_c_extreme << " (Cap: " << mat.dif_cap_compression << ")" << std::endl;
     std::cout << "  DIF Tension:     Static = " << dif_t_static << ", Blast (100/s) = " << dif_t_blast << ", Extreme = " << dif_t_extreme << " (Cap: " << mat.dif_cap_tension << ")" << std::endl;
 
-    assert(dif_c_static == 1.0f);
-    assert(dif_c_blast > 1.2f && dif_c_blast <= mat.dif_cap_compression);
-    assert(dif_c_extreme == mat.dif_cap_compression);
+    CONCRETE_CHECK(dif_c_static == 1.0f);
+    CONCRETE_CHECK(dif_c_blast > 1.2f && dif_c_blast <= mat.dif_cap_compression);
+    CONCRETE_CHECK(dif_c_extreme == mat.dif_cap_compression);
 
-    assert(dif_t_static == 1.0f);
-    assert(dif_t_blast > 1.5f && dif_t_blast <= mat.dif_cap_tension);
-    assert(dif_t_extreme == mat.dif_cap_tension);
+    CONCRETE_CHECK(dif_t_static == 1.0f);
+    CONCRETE_CHECK(dif_t_blast > 1.5f && dif_t_blast <= mat.dif_cap_tension);
+    CONCRETE_CHECK(dif_t_extreme == mat.dif_cap_tension);
 
     std::cout << "  [PASS] DIF rate sensitivity and saturation caps verified.\n" << std::endl;
+    return true;
 }
 
-void testMoistureSaturationAndCrush() {
+bool testMoistureSaturationAndCrush() {
     std::cout << "--- Test 5: Moisture Saturation & P-alpha Pore Compaction ---" << std::endl;
 
     MaterialTable3D mat_dry;
@@ -302,13 +323,14 @@ void testMoistureSaturationAndCrush() {
     float alpha_sat = ConcreteModels::computeAlpha(p_mid, mat_sat);
 
     std::cout << "  P-alpha Porosity at p = 100 MPa: Dry alpha = " << alpha_dry << ", Saturated alpha = " << alpha_sat << std::endl;
-    assert(alpha_dry > 1.0f && alpha_dry < mat_dry.rht_alpha0);
-    assert(alpha_sat < alpha_dry); // Moisture accelerates compaction / stiffens pores
+    CONCRETE_CHECK(alpha_dry > 1.0f && alpha_dry < mat_dry.rht_alpha0);
+    CONCRETE_CHECK(alpha_sat < alpha_dry); // Moisture accelerates compaction / stiffens pores
 
     std::cout << "  [PASS] Moisture saturation and pore compaction verified.\n" << std::endl;
+    return true;
 }
 
-void testUnilateralCrackClosure() {
+bool testUnilateralCrackClosure() {
     std::cout << "--- Test 6: Unilateral Crack Closure ---" << std::endl;
 
     MaterialTable3D mat;
@@ -333,7 +355,7 @@ void testUnilateralCrackClosure() {
         ConcreteModels::updateRHTStress<float>(sig, de, ep, D, mat, dt, h_c);
     }
     std::cout << "  After Tension: Damage D = " << D << ", Tensile Stress = " << (sig[0] * 1e-6f) << " MPa" << std::endl;
-    assert(D > 0.5f);
+    CONCRETE_CHECK(D > 0.5f);
 
     // 2. Reverse loading to compression (crack closure)
     float comp_stress = 0.0f;
@@ -343,8 +365,9 @@ void testUnilateralCrackClosure() {
         if (-sig[0] > comp_stress) comp_stress = -sig[0];
     }
     std::cout << "  Under Reversed Compression: Peak Stress = " << (comp_stress * 1e-6f) << " MPa" << std::endl;
-    assert(comp_stress > 15.0e6f); // Compression stiffness recovered despite tensile crack damage
+    CONCRETE_CHECK(comp_stress > 15.0e6f); // Compression stiffness recovered despite tensile crack damage
     std::cout << "  [PASS] Unilateral crack closure stiffness recovery verified.\n" << std::endl;
+    return true;
 }
 
 int main() {
@@ -352,12 +375,12 @@ int main() {
     std::cout << "   BlastSolver Concrete Constitutive Models Single-Element Tests  " << std::endl;
     std::cout << "=================================================================\n" << std::endl;
 
-    testUniaxialCompression();
-    testTriaxialConfinement();
-    testTensileSofteningAndFractureEnergy();
-    testDynamicIncreaseFactor();
-    testMoistureSaturationAndCrush();
-    testUnilateralCrackClosure();
+    if (!testUniaxialCompression()) return 1;
+    if (!testTriaxialConfinement()) return 1;
+    if (!testTensileSofteningAndFractureEnergy()) return 1;
+    if (!testDynamicIncreaseFactor()) return 1;
+    if (!testMoistureSaturationAndCrush()) return 1;
+    if (!testUnilateralCrackClosure()) return 1;
 
     std::cout << "=================================================================" << std::endl;
     std::cout << "   ALL SINGLE ELEMENT CONCRETE TESTS PASSED SUCCESSFULLY!       " << std::endl;

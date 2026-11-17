@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; fill: #c9d1d9; }
+    .title { font-size: 16px; font-weight: 600; fill: #f0f6fc; }
+    .axis-label { font-size: 12px; fill: #8b949e; }
+    .tick { font-size: 10px; fill: #8b949e; }
+    .grid { stroke: #30363d; stroke-width: 1; stroke-dasharray: 4,4; }
+    .axis-line { stroke: #484f58; stroke-width: 1.5; }
+    .exact-curve { fill: none; stroke: #58a6ff; stroke-width: 2.5; }
+    .num-curve { fill: none; stroke: #f0883e; stroke-width: 2.0; stroke-dasharray: 6,3; }
+    .corridor-yellow { fill: rgba(210, 153, 34, 0.18); }
+    .corridor-green { fill: rgba(46, 160, 67, 0.30); }
+  </style>
+  <rect width="800" height="450" fill="#0d1117" rx="8"/>
+  <text x="400" y="30" text-anchor="middle" class="title">VV-MAT-08: Corotational Hill48 sigma_xx During 360-deg Rigid Spin</text>
+  <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
+  <text x="67" y="394" text-anchor="end" class="tick">1.15e+08</text>
+  <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
+  <text x="67" y="326" text-anchor="end" class="tick">1.46e+08</text>
+  <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
+  <text x="67" y="258" text-anchor="end" class="tick">1.78e+08</text>
+  <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
+  <text x="67" y="190" text-anchor="end" class="tick">2.09e+08</text>
+  <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
+  <text x="67" y="122" text-anchor="end" class="tick">2.41e+08</text>
+  <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
+  <text x="67" y="54" text-anchor="end" class="tick">2.72e+08</text>
+  <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
+  <text x="75" y="408" text-anchor="middle" class="tick">10</text>
+  <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
+  <text x="213" y="408" text-anchor="middle" class="tick">80</text>
+  <line x1="351" y1="50" x2="351" y2="390" class="grid"/>
+  <text x="351" y="408" text-anchor="middle" class="tick">150</text>
+  <line x1="489" y1="50" x2="489" y2="390" class="grid"/>
+  <text x="489" y="408" text-anchor="middle" class="tick">220</text>
+  <line x1="627" y1="50" x2="627" y2="390" class="grid"/>
+  <text x="627" y="408" text-anchor="middle" class="tick">290</text>
+  <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
+  <text x="765" y="408" text-anchor="middle" class="tick">360</text>
+  <path class="corridor-yellow" d="M 75 59.4 L 94.7 85.2 L 114 125 L 134 173 L 154 225 L 174 274 L 193 313 L 213 339 L 233 348 L 252 339 L 272 313 L 292 274 L 312 225 L 331 173 L 351 125 L 371 85.2 L 390 59.4 L 410 50.4 L 430 59.4 L 450 85.2 L 469 125 L 489 173 L 509 225 L 528 274 L 548 313 L 568 339 L 588 348 L 607 339 L 627 313 L 647 274 L 666 225 L 686 173 L 706 125 L 726 85.2 L 745 59.4 L 765 50.4 L 765 106 L 745 114 L 726 138 L 706 174 L 686 217 L 666 264 L 647 308 L 627 344 L 607 367 L 588 375 L 568 367 L 548 344 L 528 308 L 509 264 L 489 217 L 469 174 L 450 138 L 430 114 L 410 106 L 390 114 L 371 138 L 351 174 L 331 217 L 312 264 L 292 308 L 272 344 L 252 367 L 233 375 L 213 367 L 193 344 L 174 308 L 154 264 L 134 217 L 114 174 L 94.7 138 L 75 114 Z"/>
+  <path class="corridor-green" d="M 75 81.4 L 94.7 106 L 114 144 L 134 191 L 154 241 L 174 287 L 193 325 L 213 350 L 233 359 L 252 350 L 272 325 L 292 287 L 312 241 L 331 191 L 351 144 L 371 106 L 390 81.4 L 410 72.7 L 430 81.4 L 450 106 L 469 144 L 489 191 L 509 241 L 528 287 L 548 325 L 568 350 L 588 359 L 607 350 L 627 325 L 647 287 L 666 241 L 686 191 L 706 144 L 726 106 L 745 81.4 L 765 72.7 L 765 83.9 L 745 92.4 L 726 117 L 706 154 L 686 200 L 666 249 L 647 294 L 627 332 L 607 356 L 588 364 L 568 356 L 548 332 L 528 294 L 509 249 L 489 200 L 469 154 L 450 117 L 430 92.4 L 410 83.9 L 390 92.4 L 371 117 L 351 154 L 331 200 L 312 249 L 292 294 L 272 332 L 252 356 L 233 364 L 213 356 L 193 332 L 174 294 L 154 249 L 134 200 L 114 154 L 94.7 117 L 75 92.4 Z"/>
+  <path class="exact-curve" d="M 75 86.9 L 94.7 111 L 114 149 L 134 195 L 154 245 L 174 291 L 193 329 L 213 353 L 233 362 L 252 353 L 272 329 L 292 291 L 312 245 L 331 195 L 351 149 L 371 111 L 390 86.9 L 410 78.3 L 430 86.9 L 450 111 L 469 149 L 489 195 L 509 245 L 528 291 L 548 329 L 568 353 L 588 362 L 607 353 L 627 329 L 647 291 L 666 245 L 686 195 L 706 149 L 726 111 L 745 86.9 L 765 78.3 "/>
+  <path class="num-curve" d="M 75 86.9 L 94.7 111 L 114 149 L 134 195 L 154 245 L 174 291 L 193 329 L 213 353 L 233 362 L 252 353 L 272 329 L 292 291 L 312 245 L 331 195 L 351 149 L 371 111 L 390 86.9 L 410 78.3 L 430 86.9 L 450 111 L 469 149 L 489 195 L 509 245 L 528 291 L 548 329 L 568 353 L 588 362 L 607 353 L 627 329 L 647 291 L 666 245 L 686 195 L 706 149 L 726 111 L 745 86.9 L 765 78.3 "/>
+  <circle cx="75" cy="86.9" r="3.5" fill="#f0883e"/>
+  <circle cx="94.7" cy="111" r="3.5" fill="#f0883e"/>
+  <circle cx="114" cy="149" r="3.5" fill="#f0883e"/>
+  <circle cx="134" cy="195" r="3.5" fill="#f0883e"/>
+  <circle cx="154" cy="245" r="3.5" fill="#f0883e"/>
+  <circle cx="174" cy="291" r="3.5" fill="#f0883e"/>
+  <circle cx="193" cy="329" r="3.5" fill="#f0883e"/>
+  <circle cx="213" cy="353" r="3.5" fill="#f0883e"/>
+  <circle cx="233" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="252" cy="353" r="3.5" fill="#f0883e"/>
+  <circle cx="272" cy="329" r="3.5" fill="#f0883e"/>
+  <circle cx="292" cy="291" r="3.5" fill="#f0883e"/>
+  <circle cx="312" cy="245" r="3.5" fill="#f0883e"/>
+  <circle cx="331" cy="195" r="3.5" fill="#f0883e"/>
+  <circle cx="351" cy="149" r="3.5" fill="#f0883e"/>
+  <circle cx="371" cy="111" r="3.5" fill="#f0883e"/>
+  <circle cx="390" cy="86.9" r="3.5" fill="#f0883e"/>
+  <circle cx="410" cy="78.3" r="3.5" fill="#f0883e"/>
+  <circle cx="430" cy="86.9" r="3.5" fill="#f0883e"/>
+  <circle cx="450" cy="111" r="3.5" fill="#f0883e"/>
+  <circle cx="469" cy="149" r="3.5" fill="#f0883e"/>
+  <circle cx="489" cy="195" r="3.5" fill="#f0883e"/>
+  <circle cx="509" cy="245" r="3.5" fill="#f0883e"/>
+  <circle cx="528" cy="291" r="3.5" fill="#f0883e"/>
+  <circle cx="548" cy="329" r="3.5" fill="#f0883e"/>
+  <circle cx="568" cy="353" r="3.5" fill="#f0883e"/>
+  <circle cx="588" cy="362" r="3.5" fill="#f0883e"/>
+  <circle cx="607" cy="353" r="3.5" fill="#f0883e"/>
+  <circle cx="627" cy="329" r="3.5" fill="#f0883e"/>
+  <circle cx="647" cy="291" r="3.5" fill="#f0883e"/>
+  <circle cx="666" cy="245" r="3.5" fill="#f0883e"/>
+  <circle cx="686" cy="195" r="3.5" fill="#f0883e"/>
+  <circle cx="706" cy="149" r="3.5" fill="#f0883e"/>
+  <circle cx="726" cy="111" r="3.5" fill="#f0883e"/>
+  <circle cx="745" cy="86.9" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="78.3" r="3.5" fill="#f0883e"/>
+  <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
+  <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
+  <text x="400" y="435" text-anchor="middle" class="axis-label">Rigid Rotation Angle (deg)</text>
+  <text x="20" y="225" text-anchor="middle" transform="rotate(-90 20 225)" class="axis-label">Global Cauchy Stress sigma_xx (Pa)</text>
+  <rect x="570" y="55" width="195" height="85" fill="#161b22" stroke="#30363d" rx="4"/>
+  <line x1="580" y1="73" x2="605" y2="73" stroke="#58a6ff" stroke-width="2.5"/>
+  <text x="612" y="77" font-size="11">Analytical / Exact</text>
+  <line x1="580" y1="93" x2="605" y2="93" stroke="#f0883e" stroke-width="2.0" stroke-dasharray="4,2"/>
+  <circle cx="592" cy="93" r="3" fill="#f0883e"/>
+  <text x="612" y="97" font-size="11">Numerical Result</text>
+  <rect x="580" y="107" width="25" height="10" fill="rgba(46,160,67,0.5)"/>
+  <text x="612" y="116" font-size="10">Acceptance Corridor ±1%</text>
+  <rect x="580" y="123" width="25" height="10" fill="rgba(210,153,34,0.3)"/>
+  <text x="612" y="132" font-size="10">Tolerance Corridor ±5%</text>
+</svg>

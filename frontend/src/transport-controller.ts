@@ -11,12 +11,13 @@
 
 import { PlaybackRingBuffer, BufferedFrame } from './playback-buffer.js';
 import { StateManager, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, getSliceAxisLabel } from './state-manager.js';
+import { COLORMAP_OPTIONS, getQuantityStyle, applyQuantityStyleUpdate, normalizeColormapId } from './contour-style.js';
 import { Model, SimulationStatus, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { GaugeManagerModal } from './gauge-manager-modal.js';
 import { showModelErrorModal, getErrorBadgeTooltip } from './model-error-modal.js';
 
 export type CameraPreset = 'iso' | '+x' | '-x' | '+y' | '-y' | '+z' | '-z' | 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right' | 'reset';
-export type ColormapType = 'rainbow' | 'plasma' | 'viridis' | 'inferno' | 'magma' | 'coolwarm' | 'cividis' | 'turbo' | 'jet' | 'grayscale';
+export type ColormapType = 'rainbow' | 'plasma' | 'viridis' | 'inferno' | 'magma' | 'coolwarm' | 'cividis' | 'turbo' | 'jet' | 'grayscale' | 'hot' | 'seismic' | 'rdylbu';
 export type WorkstationTab = 'sim_view' | 'camera_view' | 'slices_matrix' | 'shading_lighting' | 'gauges_roi' | 'context_object';
 
 export interface TransportControllerOptions {
@@ -2880,11 +2881,25 @@ export class TransportController {
         return snapGrid;
     }
 
+    private getActive3DViewport(): any {
+        const wm = (window as any).workspaceManager;
+        if (wm && typeof wm.getTargetPanes === 'function') {
+            const panes = wm.getTargetPanes();
+            for (const p of panes) {
+                if (p && p.viewType === '3D_VIEWPORT' && p.instance) {
+                    return p.instance;
+                }
+            }
+        }
+        return (window as any).telemetry3DViewport || null;
+    }
+
     public getCurrentContextSettings(): ContextualVisualSettings {
         const vpNode = this.getActiveViewportNode();
         const params = vpNode?.parameters || {};
         const activeModel = this.stateManager.getActiveModel();
         const isGloballyLocked = true;
+        const vp3d = this.getActive3DViewport();
 
         // 0. Check if active Workspace pane is 2D_CONTOUR, 1D_CHART, or GAUGE_CHART
         const wm = (window as any).workspaceManager;
@@ -3021,21 +3036,12 @@ export class TransportController {
             const domainNode = this.getActiveDomainNode();
             const slices = this.getSlices();
             const slice = slices[selectedSliceIdx] || {};
-            let rawQ = slice.quantities?.[0] || slice.quantity || 'pressure';
-            if (rawQ === 'species_1' || rawQ === 'species' || rawQ === 'products' || rawQ === 'detonation_products' || rawQ === 'detonation' || rawQ === 'reacted' || rawQ === 'reacted_gas' || rawQ === 'alpha1' || rawQ === 'alpha_1') rawQ = 'species1';
-            else if (rawQ === 'species_2' || rawQ === 'unreacted' || rawQ === 'unreacted_solid' || rawQ === 'solid_he' || rawQ === 'alpha2' || rawQ === 'alpha_2') rawQ = 'species2';
-            else if (rawQ === 'species_3' || rawQ === 'air' || rawQ === 'ambient_air' || rawQ === 'alpha3' || rawQ === 'alpha_3') rawQ = 'species3';
-            else if (rawQ === 'von_mises') rawQ = 'vonMises';
-            else if (rawQ === 'plastic_strain') rawQ = 'plasticStrain';
-            const axis = (slice.axis || 'xy').toUpperCase();
+            const rawQ = canonicalizeQuantity(slice.quantities?.[0] || slice.quantity || 'pressure');
             const bounds = this.getSliceBounds(slice.axis || 'xy');
-            const defaultSliceRange = params.quantity_ranges?.[rawQ] || DEFAULT_QUANTITY_RANGES[rawQ] || [0.0, 1.0];
-            let sMin = slice.min_val ?? defaultSliceRange[0];
-            let sMax = slice.max_val ?? defaultSliceRange[1];
-            if (isGloballyLocked) {
-                sMin = defaultSliceRange[0];
-                sMax = defaultSliceRange[1];
-            }
+            const style = getQuantityStyle(params, rawQ);
+            const liveRange = vp3d?.getLiveQuantityRange?.(rawQ);
+            const sMin = liveRange ? liveRange[0] : style.minVal;
+            const sMax = liveRange ? liveRange[1] : style.maxVal;
 
             return {
                 targetType: 'slice',
@@ -3045,18 +3051,18 @@ export class TransportController {
                 nodeId: domainNode?.id || vpNode?.id,
                 quantity: rawQ,
                 availableQuantities: this.getCFDQuantities(true),
-                colormap: ((isGloballyLocked ? params.quantity_colormaps?.[rawQ] : undefined) || slice.colormap || 'rainbow') as ColormapType,
-                autoScale: slice.auto_scale !== false,
+                colormap: style.colormap as ColormapType,
+                autoScale: style.autoScale,
                 minVal: sMin,
                 maxVal: sMax,
-                logScale: (isGloballyLocked ? params.quantity_log_scales?.[rawQ] : undefined) ?? (slice.log_scale === true),
+                logScale: style.logScale,
                 isLocked: isGloballyLocked,
-                contourLevels: slice.contour_levels ?? params.sliceContourLevels ?? 0,
-                smoothContours: slice.smooth_contours ?? params.sliceSmoothContours ?? true,
-                showColorbar: slice.show_colorbar === true,
-                showMeshLines: slice.interpolate === false || slice.gridlines === true,
+                contourLevels: style.contourLevels,
+                smoothContours: style.smoothContours,
+                showColorbar: style.showColorbar,
+                showMeshLines: slice.gridlines === true,
                 visibility: slice.enabled !== false,
-                interpolate: slice.interpolate !== false,
+                interpolate: style.interpolate,
                 sliceAxis: (slice.axis || 'xy').toLowerCase(),
                 sliceOffset: slice.offset !== undefined ? Number(slice.offset) : 0.0,
                 sliceOpacity: slice.opacity !== undefined ? Number(slice.opacity) : 1.0,
@@ -3072,24 +3078,17 @@ export class TransportController {
         const objType = this.selectedObject?.objectType || selectedNode?.type || '';
 
         if (['FEMObject3D', 'FEMDomain3D', 'FEMBeam3D', 'FEMRebar3D', 'LSDynaImporter3D'].includes(objType)) {
-            const rawFemQ = selectedNode?.parameters?.femQuantity || selectedNode?.parameters?.quantity || params.femQuantity || 'vonMises';
-            const femQ = canonicalizeQuantity(rawFemQ);
-            const defaultFemRange = params.quantity_ranges?.[femQ] || DEFAULT_QUANTITY_RANGES[femQ] || [0.0, (femQ === 'plastic_strain' ? 1.0 : 500.0e6)];
-            const femCmap = ((isGloballyLocked ? params.quantity_colormaps?.[femQ] : undefined) || selectedNode?.parameters?.femColormap || selectedNode?.parameters?.colormap || params.femColormap || 'rainbow') as ColormapType;
-            const femAuto = (isGloballyLocked ? (params.quantity_auto_scales?.[femQ] !== false) : undefined) ?? ((selectedNode?.parameters?.femAutoScale ?? params.femAutoScale) !== false);
-            let femMin = isGloballyLocked ? defaultFemRange[0] : (selectedNode?.parameters?.femMinVal ?? params.femMinVal ?? defaultFemRange[0]);
-            let femMax = isGloballyLocked ? defaultFemRange[1] : (selectedNode?.parameters?.femMaxVal ?? params.femMaxVal ?? defaultFemRange[1]);
-            const femLog = (isGloballyLocked ? params.quantity_log_scales?.[femQ] : undefined) ?? ((selectedNode?.parameters?.femLogScale ?? params.femLogScale) === true);
-            const femBar = (selectedNode?.parameters?.femShowColorbar ?? selectedNode?.parameters?.showColorbar ?? params.femShowColorbar) !== false;
-            const femWire = (selectedNode?.parameters?.femWireframe ?? selectedNode?.parameters?.wireframe ?? params.femWireframe) !== false;
-            const femVis = this.isLayerActive('fem') && (selectedNode?.parameters?.visible !== false && !selectedNode?.parameters?.hidden);
             const isBeamOrRebar = objType === 'FEMBeam3D' || objType === 'FEMRebar3D';
-            const femLevels = isBeamOrRebar
-                ? (selectedNode?.parameters?.beamContourLevels ?? params.beamContourLevels ?? 0)
-                : (selectedNode?.parameters?.femContourLevels ?? params.femContourLevels ?? 0);
-            const femSmooth = isBeamOrRebar
-                ? (selectedNode?.parameters?.beamSmoothContours ?? params.beamSmoothContours ?? true)
-                : (selectedNode?.parameters?.femSmoothContours ?? params.femSmoothContours ?? true);
+            const rawFemQ = isBeamOrRebar
+                ? (selectedNode?.parameters?.beamQuantity || params.beamQuantity || selectedNode?.parameters?.femQuantity || params.femQuantity || 'vonMises')
+                : (selectedNode?.parameters?.femQuantity || selectedNode?.parameters?.quantity || params.femQuantity || 'vonMises');
+            const femQ = canonicalizeQuantity(rawFemQ);
+            const style = getQuantityStyle(params, femQ);
+            const liveRange = vp3d?.getLiveQuantityRange?.(femQ);
+            const femMin = liveRange ? liveRange[0] : style.minVal;
+            const femMax = liveRange ? liveRange[1] : style.maxVal;
+            const femWire = (selectedNode?.parameters?.femWireframe ?? selectedNode?.parameters?.wireframe ?? params.femWireframe) !== false;
+            const femVis = this.isLayerActive(isBeamOrRebar ? 'beams' : 'fem') && (selectedNode?.parameters?.visible !== false && !selectedNode?.parameters?.hidden);
 
             return {
                 targetType: 'fem',
@@ -3108,16 +3107,16 @@ export class TransportController {
                     { val: 'energy', label: 'Internal Energy (J/kg)' },
                     { val: 'failure_flag', label: 'Failure / Erosion' }
                 ],
-                colormap: femCmap,
-                autoScale: femAuto,
+                colormap: style.colormap as ColormapType,
+                autoScale: style.autoScale,
                 minVal: femMin,
                 maxVal: femMax,
-                logScale: femLog,
+                logScale: style.logScale,
                 isLocked: isGloballyLocked,
-                contourLevels: femLevels,
-                smoothContours: femSmooth,
-                interpolate: (selectedNode?.parameters?.femInterpolate ?? params.femInterpolate) !== false,
-                showColorbar: femBar,
+                contourLevels: style.contourLevels,
+                smoothContours: style.smoothContours,
+                interpolate: style.interpolate,
+                showColorbar: style.showColorbar,
                 showMeshLines: femWire,
                 visibility: femVis,
                 lighting: params.femLighting !== false,
@@ -3134,13 +3133,10 @@ export class TransportController {
         if (['MPMObject3D', 'MPMDomain3D'].includes(objType) || isMarineSleeve || isMarineSoil) {
             const rawMpmQ = selectedNode?.parameters?.mpmParticleQuantity || selectedNode?.parameters?.quantity || params.mpmParticleQuantity || 'vonMises';
             const mpmQ = canonicalizeQuantity(rawMpmQ);
-            const defaultMpmRange = params.quantity_ranges?.[mpmQ] || DEFAULT_QUANTITY_RANGES[mpmQ] || [0.0, 500.0e6];
-            const mpmCmap = ((isGloballyLocked ? params.quantity_colormaps?.[mpmQ] : undefined) || selectedNode?.parameters?.mpmParticleColormap || selectedNode?.parameters?.colormap || params.mpmParticleColormap || 'rainbow') as ColormapType;
-            const mpmAuto = (isGloballyLocked ? (params.quantity_auto_scales?.[mpmQ] !== false) : undefined) ?? ((selectedNode?.parameters?.mpmParticleAutoScale ?? params.mpmParticleAutoScale) !== false);
-            let mpmMin = isGloballyLocked ? defaultMpmRange[0] : (selectedNode?.parameters?.mpmParticleMinVal ?? params.mpmParticleMinVal ?? defaultMpmRange[0]);
-            let mpmMax = isGloballyLocked ? defaultMpmRange[1] : (selectedNode?.parameters?.mpmParticleMaxVal ?? params.mpmParticleMaxVal ?? defaultMpmRange[1]);
-            const mpmLog = (isGloballyLocked ? params.quantity_log_scales?.[mpmQ] : undefined) ?? ((selectedNode?.parameters?.mpmParticleLogScale ?? params.mpmParticleLogScale) === true);
-            const mpmBar = (selectedNode?.parameters?.mpmParticleShowColorbar ?? selectedNode?.parameters?.showColorbar ?? params.mpmParticleShowColorbar) === true;
+            const style = getQuantityStyle(params, mpmQ);
+            const liveRange = vp3d?.getLiveQuantityRange?.(mpmQ);
+            const mpmMin = liveRange ? liveRange[0] : style.minVal;
+            const mpmMax = liveRange ? liveRange[1] : style.maxVal;
             const mpmWire = (selectedNode?.parameters?.mpmParticleWireframe ?? selectedNode?.parameters?.wireframe ?? params.mpmParticleWireframe) === true;
             let mpmVis = this.isLayerActive('mpm') && (selectedNode?.parameters?.visible !== false && !selectedNode?.parameters?.hidden);
             if (isMarineSleeve) {
@@ -3148,8 +3144,6 @@ export class TransportController {
             } else if (isMarineSoil) {
                 mpmVis = this.isLayerActive('mpm') && (selectedNode?.parameters?.show_soil_mpm !== false) && (selectedNode?.parameters?.visible !== false && !selectedNode?.parameters?.hidden);
             }
-            const mpmLevels = selectedNode?.parameters?.mpmContourLevels ?? params.mpmContourLevels ?? 0;
-            const mpmSmooth = selectedNode?.parameters?.mpmSmoothContours ?? params.mpmSmoothContours ?? true;
 
             let targetLabel = selectedNode?.parameters?.name || this.selectedObject?.label || 'MPM Particles';
             let targetIcon = '✨';
@@ -3178,15 +3172,16 @@ export class TransportController {
                     { val: 'cluster_id', label: 'Fragment Cluster ID' },
                     { val: 'failure_flag', label: 'Failure / Erosion' }
                 ],
-                colormap: mpmCmap,
-                autoScale: mpmAuto,
+                colormap: style.colormap as ColormapType,
+                autoScale: style.autoScale,
                 minVal: mpmMin,
                 maxVal: mpmMax,
-                logScale: mpmLog,
+                logScale: style.logScale,
                 isLocked: isGloballyLocked,
-                contourLevels: mpmLevels,
-                smoothContours: mpmSmooth,
-                showColorbar: mpmBar,
+                contourLevels: style.contourLevels,
+                smoothContours: style.smoothContours,
+                interpolate: style.interpolate,
+                showColorbar: style.showColorbar,
                 showMeshLines: mpmWire,
                 visibility: mpmVis,
                 opacity: selectedNode?.parameters?.mpmParticleOpacity ?? params.mpmParticleOpacity ?? 1.0
@@ -3196,14 +3191,10 @@ export class TransportController {
         // 4. Check if STL CAD
         if (objType === 'STLGeometry') {
             const stlQ = canonicalizeQuantity(selectedNode?.parameters?.stl_quantity || selectedNode?.parameters?.quantity || params.stl_quantity || 'pressure');
-            const defaultStlRange = params.quantity_ranges?.[stlQ] || DEFAULT_QUANTITY_RANGES[stlQ] || [0.0, 1.0];
-            const rawStlCmap = selectedNode?.parameters?.stl_colormap || selectedNode?.parameters?.colormap || params.stl_colormap || 'rainbow';
-            const stlCmap = ((isGloballyLocked ? params.quantity_colormaps?.[stlQ] : undefined) || rawStlCmap) as ColormapType;
-            const stlAuto = (isGloballyLocked ? (params.quantity_auto_scales?.[stlQ] !== false) : undefined) ?? ((selectedNode?.parameters?.stl_auto_scale ?? params.stl_auto_scale) !== false);
-            let stlMin = isGloballyLocked ? defaultStlRange[0] : (selectedNode?.parameters?.stl_min_val ?? params.stl_min_val ?? defaultStlRange[0]);
-            let stlMax = isGloballyLocked ? defaultStlRange[1] : (selectedNode?.parameters?.stl_max_val ?? params.stl_max_val ?? defaultStlRange[1]);
-            const stlLog = (isGloballyLocked ? params.quantity_log_scales?.[stlQ] : undefined) ?? ((selectedNode?.parameters?.stl_log_scale ?? params.stl_log_scale) === true);
-            const stlBar = (selectedNode?.parameters?.stl_show_colorbar ?? selectedNode?.parameters?.showColorbar ?? params.stl_show_colorbar) === true;
+            const style = getQuantityStyle(params, stlQ);
+            const liveRange = vp3d?.getLiveQuantityRange?.(stlQ);
+            const stlMin = liveRange ? liveRange[0] : style.minVal;
+            const stlMax = liveRange ? liveRange[1] : style.maxVal;
             const stlWire = (selectedNode?.parameters?.stl_wireframe ?? selectedNode?.parameters?.wireframe ?? params.stl_wireframe) === true;
             const stlVis = this.isLayerActive('stl') && (selectedNode?.parameters?.visible !== false && !selectedNode?.parameters?.hidden);
 
@@ -3214,16 +3205,16 @@ export class TransportController {
                 nodeId: selectedNode?.id || vpNode?.id,
                 quantity: stlQ,
                 availableQuantities: this.getCFDQuantities(false),
-                colormap: stlCmap,
-                autoScale: stlAuto,
+                colormap: style.colormap as ColormapType,
+                autoScale: style.autoScale,
                 minVal: stlMin,
                 maxVal: stlMax,
-                logScale: stlLog,
+                logScale: style.logScale,
                 isLocked: isGloballyLocked,
-                contourLevels: params.stl_contour_levels ?? 0,
-                smoothContours: params.stl_smooth_contours ?? true,
-                interpolate: (params.stl_sampling_mode ?? 'linear') === 'linear',
-                showColorbar: stlBar,
+                contourLevels: style.contourLevels,
+                smoothContours: style.smoothContours,
+                interpolate: style.interpolate,
+                showColorbar: style.showColorbar,
                 showMeshLines: stlWire,
                 visibility: stlVis,
                 lighting: params.stl_lighting !== false,
@@ -3234,14 +3225,10 @@ export class TransportController {
         // 5. Check if Obstacles / Primitive Geometry
         if (['PrimitiveGeometry3D', 'Obstacle', 'Obstacles', 'Obstacle3D', 'OBSTACLES'].includes(objType)) {
             const obsQ = canonicalizeQuantity(selectedNode?.parameters?.obstacles_quantity || selectedNode?.parameters?.quantity || params.obstacles_quantity || 'pressure');
-            const defaultObsRange = params.quantity_ranges?.[obsQ] || DEFAULT_QUANTITY_RANGES[obsQ] || [0.0, 1.0];
-            const rawObsCmap = selectedNode?.parameters?.obstacles_colormap || selectedNode?.parameters?.colormap || params.obstacles_colormap || 'rainbow';
-            const obsCmap = ((isGloballyLocked ? params.quantity_colormaps?.[obsQ] : undefined) || rawObsCmap) as ColormapType;
-            const obsAuto = (isGloballyLocked ? (params.quantity_auto_scales?.[obsQ] !== false) : undefined) ?? ((selectedNode?.parameters?.obstacles_auto_scale ?? params.obstacles_auto_scale) !== false);
-            let obsMin = isGloballyLocked ? defaultObsRange[0] : (selectedNode?.parameters?.obstacles_min_val ?? params.obstacles_min_val ?? defaultObsRange[0]);
-            let obsMax = isGloballyLocked ? defaultObsRange[1] : (selectedNode?.parameters?.obstacles_max_val ?? params.obstacles_max_val ?? defaultObsRange[1]);
-            const obsLog = (isGloballyLocked ? params.quantity_log_scales?.[obsQ] : undefined) ?? ((selectedNode?.parameters?.obstacles_log_scale ?? params.obstacles_log_scale) === true);
-            const obsBar = (selectedNode?.parameters?.obstacles_show_colorbar ?? selectedNode?.parameters?.showColorbar ?? params.obstacles_show_colorbar) === true;
+            const style = getQuantityStyle(params, obsQ);
+            const liveRange = vp3d?.getLiveQuantityRange?.(obsQ);
+            const obsMin = liveRange ? liveRange[0] : style.minVal;
+            const obsMax = liveRange ? liveRange[1] : style.maxVal;
             const obsGrid = (selectedNode?.parameters?.obstacles_gridlines ?? selectedNode?.parameters?.wireframe ?? params.obstacles_gridlines) !== false;
             const obsVis = this.isLayerActive('obstacles') && (selectedNode?.parameters?.visible !== false && !selectedNode?.parameters?.hidden);
 
@@ -3252,16 +3239,16 @@ export class TransportController {
                 nodeId: selectedNode?.id || vpNode?.id,
                 quantity: obsQ,
                 availableQuantities: this.getCFDQuantities(false),
-                colormap: obsCmap,
-                autoScale: obsAuto,
+                colormap: style.colormap as ColormapType,
+                autoScale: style.autoScale,
                 minVal: obsMin,
                 maxVal: obsMax,
-                logScale: obsLog,
+                logScale: style.logScale,
                 isLocked: isGloballyLocked,
-                contourLevels: params.obstacles_contour_levels ?? 0,
-                smoothContours: params.obstacles_smooth_contours ?? true,
-                interpolate: params.obstacles_interpolate !== false,
-                showColorbar: obsBar,
+                contourLevels: style.contourLevels,
+                smoothContours: style.smoothContours,
+                interpolate: style.interpolate,
+                showColorbar: style.showColorbar,
                 showMeshLines: obsGrid,
                 visibility: obsVis,
                 lighting: params.obstacles_lighting !== false,
@@ -3351,12 +3338,8 @@ export class TransportController {
         if (hasMPM && !hasCFD) {
             const rawMpmQ = params.mpmParticleQuantity || this.activeQuantity || 'vonMises';
             const mpmQ = canonicalizeQuantity(rawMpmQ);
-            const mpmRange = params.quantity_ranges?.[mpmQ] || DEFAULT_QUANTITY_RANGES[mpmQ] || [0.0, 500000000.0];
-            const mpmCmap = ((isGloballyLocked ? params.quantity_colormaps?.[mpmQ] : undefined) || params.mpmParticleColormap || params.colormap || this.activeColormap || 'plasma') as ColormapType;
-            const mpmAuto = isGloballyLocked ? (params.quantity_auto_scales?.[mpmQ] !== false) : (params.mpmParticleAutoScale !== false);
-            const mpmLog = isGloballyLocked ? (params.quantity_log_scales?.[mpmQ] ?? (params.mpmParticleLogScale === true)) : (params.mpmParticleLogScale === true);
-            const mpmMin = isGloballyLocked ? mpmRange[0] : (params.mpmParticleMinVal !== undefined ? Number(params.mpmParticleMinVal) : mpmRange[0]);
-            const mpmMax = isGloballyLocked ? mpmRange[1] : (params.mpmParticleMaxVal !== undefined ? Number(params.mpmParticleMaxVal) : mpmRange[1]);
+            const style = getQuantityStyle(params, mpmQ);
+            const liveRange = vp3d?.getLiveQuantityRange?.(mpmQ);
 
             return {
                 targetType: 'global',
@@ -3365,13 +3348,16 @@ export class TransportController {
                 nodeId: vpNode?.id,
                 quantity: mpmQ,
                 availableQuantities: this.getMPMQuantities(),
-                colormap: mpmCmap,
-                autoScale: mpmAuto,
-                minVal: mpmMin,
-                maxVal: mpmMax,
-                logScale: mpmLog,
+                colormap: style.colormap as ColormapType,
+                autoScale: style.autoScale,
+                minVal: liveRange ? liveRange[0] : style.minVal,
+                maxVal: liveRange ? liveRange[1] : style.maxVal,
+                logScale: style.logScale,
                 isLocked: isGloballyLocked,
-                showColorbar: params.mpmParticleShowColorbar !== false,
+                contourLevels: style.contourLevels,
+                smoothContours: style.smoothContours,
+                interpolate: style.interpolate,
+                showColorbar: style.showColorbar,
                 showMeshLines: this.activeLayers.grid !== false || params.show_grid !== false,
                 visibility: this.isLayerActive('mpm')
             };
@@ -3380,12 +3366,8 @@ export class TransportController {
         if (hasFEM && !hasCFD) {
             const rawFemQ = params.femQuantity || this.activeQuantity || 'vonMises';
             const femQ = canonicalizeQuantity(rawFemQ);
-            const femRange = params.quantity_ranges?.[femQ] || DEFAULT_QUANTITY_RANGES[femQ] || [0.0, 500000000.0];
-            const femCmap = ((isGloballyLocked ? params.quantity_colormaps?.[femQ] : undefined) || params.femColormap || params.colormap || this.activeColormap || 'plasma') as ColormapType;
-            const femAuto = isGloballyLocked ? (params.quantity_auto_scales?.[femQ] !== false) : (params.femAutoScale !== false);
-            const femLog = isGloballyLocked ? (params.quantity_log_scales?.[femQ] ?? (params.femLogScale === true)) : (params.femLogScale === true);
-            const femMin = isGloballyLocked ? femRange[0] : (params.femMinVal !== undefined ? Number(params.femMinVal) : femRange[0]);
-            const femMax = isGloballyLocked ? femRange[1] : (params.femMaxVal !== undefined ? Number(params.femMaxVal) : femRange[1]);
+            const style = getQuantityStyle(params, femQ);
+            const liveRange = vp3d?.getLiveQuantityRange?.(femQ);
 
             return {
                 targetType: 'global',
@@ -3394,16 +3376,16 @@ export class TransportController {
                 nodeId: vpNode?.id,
                 quantity: femQ,
                 availableQuantities: this.getFEMQuantities(),
-                colormap: femCmap,
-                autoScale: femAuto,
-                minVal: femMin,
-                maxVal: femMax,
-                logScale: femLog,
+                colormap: style.colormap as ColormapType,
+                autoScale: style.autoScale,
+                minVal: liveRange ? liveRange[0] : style.minVal,
+                maxVal: liveRange ? liveRange[1] : style.maxVal,
+                logScale: style.logScale,
                 isLocked: isGloballyLocked,
-                contourLevels: params.femContourLevels ?? 0,
-                smoothContours: params.femSmoothContours ?? true,
-                interpolate: params.femInterpolate !== false,
-                showColorbar: (params.femShowColorbar !== undefined ? params.femShowColorbar : params.show_colorbar) !== false,
+                contourLevels: style.contourLevels,
+                smoothContours: style.smoothContours,
+                interpolate: style.interpolate,
+                showColorbar: style.showColorbar,
                 showMeshLines: params.femWireframe !== false,
                 visibility: this.isLayerActive('fem')
             };
@@ -3411,12 +3393,9 @@ export class TransportController {
 
         const rawGlobQ = params.focusedQuantity || this.activeQuantity || 'pressure';
         const globQ = canonicalizeQuantity(rawGlobQ);
-        const defaultGlobRange = params.quantity_ranges?.[globQ] || DEFAULT_QUANTITY_RANGES[globQ] || [0.0, 1.0];
-        const globCmap = ((isGloballyLocked ? params.quantity_colormaps?.[globQ] : undefined) || params.colormap || this.activeColormap || 'rainbow') as ColormapType;
-        const globAuto = isGloballyLocked ? (params.quantity_auto_scales?.[globQ] !== false) : this.autoScale;
-        const globLog = (isGloballyLocked ? params.quantity_log_scales?.[globQ] : undefined) ?? this.logScale;
+        const style = getQuantityStyle(params, globQ);
+        const liveRange = vp3d?.getLiveQuantityRange?.(globQ);
         const globMesh = this.activeLayers.grid !== false || params.show_grid !== false;
-        const globBar = this.activeLayers.slices !== false;
 
         return {
             targetType: 'global',
@@ -3425,15 +3404,16 @@ export class TransportController {
             nodeId: vpNode?.id,
             quantity: globQ,
             availableQuantities: this.getCFDQuantities(false),
-            colormap: globCmap,
-            autoScale: globAuto,
-            minVal: isGloballyLocked ? defaultGlobRange[0] : (params.min_val !== undefined ? Number(params.min_val) : this.minScalarVal),
-            maxVal: isGloballyLocked ? defaultGlobRange[1] : (params.max_val !== undefined ? Number(params.max_val) : this.maxScalarVal),
-            logScale: globLog,
+            colormap: style.colormap as ColormapType,
+            autoScale: style.autoScale,
+            minVal: liveRange ? liveRange[0] : style.minVal,
+            maxVal: liveRange ? liveRange[1] : style.maxVal,
+            logScale: style.logScale,
             isLocked: isGloballyLocked,
-            contourLevels: params.sliceContourLevels ?? 0,
-            smoothContours: params.sliceSmoothContours ?? true,
-            showColorbar: globBar,
+            contourLevels: style.contourLevels,
+            smoothContours: style.smoothContours,
+            interpolate: style.interpolate,
+            showColorbar: style.showColorbar,
             showMeshLines: globMesh,
             visibility: this.activeLayers.slices !== false
         };
@@ -3589,41 +3569,22 @@ export class TransportController {
         const params = vpNode?.parameters || {};
         const ctx = this.getCurrentContextSettings();
         const selectedNode = ctx.nodeId ? activeModel?.nodes.find((n: any) => n.id === ctx.nodeId) : null;
+        const vp3d = this.getActive3DViewport();
 
         if (key === 'lockRanges' || key === 'isLocked') {
             if (vpNode) {
                 const newLock = Boolean(value);
                 if (newLock && ctx.quantity) {
                     const cQ = canonicalizeQuantity(ctx.quantity);
-                    const qCmaps = { ...(params.quantity_colormaps || {}) };
-                    const qLogs = { ...(params.quantity_log_scales || {}) };
-                    const qAutos = { ...(params.quantity_auto_scales || {}) };
-                    const qRanges = { ...(params.quantity_ranges || {}) };
-                    
-                    if (ctx.colormap) {
-                        qCmaps[cQ] = ctx.colormap;
-                        qCmaps[ctx.quantity] = ctx.colormap;
-                    }
-                    if (ctx.logScale !== undefined) {
-                        qLogs[cQ] = ctx.logScale;
-                        qLogs[ctx.quantity] = ctx.logScale;
-                    }
-                    if (ctx.autoScale !== undefined) {
-                        qAutos[cQ] = ctx.autoScale;
-                        qAutos[ctx.quantity] = ctx.autoScale;
-                    }
-                    if (ctx.minVal !== undefined && ctx.maxVal !== undefined) {
-                        qRanges[cQ] = [Number(ctx.minVal), Number(ctx.maxVal)];
-                        qRanges[ctx.quantity] = [Number(ctx.minVal), Number(ctx.maxVal)];
-                    }
-
-                    this.stateManager.updateNodeParametersInPlace(vpNode.id, {
-                        lock_quantity_ranges: true,
-                        quantity_colormaps: qCmaps,
-                        quantity_log_scales: qLogs,
-                        quantity_auto_scales: qAutos,
-                        quantity_ranges: qRanges
+                    const { updates } = applyQuantityStyleUpdate(params, cQ, {
+                        colormap: ctx.colormap ? normalizeColormapId(ctx.colormap) : undefined,
+                        logScale: ctx.logScale,
+                        autoScale: ctx.autoScale,
+                        minVal: ctx.minVal,
+                        maxVal: ctx.maxVal
                     });
+                    updates.lock_quantity_ranges = true;
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, updates);
                 } else {
                     this.stateManager.updateNodeParametersInPlace(vpNode.id, { lock_quantity_ranges: newLock });
                 }
@@ -3636,65 +3597,30 @@ export class TransportController {
         if (ctx.isLocked && (key === 'minVal' || key === 'maxVal' || key === 'autoScale')) {
             const q = ctx.quantity ? canonicalizeQuantity(ctx.quantity) : null;
             if (q && vpNode) {
-                const qRanges = { ...(params.quantity_ranges || {}) };
-                const current = qRanges[q] || DEFAULT_QUANTITY_RANGES[q] || [0.0, 1.0];
-                const newMin = key === 'minVal' ? Number(value) : current[0];
-                const newMax = key === 'maxVal' ? Number(value) : current[1];
-                qRanges[q] = [newMin, newMax];
-                qRanges[ctx.quantity] = [newMin, newMax];
-                if (q === 'velocity') qRanges['speed'] = [newMin, newMax];
-
-                const qAutoScales = { ...(params.quantity_auto_scales || {}) };
+                const liveRange = vp3d?.getLiveQuantityRange?.(q) || [ctx.minVal, ctx.maxVal];
                 const newAuto = key === 'autoScale' ? Boolean(value) : false;
-                qAutoScales[q] = newAuto;
-                qAutoScales[ctx.quantity] = newAuto;
-                if (q === 'velocity') qAutoScales['speed'] = newAuto;
+                const newMin = key === 'minVal' ? Number(value) : liveRange[0];
+                const newMax = key === 'maxVal' ? Number(value) : liveRange[1];
 
-                const vpUpdates: any = { 
-                    quantity_ranges: qRanges, 
-                    quantity_auto_scales: qAutoScales,
-                    min_val: newMin,
-                    max_val: newMax,
-                    auto_scale: newAuto,
-                    autoScale: newAuto
-                };
-                if (canonicalizeQuantity(params.stl_quantity || 'pressure') === q) {
-                    vpUpdates.stl_min_val = newMin;
-                    vpUpdates.stl_max_val = newMax;
-                    vpUpdates.stl_auto_scale = newAuto;
-                }
-                if (canonicalizeQuantity(params.obstacles_quantity || 'pressure') === q) {
-                    vpUpdates.obstacles_min_val = newMin;
-                    vpUpdates.obstacles_max_val = newMax;
-                    vpUpdates.obstacles_auto_scale = newAuto;
-                }
-                if (canonicalizeQuantity(params.mpmParticleQuantity || 'vonMises') === q) {
-                    vpUpdates.mpmParticleMinVal = newMin;
-                    vpUpdates.mpmParticleMaxVal = newMax;
-                    vpUpdates.mpmParticleAutoScale = newAuto;
-                }
-                if (canonicalizeQuantity(params.femQuantity || 'vonMises') === q) {
-                    vpUpdates.femMinVal = newMin;
-                    vpUpdates.femMaxVal = newMax;
-                    vpUpdates.femAutoScale = newAuto;
-                }
-                if (canonicalizeQuantity(params.beamQuantity || 'plasticStrain') === q) {
-                    vpUpdates.beamMinVal = newMin;
-                    vpUpdates.beamMaxVal = newMax;
-                    vpUpdates.beamAutoScale = newAuto;
-                }
-                const allSlices = vpNode.parameters?.slices ? [...vpNode.parameters.slices] : [];
-                allSlices.forEach((s: any) => {
-                    if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === q) {
-                        s.min_val = newMin;
-                        s.max_val = newMax;
-                        s.auto_scale = newAuto;
+                if (vp3d && typeof vp3d.updateQuantityContourStyle === 'function') {
+                    if (key === 'autoScale') {
+                        vp3d.setQuantityAutoScale(q, newAuto);
+                    } else {
+                        vp3d.setQuantityRange(q, newMin, newMax);
                     }
-                });
-                vpUpdates.slices = allSlices;
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
+                } else {
+                    const { updates: vpUpdates } = applyQuantityStyleUpdate(params, q, {
+                        autoScale: newAuto,
+                        minVal: newMin,
+                        maxVal: newMax
+                    });
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
+                }
+                if (domainNode && domainNode.id !== vpNode.id && vpNode.parameters?.slices) {
+                    this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: vpNode.parameters.slices });
+                }
                 const stlNode = activeModel?.nodes?.find((n: any) => n.type === 'STLGeometry');
-                if (stlNode) {
+                if (stlNode && canonicalizeQuantity(params.stl_quantity || 'pressure') === q) {
                     this.stateManager.updateNodeParametersInPlace(stlNode.id, {
                         stl_min_val: newMin,
                         stl_max_val: newMax,
@@ -3702,8 +3628,6 @@ export class TransportController {
                     });
                 }
                 this.onShadingChange?.(key, value);
-                this.onShadingChange?.('quantityRanges', qRanges);
-                this.onShadingChange?.('quantityAutoScales', qAutoScales);
                 if (key === 'minVal' || key === 'maxVal') {
                     this.onColormapChange?.(ctx.colormap, newMin, newMax);
                 }
@@ -3715,29 +3639,19 @@ export class TransportController {
         if (ctx.isLocked && key === 'colormap') {
             const q = ctx.quantity ? canonicalizeQuantity(ctx.quantity) : null;
             if (q && vpNode) {
-                const qCmaps = { ...(params.quantity_colormaps || {}) };
-                qCmaps[q] = value;
-                qCmaps[ctx.quantity] = value;
-                if (q === 'velocity') qCmaps['speed'] = value;
-                const vpUpdates: any = { quantity_colormaps: qCmaps, colormap: value };
-                if (canonicalizeQuantity(params.stl_quantity || 'pressure') === q) vpUpdates.stl_colormap = value;
-                if (canonicalizeQuantity(params.obstacles_quantity || 'pressure') === q) vpUpdates.obstacles_colormap = value;
-                if (canonicalizeQuantity(params.mpmParticleQuantity || 'vonMises') === q) vpUpdates.mpmParticleColormap = value;
-                if (canonicalizeQuantity(params.femQuantity || 'vonMises') === q) vpUpdates.femColormap = value;
-                if (canonicalizeQuantity(params.beamQuantity || 'plasticStrain') === q) vpUpdates.beamColormap = value;
-                const allSlices = vpNode.parameters?.slices ? [...vpNode.parameters.slices] : [];
-                allSlices.forEach((s: any) => {
-                    if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === q) s.colormap = value;
-                });
-                vpUpdates.slices = allSlices;
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
-                const stlNode = activeModel?.nodes?.find((n: any) => n.type === 'STLGeometry');
-                if (stlNode) {
-                    this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_colormap: value, colormap: value });
+                const cmap = normalizeColormapId(String(value));
+                if (vp3d && typeof vp3d.setQuantityColormap === 'function') {
+                    vp3d.setQuantityColormap(q, cmap);
+                } else {
+                    const { updates: vpUpdates } = applyQuantityStyleUpdate(params, q, { colormap: cmap });
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
                 }
-                this.onColormapChange?.(value);
-                this.onShadingChange?.('colormap', value);
-                this.onShadingChange?.('quantityColormaps', qCmaps);
+                const stlNode = activeModel?.nodes?.find((n: any) => n.type === 'STLGeometry');
+                if (stlNode && canonicalizeQuantity(params.stl_quantity || 'pressure') === q) {
+                    this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_colormap: cmap, colormap: cmap });
+                }
+                this.onColormapChange?.(cmap);
+                this.onShadingChange?.('colormap', cmap);
                 this.renderActiveTabContent();
                 return;
             }
@@ -3746,29 +3660,18 @@ export class TransportController {
         if (ctx.isLocked && key === 'logScale') {
             const q = ctx.quantity ? canonicalizeQuantity(ctx.quantity) : null;
             if (q && vpNode) {
-                const qLogScales = { ...(params.quantity_log_scales || {}) };
                 const bVal = Boolean(value);
-                qLogScales[q] = bVal;
-                qLogScales[ctx.quantity] = bVal;
-                if (q === 'velocity') qLogScales['speed'] = bVal;
-                const vpUpdates: any = { quantity_log_scales: qLogScales, logScale: bVal };
-                if (canonicalizeQuantity(params.stl_quantity || 'pressure') === q) vpUpdates.stl_log_scale = bVal;
-                if (canonicalizeQuantity(params.obstacles_quantity || 'pressure') === q) vpUpdates.obstacles_log_scale = bVal;
-                if (canonicalizeQuantity(params.mpmParticleQuantity || 'vonMises') === q) vpUpdates.mpmParticleLogScale = bVal;
-                if (canonicalizeQuantity(params.femQuantity || 'vonMises') === q) vpUpdates.femLogScale = bVal;
-                if (canonicalizeQuantity(params.beamQuantity || 'plasticStrain') === q) vpUpdates.beamLogScale = bVal;
-                const allSlices = vpNode.parameters?.slices ? [...vpNode.parameters.slices] : [];
-                allSlices.forEach((s: any) => {
-                    if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === q) s.log_scale = bVal;
-                });
-                vpUpdates.slices = allSlices;
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
+                if (vp3d && typeof vp3d.setQuantityLogScale === 'function') {
+                    vp3d.setQuantityLogScale(q, bVal);
+                } else {
+                    const { updates: vpUpdates } = applyQuantityStyleUpdate(params, q, { logScale: bVal });
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
+                }
                 const stlNode = activeModel?.nodes?.find((n: any) => n.type === 'STLGeometry');
-                if (stlNode) {
+                if (stlNode && canonicalizeQuantity(params.stl_quantity || 'pressure') === q) {
                     this.stateManager.updateNodeParametersInPlace(stlNode.id, { stl_log_scale: bVal });
                 }
                 this.onShadingChange?.('logScale', bVal);
-                this.onShadingChange?.('quantityLogScales', qLogScales);
                 this.renderActiveTabContent();
                 return;
             }
@@ -3777,58 +3680,17 @@ export class TransportController {
         if (ctx.isLocked && (key === 'contourLevels' || key === 'smoothContours')) {
             const q = ctx.quantity ? canonicalizeQuantity(ctx.quantity) : null;
             if (q && vpNode) {
-                const cl = key === 'contourLevels' ? Math.max(0, Math.round(Number(value))) : (Boolean(value) ? 0 : Math.max(2, Number(ctx.contourLevels ?? 10)));
+                const cl = key === 'contourLevels' ? Math.max(0, Math.round(Number(value))) : (Boolean(value) ? 0 : Math.max(2, Number(ctx.contourLevels || 12)));
                 const sm = key === 'smoothContours' ? Boolean(value) : (cl <= 1);
-                const vpUpdates: any = {};
-                if (canonicalizeQuantity(params.stl_quantity || 'pressure') === q) {
-                    vpUpdates.stl_contour_levels = cl;
-                    vpUpdates.stl_smooth_contours = sm;
-                    this.onShadingChange?.('stl_contour_levels', cl);
-                    this.onShadingChange?.('stl_smooth_contours', sm);
+                if (vp3d && typeof vp3d.updateQuantityContourStyle === 'function') {
+                    vp3d.updateQuantityContourStyle(q, { contourLevels: sm ? 0 : cl, smoothContours: sm });
+                } else {
+                    const { updates: vpUpdates } = applyQuantityStyleUpdate(params, q, { contourLevels: sm ? 0 : cl, smoothContours: sm });
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
                 }
-                if (canonicalizeQuantity(params.obstacles_quantity || 'pressure') === q) {
-                    vpUpdates.obstacles_contour_levels = cl;
-                    vpUpdates.obstacles_smooth_contours = sm;
-                    this.onShadingChange?.('obstacles_contour_levels', cl);
-                    this.onShadingChange?.('obstacles_smooth_contours', sm);
+                if (domainNode && domainNode.id !== vpNode.id && vpNode.parameters?.slices) {
+                    this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: vpNode.parameters.slices });
                 }
-                if (canonicalizeQuantity(params.mpmParticleQuantity || 'vonMises') === q) {
-                    vpUpdates.mpmContourLevels = cl;
-                    vpUpdates.mpmSmoothContours = sm;
-                    this.onShadingChange?.('mpmContourLevels', cl);
-                    this.onShadingChange?.('mpmSmoothContours', sm);
-                }
-                if (canonicalizeQuantity(params.femQuantity || 'vonMises') === q) {
-                    vpUpdates.femContourLevels = cl;
-                    vpUpdates.femSmoothContours = sm;
-                    this.onShadingChange?.('femContourLevels', cl);
-                    this.onShadingChange?.('femSmoothContours', sm);
-                }
-                if (canonicalizeQuantity(params.beamQuantity || 'plasticStrain') === q) {
-                    vpUpdates.beamContourLevels = cl;
-                    vpUpdates.beamSmoothContours = sm;
-                    this.onShadingChange?.('beamContourLevels', cl);
-                    this.onShadingChange?.('beamSmoothContours', sm);
-                }
-                const allSlices = vpNode.parameters?.slices ? [...vpNode.parameters.slices] : [];
-                let sliceChanged = false;
-                allSlices.forEach((s: any) => {
-                    if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === q) {
-                        s.contour_levels = cl;
-                        s.smooth_contours = sm;
-                        sliceChanged = true;
-                    }
-                });
-                if (sliceChanged) {
-                    vpUpdates.slices = allSlices;
-                    vpUpdates.sliceContourLevels = cl;
-                    vpUpdates.sliceSmoothContours = sm;
-                    if (domainNode && domainNode.id !== vpNode.id) {
-                        this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: allSlices });
-                    }
-                    this.onSliceConfigChange?.(allSlices);
-                }
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
                 this.renderActiveTabContent();
                 return;
             }
@@ -3838,36 +3700,15 @@ export class TransportController {
             const q = ctx.quantity ? canonicalizeQuantity(ctx.quantity) : null;
             if (q && vpNode) {
                 const interp = Boolean(value);
-                const vpUpdates: any = {};
-                if (canonicalizeQuantity(params.stl_quantity || 'pressure') === q) {
-                    const mode = interp ? 'linear' : 'nearest';
-                    vpUpdates.stl_sampling_mode = mode;
-                    this.onShadingChange?.('stl_sampling_mode', mode);
+                if (vp3d && typeof vp3d.updateQuantityContourStyle === 'function') {
+                    vp3d.updateQuantityContourStyle(q, { interpolate: interp });
+                } else {
+                    const { updates: vpUpdates } = applyQuantityStyleUpdate(params, q, { interpolate: interp });
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
                 }
-                if (canonicalizeQuantity(params.obstacles_quantity || 'pressure') === q) {
-                    vpUpdates.obstacles_interpolate = interp;
-                    this.onShadingChange?.('obstacles_interpolate', interp);
+                if (domainNode && domainNode.id !== vpNode.id && vpNode.parameters?.slices) {
+                    this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: vpNode.parameters.slices });
                 }
-                if (canonicalizeQuantity(params.femQuantity || 'vonMises') === q) {
-                    vpUpdates.femInterpolate = interp;
-                    this.onShadingChange?.('femInterpolate', interp);
-                }
-                const allSlices = vpNode.parameters?.slices ? [...vpNode.parameters.slices] : [];
-                let sliceChanged = false;
-                allSlices.forEach((s: any) => {
-                    if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === q) {
-                        s.interpolate = interp;
-                        sliceChanged = true;
-                    }
-                });
-                if (sliceChanged) {
-                    vpUpdates.slices = allSlices;
-                    if (domainNode && domainNode.id !== vpNode.id) {
-                        this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: allSlices });
-                    }
-                    this.onSliceConfigChange?.(allSlices);
-                }
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
                 this.renderActiveTabContent();
                 return;
             }
@@ -3877,43 +3718,15 @@ export class TransportController {
             const q = ctx.quantity ? canonicalizeQuantity(ctx.quantity) : null;
             if (q && vpNode) {
                 const show = Boolean(value);
-                const vpUpdates: any = {};
-                if (canonicalizeQuantity(params.stl_quantity || 'pressure') === q) {
-                    vpUpdates.stl_show_colorbar = show;
-                    this.onShadingChange?.('stl_show_colorbar', show);
+                if (vp3d && typeof vp3d.setQuantityShowColorbar === 'function') {
+                    vp3d.setQuantityShowColorbar(q, show);
+                } else {
+                    const { updates: vpUpdates } = applyQuantityStyleUpdate(params, q, { showColorbar: show });
+                    this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
                 }
-                if (canonicalizeQuantity(params.obstacles_quantity || 'pressure') === q) {
-                    vpUpdates.obstacles_show_colorbar = show;
-                    this.onShadingChange?.('obstacles_show_colorbar', show);
+                if (domainNode && domainNode.id !== vpNode.id && vpNode.parameters?.slices) {
+                    this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: vpNode.parameters.slices });
                 }
-                if (canonicalizeQuantity(params.mpmParticleQuantity || 'vonMises') === q) {
-                    vpUpdates.mpmParticleShowColorbar = show;
-                    this.onShadingChange?.('mpmParticleShowColorbar', show);
-                }
-                if (canonicalizeQuantity(params.femQuantity || 'vonMises') === q) {
-                    vpUpdates.femShowColorbar = show;
-                    this.onShadingChange?.('femShowColorbar', show);
-                }
-                if (canonicalizeQuantity(params.beamQuantity || 'plasticStrain') === q) {
-                    vpUpdates.beamShowColorbar = show;
-                    this.onShadingChange?.('beamShowColorbar', show);
-                }
-                const allSlices = vpNode.parameters?.slices ? [...vpNode.parameters.slices] : [];
-                let sliceChanged = false;
-                allSlices.forEach((s: any) => {
-                    if (canonicalizeQuantity(s.quantities?.[0] || 'pressure') === q) {
-                        s.show_colorbar = show;
-                        sliceChanged = true;
-                    }
-                });
-                if (sliceChanged) {
-                    vpUpdates.slices = allSlices;
-                    if (domainNode && domainNode.id !== vpNode.id) {
-                        this.stateManager.updateNodeParametersInPlace(domainNode.id, { slices: allSlices });
-                    }
-                    this.onSliceConfigChange?.(allSlices);
-                }
-                this.stateManager.updateNodeParametersInPlace(vpNode.id, vpUpdates);
                 this.renderActiveTabContent();
                 return;
             }
@@ -5042,11 +4855,11 @@ export class TransportController {
 
             const cmapSelect = document.createElement('select');
             cmapSelect.className = `transport-select full-width ${isCockpit ? 'compact-select' : ''}`;
-            (['rainbow', 'plasma', 'viridis', 'turbo', 'inferno', 'coolwarm', 'jet', 'magma', 'grayscale', 'cividis'] as ColormapType[]).forEach(cm => {
+            COLORMAP_OPTIONS.forEach(cm => {
                 const opt = document.createElement('option');
-                opt.value = cm;
-                opt.textContent = cm.toUpperCase();
-                if (cm === ctx.colormap) opt.selected = true;
+                opt.value = cm.id;
+                opt.textContent = cm.label.toUpperCase();
+                if (cm.id === ctx.colormap) opt.selected = true;
                 cmapSelect.appendChild(opt);
             });
             cmapSelect.addEventListener('change', () => {
@@ -5090,7 +4903,6 @@ export class TransportController {
                 smoothBtn.title = 'Render continuous scalar field gradient (no discrete bands)';
                 smoothBtn.onclick = () => {
                     this.updateContextSetting('smoothContours', true);
-                    this.updateContextSetting('contourLevels', 0);
                 };
 
                 const steppedBtn = document.createElement('button');
@@ -5106,7 +4918,6 @@ export class TransportController {
                 steppedBtn.style.color = !isSmooth ? '#ffffff' : '#94a3b8';
                 steppedBtn.title = 'Render discretized isocontour bands';
                 steppedBtn.onclick = () => {
-                    this.updateContextSetting('smoothContours', false);
                     this.updateContextSetting('contourLevels', curLvl > 1 ? curLvl : 10);
                 };
 
@@ -5140,7 +4951,6 @@ export class TransportController {
                 }
                 lvlSelect.addEventListener('change', () => {
                     const v = parseInt(lvlSelect.value, 10);
-                    this.updateContextSetting('smoothContours', false);
                     this.updateContextSetting('contourLevels', v);
                 });
                 rowLevels.appendChild(lvlSelect);
@@ -5289,8 +5099,8 @@ export class TransportController {
             logBtn.title = 'Toggle logarithmic (Log10) scalar color transfer';
             rowToggles.appendChild(logBtn);
 
-            // If slice, add Smooth (Nodal) vs Cell toggle chip
-            if (ctx.targetType === 'slice') {
+            // If slice / global / mpm, add Smooth (Nodal) vs Cell toggle chip
+            if (ctx.targetType === 'slice' || ctx.targetType === 'global' || ctx.targetType === 'mpm') {
                 const interpBtn = this.createButton(
                     ctx.interpolate !== false ? '〰️ Smooth' : '🧱 Cell',
                     `chip-btn compact-chip span-2-col ${ctx.interpolate !== false ? 'active' : ''}`,

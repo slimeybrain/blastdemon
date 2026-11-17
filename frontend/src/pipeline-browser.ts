@@ -12,7 +12,7 @@ import { HostFileBrowserModal, showRecentFoldersQuickMenu, recordRecentFolder } 
 import { GaugeManagerModal } from './gauge-manager-modal.js';
 import { PipelineConnectionModal } from './pipeline-connection-modal.js';
 import { FEMSetupModal } from './fem-setup-modal.js';
-import { syncModelFEMSetup, FEMSetupConfig, FEMPartConfig, FEMEntitySet, FEMBoundaryCondition, FEMContactConfig, FEMSectionType, getPartColor } from './fem-setup-types.js';
+import { syncModelFEMSetup, FEMSetupConfig, FEMPartConfig, FEMEntitySet, FEMBoundaryCondition, FEMContactConfig, FEMSectionType, getPartColor, syncFEMPartAndNodeParams, sectionTypeToTopology } from './fem-setup-types.js';
 import { isAirMaterialNode, isJWLMaterialNode, resolveRemapInheritance } from './serialization.js';
 import { isIdealGasAirMaterial, isIdealGasChargeMaterial, isGeomaterialModel, isWaterMaterialModel } from './mpm-presets.js';
 import { showModelErrorModal, getErrorBadgeTooltip } from './model-error-modal.js';
@@ -3287,7 +3287,6 @@ export class PipelineBrowser {
             if (tNode.type === 'FEMDomain3D') {
                 if (setupCopy.merge_coincident_nodes !== undefined) tUpdates.merge_coincident_nodes = setupCopy.merge_coincident_nodes;
                 if (setupCopy.node_merge_tolerance !== undefined) tUpdates.node_merge_tolerance = setupCopy.node_merge_tolerance;
-                if (setupCopy.embedded_rebar_coupling !== undefined) tUpdates.embedded_rebar_coupling = setupCopy.embedded_rebar_coupling;
             }
             this.stateManager.updateNodeParametersInPlace(tNode.id, tUpdates);
         }
@@ -3318,17 +3317,8 @@ export class PipelineBrowser {
                     updates.showFEMMesh = partVis;
                 }
             } else {
-                if (part.name) updates.name = part.name;
+                syncFEMPartAndNodeParams(part, updates, true, cNode.type);
                 if (matDef?.node_id) updates.material = matDef.node_id;
-                if (part.section_type === 'SolidHex8') updates.element_topology = 'Hex8';
-                else if (part.section_type === 'SolidHex8_SRI') updates.element_topology = 'Hex8_SRI';
-                else if (part.section_type === 'SolidHex8_Full') updates.element_topology = 'Hex8_Full';
-                else if (part.section_type === 'SolidTet4') updates.element_topology = 'Tet4';
-                else if (part.section_type === 'SolidTet4_ANP') updates.element_topology = 'Tet4_ANP';
-                else if (part.section_type === 'SolidWedge6') updates.element_topology = 'Wedge6';
-                else if (part.section_type === 'Shell4') updates.element_topology = 'Shell4';
-                updates.visible = partVis;
-                updates.hidden = !partVis;
                 if (isRebarPart) {
                     updates.showBeams = partVis;
                     updates.showRebar = partVis;
@@ -3383,10 +3373,8 @@ export class PipelineBrowser {
             { id: 'SolidHex8', label: '🧱 SolidHex8 (1-pt B-Bar + Hourglass)', sublabel: 'Standard explicit 8-node hexahedron with physical hourglass control' },
             { id: 'SolidHex8_SRI', label: '🛡️ SolidHex8_SRI (Selective Reduced 2x2x2)', sublabel: 'Locking-free 8-pt deviatoric + 1-pt volumetric (zero hourglass energy)' },
             { id: 'SolidHex8_Full', label: '📐 SolidHex8_Full (Full 2x2x2 Gauss)', sublabel: 'Full 8-point Gauss quadrature hexahedron' },
-            { id: 'SolidTet4', label: '🔺 SolidTet4 (4-Node Tetrahedron)', sublabel: '1-point constant strain tetrahedron with nodal pressure stabilization' },
+            { id: 'SolidTet4', label: '🔺 SolidTet4 (4-Node P1 Tetrahedron)', sublabel: '1-point constant strain P1 tetrahedron' },
             { id: 'SolidTet4_ANP', label: '💎 SolidTet4_ANP (Avg Nodal Pressure)', sublabel: 'Locking-free Joldes-Wittek-Miller average nodal pressure Tet4' },
-            { id: 'SolidWedge6', label: '📐 SolidWedge6 (6-Node Prism)', sublabel: '2-point axial × 1-point triangle prism element' },
-            { id: 'Shell4', label: '📄 Shell4 (Belytschko-Tsay Mindlin Shell)', sublabel: '4-node corotational shell with 5 through-thickness Lobatto points' },
             { id: 'Beam3D', label: '⛓️ Beam3D (Hughes-Liu 3D Beam / Rebar)', sublabel: '6-DOF 2-node structural frame or embedded reinforcing bar' },
             { id: 'Truss1D', label: '📏 Truss1D (Axial Cable / Tie Rod)', sublabel: '3-DOF axial tension/compression bar element' }
         ];
@@ -3474,6 +3462,7 @@ export class PipelineBrowser {
                     onSelect: (newSec) => {
                         if (newSec) {
                             part.section_type = newSec as FEMSectionType;
+                            part.element_topology = sectionTypeToTopology(newSec);
                             this.saveFEMSetupToModel(model, femSetup, ownerNode);
                         }
                     }
@@ -3723,8 +3712,8 @@ export class PipelineBrowser {
                     model,
                     candidateNodes: [
                         { id: 'box_hex8', label: '🧊 Add Primitive Hex8 Box Part', sublabel: 'Structured 8-node hexahedral block (SolidHex8 / SolidHex8_SRI)' },
-                        { id: 'plate_shell4', label: '📄 Add Belytschko-Tsay Shell4 Plate Part', sublabel: '4-node corotational Mindlin-Reissner armor/hull plate' },
-                        { id: 'cyl_hex8', label: '🛢️ Add Cylindrical Column / Pipe Part', sublabel: 'Structured cylindrical solid or shell component' },
+                        { id: 'plate_hex8', label: '🛡️ Add Solid Plate Part (Hex8 / Tet4)', sublabel: 'Structured solid plate for blast wave / impact loading' },
+                        { id: 'cyl_hex8', label: '🛢️ Add Cylindrical Column / Pipe Part', sublabel: 'Structured cylindrical solid component' },
                         { id: 'rebar_beam', label: '⛓️ Add 1D Embedded Rebar / Beam Part', sublabel: 'Hughes-Liu 3D beam reinforcement cage or frame member' },
                         { id: 'import_lsdyna', label: '📂 Import LS-DYNA Keyword Mesh (.k)', sublabel: 'Add an LSDynaImporter3D deck to this multi-part assembly' }
                     ],
@@ -3740,6 +3729,7 @@ export class PipelineBrowser {
                                 y: node.y + (femSetup.parts.length * 70),
                                 parameters: {
                                     name: `LS-DYNA Mesh #${nextPartId}`,
+                                    k_file: 'concrete_cubicle_30mm.k',
                                     keyword_file: 'concrete_cubicle_30mm.k',
                                     scale_factor: 1.0,
                                     pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
@@ -3764,13 +3754,13 @@ export class PipelineBrowser {
                             return;
                         }
 
-                        const isShell = choice === 'plate_shell4';
+                        const isPlate = choice === 'plate_hex8';
                         const isCyl = choice === 'cyl_hex8';
                         const isBeam = choice === 'rebar_beam';
                         const newObjId = `fem_obj_${Date.now().toString(36).slice(-4)}`;
-                        const newPartName = isShell ? `Shell Plate #${nextPartId}` : (isCyl ? `Cylinder #${nextPartId}` : (isBeam ? `Rebar Frame #${nextPartId}` : `Solid Block #${nextPartId}`));
-                        const secType: FEMSectionType = isShell ? 'Shell4' : (isBeam ? 'Beam3D' : 'SolidHex8');
-                        const shapeType = isShell ? 'Plate' : (isCyl ? 'Cylinder' : 'Box');
+                        const newPartName = isPlate ? `Solid Plate #${nextPartId}` : (isCyl ? `Cylinder #${nextPartId}` : (isBeam ? `Rebar Frame #${nextPartId}` : `Solid Block #${nextPartId}`));
+                        const secType: FEMSectionType = isBeam ? 'Beam3D' : 'SolidHex8';
+                        const shapeType = isPlate ? 'Plate' : (isCyl ? 'Cylinder' : 'Box');
 
                         const newObjNode: Node = {
                             id: newObjId,
@@ -3779,12 +3769,12 @@ export class PipelineBrowser {
                             y: node.y + (femSetup.parts.length * 70),
                             parameters: {
                                 name: newPartName,
-                                mesh_source: 'Primitive Box/Cylinder',
                                 shape_type: shapeType,
-                                element_topology: isShell ? 'Shell4' : 'Hex8',
+                                element_topology: isBeam ? 'Beam3D' : 'Hex8',
                                 pos_x: 0.0, pos_y: 0.0, pos_z: 0.5,
-                                size_x: 1.0, size_y: isShell ? 0.02 : 0.3, size_z: 1.0,
-                                nx: 10, ny: isShell ? 1 : 4, nz: 10,
+                                rot_x: 0.0, rot_y: 0.0, rot_z: 0.0,
+                                size_x: 1.0, size_y: isPlate ? 0.05 : 0.3, size_z: 1.0,
+                                nx: 10, ny: isPlate ? 2 : 4, nz: 10,
                                 target_domain: node.id
                             },
                             inputs: [
@@ -3807,13 +3797,13 @@ export class PipelineBrowser {
                             source: 'canvas_node',
                             section_type: secType,
                             section_properties: {
-                                thickness: isShell ? 0.02 : 0.04,
+                                thickness: isPlate ? 0.05 : 0.04,
                                 diameter: isBeam ? 0.012 : 0.01,
                                 hourglass_coeff: 0.03
                             },
                             material_assignment: defaultMatAssign,
-                            num_elements: isShell ? 100 : 400,
-                            num_nodes: isShell ? 121 : 605,
+                            num_elements: isPlate ? 200 : 400,
+                            num_nodes: isPlate ? 363 : 605,
                             bounds: [-0.5, 0.5, -0.15, 0.15, 0.0, 1.0],
                             initial_velocity: [0, 0, 0],
                             visible: true,
@@ -3821,8 +3811,9 @@ export class PipelineBrowser {
                             color: getPartColor(nextPartId - 1),
                             shape_type: shapeType,
                             pos_x: 0.0, pos_y: 0.0, pos_z: 0.5,
-                            size_x: 1.0, size_y: isShell ? 0.02 : 0.3, size_z: 1.0,
-                            nx: 10, ny: isShell ? 1 : 4, nz: 10
+                            rot_x: 0.0, rot_y: 0.0, rot_z: 0.0,
+                            size_x: 1.0, size_y: isPlate ? 0.05 : 0.3, size_z: 1.0,
+                            nx: 10, ny: isPlate ? 2 : 4, nz: 10
                         });
                         this.saveFEMSetupToModel(model, femSetup, node);
                         this.stateManager.selectNode(model.id, node.id);
@@ -4155,12 +4146,9 @@ export class PipelineBrowser {
                             slave_id: femSetup.parts[1]?.part_id || femSetup.parts[0]?.part_id || 0,
                             friction_static: 0.30,
                             friction_kinetic: 0.20,
-                            penalty_scale: 0.10,
+                            penalty_scale: 1.0,
                             active: true
                         });
-                        if (spec.type === 'EMBEDDED_REBAR') {
-                            femSetup.embedded_rebar_coupling = true;
-                        }
                         this.saveFEMSetupToModel(model, femSetup, node);
                         this.stateManager.selectNode(model.id, node.id);
                         this.stateManager.setSelectedFEMEntity({ type: 'contact', id: ctId });
@@ -5586,19 +5574,25 @@ export class PipelineBrowser {
             case 'FEMObject3D': {
                 const shape = node.parameters.shape_type || (node.parameters.mesh_source === 'Cylinder Generator' ? 'Cylinder' : (node.parameters.mesh_source === 'STL Tetrahedral Mesher' ? 'STL' : (node.parameters.mesh_source === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
                 const topo = node.parameters.element_topology === 'Tet4_ANP' ? ' [Tet4]' : '';
-                if (shape === 'Box') {
+                const rx = Number(node.parameters.rot_x ?? 0);
+                const ry = Number(node.parameters.rot_y ?? 0);
+                const rz = Number(node.parameters.rot_z ?? 0);
+                const rotTag = (Math.abs(rx) > 1e-4 || Math.abs(ry) > 1e-4 || Math.abs(rz) > 1e-4)
+                    ? ` ↻(${Number(rx.toFixed(1))},${Number(ry.toFixed(1))},${Number(rz.toFixed(1))}°)`
+                    : '';
+                if (shape === 'Box' || shape === 'Plate') {
                     const nx = node.parameters.nx ?? 10;
                     const ny = node.parameters.ny ?? 10;
                     const nz = node.parameters.nz ?? 10;
-                    return `Box ${nx}×${ny}×${nz}${topo}`;
+                    return `${shape} ${nx}×${ny}×${nz}${topo}${rotTag}`;
                 } else if (shape === 'Cylinder') {
                     const nr = node.parameters.nx ?? 2;
                     const nz = node.parameters.nz ?? 4;
-                    return `Cyl ${nr}r×${nz}z${topo}`;
+                    return `Cyl ${nr}r×${nz}z${topo}${rotTag}`;
                 } else if (shape === 'STL') {
-                    return `STL Tet4`;
+                    return `STL Tet4${rotTag}`;
                 } else {
-                    return `${shape}${topo}`;
+                    return `${shape}${topo}${rotTag}`;
                 }
             }
             case 'LSDynaImporter3D': {
@@ -8211,10 +8205,12 @@ export class PipelineBrowser {
             const stlNode = model.nodes.find(n => n.id === newStlId);
             const stlFile = stlNode?.parameters?.file_path || stlNode?.parameters?.stl_file || '';
             if (body.type === 'FEMObject3D') {
+                const curTopo = body.parameters?.element_topology;
+                const keepTopo = curTopo && curTopo !== 'Hex8' && curTopo !== 'Hex8_SRI' && curTopo !== 'Hex8_FullGauss8';
                 this.syncParamInStateAndModel(state, model, body.id, {
                     shape_type: 'STL',
-                    mesh_source: 'STL Tetrahedral Mesher',
-                    element_topology: 'Tet4_ANP',
+                    mesh_source: 'STL File',
+                    ...(keepTopo ? {} : { element_topology: 'Tet4_ANP' }),
                     ...(stlFile ? { stl_file: stlFile } : {})
                 });
             }
@@ -8543,10 +8539,12 @@ export class PipelineBrowser {
             const targetNode = model.nodes.find(n => n.id === newTargetId);
             const stlFile = stlNode.parameters?.file_path || stlNode.parameters?.stl_file || '';
             if (targetNode && targetNode.type === 'FEMObject3D') {
+                const curTopo = targetNode.parameters?.element_topology;
+                const keepTopo = (curTopo && curTopo !== 'Hex8') ? curTopo : 'Tet4_ANP';
                 this.syncParamInStateAndModel(state, model, targetNode.id, {
                     shape_type: 'STL',
-                    mesh_source: 'STL Tetrahedral Mesher',
-                    element_topology: 'Tet4_ANP',
+                    mesh_source: 'STL File',
+                    element_topology: keepTopo,
                     ...(stlFile ? { stl_file: stlFile } : {})
                 });
             }
@@ -10844,7 +10842,6 @@ export class PipelineBrowser {
                 ...this.stateManager.getDefaultParameters('FEMObject3D'),
                 name: 'Concrete Quay Wall',
                 shape_type: 'Box',
-                mesh_source: 'Box Generator',
                 origin_mode: 'Center',
                 boundary_condition: 'Clamped',
                 pos_x: 20.0,

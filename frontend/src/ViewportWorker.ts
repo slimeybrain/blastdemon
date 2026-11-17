@@ -4067,11 +4067,11 @@ function getBeamQuantityValue(facetIdx: number, qty: string): number {
         const v = latestFEMFacetsData[base + 5];
         return Number.isFinite(v) ? Math.max(0, v) : 0;
     }
-    if (cQ === 'vonMises' || qty === 'stress' || qty === 'axialStress') {
+    if (cQ === 'vonMises' || qty === 'stress' || qty === 'axialStress' || qty === 'axial_stress') {
         const v = latestFEMFacetsData[base + 4];
         return Number.isFinite(v) ? Math.max(0, v) : 0;
     }
-    if (cQ === 'pressure' || qty === 'momentOrForce' || qty === 'bendingMoment' || qty === 'axialForce') {
+    if (cQ === 'pressure' || cQ === 'momentOrForce' || qty === 'momentOrForce' || qty === 'bendingMoment' || qty === 'axialForce') {
         const v = latestFEMFacetsData[base + 6];
         return Number.isFinite(v) ? v : 0;
     }
@@ -4129,7 +4129,7 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
     if (!latestFEMNodesData || !latestFEMFacetsData || latestFEMNodesData.length === 0 || latestFEMFacetsData.length === 0) {
         femSolidCount = 0;
         femWireframeCount = 0;
-        if (buffer) render(); else requestRender();
+        requestRender();
         return;
     }
 
@@ -4160,9 +4160,10 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         cachedFemAABB = null;
     }
 
-    // If FEM-only model (no active CFD solver present), initialize spatial bounds ONCE on initial frame load.
+    // If FEM-only model (no active CFD or MPM solver/objects present), initialize spatial bounds ONCE on initial frame load.
     // Do NOT auto-reset camera or bounds on every frame render while the simulation is running!
-    if (!hasCFDSolver && !femBoundsInitialized && isFinite(femMinX) && isFinite(femMaxX) && femMaxX > femMinX) {
+    const hasMPMPresent = mpmObjectsData.length > 0 || (latestMPMParticlesData !== null && latestMPMParticlesData.length > 0);
+    if (!hasCFDSolver && !hasMPMPresent && !femBoundsInitialized && isFinite(femMinX) && isFinite(femMaxX) && femMaxX > femMinX) {
         xmin = femMinX;
         xmax = femMaxX;
         ymin = femMinY;
@@ -4173,6 +4174,7 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         const w = canvasWidth();
         const h = canvasHeight();
         updateMatrices(w, h);
+        updateAxesGeometry();
     }
 
     const sizeX = getDimX();
@@ -4345,14 +4347,29 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
     const nTotalFEMNodes = latestFEMNodesData ? Math.floor(latestFEMNodesData.length / 7) : 0;
     if (femStyle.interpolate && nTotalFEMNodes > 0 && latestFEMFacetsData) {
         femNodalVals = new Float32Array(nTotalFEMNodes);
-        const femNodalCounts = new Uint32Array(nTotalFEMNodes);
+        const femNodalWeights = new Float32Array(nTotalFEMNodes);
         if (cFemQ === 'velocity') {
             for (let ni = 0; ni < nTotalFEMNodes; ni++) {
                 const v = latestFEMNodesData[ni * 7 + 6];
                 femNodalVals[ni] = Number.isFinite(v) ? Math.max(0, v) : 0;
-                femNodalCounts[ni] = 1;
+                femNodalWeights[ni] = 1.0;
             }
         } else {
+            const getNodePos = (nid: number): [number, number, number] => {
+                if (latestFEMNodesData && nid >= 0 && nid < nTotalFEMNodes) {
+                    const nb = nid * 7;
+                    return [latestFEMNodesData[nb], latestFEMNodesData[nb + 1], latestFEMNodesData[nb + 2]];
+                }
+                return [0, 0, 0];
+            };
+            const cornerAngle = (a: [number, number, number], b: [number, number, number], c: [number, number, number]): number => {
+                const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+                const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+                const lu = Math.sqrt(ux * ux + uy * uy + uz * uz) + 1e-12;
+                const lv = Math.sqrt(vx * vx + vy * vy + vz * vz) + 1e-12;
+                const cosTheta = Math.max(-1.0, Math.min(1.0, (ux * vx + uy * vy + uz * vz) / (lu * lv)));
+                return Math.max(1e-4, Math.acos(cosTheta));
+            };
             for (let f = 0; f < nFacets; f++) {
                 const fBase = f * 8;
                 const fn0 = Math.round(latestFEMFacetsData[fBase + 0]);
@@ -4364,13 +4381,32 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
                 if (isErodedFacetAvg) continue;
                 const fVal = getFEMFacetQuantityValue(f, femQuantity);
                 if (!isValidQuantitySample(femQuantity, fVal)) continue;
-                if (fn0 >= 0 && fn0 < nTotalFEMNodes) { femNodalVals[fn0] += fVal; femNodalCounts[fn0]++; }
-                if (fn1 >= 0 && fn1 < nTotalFEMNodes) { femNodalVals[fn1] += fVal; femNodalCounts[fn1]++; }
-                if (fn2 >= 0 && fn2 < nTotalFEMNodes) { femNodalVals[fn2] += fVal; femNodalCounts[fn2]++; }
-                if (fn3 !== fn2 && fn3 >= 0 && fn3 < nTotalFEMNodes) { femNodalVals[fn3] += fVal; femNodalCounts[fn3]++; }
+
+                const p0 = getNodePos(fn0);
+                const p1 = getNodePos(fn1);
+                const p2 = getNodePos(fn2);
+                if (fn3 === fn2) {
+                    // Triangle facet (Tet4): weight by included corner angle to eliminate 4-vs-8 valence checkerboard bias
+                    const w0 = cornerAngle(p0, p1, p2);
+                    const w1 = cornerAngle(p1, p2, p0);
+                    const w2 = cornerAngle(p2, p0, p1);
+                    if (fn0 >= 0 && fn0 < nTotalFEMNodes) { femNodalVals[fn0] += fVal * w0; femNodalWeights[fn0] += w0; }
+                    if (fn1 >= 0 && fn1 < nTotalFEMNodes) { femNodalVals[fn1] += fVal * w1; femNodalWeights[fn1] += w1; }
+                    if (fn2 >= 0 && fn2 < nTotalFEMNodes) { femNodalVals[fn2] += fVal * w2; femNodalWeights[fn2] += w2; }
+                } else {
+                    const p3 = getNodePos(fn3);
+                    const w0 = cornerAngle(p0, p1, p3);
+                    const w1 = cornerAngle(p1, p2, p0);
+                    const w2 = cornerAngle(p2, p3, p1);
+                    const w3 = cornerAngle(p3, p0, p2);
+                    if (fn0 >= 0 && fn0 < nTotalFEMNodes) { femNodalVals[fn0] += fVal * w0; femNodalWeights[fn0] += w0; }
+                    if (fn1 >= 0 && fn1 < nTotalFEMNodes) { femNodalVals[fn1] += fVal * w1; femNodalWeights[fn1] += w1; }
+                    if (fn2 >= 0 && fn2 < nTotalFEMNodes) { femNodalVals[fn2] += fVal * w2; femNodalWeights[fn2] += w2; }
+                    if (fn3 >= 0 && fn3 < nTotalFEMNodes) { femNodalVals[fn3] += fVal * w3; femNodalWeights[fn3] += w3; }
+                }
             }
             for (let ni = 0; ni < nTotalFEMNodes; ni++) {
-                if (femNodalCounts[ni] > 1) femNodalVals[ni] /= femNodalCounts[ni];
+                if (femNodalWeights[ni] > 0) femNodalVals[ni] /= femNodalWeights[ni];
             }
         }
     }
@@ -4653,7 +4689,7 @@ function updateFEMMeshGeometry(buffer?: ArrayBuffer) {
         cachedHoverKey = null;
     }
 
-    if (buffer) render(); else requestRender();
+    requestRender();
 }
 
 function sampleColormapRGB(v: number, cmapName: string): [number, number, number] {
@@ -4790,7 +4826,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
     }
     if (!latestMPMParticlesData || latestMPMParticlesData.length === 0) {
         mpmParticlesCount = 0;
-        if (data) render(); else requestRender();
+        requestRender();
         return;
     }
 
@@ -4825,7 +4861,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         if (!anyMpmObjVisible) {
             mpmParticlesCount = 0;
             cachedMpmAABB = null;
-            if (data) render(); else requestRender();
+            requestRender();
             return;
         }
     }
@@ -4981,7 +5017,7 @@ function updateMPMParticlesGeometry(data?: Float32Array) {
         cachedHoverKey = null;
     }
 
-    if (data) render(); else requestRender();
+    requestRender();
 }
 
 const PHASE_COLORS: [number, number, number][] = [
@@ -5003,7 +5039,7 @@ function updatePhaseParticlesGeometry(data?: Float32Array) {
     }
     if (!latestPhaseParticlesData || latestPhaseParticlesData.length === 0) {
         phaseParticlesCount = 0;
-        if (data) render(); else requestRender();
+        requestRender();
         return;
     }
 
@@ -5092,7 +5128,7 @@ function updatePhaseParticlesGeometry(data?: Float32Array) {
         }
     }
     phaseParticlesCount = writtenParticles;
-    if (data) render(); else requestRender();
+    requestRender();
 }
 
 function getRotatedBoxVertices(cx: number, cy: number, cz: number, lx: number, ly: number, lz: number, ax: number, ay: number, az: number, dimX: number, dimY: number, dimZ: number): number[] {
@@ -5781,9 +5817,9 @@ function updateFEMPreviewGeometry() {
             const rotX = (Number(obj.rot_x) || 0.0) * Math.PI / 180.0;
             const rotY = (Number(obj.rot_y) || 0.0) * Math.PI / 180.0;
             const rotZ = (Number(obj.rot_z) || 0.0) * Math.PI / 180.0;
-            const nx = Math.max(1, Math.min(100, Number(obj.nx ?? 10)));
-            const ny = Math.max(1, Math.min(100, Number(obj.ny ?? 10)));
-            const nz = Math.max(1, Math.min(100, Number(obj.nz ?? 10)));
+            const nx = Math.max(1, Number(obj.nx ?? 10));
+            const ny = Math.max(1, Number(obj.ny ?? 10));
+            const nz = Math.max(1, Number(obj.nz ?? 10));
             const wire = getRotatedBoxWireframeVertices(pxBox, pyBox, pzBox, lx, ly, lz, rotX, rotY, rotZ, dimX, dimY, dimZ, nx, ny, nz);
             allVerts.push(...wire);
         } else if (shape === 'Cylinder') {
@@ -6637,7 +6673,7 @@ function recomputeActiveRanges(caller?: 'fem' | 'mpm' | 'phase' | 'slice' | 'con
         activeQuantities.add(canonicalizeQuantity(femQuantity || 'vonMises'));
     }
     if (showBeams || showRebar) {
-        activeQuantities.add(canonicalizeQuantity(beamQuantity || 'axial_stress'));
+        activeQuantities.add(canonicalizeQuantity(beamQuantity || 'plasticStrain'));
     }
     if ((showFEMMesh || showBeams || showRebar) && latestFEMFacetsData && latestFEMFacetsData.length > 0) {
         const totalFacets = Math.floor(latestFEMFacetsData.length / 8);
@@ -6701,10 +6737,13 @@ function recomputeActiveRanges(caller?: 'fem' | 'mpm' | 'phase' | 'slice' | 'con
         } else {
             const ext = qtyDynamicExtents[q];
             if (ext && ext.hasData) {
-                if (isFraction && ext.max <= 1e-4) {
+                if (isFraction && ext.max <= 1e-7) {
                     nextMin = defRange[0];
                     nextMax = defRange[1];
-                } else if (ext.min < ext.max && (ext.max - ext.min) > Math.max(1e-4 * Math.abs(ext.max), 1e-6)) {
+                } else if (isFraction && ext.min >= 0 && ext.max > 1e-7) {
+                    nextMin = ext.min;
+                    nextMax = ext.max;
+                } else if (ext.min < ext.max && (ext.max - ext.min) > Math.max(1e-4 * Math.abs(ext.max), 1e-9)) {
                     nextMin = ext.min;
                     nextMax = ext.max;
                 } else if (ext.min >= defRange[0] && ext.max <= defRange[1] && defRange[1] > defRange[0]) {
@@ -6742,9 +6781,9 @@ function recomputeActiveRanges(caller?: 'fem' | 'mpm' | 'phase' | 'slice' | 'con
         }
     }
 
-    if (modifiedQuantities.size > 0) {
-        self.postMessage({ type: 'quantityRangesUpdated', ranges: resolvedQuantityRanges });
-    }
+        if (modifiedQuantities.size > 0 || caller === 'config' || caller === 'scale') {
+            self.postMessage({ type: 'quantityRangesUpdated', ranges: resolvedQuantityRanges });
+        }
 
     // Push unified quantity style and resolved bounds onto all slices
     const sliceRanges: { min: number, max: number }[] = [];
@@ -6861,7 +6900,7 @@ function handleFrame(buffer: ArrayBuffer) {
                 gl.bindBuffer(gl.ARRAY_BUFFER, mpmParticlesBuffer);
                 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(0), gl.DYNAMIC_DRAW);
             }
-            render();
+            requestRender();
             self.postMessage({ type: 'frameComplete' });
             return;
         }
@@ -6886,7 +6925,7 @@ function handleFrame(buffer: ArrayBuffer) {
                 gl.bindBuffer(gl.ARRAY_BUFFER, phaseParticlesBuffer);
                 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(0), gl.DYNAMIC_DRAW);
             }
-            render();
+            requestRender();
             self.postMessage({ type: 'frameComplete' });
             return;
         }
@@ -7010,7 +7049,8 @@ function handleFrame(buffer: ArrayBuffer) {
 
     if (is2DFallback) {
         activeSlices2D = cachedSlices;
-        render();
+        requestRender();
+        self.postMessage({ type: 'frameComplete' });
         return;
     }
     // We clear slices on size changes or if configuration changes
@@ -7161,7 +7201,8 @@ function handleFrame(buffer: ArrayBuffer) {
                 activeSlicesWebGPU[i] = slice;
             }
         });
-        render();
+        requestRender();
+        self.postMessage({ type: 'frameComplete' });
         return;
     }
 
@@ -7269,7 +7310,8 @@ function handleFrame(buffer: ArrayBuffer) {
             activeSlicesWebGL[i] = slice;
         }
     });
-    render();
+    requestRender();
+    self.postMessage({ type: 'frameComplete' });
 }
 
 function getRayFromScreen(mouseX: number, mouseY: number, width: number, height: number): { origin: number[], dir: number[] } | null {
@@ -8813,14 +8855,28 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
             const cx = Number(obj.x ?? obj.pos_x ?? (xmin + sizeX * 0.5));
             const cy = Number(obj.y ?? obj.pos_y ?? (ymin + sizeY * 0.5));
             const cz = Number(obj.z ?? obj.pos_z ?? (zmin + sizeZ * 0.5));
-            const center = physToWorld(cx, cy, cz);
             const shape = obj.shape || obj.shape_type || 'Box';
+            const originMode = String(obj.origin_mode || 'Center');
+            const isCADOrigin = originMode === 'CAD Origin' || originMode === 'Min Corner';
+            const rotX = (Number(obj.rot_x) || 0.0) * Math.PI / 180.0;
+            const rotY = (Number(obj.rot_y) || 0.0) * Math.PI / 180.0;
+            const rotZ = (Number(obj.rot_z) || 0.0) * Math.PI / 180.0;
             if (shape === 'Cylinder') {
                 const r = Number(obj.radius ?? 0.1);
                 const h = Number(obj.height ?? 0.2);
+                const cylCenterZ = isCADOrigin ? (cz + 0.5 * h) : cz;
+                const center = physToWorld(cx, cy, cylCenterZ);
                 const rWorld = r / maxSize;
                 const hWorld = (h * 0.5) / maxSize;
-                const t = rayCylinderIntersect(O, D, center, rWorld, hWorld);
+                let t: number | null = null;
+                if (rotX === 0 && rotY === 0 && rotZ === 0) {
+                    t = rayCylinderIntersect(O, D, center, rWorld, hWorld);
+                } else {
+                    const relO = [O[0] - center[0], O[1] - center[1], O[2] - center[2]];
+                    const locO = invRotatePointEuler(relO[0], relO[1], relO[2], rotX, rotY, rotZ);
+                    const locD = invRotatePointEuler(D[0], D[1], D[2], rotX, rotY, rotZ);
+                    t = rayCylinderIntersect(locO, locD, [0, 0, 0], rWorld, hWorld);
+                }
                 if (t !== null && t > 1e-4 && t < minSolidT) {
                     minSolidT = t;
                     solidHit = {
@@ -8832,6 +8888,7 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
                     };
                 }
             } else if (shape === 'Sphere') {
+                const center = physToWorld(cx, cy, cz);
                 const r = Number(obj.radius ?? 0.1);
                 const rWorld = Math.max(r / maxSize, 0.01);
                 const t = raySphereIntersect(O, D, center, rWorld);
@@ -8849,17 +8906,33 @@ function raycastScene(mouseX: number, mouseY: number, width: number, height: num
                 const lx = Number(obj.size_x ?? obj.lx ?? 0.2);
                 const ly = Number(obj.size_y ?? obj.ly ?? 0.2);
                 const lz = Number(obj.size_z ?? obj.lz ?? 0.2);
-                const boxMin = [
-                    center[0] - (lx * 0.5) / maxSize,
-                    center[1] - (ly * 0.5) / maxSize,
-                    center[2] - (lz * 0.5) / maxSize
-                ];
-                const boxMax = [
-                    center[0] + (lx * 0.5) / maxSize,
-                    center[1] + (ly * 0.5) / maxSize,
-                    center[2] + (lz * 0.5) / maxSize
-                ];
-                const t = rayBoxIntersect(O, D, boxMin, boxMax);
+                const boxCenter = physToWorld(
+                    isCADOrigin ? (cx + 0.5 * lx) : cx,
+                    isCADOrigin ? (cy + 0.5 * ly) : cy,
+                    isCADOrigin ? (cz + 0.5 * lz) : cz
+                );
+                let t: number | null = null;
+                if (rotX === 0 && rotY === 0 && rotZ === 0) {
+                    const boxMin = [
+                        boxCenter[0] - (lx * 0.5) / maxSize,
+                        boxCenter[1] - (ly * 0.5) / maxSize,
+                        boxCenter[2] - (lz * 0.5) / maxSize
+                    ];
+                    const boxMax = [
+                        boxCenter[0] + (lx * 0.5) / maxSize,
+                        boxCenter[1] + (ly * 0.5) / maxSize,
+                        boxCenter[2] + (lz * 0.5) / maxSize
+                    ];
+                    t = rayBoxIntersect(O, D, boxMin, boxMax);
+                } else {
+                    const relO = [O[0] - boxCenter[0], O[1] - boxCenter[1], O[2] - boxCenter[2]];
+                    const locO = invRotatePointEuler(relO[0], relO[1], relO[2], rotX, rotY, rotZ);
+                    const locD = invRotatePointEuler(D[0], D[1], D[2], rotX, rotY, rotZ);
+                    const hx = (lx * 0.5) / maxSize;
+                    const hy = (ly * 0.5) / maxSize;
+                    const hz = (lz * 0.5) / maxSize;
+                    t = rayBoxIntersect(locO, locD, [-hx, -hy, -hz], [hx, hy, hz]);
+                }
                 if (t !== null && t > 1e-4 && t < minSolidT) {
                     minSolidT = t;
                     solidHit = {
@@ -9253,6 +9326,7 @@ function render2D() {
 
 function render() {
     renderPending = false;
+    if (isPageHidden) return;
     const w = canvasWidth();
     const h = canvasHeight();
     updateMatrices(w, h);
@@ -11672,6 +11746,7 @@ function canvasHeight(): number {
 }
 
 let renderPending = false;
+let isPageHidden = false;
 function requestRender(): void {
     if (renderPending) return;
     renderPending = true;
@@ -12193,6 +12268,11 @@ self.onmessage = async (e) => {
                 mpmParticleRenderMode = data.mode;
                 requestRender();
             }
+        } else if (type === "setVisibility") {
+            isPageHidden = Boolean(data?.hidden);
+            if (!isPageHidden) {
+                requestRender();
+            }
         } else if (type === "frame") {
             try {
                 handleFrame(data.buffer);
@@ -12353,6 +12433,104 @@ self.onmessage = async (e) => {
                             quantityStyles[ck] = { ...prevS, minVal: arr[0], maxVal: arr[1] };
                         }
                     }
+                }
+                const applyLegacyWorkerLayerPatch = (rawQty: string, patch: Partial<QuantityContourStyle>) => {
+                    const ck = canonicalizeQuantity(rawQty);
+                    const prevS = getWorkerQuantityStyle(ck);
+                    const rawLevels = patch.contourLevels !== undefined
+                        ? Math.max(0, Math.round(Number(patch.contourLevels)))
+                        : prevS.contourLevels;
+                    const nextSmooth = patch.smoothContours !== undefined
+                        ? (Boolean(patch.smoothContours) || rawLevels <= 1)
+                        : (patch.contourLevels !== undefined ? rawLevels <= 1 : prevS.smoothContours);
+                    const nextS: QuantityContourStyle = {
+                        ...prevS,
+                        colormap: patch.colormap !== undefined ? normalizeColormapId(patch.colormap) : prevS.colormap,
+                        autoScale: patch.autoScale !== undefined ? Boolean(patch.autoScale) : prevS.autoScale,
+                        logScale: patch.logScale !== undefined ? Boolean(patch.logScale) : prevS.logScale,
+                        minVal: (patch.minVal !== undefined && Number.isFinite(Number(patch.minVal))) ? Number(patch.minVal) : prevS.minVal,
+                        maxVal: (patch.maxVal !== undefined && Number.isFinite(Number(patch.maxVal))) ? Number(patch.maxVal) : prevS.maxVal,
+                        contourLevels: nextSmooth ? 0 : rawLevels,
+                        smoothContours: nextSmooth,
+                        interpolate: patch.interpolate !== undefined ? Boolean(patch.interpolate) : prevS.interpolate
+                    };
+                    if (
+                        prevS.colormap !== nextS.colormap ||
+                        prevS.autoScale !== nextS.autoScale ||
+                        prevS.logScale !== nextS.logScale ||
+                        prevS.minVal !== nextS.minVal ||
+                        prevS.maxVal !== nextS.maxVal ||
+                        prevS.contourLevels !== nextS.contourLevels ||
+                        prevS.smoothContours !== nextS.smoothContours ||
+                        prevS.interpolate !== nextS.interpolate
+                    ) {
+                        stylesChanged = true;
+                    }
+                    quantityStyles[ck] = nextS;
+                    quantityColormaps[ck] = nextS.colormap;
+                    quantityLogScales[ck] = nextS.logScale;
+                    quantityAutoScales[ck] = nextS.autoScale;
+                    if (!nextS.autoScale) {
+                        quantityRanges[ck] = [nextS.minVal, nextS.maxVal];
+                        resolvedQuantityRanges[ck] = [nextS.minVal, nextS.maxVal];
+                    }
+                };
+                if (data.femColormap !== undefined || data.femContourLevels !== undefined || data.femSmoothContours !== undefined || data.femInterpolate !== undefined || data.femAutoScale !== undefined || data.femLogScale !== undefined || data.femMinVal !== undefined || data.femMaxVal !== undefined) {
+                    applyLegacyWorkerLayerPatch(data.femQuantity || femQuantity, {
+                        ...(data.femColormap !== undefined ? { colormap: data.femColormap } : {}),
+                        ...(data.femAutoScale !== undefined ? { autoScale: data.femAutoScale } : {}),
+                        ...(data.femLogScale !== undefined ? { logScale: data.femLogScale } : {}),
+                        ...(data.femMinVal !== undefined ? { minVal: data.femMinVal } : {}),
+                        ...(data.femMaxVal !== undefined ? { maxVal: data.femMaxVal } : {}),
+                        ...(data.femContourLevels !== undefined ? { contourLevels: data.femContourLevels } : {}),
+                        ...(data.femSmoothContours !== undefined ? { smoothContours: data.femSmoothContours } : {}),
+                        ...(data.femInterpolate !== undefined ? { interpolate: data.femInterpolate } : {})
+                    });
+                }
+                if (data.mpmParticleColormap !== undefined || data.mpmContourLevels !== undefined || data.mpmSmoothContours !== undefined || data.mpmParticleAutoScale !== undefined || data.mpmParticleLogScale !== undefined || data.mpmParticleMinVal !== undefined || data.mpmParticleMaxVal !== undefined) {
+                    applyLegacyWorkerLayerPatch(data.mpmParticleQuantity || mpmParticleQuantity, {
+                        ...(data.mpmParticleColormap !== undefined ? { colormap: data.mpmParticleColormap } : {}),
+                        ...(data.mpmParticleAutoScale !== undefined ? { autoScale: data.mpmParticleAutoScale } : {}),
+                        ...(data.mpmParticleLogScale !== undefined ? { logScale: data.mpmParticleLogScale } : {}),
+                        ...(data.mpmParticleMinVal !== undefined ? { minVal: data.mpmParticleMinVal } : {}),
+                        ...(data.mpmParticleMaxVal !== undefined ? { maxVal: data.mpmParticleMaxVal } : {}),
+                        ...(data.mpmContourLevels !== undefined ? { contourLevels: data.mpmContourLevels } : {}),
+                        ...(data.mpmSmoothContours !== undefined ? { smoothContours: data.mpmSmoothContours } : {})
+                    });
+                }
+                if (data.beamColormap !== undefined || data.beamContourLevels !== undefined || data.beamSmoothContours !== undefined || data.beamAutoScale !== undefined || data.beamLogScale !== undefined || data.beamMinVal !== undefined || data.beamMaxVal !== undefined) {
+                    applyLegacyWorkerLayerPatch(data.beamQuantity || beamQuantity, {
+                        ...(data.beamColormap !== undefined ? { colormap: data.beamColormap } : {}),
+                        ...(data.beamAutoScale !== undefined ? { autoScale: data.beamAutoScale } : {}),
+                        ...(data.beamLogScale !== undefined ? { logScale: data.beamLogScale } : {}),
+                        ...(data.beamMinVal !== undefined ? { minVal: data.beamMinVal } : {}),
+                        ...(data.beamMaxVal !== undefined ? { maxVal: data.beamMaxVal } : {}),
+                        ...(data.beamContourLevels !== undefined ? { contourLevels: data.beamContourLevels } : {}),
+                        ...(data.beamSmoothContours !== undefined ? { smoothContours: data.beamSmoothContours } : {})
+                    });
+                }
+                if (data.stlColormap !== undefined || data.stlContourLevels !== undefined || data.stlSmoothContours !== undefined || data.stlAutoScale !== undefined || data.stlLogScale !== undefined || data.stlMinVal !== undefined || data.stlMaxVal !== undefined) {
+                    applyLegacyWorkerLayerPatch(data.stlQuantity || stlQuantity, {
+                        ...(data.stlColormap !== undefined ? { colormap: data.stlColormap } : {}),
+                        ...(data.stlAutoScale !== undefined ? { autoScale: data.stlAutoScale } : {}),
+                        ...(data.stlLogScale !== undefined ? { logScale: data.stlLogScale } : {}),
+                        ...(data.stlMinVal !== undefined ? { minVal: data.stlMinVal } : {}),
+                        ...(data.stlMaxVal !== undefined ? { maxVal: data.stlMaxVal } : {}),
+                        ...(data.stlContourLevels !== undefined ? { contourLevels: data.stlContourLevels } : {}),
+                        ...(data.stlSmoothContours !== undefined ? { smoothContours: data.stlSmoothContours } : {})
+                    });
+                }
+                if (data.obstaclesColormap !== undefined || data.obstaclesContourLevels !== undefined || data.obstaclesSmoothContours !== undefined || data.obstaclesInterpolate !== undefined || data.obstaclesAutoScale !== undefined || data.obstaclesLogScale !== undefined || data.obstaclesMinVal !== undefined || data.obstaclesMaxVal !== undefined) {
+                    applyLegacyWorkerLayerPatch(data.obstaclesQuantity || obstaclesQuantity, {
+                        ...(data.obstaclesColormap !== undefined ? { colormap: data.obstaclesColormap } : {}),
+                        ...(data.obstaclesAutoScale !== undefined ? { autoScale: data.obstaclesAutoScale } : {}),
+                        ...(data.obstaclesLogScale !== undefined ? { logScale: data.obstaclesLogScale } : {}),
+                        ...(data.obstaclesMinVal !== undefined ? { minVal: data.obstaclesMinVal } : {}),
+                        ...(data.obstaclesMaxVal !== undefined ? { maxVal: data.obstaclesMaxVal } : {}),
+                        ...(data.obstaclesContourLevels !== undefined ? { contourLevels: data.obstaclesContourLevels } : {}),
+                        ...(data.obstaclesSmoothContours !== undefined ? { smoothContours: data.obstaclesSmoothContours } : {}),
+                        ...(data.obstaclesInterpolate !== undefined ? { interpolate: data.obstaclesInterpolate } : {})
+                    });
                 }
             }
             if (stylesChanged) {
@@ -12877,6 +13055,9 @@ self.onmessage = async (e) => {
                 }
                 if (latestMPMParticlesData && latestMPMParticlesData.length > 0) {
                     mpmChanged = true;
+                }
+                if (latestFEMFacetsData && latestFEMFacetsData.length > 0) {
+                    femChanged = true;
                 }
             }
             if (gaugesChanged) {

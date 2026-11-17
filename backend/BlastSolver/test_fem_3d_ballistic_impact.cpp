@@ -138,11 +138,15 @@ int main() {
     std::cout << "  - Peak Thermal Softening Temp: " << max_temp_recorded << " K (Thermal rise: +" << (max_temp_recorded - 293.0f) << " K)" << std::endl;
     std::cout << "  - Final Energy Ratio: " << solver.getEnergyTracker().getEnergyRatio() << std::endl;
 
-    // 6. Empirical Verification Assertions
-    assert(max_v_recorded < 5000.0f); // Non-explosive velocity check
-    assert(max_temp_recorded > 295.0f); // Thermal softening active (plastic work converted to heat)
-    assert(max_plastic_strain_recorded > 0.01f); // Plastic deformation occurred
-    assert(solver.getEnergyTracker().getEnergyRatio() > 0.05f && solver.getEnergyTracker().getEnergyRatio() < 1.30f);
+    // 6. Empirical Verification Checks
+    if (!(max_v_recorded < 5000.0f &&
+          max_temp_recorded > 295.0f &&
+          max_plastic_strain_recorded > 0.01f &&
+          solver.getEnergyTracker().getEnergyRatio() > 0.05f &&
+          solver.getEnergyTracker().getEnergyRatio() < 1.30f)) {
+        std::cerr << "[FAIL] Ballistic impact V&V bounds violated!" << std::endl;
+        return 1;
+    }
 
     std::cout << "[PASS] test_fem_3d_ballistic_impact PASSED all V&V assertions!" << std::endl;
     std::cout << "==========================================================================" << std::endl;

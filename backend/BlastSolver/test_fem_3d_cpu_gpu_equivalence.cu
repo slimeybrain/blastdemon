@@ -67,8 +67,11 @@ int main() {
     std::cout << "  CPU Mesh: " << cpu_solver.getNodes().size() << " nodes, " << cpu_solver.getElements().size() << " elements." << std::endl;
     std::cout << "  GPU Mesh: " << gpu_solver.getNodes().size() << " nodes, " << gpu_solver.getElements().size() << " elements." << std::endl;
 
-    assert(cpu_solver.getNodes().size() == gpu_solver.getNodes().size());
-    assert(cpu_solver.getElements().size() == gpu_solver.getElements().size());
+    if (cpu_solver.getNodes().size() != gpu_solver.getNodes().size() ||
+        cpu_solver.getElements().size() != gpu_solver.getElements().size()) {
+        std::cerr << "[FAIL] CPU vs GPU mesh size mismatch!" << std::endl;
+        return 1;
+    }
 
     float fixed_dt = 1.0e-7f;
 
@@ -136,15 +139,16 @@ int main() {
                 std::cout << "    CPU V: " << cpu_elems[mismatch_elem].V << ", GPU V: " << gpu_elems[mismatch_elem].V << std::endl;
             }
 
-
-
             if (step < 60) {
-                // Pre-impact free flight phase
-                assert(max_x_diff < 1.0e-5f);
-                assert(max_v_diff < 0.1f);
+                if (!(max_x_diff < 1.0e-5f && max_v_diff < 0.1f)) {
+                    std::cerr << "[FAIL] Pre-impact CPU-GPU equivalence exceeded tolerance at step " << step << std::endl;
+                    return 1;
+                }
             } else {
-                // Post-impact contact deformation phase
-                assert(max_x_diff < 1.0e-3f);
+                if (!(max_x_diff < 1.0e-3f)) {
+                    std::cerr << "[FAIL] Post-impact CPU-GPU equivalence exceeded tolerance at step " << step << std::endl;
+                    return 1;
+                }
             }
         }
     }
@@ -159,8 +163,10 @@ int main() {
     }
 
     std::cout << "  Final Minimum Projectile Z (GPU) = " << min_z_projectile << " m" << std::endl;
-    // Target surface is at z=0.03m. Projectile should not penetrate below 0.028m!
-    assert(min_z_projectile > 0.028f);
+    if (!(min_z_projectile > 0.028f)) {
+        std::cerr << "[FAIL] Projectile penetrated past z=0.028m (min_z=" << min_z_projectile << ")" << std::endl;
+        return 1;
+    }
 
     std::cout << "[PASS] test_fem_3d_cpu_gpu_equivalence PASSED successfully." << std::endl;
     return 0;

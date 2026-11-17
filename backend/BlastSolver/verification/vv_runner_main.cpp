@@ -8,6 +8,7 @@
 #include "vv_mpm_sparse_grid.hpp"
 #include "vv_lee_tarver.hpp"
 #include "vv_mat_audit.hpp"
+#include "vv_fem_coupling_fixes.hpp"
 #include <iostream>
 #include <vector>
 #include <iomanip>
@@ -22,7 +23,7 @@ int main(int argc, char** argv) {
     std::vector<Blast::VV::BenchmarkResult> all_results;
 
     if (argc > 4 && std::string(argv[1]) == "--lt-trace") {
-        Blast::VV::run_lee_tarver_trace(std::atoi(argv[2]), std::atof(argv[3]), std::atof(argv[4]));
+        Blast::VV::run_lee_tarver_trace(std::atoi(argv[2]), std::atof(argv[3]), std::atof(argv[4]), !(argc > 5 && std::atoi(argv[5]) == 0));
         return 0;
     }
     if (argc > 1 && std::string(argv[1]) == "--lee-tarver") {
@@ -39,6 +40,15 @@ int main(int argc, char** argv) {
             std::cout << b.id << " " << (b.pending ? "PENDING" : (b.passed ? "PASS" : "FAIL")) << " | " << b.summary << "\n" << b.details << "\n\n";
         }
         return (mat_fail == 0) ? 0 : 1;
+    }
+
+    if (argc > 1 && std::string(argv[1]) == "--fem-coupling") {
+        int fem_fail = 0;
+        for (const auto& b : Blast::VV::run_fem_coupling_fixes_benchmarks()) {
+            if (!b.pending && !b.passed) fem_fail++;
+            std::cout << b.id << " " << (b.pending ? "PENDING" : (b.passed ? "PASS" : "FAIL")) << " | " << b.summary << "\n" << b.details << "\n\n";
+        }
+        return (fem_fail == 0) ? 0 : 1;
     }
 
     // Run Level 1
@@ -75,6 +85,11 @@ int main(int argc, char** argv) {
     std::cout << "[RUNNING] Level 3: Component & Subsystem Impact/Blast Tests...\n";
     auto l3 = Blast::VV::run_level_3_benchmarks();
     all_results.insert(all_results.end(), l3.begin(), l3.end());
+
+    // Coupled MPM-FEM contact, Tet4/KosloffFrazier, and per-part isolation verification
+    std::cout << "[RUNNING] Level 2/3: FEM-MPM Coupling, Tet4/ANP/KF & Per-Part Isolation...\n";
+    auto fc = Blast::VV::run_fem_coupling_fixes_benchmarks();
+    all_results.insert(all_results.end(), fc.begin(), fc.end());
 
     // Run Level 4
     std::cout << "[RUNNING] Level 4: Full-Scale 3D Multi-Physics System Test Cases...\n";

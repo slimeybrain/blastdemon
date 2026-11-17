@@ -52,7 +52,10 @@ int main() {
 
     std::cout << "  Single Precision Hex8 Volume = " << V_f << " m^3" << std::endl;
     std::cout << "  Double Precision Hex8 Volume = " << V_d << " m^3" << std::endl;
-    assert(std::fabs(V_f - static_cast<float>(V_d)) < 1.0e-5f);
+    if (!(std::fabs(V_f - static_cast<float>(V_d)) < 1.0e-5f)) {
+        std::cerr << "[FAIL] Precision parity volume mismatch: " << V_f << " vs " << V_d << std::endl;
+        return 1;
+    }
 
     std::cout << "[PASS] test_fem_3d_precision_parity PASSED successfully." << std::endl;
     return 0;

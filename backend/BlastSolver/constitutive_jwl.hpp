@@ -5,7 +5,7 @@
 #include <algorithm>
 
 #ifdef __CUDACC__
-#define HD_JWL_FUNC __host__ __device__
+#define HD_JWL_FUNC __host__ __device__ inline
 #else
 #define HD_JWL_FUNC inline
 #endif

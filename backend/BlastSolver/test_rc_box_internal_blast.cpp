@@ -10,7 +10,7 @@
 
 using namespace Blast;
 
-void test_rc_box_internal_blast_simulation(int argc, char** argv) {
+bool test_rc_box_internal_blast_simulation(int argc, char** argv) {
     std::cout << "======================================================" << std::endl;
     std::cout << "=== RC BOX INTERNAL BLAST INTEGRATION TEST ===" << std::endl;
     std::cout << "======================================================" << std::endl;
@@ -44,16 +44,20 @@ void test_rc_box_internal_blast_simulation(int argc, char** argv) {
         k_filepath = "hollow_concrete_box_2m_30mpa.k";
         ok = reader.parseFile(k_filepath, nodes, elements, trusses, beams, rht_concrete, mats);
     }
-    assert(ok);
+    if (!ok) {
+        std::cerr << "[FAIL] Failed to parse LS-DYNA RC Box file: " << k_filepath << std::endl;
+        return false;
+    }
 
     std::cout << "[INFO] Ingested RC Box: " << nodes.size() << " nodes, "
               << elements.size() << " concrete solids, "
               << beams.size() << " rebar beams, "
               << trusses.size() << " rebar trusses." << std::endl;
 
-    assert(!nodes.empty());
-    assert(!elements.empty());
-    assert(!beams.empty() || !trusses.empty());
+    if (nodes.empty() || elements.empty() || (beams.empty() && trusses.empty())) {
+        std::cerr << "[FAIL] Empty RC Box mesh or missing rebar elements" << std::endl;
+        return false;
+    }
 
     // 2. Setup FEM Solver
     FEMSolver3D<float> fem;
@@ -97,8 +101,11 @@ void test_rc_box_internal_blast_simulation(int argc, char** argv) {
     fem.getElements()[0].is_eroded = false;
 
     fem.evaluateErosionCriteria();
-    assert(fem.getElements()[0].is_eroded);
-    assert(mpm.getParticles().size() >= 8);
+    if (!fem.getElements()[0].is_eroded || mpm.getParticles().size() < 8) {
+        std::cerr << "[FAIL] Expected concrete element erosion into >=8 MPM particles (eroded="
+                  << fem.getElements()[0].is_eroded << ", particles=" << mpm.getParticles().size() << ")" << std::endl;
+        return false;
+    }
     std::cout << "  ✓ Concrete element eroded into " << mpm.getParticles().size() << " MPM debris particles" << std::endl;
 
     // 6. Test FV-MPM Fluid Drag Acceleration on Debris
@@ -113,7 +120,10 @@ void test_rc_box_internal_blast_simulation(int argc, char** argv) {
     float f_drag = 0.5f * Cd * rho_f * (3.14159265f * p_rad * p_rad) * rel_v * std::abs(rel_v);
     float dt = 1.0e-6f;
     p.v[0] += (f_drag / p.m) * dt;
-    assert(p.v[0] > p_v0);
+    if (!(p.v[0] > p_v0)) {
+        std::cerr << "[FAIL] Expected aerodynamic blast drag to accelerate debris particle" << std::endl;
+        return false;
+    }
     std::cout << "  ✓ Aerodynamic blast drag accelerated debris particle: v_x = " << p.v[0] << " m/s (F_drag = " << f_drag << " N)" << std::endl;
 
     // 7. Test Line-to-Sphere Rebar Collision
@@ -128,9 +138,9 @@ void test_rc_box_internal_blast_simulation(int argc, char** argv) {
     std::cout << "======================================================" << std::endl;
     std::cout << ">>> RC BOX MULTI-PHYSICS INTEGRATION TEST PASSED! <<<" << std::endl;
     std::cout << "======================================================" << std::endl;
+    return true;
 }
 
 int main(int argc, char** argv) {
-    test_rc_box_internal_blast_simulation(argc, argv);
-    return 0;
+    return test_rc_box_internal_blast_simulation(argc, argv) ? 0 : 1;
 }

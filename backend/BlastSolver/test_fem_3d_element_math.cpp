@@ -36,14 +36,23 @@ int main() {
     solver.setNodesAndElements(nodes, elements, mat);
 
     const auto& elems_out = solver.getElements();
-    assert(elems_out.size() == 1);
+    if (elems_out.size() != 1) {
+        std::cerr << "[FAIL] Expected 1 element, got " << elems_out.size() << std::endl;
+        return 1;
+    }
     float V0 = elems_out[0].V0;
     std::cout << "  Computed Hex8 V0 = " << V0 << " m^3 (Expected: 1.0 m^3)" << std::endl;
-    assert(std::fabs(V0 - 1.0f) < 1.0e-4f);
+    if (!(std::fabs(V0 - 1.0f) < 1.0e-4f)) {
+        std::cerr << "[FAIL] Hex8 V0 mismatch: " << V0 << std::endl;
+        return 1;
+    }
 
     // Single step
     solver.stepWithDt(1.0e-7f);
-    assert(solver.getStepCount() == 1);
+    if (solver.getStepCount() != 1) {
+        std::cerr << "[FAIL] Expected step count 1, got " << solver.getStepCount() << std::endl;
+        return 1;
+    }
 
     // Test Cylinder Mesh Generation Jacobians & Facet Normals
     FEMSolver3D<float> cyl_solver;
@@ -62,7 +71,10 @@ int main() {
         }
     }
     std::cout << "  Invalid cylinder elements count = " << invalid_elems << std::endl;
-    assert(invalid_elems == 0);
+    if (invalid_elems != 0) {
+        std::cerr << "[FAIL] Found non-positive Jacobian elements in cylinder mesh" << std::endl;
+        return 1;
+    }
 
     std::cout << "[PASS] test_fem_3d_element_math PASSED successfully." << std::endl;
     return 0;

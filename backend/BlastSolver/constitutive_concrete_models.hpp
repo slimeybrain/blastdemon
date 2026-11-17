@@ -557,7 +557,8 @@ HD_CONC_FUNC void updateCSCMStress(
             T d_ep_vol = (p_min - p_trial) / (K_bulk + static_cast<T>(1.0e6));
             T d_D = d_ep_vol / g_reg;
             state.damage_brittle += d_D;
-            state.damage = std::max(state.damage_brittle, state.damage_ductile);
+            if (state.damage_brittle > static_cast<T>(1.0)) state.damage_brittle = static_cast<T>(1.0);
+            state.damage = std::max(state.damage, std::max(state.damage_brittle, state.damage_ductile));
             if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
             p_trial = -(static_cast<T>(1.0) - state.damage) * ft * dif_t;
         }
@@ -594,6 +595,7 @@ HD_CONC_FUNC void updateCSCMStress(
         T scale = Y_limit / q_vm;
 
         T d_ep = d_sigma / (static_cast<T>(3.0) * G_shear + static_cast<T>(1.0e7));
+        state.ep_bar += d_ep;
 
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
@@ -609,12 +611,14 @@ HD_CONC_FUNC void updateCSCMStress(
             state.kappa += d_ep * (K_bulk * static_cast<T>(0.1));
             T d_ductile = d_ep / (static_cast<T>(2.0) * g_reg);
             state.damage_ductile += d_ductile;
+            if (state.damage_ductile > static_cast<T>(1.0)) state.damage_ductile = static_cast<T>(1.0);
         } else {
             T d_brittle = d_ep / g_reg;
             state.damage_brittle += d_brittle;
+            if (state.damage_brittle > static_cast<T>(1.0)) state.damage_brittle = static_cast<T>(1.0);
         }
 
-        state.damage = std::max(state.damage_brittle, state.damage_ductile);
+        state.damage = std::max(state.damage, std::max(state.damage_brittle, state.damage_ductile));
         if (state.damage > static_cast<T>(1.0)) state.damage = static_cast<T>(1.0);
     }
 
@@ -792,6 +796,8 @@ HD_CONC_FUNC void updateCSCMStress(
 
     CSCMStateVariables<T> state;
     state.damage = damage;
+    state.damage_brittle = damage;
+    state.damage_ductile = damage;
     state.kappa = kappa;
     state.ep_bar = ep;
     state.p_hydro = p_trial;

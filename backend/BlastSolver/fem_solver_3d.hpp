@@ -40,6 +40,15 @@ enum class FEMContactSearchMethod {
     LinearBVH              // GPU Linear Bounding Volume Hierarchy with 30-Bit Morton Codes
 };
 
+enum class FEMElementFormulation : int8_t {
+    Auto = -1,
+    Hex8_OnePoint = 0,
+    Hex8_SRI = 1,
+    Hex8_FullGauss8 = 2,
+    Tet4_Standard = 3,
+    Tet4_ANP = 4
+};
+
 template <typename T>
 struct BlastPhysicsParams {
     T bulk_viscosity_b1{0.06f};   // Linear artificial bulk viscosity coefficient
@@ -71,7 +80,7 @@ struct FEMErosionCriteria {
     T timestep_erosion_factor{0.10f};  // Erode when dt_e <= eta * dt_e,0 (default 0.10)
     T failure_strain{0.50f};           // Equivalent plastic strain threshold
     T tensile_failure_stress{600.0e6f};// Tensile failure stress threshold (Pa)
-    T min_volume_ratio{0.05f};         // V / V0 minimum compression ratio limit
+    T min_volume_ratio{0.02f};         // V / V0 minimum compression ratio limit
     T max_volume_ratio{5.00f};         // V / V0 maximum expansion ratio limit
     T max_damage{1.0f};                // Johnson-Cook cumulative damage threshold D >= 1.0
     bool enable_timestep_erosion{false};
@@ -91,6 +100,7 @@ struct alignas(32) FEMNode3D {
     T f_contact[3]; // Frictional penalty contact forces
     T m{0.0f};      // Lumped mass
     bool is_fixed[3]{false, false, false}; // Constrained degrees of freedom (SPC)
+    bool is_prescribed[3]{false, false, false}; // Prescribed nonzero velocity degrees of freedom
     bool is_eroded{false};
     int64_t lsdyna_id{-1}; // Original LS-DYNA node ID
 };
@@ -128,6 +138,9 @@ struct alignas(32) FEMElement3D {
     bool is_eroded{false};
     bool mpm_converted{false}; // Converted to MPM debris particles
     bool is_detached{false};   // True once Option C cohesive node-splitting has detached this element
+    int8_t element_formulation{-1}; // FEMElementFormulation override (-1 = solver default)
+    int8_t hourglass_model{-1};     // FEMHourglassModel override (-1 = solver default)
+    float hourglass_coeff{-1.0f};   // Hourglass coeff override (< 0 = solver default)
     int decay_step{0};   // Multi-step cohesive traction decay counter for soft stress release
     int mat_id{0};       // Material Table ID
     int part_id{0};      // LS-DYNA Part ID
@@ -171,6 +184,10 @@ struct alignas(64) FEMBeam3DElement {
     T kappa_tor{0.0f};          // Torsional twist angle per unit length
     T eps_p{0.0f};              // Signed axial plastic strain
     T ep_bar{0.0f};             // Accumulated equivalent plastic strain
+    T N{0.0f};                  // Current axial force resultant (N)
+    T V2{0.0f}, V3{0.0f};       // Current transverse shear force resultants (N)
+    T M2{0.0f}, M3{0.0f};       // Current bending moment resultants (N*m)
+    T T_tor{0.0f};              // Current torsional moment resultant (N*m)
     T failure_strain{0.20f};    // Plastic failure strain
     bool is_eroded{false};      // Erosion flag
     int mat_id{0};              // Material table index
@@ -245,6 +262,43 @@ HD_FEM_FUNC inline bool isTet4Element(const FEMElement3D<T>& elem) {
 }
 
 template <typename T>
+HD_FEM_FUNC inline bool isTet4ANPElement(const FEMElement3D<T>& elem) {
+    return isTet4Element(elem) && (elem.element_formulation != static_cast<int8_t>(FEMElementFormulation::Tet4_Standard));
+}
+
+template <typename T>
+HD_FEM_FUNC inline FEMIntegrationScheme resolveElementIntegrationScheme(const FEMElement3D<T>& elem, FEMIntegrationScheme fallback_scheme) {
+    switch (static_cast<FEMElementFormulation>(elem.element_formulation)) {
+        case FEMElementFormulation::Hex8_OnePoint:
+            return (elem.hourglass_model == static_cast<int8_t>(FEMHourglassModel::KosloffFrazier))
+                ? FEMIntegrationScheme::OnePointKF
+                : FEMIntegrationScheme::OnePointFB;
+        case FEMElementFormulation::Hex8_SRI:
+            return FEMIntegrationScheme::SelectiveReduced;
+        case FEMElementFormulation::Hex8_FullGauss8:
+            return FEMIntegrationScheme::FullGauss8;
+        case FEMElementFormulation::Tet4_Standard:
+        case FEMElementFormulation::Tet4_ANP:
+        case FEMElementFormulation::Auto:
+        default:
+            return fallback_scheme;
+    }
+}
+
+template <typename T>
+HD_FEM_FUNC inline FEMHourglassModel resolveElementHourglassModel(const FEMElement3D<T>& elem, FEMHourglassModel fallback_model) {
+    if (elem.hourglass_model >= 0 && elem.hourglass_model <= static_cast<int8_t>(FEMHourglassModel::KosloffFrazier)) {
+        return static_cast<FEMHourglassModel>(elem.hourglass_model);
+    }
+    return fallback_model;
+}
+
+template <typename T>
+HD_FEM_FUNC inline T resolveElementHourglassCoeff(const FEMElement3D<T>& elem, T fallback_coeff) {
+    return (elem.hourglass_coeff >= 0.0f) ? static_cast<T>(elem.hourglass_coeff) : fallback_coeff;
+}
+
+template <typename T>
 HD_FEM_FUNC inline T computeTet4SignedVolume(const T x_nodes[4][3]) {
     const T e10x = x_nodes[1][0] - x_nodes[0][0], e10y = x_nodes[1][1] - x_nodes[0][1], e10z = x_nodes[1][2] - x_nodes[0][2];
     const T e20x = x_nodes[2][0] - x_nodes[0][0], e20y = x_nodes[2][1] - x_nodes[0][1], e20z = x_nodes[2][2] - x_nodes[0][2];
@@ -263,10 +317,17 @@ HD_FEM_FUNC inline void computeTet4ShapeGradients(const T x_nodes[4][3], T dN_dx
     const T det = e10x * (e20y * e30z - e20z * e30y) -
                   e10y * (e20x * e30z - e20z * e30x) +
                   e10z * (e20x * e30y - e20y * e30x);
-    V_out = (det >= static_cast<T>(0.0f) ? det : -det) / static_cast<T>(6.0f);
-    const T sign_det = (det >= static_cast<T>(0.0f)) ? static_cast<T>(1.0f) : static_cast<T>(-1.0f);
-    const T abs_det = (det >= static_cast<T>(0.0f) ? det : -det);
-    const T inv_det = sign_det / (abs_det > static_cast<T>(1.0e-18f) ? abs_det : static_cast<T>(1.0e-18f));
+    // Preserve signed Tet4 volume so element inversion (det <= 0) is strictly detected rather than masked by |det|
+    V_out = det / static_cast<T>(6.0f);
+    if (det <= static_cast<T>(1.0e-18f)) {
+        for (int a = 0; a < 4; ++a) {
+            dN_dx[a][0] = static_cast<T>(0.0f);
+            dN_dx[a][1] = static_cast<T>(0.0f);
+            dN_dx[a][2] = static_cast<T>(0.0f);
+        }
+        return;
+    }
+    const T inv_det = static_cast<T>(1.0f) / det;
     dN_dx[1][0] = (e20y * e30z - e20z * e30y) * inv_det;
     dN_dx[1][1] = (e20z * e30x - e20x * e30z) * inv_det;
     dN_dx[1][2] = (e20x * e30y - e20y * e30x) * inv_det;
@@ -356,21 +417,82 @@ HD_FEM_FUNC inline T computeDilatationalWaveSpeed(const MaterialTable3D& mat, T 
     return Blast::Materials::computeInstantaneousSoundSpeed<T>(mat, v_rel, p_val, e_int);
 }
 
+HD_FEM_FUNC inline float hashFEMLatticeUniform(int ix, int iy, int iz, uint32_t user_seed) {
+    uint32_t h = user_seed
+               ^ (static_cast<uint32_t>(ix) * 73856093u)
+               ^ (static_cast<uint32_t>(iy) * 19349663u)
+               ^ (static_cast<uint32_t>(iz) * 83492791u);
+    h = (h ^ 61u) ^ (h >> 16);
+    h *= 9u;
+    h = h ^ (h >> 4);
+    h *= 0x27d4eb2du;
+    h = h ^ (h >> 15);
+    return static_cast<float>(h & 0xFFFFu) / 65535.0f;
+}
+
 template <typename T>
-HD_FEM_FUNC inline T computeFEMWeibullFactor(uint32_t seed_base, const BlastPhysicsParams<T>& params) {
-    if (!params.enable_heterogeneity) return static_cast<T>(1.0f);
-    uint32_t seed = seed_base;
-    seed = (seed ^ 61u) ^ (seed >> 16);
-    seed *= 9u;
-    seed = seed ^ (seed >> 4);
-    seed *= 0x27d4eb2du;
-    seed = seed ^ (seed >> 15);
-    float u = static_cast<float>(seed & 0xFFFFu) / 65535.0f;
+HD_FEM_FUNC inline T computeFEMWeibullFactor(
+    uint32_t seed_base,
+    const BlastPhysicsParams<T>& params,
+    T cx = static_cast<T>(0.0f),
+    T cy = static_cast<T>(0.0f),
+    T cz = static_cast<T>(0.0f),
+    T corr_len = static_cast<T>(0.0f),
+    const MaterialTable3D* mat_ptr = nullptr
+) {
+    const bool mat_het = (mat_ptr != nullptr) ? mat_ptr->enable_heterogeneity : false;
+    if (!mat_het && !params.enable_heterogeneity) return static_cast<T>(1.0f);
+    float u = 0.5f;
+    if (corr_len > static_cast<T>(1.0e-6f)) {
+        uint32_t user_seed = static_cast<uint32_t>(params.random_seed) * 2654435761u;
+        float inv_L = 1.0f / static_cast<float>(corr_len);
+        float gx = static_cast<float>(cx) * inv_L;
+        float gy = static_cast<float>(cy) * inv_L;
+        float gz = static_cast<float>(cz) * inv_L;
+        int ix = static_cast<int>(floorf(gx));
+        int iy = static_cast<int>(floorf(gy));
+        int iz = static_cast<int>(floorf(gz));
+        float fx = gx - static_cast<float>(ix);
+        float fy = gy - static_cast<float>(iy);
+        float fz = gz - static_cast<float>(iz);
+        float sx = fx * fx * (3.0f - 2.0f * fx);
+        float sy = fy * fy * (3.0f - 2.0f * fy);
+        float sz = fz * fz * (3.0f - 2.0f * fz);
+
+        float u_interp = 0.0f;
+        float w_var = 0.0f;
+        for (int dz = 0; dz <= 1; ++dz) {
+            float wz = dz ? sz : (1.0f - sz);
+            for (int dy = 0; dy <= 1; ++dy) {
+                float wy = dy ? sy : (1.0f - sy);
+                for (int dx = 0; dx <= 1; ++dx) {
+                    float wx = dx ? sx : (1.0f - sx);
+                    float w = wx * wy * wz;
+                    float u_corner = hashFEMLatticeUniform(ix + dx, iy + dy, iz + dz, user_seed);
+                    u_interp += w * u_corner;
+                    w_var += w * w;
+                }
+            }
+        }
+        u = 0.5f + (u_interp - 0.5f) / sqrtf(fmaxf(w_var, 0.125f));
+    } else {
+        uint32_t seed = seed_base;
+        seed = (seed ^ 61u) ^ (seed >> 16);
+        seed *= 9u;
+        seed = seed ^ (seed >> 4);
+        seed *= 0x27d4eb2du;
+        seed = seed ^ (seed >> 15);
+        u = static_cast<float>(seed & 0xFFFFu) / 65535.0f;
+    }
     u = fminf(0.999f, fmaxf(0.001f, u));
-    float m_w = (params.weibull_modulus > static_cast<T>(0.001f))
-        ? static_cast<float>(params.weibull_modulus)
-        : ((params.material_heterogeneity > static_cast<T>(1.0e-4f)) ? (1.0f / static_cast<float>(params.material_heterogeneity)) : 8.0f);
-    float eta_w = (params.weibull_scale > static_cast<T>(0.001f)) ? static_cast<float>(params.weibull_scale) : 1.0f;
+    float m_w = (mat_het && mat_ptr->weibull_modulus > 0.001f)
+        ? mat_ptr->weibull_modulus
+        : ((params.weibull_modulus > static_cast<T>(0.001f))
+            ? static_cast<float>(params.weibull_modulus)
+            : ((params.material_heterogeneity > static_cast<T>(1.0e-4f)) ? (1.0f / static_cast<float>(params.material_heterogeneity)) : 8.0f));
+    float eta_w = (mat_het && mat_ptr->weibull_scale > 0.001f)
+        ? mat_ptr->weibull_scale
+        : ((params.weibull_scale > static_cast<T>(0.001f)) ? static_cast<float>(params.weibull_scale) : 1.0f);
     float gamma_mean = tgammaf(1.0f + 1.0f / m_w);
     float w = (powf(-logf(1.0f - u), 1.0f / m_w) / gamma_mean) * eta_w;
     w = fminf(3.0f, fmaxf(0.10f, w));
@@ -441,7 +563,9 @@ HD_FEM_FUNC inline void runFEMConstitutivePoint(
         (mat.cs_C <= 0.0f && physics_params.cowper_symonds_C > static_cast<T>(0.0f) && physics_params.cowper_symonds_P > static_cast<T>(0.0f)) ||
         (!mat.enable_heterogeneity && physics_params.enable_heterogeneity) ||
         (!mat.enable_anisotropy && physics_params.enable_anisotropy) ||
-        (!mat.directional_crack_band && physics_params.enable_directional_crack_band);
+        (!mat.directional_crack_band && physics_params.enable_directional_crack_band) ||
+        (mat.enable_cohesive_splitting && mat.cohesive_fracture_energy > 0.0f) ||
+        (physics_params.enable_cohesive_splitting && physics_params.cohesive_fracture_energy > static_cast<T>(0.0f));
     if (need_bridge) {
         mat_local = mat;
         if (mat_local.cs_C <= 0.0f && physics_params.cowper_symonds_C > static_cast<T>(0.0f) && physics_params.cowper_symonds_P > static_cast<T>(0.0f)) {
@@ -460,6 +584,13 @@ HD_FEM_FUNC inline void runFEMConstitutivePoint(
         }
         if (!mat_local.directional_crack_band && physics_params.enable_directional_crack_band) {
             mat_local.directional_crack_band = true;
+        }
+        if (mat_local.enable_cohesive_splitting && mat_local.cohesive_fracture_energy > 0.0f) {
+            mat_local.G_f = mat_local.cohesive_fracture_energy;
+            mat_local.cdp_g_f = mat_local.cohesive_fracture_energy;
+        } else if (physics_params.enable_cohesive_splitting && physics_params.cohesive_fracture_energy > static_cast<T>(0.0f)) {
+            mat_local.G_f = static_cast<float>(physics_params.cohesive_fracture_energy);
+            mat_local.cdp_g_f = static_cast<float>(physics_params.cohesive_fracture_energy);
         }
         mat_ptr = &mat_local;
     }
@@ -503,7 +634,7 @@ HD_FEM_FUNC inline void runFEMConstitutivePoint(
         }
     }
     st.ep_bar = ep_bar;
-    st.damage = damage;
+    st.damage = is_detached ? static_cast<T>(0.0) : damage;
     st.lambda = lambda;
     st.temperature = temperature;
     st.e_internal = e_internal;
@@ -529,7 +660,7 @@ HD_FEM_FUNC inline void runFEMConstitutivePoint(
         }
     }
     ep_bar = st.ep_bar;
-    damage = st.damage;
+    damage = is_detached ? static_cast<T>(1.0) : st.damage;
     lambda = st.lambda;
     temperature = st.temperature;
     e_internal = st.e_internal;
@@ -541,11 +672,6 @@ HD_FEM_FUNC inline void runFEMConstitutivePoint(
     if (is_detached) {
         if (p_constit < static_cast<T>(0.0)) p_constit = static_cast<T>(0.0);
         if (p_hydro_total < static_cast<T>(0.0)) p_hydro_total = static_cast<T>(0.0);
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                s_dev[r][c] *= static_cast<T>(0.2);
-            }
-        }
     }
 }
 
@@ -581,14 +707,18 @@ HD_FEM_FUNC inline void evaluateFEMAxialPlasticity(
     T Etan = static_cast<T>(mat.hardening_modulus >= 0.0f ? mat.hardening_modulus : 0.0f);
     T current_yield = sigma_y0 + Etan * ep_bar;
 
+    bool is_jc = false;
+    T jc_A_val = static_cast<T>(0.0), jc_B_val = static_cast<T>(0.0), jc_n_val = static_cast<T>(1.0), jc_rt_fac = static_cast<T>(1.0);
     if (mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen && mat.jc_A > 0.0f) {
-        const T A_jc = static_cast<T>(mat.jc_A);
-        const T B_jc = static_cast<T>(mat.jc_B);
-        const T n_jc = static_cast<T>(mat.jc_n > 0.0f ? mat.jc_n : 1.0f);
+        is_jc = true;
+        jc_A_val = static_cast<T>(mat.jc_A);
+        jc_B_val = static_cast<T>(mat.jc_B);
+        jc_n_val = static_cast<T>(mat.jc_n > 0.0f ? mat.jc_n : 1.0f);
         const T C_jc = static_cast<T>(mat.jc_C);
         const T m_jc = static_cast<T>(mat.jc_m);
-        const T ep_pos = (ep_bar > static_cast<T>(1.0e-12)) ? ep_bar : static_cast<T>(1.0e-12);
-        const T sig_hard = A_jc + (B_jc > static_cast<T>(0.0) ? B_jc * std::pow(ep_pos, n_jc) : static_cast<T>(0.0));
+        const T sig_hard = jc_A_val + ((jc_B_val > static_cast<T>(0.0) && ep_bar > static_cast<T>(0.0))
+            ? jc_B_val * std::pow(ep_bar, jc_n_val)
+            : static_cast<T>(0.0));
         T rate_fac = static_cast<T>(1.0);
         const T abs_edot = std::abs(axial_strain_rate);
         if (C_jc > static_cast<T>(0.0) && abs_edot > static_cast<T>(1.0)) {
@@ -599,11 +729,13 @@ HD_FEM_FUNC inline void evaluateFEMAxialPlasticity(
             T t_star = (temperature - static_cast<T>(mat.T_room)) / static_cast<T>(mat.T_melt - mat.T_room);
             if (t_star < static_cast<T>(0.0)) t_star = static_cast<T>(0.0);
             if (t_star > static_cast<T>(1.0)) t_star = static_cast<T>(1.0);
-            therm_fac = static_cast<T>(1.0) - std::pow(t_star, m_jc);
-            if (therm_fac < static_cast<T>(0.01)) therm_fac = static_cast<T>(0.01);
+            if (t_star > static_cast<T>(0.0)) {
+                therm_fac = static_cast<T>(1.0) - std::pow(t_star, m_jc);
+                if (therm_fac < static_cast<T>(0.01)) therm_fac = static_cast<T>(0.01);
+            }
         }
-        current_yield = sig_hard * rate_fac * therm_fac;
-        Etan = (B_jc > static_cast<T>(0.0)) ? (B_jc * n_jc * std::pow(ep_pos, n_jc - static_cast<T>(1.0)) * rate_fac * therm_fac) : static_cast<T>(0.0);
+        jc_rt_fac = rate_fac * therm_fac;
+        current_yield = sig_hard * jc_rt_fac;
     } else if (mat.cs_C > 0.0f && mat.cs_P > 0.0f && std::abs(axial_strain_rate) > static_cast<T>(0.0)) {
         const T rate_fac = static_cast<T>(1.0) + std::pow(std::abs(axial_strain_rate) / static_cast<T>(mat.cs_C), static_cast<T>(1.0) / static_cast<T>(mat.cs_P));
         current_yield *= rate_fac;
@@ -613,12 +745,40 @@ HD_FEM_FUNC inline void evaluateFEMAxialPlasticity(
     const T abs_trial = std::abs(trial_stress);
     T sigma = trial_stress;
     if (abs_trial > current_yield) {
-        const T dep = (abs_trial - current_yield) / (E + Etan);
         const T sign_trial = (trial_stress > static_cast<T>(0.0)) ? static_cast<T>(1.0) : static_cast<T>(-1.0);
-        eps_p += sign_trial * dep;
-        ep_bar += dep;
-        sigma = sign_trial * (current_yield + Etan * dep);
-        current_yield += Etan * dep;
+        T dep = static_cast<T>(0.0);
+        if (is_jc) {
+            if (jc_B_val <= static_cast<T>(0.0)) {
+                dep = (abs_trial - current_yield) / E;
+                current_yield = jc_A_val * jc_rt_fac;
+            } else {
+                T lo = static_cast<T>(0.0);
+                T hi = (abs_trial - current_yield) / E;
+                dep = static_cast<T>(0.5) * hi;
+                for (int it = 0; it < 8; ++it) {
+                    const T ep_try = ep_bar + dep;
+                    const T ep_safe = (ep_try > static_cast<T>(1.0e-15)) ? ep_try : static_cast<T>(1.0e-15);
+                    const T sig_y_try = (jc_A_val + jc_B_val * std::pow(ep_try, jc_n_val)) * jc_rt_fac;
+                    const T g = E * dep + sig_y_try - abs_trial;
+                    if (std::abs(g) <= static_cast<T>(1.0e-7) * abs_trial) break;
+                    if (g < static_cast<T>(0.0)) lo = dep; else hi = dep;
+                    const T dg = E + jc_B_val * jc_n_val * std::pow(ep_safe, jc_n_val - static_cast<T>(1.0)) * jc_rt_fac;
+                    const T dep_new = dep - g / dg;
+                    dep = (dep_new > lo && dep_new < hi) ? dep_new : static_cast<T>(0.5) * (lo + hi);
+                }
+                const T ep_next = ep_bar + dep;
+                current_yield = (jc_A_val + jc_B_val * std::pow(ep_next, jc_n_val)) * jc_rt_fac;
+            }
+            eps_p += sign_trial * dep;
+            ep_bar += dep;
+            sigma = sign_trial * (abs_trial - E * dep);
+        } else {
+            dep = (abs_trial - current_yield) / (E + Etan);
+            eps_p += sign_trial * dep;
+            ep_bar += dep;
+            sigma = sign_trial * (current_yield + Etan * dep);
+            current_yield += Etan * dep;
+        }
     }
     sigma_out = sigma;
     current_yield_out = current_yield;
@@ -713,6 +873,12 @@ struct FEMDetonator3D {
     bool fired{false};
 };
 
+} // namespace Blast
+
+#include "fem_contact_3d.hpp"
+
+namespace Blast {
+
 template <typename T>
 class FEMSolver3D {
 public:
@@ -730,41 +896,6 @@ public:
     void setPhysicsParams(const BlastPhysicsParams<T>& params) { m_physics_params = params; }
     void setErosionCriteria(const FEMErosionCriteria<T>& criteria) {
         m_erosion_criteria = criteria;
-        for (auto& mat : m_material_tables) {
-            bool is_concrete = (mat.material_model == Blast::MPMMaterialModel::RHTConcrete ||
-                                mat.material_model == Blast::MPMMaterialModel::KCConcrete ||
-                                mat.material_model == Blast::MPMMaterialModel::CSCMConcrete);
-            if (criteria.enable_strain_erosion) {
-                mat.enable_strain_erosion = true;
-                if (criteria.failure_strain > static_cast<T>(0.0f)) {
-                    if (is_concrete) {
-                        if (criteria.failure_strain >= static_cast<T>(0.02f)) {
-                            mat.erosion_strain = static_cast<float>(criteria.failure_strain);
-                        } else if (mat.erosion_strain < 0.02f) {
-                            mat.erosion_strain = 0.10f;
-                        }
-                    } else {
-                        mat.erosion_strain = static_cast<float>(criteria.failure_strain);
-                        mat.failure_strain = static_cast<float>(criteria.failure_strain);
-                    }
-                }
-            }
-            if (criteria.enable_stress_erosion) {
-                mat.enable_stress_erosion = true;
-                if (criteria.tensile_failure_stress > static_cast<T>(0.0f)) {
-                    mat.erosion_stress = static_cast<float>(criteria.tensile_failure_stress);
-                    if (!is_concrete) {
-                        mat.tensile_failure_stress = static_cast<float>(criteria.tensile_failure_stress);
-                    }
-                }
-            }
-            if (criteria.enable_timestep_erosion) {
-                mat.enable_timestep_erosion = true;
-                if (criteria.timestep_erosion_factor > static_cast<T>(0.0f)) {
-                    mat.timestep_erosion_factor = static_cast<float>(criteria.timestep_erosion_factor);
-                }
-            }
-        }
     }
     void setContactPenaltyScale(T scale) { m_contact_penalty_scale = scale; }
     void setFrictionCoefficients(T mu_static, T mu_kinetic) { m_friction_static = mu_static; m_friction_kinetic = mu_kinetic; }
@@ -786,12 +917,12 @@ public:
 
     // Mesh Builders (Structured Box, Cylinder, Tet4-ANP, and STL Voxel/Tet Generators)
     void createStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, const std::string& boundary_condition = "Free");
-    void addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), const std::string& boundary_condition = "Free");
+    void addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), const std::string& boundary_condition = "Free", T rot_x = static_cast<T>(0), T rot_y = static_cast<T>(0), T rot_z = static_cast<T>(0));
     void createStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, const std::string& boundary_condition = "Free");
-    void addStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), const std::string& boundary_condition = "Free");
+    void addStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), const std::string& boundary_condition = "Free", T rot_x = static_cast<T>(0), T rot_y = static_cast<T>(0), T rot_z = static_cast<T>(0));
     void createStructuredCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T inner_radius = static_cast<T>(0), const std::string& boundary_condition = "Free");
-    void addStructuredCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), T inner_radius = static_cast<T>(0), const std::string& boundary_condition = "Free");
-    void addStructuredTetCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), T inner_radius = static_cast<T>(0), const std::string& boundary_condition = "Free");
+    void addStructuredCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), T inner_radius = static_cast<T>(0), const std::string& boundary_condition = "Free", T rot_x = static_cast<T>(0), T rot_y = static_cast<T>(0), T rot_z = static_cast<T>(0));
+    void addStructuredTetCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), T inner_radius = static_cast<T>(0), const std::string& boundary_condition = "Free", T rot_x = static_cast<T>(0), T rot_y = static_cast<T>(0), T rot_z = static_cast<T>(0));
     void addSTLMesh(const std::string& stl_filepath, int nx, int ny, int nz, T pos_x, T pos_y, T pos_z, T scale_x, T scale_y, T scale_z, T rot_x, T rot_y, T rot_z, const std::string& origin_mode, const MaterialTable3D& material, T vel_x = static_cast<T>(0), T vel_y = static_cast<T>(0), T vel_z = static_cast<T>(0), bool use_tet4 = true, const std::string& boundary_condition = "Free");
 
     // Energetic Detonator & Trigger Initiation
@@ -805,7 +936,7 @@ public:
         det.radius = static_cast<float>(radius);
         det.time_delay = static_cast<float>(delay);
         det.target_part_id = target_part_id;
-        det.fired = (delay <= static_cast<T>(0));
+        det.fired = false; // delay 0 = ignite on first step
         addDetonator(det);
     }
     void igniteDetonator(T det_x, T det_y, T det_z, T det_r, int target_part_id = -1, T time_delay = static_cast<T>(0));
@@ -844,10 +975,12 @@ public:
     // Dynamic Execution Control
     void step(T cfl = 0.6f);
     void stepWithDt(T dt);
+    void applyMPMContact(T dt);
     T computeStepSize(T cfl = 0.6f) const;
 
     // Boundary Conditions & Rigid Bodies
     void setNodeFixed(int node_idx, bool fix_x, bool fix_y, bool fix_z);
+    void setNodePrescribed(int node_idx, bool presc_x, bool presc_y, bool presc_z);
     void setNodalVelocity(int node_idx, T vx, T vy, T vz);
 
     // Accessors & Telemetry
@@ -873,6 +1006,10 @@ public:
     std::vector<FEMFacet3D<T>>& getSurfaceFacets() { if (m_surface_facets_dirty) extractBoundaryFacets(); return m_surface_facets; }
     const std::vector<FEMFacet3D<T>>& getSurfaceFacets() const { if (m_surface_facets_dirty) const_cast<FEMSolver3D<T>*>(this)->extractBoundaryFacets(); return m_surface_facets; }
     void invalidateSurfaceFacets() { m_surface_facets_dirty = true; }
+    const std::vector<int>& getFaceNeighbors() {
+        if (m_face_neighbors.size() != m_elements.size() * 6) buildFaceConnectivity();
+        return m_face_neighbors;
+    }
 
     const std::vector<MaterialTable3D>& getMaterialTables() const { return m_material_tables; }
     std::vector<MaterialTable3D>& getMaterialTables() { return m_material_tables; }
@@ -880,6 +1017,7 @@ public:
     const FEMEnergyTracker<T>& getEnergyTracker() const { return m_energy_tracker; }
 
     T getSimTime() const { return m_sim_time; }
+    void setSimTime(T sim_time) { m_sim_time = sim_time; }
     int getStepCount() const { return m_step_count; }
     T getLastDt() const { return m_last_dt; }
     T getLastCFL() const { return m_last_cfl; }
@@ -935,10 +1073,17 @@ private:
 
     std::vector<int> m_face_neighbors; // Size: m_elements.size() * 6. Stores neighbor element ID for each face (-1 if boundary).
 
-    // Pre-allocated buffers for Tet4-ANP (Average Nodal Pressure) and Option C Cohesive Node-Splitting
+    // Pre-allocated buffers for Tet4-ANP (Average Nodal Pressure), Option C Cohesive Node-Splitting, and step/erosion loops
     std::vector<T> m_nodal_vol_cur;
     std::vector<T> m_nodal_vol_ref;
+    std::vector<T> m_nodal_dvol_dt;
     std::vector<int> m_node_elem_ref_count;
+    std::vector<std::array<T, 3>> m_v_half_list;
+    std::vector<T> m_mpm_impulse_accum;
+    bool m_has_pending_mpm_impulse{false};
+    std::vector<T> m_ep_bar_effective;
+    std::vector<int> m_active_elem_count;
+    FEMContact3D<T> m_contact_solver;
     size_t m_max_nodes_capacity{0};
     std::vector<FEMDetonator3D> m_detonators;
 

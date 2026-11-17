@@ -2364,10 +2364,10 @@ export class PropertyEditor {
             'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
             'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
             // FEM keys
-            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy', 'node_merge_tolerance',
-            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
+            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'max_volume_ratio', 'max_damage', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy', 'node_merge_tolerance',
+            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'diameter', 'cross_section_area', 'beamMinVal', 'beamMaxVal',
             'rebarRadius', 'viewport_refresh_rate', 'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
-            'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
+            'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'fsi_rho_vac', 'fsi_p_vac', 'uncovering_tolerance',
             // Concrete Core & Models (RHT, K&C, CSCM)
             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
@@ -2457,6 +2457,7 @@ export class PropertyEditor {
             'product_model': ['JWL Product Gas', 'Davis Detonation Product'],
             'rebar_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
             'beam_formulation': ['TimoshenkoBeam3D', 'AxialTruss1D'],
+            'erosion_source': ['Inherit Material', 'Override Object'],
             'beamQuantity': ['plasticStrain', 'vonMises', 'momentOrForce', 'velocity', 'damage'],
             'beamColormap': ['rainbow', 'turbo', 'plasma', 'viridis', 'inferno', 'magma', 'jet', 'coolwarm', 'cividis', 'grayscale'],
             'mpmParticleQuantity': ['vonMises', 'plastic_strain', 'damage', 'cluster_id', 'pressure', 'velocity', 'density', 'has_failed', 'object_id'],
@@ -2496,7 +2497,7 @@ export class PropertyEditor {
             'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
             'contact_search_method': ['Hierarchical Octave Hash Grid', 'Linear BVH (Morton Code)'],
             'mesh_source': ['Box Generator', 'Cylinder Generator', 'Plate Generator', 'STL File', 'LS-DYNA Keyword File'],
-            'element_topology': ['Hex8', 'Tet4_ANP'],
+            'element_topology': ['Hex8', 'Hex8_SRI', 'Hex8_FullGauss8', 'Tet4', 'Tet4_ANP'],
             'trigger_type': ['Step Interval', 'Time Interval'],
             'composition': [...Object.keys(EXPLOSIVE_PRESETS).sort(), 'Custom'],
             'init_mode': (node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain') ? ['From1D', 'From2D', 'From3D', 'Multi-Material JWL', 'Ideal Gas', 'Hydrostatic_Stratified_3D'] : (node.type === 'CFDSolver' ? ['Multi-Material JWL', 'Ideal Gas'] : ['From1D', 'Multi-Material JWL', 'Ideal Gas']),
@@ -2859,7 +2860,7 @@ export class PropertyEditor {
             const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
             const is3D = node.type === 'DetonatorLocation3D' || node.type === 'TriggerLocation3D';
             const solverNodes = candidateNodes.filter(n => is3D 
-                ? (n.type === 'MPMDomain3D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain') 
+                ? (n.type === 'MPMDomain3D' || n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain' || n.type === 'FEMDomain3D') 
                 : (n.type === 'MPMDomain2D' || n.type === 'CFDSolver2D'));
 
             let currentSolverId = node.parameters['target_domain'] || '';
@@ -2962,10 +2963,13 @@ export class PropertyEditor {
                 const newDomId = select.value;
                 this.updateParameter('target_domain', newDomId);
                 if (state) {
-                    state.connections = state.connections.filter(c => !(c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'couplers' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects' || c.toPort === 'parts')));
+                    const isFEMChild = ['FEMObject3D', 'FEMBeam3D', 'FEMRebar3D', 'LSDynaImporter3D'].includes(node.type);
+                    state.connections = state.connections.filter(c => !(c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'couplers' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects' || c.toPort === 'elements' || c.toPort === 'parts' || c.toPort === 'in')));
                     if (newDomId) {
                         const targetDom = candidateNodes.find(n => n.id === newDomId);
-                        const toPort = (targetDom?.type === 'FEMDomain3D') ? 'mesh' : (node.type === 'MPMContactCoupler3D' ? 'couplers' : 'objects');
+                        const toPort = (targetDom?.type === 'FEMDomain3D')
+                            ? 'mesh'
+                            : (node.type === 'MPMContactCoupler3D' ? 'couplers' : (targetDom?.type === 'MarineHarbourDomain' && isFEMChild ? 'elements' : 'objects'));
                         state.connections.push({
                             fromNode: node.id,
                             fromPort: 'out',
@@ -2983,7 +2987,7 @@ export class PropertyEditor {
             return select;
         }
 
-        if (key === 'connected_detonators' && ['MPMDomain3D', 'CFDSolver3D', 'MPMDomain2D', 'CFDSolver2D', 'MarineHarbourDomain'].includes(node.type)) {
+        if (key === 'connected_detonators' && ['MPMDomain3D', 'CFDSolver3D', 'MPMDomain2D', 'CFDSolver2D', 'MarineHarbourDomain', 'FEMDomain3D'].includes(node.type)) {
             const select = document.createElement('select');
             select.style.width = '100%';
             select.style.background = '#252526';
@@ -2999,7 +3003,7 @@ export class PropertyEditor {
             const state = this.stateManager.getCurrentState();
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
             const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
-            const is3D = node.type === 'MPMDomain3D' || node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain';
+            const is3D = node.type === 'MPMDomain3D' || node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain' || node.type === 'FEMDomain3D';
             const detNodes = candidateNodes.filter(n => is3D 
                 ? (n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D') 
                 : (n.type === 'DetonatorLocation' || n.type === 'TriggerLocation'));
@@ -4949,12 +4953,14 @@ export class PropertyEditor {
                 }
             }
         } else if (node.type === 'FEMObject3D' && (key === 'shape_type' || key === 'mesh_source')) {
+            const curTopo = node.parameters['element_topology'];
+            const isHexOrUnset = !curTopo || curTopo === 'Hex8' || curTopo === 'Hex8_SRI' || curTopo === 'Hex8_FullGauss8';
             if (key === 'shape_type') {
                 updates['mesh_source'] = value === 'Cylinder' ? 'Cylinder Generator' : (value === 'STL' ? 'STL File' : (value === 'Plate' ? 'Plate Generator' : (value === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')));
-                if (value === 'STL') updates['element_topology'] = 'Tet4_ANP';
+                if (value === 'STL' && isHexOrUnset) updates['element_topology'] = 'Tet4_ANP';
             } else if (key === 'mesh_source') {
                 updates['shape_type'] = value === 'Cylinder Generator' ? 'Cylinder' : (value === 'STL File' ? 'STL' : (value === 'Plate Generator' ? 'Plate' : (value === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
-                if (value === 'STL File') updates['element_topology'] = 'Tet4_ANP';
+                if (value === 'STL File' && isHexOrUnset) updates['element_topology'] = 'Tet4_ANP';
             }
         } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && value === 'STL') || (key === 'origin_mode' && value === 'CAD Origin'))) {
             if (key === 'shape_type' && value === 'STL') {

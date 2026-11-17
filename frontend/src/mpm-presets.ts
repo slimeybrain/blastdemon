@@ -2649,18 +2649,18 @@ export type MPMMaterialPresetName = string;
 
 export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     'Structural Steel (A36)': {
-        density: 7850.0, youngs_modulus: 200.0e9, poissons_ratio: 0.26, yield_stress: 250.0e6, hardening_modulus: 1.0e9, failure_strain: 0.20, tensile_failure_stress: 400.0e6,
-        jc_A: 250.0e6, jc_B: 510.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.03, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        density: 7850.0, youngs_modulus: 200.0e9, poissons_ratio: 0.26, yield_stress: 250.0e6, hardening_modulus: 1.0e9, failure_strain: 0.25, tensile_failure_stress: 400.0e6,
+        jc_A: 286.1e6, jc_B: 500.1e6, jc_n: 0.228, jc_C: 0.022, jc_m: 0.917, jc_d1: 0.4025, jc_d2: 1.107, jc_d3: -1.899, jc_d4: 0.0096, jc_d5: 0.30,
         cs_C: 40.4, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1793.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
         hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 250.0e6,
-        category: 'Structural & Military Steels', reference: 'ASTM A36 Standard / Cowper & Symonds (1957)'
+        category: 'Structural & Military Steels', reference: 'Seidt et al. (2007) / Schwer (2007) ASTM A36 & Cowper-Symonds (1957)'
     },
     'Steel S275': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 275.0e6, hardening_modulus: 900.0e6, failure_strain: 0.23, tensile_failure_stress: 430.0e6,
-        jc_A: 275.0e6, jc_B: 450.0e6, jc_n: 0.28, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 275.0e6, jc_B: 450.0e6, jc_n: 0.28, jc_C: 0.018, jc_m: 0.95, jc_d1: 0.32, jc_d2: 1.45, jc_d3: -1.90, jc_d4: 0.008, jc_d5: 0.40,
         cs_C: 40.4, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
@@ -2670,7 +2670,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Steel S355': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 355.0e6, hardening_modulus: 1.0e9, failure_strain: 0.22, tensile_failure_stress: 510.0e6,
-        jc_A: 355.0e6, jc_B: 480.0e6, jc_n: 0.27, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 355.0e6, jc_B: 480.0e6, jc_n: 0.27, jc_C: 0.016, jc_m: 0.95, jc_d1: 0.28, jc_d2: 1.65, jc_d3: -1.95, jc_d4: 0.007, jc_d5: 0.45,
         cs_C: 40.4, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
@@ -2680,7 +2680,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Steel S460': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 460.0e6, hardening_modulus: 1.1e9, failure_strain: 0.19, tensile_failure_stress: 600.0e6,
-        jc_A: 460.0e6, jc_B: 520.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 460.0e6, jc_B: 520.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.22, jc_d2: 2.10, jc_d3: -2.00, jc_d4: 0.005, jc_d5: 0.50,
         cs_C: 100.0, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 475.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
@@ -2690,17 +2690,17 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Steel 1006': {
         density: 7890.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 350.0e6, hardening_modulus: 800.0e6, failure_strain: 0.30, tensile_failure_stress: 450.0e6,
-        jc_A: 350.0e6, jc_B: 275.0e6, jc_n: 0.36, jc_C: 0.022, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 350.0e6, jc_B: 275.0e6, jc_n: 0.36, jc_C: 0.022, jc_m: 1.00, jc_d1: -0.80, jc_d2: 2.10, jc_d3: -0.50, jc_d4: 0.002, jc_d5: 0.61,
         cs_C: 40.4, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1811.0, T_room: 293.0, Cp: 452.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
         hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 350.0e6,
-        category: 'Structural & Military Steels', reference: 'Bane & Johnson, J. Appl. Mech. (1985)'
+        category: 'Structural & Military Steels', reference: 'Johnson & Cook (1983/1985) Eng. Fract. Mech. 21:31-48'
     },
     'Steel 1020': {
         density: 7870.0, youngs_modulus: 200.0e9, poissons_ratio: 0.29, yield_stress: 330.0e6, hardening_modulus: 900.0e6, failure_strain: 0.28, tensile_failure_stress: 420.0e6,
-        jc_A: 330.0e6, jc_B: 410.0e6, jc_n: 0.32, jc_C: 0.019, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 330.0e6, jc_B: 410.0e6, jc_n: 0.32, jc_C: 0.019, jc_m: 1.00, jc_d1: 0.25, jc_d2: 1.90, jc_d3: -1.60, jc_d4: 0.004, jc_d5: 0.55,
         cs_C: 40.4, cs_P: 5.0,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1790.0, T_room: 293.0, Cp: 486.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
@@ -3011,7 +3011,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Q1N (HY-80 Naval Steel)': {
         density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 550.0e6, hardening_modulus: 1.1e9, failure_strain: 0.22, tensile_failure_stress: 700.0e6,
-        jc_A: 550.0e6, jc_B: 600.0e6, jc_n: 0.30, jc_C: 0.015, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 550.0e6, jc_B: 600.0e6, jc_n: 0.30, jc_C: 0.015, jc_m: 1.00, jc_d1: 0.15, jc_d2: 3.20, jc_d3: -2.10, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
@@ -3020,7 +3020,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'HY-100 Steel': {
         density: 7850.0, youngs_modulus: 205.0e9, poissons_ratio: 0.29, yield_stress: 690.0e6, hardening_modulus: 1.2e9, failure_strain: 0.20, tensile_failure_stress: 820.0e6,
-        jc_A: 690.0e6, jc_B: 650.0e6, jc_n: 0.28, jc_C: 0.015, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 690.0e6, jc_B: 650.0e6, jc_n: 0.28, jc_C: 0.015, jc_m: 1.00, jc_d1: 0.12, jc_d2: 3.10, jc_d3: -2.10, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
@@ -3038,7 +3038,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Armox 500T': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 1250.0e6, hardening_modulus: 1.5e9, failure_strain: 0.15, tensile_failure_stress: 1600.0e6,
-        jc_A: 1250.0e6, jc_B: 840.0e6, jc_n: 0.26, jc_C: 0.005, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 1250.0e6, jc_B: 840.0e6, jc_n: 0.26, jc_C: 0.005, jc_m: 1.00, jc_d1: 0.068, jc_d2: 5.328, jc_d3: -2.554, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 9.0, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
@@ -3047,7 +3047,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Armox 600T': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 1650.0e6, hardening_modulus: 1.8e9, failure_strain: 0.10, tensile_failure_stress: 2000.0e6,
-        jc_A: 1650.0e6, jc_B: 950.0e6, jc_n: 0.20, jc_C: 0.005, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 1650.0e6, jc_B: 950.0e6, jc_n: 0.20, jc_C: 0.005, jc_m: 1.00, jc_d1: 0.04, jc_d2: 2.80, jc_d3: -2.20, jc_d4: 0.002, jc_d5: 0.61,
         weibull_modulus: 8.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
@@ -3056,16 +3056,16 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Weldox 700E': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 700.0e6, hardening_modulus: 1.2e9, failure_strain: 0.16, tensile_failure_stress: 800.0e6,
-        jc_A: 700.0e6, jc_B: 560.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 700.0e6, jc_B: 560.0e6, jc_n: 0.26, jc_C: 0.014, jc_m: 1.00, jc_d1: 0.361, jc_d2: 4.768, jc_d3: -5.107, jc_d4: 0.001, jc_d5: 0.61,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
         hill_F: 0.50, hill_G: 0.50, hill_H: 0.50, hill_L: 1.50, hill_M: 1.50, hill_N: 1.50, hill_sigma_y0: 700.0e6,
-        category: 'Structural & Military Steels', reference: 'Borvik et al., Eur. J. Mech. A (2001)'
+        category: 'Structural & Military Steels', reference: 'Borvik et al., Eur. J. Mech. A (2001) / Dey et al. (2004)'
     },
     'Weldox 900E': {
         density: 7850.0, youngs_modulus: 210.0e9, poissons_ratio: 0.30, yield_stress: 900.0e6, hardening_modulus: 1.4e9, failure_strain: 0.14, tensile_failure_stress: 1000.0e6,
-        jc_A: 900.0e6, jc_B: 620.0e6, jc_n: 0.24, jc_C: 0.012, jc_m: 1.00, jc_d1: 0.05, jc_d2: 3.44, jc_d3: -2.12, jc_d4: 0.002, jc_d5: 0.61,
+        jc_A: 900.0e6, jc_B: 620.0e6, jc_n: 0.24, jc_C: 0.012, jc_m: 1.00, jc_d1: 0.294, jc_d2: 5.149, jc_d3: -5.583, jc_d4: 0.0023, jc_d5: 0.951,
         weibull_modulus: 9.5, weibull_scale: 1.0, weibull_ref_volume: 1.0e-6, transfer_scheme: 'BSpline',
         T_melt: 1773.0, T_room: 293.0, Cp: 470.0, mg_gamma0: 1.81, mg_c0: 4570.0, mg_s: 1.49,
         // Hill48: isotropic (von Mises-equivalent) coefficients - no orthotropy data for this grade
@@ -3111,13 +3111,15 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Aluminum 7075-T6': {
         density: 2810.0, youngs_modulus: 71.7e9, poissons_ratio: 0.33, yield_stress: 520.0e6, hardening_modulus: 600.0e6, failure_strain: 0.11, tensile_failure_stress: 570.0e6,
-        jc_A: 520.0e6, jc_B: 477.0e6, jc_n: 0.52, jc_C: 0.001, jc_m: 1.61, T_melt: 893.0, T_room: 293.0, Cp: 960.0, mg_gamma0: 2.00, mg_c0: 5200.0, mg_s: 1.39,
-        category: 'Light Alloys & Refractory Metals', reference: 'Nicholas, Exp. Mech. (1981)'
+        jc_A: 520.0e6, jc_B: 477.0e6, jc_n: 0.52, jc_C: 0.001, jc_m: 1.61, jc_d1: 0.096, jc_d2: 0.049, jc_d3: -3.465, jc_d4: 0.016, jc_d5: 1.099,
+        T_melt: 893.0, T_room: 293.0, Cp: 960.0, mg_gamma0: 2.00, mg_c0: 5200.0, mg_s: 1.39,
+        category: 'Light Alloys & Refractory Metals', reference: 'Nicholas, Exp. Mech. (1981) / Brar et al. (2009)'
     },
     'Aluminum 2024-T3': {
         density: 2780.0, youngs_modulus: 73.1e9, poissons_ratio: 0.33, yield_stress: 369.0e6, hardening_modulus: 550.0e6, failure_strain: 0.18, tensile_failure_stress: 485.0e6,
-        jc_A: 369.0e6, jc_B: 684.0e6, jc_n: 0.73, jc_C: 0.0083, jc_m: 1.70, T_melt: 775.0, T_room: 293.0, Cp: 875.0, mg_gamma0: 2.00, mg_c0: 5320.0, mg_s: 1.34,
-        category: 'Light Alloys & Refractory Metals', reference: 'Buyuk et al., Int. J. Impact Eng. (2009)'
+        jc_A: 369.0e6, jc_B: 684.0e6, jc_n: 0.73, jc_C: 0.0083, jc_m: 1.70, jc_d1: 0.13, jc_d2: 0.13, jc_d3: -1.50, jc_d4: 0.011, jc_d5: 0.0,
+        T_melt: 775.0, T_room: 293.0, Cp: 875.0, mg_gamma0: 2.00, mg_c0: 5320.0, mg_s: 1.34,
+        category: 'Light Alloys & Refractory Metals', reference: 'Lesuer (2000) / Buyuk et al., Int. J. Impact Eng. (2009)'
     },
     'Aluminum 1100-O': {
         density: 2710.0, youngs_modulus: 69.0e9, poissons_ratio: 0.33, yield_stress: 34.0e6, hardening_modulus: 200.0e6, failure_strain: 0.35, tensile_failure_stress: 90.0e6,
@@ -3126,15 +3128,17 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Aluminum 5083-H116': {
         density: 2660.0, youngs_modulus: 70.3e9, poissons_ratio: 0.33, yield_stress: 215.0e6, hardening_modulus: 350.0e6, failure_strain: 0.16, tensile_failure_stress: 315.0e6,
-        jc_A: 215.0e6, jc_B: 390.0e6, jc_n: 0.45, jc_C: 0.005, jc_m: 1.20, cs_C: 6500.0, cs_P: 4.0,
+        jc_A: 215.0e6, jc_B: 390.0e6, jc_n: 0.45, jc_C: 0.005, jc_m: 1.20, jc_d1: 0.0261, jc_d2: 0.263, jc_d3: -0.349, jc_d4: 0.147, jc_d5: 1.68,
+        cs_C: 6500.0, cs_P: 4.0,
         T_melt: 864.0, T_room: 293.0, Cp: 900.0, mg_gamma0: 1.97, mg_c0: 5240.0, mg_s: 1.40,
         category: 'Light Alloys & Refractory Metals', reference: 'Clausen et al., Int. J. Impact Eng. (2004)'
     },
     'Copper (OFHC)': {
         density: 8960.0, youngs_modulus: 124.0e9, poissons_ratio: 0.34, yield_stress: 90.0e6, hardening_modulus: 292.0e6, failure_strain: 0.54, tensile_failure_stress: 230.0e6,
-        jc_A: 90.0e6, jc_B: 292.0e6, jc_n: 0.31, jc_C: 0.025, jc_m: 1.09, T_melt: 1356.0, T_room: 293.0, Cp: 383.0, mg_gamma0: 2.02, mg_c0: 3940.0, mg_s: 1.49,
+        jc_A: 90.0e6, jc_B: 292.0e6, jc_n: 0.31, jc_C: 0.025, jc_m: 1.09, jc_d1: 0.54, jc_d2: 4.89, jc_d3: -3.03, jc_d4: 0.014, jc_d5: 1.12,
+        T_melt: 1356.0, T_room: 293.0, Cp: 383.0, mg_gamma0: 2.02, mg_c0: 3940.0, mg_s: 1.49,
         sg_Y0: 120.0e6, sg_Ymax: 640.0e6, sg_beta: 36.0, sg_n: 0.45, sg_bp: 2.83e-11, sg_bT: 3.77e-4,
-        category: 'Light Alloys & Refractory Metals', reference: 'Johnson & Cook (1983) / Steinberg-Cochran-Guinan (1980)'
+        category: 'Light Alloys & Refractory Metals', reference: 'Johnson & Cook (1983/1985) / Steinberg-Cochran-Guinan (1980)'
     },
     'Copper (C11000)': {
         density: 8890.0, youngs_modulus: 117.0e9, poissons_ratio: 0.34, yield_stress: 70.0e6, hardening_modulus: 280.0e6, failure_strain: 0.45, tensile_failure_stress: 220.0e6,
@@ -3153,9 +3157,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Titanium Ti-6Al-4V': {
         density: 4430.0, youngs_modulus: 113.8e9, poissons_ratio: 0.342, yield_stress: 1098.0e6, hardening_modulus: 1092.0e6, failure_strain: 0.14, tensile_failure_stress: 1170.0e6,
-        jc_A: 1098.0e6, jc_B: 1092.0e6, jc_n: 0.93, jc_C: 0.014, jc_m: 1.10, T_melt: 1878.0, T_room: 293.0, Cp: 526.0, mg_gamma0: 1.23, mg_c0: 5130.0, mg_s: 1.028,
+        jc_A: 1098.0e6, jc_B: 1092.0e6, jc_n: 0.93, jc_C: 0.014, jc_m: 1.10, jc_d1: -0.09, jc_d2: 0.25, jc_d3: -0.50, jc_d4: 0.014, jc_d5: 3.87,
+        T_melt: 1878.0, T_room: 293.0, Cp: 526.0, mg_gamma0: 1.23, mg_c0: 5130.0, mg_s: 1.028,
         sg_Y0: 1330.0e6, sg_Ymax: 2120.0e6, sg_beta: 12.0, sg_n: 0.10, sg_bp: 1.15e-11, sg_bT: 6.44e-4,
-        category: 'Light Alloys & Refractory Metals', reference: 'Kay LLNL UCRL-ID-146715 / Steinberg (1980)'
+        category: 'Light Alloys & Refractory Metals', reference: 'Kay LLNL UCRL-ID-146715 / Lesuer (2000) / Steinberg (1980)'
     },
     'Titanium CP (Grade 2)': {
         density: 4510.0, youngs_modulus: 105.0e9, poissons_ratio: 0.34, yield_stress: 275.0e6, hardening_modulus: 500.0e6, failure_strain: 0.20, tensile_failure_stress: 345.0e6,
@@ -3170,9 +3175,10 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Tungsten (Pure)': {
         density: 19300.0, youngs_modulus: 411.0e9, poissons_ratio: 0.28, yield_stress: 1500.0e6, hardening_modulus: 800.0e6, failure_strain: 0.05, tensile_failure_stress: 1700.0e6,
-        jc_A: 1500.0e6, jc_B: 500.0e6, jc_n: 0.25, jc_C: 0.016, jc_m: 1.00, T_melt: 3695.0, T_room: 293.0, Cp: 134.0, mg_gamma0: 1.67, mg_c0: 4030.0, mg_s: 1.237,
+        jc_A: 1500.0e6, jc_B: 500.0e6, jc_n: 0.25, jc_C: 0.016, jc_m: 1.00, jc_d1: 0.0, jc_d2: 0.33, jc_d3: -1.50, jc_d4: 0.0, jc_d5: 0.0,
+        T_melt: 3695.0, T_room: 293.0, Cp: 134.0, mg_gamma0: 1.67, mg_c0: 4030.0, mg_s: 1.237,
         sg_Y0: 2200.0e6, sg_Ymax: 4000.0e6, sg_beta: 7.7, sg_n: 0.13, sg_bp: 9.38e-12, sg_bT: 1.38e-4,
-        category: 'Light Alloys & Refractory Metals', reference: 'Marsh LASL (1980) / Steinberg (1980)'
+        category: 'Light Alloys & Refractory Metals', reference: 'Johnson & Holmquist (1988) / Marsh LASL (1980) / Steinberg (1980)'
     },
     'Tungsten Heavy Alloy (W-Ni-Fe)': {
         density: 17600.0, youngs_modulus: 360.0e9, poissons_ratio: 0.29, yield_stress: 670.0e6, hardening_modulus: 700.0e6, failure_strain: 0.15, tensile_failure_stress: 960.0e6,
@@ -3340,7 +3346,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Loose Dry Sand (Dr = 30%)': {
         density: 1550.0, youngs_modulus: 30.0e6, poissons_ratio: 0.30, yield_stress: 0.05e6, hardening_modulus: 0.2e6, failure_strain: 0.15, tensile_failure_stress: 0.001e6,
-        jc_A: 0.05e6, jc_B: 0.20e6, jc_n: 0.50, jc_C: 0.010, jc_m: 1.00, T_melt: 1700.0, T_room: 293.0, Cp: 800.0, mg_gamma0: 0.45, mg_c0: 1450.0, mg_s: 1.35,
+        jc_A: 0.05e6, jc_B: 0.20e6, jc_n: 0.50, jc_C: 0.010, jc_m: 1.00, T_melt: 1700.0, T_room: 293.0, Cp: 800.0, mg_gamma0: 0.45, mg_c0: 450.0, mg_s: 1.35,
         dp_friction_angle: 30.0, dp_cohesion: 1.00e3, dp_dilatancy_angle: 0.0, dp_tensile_cutoff: 0.001e6, k0_earth_pressure: 0.50,
         cap_X0: 1.0e5, cap_W: 0.30, cap_D1: 1.5e-6, cap_D2: 5.0e-13, cap_R: 2.5, provenance: 'hybrid',
         category: 'Soils, Rocks & Geomaterial Strengths', reference: 'Lade & Duncan / DiMaggio-Sandler Granular Soil Benchmark'
@@ -3646,7 +3652,7 @@ export const MPM_MATERIAL_PRESETS: Record<string, MPMMaterialParams> = {
     },
     'Fused Silica Glass': {
         density: 2200.0, youngs_modulus: 72.0e9, poissons_ratio: 0.17, yield_stress: 3.0e9, hardening_modulus: 1.5e9, failure_strain: 0.006, tensile_failure_stress: 110.0e6,
-        jc_A: 3.0e9, jc_B: 1.2e9, jc_n: 0.30, jc_C: 0.005, jc_m: 1.00, T_melt: 1983.0, T_room: 293.0, Cp: 740.0, mg_gamma0: 0.30, mg_c0: 5970.0, mg_s: 0.40,
+        jc_A: 3.0e9, jc_B: 1.2e9, jc_n: 0.30, jc_C: 0.005, jc_m: 1.00, T_melt: 1983.0, T_room: 293.0, Cp: 740.0, mg_gamma0: 0.30, mg_c0: 4095.0, mg_s: 0.40,
         jh2_sigma_hel: 7.24e9, jh2_p_hel: 3.87e9, jh2_t_max: 0.11e9, jh2_A: 0.90, jh2_N: 0.75, jh2_B: 0.15, jh2_M: 0.45, jh2_C: 0.003,
         jh2_D1: 0.050, jh2_D2: 0.85, jh2_K1: 36.9e9, jh2_K2: -93.0e9, jh2_K3: 240.0e9, jh2_beta: 1.0,
         category: 'Technical Ceramics & Armor Glasses', reference: 'Marsh LASL Shock Data / Alexander et al. (2008) Fused Silica'
@@ -4673,6 +4679,33 @@ const LEE_TARVER_SOURCES: Record<string, LLNLLeeTarverSource> = {
 
 for (const [name, src] of Object.entries(LEE_TARVER_SOURCES)) {
     MPM_MATERIAL_PRESETS[name] = llnlLeeTarverToSI(src, 'Lee-Tarver Ignition & Growth Presets');
+}
+
+function estimateCohesiveFractureEnergy(name: string, p: Record<string, any>): number {
+    if (typeof p.cohesive_fracture_energy === 'number' && p.cohesive_fracture_energy > 0) return p.cohesive_fracture_energy;
+    if (typeof p.cdp_g_f === 'number' && p.cdp_g_f > 0) return p.cdp_g_f;
+    if (typeof p.G_f === 'number' && p.G_f > 0) return p.G_f;
+    const n = (name + ' ' + (p.category || '')).toLowerCase();
+    if (n.includes('mortar') || n.includes('masonry') || n.includes('brick')) return 65.0;
+    if (n.includes('concrete') || n.includes('uhpc')) return n.includes('uhpc') || n.includes('high') ? 160.0 : 120.0;
+    if (n.includes('ceramic') || n.includes('alumina') || n.includes('sic') || n.includes('glass') || n.includes('sapphire')) return 40.0;
+    if (n.includes('granite') || n.includes('limestone') || n.includes('basalt') || n.includes('sandstone') || n.includes('rock')) return 150.0;
+    if (n.includes('sand') || n.includes('clay') || n.includes('soil') || n.includes('loam') || n.includes('silt')) return 25.0;
+    if (n.includes('foam') || n.includes('rubber') || n.includes('neoprene') || n.includes('silicone')) return 800.0;
+    if (n.includes('wood') || n.includes('timber') || n.includes('cfrp') || n.includes('kevlar') || n.includes('composite')) return 1200.0;
+    if (n.includes('aluminum') || n.includes('aluminium') || n.includes('6061') || n.includes('7075') || n.includes('2024')) return 10000.0;
+    if (n.includes('titanium') || n.includes('copper') || n.includes('brass') || n.includes('tungsten') || n.includes('inconel')) return 15000.0;
+    if (n.includes('4340') || n.includes('4150') || n.includes('rha') || n.includes('armor') || n.includes('martensit')) return 12000.0;
+    if (n.includes('steel') || n.includes('iron') || n.includes('a36') || n.includes('s275') || n.includes('s355')) return 18000.0;
+    return 1000.0;
+}
+
+for (const [name, preset] of Object.entries(MPM_MATERIAL_PRESETS)) {
+    const p = preset as Record<string, any>;
+    if (p.enable_cohesive_splitting === undefined) {
+        p.enable_cohesive_splitting = false;
+    }
+    p.cohesive_fracture_energy = estimateCohesiveFractureEnergy(name, p);
 }
 
 export function getConstitutiveModels(): string[] {

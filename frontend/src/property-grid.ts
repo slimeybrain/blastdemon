@@ -10,7 +10,7 @@ import { Node, NodeType, SimulationState, isDomainMesh3DNode, isDomainMesh2DNode
 import { HostFileBrowserModal, FileFilterPreset, showRecentFoldersQuickMenu, recordRecentFolder } from './host-file-browser.js';
 import { GaugeManagerModal } from './gauge-manager-modal.js';
 import { FEMSetupModal } from './fem-setup-modal.js';
-import { syncModelFEMSetup, FEMSetupConfig, FEMSectionType } from './fem-setup-types.js';
+import { syncModelFEMSetup, FEMSetupConfig, FEMSectionType, syncFEMPartAndNodeParams, sectionTypeToTopology, normalizeFEMHourglassModel } from './fem-setup-types.js';
 import { MPM_MATERIAL_PRESET_NAMES, MPM_MATERIAL_PRESETS, getExplosiveCompositionTable, getConstitutiveModels, getPresetsForConstitutiveModel, getCategorizedPresetsForModel, getDefaultPresetForModel } from './mpm-presets.js';
 import { getParameterInfo, getNodeDefinition, getNodeDescription as getMasterNodeDescription, showParameterPopover, showNodeDetailsModal, getSolverBadgeHTML, getSolverScope, shouldSkipNodeParameter, PARAMETER_DEFINITIONS, resolveModelContext } from './parameter-definitions.js';
 
@@ -57,9 +57,9 @@ const NUMERIC_KEYS = new Set([
     'mpmParticleDiameter', 'mpmParticleSize', 'mpmParticleMinVal', 'mpmParticleMaxVal', 'mpmParticleOpacity', 'flip_blend',
     'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
     'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
-    'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy', 'node_merge_tolerance',
-    'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
-    'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
+    'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'max_volume_ratio', 'max_damage', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy', 'node_merge_tolerance',
+    'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'diameter', 'cross_section_area', 'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z', 'beamMinVal', 'beamMaxVal',
+    'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'fsi_rho_vac', 'fsi_p_vac', 'uncovering_tolerance',
     'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
     'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
     'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat', 'rht_f_el_c',
@@ -610,17 +610,8 @@ export class PropertyGrid {
                         updates.showFEMMesh = part.visible !== false && !part.suppressed;
                     }
                 } else {
-                    if (part.name) updates.name = part.name;
+                    syncFEMPartAndNodeParams(part, updates, true, cNode.type);
                     if (matDef?.node_id) updates.material = matDef.node_id;
-                    if (part.pos_x !== undefined) updates.pos_x = part.pos_x;
-                    if (part.pos_y !== undefined) updates.pos_y = part.pos_y;
-                    if (part.pos_z !== undefined) updates.pos_z = part.pos_z;
-                    if (part.size_x !== undefined) updates.size_x = part.size_x;
-                    if (part.size_y !== undefined) updates.size_y = part.size_y;
-                    if (part.size_z !== undefined) updates.size_z = part.size_z;
-                    if (part.nx !== undefined) updates.nx = part.nx;
-                    if (part.ny !== undefined) updates.ny = part.ny;
-                    if (part.nz !== undefined) updates.nz = part.nz;
                 }
                 Object.assign(cNode.parameters, updates);
                 if (state) {
@@ -726,16 +717,18 @@ export class PropertyGrid {
 
             addRow('Part Name', makeInput('text', part.name, v => { part.name = v.trim() || part.name; persistFEMSetup(); }));
             addRow('Section Type', makeSelect([
-                { value: 'SolidHex8', label: 'SolidHex8 (1-pt B-Bar + Hourglass)' },
+                { value: 'SolidHex8', label: 'SolidHex8 (1-pt Reduced / Domain Default)' },
                 { value: 'SolidHex8_SRI', label: 'SolidHex8_SRI (Selective Reduced 2x2x2)' },
                 { value: 'SolidHex8_Full', label: 'SolidHex8_Full (Full 2x2x2 Gauss)' },
-                { value: 'SolidTet4', label: 'SolidTet4 (4-Node Tetrahedron)' },
+                { value: 'SolidTet4', label: 'SolidTet4 (4-Node P1 Tetrahedron)' },
                 { value: 'SolidTet4_ANP', label: 'SolidTet4_ANP (Avg Nodal Pressure)' },
-                { value: 'SolidWedge6', label: 'SolidWedge6 (6-Node Prism)' },
-                { value: 'Shell4', label: 'Shell4 (Belytschko-Tsay Mindlin Shell)' },
                 { value: 'Beam3D', label: 'Beam3D (Hughes-Liu 3D Beam / Rebar)' },
                 { value: 'Truss1D', label: 'Truss1D (Axial Cable / Tie Rod)' }
-            ], part.section_type, v => { part.section_type = v as FEMSectionType; persistFEMSetup(); }));
+            ], part.section_type, v => {
+                part.section_type = v as FEMSectionType;
+                part.element_topology = sectionTypeToTopology(v);
+                persistFEMSetup();
+            }));
 
             addRow('Material', makeSelect(
                 femSetup.materials.map(m => ({
@@ -751,19 +744,49 @@ export class PropertyGrid {
             ));
 
             const isBeamPart = part.section_type === 'Beam3D' || part.section_type === 'Truss1D';
-            const thickLabel = part.section_type === 'Shell4' ? 'Shell Thickness (m)' :
-                               (isBeamPart ? 'Bar Diameter (m)' : 'Section Thickness (m)');
-            const curDim = isBeamPart ? (part.section_properties?.diameter ?? 0.012) : (part.section_properties?.thickness ?? 0.02);
-            addRow(thickLabel, makeInput('number', curDim, v => {
-                if (!part.section_properties) part.section_properties = {};
-                const num = parseFloat(v) || 0.01;
-                if (isBeamPart) part.section_properties.diameter = num;
-                else part.section_properties.thickness = num;
+            if (isBeamPart || part.section_type === 'Shell4') {
+                const thickLabel = isBeamPart ? 'Bar Diameter (m)' : 'Shell Thickness (m)';
+                const curDim = isBeamPart ? (part.section_properties?.diameter ?? 0.012) : (part.section_properties?.thickness ?? 0.02);
+                addRow(thickLabel, makeInput('number', curDim, v => {
+                    if (!part.section_properties) part.section_properties = {};
+                    const num = parseFloat(v) || 0.01;
+                    if (isBeamPart) part.section_properties.diameter = num;
+                    else part.section_properties.thickness = num;
+                    persistFEMSetup();
+                }));
+            }
+            if (part.section_type === 'SolidHex8') {
+                const curHgModel = normalizeFEMHourglassModel(
+                    part.section_properties?.hourglass_model ?? part.section_properties?.hourglass_type
+                );
+                addRow('Hourglass Model', makeSelect([
+                    { value: 'Inherit', label: 'Inherit Domain Default' },
+                    { value: 'FlanaganBelytschkoViscous', label: 'Flanagan-Belytschko Viscous' },
+                    { value: 'FlanaganBelytschkoStiffness', label: 'Flanagan-Belytschko Stiffness' },
+                    { value: 'KosloffFrazier', label: 'Kosloff-Frazier (Hex8 Only)' }
+                ], curHgModel, v => {
+                    if (!part.section_properties) part.section_properties = {};
+                    part.section_properties.hourglass_model = normalizeFEMHourglassModel(v);
+                    delete part.section_properties.hourglass_type;
+                    persistFEMSetup();
+                }));
+                addRow('Hourglass Coeff', makeInput('number', part.section_properties?.hourglass_coeff ?? '', v => {
+                    if (!part.section_properties) part.section_properties = {};
+                    const trimmed = v.trim();
+                    part.section_properties.hourglass_coeff = trimmed === '' ? undefined : (parseFloat(trimmed) || 0.10);
+                    persistFEMSetup();
+                }));
+            }
+            addRow('Override Failure Strain', makeInput('number', part.erosion_override?.failure_strain ?? '', v => {
+                if (!part.erosion_override) part.erosion_override = {};
+                const trimmed = v.trim();
+                part.erosion_override.failure_strain = trimmed === '' ? undefined : parseFloat(trimmed);
                 persistFEMSetup();
             }));
-            addRow('Hourglass Coeff', makeInput('number', part.section_properties?.hourglass_coeff ?? 0.03, v => {
-                if (!part.section_properties) part.section_properties = {};
-                part.section_properties.hourglass_coeff = parseFloat(v) || 0.03;
+            addRow('Override Tensile Stress (Pa)', makeInput('number', part.erosion_override?.tensile_failure_stress ?? '', v => {
+                if (!part.erosion_override) part.erosion_override = {};
+                const trimmed = v.trim();
+                part.erosion_override.tensile_failure_stress = trimmed === '' ? undefined : parseFloat(trimmed);
                 persistFEMSetup();
             }));
 
@@ -781,20 +804,6 @@ export class PropertyGrid {
                 velWrap.appendChild(inp);
             });
             addRow('Init Velocity (m/s)', velWrap);
-
-            const posWrap = document.createElement('div');
-            posWrap.style.display = 'grid';
-            posWrap.style.gridTemplateColumns = '1fr 1fr 1fr';
-            posWrap.style.gap = '4px';
-            (['pos_x', 'pos_y', 'pos_z'] as const).forEach((k) => {
-                const inp = makeInput('number', (part as any)[k] ?? 0, v => {
-                    (part as any)[k] = parseFloat(v) || 0;
-                    persistFEMSetup();
-                });
-                inp.title = k;
-                posWrap.appendChild(inp);
-            });
-            addRow('Position [X,Y,Z] (m)', posWrap);
 
             const suppChk = document.createElement('input');
             suppChk.type = 'checkbox';
@@ -3224,7 +3233,7 @@ export class PropertyGrid {
             const table = document.createElement('table');
             table.className = 'property-table';
 
-            const quantities = ['vonMises', 'plastic_strain', 'damage', 'displacement', 'velocity', 'pressure', 'density', 'energy', 'failure_flag'];
+            const quantities = ['vonMises', 'plasticStrain', 'pressure', 'velocity', 'damage'];
             const curQty = p.femQuantity || 'vonMises';
             table.appendChild(this.createTableRow('Visualized Quantity', this.createDropdown(quantities, curQty, (val) => {
                 this.updateDisplayParam(node, 'femQuantity', val);
@@ -4217,7 +4226,7 @@ export class PropertyGrid {
             return select;
         }
 
-        if (key === 'connected_detonators' && ['MPMDomain3D', 'CFDSolver3D', 'MPMDomain2D', 'CFDSolver2D', 'MarineHarbourDomain'].includes(node.type)) {
+        if (key === 'connected_detonators' && ['MPMDomain3D', 'CFDSolver3D', 'MPMDomain2D', 'CFDSolver2D', 'MarineHarbourDomain', 'FEMDomain3D'].includes(node.type)) {
             const select = document.createElement('select');
             select.className = 'property-select';
             select.id = `param-input-${node.id}-${key}`;
@@ -4230,7 +4239,7 @@ export class PropertyGrid {
             const state = this.stateManager.getCurrentState();
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
             const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
-            const is3D = node.type === 'MPMDomain3D' || node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain';
+            const is3D = node.type === 'MPMDomain3D' || node.type === 'CFDSolver3D' || node.type === 'MarineHarbourDomain' || node.type === 'FEMDomain3D';
             const detNodes = candidateNodes.filter(n => is3D 
                 ? (n.type === 'DetonatorLocation3D' || n.type === 'TriggerLocation3D') 
                 : (n.type === 'DetonatorLocation' || n.type === 'TriggerLocation'));
@@ -4289,7 +4298,7 @@ export class PropertyGrid {
                 if (node.type === 'Charge2D') return n.type === 'CFDSolver2D';
                 if (node.type === 'Charge3D') return n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain';
                 const is3D = node.type === 'DetonatorLocation3D' || node.type === 'TriggerLocation3D';
-                return is3D ? ['MPMDomain3D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(n.type) : ['MPMDomain2D', 'CFDSolver2D', 'CFDSolver'].includes(n.type);
+                return is3D ? ['MPMDomain3D', 'CFDSolver3D', 'MarineHarbourDomain', 'FEMDomain3D'].includes(n.type) : ['MPMDomain2D', 'CFDSolver2D', 'CFDSolver'].includes(n.type);
             });
 
             const targetPort = isCharge ? 'charge' : 'detonator';
@@ -4390,10 +4399,13 @@ export class PropertyGrid {
                 const newDomId = select.value;
                 this.updateNodeParam(node, 'target_domain', newDomId);
                 if (state) {
-                    state.connections = state.connections.filter(c => !(c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'couplers' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects' || c.toPort === 'parts')));
+                    const isFEMChild = ['FEMObject3D', 'FEMBeam3D', 'FEMRebar3D', 'LSDynaImporter3D'].includes(node.type);
+                    state.connections = state.connections.filter(c => !(c.fromNode === node.id && (c.toPort === 'mesh' || c.toPort === 'objects' || c.toPort === 'couplers' || c.toPort === 'mpm_objects' || c.toPort === 'fem_objects' || c.toPort === 'elements' || c.toPort === 'parts' || c.toPort === 'in')));
                     if (newDomId) {
                         const targetDom = candidateNodes.find(n => n.id === newDomId);
-                        const toPort = (targetDom?.type === 'FEMDomain3D') ? 'mesh' : (node.type === 'MPMContactCoupler3D' ? 'couplers' : 'objects');
+                        const toPort = (targetDom?.type === 'FEMDomain3D')
+                            ? 'mesh'
+                            : (node.type === 'MPMContactCoupler3D' ? 'couplers' : (targetDom?.type === 'MarineHarbourDomain' && isFEMChild ? 'elements' : 'objects'));
                         state.connections.push({
                             fromNode: node.id,
                             fromPort: 'out',
@@ -4966,6 +4978,7 @@ export class PropertyGrid {
             'precision': ['single', 'double'],
             'integration_scheme': ['OnePointFB', 'OnePointKF', 'FullGauss8', 'SelectiveReduced'],
             'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
+            'erosion_source': ['Inherit Material', 'Override Object'],
             'contact_search_method': ['Hierarchical Octave Hash Grid', 'Linear BVH (Morton Code)'],
             'trigger_type': ['Step Interval', 'Time Interval'],
             'composition': [...Object.keys(EXPLOSIVE_PRESETS).sort(), 'Custom'],
@@ -5017,7 +5030,7 @@ export class PropertyGrid {
             'shape_type': node.type === 'FEMObject3D' ? ['Box', 'Cylinder', 'Plate', 'STL', 'LS-DYNA File'] : (node.type === 'MPMObject3D' ? ['Box', 'Sphere', 'Cylinder', 'STL'] : ['Rectangle', 'Circle']),
             'anisotropy_axis': ['X', 'Y', 'Z', 'Custom'],
             'mesh_source': ['Box Generator', 'Cylinder Generator', 'Plate Generator', 'STL File', 'LS-DYNA Keyword File'],
-            'element_topology': ['Hex8', 'Tet4_ANP'],
+            'element_topology': ['Hex8', 'Hex8_SRI', 'Hex8_FullGauss8', 'Tet4', 'Tet4_ANP'],
             'space_time_scheme': (node.type === 'MPMDomain2D' || node.type === 'MPMDomain3D') ? 
                 ['Leapfrog', 'RK2', 'USL', 'USF'] : 
                 ['MUSCL-Hancock (2nd-Order Space/Time)', 'ADER-2 (2nd-Order Space/Time)', 'ADER-3 (3rd-Order Space/Time)'],
@@ -6296,12 +6309,14 @@ export class PropertyGrid {
                 updates['temporal_order'] = t_order;
             }
         } else if (node.type === 'FEMObject3D' && (key === 'shape_type' || key === 'mesh_source')) {
+            const curTopo = node.parameters['element_topology'];
+            const isHexOrUnset = !curTopo || curTopo === 'Hex8' || curTopo === 'Hex8_SRI' || curTopo === 'Hex8_FullGauss8';
             if (key === 'shape_type') {
                 updates['mesh_source'] = value === 'Cylinder' ? 'Cylinder Generator' : (value === 'STL' ? 'STL File' : (value === 'Plate' ? 'Plate Generator' : (value === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')));
-                if (value === 'STL') updates['element_topology'] = 'Tet4_ANP';
+                if (value === 'STL' && isHexOrUnset) updates['element_topology'] = 'Tet4_ANP';
             } else if (key === 'mesh_source') {
                 updates['shape_type'] = value === 'Cylinder Generator' ? 'Cylinder' : (value === 'STL File' ? 'STL' : (value === 'Plate Generator' ? 'Plate' : (value === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
-                if (value === 'STL File') updates['element_topology'] = 'Tet4_ANP';
+                if (value === 'STL File' && isHexOrUnset) updates['element_topology'] = 'Tet4_ANP';
             }
         } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && value === 'STL') || (key === 'origin_mode' && value === 'CAD Origin'))) {
             if (key === 'shape_type' && value === 'STL') {
@@ -6356,7 +6371,7 @@ export class PropertyGrid {
             'shape_type', 'dimension', 'space_time_scheme', 'init_mode',
             'solid_model', 'burn_model', 'product_model', 'afterburn_enabled',
             'enable_heterogeneity', 'enable_anisotropy',
-            'enable_strain_erosion', 'enable_stress_erosion', 'enable_timestep_erosion', 'enable_density_erosion', 'erode_to_fv_grid',
+            'erosion_source', 'enable_strain_erosion', 'enable_stress_erosion', 'enable_damage_erosion', 'enable_timestep_erosion', 'enable_density_erosion', 'erode_to_fv_grid',
             'kc_auto_generate', 'directional_crack_band', 'enable_directional_crack_band',
             'contact_method', 'bardenhagen_initial_tie', 'enable_impact_welding', 'enable_frictional_heating', 'enable_thermal_conduction', 'enable_dem_contact', 'dem_contact_mode',
             'export_fem', 'export_mpm', 'export_mpm_density_grid', 'export_stl_faces', 'tessellate_stl_faces',
@@ -6639,7 +6654,10 @@ export class PropertyGrid {
             const commonErosionFlawsAniso = [
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio',
+                'enable_cohesive_splitting', 'cohesive_fracture_energy',
                 'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
@@ -6648,8 +6666,7 @@ export class PropertyGrid {
             if (matModelResolved === 'Concrete Damage Plasticity (CDP)') {
                 return [
                     'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
+                    ...commonErosionFlawsAniso
                 ];
             }
 
@@ -6657,8 +6674,7 @@ export class PropertyGrid {
                 return [
                     'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0',
                     'failure_strain', 'tensile_failure_stress',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
+                    ...commonErosionFlawsAniso
                 ];
             }
 
@@ -6681,8 +6697,7 @@ export class PropertyGrid {
             if (matModelResolved === 'Linear Elastic') {
                 return [
                     'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'tensile_failure_stress',
-                    'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
-                    'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
+                    ...commonErosionFlawsAniso
                 ];
             }
 
@@ -6759,8 +6774,7 @@ export class PropertyGrid {
                     'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening',
                     'yield_stress', 'hardening_modulus',
                     'failure_strain', 'tensile_failure_stress',
-                    'enable_strain_erosion', 'erosion_strain',
-                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio'
+                    ...commonErosionFlawsAniso
                 ];
             }
 
@@ -6898,29 +6912,54 @@ export class PropertyGrid {
 
         if (node.type === 'FEMDomain3D') {
             return [
-                'device', 'precision', 'cfl', 'endtime',
+                'device', 'precision', 'connected_detonators', 'cfl', 'endtime',
+                'integration_scheme', 'hourglass_model', 'hourglass_coeff',
+                'bulk_viscosity_b1', 'bulk_viscosity_b2',
+                'merge_coincident_nodes', 'node_merge_tolerance',
                 'enable_directional_crack_band', 'enable_nonlocal_damage',
-                'enable_cohesive_splitting', 'cohesive_fracture_energy',
-                'enable_heterogeneity', 'material_heterogeneity',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
                 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed',
                 'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
-                'hourglass_coeff', 'contact_search_method', 'contact_penalty_scale', 'friction_static', 'friction_kinetic',
-                'integration_scheme', 'hourglass_model'
+                'contact_search_method', 'contact_penalty_scale', 'contact_damping', 'friction_static', 'friction_kinetic'
             ].filter(k => k in node.parameters);
         }
 
         if (node.type === 'FEMObject3D') {
             const shape = node.parameters['shape_type'] || 'Box';
+            const ensureTransformKeys = (k: string) =>
+                k in node.parameters || k === 'origin_mode' || k === 'element_topology' || k === 'rot_x' || k === 'rot_y' || k === 'rot_z' || k === 'erosion_source';
+            let geomKeys: string[];
             if (shape === 'Box' || shape === 'Plate') {
-                return ['shape_type', 'element_topology', 'origin_mode', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'].filter(k => k in node.parameters || k === 'origin_mode' || k === 'element_topology');
+                geomKeys = ['shape_type', 'element_topology', 'origin_mode', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'size_x', 'size_y', 'size_z', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z'].filter(ensureTransformKeys);
             } else if (shape === 'Cylinder') {
-                return ['shape_type', 'element_topology', 'origin_mode', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'].filter(k => k in node.parameters || k === 'origin_mode' || k === 'element_topology');
+                geomKeys = ['shape_type', 'element_topology', 'origin_mode', 'boundary_condition', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z'].filter(ensureTransformKeys);
             } else if (shape === 'STL') {
-                return ['shape_type', 'element_topology', 'stl_file', 'origin_mode', 'boundary_condition', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z'].filter(k => k in node.parameters || k === 'origin_mode' || k === 'element_topology');
+                geomKeys = ['shape_type', 'element_topology', 'stl_file', 'origin_mode', 'boundary_condition', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'nx', 'ny', 'nz', 'vel_x', 'vel_y', 'vel_z'].filter(ensureTransformKeys);
             } else {
-                return ['shape_type', 'boundary_condition', 'k_file', 'scale_factor', 'pos_x', 'pos_y', 'pos_z', 'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'].filter(k => k in node.parameters);
+                geomKeys = ['shape_type', 'boundary_condition', 'k_file', 'scale_factor', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'vel_x', 'vel_y', 'vel_z'].filter(k => k in node.parameters || k === 'rot_x' || k === 'rot_y' || k === 'rot_z');
             }
+            const erosionKeys: string[] = ['erosion_source'];
+            if (node.parameters['erosion_source'] === 'Override Object') {
+                erosionKeys.push('enable_strain_erosion');
+                if (node.parameters['enable_strain_erosion'] === true) erosionKeys.push('erosion_strain');
+                erosionKeys.push('enable_stress_erosion');
+                if (node.parameters['enable_stress_erosion'] === true) erosionKeys.push('erosion_stress');
+                erosionKeys.push('enable_damage_erosion');
+                if (node.parameters['enable_damage_erosion'] === true) erosionKeys.push('max_damage');
+                erosionKeys.push('enable_timestep_erosion');
+                if (node.parameters['enable_timestep_erosion'] === true) erosionKeys.push('timestep_erosion_factor');
+                erosionKeys.push('min_volume_ratio', 'max_volume_ratio');
+                erosionKeys.push('enable_cohesive_splitting');
+                if (node.parameters['enable_cohesive_splitting'] === true) erosionKeys.push('cohesive_fracture_energy');
+            }
+            return [...geomKeys, ...erosionKeys];
+        }
+
+        if (node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D') {
+            return [
+                'target_domain', 'material',
+                'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
+                'radius', 'diameter', 'cross_section_area', 'failure_strain'
+            ].filter(k => k in node.parameters);
         }
 
         if (node.type === 'FEMFSICoupler3D') {
@@ -7260,6 +7299,10 @@ export class PropertyGrid {
                     'afterburn_ambient_o2_fraction'
                 ]);
 
+                addGroup('mat_erosion', 'Low-Density Particle Erosion & FV Handoff [MPM · FV]', [
+                    'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio', 'erode_to_fv_grid'
+                ]);
+
                 return groups;
             }
 
@@ -7294,6 +7337,9 @@ export class PropertyGrid {
                 return groups;
             }
 
+            const isErosionKey = (k: string) =>
+                k.includes('erosion') || k === 'erode_to_fv_grid' || k === 'max_damage' || k === 'min_volume_ratio' || k === 'max_volume_ratio' || k === 'enable_cohesive_splitting' || k === 'cohesive_fracture_energy';
+
             if (matModel === 'Tait Water') {
                 addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
                 addGroup('mat_tait', 'Modified Tait Fluid EOS', [
@@ -7301,8 +7347,8 @@ export class PropertyGrid {
                     'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str',
                     'bulk_viscosity_b1', 'bulk_viscosity_b2'
                 ]);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 return groups;
             }
@@ -7311,8 +7357,8 @@ export class PropertyGrid {
                 addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
                 addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
                 addGroup('mat_cdp', 'Concrete Damage Plasticity (CDP)', ['cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 return groups;
             }
@@ -7322,8 +7368,8 @@ export class PropertyGrid {
                 addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
                 addGroup('mat_hill48', 'Hill48 Anisotropic Yield Tensor', ['hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0']);
                 addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 return groups;
             }
@@ -7336,8 +7382,8 @@ export class PropertyGrid {
                     addGroup('mat_hyperelastic', 'Mooney-Rivlin Strain Energy', ['density', 'mr_c10', 'mr_c01', 'k_bulk']);
                 }
                 addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
                     addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
@@ -7351,6 +7397,9 @@ export class PropertyGrid {
             if (matModel === 'Linear Elastic') {
                 addGroup('mat_law', 'Constitutive Law & Presets', ['material_model', 'preset', 'transfer_scheme']);
                 addGroup('mat_elasticity', 'Elasticity & Spall Failure', ['density', 'youngs_modulus', 'poissons_ratio', 'tensile_failure_stress']);
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
+                }
                 if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
                     addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
                 }
@@ -7366,8 +7415,8 @@ export class PropertyGrid {
                 addGroup('mat_jc_plasticity', 'Johnson-Cook Viscoplasticity', ['jc_A', 'jc_B', 'jc_n', 'jc_C', 'jc_m', 'T_melt', 'T_room', 'initial_temperature', 'Cp']);
                 addGroup('mat_jc_damage', 'Failure & Spall Fracture', ['failure_strain', 'tensile_failure_stress', 'jc_d1', 'jc_d2', 'jc_d3', 'jc_d4', 'jc_d5']);
                 addGroup('mat_shock_eos', 'Mie-Grüneisen Shock EOS', ['mg_gamma0', 'mg_c0', 'mg_s']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_failure', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
                     addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
@@ -7384,8 +7433,8 @@ export class PropertyGrid {
                 addGroup('mat_sg_plasticity', 'Steinberg-Guinan High-Rate Plasticity', ['sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT', 'T_melt', 'T_room', 'initial_temperature', 'Cp']);
                 addGroup('mat_shock_eos', 'Mie-Grüneisen Shock EOS', ['mg_gamma0', 'mg_c0', 'mg_s']);
                 addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
                     addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
@@ -7405,8 +7454,8 @@ export class PropertyGrid {
                     addGroup('mat_concrete_adv', 'Advanced Concrete Damage Parameters', concreteKeys);
                 }
                 addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
                     addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
@@ -7422,8 +7471,8 @@ export class PropertyGrid {
                 addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
                 addGroup('mat_foam', 'Crushable Foam Compaction (*MAT_063)', ['foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening', 'yield_stress', 'hardening_modulus']);
                 addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 return groups;
             }
@@ -7434,8 +7483,8 @@ export class PropertyGrid {
                 addGroup('mat_jh2_strength', 'JH-2 Strength & HEL Envelope (*MAT_110)', ['jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max', 'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C']);
                 addGroup('mat_jh2_eos', 'JH-2 Polynomial EOS & Damage', ['jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta']);
                 addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
                     addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
@@ -7451,8 +7500,8 @@ export class PropertyGrid {
                 addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
                 addGroup('mat_geotech', 'Geotechnical Friction & Cohesion (*MAT_173)', ['dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff', 'dp_hardening_modulus']);
                 addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
                     addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
@@ -7469,8 +7518,8 @@ export class PropertyGrid {
                 addGroup('mat_geotech', 'Shear Failure Envelope', ['dp_cohesion', 'dp_friction_angle', 'dp_dilatancy_angle', 'dp_tensile_cutoff']);
                 addGroup('mat_cap', 'Elliptic Volumetric Hardening Cap (*MAT_025)', ['cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R']);
                 addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
                     addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
@@ -7486,8 +7535,8 @@ export class PropertyGrid {
                 addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
                 addGroup('mat_hoekbrown', 'Hoek-Brown Generalized Rock Mass', ['hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D', 'dp_dilatancy_angle']);
                 addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress']);
-                if (visibleKeys.some(k => k.includes('erosion'))) {
-                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+                if (visibleKeys.some(isErosionKey)) {
+                    addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
                 }
                 if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
                     addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
@@ -7503,8 +7552,8 @@ export class PropertyGrid {
             addGroup('mat_elasticity', 'Elasticity & Mass Density', ['density', 'youngs_modulus', 'poissons_ratio']);
             addGroup('mat_strength', 'Plastic Yield, Hardening & Cowper-Symonds Rate (*MAT_024)', ['yield_stress', 'hardening_modulus', 'cs_C', 'cs_P']);
             addGroup('mat_failure', 'Constitutive Failure & Spall', ['failure_strain', 'tensile_failure_stress', 'directional_crack_band', 'nonlocal_radius']);
-            if (visibleKeys.some(k => k.includes('erosion'))) {
-                addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(k => k.includes('erosion')));
+            if (visibleKeys.some(isErosionKey)) {
+                addGroup('mat_erosion', 'Constitutive Erosion', visibleKeys.filter(isErosionKey));
             }
             if (visibleKeys.some(k => k === 'enable_heterogeneity' || k.startsWith('weibull_'))) {
                 addGroup('mat_flaws', 'Microstructural Flaws & Heterogeneity', ['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume']);
@@ -7551,17 +7600,13 @@ export class PropertyGrid {
         }
 
         if (node.type === 'FEMDomain3D') {
-            addGroup('fem_numerics', 'Hardware & Time Integration', ['device', 'precision', 'cfl', 'endtime', 'integration_scheme', 'hourglass_model', 'hourglass_coeff']);
-            addGroup('fem_contact', 'Contact & Interface Dynamics', ['contact_search_method', 'contact_penalty_scale', 'friction_static', 'friction_kinetic']);
-            addGroup('fem_hetero_aniso', 'Material Heterogeneity & Directional Anisotropy', [
-                'enable_heterogeneity', 'material_heterogeneity',
-                'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
-            ]);
-            addGroup('fem_damage', 'Damage, Cohesive Splitting & Debris', [
+            addGroup('fem_numerics', 'Hardware & Time Integration', ['device', 'precision', 'connected_detonators', 'cfl', 'endtime', 'integration_scheme', 'hourglass_model', 'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2']);
+            addGroup('fem_assembly', 'Assembly & Rebar Coupling', ['merge_coincident_nodes', 'node_merge_tolerance', 'rebar_formulation']);
+            addGroup('fem_contact', 'Contact & Interface Dynamics', ['contact_search_method', 'contact_penalty_scale', 'contact_damping', 'friction_static', 'friction_kinetic']);
+            addGroup('fem_damage', 'Damage Regularization & MPM Debris Conversion', [
                 'enable_directional_crack_band', 'enable_nonlocal_damage',
-                'enable_cohesive_splitting', 'cohesive_fracture_energy',
                 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed',
-                'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element'
+                'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element'
             ]);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
@@ -7571,7 +7616,15 @@ export class PropertyGrid {
         if (node.type === 'FEMObject3D') {
             addGroup('fem_geom', 'Geometry & Mesh Discretization', ['shape_type', 'element_topology', 'origin_mode', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z', 'size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'k_file', 'scale_factor']);
             addGroup('fem_bc', 'Boundary Conditions & Kinematics', ['boundary_condition', 'vel_x', 'vel_y', 'vel_z']);
-            addGroup('fem_visco', 'Viscosity & Time Step Control', ['bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor']);
+            addGroup('fem_obj_erosion', 'Object Erosion & Cohesive Override', ['erosion_source', 'enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress', 'enable_damage_erosion', 'max_damage', 'enable_timestep_erosion', 'timestep_erosion_factor', 'min_volume_ratio', 'max_volume_ratio', 'enable_cohesive_splitting', 'cohesive_fracture_energy']);
+            const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
+            addGroup('general', 'General & Custom Parameters', remaining);
+            return groups;
+        }
+
+        if (node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D') {
+            addGroup('fem_beam_assign', 'Domain & Material Assignment', ['target_domain', 'material']);
+            addGroup('fem_beam_geom', '3D Endpoints, Cross-Section & Failure', ['node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z', 'radius', 'diameter', 'cross_section_area', 'failure_strain']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
             return groups;
@@ -7711,7 +7764,7 @@ export class PropertyGrid {
         }
 
         if (node.type === 'LSDynaImporter3D') {
-            addGroup('dyna_import', 'LS-DYNA Input & Scaling', ['k_file', 'scale_factor']);
+            addGroup('dyna_import', 'LS-DYNA Input & Transform', ['k_file', 'scale_factor', 'pos_x', 'pos_y', 'pos_z', 'rot_x', 'rot_y', 'rot_z']);
             const remaining = visibleKeys.filter(k => !assignedKeys.has(k));
             addGroup('general', 'General & Custom Parameters', remaining);
             return groups;

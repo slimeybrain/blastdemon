@@ -333,6 +333,7 @@ struct MPMParticle2D {
     float jwlr_omega{0.8867f};           // Gruneisen omega
     float jwlr_Cv{2.7806e6f};            // Cv (Pa/K, per initial volume)
     float jwlr_T0{298.0f};               // Reference temperature (K)
+    float jwlp_Cv{1.0e6f};               // Detonation-product heat capacity per INITIAL volume (Pa/K); LLNL 1.0e-5 Mbar/K = 1.0e6 Pa/K
     int   mixture_rule{1};               // 0 = linear blend, 1 = pressure equilibrium (volume additive)
 
     // Tait Water / Compressible Fluid Parameters (2D)

@@ -105,10 +105,13 @@ int main() {
                       << " | Shielded Side B P: " << vals_b[0] << " Pa"
                       << " | 1-Voxel Gap P: " << vals_gap[0] << " Pa" << std::endl;
 
-            // Assertions for stability:
-            assert(!std::isnan(vals_a[0]) && !std::isinf(vals_a[0]) && vals_a[0] > 0.0f);
-            assert(!std::isnan(vals_b[0]) && !std::isinf(vals_b[0]) && vals_b[0] > 0.0f);
-            assert(!std::isnan(vals_gap[0]) && !std::isinf(vals_gap[0]) && vals_gap[0] > 0.0f);
+            // Explicit runtime stability checks (active even in Release/-DNDEBUG):
+            if (std::isnan(vals_a[0]) || std::isinf(vals_a[0]) || vals_a[0] <= 0.0f ||
+                std::isnan(vals_b[0]) || std::isinf(vals_b[0]) || vals_b[0] <= 0.0f ||
+                std::isnan(vals_gap[0]) || std::isinf(vals_gap[0]) || vals_gap[0] <= 0.0f) {
+                std::cerr << "[FAIL] Non-physical or non-positive pressure at step " << step << std::endl;
+                return 1;
+            }
         }
     }
 

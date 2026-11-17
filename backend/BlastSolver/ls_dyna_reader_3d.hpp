@@ -142,8 +142,14 @@ private:
         bool fix_y{false};
         bool fix_z{false};
     };
+    struct PendingMatErosion {
+        int mid{0};
+        float fail_eps{0.0f};
+        float fail_stress{0.0f};
+    };
     std::vector<PendingSPCNode> m_pending_spc_nodes;
     std::vector<PendingSPCSet> m_pending_spc_sets;
+    std::vector<PendingMatErosion> m_pending_erosions;
 
     struct GruneisenEOSProps {
         float c0{0.0f};

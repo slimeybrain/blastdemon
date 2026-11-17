@@ -58,7 +58,19 @@ FEMSolver3D<T>::~FEMSolver3D() {
 
 template <typename T>
 void FEMSolver3D<T>::ensureGaussPointHistory() {
-    if (m_integration_scheme == FEMIntegrationScheme::FullGauss8 || m_integration_scheme == FEMIntegrationScheme::SelectiveReduced) {
+    bool need_gp_hist = (m_integration_scheme == FEMIntegrationScheme::FullGauss8 ||
+                         m_integration_scheme == FEMIntegrationScheme::SelectiveReduced);
+    if (!need_gp_hist) {
+        for (const auto& elem : m_elements) {
+            if (elem.is_eroded) continue;
+            FEMIntegrationScheme es = resolveElementIntegrationScheme(elem, m_integration_scheme);
+            if (es == FEMIntegrationScheme::FullGauss8 || es == FEMIntegrationScheme::SelectiveReduced) {
+                need_gp_hist = true;
+                break;
+            }
+        }
+    }
+    if (need_gp_hist) {
         if (m_gp_history.size() != m_elements.size()) {
             size_t old_size = m_gp_history.size();
             m_gp_history.resize(m_elements.size());
@@ -102,7 +114,44 @@ void FEMSolver3D<T>::createStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly,
 }
 
 template <typename T>
-void FEMSolver3D<T>::addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x, T vel_y, T vel_z, const std::string& boundary_condition) {
+static void rotateFEMNodesEuler(std::vector<FEMNode3D<T>>& nodes, size_t start_idx, T cx_pivot, T cy_pivot, T cz_pivot, T rot_x_deg, T rot_y_deg, T rot_z_deg) {
+    if (std::abs(rot_x_deg) <= static_cast<T>(1.0e-6) &&
+        std::abs(rot_y_deg) <= static_cast<T>(1.0e-6) &&
+        std::abs(rot_z_deg) <= static_cast<T>(1.0e-6)) {
+        return;
+    }
+    constexpr double DEG_TO_RAD = 3.14159265358979323846 / 180.0;
+    const T cx = static_cast<T>(std::cos(static_cast<double>(rot_x_deg) * DEG_TO_RAD));
+    const T sx = static_cast<T>(std::sin(static_cast<double>(rot_x_deg) * DEG_TO_RAD));
+    const T cy = static_cast<T>(std::cos(static_cast<double>(rot_y_deg) * DEG_TO_RAD));
+    const T sy = static_cast<T>(std::sin(static_cast<double>(rot_y_deg) * DEG_TO_RAD));
+    const T cz = static_cast<T>(std::cos(static_cast<double>(rot_z_deg) * DEG_TO_RAD));
+    const T sz = static_cast<T>(std::sin(static_cast<double>(rot_z_deg) * DEG_TO_RAD));
+
+    for (size_t idx = start_idx; idx < nodes.size(); ++idx) {
+        T u = nodes[idx].x[0] - cx_pivot;
+        T v = nodes[idx].x[1] - cy_pivot;
+        T w = nodes[idx].x[2] - cz_pivot;
+
+        // Rotate X, then Y, then Z (consistent with PrimitiveGeometry::rotate_point_euler)
+        T v1 = cx * v - sx * w;
+        T w1 = sx * v + cx * w;
+        T u2 = cy * u + sy * w1;
+        T w2 = -sy * u + cy * w1;
+        T u3 = cz * u2 - sz * v1;
+        T v3 = sz * u2 + cz * v1;
+
+        nodes[idx].x[0] = cx_pivot + u3;
+        nodes[idx].x[1] = cy_pivot + v3;
+        nodes[idx].x[2] = cz_pivot + w2;
+        nodes[idx].x0[0] = nodes[idx].x[0];
+        nodes[idx].x0[1] = nodes[idx].x[1];
+        nodes[idx].x0[2] = nodes[idx].x[2];
+    }
+}
+
+template <typename T>
+void FEMSolver3D<T>::addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x, T vel_y, T vel_z, const std::string& boundary_condition, T rot_x, T rot_y, T rot_z) {
     int mat_id = static_cast<int>(m_material_tables.size());
     m_material_tables.push_back(material);
 
@@ -148,6 +197,12 @@ void FEMSolver3D<T>::addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T 
             }
         }
     }
+
+    rotateFEMNodesEuler(m_nodes, static_cast<size_t>(base_node_idx),
+        pos_x + static_cast<T>(0.5) * lx,
+        pos_y + static_cast<T>(0.5) * ly,
+        pos_z + static_cast<T>(0.5) * lz,
+        rot_x, rot_y, rot_z);
 
     int part_id = m_next_part_id++;
 
@@ -222,7 +277,7 @@ void FEMSolver3D<T>::createStructuredCylinderMesh(int nr, int nz, T radius, T he
 }
 
 template <typename T>
-void FEMSolver3D<T>::addStructuredCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x, T vel_y, T vel_z, T inner_radius, const std::string& boundary_condition) {
+void FEMSolver3D<T>::addStructuredCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x, T vel_y, T vel_z, T inner_radius, const std::string& boundary_condition, T rot_x, T rot_y, T rot_z) {
     int mat_id = static_cast<int>(m_material_tables.size());
     m_material_tables.push_back(material);
 
@@ -547,6 +602,10 @@ void FEMSolver3D<T>::addStructuredCylinderMesh(int nr, int nz, T radius, T heigh
         }
     }
 
+    rotateFEMNodesEuler(m_nodes, static_cast<size_t>(base_node_idx),
+        pos_x, pos_y, pos_z + static_cast<T>(0.5) * height,
+        rot_x, rot_y, rot_z);
+
     m_surface_facets_dirty = true;
     computeLumpedMasses();
     extractBoundaryFacets();
@@ -578,9 +637,9 @@ void FEMSolver3D<T>::createStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T 
 }
 
 template <typename T>
-void FEMSolver3D<T>::addStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x, T vel_y, T vel_z, const std::string& boundary_condition) {
+void FEMSolver3D<T>::addStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x, T vel_y, T vel_z, const std::string& boundary_condition, T rot_x, T rot_y, T rot_z) {
     size_t base_elem_idx = m_elements.size();
-    addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, material, vel_x, vel_y, vel_z, boundary_condition);
+    addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, material, vel_x, vel_y, vel_z, boundary_condition, rot_x, rot_y, rot_z);
 
     static const int FREUDENTHAL_TETS[6][4] = {
         {0, 1, 2, 6},
@@ -641,9 +700,9 @@ void FEMSolver3D<T>::addStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly,
 }
 
 template <typename T>
-void FEMSolver3D<T>::addStructuredTetCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x, T vel_y, T vel_z, T inner_radius, const std::string& boundary_condition) {
+void FEMSolver3D<T>::addStructuredTetCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& material, T vel_x, T vel_y, T vel_z, T inner_radius, const std::string& boundary_condition, T rot_x, T rot_y, T rot_z) {
     size_t base_elem_idx = m_elements.size();
-    addStructuredCylinderMesh(nr, nz, radius, height, pos_x, pos_y, pos_z, material, vel_x, vel_y, vel_z, inner_radius, boundary_condition);
+    addStructuredCylinderMesh(nr, nz, radius, height, pos_x, pos_y, pos_z, material, vel_x, vel_y, vel_z, inner_radius, boundary_condition, rot_x, rot_y, rot_z);
 
     static const int FREUDENTHAL_TETS[6][4] = {
         {0, 1, 2, 6},
@@ -1394,6 +1453,7 @@ int FEMSolver3D<T>::mergeCoincidentNodes(T tolerance) {
             old_to_new[i] = matched_idx;
             for (int d = 0; d < 3; ++d) {
                 if (nd.is_fixed[d]) welded_nodes[matched_idx].is_fixed[d] = true;
+                if (nd.is_prescribed[d]) welded_nodes[matched_idx].is_prescribed[d] = true;
             }
             ++merged_count;
         } else {
@@ -1431,9 +1491,38 @@ int FEMSolver3D<T>::mergeCoincidentNodes(T tolerance) {
             }
         }
     }
-    for (auto& rn : m_rot_nodes) {
-        if (rn.global_node_id >= 0 && rn.global_node_id < static_cast<int>(old_to_new.size())) {
-            rn.global_node_id = old_to_new[rn.global_node_id];
+    if (!m_rot_nodes.empty()) {
+        std::vector<FEMNodeRotationalState3D<T>> dedup_rot;
+        dedup_rot.reserve(m_rot_nodes.size());
+        std::vector<int> old_to_new_rot(m_rot_nodes.size(), -1);
+        m_global_to_rot_node.assign(m_nodes.size(), -1);
+        for (size_t r = 0; r < m_rot_nodes.size(); ++r) {
+            int g_old = m_rot_nodes[r].global_node_id;
+            int g_new = (g_old >= 0 && g_old < static_cast<int>(old_to_new.size())) ? old_to_new[g_old] : -1;
+            if (g_new < 0 || g_new >= static_cast<int>(m_nodes.size())) continue;
+            if (m_global_to_rot_node[g_new] < 0) {
+                int new_r = static_cast<int>(dedup_rot.size());
+                FEMNodeRotationalState3D<T> rn = m_rot_nodes[r];
+                rn.global_node_id = g_new;
+                dedup_rot.push_back(rn);
+                m_global_to_rot_node[g_new] = new_r;
+                old_to_new_rot[r] = new_r;
+            } else {
+                int new_r = m_global_to_rot_node[g_new];
+                for (int c = 0; c < 3; ++c) {
+                    if (m_rot_nodes[r].is_fixed[c]) dedup_rot[new_r].is_fixed[c] = true;
+                }
+                old_to_new_rot[r] = new_r;
+            }
+        }
+        m_rot_nodes = std::move(dedup_rot);
+        for (auto& bm : m_beams) {
+            for (int k = 0; k < 2; ++k) {
+                int old_r = bm.rot_node_ids[k];
+                if (old_r >= 0 && old_r < static_cast<int>(old_to_new_rot.size())) {
+                    bm.rot_node_ids[k] = old_to_new_rot[old_r];
+                }
+            }
         }
     }
 
@@ -1450,8 +1539,7 @@ void FEMSolver3D<T>::addTruss(int n1, int n2, T area, const MaterialTable3D& mat
         return;
     }
     MaterialTable3D truss_mat = mat;
-    if (truss_mat.youngs_modulus < 100.0e9f || truss_mat.yield_stress < 100.0e6f ||
-        truss_mat.material_model == MPMMaterialModel::RHTConcrete ||
+    if (truss_mat.material_model == MPMMaterialModel::RHTConcrete ||
         truss_mat.material_model == MPMMaterialModel::KCConcrete ||
         truss_mat.material_model == MPMMaterialModel::CSCMConcrete) {
         truss_mat.youngs_modulus = 200.0e9f;
@@ -1461,6 +1549,10 @@ void FEMSolver3D<T>::addTruss(int n1, int n2, T area, const MaterialTable3D& mat
         truss_mat.density = 7850.0f;
         truss_mat.material_model = MPMMaterialModel::Hypoelastic;
         truss_mat.failure_strain = 0.20f;
+    } else {
+        if (truss_mat.youngs_modulus <= 0.0f) truss_mat.youngs_modulus = 200.0e9f;
+        if (truss_mat.yield_stress <= 0.0f) truss_mat.yield_stress = 500.0e6f;
+        if (truss_mat.density <= 0.0f) truss_mat.density = 7850.0f;
     }
 
     int mat_id = -1;
@@ -1510,8 +1602,7 @@ void FEMSolver3D<T>::addBeam3D(int n1, int n2, T diameter, const MaterialTable3D
         return;
     }
     MaterialTable3D beam_mat = mat;
-    if (beam_mat.youngs_modulus < 100.0e9f || beam_mat.yield_stress < 100.0e6f ||
-        beam_mat.material_model == MPMMaterialModel::RHTConcrete ||
+    if (beam_mat.material_model == MPMMaterialModel::RHTConcrete ||
         beam_mat.material_model == MPMMaterialModel::KCConcrete ||
         beam_mat.material_model == MPMMaterialModel::CSCMConcrete) {
         beam_mat.youngs_modulus = 200.0e9f;
@@ -1521,6 +1612,10 @@ void FEMSolver3D<T>::addBeam3D(int n1, int n2, T diameter, const MaterialTable3D
         beam_mat.density = 7850.0f;
         beam_mat.material_model = MPMMaterialModel::Hypoelastic;
         beam_mat.failure_strain = 0.20f;
+    } else {
+        if (beam_mat.youngs_modulus <= 0.0f) beam_mat.youngs_modulus = 200.0e9f;
+        if (beam_mat.yield_stress <= 0.0f) beam_mat.yield_stress = 500.0e6f;
+        if (beam_mat.density <= 0.0f) beam_mat.density = 7850.0f;
     }
 
     int mat_id = -1;
@@ -1668,12 +1763,12 @@ void FEMSolver3D<T>::computeTrussForces1D(T dt) {
             mat, eps, axial_edot, static_cast<T>(293.0f),
             truss.eps_p, truss.ep_bar, sigma, current_yield,
             truss.failure_strain, eroded_truss);
-        truss.sigma = sigma;
-
         if (eroded_truss) {
+            truss.sigma = static_cast<T>(0.0f);
             truss.is_eroded = true;
             continue;
         }
+        truss.sigma = sigma;
 
         T N = sigma * truss.A;
         T fx = N * e1[0];
@@ -1737,6 +1832,92 @@ void FEMSolver3D<T>::computeBeamForces3D(T dt) {
         T invL = static_cast<T>(1.0f) / L;
         T e1[3] = { dx * invL, dy * invL, dz * invL };
 
+        T w1[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
+        T w2[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
+        if (r1 >= 0 && r1 < static_cast<int>(m_rot_nodes.size())) {
+            w1[0] = m_rot_nodes[r1].omega[0];
+            w1[1] = m_rot_nodes[r1].omega[1];
+            w1[2] = m_rot_nodes[r1].omega[2];
+        }
+        if (r2 >= 0 && r2 < static_cast<int>(m_rot_nodes.size())) {
+            w2[0] = m_rot_nodes[r2].omega[0];
+            w2[1] = m_rot_nodes[r2].omega[1];
+            w2[2] = m_rot_nodes[r2].omega[2];
+        }
+
+        // Co-rotate cross-section triad (beam.e2, beam.e3) with current axis e1 and axial twist
+        T e1_old[3] = {
+            beam.e2[1]*beam.e3[2] - beam.e2[2]*beam.e3[1],
+            beam.e2[2]*beam.e3[0] - beam.e2[0]*beam.e3[2],
+            beam.e2[0]*beam.e3[1] - beam.e2[1]*beam.e3[0]
+        };
+        T norm_e1_old = std::sqrt(e1_old[0]*e1_old[0] + e1_old[1]*e1_old[1] + e1_old[2]*e1_old[2]);
+        if (norm_e1_old > static_cast<T>(1.0e-12f)) {
+            e1_old[0] /= norm_e1_old;
+            e1_old[1] /= norm_e1_old;
+            e1_old[2] /= norm_e1_old;
+        } else {
+            e1_old[0] = e1[0]; e1_old[1] = e1[1]; e1_old[2] = e1[2];
+        }
+        T c_rot = e1_old[0]*e1[0] + e1_old[1]*e1[1] + e1_old[2]*e1[2];
+        T rot_axis[3] = {
+            e1_old[1]*e1[2] - e1_old[2]*e1[1],
+            e1_old[2]*e1[0] - e1_old[0]*e1[2],
+            e1_old[0]*e1[1] - e1_old[1]*e1[0]
+        };
+        T e2_rot[3] = { beam.e2[0], beam.e2[1], beam.e2[2] };
+        if (static_cast<T>(1.0f) + c_rot > static_cast<T>(1.0e-12f)) {
+            T ax_x_e2[3] = {
+                rot_axis[1]*beam.e2[2] - rot_axis[2]*beam.e2[1],
+                rot_axis[2]*beam.e2[0] - rot_axis[0]*beam.e2[2],
+                rot_axis[0]*beam.e2[1] - rot_axis[1]*beam.e2[0]
+            };
+            T ax_x_ax_e2[3] = {
+                rot_axis[1]*ax_x_e2[2] - rot_axis[2]*ax_x_e2[1],
+                rot_axis[2]*ax_x_e2[0] - rot_axis[0]*ax_x_e2[2],
+                rot_axis[0]*ax_x_e2[1] - rot_axis[1]*ax_x_e2[0]
+            };
+            T inv_1pc = static_cast<T>(1.0f) / (static_cast<T>(1.0f) + c_rot);
+            e2_rot[0] = beam.e2[0] + ax_x_e2[0] + ax_x_ax_e2[0] * inv_1pc;
+            e2_rot[1] = beam.e2[1] + ax_x_e2[1] + ax_x_ax_e2[1] * inv_1pc;
+            e2_rot[2] = beam.e2[2] + ax_x_e2[2] + ax_x_ax_e2[2] * inv_1pc;
+        }
+        T dtheta_twist = static_cast<T>(0.5f) * ((w1[0] + w2[0])*e1[0] + (w1[1] + w2[1])*e1[1] + (w1[2] + w2[2])*e1[2]) * dt;
+        if (std::abs(dtheta_twist) > static_cast<T>(1.0e-12f)) {
+            T c_tw = std::cos(dtheta_twist);
+            T s_tw = std::sin(dtheta_twist);
+            T e1_x_e2[3] = {
+                e1[1]*e2_rot[2] - e1[2]*e2_rot[1],
+                e1[2]*e2_rot[0] - e1[0]*e2_rot[2],
+                e1[0]*e2_rot[1] - e1[1]*e2_rot[0]
+            };
+            e2_rot[0] = c_tw * e2_rot[0] + s_tw * e1_x_e2[0];
+            e2_rot[1] = c_tw * e2_rot[1] + s_tw * e1_x_e2[1];
+            e2_rot[2] = c_tw * e2_rot[2] + s_tw * e1_x_e2[2];
+        }
+        // Re-orthonormalize e1, e2, e3
+        T dot_e2_e1 = e2_rot[0]*e1[0] + e2_rot[1]*e1[1] + e2_rot[2]*e1[2];
+        e2_rot[0] -= dot_e2_e1 * e1[0];
+        e2_rot[1] -= dot_e2_e1 * e1[1];
+        e2_rot[2] -= dot_e2_e1 * e1[2];
+        T norm_e2 = std::sqrt(e2_rot[0]*e2_rot[0] + e2_rot[1]*e2_rot[1] + e2_rot[2]*e2_rot[2]);
+        if (norm_e2 > static_cast<T>(1.0e-12f)) {
+            beam.e2[0] = e2_rot[0] / norm_e2;
+            beam.e2[1] = e2_rot[1] / norm_e2;
+            beam.e2[2] = e2_rot[2] / norm_e2;
+        }
+        T e3_new[3] = {
+            e1[1]*beam.e2[2] - e1[2]*beam.e2[1],
+            e1[2]*beam.e2[0] - e1[0]*beam.e2[2],
+            e1[0]*beam.e2[1] - e1[1]*beam.e2[0]
+        };
+        T norm_e3 = std::sqrt(e3_new[0]*e3_new[0] + e3_new[1]*e3_new[1] + e3_new[2]*e3_new[2]);
+        if (norm_e3 > static_cast<T>(1.0e-12f)) {
+            beam.e3[0] = e3_new[0] / norm_e3;
+            beam.e3[1] = e3_new[1] / norm_e3;
+            beam.e3[2] = e3_new[2] / norm_e3;
+        }
+
         T eps = (L - beam.L0) / beam.L0;
         T dv[3] = { m_nodes[n2].v[0] - m_nodes[n1].v[0], m_nodes[n2].v[1] - m_nodes[n1].v[1], m_nodes[n2].v[2] - m_nodes[n1].v[2] };
         T axial_edot = (dv[0]*e1[0] + dv[1]*e1[1] + dv[2]*e1[2]) * invL;
@@ -1755,22 +1936,15 @@ void FEMSolver3D<T>::computeBeamForces3D(T dt) {
             beam.failure_strain, eroded_beam);
         if (eroded_beam) {
             beam.is_eroded = true;
+            beam.N = static_cast<T>(0.0f);
+            beam.V2 = static_cast<T>(0.0f);
+            beam.V3 = static_cast<T>(0.0f);
+            beam.M2 = static_cast<T>(0.0f);
+            beam.M3 = static_cast<T>(0.0f);
+            beam.T_tor = static_cast<T>(0.0f);
             continue;
         }
         T N = sigma * beam.A;
-
-        T w1[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
-        T w2[3] = { static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f) };
-        if (r1 >= 0 && r1 < static_cast<int>(m_rot_nodes.size())) {
-            w1[0] = m_rot_nodes[r1].omega[0];
-            w1[1] = m_rot_nodes[r1].omega[1];
-            w1[2] = m_rot_nodes[r1].omega[2];
-        }
-        if (r2 >= 0 && r2 < static_cast<int>(m_rot_nodes.size())) {
-            w2[0] = m_rot_nodes[r2].omega[0];
-            w2[1] = m_rot_nodes[r2].omega[1];
-            w2[2] = m_rot_nodes[r2].omega[2];
-        }
 
         T dw[3] = { w2[0] - w1[0], w2[1] - w1[1], w2[2] - w1[2] };
         T dot_kappa2 = (dw[0]*beam.e2[0] + dw[1]*beam.e2[1] + dw[2]*beam.e2[2]) * invL;
@@ -1797,17 +1971,14 @@ void FEMSolver3D<T>::computeBeamForces3D(T dt) {
         T V3 = 0.0f;
 
         if (r1 >= 0 && r1 < static_cast<int>(m_rot_nodes.size()) && r2 >= 0 && r2 < static_cast<int>(m_rot_nodes.size())) {
-            T w_mag_sq = w1[0]*w1[0] + w1[1]*w1[1] + w1[2]*w1[2] + w2[0]*w2[0] + w2[1]*w2[1] + w2[2]*w2[2];
-            if (w_mag_sq > static_cast<T>(1.0e-12f)) {
-                T w_rel[3] = { w_avg[0] - omega_rigid[0], w_avg[1] - omega_rigid[1], w_avg[2] - omega_rigid[2] };
-                dot_gamma12 = w_rel[0]*beam.e3[0] + w_rel[1]*beam.e3[1] + w_rel[2]*beam.e3[2];
-                dot_gamma13 = -(w_rel[0]*beam.e2[0] + w_rel[1]*beam.e2[1] + w_rel[2]*beam.e2[2]);
-                beam.gamma12 += dot_gamma12 * dt;
-                beam.gamma13 += dot_gamma13 * dt;
-                T kappa_shear = static_cast<T>(0.90f);
-                V2 = kappa_shear * G * beam.A * beam.gamma12;
-                V3 = kappa_shear * G * beam.A * beam.gamma13;
-            }
+            T w_rel[3] = { w_avg[0] - omega_rigid[0], w_avg[1] - omega_rigid[1], w_avg[2] - omega_rigid[2] };
+            dot_gamma12 = -(w_rel[0]*beam.e3[0] + w_rel[1]*beam.e3[1] + w_rel[2]*beam.e3[2]);
+            dot_gamma13 =  (w_rel[0]*beam.e2[0] + w_rel[1]*beam.e2[1] + w_rel[2]*beam.e2[2]);
+            beam.gamma12 += dot_gamma12 * dt;
+            beam.gamma13 += dot_gamma13 * dt;
+            T kappa_shear = static_cast<T>(0.90f);
+            V2 = kappa_shear * G * beam.A * beam.gamma12;
+            V3 = kappa_shear * G * beam.A * beam.gamma13;
         }
 
         T M2 = E * beam.I2 * beam.kappa2;
@@ -1816,15 +1987,41 @@ void FEMSolver3D<T>::computeBeamForces3D(T dt) {
         T Mp = beam.Zp * current_yield;
         if (M_res > Mp && M_res > static_cast<T>(1.0e-12f)) {
             T scale_m = Mp / M_res;
+            T kappa_res = std::sqrt(beam.kappa2*beam.kappa2 + beam.kappa3*beam.kappa3);
             M2 *= scale_m;
             M3 *= scale_m;
+            beam.kappa2 *= scale_m;
+            beam.kappa3 *= scale_m;
+            if (beam.d > static_cast<T>(0.0f)) {
+                beam.ep_bar += (static_cast<T>(1.0f) - scale_m) * kappa_res * static_cast<T>(0.5f) * beam.d;
+                T fail_lim = (mat.enable_strain_erosion && mat.erosion_strain > 0.0f)
+                    ? static_cast<T>(mat.erosion_strain)
+                    : (mat.failure_strain > 0.0f ? static_cast<T>(mat.failure_strain) : beam.failure_strain);
+                if (fail_lim > static_cast<T>(0.0f) && beam.ep_bar >= fail_lim) {
+                    beam.is_eroded = true;
+                    beam.N = static_cast<T>(0.0f);
+                    beam.V2 = static_cast<T>(0.0f);
+                    beam.V3 = static_cast<T>(0.0f);
+                    beam.M2 = static_cast<T>(0.0f);
+                    beam.M3 = static_cast<T>(0.0f);
+                    beam.T_tor = static_cast<T>(0.0f);
+                    continue;
+                }
+            }
         }
 
         T T_tor = G * beam.J * beam.kappa_tor;
 
-        T f2_x = N * e1[0];
-        T f2_y = N * e1[1];
-        T f2_z = N * e1[2];
+        beam.N = N;
+        beam.V2 = V2;
+        beam.V3 = V3;
+        beam.M2 = M2;
+        beam.M3 = M3;
+        beam.T_tor = T_tor;
+
+        T f2_x = beam.N * e1[0] + beam.V2 * beam.e2[0] + beam.V3 * beam.e3[0];
+        T f2_y = beam.N * e1[1] + beam.V2 * beam.e2[1] + beam.V3 * beam.e3[1];
+        T f2_z = beam.N * e1[2] + beam.V2 * beam.e2[2] + beam.V3 * beam.e3[2];
 
 #ifdef _OPENMP
         #pragma omp atomic
@@ -1852,9 +2049,9 @@ void FEMSolver3D<T>::computeBeamForces3D(T dt) {
 
         T half_L = static_cast<T>(0.5f) * L;
         T V_cross[3] = {
-            -V3 * beam.e2[0] + V2 * beam.e3[0],
-            -V3 * beam.e2[1] + V2 * beam.e3[1],
-            -V3 * beam.e2[2] + V2 * beam.e3[2]
+            V3 * beam.e2[0] - V2 * beam.e3[0],
+            V3 * beam.e2[1] - V2 * beam.e3[1],
+            V3 * beam.e2[2] - V2 * beam.e3[2]
         };
 
         T m2_x = T_tor * e1[0] + M2 * beam.e2[0] + M3 * beam.e3[0] + half_L * V_cross[0];
@@ -1916,7 +2113,7 @@ void FEMSolver3D<T>::updateRotationalKinematicsCentralDifference(T dt) {
             }
             T m_net = rnode.m_ext[c] - rnode.m_int[c];
             rnode.alpha[c] = m_net / rnode.I_rot;
-            rnode.omega[c] += rnode.alpha[c] * dt;
+            rnode.omega[c] += static_cast<T>(0.5f) * rnode.alpha[c] * dt;
         }
     }
 }
@@ -1927,6 +2124,7 @@ void FEMSolver3D<T>::computeLumpedMasses() {
     m_nodes.reserve(m_max_nodes_capacity);
     m_nodal_vol_cur.resize(m_max_nodes_capacity, static_cast<T>(0.0f));
     m_nodal_vol_ref.resize(m_max_nodes_capacity, static_cast<T>(0.0f));
+    m_nodal_dvol_dt.resize(m_max_nodes_capacity, static_cast<T>(0.0f));
     m_node_elem_ref_count.assign(m_max_nodes_capacity, 0);
 
     for (auto& node : m_nodes) {
@@ -2084,14 +2282,30 @@ void FEMSolver3D<T>::computeHourglassForcesFB(FEMElement3D<T>& elem, T dt, const
     (void)dt;
     (void)B;
     (void)detJ;
-    if (elem.is_eroded || isTet4Element(elem) || m_hourglass_coeff <= static_cast<T>(1.0e-6)) return;
+    const T hg_coeff = resolveElementHourglassCoeff(elem, m_hourglass_coeff);
+    if (elem.is_eroded || isTet4Element(elem) || hg_coeff <= static_cast<T>(1.0e-6)) return;
 
     const auto& mat = m_material_tables[elem.mat_id];
     T E = static_cast<T>(mat.youngs_modulus);
+    T nu = static_cast<T>(mat.poissons_ratio > 0.0f ? mat.poissons_ratio : 0.30f);
+    if (nu >= static_cast<T>(0.499f)) nu = static_cast<T>(0.499f);
+    T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
+    T nu_kf = (nu > static_cast<T>(0.45f)) ? static_cast<T>(0.45f) : nu;
+    T lambda_kf = (E * nu_kf) / ((static_cast<T>(1.0f) + nu_kf) * (static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu_kf));
     T density = static_cast<T>(mat.density);
+    T V_cur = elem.V > static_cast<T>(0.0f) ? elem.V : elem.V0;
+    T b_norm_sq = static_cast<T>(0.0f);
+    for (int n = 0; n < 8; ++n) {
+        b_norm_sq += dN_dx[n][0]*dN_dx[n][0] + dN_dx[n][1]*dN_dx[n][1] + dN_dx[n][2]*dN_dx[n][2];
+    }
 
-    T viscous_factor = static_cast<T>(0.05f) * m_hourglass_coeff * density * cd * char_len * char_len;
-    T stiffness_factor = static_cast<T>(0.25f) * m_hourglass_coeff * E * char_len;
+    T viscous_factor = static_cast<T>(0.05f) * hg_coeff * density * cd * char_len * char_len;
+    T stiffness_factor = static_cast<T>(0.25f) * hg_coeff * E * char_len;
+    T c_stiff_kf = static_cast<T>(0.5f) * hg_coeff * (lambda_kf + static_cast<T>(2.0f) * G) * V_cur * b_norm_sq;
+    const FEMHourglassModel hg_model_elem = resolveElementHourglassModel(elem, m_hourglass_model);
+    const FEMIntegrationScheme scheme_elem = resolveElementIntegrationScheme(elem, m_integration_scheme);
+    const bool use_kf = (hg_model_elem == FEMHourglassModel::KosloffFrazier ||
+                         scheme_elem == FEMIntegrationScheme::OnePointKF);
 
     // Newton-Schulz Polar Decomposition to extract element rotation R_elem
     T R_elem[3][3];
@@ -2195,9 +2409,14 @@ void FEMSolver3D<T>::computeHourglassForcesFB(FEMElement3D<T>& elem, T dt, const
         for (int n = 0; n < 8; ++n) {
             int nid = elem.node_ids[n];
             for (int c = 0; c < 3; ++c) {
-                T f_hg = (m_hourglass_model == FEMHourglassModel::FlanaganBelytschkoViscous)
-                         ? viscous_factor * gamma_ortho[n] * q_vel[c]
-                         : stiffness_factor * gamma_ortho[n] * q_disp[c];
+                T f_hg;
+                if (use_kf) {
+                    f_hg = gamma_ortho[n] * (c_stiff_kf * q_disp[c] + static_cast<T>(0.15f) * viscous_factor * q_vel[c]);
+                } else if (hg_model_elem == FEMHourglassModel::FlanaganBelytschkoViscous) {
+                    f_hg = gamma_ortho[n] * (viscous_factor * q_vel[c] + static_cast<T>(0.10f) * stiffness_factor * q_disp[c]);
+                } else {
+                    f_hg = gamma_ortho[n] * (stiffness_factor * q_disp[c] + static_cast<T>(0.25f) * viscous_factor * q_vel[c]);
+                }
 #ifdef _OPENMP
                 #pragma omp atomic
                 m_nodes[nid].f_int[c] += f_hg;
@@ -2217,6 +2436,9 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
     if (m_nodal_vol_cur.size() < m_nodes.size()) {
         m_nodal_vol_cur.resize(m_nodes.size(), static_cast<T>(0.0f));
         m_nodal_vol_ref.resize(m_nodes.size(), static_cast<T>(0.0f));
+        m_nodal_dvol_dt.resize(m_nodes.size(), static_cast<T>(0.0f));
+    } else if (m_nodal_dvol_dt.size() < m_nodes.size()) {
+        m_nodal_dvol_dt.resize(m_nodes.size(), static_cast<T>(0.0f));
     }
 
     // Reset internal nodal forces and ANP volume accumulators
@@ -2229,32 +2451,54 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
         m_nodes[nid].f_int[2] = static_cast<T>(0.0f);
         m_nodal_vol_cur[nid] = static_cast<T>(0.0f);
         m_nodal_vol_ref[nid] = static_cast<T>(0.0f);
+        m_nodal_dvol_dt[nid] = static_cast<T>(0.0f);
     }
 
-    // Pass 1: Tet4-ANP Nodal Volume Scatter (Bonet & Burton 1998) for non-energetic solid tetrahedra
+    // Pass 1: Tet4-ANP Nodal Volume & Volume Rate Scatter (Bonet & Burton 1998; Puso & Solberg 2006)
 #ifdef _OPENMP
     #pragma omp parallel for schedule(static)
 #endif
     for (int e = 0; e < static_cast<int>(m_elements.size()); ++e) {
         auto& elem = m_elements[e];
-        if (elem.is_eroded || !isTet4Element(elem)) continue;
+        if (elem.is_eroded || !isTet4ANPElement(elem)) continue;
         const auto& mat = m_material_tables[elem.mat_id];
         bool is_energetic = (mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
                              mat.material_model == MPMMaterialModel::CRESTReactiveBurn ||
                              mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth);
         if (is_energetic || elem.is_detached) continue;
 
-        T x_mid_t[4][3];
+        T x_cur_t[4][3], x_mid_t[4][3], v_t[4][3];
+        T v_center_t[3] = {static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f)};
         for (int n = 0; n < 4; ++n) {
             int nid = elem.node_ids[n];
             for (int c = 0; c < 3; ++c) {
-                x_mid_t[n][c] = m_nodes[nid].x[c] - static_cast<T>(0.5f) * m_nodes[nid].v[c] * dt;
+                x_cur_t[n][c] = m_nodes[nid].x[c];
+                v_t[n][c] = m_nodes[nid].v[c];
+                x_mid_t[n][c] = x_cur_t[n][c] - static_cast<T>(0.5f) * v_t[n][c] * dt;
+                v_center_t[c] += v_t[n][c];
             }
         }
-        T V_cur = computeTet4SignedVolume(x_mid_t);
-        if (V_cur <= static_cast<T>(1.0e-18f)) continue;
+        v_center_t[0] *= static_cast<T>(0.25f);
+        v_center_t[1] *= static_cast<T>(0.25f);
+        v_center_t[2] *= static_cast<T>(0.25f);
+
+        T dN_cur_t[4][3], V_cur = static_cast<T>(0.0f);
+        computeTet4ShapeGradients(x_cur_t, dN_cur_t, V_cur);
+
+        T dN_t[4][3], V_mid = static_cast<T>(0.0f);
+        computeTet4ShapeGradients(x_mid_t, dN_t, V_mid);
+        if (V_cur <= static_cast<T>(1.0e-18f) || V_mid <= static_cast<T>(1.0e-18f)) continue;
+
+        T div_v_elem = static_cast<T>(0.0f);
+        for (int n = 0; n < 4; ++n) {
+            div_v_elem += dN_t[n][0] * (v_t[n][0] - v_center_t[0])
+                        + dN_t[n][1] * (v_t[n][1] - v_center_t[1])
+                        + dN_t[n][2] * (v_t[n][2] - v_center_t[2]);
+        }
+
         T v_cur_q = static_cast<T>(0.25f) * V_cur;
         T v_ref_q = static_cast<T>(0.25f) * elem.V0;
+        T dvol_dt_q = static_cast<T>(0.25f) * V_mid * div_v_elem;
         for (int n = 0; n < 4; ++n) {
             int nid = elem.node_ids[n];
 #ifdef _OPENMP
@@ -2262,15 +2506,36 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             m_nodal_vol_cur[nid] += v_cur_q;
             #pragma omp atomic
             m_nodal_vol_ref[nid] += v_ref_q;
+            #pragma omp atomic
+            m_nodal_dvol_dt[nid] += dvol_dt_q;
 #else
             m_nodal_vol_cur[nid] += v_cur_q;
             m_nodal_vol_ref[nid] += v_ref_q;
+            m_nodal_dvol_dt[nid] += dvol_dt_q;
 #endif
         }
     }
 
+    if (!m_elements.empty() && m_gp_history.size() < m_elements.size()) {
+        bool need_gp_hist = (m_integration_scheme == FEMIntegrationScheme::FullGauss8 ||
+                             m_integration_scheme == FEMIntegrationScheme::SelectiveReduced);
+        if (!need_gp_hist) {
+            for (const auto& el : m_elements) {
+                if (el.element_formulation == static_cast<int8_t>(FEMElementFormulation::Hex8_SRI) ||
+                    el.element_formulation == static_cast<int8_t>(FEMElementFormulation::Hex8_FullGauss8)) {
+                    need_gp_hist = true;
+                    break;
+                }
+            }
+        }
+        if (need_gp_hist) {
+            ensureGaussPointHistory();
+        }
+    }
+
+    int any_facets_dirty = 0;
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(guided)
+    #pragma omp parallel for reduction(|:any_facets_dirty) schedule(guided)
 #endif
     for (int e = 0; e < static_cast<int>(m_elements.size()); ++e) {
         auto& elem = m_elements[e];
@@ -2303,6 +2568,19 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             }
         }
 
+        const int num_nodes_elem = is_tet4 ? 4 : 8;
+        const T inv_num_nodes = is_tet4 ? static_cast<T>(0.25f) : static_cast<T>(0.125f);
+        T x0_center[3] = {static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f)};
+        for (int n = 0; n < num_nodes_elem; ++n) {
+            int nid = elem.node_ids[n];
+            x0_center[0] += m_nodes[nid].x0[0];
+            x0_center[1] += m_nodes[nid].x0[1];
+            x0_center[2] += m_nodes[nid].x0[2];
+        }
+        x0_center[0] *= inv_num_nodes;
+        x0_center[1] *= inv_num_nodes;
+        x0_center[2] *= inv_num_nodes;
+
         T cs_C = m_physics_params.cowper_symonds_C;
         T cs_P = m_physics_params.cowper_symonds_P;
         T b1 = static_cast<T>(mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : m_physics_params.bulk_viscosity_b1);
@@ -2312,8 +2590,8 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
         T p_elem_prev = -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f) - elem.q_visc;
         T cd = computeDilatationalWaveSpeed<T>(mat, v_rel_elem, elem.lambda, p_elem_prev, elem.e_int);
 
-        if (!is_tet4 && !is_energetic && (m_integration_scheme == FEMIntegrationScheme::FullGauss8 || m_integration_scheme == FEMIntegrationScheme::SelectiveReduced)) {
-            ensureGaussPointHistory();
+        const FEMIntegrationScheme elem_scheme = resolveElementIntegrationScheme(elem, m_integration_scheme);
+        if (!is_tet4 && !is_energetic && (elem_scheme == FEMIntegrationScheme::FullGauss8 || elem_scheme == FEMIntegrationScheme::SelectiveReduced)) {
             auto& gp_hist = m_gp_history[e];
             static const T gp_coords[8][3] = {
                 {static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257)},
@@ -2327,19 +2605,26 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             };
 
             T B_center[6][24], detJ_center;
+            T B_center_cur[6][24], detJ_center_cur;
+            computeHex8BMatrix(x_nodes, B_center_cur, detJ_center_cur);
             computeHex8BMatrix(x_mid, B_center, detJ_center);
-            T min_vol_r = m_erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) ? m_erosion_criteria.min_volume_ratio : static_cast<T>(0.02f);
-            if (detJ_center <= static_cast<T>(1.0e-15f) || (elem.V0 > static_cast<T>(1.0e-18f) && (detJ_center * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
-                if (elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f)) {
-                    elem.is_eroded = true;
-                    m_surface_facets_dirty = true;
-                }
+            const T mat_min_vol = static_cast<T>(mat.min_volume_ratio > 0.0f ? mat.min_volume_ratio : 0.02f);
+            const T crit_min_vol = m_erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) ? m_erosion_criteria.min_volume_ratio : mat_min_vol;
+            const bool has_global_er = (m_erosion_criteria.enable_strain_erosion || m_erosion_criteria.enable_stress_erosion ||
+                                        m_erosion_criteria.enable_damage_erosion || m_erosion_criteria.enable_timestep_erosion);
+            const T min_vol_r = (has_global_er && mat.min_volume_ratio == 0.02f) ? crit_min_vol : mat_min_vol;
+            if (detJ_center_cur <= static_cast<T>(0.0f) || (elem.V0 > static_cast<T>(1.0e-30f) && (detJ_center_cur * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
+                elem.V = detJ_center_cur * static_cast<T>(8.0f);
+                elem.is_eroded = true;
+                std::memset(elem.sigma, 0, sizeof(elem.sigma));
+                std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
+                any_facets_dirty = 1;
                 continue;
             }
-            elem.V = detJ_center * static_cast<T>(8.0f);
+            elem.V = detJ_center_cur * static_cast<T>(8.0f);
 
             T div_v_center = 0.0f;
-            if (m_integration_scheme == FEMIntegrationScheme::SelectiveReduced) {
+            if (elem_scheme == FEMIntegrationScheme::SelectiveReduced) {
                 T v_center_local[3] = {0.0f, 0.0f, 0.0f};
                 for (int n = 0; n < 8; ++n) {
                     v_center_local[0] += v_nodes[n][0]; v_center_local[1] += v_nodes[n][1]; v_center_local[2] += v_nodes[n][2];
@@ -2359,7 +2644,7 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     }
                 }
                 div_v_center = strain_rate_center[0] + strain_rate_center[1] + strain_rate_center[2];
-                if (std::abs(div_v_center) * dt < static_cast<T>(1.0e-6f)) {
+                if (std::abs(div_v_center) * dt < static_cast<T>(1.0e-15f)) {
                     div_v_center = static_cast<T>(0.0f);
                 }
             }
@@ -2372,6 +2657,9 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             T lambda_avg = 0.0f;
             T e_int_avg = 0.0f;
             T V_sum = 0.0f;
+            T f_elem_total[24] = {0.0f};
+            T dw_visc_total = static_cast<T>(0.0f);
+            bool all_gp_valid = true;
 
             for (int g = 0; g < 8; ++g) {
                 T dN_dxi_g[8][3];
@@ -2384,52 +2672,96 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     dN_dxi_g[i][2] = 0.125f * HEX8_XI[i][2] * (1.0f + HEX8_XI[i][0] * xi)  * (1.0f + HEX8_XI[i][1] * eta);
                 }
 
+                T x_center_cur_local[3] = {0.0f, 0.0f, 0.0f};
                 T x_center_local[3] = {0.0f, 0.0f, 0.0f};
                 for (int n = 0; n < 8; ++n) {
+                    x_center_cur_local[0] += x_nodes[n][0]; x_center_cur_local[1] += x_nodes[n][1]; x_center_cur_local[2] += x_nodes[n][2];
                     x_center_local[0] += x_mid[n][0]; x_center_local[1] += x_mid[n][1]; x_center_local[2] += x_mid[n][2];
                 }
+                x_center_cur_local[0] *= static_cast<T>(0.125f); x_center_cur_local[1] *= static_cast<T>(0.125f); x_center_cur_local[2] *= static_cast<T>(0.125f);
                 x_center_local[0] *= static_cast<T>(0.125f); x_center_local[1] *= static_cast<T>(0.125f); x_center_local[2] *= static_cast<T>(0.125f);
 
+                T x_cur_rel_local[8][3];
                 T x_rel_local[8][3];
                 for (int n = 0; n < 8; ++n) {
+                    x_cur_rel_local[n][0] = x_nodes[n][0] - x_center_cur_local[0];
+                    x_cur_rel_local[n][1] = x_nodes[n][1] - x_center_cur_local[1];
+                    x_cur_rel_local[n][2] = x_nodes[n][2] - x_center_cur_local[2];
                     x_rel_local[n][0] = x_mid[n][0] - x_center_local[0];
                     x_rel_local[n][1] = x_mid[n][1] - x_center_local[1];
                     x_rel_local[n][2] = x_mid[n][2] - x_center_local[2];
                 }
 
+                T J_g_cur[3][3] = {{0.0f}};
                 T J_g[3][3] = {{0.0f}};
                 for (int i = 0; i < 8; ++i) {
                     for (int r = 0; r < 3; ++r) {
                         for (int c = 0; c < 3; ++c) {
+                            J_g_cur[r][c] += dN_dxi_g[i][r] * x_cur_rel_local[i][c];
                             J_g[r][c] += dN_dxi_g[i][r] * x_rel_local[i][c];
                         }
                     }
                 }
 
+                T detJ_g_cur = J_g_cur[0][0] * (J_g_cur[1][1]*J_g_cur[2][2] - J_g_cur[1][2]*J_g_cur[2][1])
+                             - J_g_cur[0][1] * (J_g_cur[1][0]*J_g_cur[2][2] - J_g_cur[1][2]*J_g_cur[2][0])
+                             + J_g_cur[0][2] * (J_g_cur[1][0]*J_g_cur[2][1] - J_g_cur[1][1]*J_g_cur[2][0]);
+
+                if (detJ_g_cur <= static_cast<T>(1.0e-15f)) {
+                    elem.is_eroded = true;
+                    any_facets_dirty = 1;
+                    all_gp_valid = false;
+                    break;
+                }
+                V_sum += detJ_g_cur;
+                T invDetJ_g_cur = static_cast<T>(1.0f) / detJ_g_cur;
+
+                T J_inv_g_cur[3][3];
+                J_inv_g_cur[0][0] = (J_g_cur[1][1]*J_g_cur[2][2] - J_g_cur[1][2]*J_g_cur[2][1]) * invDetJ_g_cur;
+                J_inv_g_cur[0][1] = (J_g_cur[0][2]*J_g_cur[2][1] - J_g_cur[0][1]*J_g_cur[2][2]) * invDetJ_g_cur;
+                J_inv_g_cur[0][2] = (J_g_cur[0][1]*J_g_cur[1][2] - J_g_cur[0][2]*J_g_cur[1][1]) * invDetJ_g_cur;
+                J_inv_g_cur[1][0] = (J_g_cur[1][2]*J_g_cur[2][0] - J_g_cur[1][0]*J_g_cur[2][2]) * invDetJ_g_cur;
+                J_inv_g_cur[1][1] = (J_g_cur[0][0]*J_g_cur[2][2] - J_g_cur[0][2]*J_g_cur[2][0]) * invDetJ_g_cur;
+                J_inv_g_cur[1][2] = (J_g_cur[0][2]*J_g_cur[1][0] - J_g_cur[0][0]*J_g_cur[1][2]) * invDetJ_g_cur;
+                J_inv_g_cur[2][0] = (J_g_cur[1][0]*J_g_cur[2][1] - J_g_cur[1][1]*J_g_cur[2][0]) * invDetJ_g_cur;
+                J_inv_g_cur[2][1] = (J_g_cur[0][1]*J_g_cur[2][0] - J_g_cur[0][0]*J_g_cur[2][1]) * invDetJ_g_cur;
+                J_inv_g_cur[2][2] = (J_g_cur[0][0]*J_g_cur[1][1] - J_g_cur[0][1]*J_g_cur[1][0]) * invDetJ_g_cur;
+
+                T dN_dx_g_cur[8][3];
+                for (int i = 0; i < 8; ++i) {
+                    for (int c = 0; c < 3; ++c) {
+                        dN_dx_g_cur[i][c] = J_inv_g_cur[c][0] * dN_dxi_g[i][0] + J_inv_g_cur[c][1] * dN_dxi_g[i][1] + J_inv_g_cur[c][2] * dN_dxi_g[i][2];
+                    }
+                }
+
+                T B_g_cur[6][24] = {{0.0f}};
+                for (int i = 0; i < 8; ++i) {
+                    int col = i * 3;
+                    B_g_cur[0][col + 0] = dN_dx_g_cur[i][0];
+                    B_g_cur[1][col + 1] = dN_dx_g_cur[i][1];
+                    B_g_cur[2][col + 2] = dN_dx_g_cur[i][2];
+                    B_g_cur[3][col + 0] = dN_dx_g_cur[i][1]; B_g_cur[3][col + 1] = dN_dx_g_cur[i][0];
+                    B_g_cur[4][col + 1] = dN_dx_g_cur[i][2]; B_g_cur[4][col + 2] = dN_dx_g_cur[i][1];
+                    B_g_cur[5][col + 0] = dN_dx_g_cur[i][2]; B_g_cur[5][col + 2] = dN_dx_g_cur[i][0];
+                }
+
                 T detJ_g = J_g[0][0] * (J_g[1][1]*J_g[2][2] - J_g[1][2]*J_g[2][1])
                          - J_g[0][1] * (J_g[1][0]*J_g[2][2] - J_g[1][2]*J_g[2][0])
                          + J_g[0][2] * (J_g[1][0]*J_g[2][1] - J_g[1][1]*J_g[2][0]);
-
-                if (detJ_g <= static_cast<T>(1.0e-15f)) {
-                    if (elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f)) {
-                        elem.is_eroded = true;
-                        m_surface_facets_dirty = true;
-                    }
-                    break;
-                }
-                V_sum += detJ_g;
-                T invDetJ_g = static_cast<T>(1.0f) / detJ_g;
+                const T (&J_g_kin)[3][3] = (detJ_g > static_cast<T>(1.0e-15f)) ? J_g : J_g_cur;
+                const T detJ_g_kin = (detJ_g > static_cast<T>(1.0e-15f)) ? detJ_g : detJ_g_cur;
+                T invDetJ_g = static_cast<T>(1.0f) / detJ_g_kin;
 
                 T J_inv_g[3][3];
-                J_inv_g[0][0] = (J_g[1][1]*J_g[2][2] - J_g[1][2]*J_g[2][1]) * invDetJ_g;
-                J_inv_g[0][1] = (J_g[0][2]*J_g[2][1] - J_g[0][1]*J_g[2][2]) * invDetJ_g;
-                J_inv_g[0][2] = (J_g[0][1]*J_g[1][2] - J_g[0][2]*J_g[1][1]) * invDetJ_g;
-                J_inv_g[1][0] = (J_g[1][2]*J_g[2][0] - J_g[1][0]*J_g[2][2]) * invDetJ_g;
-                J_inv_g[1][1] = (J_g[0][0]*J_g[2][2] - J_g[0][2]*J_g[2][0]) * invDetJ_g;
-                J_inv_g[1][2] = (J_g[0][2]*J_g[1][0] - J_g[0][0]*J_g[1][2]) * invDetJ_g;
-                J_inv_g[2][0] = (J_g[1][0]*J_g[2][1] - J_g[1][1]*J_g[2][0]) * invDetJ_g;
-                J_inv_g[2][1] = (J_g[0][1]*J_g[2][0] - J_g[0][0]*J_g[2][1]) * invDetJ_g;
-                J_inv_g[2][2] = (J_g[0][0]*J_g[1][1] - J_g[0][1]*J_g[1][0]) * invDetJ_g;
+                J_inv_g[0][0] = (J_g_kin[1][1]*J_g_kin[2][2] - J_g_kin[1][2]*J_g_kin[2][1]) * invDetJ_g;
+                J_inv_g[0][1] = (J_g_kin[0][2]*J_g_kin[2][1] - J_g_kin[0][1]*J_g_kin[2][2]) * invDetJ_g;
+                J_inv_g[0][2] = (J_g_kin[0][1]*J_g_kin[1][2] - J_g_kin[0][2]*J_g_kin[1][1]) * invDetJ_g;
+                J_inv_g[1][0] = (J_g_kin[1][2]*J_g_kin[2][0] - J_g_kin[1][0]*J_g_kin[2][2]) * invDetJ_g;
+                J_inv_g[1][1] = (J_g_kin[0][0]*J_g_kin[2][2] - J_g_kin[0][2]*J_g_kin[2][0]) * invDetJ_g;
+                J_inv_g[1][2] = (J_g_kin[0][2]*J_g_kin[1][0] - J_g_kin[0][0]*J_g_kin[1][2]) * invDetJ_g;
+                J_inv_g[2][0] = (J_g_kin[1][0]*J_g_kin[2][1] - J_g_kin[1][1]*J_g_kin[2][0]) * invDetJ_g;
+                J_inv_g[2][1] = (J_g_kin[0][1]*J_g_kin[2][0] - J_g_kin[0][0]*J_g_kin[2][1]) * invDetJ_g;
+                J_inv_g[2][2] = (J_g_kin[0][0]*J_g_kin[1][1] - J_g_kin[0][1]*J_g_kin[1][0]) * invDetJ_g;
 
                 T dN_dx_g[8][3];
                 for (int i = 0; i < 8; ++i) {
@@ -2470,7 +2802,7 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 }
 
                 T div_v_g = strain_rate_g[0] + strain_rate_g[1] + strain_rate_g[2];
-                if (std::abs(div_v_g) * dt < static_cast<T>(1.0e-6f)) {
+                if (std::abs(div_v_g) * dt < static_cast<T>(1.0e-15f)) {
                     div_v_g = static_cast<T>(0.0f);
                 }
 
@@ -2482,17 +2814,18 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 }
 
                 T d_dev_g[3][3];
-                T active_div_v = (m_integration_scheme == FEMIntegrationScheme::SelectiveReduced) ? div_v_center : div_v_g;
-                d_dev_g[0][0] = strain_rate_g[0] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * active_div_v;
-                d_dev_g[1][1] = strain_rate_g[1] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * active_div_v;
-                d_dev_g[2][2] = strain_rate_g[2] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * active_div_v;
+                T active_div_v = (elem_scheme == FEMIntegrationScheme::SelectiveReduced) ? div_v_center : div_v_g;
+                d_dev_g[0][0] = strain_rate_g[0] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * div_v_g;
+                d_dev_g[1][1] = strain_rate_g[1] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * div_v_g;
+                d_dev_g[2][2] = strain_rate_g[2] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * div_v_g;
                 d_dev_g[0][1] = d_dev_g[1][0] = static_cast<T>(0.5f) * strain_rate_g[3];
                 d_dev_g[1][2] = d_dev_g[2][1] = static_cast<T>(0.5f) * strain_rate_g[4];
                 d_dev_g[2][0] = d_dev_g[0][2] = static_cast<T>(0.5f) * strain_rate_g[5];
 
                 uint32_t user_seed_g = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
                 uint32_t elem_seed_g = user_seed_g ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[6]) * 19349663u) ^ (static_cast<uint32_t>(e) * 83492791u) ^ (static_cast<uint32_t>(g) * 374761393u);
-                T het_factor_g = computeFEMWeibullFactor(elem_seed_g, m_physics_params);
+                T L_corr_g = std::max(static_cast<T>(3.0f) * h_e_g, static_cast<T>(mat.nonlocal_radius));
+                T het_factor_g = computeFEMWeibullFactor(elem_seed_g, m_physics_params, x0_center[0], x0_center[1], x0_center[2], L_corr_g, &mat);
 
                 T L_g[3][3] = {{static_cast<T>(0.0f)}};
                 for (int i = 0; i < 8; ++i) {
@@ -2577,7 +2910,7 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 }
 
                 T J_vol_g = static_cast<T>(1.0f);
-                if (m_integration_scheme == FEMIntegrationScheme::SelectiveReduced) {
+                if (elem_scheme == FEMIntegrationScheme::SelectiveReduced) {
                     J_vol_g = (elem.V0 > static_cast<T>(1.0e-18f)) ? (elem.V / elem.V0) : static_cast<T>(1.0f);
                 } else {
                     J_vol_g = gp_hist.F_gp[g][0][0] * (gp_hist.F_gp[g][1][1]*gp_hist.F_gp[g][2][2] - gp_hist.F_gp[g][1][2]*gp_hist.F_gp[g][2][1])
@@ -2606,27 +2939,13 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     sigma_g[0][1], sigma_g[1][2], sigma_g[2][0]
                 };
 
-                T f_elem_g[24] = {0.0f};
                 for (int r = 0; r < 24; ++r) {
                     for (int c = 0; c < 6; ++c) {
-                        f_elem_g[r] += B_g[c][r] * sig_voigt_g[c] * detJ_g;
+                        f_elem_total[r] += B_g_cur[c][r] * sig_voigt_g[c] * detJ_g_cur;
                     }
                 }
-
-                for (int n = 0; n < 8; ++n) {
-                    int nid = elem.node_ids[n];
-#ifdef _OPENMP
-                    #pragma omp atomic
-                    m_nodes[nid].f_int[0] += f_elem_g[n * 3 + 0];
-                    #pragma omp atomic
-                    m_nodes[nid].f_int[1] += f_elem_g[n * 3 + 1];
-                    #pragma omp atomic
-                    m_nodes[nid].f_int[2] += f_elem_g[n * 3 + 2];
-#else
-                    m_nodes[nid].f_int[0] += f_elem_g[n * 3 + 0];
-                    m_nodes[nid].f_int[1] += f_elem_g[n * 3 + 1];
-                    m_nodes[nid].f_int[2] += f_elem_g[n * 3 + 2];
-#endif
+                if (q_visc_g > static_cast<T>(0.0f) && active_div_v < static_cast<T>(0.0f)) {
+                    dw_visc_total += q_visc_g * (-active_div_v) * detJ_g_cur * dt;
                 }
 
                 for (int r = 0; r < 3; ++r) {
@@ -2642,7 +2961,32 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 e_int_avg += 0.125f * gp_hist.e_int_gp[g];
             }
 
-            if (elem.is_eroded) continue;
+            if (!all_gp_valid || elem.is_eroded) continue;
+
+            if (dw_visc_total > static_cast<T>(0.0f)) {
+#ifdef _OPENMP
+                #pragma omp atomic
+                m_energy_tracker.E_visc += dw_visc_total;
+#else
+                m_energy_tracker.E_visc += dw_visc_total;
+#endif
+            }
+
+            for (int n = 0; n < 8; ++n) {
+                int nid = elem.node_ids[n];
+#ifdef _OPENMP
+                #pragma omp atomic
+                m_nodes[nid].f_int[0] += f_elem_total[n * 3 + 0];
+                #pragma omp atomic
+                m_nodes[nid].f_int[1] += f_elem_total[n * 3 + 1];
+                #pragma omp atomic
+                m_nodes[nid].f_int[2] += f_elem_total[n * 3 + 2];
+#else
+                m_nodes[nid].f_int[0] += f_elem_total[n * 3 + 0];
+                m_nodes[nid].f_int[1] += f_elem_total[n * 3 + 1];
+                m_nodes[nid].f_int[2] += f_elem_total[n * 3 + 2];
+#endif
+            }
 
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
@@ -2675,26 +3019,35 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
         }
 
 
-        T B[6][24], detJ = static_cast<T>(0.0f);
+        T B[6][24], B_mid[6][24], detJ = static_cast<T>(0.0f);
         T v_center[3] = {static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f)};
         const int num_elem_nodes = is_tet4 ? 4 : 8;
+        const bool has_global_er = (m_erosion_criteria.enable_strain_erosion || m_erosion_criteria.enable_stress_erosion ||
+                                    m_erosion_criteria.enable_damage_erosion || m_erosion_criteria.enable_timestep_erosion);
+        const T mat_min_vol = static_cast<T>(mat.min_volume_ratio > 0.0f ? mat.min_volume_ratio : 0.02f);
+        const T crit_min_vol = m_erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) ? m_erosion_criteria.min_volume_ratio : mat_min_vol;
         const T min_vol_r = is_energetic
             ? static_cast<T>(0.005f)
-            : (m_erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) ? m_erosion_criteria.min_volume_ratio : static_cast<T>(0.02f));
+            : ((has_global_er && mat.min_volume_ratio == 0.02f) ? crit_min_vol : mat_min_vol);
 
         if (is_tet4) {
             std::memset(B, 0, sizeof(T) * 6 * 24);
+            std::memset(B_mid, 0, sizeof(T) * 6 * 24);
             T dN_tet[4][3], V_tet = static_cast<T>(0.0f);
-            computeTet4ShapeGradients(x_mid, dN_tet, V_tet);
-            if (V_tet <= static_cast<T>(1.0e-18f) || (elem.V0 > static_cast<T>(1.0e-18f) && (V_tet / elem.V0) <= min_vol_r)) {
-                if (is_energetic || elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f) || elem.is_detached) {
-                    elem.is_eroded = true;
-                    m_surface_facets_dirty = true;
-                }
+            computeTet4ShapeGradients(x_nodes, dN_tet, V_tet);
+            if (V_tet <= static_cast<T>(0.0f) || (elem.V0 > static_cast<T>(1.0e-30f) && (V_tet / elem.V0) <= min_vol_r)) {
+                elem.V = V_tet;
+                elem.is_eroded = true;
+                std::memset(elem.sigma, 0, sizeof(elem.sigma));
+                std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
+                any_facets_dirty = 1;
                 continue;
             }
             elem.V = V_tet;
             detJ = V_tet;
+            T dN_tet_mid[4][3], V_tet_mid = static_cast<T>(0.0f);
+            computeTet4ShapeGradients(x_mid, dN_tet_mid, V_tet_mid);
+            const T (&dN_kin)[4][3] = (V_tet_mid > static_cast<T>(1.0e-18f)) ? dN_tet_mid : dN_tet;
             for (int i = 0; i < 4; ++i) {
                 int col = i * 3;
                 B[0][col + 0] = dN_tet[i][0];
@@ -2703,6 +3056,12 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 B[3][col + 0] = dN_tet[i][1]; B[3][col + 1] = dN_tet[i][0];
                 B[4][col + 1] = dN_tet[i][2]; B[4][col + 2] = dN_tet[i][1];
                 B[5][col + 0] = dN_tet[i][2]; B[5][col + 2] = dN_tet[i][0];
+                B_mid[0][col + 0] = dN_kin[i][0];
+                B_mid[1][col + 1] = dN_kin[i][1];
+                B_mid[2][col + 2] = dN_kin[i][2];
+                B_mid[3][col + 0] = dN_kin[i][1]; B_mid[3][col + 1] = dN_kin[i][0];
+                B_mid[4][col + 1] = dN_kin[i][2]; B_mid[4][col + 2] = dN_kin[i][1];
+                B_mid[5][col + 0] = dN_kin[i][2]; B_mid[5][col + 2] = dN_kin[i][0];
                 v_center[0] += v_nodes[i][0];
                 v_center[1] += v_nodes[i][1];
                 v_center[2] += v_nodes[i][2];
@@ -2711,15 +3070,21 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             v_center[1] *= static_cast<T>(0.25f);
             v_center[2] *= static_cast<T>(0.25f);
         } else {
-            computeHex8BMatrix(x_mid, B, detJ);
-            if (detJ <= static_cast<T>(1.0e-15f) || (elem.V0 > static_cast<T>(1.0e-18f) && (detJ * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
-                if (is_energetic || elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f) || elem.is_detached) {
-                    elem.is_eroded = true;
-                    m_surface_facets_dirty = true;
-                }
-                continue; // Skip force generation for inverted or severely crushed elements
+            computeHex8BMatrix(x_nodes, B, detJ);
+            if (detJ <= static_cast<T>(0.0f) || (elem.V0 > static_cast<T>(1.0e-30f) && (detJ * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
+                elem.V = detJ * static_cast<T>(8.0f);
+                elem.is_eroded = true;
+                std::memset(elem.sigma, 0, sizeof(elem.sigma));
+                std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
+                any_facets_dirty = 1;
+                continue; // Skip force generation and cleanly erode inverted or severely crushed elements
             }
             elem.V = detJ * static_cast<T>(8.0f);
+            T detJ_mid = static_cast<T>(0.0f);
+            computeHex8BMatrix(x_mid, B_mid, detJ_mid);
+            if (detJ_mid <= static_cast<T>(1.0e-15f)) {
+                std::memcpy(B_mid, B, sizeof(T) * 6 * 24);
+            }
             for (int n = 0; n < 8; ++n) {
                 v_center[0] += v_nodes[n][0];
                 v_center[1] += v_nodes[n][1];
@@ -2740,12 +3105,12 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
         T strain_rate[6] = {0.0f};
         for (int r = 0; r < 6; ++r) {
             for (int c = 0; c < num_elem_nodes * 3; ++c) {
-                strain_rate[r] += B[r][c] * v_vec[c];
+                strain_rate[r] += B_mid[r][c] * v_vec[c];
             }
         }
 
         T div_v = strain_rate[0] + strain_rate[1] + strain_rate[2];
-        if (std::abs(div_v) * dt < static_cast<T>(1.0e-6f)) {
+        if (std::abs(div_v) * dt < static_cast<T>(1.0e-15f)) {
             div_v = static_cast<T>(0.0f);
         }
 
@@ -2754,13 +3119,45 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
               : std::cbrt(elem.V > static_cast<T>(1.0e-18f) ? elem.V : static_cast<T>(1.0e-18f));
         v_rel_elem = (elem.V0 > static_cast<T>(1.0e-18f) && elem.V > static_cast<T>(0.0f))
             ? (elem.V / elem.V0) : static_cast<T>(1.0f);
+
+        // Compute effective volumetric ratio J_elem and volumetric strain rate (Puso & Solberg 2006 stabilized Tet4-ANP)
+        T J_elem = v_rel_elem;
+        if (isTet4ANPElement(elem) && !is_energetic && !elem.is_detached) {
+            T J_anp_sum = static_cast<T>(0.0f);
+            T div_v_anp_sum = static_cast<T>(0.0f);
+            int valid_anp = 0;
+            for (int n = 0; n < 4; ++n) {
+                int nid = elem.node_ids[n];
+                if (m_nodal_vol_ref[nid] > static_cast<T>(1.0e-18f) && m_nodal_vol_cur[nid] > static_cast<T>(1.0e-18f)) {
+                    J_anp_sum += m_nodal_vol_cur[nid] / m_nodal_vol_ref[nid];
+                    div_v_anp_sum += m_nodal_dvol_dt[nid] / m_nodal_vol_cur[nid];
+                    valid_anp++;
+                }
+            }
+            if (valid_anp > 0) {
+                T inv_valid = static_cast<T>(1.0f) / static_cast<T>(valid_anp);
+                T J_anp = J_anp_sum * inv_valid;
+                T div_v_anp = div_v_anp_sum * inv_valid;
+                J_elem = static_cast<T>(0.85f) * J_anp + static_cast<T>(0.15f) * v_rel_elem;
+                T div_v_eff = static_cast<T>(0.85f) * div_v_anp + static_cast<T>(0.15f) * div_v;
+                if (std::abs(div_v_eff) * dt < static_cast<T>(1.0e-15f)) {
+                    div_v_eff = static_cast<T>(0.0f);
+                }
+                T d_div_third = (div_v_eff - div_v) / static_cast<T>(3.0f);
+                strain_rate[0] += d_div_third;
+                strain_rate[1] += d_div_third;
+                strain_rate[2] += d_div_third;
+                div_v = div_v_eff;
+            }
+        }
+
         T p_constit = -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f) - elem.q_visc;
         T p_prev_elem = p_constit + elem.q_visc;
-        cd = computeDilatationalWaveSpeed<T>(mat, v_rel_elem, elem.lambda, p_prev_elem, elem.e_int);
+        cd = computeDilatationalWaveSpeed<T>(mat, J_elem, elem.lambda, p_prev_elem, elem.e_int);
         b1 = static_cast<T>(mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : m_physics_params.bulk_viscosity_b1);
         b2 = static_cast<T>(mat.bulk_viscosity_b2 > 0.0f ? mat.bulk_viscosity_b2 : m_physics_params.bulk_viscosity_b2);
 
-        T rho_curr = density / std::max(static_cast<T>(0.05f), v_rel_elem);
+        T rho_curr = density / std::max(static_cast<T>(0.05f), J_elem);
         T q_visc = (div_v < static_cast<T>(0.0f))
                  ? (rho_curr * (-b1 * h_e * div_v * cd + b2 * h_e * h_e * div_v * div_v))
                  : static_cast<T>(0.0f);
@@ -2793,7 +3190,10 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
         T T_room = static_cast<T>(mat.T_room > 0.0f ? mat.T_room : 293.0f);
 
         T ep_val = std::max(static_cast<T>(0.0f), elem.ep_bar);
-        T sigma_hard = A_mat + (B_mat > static_cast<T>(0.0f) ? B_mat * std::pow(ep_val, n_exp) : static_cast<T>(0.0f));
+        T hard_term = (B_mat > static_cast<T>(0.0f) && ep_val > static_cast<T>(0.0f))
+            ? (B_mat * (n_exp > static_cast<T>(0.0f) ? std::pow(ep_val, n_exp) : static_cast<T>(1.0f)))
+            : static_cast<T>(0.0f);
+        T sigma_hard = A_mat + hard_term;
 
         T strain_rate_factor = static_cast<T>(1.0f);
         if (ep_dot > static_cast<T>(1.0e-3f)) {
@@ -2810,30 +3210,37 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
         if (m_exp > static_cast<T>(0.0f) && T_melt > T_room) {
             T T_star = (elem.temperature - T_room) / (T_melt - T_room);
             T_star = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), T_star));
-            thermal_factor = static_cast<T>(1.0f) - std::pow(T_star, m_exp);
-            if (thermal_factor < static_cast<T>(0.01f)) thermal_factor = static_cast<T>(0.01f);
+            if (T_star > static_cast<T>(0.0f)) {
+                thermal_factor = static_cast<T>(1.0f) - std::pow(T_star, m_exp);
+                if (thermal_factor < static_cast<T>(0.01f)) thermal_factor = static_cast<T>(0.01f);
+            }
         }
         uint32_t user_seed = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
         uint32_t elem_seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[is_tet4 ? 3 : 6]) * 19349663u) ^ (static_cast<uint32_t>(e) * 83492791u);
-        T het_factor = computeFEMWeibullFactor(elem_seed, m_physics_params);
-        dynamic_yield = std::max(static_cast<T>(1.0e6f), sigma_hard * strain_rate_factor * thermal_factor * het_factor);
+        T L_corr = std::max(static_cast<T>(3.0f) * h_e, static_cast<T>(mat.nonlocal_radius));
+        T het_factor = computeFEMWeibullFactor(elem_seed, m_physics_params, x0_center[0], x0_center[1], x0_center[2], L_corr, &mat);
+        dynamic_yield = std::max(static_cast<T>(1.0f), sigma_hard * strain_rate_factor * thermal_factor * het_factor);
         if (elem.is_detached) {
             dynamic_yield *= static_cast<T>(0.15f);
         }
 
         T dN_dx[8][3] = {{static_cast<T>(0.0f)}};
+        T dN_dx_mid[8][3] = {{static_cast<T>(0.0f)}};
         for (int i = 0; i < num_elem_nodes; ++i) {
             dN_dx[i][0] = B[0][i * 3 + 0];
             dN_dx[i][1] = B[1][i * 3 + 1];
             dN_dx[i][2] = B[2][i * 3 + 2];
+            dN_dx_mid[i][0] = B_mid[0][i * 3 + 0];
+            dN_dx_mid[i][1] = B_mid[1][i * 3 + 1];
+            dN_dx_mid[i][2] = B_mid[2][i * 3 + 2];
         }
 
-        // 1. Calculate Velocity Gradient Tensor L[3][3]
+        // 1. Calculate Velocity Gradient Tensor L[3][3] (midpoint kinematics)
         T L[3][3] = {{static_cast<T>(0.0f)}};
         for (int i = 0; i < num_elem_nodes; ++i) {
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
-                    L[r][c] += (v_nodes[i][r] - v_center[r]) * dN_dx[i][c];
+                    L[r][c] += (v_nodes[i][r] - v_center[r]) * dN_dx_mid[i][c];
                 }
             }
         }
@@ -2917,26 +3324,22 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 }
             }
         }
+        if (is_tet4 && !is_energetic && !elem.is_detached) {
+            T detF_new = F_new[0][0] * (F_new[1][1] * F_new[2][2] - F_new[1][2] * F_new[2][1])
+                       - F_new[0][1] * (F_new[1][0] * F_new[2][2] - F_new[1][2] * F_new[2][0])
+                       + F_new[0][2] * (F_new[1][0] * F_new[2][1] - F_new[1][1] * F_new[2][0]);
+            if (detF_new > static_cast<T>(1.0e-12f) && J_elem > static_cast<T>(1.0e-12f)) {
+                T scale_anp = std::cbrt(J_elem / detF_new);
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        F_new[r][c] *= scale_anp;
+                    }
+                }
+            }
+        }
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
                 elem.F[r][c] = F_new[r][c];
-            }
-        }
-
-        // Compute effective volumetric ratio J_elem (using Average Nodal Pressure J_anp for non-energetic solid Tet4)
-        T J_elem = v_rel_elem;
-        if (is_tet4 && !is_energetic && !elem.is_detached) {
-            T J_anp_sum = static_cast<T>(0.0f);
-            int valid_anp = 0;
-            for (int n = 0; n < 4; ++n) {
-                int nid = elem.node_ids[n];
-                if (m_nodal_vol_ref[nid] > static_cast<T>(1.0e-18f)) {
-                    J_anp_sum += m_nodal_vol_cur[nid] / m_nodal_vol_ref[nid];
-                    valid_anp++;
-                }
-            }
-            if (valid_anp > 0) {
-                J_elem = J_anp_sum / static_cast<T>(valid_anp);
             }
         }
 
@@ -2974,7 +3377,7 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 awe_vtmd = rho0s / mat.density;
             }
 
-            float p_curr_comp = static_cast<float>(-(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f) + q_visc);
+            float p_curr_comp = static_cast<float>(-(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f));
             if (p_curr_comp < 0.0f) p_curr_comp = 0.0f;
 
             if (awe) {
@@ -3015,7 +3418,8 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                     mat.crest_b2, mat.crest_c2, mat.crest_c3, mat.crest_m2,
                     mat.crest_s0, mat.crest_s_threshold);
             } else if (is_lt_kinetics) {
-                const float e_th_lt = static_cast<float>(elem.e_int) - lam_curr * mat.detonation_energy;
+                const float q_heat_lt = use_davis_prod ? mat.davis_q_det : mat.detonation_energy;
+                const float e_th_lt = std::max(0.0f, static_cast<float>(elem.e_int) - lam_curr * q_heat_lt);
                 float p_react_trial = (mat.solid_model == SolidReactantEOS::JWLReactant)
                     ? JWL::computeJWLReactantPressure(v_rel_f, e_th_lt, mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_omega, mat.jwlr_Cv, mat.jwlr_T0, mat.density)
                     : use_davis_solid
@@ -3090,20 +3494,28 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             T solid_frac = static_cast<T>(1.0f - lam_new);
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
-                    elem.s_dev[r][c] = solid_frac * (elem.s_dev[r][c] + static_cast<T>(2.0f) * solid_frac * G * d_dev[r][c] * dt);
+                    elem.s_dev[r][c] += static_cast<T>(2.0f) * (solid_frac * G) * d_dev[r][c] * dt;
                 }
             }
-            T s_norm = std::sqrt(
-                elem.s_dev[0][0]*elem.s_dev[0][0] + elem.s_dev[1][1]*elem.s_dev[1][1] + elem.s_dev[2][2]*elem.s_dev[2][2] +
-                static_cast<T>(2.0f)*(elem.s_dev[0][1]*elem.s_dev[0][1] + elem.s_dev[1][2]*elem.s_dev[1][2] + elem.s_dev[2][0]*elem.s_dev[2][0])
-            );
-            T vm_trial = std::sqrt(static_cast<T>(1.5f)) * s_norm;
-            T q_yield = solid_frac * dynamic_yield;
-            if (vm_trial > q_yield && vm_trial > static_cast<T>(1.0e-6f)) {
-                T scale = q_yield / vm_trial;
+            if (elem.lambda >= static_cast<T>(0.99f)) {
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
-                        elem.s_dev[r][c] *= scale;
+                        elem.s_dev[r][c] = static_cast<T>(0.0f);
+                    }
+                }
+            } else {
+                T s_norm = std::sqrt(
+                    elem.s_dev[0][0]*elem.s_dev[0][0] + elem.s_dev[1][1]*elem.s_dev[1][1] + elem.s_dev[2][2]*elem.s_dev[2][2] +
+                    static_cast<T>(2.0f)*(elem.s_dev[0][1]*elem.s_dev[0][1] + elem.s_dev[1][2]*elem.s_dev[1][2] + elem.s_dev[2][0]*elem.s_dev[2][0])
+                );
+                T vm_trial = std::sqrt(static_cast<T>(1.5f)) * s_norm;
+                T q_yield = solid_frac * dynamic_yield;
+                if (vm_trial > q_yield && vm_trial > static_cast<T>(1.0e-6f)) {
+                    T scale = q_yield / vm_trial;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            elem.s_dev[r][c] *= scale;
+                        }
                     }
                 }
             }
@@ -3138,6 +3550,15 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
                 f_elem[r] += B[c][r] * sig_voigt[c] * elem.V;
             }
         }
+        if (elem.q_visc > static_cast<T>(0.0f) && div_v < static_cast<T>(0.0f)) {
+            T dw_visc = elem.q_visc * (-div_v) * elem.V * dt;
+#ifdef _OPENMP
+            #pragma omp atomic
+            m_energy_tracker.E_visc += dw_visc;
+#else
+            m_energy_tracker.E_visc += dw_visc;
+#endif
+        }
 
         for (int n = 0; n < num_elem_nodes; ++n) {
             int nid = elem.node_ids[n];
@@ -3159,19 +3580,24 @@ void FEMSolver3D<T>::computeElementForces(T dt) {
             computeHourglassForcesFB(elem, dt, x_nodes, v_nodes, B, dN_dx, detJ, cd, h_e);
         }
     }
+    if (any_facets_dirty) {
+        m_surface_facets_dirty = true;
+    }
 }
 
 template <typename T>
 void FEMSolver3D<T>::evaluateErosionCriteria() {
-    bool erosion_occurred = false;
+    int erosion_occurred_flag = 0;
 
     if (m_physics_params.enable_nonlocal_damage && m_face_neighbors.size() != m_elements.size() * 6) {
         buildFaceConnectivity();
     }
 
-    std::vector<T> ep_bar_effective(m_elements.size());
+    if (m_ep_bar_effective.size() < m_elements.size()) {
+        m_ep_bar_effective.resize(m_elements.size());
+    }
     for (size_t e = 0; e < m_elements.size(); ++e) {
-        ep_bar_effective[e] = m_elements[e].ep_bar;
+        m_ep_bar_effective[e] = m_elements[e].ep_bar;
     }
 
     if (m_physics_params.enable_nonlocal_damage) {
@@ -3180,29 +3606,62 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
             const auto& mat = m_material_tables[m_elements[e].mat_id];
             float R_c = mat.nonlocal_radius;
             if (R_c > 1.0e-4f) {
-                T w_sum = static_cast<T>(1.0f);
-                T val_sum = m_elements[e].ep_bar;
-                T h_elem = std::cbrt(m_elements[e].V0 > static_cast<T>(1.0e-18f) ? m_elements[e].V0 : static_cast<T>(1.0e-6f));
-                T R_sq = static_cast<T>(R_c * R_c);
+                const bool self_tet = isTet4Element(m_elements[e]);
+                const int n_self = self_tet ? 4 : 8;
+                const T inv_n_self = self_tet ? static_cast<T>(0.25f) : static_cast<T>(0.125f);
+                T c_self[3] = {static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f)};
+                for (int n = 0; n < n_self; ++n) {
+                    int nid = m_elements[e].node_ids[n];
+                    c_self[0] += m_nodes[nid].x0[0];
+                    c_self[1] += m_nodes[nid].x0[1];
+                    c_self[2] += m_nodes[nid].x0[2];
+                }
+                c_self[0] *= inv_n_self;
+                c_self[1] *= inv_n_self;
+                c_self[2] *= inv_n_self;
+
+                T w_self = m_elements[e].V0 > static_cast<T>(0.0f) ? m_elements[e].V0 : static_cast<T>(1.0f);
+                T w_sum = w_self;
+                T val_sum = m_elements[e].ep_bar * w_self;
+                T R_sq = std::max(static_cast<T>(1.0e-12f), static_cast<T>(R_c) * static_cast<T>(R_c));
 
                 for (int f = 0; f < 6; ++f) {
                     int nb = m_face_neighbors[e * 6 + f];
                     if (nb >= 0 && nb < static_cast<int>(m_elements.size()) && !m_elements[nb].is_eroded) {
-                        T dist_sq = h_elem * h_elem;
-                        T w = std::exp(-dist_sq / R_sq);
-                        w_sum += w;
-                        val_sum += w * m_elements[nb].ep_bar;
+                        const auto& nb_elem = m_elements[nb];
+                        const bool nb_tet = isTet4Element(nb_elem);
+                        const int n_nb = nb_tet ? 4 : 8;
+                        const T inv_n_nb = nb_tet ? static_cast<T>(0.25f) : static_cast<T>(0.125f);
+                        T c_nb[3] = {static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f)};
+                        for (int n = 0; n < n_nb; ++n) {
+                            int nid = nb_elem.node_ids[n];
+                            c_nb[0] += m_nodes[nid].x0[0];
+                            c_nb[1] += m_nodes[nid].x0[1];
+                            c_nb[2] += m_nodes[nid].x0[2];
+                        }
+                        c_nb[0] *= inv_n_nb;
+                        c_nb[1] *= inv_n_nb;
+                        c_nb[2] *= inv_n_nb;
+
+                        T dx = c_self[0] - c_nb[0];
+                        T dy = c_self[1] - c_nb[1];
+                        T dz = c_self[2] - c_nb[2];
+                        T dist_sq = dx * dx + dy * dy + dz * dz;
+                        T w_gauss = std::exp(-dist_sq / R_sq);
+                        T w_nb = w_gauss * (nb_elem.V0 > static_cast<T>(0.0f) ? nb_elem.V0 : static_cast<T>(1.0f));
+                        w_sum += w_nb;
+                        val_sum += w_nb * nb_elem.ep_bar;
                     }
                 }
                 if (w_sum > static_cast<T>(0.0f)) {
-                    ep_bar_effective[e] = val_sum / w_sum;
+                    m_ep_bar_effective[e] = val_sum / w_sum;
                 }
             }
         }
     }
 
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(guided)
+    #pragma omp parallel for reduction(|:erosion_occurred_flag) schedule(guided)
 #endif
     for (int e = 0; e < static_cast<int>(m_elements.size()); ++e) {
         auto& elem = m_elements[e];
@@ -3230,25 +3689,39 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
                 elem.mpm_converted = true;
                 std::memset(elem.sigma, 0, sizeof(elem.sigma));
                 std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
-                erosion_occurred = true;
+                erosion_occurred_flag = 1;
             }
             continue;
         }
 
         T L_e = is_tet4 ? computeTet4CharacteristicLength(x_curr, V_cur) : computeHex8CharacteristicLength(x_curr, V_cur);
-        T p_elem = -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
-        T cd = computeDilatationalWaveSpeed<T>(mat, v_rel, elem.lambda, p_elem);
+        T p_elem = -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f) - elem.q_visc;
+        T cd = computeDilatationalWaveSpeed<T>(mat, v_rel, elem.lambda, p_elem, elem.e_int);
         T current_dt = L_e / cd;
 
         bool severe_crush = false;
         bool newly_fractured = false;
-        T min_vol_r = m_erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) ? m_erosion_criteria.min_volume_ratio : static_cast<T>(0.02f);
-        if (elem.V <= static_cast<T>(1.0e-18f) || (elem.V0 > static_cast<T>(1.0e-18f) && (elem.V / elem.V0) <= min_vol_r)) {
+        const bool global_overrides = (m_erosion_criteria.enable_strain_erosion ||
+                                       m_erosion_criteria.enable_stress_erosion ||
+                                       m_erosion_criteria.enable_damage_erosion ||
+                                       m_erosion_criteria.enable_timestep_erosion);
+        const T mat_min_vol = static_cast<T>(mat.min_volume_ratio > 0.0f ? mat.min_volume_ratio : 0.02f);
+        const T min_vol_r = (global_overrides && m_erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) && mat.min_volume_ratio == 0.02f)
+            ? m_erosion_criteria.min_volume_ratio : mat_min_vol;
+        if (elem.V <= static_cast<T>(0.0f) || (elem.V0 > static_cast<T>(1.0e-30f) && (elem.V / elem.V0) <= min_vol_r)) {
             severe_crush = true;
+        }
+        const T mat_max_vol = static_cast<T>(mat.max_volume_ratio > 1.0f ? mat.max_volume_ratio : 0.0f);
+        const T max_vol_r = (global_overrides && m_erosion_criteria.max_volume_ratio > static_cast<T>(1.0f) && mat.max_volume_ratio == 5.00f)
+            ? m_erosion_criteria.max_volume_ratio : mat_max_vol;
+        if (max_vol_r > static_cast<T>(1.0f) && v_rel >= max_vol_r) {
+            newly_fractured = true;
         }
 
         bool check_dt = (mat.enable_timestep_erosion || m_erosion_criteria.enable_timestep_erosion);
-        T eta = (mat.timestep_erosion_factor > static_cast<T>(1.0e-5f)) ? static_cast<T>(mat.timestep_erosion_factor) : m_erosion_criteria.timestep_erosion_factor;
+        T eta = static_cast<T>((mat.enable_timestep_erosion && mat.timestep_erosion_factor > 1.0e-5f)
+            ? mat.timestep_erosion_factor
+            : (m_erosion_criteria.timestep_erosion_factor > static_cast<T>(1.0e-5f) ? m_erosion_criteria.timestep_erosion_factor : static_cast<T>(mat.timestep_erosion_factor)));
         if (check_dt && eta > static_cast<T>(1.0e-5f)) {
             T dt0_eff = elem.dt0;
             if (dt0_eff <= static_cast<T>(1.0e-12f) || dt0_eff >= static_cast<T>(1.0e20f)) {
@@ -3260,29 +3733,52 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
                     x_0[n][2] = m_nodes[nid].x0[2];
                 }
                 T L_e0 = is_tet4 ? computeTet4CharacteristicLength(x_0, elem.V0) : computeHex8CharacteristicLength(x_0, elem.V0);
-                dt0_eff = L_e0 / cd;
+                T cd0 = computeDilatationalWaveSpeed<T>(mat);
+                dt0_eff = L_e0 / cd0;
             }
             if (current_dt <= eta * dt0_eff) {
                 severe_crush = true;
             }
         }
 
+        const int n_self_er = is_tet4 ? 4 : 8;
+        const T inv_n_self_er = is_tet4 ? static_cast<T>(0.25f) : static_cast<T>(0.125f);
+        T c_self_er[3] = {static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f)};
+        for (int n = 0; n < n_self_er; ++n) {
+            int nid = elem.node_ids[n];
+            c_self_er[0] += m_nodes[nid].x0[0];
+            c_self_er[1] += m_nodes[nid].x0[1];
+            c_self_er[2] += m_nodes[nid].x0[2];
+        }
+        c_self_er[0] *= inv_n_self_er;
+        c_self_er[1] *= inv_n_self_er;
+        c_self_er[2] *= inv_n_self_er;
+
         uint32_t user_seed = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
         uint32_t elem_seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[is_tet4 ? 3 : 6]) * 19349663u) ^ (static_cast<uint32_t>(e) * 83492791u);
-        T het_factor = computeFEMWeibullFactor(elem_seed, m_physics_params);
+        T L_corr_er = std::max(static_cast<T>(3.0f) * L_e, static_cast<T>(mat.nonlocal_radius));
+        T het_factor = computeFEMWeibullFactor(elem_seed, m_physics_params, c_self_er[0], c_self_er[1], c_self_er[2], L_corr_er, &mat);
 
-        // Directional Material Anisotropy (Transverse Isotropy)
+        // Directional Material Anisotropy (Transverse Isotropy - per-material first, domain fallback)
         T aniso_factor = static_cast<T>(1.0f);
-        if (m_physics_params.enable_anisotropy && std::abs(m_physics_params.anisotropy_ratio - static_cast<T>(1.0f)) > static_cast<T>(1.0e-4f)) {
-            T ax = m_physics_params.anisotropy_dir[0], ay = m_physics_params.anisotropy_dir[1], az = m_physics_params.anisotropy_dir[2];
-            T s_a = ax * (elem.sigma[0][0]*ax + elem.sigma[0][1]*ay + elem.sigma[0][2]*az) +
-                    ay * (elem.sigma[1][0]*ax + elem.sigma[1][1]*ay + elem.sigma[1][2]*az) +
-                    az * (elem.sigma[2][0]*ax + elem.sigma[2][1]*ay + elem.sigma[2][2]*az);
-            T s_dev_norm = std::sqrt(elem.sigma[0][0]*elem.sigma[0][0] + elem.sigma[1][1]*elem.sigma[1][1] + elem.sigma[2][2]*elem.sigma[2][2] + 
-                                    static_cast<T>(2.0f)*(elem.sigma[0][1]*elem.sigma[0][1] + elem.sigma[1][2]*elem.sigma[1][2] + elem.sigma[2][0]*elem.sigma[2][0]));
-            if (s_dev_norm > static_cast<T>(1.0e-6f)) {
-                T xi = std::clamp(std::abs(s_a) / s_dev_norm, static_cast<T>(0.0f), static_cast<T>(1.0f));
-                aniso_factor = static_cast<T>(1.0f) + (m_physics_params.anisotropy_ratio - static_cast<T>(1.0f)) * (static_cast<T>(1.0f) - xi * xi);
+        const bool aniso_on = mat.enable_anisotropy || m_physics_params.enable_anisotropy;
+        const T aniso_ratio_val = mat.enable_anisotropy ? static_cast<T>(mat.anisotropy_ratio) : m_physics_params.anisotropy_ratio;
+        if (aniso_on && std::abs(aniso_ratio_val - static_cast<T>(1.0f)) > static_cast<T>(1.0e-4f)) {
+            T ax = mat.enable_anisotropy ? static_cast<T>(mat.anisotropy_dir[0]) : m_physics_params.anisotropy_dir[0];
+            T ay = mat.enable_anisotropy ? static_cast<T>(mat.anisotropy_dir[1]) : m_physics_params.anisotropy_dir[1];
+            T az = mat.enable_anisotropy ? static_cast<T>(mat.anisotropy_dir[2]) : m_physics_params.anisotropy_dir[2];
+            T alen = std::sqrt(ax * ax + ay * ay + az * az);
+            if (alen > static_cast<T>(1.0e-6f)) {
+                ax /= alen; ay /= alen; az /= alen;
+                T s_a = ax * (elem.sigma[0][0]*ax + elem.sigma[0][1]*ay + elem.sigma[0][2]*az) +
+                        ay * (elem.sigma[1][0]*ax + elem.sigma[1][1]*ay + elem.sigma[1][2]*az) +
+                        az * (elem.sigma[2][0]*ax + elem.sigma[2][1]*ay + elem.sigma[2][2]*az);
+                T s_dev_norm = std::sqrt(elem.sigma[0][0]*elem.sigma[0][0] + elem.sigma[1][1]*elem.sigma[1][1] + elem.sigma[2][2]*elem.sigma[2][2] + 
+                                        static_cast<T>(2.0f)*(elem.sigma[0][1]*elem.sigma[0][1] + elem.sigma[1][2]*elem.sigma[1][2] + elem.sigma[2][0]*elem.sigma[2][0]));
+                if (s_dev_norm > static_cast<T>(1.0e-6f)) {
+                    T xi = std::clamp(std::abs(s_a) / s_dev_norm, static_cast<T>(0.0f), static_cast<T>(1.0f));
+                    aniso_factor = static_cast<T>(1.0f) + (aniso_ratio_val - static_cast<T>(1.0f)) * (static_cast<T>(1.0f) - xi * xi);
+                }
             }
         }
 
@@ -3303,35 +3799,54 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
         bool is_concrete = (mat.material_model == MPMMaterialModel::RHTConcrete ||
                             mat.material_model == MPMMaterialModel::KCConcrete ||
                             mat.material_model == MPMMaterialModel::CSCMConcrete);
+        const bool cohesive_active = mat.enable_cohesive_splitting || m_physics_params.enable_cohesive_splitting;
 
-        if (is_concrete) {
-            T conc_erosion_strain = static_cast<T>((mat.erosion_strain >= 0.02f) ? mat.erosion_strain : (m_erosion_criteria.failure_strain >= 0.02f ? m_erosion_criteria.failure_strain : 0.10f));
-            conc_erosion_strain *= (het_factor * aniso_factor);
-            bool damage_saturated = (elem.damage >= static_cast<T>(0.95f));
-            if (damage_saturated && ep_bar_effective[e] >= conc_erosion_strain) {
-                newly_fractured = true;
+        if (!(cohesive_active && elem.is_detached)) {
+            if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion || cohesive_active) {
+                if (is_concrete) {
+                    T conc_erosion_strain = static_cast<T>(
+                        (mat.enable_strain_erosion && mat.erosion_strain > 0.0f) ? mat.erosion_strain :
+                        (m_erosion_criteria.failure_strain > 0.0f ? m_erosion_criteria.failure_strain :
+                         (mat.erosion_strain > 0.0f ? mat.erosion_strain : 0.10f)));
+                    conc_erosion_strain *= (het_factor * aniso_factor);
+                    bool damage_saturated = (elem.damage >= static_cast<T>(0.95f));
+                    if ((damage_saturated && m_ep_bar_effective[e] >= conc_erosion_strain) || (elem.ep_bar >= static_cast<T>(1.5f) * conc_erosion_strain)) {
+                        newly_fractured = true;
+                    }
+                } else {
+                    T fail_strain = static_cast<T>(
+                        (mat.enable_strain_erosion && mat.erosion_strain > 0.0f) ? mat.erosion_strain :
+                        ((mat.enable_strain_erosion && mat.failure_strain > 0.0f) ? mat.failure_strain :
+                         (m_erosion_criteria.failure_strain > 0.0f ? m_erosion_criteria.failure_strain :
+                          (mat.erosion_strain > 0.0f ? mat.erosion_strain : mat.failure_strain))));
+                    fail_strain *= (het_factor * aniso_factor);
+                    if (fail_strain > static_cast<T>(0.0f) && (m_ep_bar_effective[e] >= fail_strain || elem.ep_bar >= static_cast<T>(2.0f) * fail_strain)) {
+                        newly_fractured = true;
+                    }
+                }
             }
-        } else {
-            if (mat.enable_strain_erosion || m_erosion_criteria.enable_strain_erosion) {
-                T fail_strain = static_cast<T>(
-                    (mat.enable_strain_erosion && mat.erosion_strain > 0.0f) ? mat.erosion_strain :
-                    ((mat.enable_strain_erosion && mat.failure_strain > 0.0f) ? mat.failure_strain :
-                     (m_erosion_criteria.failure_strain > 0.0f ? m_erosion_criteria.failure_strain :
-                      (mat.erosion_strain > 0.0f ? mat.erosion_strain : mat.failure_strain))));
-                fail_strain *= (het_factor * aniso_factor);
-                if (fail_strain > static_cast<T>(0.0f) && ep_bar_effective[e] >= fail_strain) {
+
+            if (mat.enable_damage_erosion || m_erosion_criteria.enable_damage_erosion || cohesive_active) {
+                T max_dmg = static_cast<T>((mat.enable_damage_erosion && mat.max_damage > 0.0f)
+                    ? mat.max_damage
+                    : ((m_erosion_criteria.max_damage > static_cast<T>(0.0f)) ? m_erosion_criteria.max_damage : static_cast<T>(mat.max_damage > 0.0f ? mat.max_damage : 0.99f)));
+                if (elem.damage >= max_dmg) {
                     newly_fractured = true;
                 }
             }
-        }
 
-        if (mat.enable_stress_erosion || m_erosion_criteria.enable_stress_erosion) {
-            T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
-            T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : m_erosion_criteria.tensile_failure_stress));
-            fail_stress *= (het_factor * aniso_factor);
-            if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
-                if (!is_concrete || elem.damage >= static_cast<T>(0.95f)) {
-                    newly_fractured = true;
+            if (mat.enable_stress_erosion || m_erosion_criteria.enable_stress_erosion || cohesive_active) {
+                T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
+                T fail_stress = static_cast<T>(
+                    (mat.enable_stress_erosion && mat.erosion_stress > 0.0f) ? mat.erosion_stress :
+                    ((mat.enable_stress_erosion && mat.tensile_failure_stress > 0.0f) ? mat.tensile_failure_stress :
+                     (mat.erosion_stress > 0.0f ? mat.erosion_stress :
+                      (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : m_erosion_criteria.tensile_failure_stress))));
+                fail_stress *= (het_factor * aniso_factor);
+                if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
+                    if (!is_concrete || elem.damage >= static_cast<T>(0.95f)) {
+                        newly_fractured = true;
+                    }
                 }
             }
         }
@@ -3341,25 +3856,83 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
             elem.mpm_converted = false;
             std::memset(elem.sigma, 0, sizeof(elem.sigma));
             std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
-            erosion_occurred = true;
+            erosion_occurred_flag = 1;
         } else if (newly_fractured) {
-            if (m_physics_params.enable_cohesive_splitting) {
-                if (!elem.is_detached) {
-                    elem.damage = static_cast<T>(1.0f);
-                    elem.decay_step = 10;
-                    erosion_occurred = true;
-                }
+            if (cohesive_active && !elem.is_detached) {
+                elem.damage = static_cast<T>(1.0f);
+                elem.decay_step = 10;
+                erosion_occurred_flag = 1;
             } else {
                 elem.is_eroded = true;
                 elem.mpm_converted = false;
                 std::memset(elem.sigma, 0, sizeof(elem.sigma));
                 std::memset(elem.s_dev, 0, sizeof(elem.s_dev));
-                erosion_occurred = true;
+                erosion_occurred_flag = 1;
             }
         }
     }
 
-    if (m_physics_params.enable_cohesive_splitting && erosion_occurred) {
+    const bool global_dt_erosion = m_erosion_criteria.enable_timestep_erosion;
+    for (auto& tr : m_trusses) {
+        if (tr.is_eroded || tr.L0 <= static_cast<T>(0.0f)) continue;
+        const int mid = (tr.mat_id >= 0 && tr.mat_id < static_cast<int>(m_material_tables.size())) ? tr.mat_id : 0;
+        const auto& mat = m_material_tables[mid];
+        const bool check_dt = mat.enable_timestep_erosion || global_dt_erosion;
+        const T eta = global_dt_erosion
+            ? static_cast<T>(m_erosion_criteria.timestep_erosion_factor)
+            : static_cast<T>(mat.timestep_erosion_factor);
+        if (!check_dt || eta <= static_cast<T>(1.0e-5f)) continue;
+        int n1 = tr.node_ids[0], n2 = tr.node_ids[1];
+        if (n1 < 0 || n1 >= static_cast<int>(m_nodes.size()) || n2 < 0 || n2 >= static_cast<int>(m_nodes.size())) continue;
+        T dx = m_nodes[n2].x[0] - m_nodes[n1].x[0];
+        T dy = m_nodes[n2].x[1] - m_nodes[n1].x[1];
+        T dz = m_nodes[n2].x[2] - m_nodes[n1].x[2];
+        T L_cur = std::sqrt(dx*dx + dy*dy + dz*dz);
+        if (L_cur <= eta * tr.L0) {
+            tr.is_eroded = true;
+            tr.sigma = static_cast<T>(0.0f);
+            erosion_occurred_flag = 1;
+        }
+    }
+
+    for (auto& bm : m_beams) {
+        if (bm.is_eroded || bm.L0 <= static_cast<T>(0.0f)) continue;
+        const int mid = (bm.mat_id >= 0 && bm.mat_id < static_cast<int>(m_material_tables.size())) ? bm.mat_id : 0;
+        const auto& mat = m_material_tables[mid];
+        const bool check_dt = mat.enable_timestep_erosion || global_dt_erosion;
+        const T eta = global_dt_erosion
+            ? static_cast<T>(m_erosion_criteria.timestep_erosion_factor)
+            : static_cast<T>(mat.timestep_erosion_factor);
+        if (!check_dt || eta <= static_cast<T>(1.0e-5f)) continue;
+        int n1 = bm.node_ids[0], n2 = bm.node_ids[1];
+        if (n1 < 0 || n1 >= static_cast<int>(m_nodes.size()) || n2 < 0 || n2 >= static_cast<int>(m_nodes.size())) continue;
+        T dx = m_nodes[n2].x[0] - m_nodes[n1].x[0];
+        T dy = m_nodes[n2].x[1] - m_nodes[n1].x[1];
+        T dz = m_nodes[n2].x[2] - m_nodes[n1].x[2];
+        T L_cur = std::sqrt(dx*dx + dy*dy + dz*dz);
+        T d_val = bm.d > static_cast<T>(1.0e-6f) ? bm.d : static_cast<T>(0.012f);
+        T dt0_ax = bm.L0;
+        T dt0_bn = (bm.L0 * bm.L0) / (static_cast<T>(3.464f) * d_val);
+        T dt0_eff = std::min(dt0_ax, dt0_bn);
+        T dt_ax = L_cur;
+        T dt_bn = (L_cur * L_cur) / (static_cast<T>(3.464f) * d_val);
+        T dt_eff = std::min(dt_ax, dt_bn);
+        if (dt0_eff > static_cast<T>(0.0f) && dt_eff <= eta * dt0_eff) {
+            bm.is_eroded = true;
+            bm.N = bm.V2 = bm.V3 = bm.M2 = bm.M3 = bm.T_tor = static_cast<T>(0.0f);
+            erosion_occurred_flag = 1;
+        }
+    }
+
+    bool any_cohesive_splitting = m_physics_params.enable_cohesive_splitting;
+    if (!any_cohesive_splitting) {
+        for (const auto& mt : m_material_tables) {
+            if (mt.enable_cohesive_splitting) { any_cohesive_splitting = true; break; }
+        }
+    }
+
+    const bool erosion_occurred = (erosion_occurred_flag != 0);
+    if (any_cohesive_splitting && erosion_occurred) {
         splitFracturedElementNodes();
     }
 
@@ -3372,7 +3945,13 @@ void FEMSolver3D<T>::evaluateErosionCriteria() {
 
 template <typename T>
 void FEMSolver3D<T>::splitFracturedElementNodes() {
-    if (!m_physics_params.enable_cohesive_splitting) return;
+    bool any_cohesive_splitting = m_physics_params.enable_cohesive_splitting;
+    if (!any_cohesive_splitting) {
+        for (const auto& mt : m_material_tables) {
+            if (mt.enable_cohesive_splitting) { any_cohesive_splitting = true; break; }
+        }
+    }
+    if (!any_cohesive_splitting) return;
 
     if (m_max_nodes_capacity < m_nodes.size() + 4 * m_elements.size()) {
         m_max_nodes_capacity = m_nodes.size() + 4 * m_elements.size();
@@ -3419,9 +3998,6 @@ void FEMSolver3D<T>::splitFracturedElementNodes() {
             if (old_nid < 0 || old_nid >= static_cast<int>(m_nodes.size())) continue;
             if (m_node_elem_ref_count[old_nid] > 1 && m_nodes.size() < m_max_nodes_capacity) {
                 FEMNode3D<T> new_node = m_nodes[old_nid];
-                new_node.is_fixed[0] = false;
-                new_node.is_fixed[1] = false;
-                new_node.is_fixed[2] = false;
                 new_node.m = m_elem_node;
                 for (int c = 0; c < 3; ++c) {
                     new_node.f_int[c] = static_cast<T>(0.0f);
@@ -3446,6 +4022,20 @@ void FEMSolver3D<T>::splitFracturedElementNodes() {
                 any_split = true;
             }
         }
+
+        if (m_face_neighbors.size() == m_elements.size() * 6) {
+            for (int f = 0; f < 6; ++f) {
+                int nb = m_face_neighbors[e * 6 + f];
+                if (nb >= 0 && nb < static_cast<int>(m_elements.size())) {
+                    for (int nf = 0; nf < 6; ++nf) {
+                        if (m_face_neighbors[nb * 6 + nf] == static_cast<int>(e)) {
+                            m_face_neighbors[nb * 6 + nf] = -1;
+                        }
+                    }
+                }
+                m_face_neighbors[e * 6 + f] = -1;
+            }
+        }
     }
 
     if (any_split) {
@@ -3453,7 +4043,6 @@ void FEMSolver3D<T>::splitFracturedElementNodes() {
             m_nodal_vol_cur.resize(m_nodes.size(), static_cast<T>(0.0f));
             m_nodal_vol_ref.resize(m_nodes.size(), static_cast<T>(0.0f));
         }
-        m_face_neighbors.clear();
         m_surface_facets_dirty = true;
     }
 }
@@ -3637,6 +4226,10 @@ void FEMSolver3D<T>::processErodedElementsToMPM() {
 template <typename T>
 void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, std::vector<MPMParticle3D>& out_particles, const float* v_cluster_com) const {
     const auto& mat = m_material_tables[elem.mat_id];
+    const bool is_tet4 = isTet4Element(elem);
+    const int num_elem_nodes = is_tet4 ? 4 : 8;
+    const float inv_num_nodes = is_tet4 ? 0.25f : 0.125f;
+
     float density = mat.density > 0.0f ? mat.density : 2400.0f;
     float V_elem = static_cast<float>(elem.V > static_cast<T>(1.0e-18f) ? elem.V : (elem.V0 > static_cast<T>(1.0e-18f) ? elem.V0 : static_cast<T>(1.0e-6f)));
     if (V_elem <= 0.0f) V_elem = 1.0e-6f;
@@ -3648,37 +4241,48 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
     float p_vol = V_elem / static_cast<float>(np);
 
     // Gather nodal positions and velocities
-    T x_nodes[8][3], v_nodes[8][3];
+    T x_nodes[8][3]{}, v_nodes[8][3]{};
     float x_elem_com[3] = {0.0f, 0.0f, 0.0f};
     float v_elem_com[3] = {0.0f, 0.0f, 0.0f};
-    for (int n = 0; n < 8; ++n) {
+    for (int n = 0; n < num_elem_nodes; ++n) {
         int nid = elem.node_ids[n];
         for (int c = 0; c < 3; ++c) {
             x_nodes[n][c] = m_nodes[nid].x[c];
             v_nodes[n][c] = m_nodes[nid].v[c];
-            x_elem_com[c] += static_cast<float>(m_nodes[nid].x[c]) * 0.125f;
-            v_elem_com[c] += static_cast<float>(m_nodes[nid].v[c]) * 0.125f;
+            x_elem_com[c] += static_cast<float>(m_nodes[nid].x[c]) * inv_num_nodes;
+            v_elem_com[c] += static_cast<float>(m_nodes[nid].v[c]) * inv_num_nodes;
         }
     }
 
-    // Compute deformed element dimensions to handle crushed / flattened (pancake) hex elements
-    float hx = 0.5f * (
-        std::sqrt((static_cast<float>(x_nodes[1][0]-x_nodes[0][0]))*(static_cast<float>(x_nodes[1][0]-x_nodes[0][0])) + (static_cast<float>(x_nodes[1][1]-x_nodes[0][1]))*(static_cast<float>(x_nodes[1][1]-x_nodes[0][1])) + (static_cast<float>(x_nodes[1][2]-x_nodes[0][2]))*(static_cast<float>(x_nodes[1][2]-x_nodes[0][2]))) +
-        std::sqrt((static_cast<float>(x_nodes[2][0]-x_nodes[3][0]))*(static_cast<float>(x_nodes[2][0]-x_nodes[3][0])) + (static_cast<float>(x_nodes[2][1]-x_nodes[3][1]))*(static_cast<float>(x_nodes[2][1]-x_nodes[3][1])) + (static_cast<float>(x_nodes[2][2]-x_nodes[3][2]))*(static_cast<float>(x_nodes[2][2]-x_nodes[3][2])))
-    );
-    float hy = 0.5f * (
-        std::sqrt((static_cast<float>(x_nodes[3][0]-x_nodes[0][0]))*(static_cast<float>(x_nodes[3][0]-x_nodes[0][0])) + (static_cast<float>(x_nodes[3][1]-x_nodes[0][1]))*(static_cast<float>(x_nodes[3][1]-x_nodes[0][1])) + (static_cast<float>(x_nodes[3][2]-x_nodes[0][2]))*(static_cast<float>(x_nodes[3][2]-x_nodes[0][2]))) +
-        std::sqrt((static_cast<float>(x_nodes[2][0]-x_nodes[1][0]))*(static_cast<float>(x_nodes[2][0]-x_nodes[1][0])) + (static_cast<float>(x_nodes[2][1]-x_nodes[1][1]))*(static_cast<float>(x_nodes[2][1]-x_nodes[1][1])) + (static_cast<float>(x_nodes[2][2]-x_nodes[1][2]))*(static_cast<float>(x_nodes[2][2]-x_nodes[1][2])))
-    );
-    float hz = 0.5f * (
-        std::sqrt((static_cast<float>(x_nodes[4][0]-x_nodes[0][0]))*(static_cast<float>(x_nodes[4][0]-x_nodes[0][0])) + (static_cast<float>(x_nodes[4][1]-x_nodes[0][1]))*(static_cast<float>(x_nodes[4][1]-x_nodes[0][1])) + (static_cast<float>(x_nodes[4][2]-x_nodes[0][2]))*(static_cast<float>(x_nodes[4][2]-x_nodes[0][2]))) +
-        std::sqrt((static_cast<float>(x_nodes[7][0]-x_nodes[3][0]))*(static_cast<float>(x_nodes[7][0]-x_nodes[3][0])) + (static_cast<float>(x_nodes[7][1]-x_nodes[3][1]))*(static_cast<float>(x_nodes[7][1]-x_nodes[3][1])) + (static_cast<float>(x_nodes[7][2]-x_nodes[3][2]))*(static_cast<float>(x_nodes[7][2]-x_nodes[3][2])))
-    );
-    float h_min = std::max(1.0e-5f, std::min({hx, hy, hz}));
-    float h_max = std::max({hx, hy, hz, 1.0e-5f});
+    auto edge_len = [&](int a, int b) -> float {
+        float dx = static_cast<float>(x_nodes[b][0] - x_nodes[a][0]);
+        float dy = static_cast<float>(x_nodes[b][1] - x_nodes[a][1]);
+        float dz = static_cast<float>(x_nodes[b][2] - x_nodes[a][2]);
+        return std::sqrt(dx*dx + dy*dy + dz*dz);
+    };
+
+    // Compute deformed element dimensions to handle crushed / flattened elements
+    float hx = 0.0f, hy = 0.0f, hz = 0.0f;
+    float h_min = 1.0e30f, h_max = 1.0e-5f;
+    if (is_tet4) {
+        static const int TET_EDGES[6][2] = {{0,1}, {0,2}, {0,3}, {1,2}, {1,3}, {2,3}};
+        for (int k = 0; k < 6; ++k) {
+            float el = edge_len(TET_EDGES[k][0], TET_EDGES[k][1]);
+            h_min = std::min(h_min, el);
+            h_max = std::max(h_max, el);
+        }
+        h_min = std::max(1.0e-5f, h_min);
+        hx = hy = hz = h_min;
+    } else {
+        hx = 0.5f * (edge_len(0, 1) + edge_len(3, 2));
+        hy = 0.5f * (edge_len(0, 3) + edge_len(1, 2));
+        hz = 0.5f * (edge_len(0, 4) + edge_len(3, 7));
+        h_min = std::max(1.0e-5f, std::min({hx, hy, hz}));
+        h_max = std::max({hx, hy, hz, 1.0e-5f});
+    }
     bool is_flattened = (h_min / h_max < 0.25f) || (elem.V0 > static_cast<T>(1.0e-18f) && (elem.V / elem.V0) < static_cast<T>(0.25f));
 
-    // Clearance-aware geometric contact radius sizing: bounded by deformed minimum gap thickness to prevent double-sided vise-trap jams
+    // Clearance-aware geometric contact radius sizing: bounded by deformed minimum gap thickness
     float clearance_factor = (np == 27) ? 0.25f : 0.35f;
     float h_p = std::min(std::cbrt(p_vol) * clearance_factor, 0.38f * h_min);
     if (h_p < 1.0e-4f) h_p = 1.0e-4f;
@@ -3695,50 +4299,69 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
         {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1}
     };
 
-    // Compute element center Jacobian and spin tensor W_ij for physical vorticity micro-mixing
+    // Compute element center spin tensor W_ij for physical vorticity micro-mixing
     float W_spin[3][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
     {
-        float J0[3][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
-        for (int a = 0; a < 8; ++a) {
-            float dN_dxi[3] = {
-                0.125f * HEX_NODES_LOCAL[a][0],
-                0.125f * HEX_NODES_LOCAL[a][1],
-                0.125f * HEX_NODES_LOCAL[a][2]
-            };
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    J0[r][c] += static_cast<float>(x_nodes[a][r]) * dN_dxi[c];
+        float L_grad[3][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+        bool valid_grad = false;
+        if (is_tet4) {
+            T dN_tet[4][3]{}, V_tet = static_cast<T>(0.0f);
+            computeTet4ShapeGradients(x_nodes, dN_tet, V_tet);
+            if (V_tet > static_cast<T>(1.0e-18f)) {
+                for (int a = 0; a < 4; ++a) {
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            L_grad[r][c] += static_cast<float>(v_nodes[a][r]) * static_cast<float>(dN_tet[a][c]);
+                        }
+                    }
                 }
+                valid_grad = true;
             }
-        }
-        float detJ = J0[0][0]*(J0[1][1]*J0[2][2] - J0[1][2]*J0[2][1])
-                   - J0[0][1]*(J0[1][0]*J0[2][2] - J0[1][2]*J0[2][0])
-                   + J0[0][2]*(J0[1][0]*J0[2][1] - J0[1][1]*J0[2][0]);
-        if (std::abs(detJ) > 1.0e-12f) {
-            float inv_det = 1.0f / detJ;
-            float invJ[3][3] = {
-                { (J0[1][1]*J0[2][2] - J0[1][2]*J0[2][1]) * inv_det, -(J0[0][1]*J0[2][2] - J0[0][2]*J0[2][1]) * inv_det,  (J0[0][1]*J0[1][2] - J0[0][2]*J0[1][1]) * inv_det},
-                {-(J0[1][0]*J0[2][2] - J0[1][2]*J0[2][0]) * inv_det,  (J0[0][0]*J0[2][2] - J0[0][2]*J0[2][0]) * inv_det, -(J0[0][0]*J0[1][2] - J0[0][2]*J0[1][0]) * inv_det},
-                { (J0[1][0]*J0[2][1] - J0[1][1]*J0[2][0]) * inv_det, -(J0[0][0]*J0[2][1] - J0[0][1]*J0[2][0]) * inv_det,  (J0[0][0]*J0[1][1] - J0[0][1]*J0[1][0]) * inv_det}
-            };
-            float L_grad[3][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+        } else {
+            float J0[3][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
             for (int a = 0; a < 8; ++a) {
                 float dN_dxi[3] = {
                     0.125f * HEX_NODES_LOCAL[a][0],
                     0.125f * HEX_NODES_LOCAL[a][1],
                     0.125f * HEX_NODES_LOCAL[a][2]
                 };
-                float dN_dx[3] = {
-                    invJ[0][0]*dN_dxi[0] + invJ[0][1]*dN_dxi[1] + invJ[0][2]*dN_dxi[2],
-                    invJ[1][0]*dN_dxi[0] + invJ[1][1]*dN_dxi[1] + invJ[1][2]*dN_dxi[2],
-                    invJ[2][0]*dN_dxi[0] + invJ[2][1]*dN_dxi[1] + invJ[2][2]*dN_dxi[2]
-                };
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
-                        L_grad[r][c] += static_cast<float>(v_nodes[a][r]) * dN_dx[c];
+                        J0[r][c] += static_cast<float>(x_nodes[a][r]) * dN_dxi[c];
                     }
                 }
             }
+            float detJ = J0[0][0]*(J0[1][1]*J0[2][2] - J0[1][2]*J0[2][1])
+                       - J0[0][1]*(J0[1][0]*J0[2][2] - J0[1][2]*J0[2][0])
+                       + J0[0][2]*(J0[1][0]*J0[2][1] - J0[1][1]*J0[2][0]);
+            if (std::abs(detJ) > 1.0e-12f) {
+                float inv_det = 1.0f / detJ;
+                float invJ[3][3] = {
+                    { (J0[1][1]*J0[2][2] - J0[1][2]*J0[2][1]) * inv_det, -(J0[0][1]*J0[2][2] - J0[0][2]*J0[2][1]) * inv_det,  (J0[0][1]*J0[1][2] - J0[0][2]*J0[1][1]) * inv_det},
+                    {-(J0[1][0]*J0[2][2] - J0[1][2]*J0[2][0]) * inv_det,  (J0[0][0]*J0[2][2] - J0[0][2]*J0[2][0]) * inv_det, -(J0[0][0]*J0[1][2] - J0[0][2]*J0[1][0]) * inv_det},
+                    { (J0[1][0]*J0[2][1] - J0[1][1]*J0[2][0]) * inv_det, -(J0[0][0]*J0[2][1] - J0[0][1]*J0[2][0]) * inv_det,  (J0[0][0]*J0[1][1] - J0[0][1]*J0[1][0]) * inv_det}
+                };
+                for (int a = 0; a < 8; ++a) {
+                    float dN_dxi[3] = {
+                        0.125f * HEX_NODES_LOCAL[a][0],
+                        0.125f * HEX_NODES_LOCAL[a][1],
+                        0.125f * HEX_NODES_LOCAL[a][2]
+                    };
+                    float dN_dx[3] = {
+                        invJ[0][0]*dN_dxi[0] + invJ[0][1]*dN_dxi[1] + invJ[0][2]*dN_dxi[2],
+                        invJ[1][0]*dN_dxi[0] + invJ[1][1]*dN_dxi[1] + invJ[1][2]*dN_dxi[2],
+                        invJ[2][0]*dN_dxi[0] + invJ[2][1]*dN_dxi[1] + invJ[2][2]*dN_dxi[2]
+                    };
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            L_grad[r][c] += static_cast<float>(v_nodes[a][r]) * dN_dx[c];
+                        }
+                    }
+                }
+                valid_grad = true;
+            }
+        }
+        if (valid_grad) {
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
                     W_spin[r][c] = 0.5f * (L_grad[r][c] - L_grad[c][r]);
@@ -3756,23 +4379,10 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
         return (static_cast<float>(seed & 0xFFFFu) / 32767.5f) - 1.0f;
     };
     uint32_t user_seed = static_cast<uint32_t>(m_physics_params.random_seed) * 2654435761u;
-    uint32_t base_seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[6]) * 19349663u);
+    uint32_t base_seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u) ^ (static_cast<uint32_t>(elem.node_ids[is_tet4 ? 3 : 6]) * 19349663u);
 
-    if (np == 1) {
+    auto push_particle = [&](const float xp[3], const float vp[3]) {
         MPMParticle3D p{};
-        float xp[3] = {0.0f, 0.0f, 0.0f};
-        float vp[3] = {0.0f, 0.0f, 0.0f};
-        for (int n = 0; n < 8; ++n) {
-            for (int c = 0; c < 3; ++c) {
-                xp[c] += static_cast<float>(x_nodes[n][c]) * 0.125f;
-                vp[c] += static_cast<float>(v_nodes[n][c]) * 0.125f;
-            }
-        }
-        float v_mag_sq = vp[0]*vp[0] + vp[1]*vp[1] + vp[2]*vp[2];
-        if (v_mag_sq > v_max_birth * v_max_birth) {
-            float scale = v_max_birth / std::sqrt(v_mag_sq);
-            vp[0] *= scale; vp[1] *= scale; vp[2] *= scale;
-        }
         p.x[0] = xp[0]; p.x[1] = xp[1]; p.x[2] = xp[2];
         p.v[0] = vp[0]; p.v[1] = vp[1]; p.v[2] = vp[2];
         p.m = p_mass;
@@ -3792,27 +4402,98 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
         p.object_id = elem.mat_id + m_mpm_material_offset;
         p.has_failed = true;
         out_particles.push_back(p);
-    } else if (np == 8) {
-        // Contracted Gauss coordinates (0.380 instead of 0.577) to guarantee zero initial overlap with adjacent element faces
-        const float g_coord = 0.380f;
-        for (int p_idx = 0; p_idx < 8; ++p_idx) {
+    };
+
+    if (np == 1) {
+        float vp[3] = {v_elem_com[0], v_elem_com[1], v_elem_com[2]};
+        if (v_cluster_com != nullptr && m_physics_params.debris_velocity_smoothing > static_cast<T>(1.0e-5f)) {
+            float alpha_s = std::clamp(static_cast<float>(m_physics_params.debris_velocity_smoothing), 0.0f, 0.90f);
+            for (int c = 0; c < 3; ++c) {
+                vp[c] = (1.0f - alpha_s) * vp[c] + alpha_s * v_cluster_com[c];
+            }
+        }
+        float v_mag_sq = vp[0]*vp[0] + vp[1]*vp[1] + vp[2]*vp[2];
+        if (v_mag_sq > v_max_birth * v_max_birth) {
+            float scale = v_max_birth / std::sqrt(v_mag_sq);
+            vp[0] *= scale; vp[1] *= scale; vp[2] *= scale;
+        }
+        push_particle(x_elem_com, vp);
+        return;
+    }
+
+    // 27 symmetric S4 barycentric orbits for Tet4 (1 centroid + 4 vertices + 6 edges + 4 faces + 12 (0.5, 0.25, 0.25, 0) permutations)
+    static const float TET_27_BASE[27][4] = {
+        {0.25f, 0.25f, 0.25f, 0.25f},
+        {1.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 1.0f},
+        {0.5f, 0.5f, 0.0f, 0.0f}, {0.5f, 0.0f, 0.5f, 0.0f}, {0.5f, 0.0f, 0.0f, 0.5f},
+        {0.0f, 0.5f, 0.5f, 0.0f}, {0.0f, 0.5f, 0.0f, 0.5f}, {0.0f, 0.0f, 0.5f, 0.5f},
+        {0.0f, 1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f}, {1.0f/3.0f, 0.0f, 1.0f/3.0f, 1.0f/3.0f},
+        {1.0f/3.0f, 1.0f/3.0f, 0.0f, 1.0f/3.0f}, {1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f, 0.0f},
+        {0.50f, 0.25f, 0.25f, 0.00f}, {0.50f, 0.25f, 0.00f, 0.25f}, {0.50f, 0.00f, 0.25f, 0.25f},
+        {0.25f, 0.50f, 0.25f, 0.00f}, {0.25f, 0.50f, 0.00f, 0.25f}, {0.00f, 0.50f, 0.25f, 0.25f},
+        {0.25f, 0.25f, 0.50f, 0.00f}, {0.25f, 0.00f, 0.50f, 0.25f}, {0.00f, 0.25f, 0.50f, 0.25f},
+        {0.25f, 0.25f, 0.00f, 0.50f}, {0.25f, 0.00f, 0.25f, 0.50f}, {0.00f, 0.25f, 0.25f, 0.50f}
+    };
+
+    for (int p_idx = 0; p_idx < np; ++p_idx) {
+        float xp[3] = {0.0f, 0.0f, 0.0f};
+        float vp[3] = {0.0f, 0.0f, 0.0f};
+
+        if (is_tet4) {
+            float w[4]{};
+            if (np == 8) {
+                const bool corner_biased = (p_idx < 4);
+                const int k_prim = p_idx % 4;
+                for (int a = 0; a < 4; ++a) {
+                    w[a] = corner_biased
+                        ? ((a == k_prim) ? 0.58f : 0.14f)
+                        : ((a == k_prim) ? 0.07f : 0.31f);
+                }
+            } else {
+                const float contract = 0.62f;
+                for (int a = 0; a < 4; ++a) {
+                    w[a] = 0.25f + contract * (TET_27_BASE[p_idx][a] - 0.25f);
+                }
+            }
+            float dw[4]{}, dw_mean = 0.0f;
+            for (int a = 0; a < 4; ++a) {
+                dw[a] = 0.02f * hash_jitter(base_seed ^ (static_cast<uint32_t>(p_idx) * 7919u + static_cast<uint32_t>(a + 1)));
+                dw_mean += 0.25f * dw[a];
+            }
+            for (int a = 0; a < 4; ++a) {
+                w[a] += (dw[a] - dw_mean);
+                for (int c = 0; c < 3; ++c) {
+                    xp[c] += static_cast<float>(x_nodes[a][c]) * w[a];
+                    vp[c] += static_cast<float>(v_nodes[a][c]) * w[a];
+                }
+            }
+        } else {
+            float xi = 0.0f, eta = 0.0f, zeta = 0.0f;
             float jx = 0.08f * hash_jitter(base_seed ^ (static_cast<uint32_t>(p_idx) * 7919u + 1u));
             float jy = 0.08f * hash_jitter(base_seed ^ (static_cast<uint32_t>(p_idx) * 7919u + 2u));
             float jz = 0.08f * hash_jitter(base_seed ^ (static_cast<uint32_t>(p_idx) * 7919u + 3u));
+            if (np == 8) {
+                const float g_coord = 0.380f;
+                xi   = (HEX_NODES_LOCAL[p_idx][0] + jx) * g_coord;
+                eta  = (HEX_NODES_LOCAL[p_idx][1] + jy) * g_coord;
+                zeta = (HEX_NODES_LOCAL[p_idx][2] + jz) * g_coord;
+            } else {
+                // np == 27 contracted 3x3x3 interior lattice
+                const float step = 0.50f;
+                int ix = (p_idx % 3) - 1;
+                int iy = ((p_idx / 3) % 3) - 1;
+                int iz = (p_idx / 9) - 1;
+                xi   = (static_cast<float>(ix) + 0.5f * jx) * step;
+                eta  = (static_cast<float>(iy) + 0.5f * jy) * step;
+                zeta = (static_cast<float>(iz) + 0.5f * jz) * step;
+            }
 
-            float xi = (HEX_NODES_LOCAL[p_idx][0] + jx) * g_coord;
-            float eta = (HEX_NODES_LOCAL[p_idx][1] + jy) * g_coord;
-            float zeta = (HEX_NODES_LOCAL[p_idx][2] + jz) * g_coord;
-
-            // If crushed/flattened, collapse particle sheet along minimum dimension
             if (is_flattened) {
                 if (hz <= hx && hz <= hy) zeta *= 0.15f;
                 else if (hx <= hy && hx <= hz) xi *= 0.15f;
                 else eta *= 0.15f;
             }
 
-            float xp[3] = {0.0f, 0.0f, 0.0f};
-            float vp[3] = {0.0f, 0.0f, 0.0f};
             for (int a = 0; a < 8; ++a) {
                 float Na = 0.125f * (1.0f + xi * HEX_NODES_LOCAL[a][0]) *
                                    (1.0f + eta * HEX_NODES_LOCAL[a][1]) *
@@ -3822,170 +4503,151 @@ void FEMSolver3D<T>::convertElementToMPMParticles(const FEMElement3D<T>& elem, s
                     vp[c] += static_cast<float>(v_nodes[a][c]) * Na;
                 }
             }
-
-            // Clumping toward element center-of-mass velocity to suppress unphysical explosive dispersion
-            float clumping = std::clamp(static_cast<float>(m_physics_params.debris_clumping > 0.0f ? m_physics_params.debris_clumping : 0.60f), 0.0f, 0.95f);
-            vp[0] = (1.0f - clumping) * vp[0] + clumping * v_elem_com[0];
-            vp[1] = (1.0f - clumping) * vp[1] + clumping * v_elem_com[1];
-            vp[2] = (1.0f - clumping) * vp[2] + clumping * v_elem_com[2];
-
-            // Bounded rotational spin from element shearing
-            float offset_x = xp[0] - x_elem_com[0];
-            float offset_y = xp[1] - x_elem_com[1];
-            float offset_z = xp[2] - x_elem_com[2];
-
-            float v_spin_x = W_spin[0][0]*offset_x + W_spin[0][1]*offset_y + W_spin[0][2]*offset_z;
-            float v_spin_y = W_spin[1][0]*offset_x + W_spin[1][1]*offset_y + W_spin[1][2]*offset_z;
-            float v_spin_z = W_spin[2][0]*offset_x + W_spin[2][1]*offset_y + W_spin[2][2]*offset_z;
-
-            float spin_mag = std::sqrt(v_spin_x*v_spin_x + v_spin_y*v_spin_y + v_spin_z*v_spin_z);
-            float v_com_speed = std::sqrt(v_elem_com[0]*v_elem_com[0] + v_elem_com[1]*v_elem_com[1] + v_elem_com[2]*v_elem_com[2]);
-            float max_spin = std::max(2.0f, 0.05f * v_com_speed);
-            if (spin_mag > max_spin) {
-                float scale = max_spin / spin_mag;
-                v_spin_x *= scale;
-                v_spin_y *= scale;
-                v_spin_z *= scale;
-            }
-
-            vp[0] += v_spin_x;
-            vp[1] += v_spin_y;
-            vp[2] += v_spin_z;
-
-            // Inter-element cluster / clump velocity smoothing
-            if (v_cluster_com != nullptr && (m_physics_params.debris_clumping > static_cast<T>(1.0e-5f) || m_physics_params.debris_velocity_smoothing > static_cast<T>(1.0e-5f))) {
-                float alpha_s = std::clamp(static_cast<float>(std::max(m_physics_params.debris_clumping, m_physics_params.debris_velocity_smoothing)), 0.0f, 0.90f);
-                vp[0] = (1.0f - alpha_s) * vp[0] + alpha_s * v_cluster_com[0];
-                vp[1] = (1.0f - alpha_s) * vp[1] + alpha_s * v_cluster_com[1];
-                vp[2] = (1.0f - alpha_s) * vp[2] + alpha_s * v_cluster_com[2];
-            }
-
-            // Filter out single-node hourglassing / rupture singularities
-            float diff_x = vp[0] - v_elem_com[0];
-            float diff_y = vp[1] - v_elem_com[1];
-            float diff_z = vp[2] - v_elem_com[2];
-            float diff_sq = diff_x*diff_x + diff_y*diff_y + diff_z*diff_z;
-            if (diff_sq > max_dev * max_dev) {
-                float scale = max_dev / std::sqrt(diff_sq);
-                vp[0] = v_elem_com[0] + diff_x * scale;
-                vp[1] = v_elem_com[1] + diff_y * scale;
-                vp[2] = v_elem_com[2] + diff_z * scale;
-            }
-
-            float v_mag_sq = vp[0]*vp[0] + vp[1]*vp[1] + vp[2]*vp[2];
-            if (v_mag_sq > v_max_birth * v_max_birth) {
-                float scale = v_max_birth / std::sqrt(v_mag_sq);
-                vp[0] *= scale; vp[1] *= scale; vp[2] *= scale;
-            }
-
-            // Geometric clearance check against embedded/neighboring rebar elements at birth
-            for (const auto& truss : m_trusses) {
-                if (truss.is_eroded || truss.node_ids[0] < 0 || truss.node_ids[1] < 0) continue;
-                int n1_id = truss.node_ids[0];
-                int n2_id = truss.node_ids[1];
-                if (n1_id >= static_cast<int>(m_nodes.size()) || n2_id >= static_cast<int>(m_nodes.size())) continue;
-
-                float x1[3] = { static_cast<float>(m_nodes[n1_id].x[0]), static_cast<float>(m_nodes[n1_id].x[1]), static_cast<float>(m_nodes[n1_id].x[2]) };
-                float x2[3] = { static_cast<float>(m_nodes[n2_id].x[0]), static_cast<float>(m_nodes[n2_id].x[1]), static_cast<float>(m_nodes[n2_id].x[2]) };
-
-                float ab[3] = { x2[0] - x1[0], x2[1] - x1[1], x2[2] - x1[2] };
-                float L2 = ab[0]*ab[0] + ab[1]*ab[1] + ab[2]*ab[2];
-                if (L2 < 1.0e-12f) continue;
-
-                float ap[3] = { xp[0] - x1[0], xp[1] - x1[1], xp[2] - x1[2] };
-                float t_proj = (ap[0]*ab[0] + ap[1]*ab[1] + ap[2]*ab[2]) / L2;
-                if (t_proj < -0.1f || t_proj > 1.1f) continue;
-                t_proj = std::clamp(t_proj, 0.0f, 1.0f);
-
-                float xc[3] = { x1[0] + t_proj * ab[0], x1[1] + t_proj * ab[1], x1[2] + t_proj * ab[2] };
-                float d_vec[3] = { xp[0] - xc[0], xp[1] - xc[1], xp[2] - xc[2] };
-                float dist2 = d_vec[0]*d_vec[0] + d_vec[1]*d_vec[1] + d_vec[2]*d_vec[2];
-                float dist = std::sqrt(dist2 > 1.0e-20f ? dist2 : 1.0e-20f);
-
-                float r_rebar = std::sqrt(truss.A > 1.0e-12f ? (static_cast<float>(truss.A) / 3.14159265f) : 0.0001f);
-                float min_clearance = r_rebar + h_p + 1.0e-4f;
-                if (dist < min_clearance) {
-                    if (dist > 1.0e-6f) {
-                        float scale_push = min_clearance / dist;
-                        xp[0] = xc[0] + d_vec[0] * scale_push;
-                        xp[1] = xc[1] + d_vec[1] * scale_push;
-                        xp[2] = xc[2] + d_vec[2] * scale_push;
-                    } else {
-                        float to_com[3] = { xp[0] - x_elem_com[0], xp[1] - x_elem_com[1], xp[2] - x_elem_com[2] };
-                        float to_com_len = std::sqrt(to_com[0]*to_com[0] + to_com[1]*to_com[1] + to_com[2]*to_com[2]);
-                        if (to_com_len > 1.0e-6f) {
-                            xp[0] = xc[0] + (to_com[0] / to_com_len) * min_clearance;
-                            xp[1] = xc[1] + (to_com[1] / to_com_len) * min_clearance;
-                            xp[2] = xc[2] + (to_com[2] / to_com_len) * min_clearance;
-                        } else {
-                            xp[0] += min_clearance;
-                        }
-                    }
-                }
-            }
-
-            for (const auto& beam : m_beams) {
-                if (beam.is_eroded || beam.node_ids[0] < 0 || beam.node_ids[1] < 0) continue;
-                int n1_id = beam.node_ids[0];
-                int n2_id = beam.node_ids[1];
-                if (n1_id >= static_cast<int>(m_nodes.size()) || n2_id >= static_cast<int>(m_nodes.size())) continue;
-
-                float x1[3] = { static_cast<float>(m_nodes[n1_id].x[0]), static_cast<float>(m_nodes[n1_id].x[1]), static_cast<float>(m_nodes[n1_id].x[2]) };
-                float x2[3] = { static_cast<float>(m_nodes[n2_id].x[0]), static_cast<float>(m_nodes[n2_id].x[1]), static_cast<float>(m_nodes[n2_id].x[2]) };
-
-                float ab[3] = { x2[0] - x1[0], x2[1] - x1[1], x2[2] - x1[2] };
-                float L2 = ab[0]*ab[0] + ab[1]*ab[1] + ab[2]*ab[2];
-                if (L2 < 1.0e-12f) continue;
-
-                float ap[3] = { xp[0] - x1[0], xp[1] - x1[1], xp[2] - x1[2] };
-                float t_proj = (ap[0]*ab[0] + ap[1]*ab[1] + ap[2]*ab[2]) / L2;
-                if (t_proj < -0.1f || t_proj > 1.1f) continue;
-                t_proj = std::clamp(t_proj, 0.0f, 1.0f);
-
-                float xc[3] = { x1[0] + t_proj * ab[0], x1[1] + t_proj * ab[1], x1[2] + t_proj * ab[2] };
-                float d_vec[3] = { xp[0] - xc[0], xp[1] - xc[1], xp[2] - xc[2] };
-                float dist2 = d_vec[0]*d_vec[0] + d_vec[1]*d_vec[1] + d_vec[2]*d_vec[2];
-                float dist = std::sqrt(dist2 > 1.0e-20f ? dist2 : 1.0e-20f);
-
-                float r_beam = std::sqrt(beam.A > 1.0e-12f ? (static_cast<float>(beam.A) / 3.14159265f) : 0.0001f);
-                float min_clearance = r_beam + h_p + 1.0e-4f;
-                if (dist < min_clearance) {
-                    if (dist > 1.0e-6f) {
-                        float scale_push = min_clearance / dist;
-                        xp[0] = xc[0] + d_vec[0] * scale_push;
-                        xp[1] = xc[1] + d_vec[1] * scale_push;
-                        xp[2] = xc[2] + d_vec[2] * scale_push;
-                    }
-                }
-            }
-
-            MPMParticle3D p{};
-            p.x[0] = xp[0]; p.x[1] = xp[1]; p.x[2] = xp[2];
-            p.v[0] = vp[0]; p.v[1] = vp[1]; p.v[2] = vp[2];
-            p.m = p_mass;
-            p.V0 = p_vol;
-            p.V = p_vol;
-            p.lp[0] = h_p; p.lp[1] = h_p; p.lp[2] = h_p;
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    p.sigma[r][c] = 0.0f;
-                    p.B[r][c] = 0.0f;
-                    p.L_grad[r][c] = 0.0f;
-                }
-            }
-            p.ep_bar = static_cast<float>(elem.ep_bar);
-            p.damage = 1.0f;
-            p.temperature = static_cast<float>(elem.temperature);
-            p.object_id = elem.mat_id + m_mpm_material_offset;
-            p.has_failed = true;
-            out_particles.push_back(p);
         }
+
+        // Clumping toward element center-of-mass velocity to suppress unphysical explosive dispersion
+        float clumping = std::clamp(static_cast<float>(m_physics_params.debris_clumping >= static_cast<T>(0.0f) ? m_physics_params.debris_clumping : static_cast<T>(0.60f)), 0.0f, 0.95f);
+        vp[0] = (1.0f - clumping) * vp[0] + clumping * v_elem_com[0];
+        vp[1] = (1.0f - clumping) * vp[1] + clumping * v_elem_com[1];
+        vp[2] = (1.0f - clumping) * vp[2] + clumping * v_elem_com[2];
+
+        // Bounded rotational spin from element shearing
+        float offset_x = xp[0] - x_elem_com[0];
+        float offset_y = xp[1] - x_elem_com[1];
+        float offset_z = xp[2] - x_elem_com[2];
+
+        float v_spin_x = W_spin[0][0]*offset_x + W_spin[0][1]*offset_y + W_spin[0][2]*offset_z;
+        float v_spin_y = W_spin[1][0]*offset_x + W_spin[1][1]*offset_y + W_spin[1][2]*offset_z;
+        float v_spin_z = W_spin[2][0]*offset_x + W_spin[2][1]*offset_y + W_spin[2][2]*offset_z;
+
+        float spin_mag = std::sqrt(v_spin_x*v_spin_x + v_spin_y*v_spin_y + v_spin_z*v_spin_z);
+        float v_com_speed = std::sqrt(v_elem_com[0]*v_elem_com[0] + v_elem_com[1]*v_elem_com[1] + v_elem_com[2]*v_elem_com[2]);
+        float max_spin = std::max(2.0f, 0.05f * v_com_speed);
+        if (spin_mag > max_spin) {
+            float scale = max_spin / spin_mag;
+            v_spin_x *= scale;
+            v_spin_y *= scale;
+            v_spin_z *= scale;
+        }
+
+        vp[0] += v_spin_x;
+        vp[1] += v_spin_y;
+        vp[2] += v_spin_z;
+
+        // Inter-element cluster velocity smoothing (controlled independently from intra-element debris_clumping)
+        if (v_cluster_com != nullptr && m_physics_params.debris_velocity_smoothing > static_cast<T>(1.0e-5f)) {
+            float alpha_s = std::clamp(static_cast<float>(m_physics_params.debris_velocity_smoothing), 0.0f, 0.90f);
+            vp[0] = (1.0f - alpha_s) * vp[0] + alpha_s * v_cluster_com[0];
+            vp[1] = (1.0f - alpha_s) * vp[1] + alpha_s * v_cluster_com[1];
+            vp[2] = (1.0f - alpha_s) * vp[2] + alpha_s * v_cluster_com[2];
+        }
+
+        // Filter out single-node hourglassing / rupture singularities
+        float diff_x = vp[0] - v_elem_com[0];
+        float diff_y = vp[1] - v_elem_com[1];
+        float diff_z = vp[2] - v_elem_com[2];
+        float diff_sq = diff_x*diff_x + diff_y*diff_y + diff_z*diff_z;
+        if (diff_sq > max_dev * max_dev) {
+            float scale = max_dev / std::sqrt(diff_sq);
+            vp[0] = v_elem_com[0] + diff_x * scale;
+            vp[1] = v_elem_com[1] + diff_y * scale;
+            vp[2] = v_elem_com[2] + diff_z * scale;
+        }
+
+        float v_mag_sq = vp[0]*vp[0] + vp[1]*vp[1] + vp[2]*vp[2];
+        if (v_mag_sq > v_max_birth * v_max_birth) {
+            float scale = v_max_birth / std::sqrt(v_mag_sq);
+            vp[0] *= scale; vp[1] *= scale; vp[2] *= scale;
+        }
+
+        // Geometric clearance check against embedded/neighboring rebar & beam elements at birth
+        for (const auto& truss : m_trusses) {
+            if (truss.is_eroded || truss.node_ids[0] < 0 || truss.node_ids[1] < 0) continue;
+            int n1_id = truss.node_ids[0];
+            int n2_id = truss.node_ids[1];
+            if (n1_id >= static_cast<int>(m_nodes.size()) || n2_id >= static_cast<int>(m_nodes.size())) continue;
+
+            float x1[3] = { static_cast<float>(m_nodes[n1_id].x[0]), static_cast<float>(m_nodes[n1_id].x[1]), static_cast<float>(m_nodes[n1_id].x[2]) };
+            float x2[3] = { static_cast<float>(m_nodes[n2_id].x[0]), static_cast<float>(m_nodes[n2_id].x[1]), static_cast<float>(m_nodes[n2_id].x[2]) };
+
+            float ab[3] = { x2[0] - x1[0], x2[1] - x1[1], x2[2] - x1[2] };
+            float L2 = ab[0]*ab[0] + ab[1]*ab[1] + ab[2]*ab[2];
+            if (L2 < 1.0e-12f) continue;
+
+            float ap[3] = { xp[0] - x1[0], xp[1] - x1[1], xp[2] - x1[2] };
+            float t_proj = (ap[0]*ab[0] + ap[1]*ab[1] + ap[2]*ab[2]) / L2;
+            if (t_proj < -0.1f || t_proj > 1.1f) continue;
+            t_proj = std::clamp(t_proj, 0.0f, 1.0f);
+
+            float xc[3] = { x1[0] + t_proj * ab[0], x1[1] + t_proj * ab[1], x1[2] + t_proj * ab[2] };
+            float d_vec[3] = { xp[0] - xc[0], xp[1] - xc[1], xp[2] - xc[2] };
+            float dist2 = d_vec[0]*d_vec[0] + d_vec[1]*d_vec[1] + d_vec[2]*d_vec[2];
+            float dist = std::sqrt(dist2 > 1.0e-20f ? dist2 : 1.0e-20f);
+
+            float r_rebar = std::sqrt(truss.A > 1.0e-12f ? (static_cast<float>(truss.A) / 3.14159265f) : 0.0001f);
+            float min_clearance = r_rebar + h_p + 1.0e-4f;
+            if (dist < min_clearance) {
+                if (dist > 1.0e-6f) {
+                    float scale_push = min_clearance / dist;
+                    xp[0] = xc[0] + d_vec[0] * scale_push;
+                    xp[1] = xc[1] + d_vec[1] * scale_push;
+                    xp[2] = xc[2] + d_vec[2] * scale_push;
+                } else {
+                    float to_com[3] = { xp[0] - x_elem_com[0], xp[1] - x_elem_com[1], xp[2] - x_elem_com[2] };
+                    float to_com_len = std::sqrt(to_com[0]*to_com[0] + to_com[1]*to_com[1] + to_com[2]*to_com[2]);
+                    if (to_com_len > 1.0e-6f) {
+                        xp[0] = xc[0] + (to_com[0] / to_com_len) * min_clearance;
+                        xp[1] = xc[1] + (to_com[1] / to_com_len) * min_clearance;
+                        xp[2] = xc[2] + (to_com[2] / to_com_len) * min_clearance;
+                    } else {
+                        xp[0] += min_clearance;
+                    }
+                }
+            }
+        }
+
+        for (const auto& beam : m_beams) {
+            if (beam.is_eroded || beam.node_ids[0] < 0 || beam.node_ids[1] < 0) continue;
+            int n1_id = beam.node_ids[0];
+            int n2_id = beam.node_ids[1];
+            if (n1_id >= static_cast<int>(m_nodes.size()) || n2_id >= static_cast<int>(m_nodes.size())) continue;
+
+            float x1[3] = { static_cast<float>(m_nodes[n1_id].x[0]), static_cast<float>(m_nodes[n1_id].x[1]), static_cast<float>(m_nodes[n1_id].x[2]) };
+            float x2[3] = { static_cast<float>(m_nodes[n2_id].x[0]), static_cast<float>(m_nodes[n2_id].x[1]), static_cast<float>(m_nodes[n2_id].x[2]) };
+
+            float ab[3] = { x2[0] - x1[0], x2[1] - x1[1], x2[2] - x1[2] };
+            float L2 = ab[0]*ab[0] + ab[1]*ab[1] + ab[2]*ab[2];
+            if (L2 < 1.0e-12f) continue;
+
+            float ap[3] = { xp[0] - x1[0], xp[1] - x1[1], xp[2] - x1[2] };
+            float t_proj = (ap[0]*ab[0] + ap[1]*ab[1] + ap[2]*ab[2]) / L2;
+            if (t_proj < -0.1f || t_proj > 1.1f) continue;
+            t_proj = std::clamp(t_proj, 0.0f, 1.0f);
+
+            float xc[3] = { x1[0] + t_proj * ab[0], x1[1] + t_proj * ab[1], x1[2] + t_proj * ab[2] };
+            float d_vec[3] = { xp[0] - xc[0], xp[1] - xc[1], xp[2] - xc[2] };
+            float dist2 = d_vec[0]*d_vec[0] + d_vec[1]*d_vec[1] + d_vec[2]*d_vec[2];
+            float dist = std::sqrt(dist2 > 1.0e-20f ? dist2 : 1.0e-20f);
+
+            float r_beam = std::sqrt(beam.A > 1.0e-12f ? (static_cast<float>(beam.A) / 3.14159265f) : 0.0001f);
+            float min_clearance = r_beam + h_p + 1.0e-4f;
+            if (dist < min_clearance) {
+                if (dist > 1.0e-6f) {
+                    float scale_push = min_clearance / dist;
+                    xp[0] = xc[0] + d_vec[0] * scale_push;
+                    xp[1] = xc[1] + d_vec[1] * scale_push;
+                    xp[2] = xc[2] + d_vec[2] * scale_push;
+                }
+            }
+        }
+
+        push_particle(xp, vp);
     }
 }
 
 template <typename T>
 void FEMSolver3D<T>::updateNodeErosionStatus() {
-    std::vector<int> active_elem_count(m_nodes.size(), 0);
+    m_active_elem_count.assign(m_nodes.size(), 0);
 
     for (const auto& elem : m_elements) {
         if (elem.is_eroded) continue;
@@ -3993,7 +4655,7 @@ void FEMSolver3D<T>::updateNodeErosionStatus() {
         for (int k = 0; k < num_n; ++k) {
             int nid = elem.node_ids[k];
             if (nid >= 0 && nid < static_cast<int>(m_nodes.size())) {
-                active_elem_count[nid]++;
+                m_active_elem_count[nid]++;
             }
         }
     }
@@ -4003,7 +4665,7 @@ void FEMSolver3D<T>::updateNodeErosionStatus() {
         for (int k = 0; k < 2; ++k) {
             int nid = truss.node_ids[k];
             if (nid >= 0 && nid < static_cast<int>(m_nodes.size())) {
-                active_elem_count[nid]++;
+                m_active_elem_count[nid]++;
             }
         }
     }
@@ -4013,14 +4675,14 @@ void FEMSolver3D<T>::updateNodeErosionStatus() {
         for (int k = 0; k < 2; ++k) {
             int nid = beam.node_ids[k];
             if (nid >= 0 && nid < static_cast<int>(m_nodes.size())) {
-                active_elem_count[nid]++;
+                m_active_elem_count[nid]++;
             }
         }
     }
 
     bool node_eroded = false;
     for (size_t nid = 0; nid < m_nodes.size(); ++nid) {
-        if (!m_nodes[nid].is_eroded && active_elem_count[nid] == 0) {
+        if (!m_nodes[nid].is_eroded && m_active_elem_count[nid] == 0) {
             m_nodes[nid].is_eroded = true;
             m_nodes[nid].v[0] = static_cast<T>(0.0f);
             m_nodes[nid].v[1] = static_cast<T>(0.0f);
@@ -4217,6 +4879,10 @@ void FEMSolver3D<T>::updateKinematicsCentralDifference(T dt) {
                 node.a[c] = static_cast<T>(0.0f);
                 continue;
             }
+            if (node.is_prescribed[c]) {
+                node.a[c] = static_cast<T>(0.0f);
+                continue;
+            }
 
             T f_net = node.f_ext[c] - node.f_int[c] + node.f_contact[c];
             node.a[c] = f_net / node.m;
@@ -4228,7 +4894,6 @@ template <typename T>
 void FEMSolver3D<T>::computeGlobalEnergy() {
     T e_kin = static_cast<T>(0.0f);
     T e_int = static_cast<T>(0.0f);
-    T e_visc = static_cast<T>(0.0f);
 
 #ifdef _OPENMP
     #pragma omp parallel for reduction(+:e_kin) schedule(static)
@@ -4239,8 +4904,13 @@ void FEMSolver3D<T>::computeGlobalEnergy() {
         e_kin += static_cast<T>(0.5f) * node.m * v2;
     }
 
+    for (const auto& rnode : m_rot_nodes) {
+        T w2 = rnode.omega[0]*rnode.omega[0] + rnode.omega[1]*rnode.omega[1] + rnode.omega[2]*rnode.omega[2];
+        e_kin += static_cast<T>(0.5f) * rnode.I_rot * w2;
+    }
+
 #ifdef _OPENMP
-    #pragma omp parallel for reduction(+:e_int, e_visc) schedule(guided)
+    #pragma omp parallel for reduction(+:e_int) schedule(guided)
 #endif
     for (int e = 0; e < static_cast<int>(m_elements.size()); ++e) {
         const auto& elem = m_elements[e];
@@ -4256,19 +4926,52 @@ void FEMSolver3D<T>::computeGlobalEnergy() {
         T s_dev00 = s00 - (s00+s11+s22)/3.0f;
         T s_dev11 = s11 - (s00+s11+s22)/3.0f;
         T s_dev22 = s22 - (s00+s11+s22)/3.0f;
-        T p = (s00+s11+s22)/3.0f;
+        T p = (s00+s11+s22)/3.0f + elem.q_visc;
 
         T w_dev = (s_dev00*s_dev00 + s_dev11*s_dev11 + s_dev22*s_dev22 + 2.0f*(s01*s01 + s12*s12 + s20*s20)) / (4.0f * G);
         T w_vol = (p * p) / (2.0f * K);
 
-        e_int += (w_dev + w_vol) * elem.V;
-        e_visc += elem.q_visc * elem.V;
+        // Since spatial velocity gradient integration accumulates logarithmic strain (d_eps = dV / V),
+        // the exact mechanical work integral int(-sigma dV) maps to 0.5*(sigma^2/M)*V0 * (V/V0)^(2/3).
+        T V_ref = elem.V0 > static_cast<T>(1.0e-18f) ? elem.V0 : elem.V;
+        T J_cur = (V_ref > static_cast<T>(1.0e-18f) && elem.V > static_cast<T>(1.0e-18f)) ? (elem.V / V_ref) : static_cast<T>(1.0f);
+        T V_work = V_ref * std::cbrt(J_cur * J_cur);
+        e_int += (w_dev + w_vol) * V_work;
+    }
+
+    for (const auto& tr : m_trusses) {
+        if (tr.is_eroded) continue;
+        const auto& mat = m_material_tables[tr.mat_id];
+        T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+        e_int += static_cast<T>(0.5f) * (tr.sigma * tr.sigma / E) * tr.A * tr.L0;
+    }
+
+    for (const auto& bm : m_beams) {
+        if (bm.is_eroded) continue;
+        const auto& mat = m_material_tables[bm.mat_id];
+        T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+        T nu = static_cast<T>(mat.poissons_ratio);
+        T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
+        if (bm.A > static_cast<T>(1.0e-12f)) {
+            e_int += static_cast<T>(0.5f) * (bm.N * bm.N / (E * bm.A)) * bm.L0;
+            if (G > static_cast<T>(1.0f)) {
+                e_int += static_cast<T>(0.5f) * ((bm.V2 * bm.V2 + bm.V3 * bm.V3) / (static_cast<T>(0.90f) * G * bm.A)) * bm.L0;
+            }
+        }
+        if (bm.I2 > static_cast<T>(1.0e-16f)) {
+            e_int += static_cast<T>(0.5f) * (bm.M2 * bm.M2 / (E * bm.I2)) * bm.L0;
+        }
+        if (bm.I3 > static_cast<T>(1.0e-16f)) {
+            e_int += static_cast<T>(0.5f) * (bm.M3 * bm.M3 / (E * bm.I3)) * bm.L0;
+        }
+        if (bm.J > static_cast<T>(1.0e-16f) && G > static_cast<T>(1.0f)) {
+            e_int += static_cast<T>(0.5f) * (bm.T_tor * bm.T_tor / (G * bm.J)) * bm.L0;
+        }
     }
 
     m_energy_tracker.E_kin = e_kin;
     m_energy_tracker.E_int = e_int;
-    m_energy_tracker.E_visc = e_visc;
-    m_energy_tracker.E_total = e_kin + e_int + e_visc;
+    m_energy_tracker.E_total = e_kin + e_int + m_energy_tracker.E_visc + m_energy_tracker.E_hg;
 
     if (m_energy_tracker.E_0 <= static_cast<T>(1.0e-12f)) {
         m_energy_tracker.E_0 = m_energy_tracker.E_total > static_cast<T>(1.0e-12f) ? m_energy_tracker.E_total : static_cast<T>(1.0f);
@@ -4298,8 +5001,8 @@ T FEMSolver3D<T>::computeStepSize(T cfl) const {
 
         const auto& mat = m_material_tables[elem.mat_id];
         T v_rel = (elem.V0 > static_cast<T>(1.0e-18f)) ? (V_cur / elem.V0) : static_cast<T>(1.0f);
-        T p_elem = -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
-        T cd = computeDilatationalWaveSpeed<T>(mat, v_rel, elem.lambda, p_elem);
+        T p_elem = -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f) - elem.q_visc;
+        T cd = computeDilatationalWaveSpeed<T>(mat, v_rel, elem.lambda, p_elem, elem.e_int);
 
         T dt_e = cfl * (L_e / cd);
         if (dt_e > static_cast<T>(0.0f) && dt_e < min_dt) min_dt = dt_e;
@@ -4307,23 +5010,43 @@ T FEMSolver3D<T>::computeStepSize(T cfl) const {
 
     for (const auto& truss : m_trusses) {
         if (truss.is_eroded || truss.L0 <= static_cast<T>(0.0f)) continue;
+        int n1 = truss.node_ids[0];
+        int n2 = truss.node_ids[1];
+        T L = truss.L0;
+        if (n1 >= 0 && n1 < static_cast<int>(m_nodes.size()) && n2 >= 0 && n2 < static_cast<int>(m_nodes.size())) {
+            T dx = m_nodes[n2].x[0] - m_nodes[n1].x[0];
+            T dy = m_nodes[n2].x[1] - m_nodes[n1].x[1];
+            T dz = m_nodes[n2].x[2] - m_nodes[n1].x[2];
+            T L_cur = std::sqrt(dx*dx + dy*dy + dz*dz);
+            if (L_cur > static_cast<T>(1.0e-12f)) L = L_cur;
+        }
         const auto& mat = m_material_tables[truss.mat_id];
         T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
         T density = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
         T cd = std::sqrt(E / density);
-        T dt_t = cfl * (truss.L0 / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f)));
+        T dt_t = cfl * (L / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f)));
         if (dt_t > static_cast<T>(0.0f) && dt_t < min_dt) min_dt = dt_t;
     }
 
     for (const auto& beam : m_beams) {
         if (beam.is_eroded || beam.L0 <= static_cast<T>(0.0f)) continue;
+        int n1 = beam.node_ids[0];
+        int n2 = beam.node_ids[1];
+        T L = beam.L0;
+        if (n1 >= 0 && n1 < static_cast<int>(m_nodes.size()) && n2 >= 0 && n2 < static_cast<int>(m_nodes.size())) {
+            T dx = m_nodes[n2].x[0] - m_nodes[n1].x[0];
+            T dy = m_nodes[n2].x[1] - m_nodes[n1].x[1];
+            T dz = m_nodes[n2].x[2] - m_nodes[n1].x[2];
+            T L_cur = std::sqrt(dx*dx + dy*dy + dz*dz);
+            if (L_cur > static_cast<T>(1.0e-12f)) L = L_cur;
+        }
         const auto& mat = m_material_tables[beam.mat_id];
         T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
         T density = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
         T cd = std::sqrt(E / density);
-        T dt_axial = beam.L0 / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f));
+        T dt_axial = L / (cd > static_cast<T>(1.0f) ? cd : static_cast<T>(5000.0f));
         T d_val = beam.d > static_cast<T>(1e-6f) ? beam.d : static_cast<T>(0.012f);
-        T dt_bending = (beam.L0 * beam.L0) / (static_cast<T>(3.464f) * d_val * cd);
+        T dt_bending = (L * L) / (static_cast<T>(3.464f) * d_val * cd);
         T dt_b = cfl * std::min(dt_axial, dt_bending);
         if (dt_b > static_cast<T>(0.0f) && dt_b < min_dt) min_dt = dt_b;
     }
@@ -4346,7 +5069,9 @@ void FEMSolver3D<T>::stepWithDt(T dt) {
     }
 
     // 1. Half-Step Velocity & Nodal Position Update (2nd-Order Velocity-Verlet)
-    std::vector<std::array<T, 3>> v_half_list(m_nodes.size());
+    if (m_v_half_list.size() < m_nodes.size()) {
+        m_v_half_list.resize(m_nodes.size());
+    }
 #ifdef _OPENMP
     #pragma omp parallel for schedule(static)
 #endif
@@ -4357,36 +5082,86 @@ void FEMSolver3D<T>::stepWithDt(T dt) {
             if (node.is_fixed[c]) {
                 node.v[c] = static_cast<T>(0.0f);
                 node.a[c] = static_cast<T>(0.0f);
-                v_half_list[nid][c] = static_cast<T>(0.0f);
+                m_v_half_list[nid][c] = static_cast<T>(0.0f);
+                continue;
+            }
+            if (node.is_prescribed[c]) {
+                node.a[c] = static_cast<T>(0.0f);
+                m_v_half_list[nid][c] = node.v[c];
+                node.x[c] += node.v[c] * dt;
                 continue;
             }
             T v_h = node.v[c] + static_cast<T>(0.5f) * node.a[c] * dt;
-            v_half_list[nid][c] = v_h;
+            m_v_half_list[nid][c] = v_h;
             node.x[c] += v_h * dt;
             node.v[c] = v_h;
         }
     }
 
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (int r = 0; r < static_cast<int>(m_rot_nodes.size()); ++r) {
+        auto& rnode = m_rot_nodes[r];
+        if (rnode.I_rot <= static_cast<T>(1.0e-12f)) continue;
+        for (int c = 0; c < 3; ++c) {
+            if (rnode.is_fixed[c]) {
+                rnode.omega[c] = static_cast<T>(0.0f);
+                rnode.alpha[c] = static_cast<T>(0.0f);
+                continue;
+            }
+            rnode.omega[c] += static_cast<T>(0.5f) * rnode.alpha[c] * dt;
+        }
+    }
+
     // 2. Internal Element Forces, Rebar Truss/Beam Forces, and Contact Penalty Assembly at new positions x^{n+1}
     if (m_contact_penalty_scale > static_cast<T>(0.0f)) {
-        FEMContact3D<T> contact_solver;
-        contact_solver.setContactPenaltyScale(m_contact_penalty_scale);
-        contact_solver.setFrictionCoefficients(m_friction_static, m_friction_kinetic);
+        m_contact_solver.setContactPenaltyScale(m_contact_penalty_scale);
+        m_contact_solver.setFrictionCoefficients(m_friction_static, m_friction_kinetic);
+        m_contact_solver.setContactDamping(m_contact_damping);
+        m_contact_solver.setSearchMethod(m_contact_search_method);
         if (!getSurfaceFacets().empty()) {
-            contact_solver.solveContact(*this, dt);
+            m_contact_solver.solveContact(*this, dt);
+        } else {
+            for (auto& node : m_nodes) {
+                node.f_contact[0] = static_cast<T>(0.0f);
+                node.f_contact[1] = static_cast<T>(0.0f);
+                node.f_contact[2] = static_cast<T>(0.0f);
+            }
         }
-        if (m_mpm_solver && !m_mpm_solver->getParticles().empty()) {
-            contact_solver.solveMPMContact(*this, *m_mpm_solver, dt);
+        if (m_has_pending_mpm_impulse && m_mpm_impulse_accum.size() == m_nodes.size() * 3) {
+            T inv_dt = (dt > static_cast<T>(1.0e-15f)) ? (static_cast<T>(1.0f) / dt) : static_cast<T>(0.0f);
+            for (size_t nid = 0; nid < m_nodes.size(); ++nid) {
+                m_nodes[nid].f_contact[0] += m_mpm_impulse_accum[3 * nid + 0] * inv_dt;
+                m_nodes[nid].f_contact[1] += m_mpm_impulse_accum[3 * nid + 1] * inv_dt;
+                m_nodes[nid].f_contact[2] += m_mpm_impulse_accum[3 * nid + 2] * inv_dt;
+                m_mpm_impulse_accum[3 * nid + 0] = static_cast<T>(0.0f);
+                m_mpm_impulse_accum[3 * nid + 1] = static_cast<T>(0.0f);
+                m_mpm_impulse_accum[3 * nid + 2] = static_cast<T>(0.0f);
+            }
+            m_has_pending_mpm_impulse = false;
+        } else if (m_mpm_solver && !m_mpm_solver->getParticles().empty()) {
+            m_contact_solver.solveMPMContact(*this, *m_mpm_solver, dt);
+        }
+    } else {
+        for (auto& node : m_nodes) {
+            node.f_contact[0] = static_cast<T>(0.0f);
+            node.f_contact[1] = static_cast<T>(0.0f);
+            node.f_contact[2] = static_cast<T>(0.0f);
+        }
+        if (m_has_pending_mpm_impulse) {
+            std::fill(m_mpm_impulse_accum.begin(), m_mpm_impulse_accum.end(), static_cast<T>(0.0f));
+            m_has_pending_mpm_impulse = false;
         }
     }
 
     computeElementForces(dt);
     computeTrussForces1D(dt);
     computeBeamForces3D(dt);
-    updateKinematicsCentralDifference(dt);
     if (m_lysmer_params.enabled) {
         applyLysmerDashpots(dt);
     }
+    updateKinematicsCentralDifference(dt);
     updateRotationalKinematicsCentralDifference(dt);
 
     // 3. Complete 2nd-Order Full Velocity Update for step n+1
@@ -4402,7 +5177,12 @@ void FEMSolver3D<T>::stepWithDt(T dt) {
                 node.a[c] = static_cast<T>(0.0f);
                 continue;
             }
-            node.v[c] = v_half_list[nid][c] + static_cast<T>(0.5f) * node.a[c] * dt;
+            if (node.is_prescribed[c]) {
+                node.v[c] = m_v_half_list[nid][c];
+                node.a[c] = static_cast<T>(0.0f);
+                continue;
+            }
+            node.v[c] = m_v_half_list[nid][c] + static_cast<T>(0.5f) * node.a[c] * dt;
         }
 
         T v_mag_sq = node.v[0]*node.v[0] + node.v[1]*node.v[1] + node.v[2]*node.v[2];
@@ -4438,6 +5218,15 @@ void FEMSolver3D<T>::setNodeFixed(int node_idx, bool fix_x, bool fix_y, bool fix
 }
 
 template <typename T>
+void FEMSolver3D<T>::setNodePrescribed(int node_idx, bool presc_x, bool presc_y, bool presc_z) {
+    if (node_idx >= 0 && node_idx < static_cast<int>(m_nodes.size())) {
+        m_nodes[node_idx].is_prescribed[0] = presc_x;
+        m_nodes[node_idx].is_prescribed[1] = presc_y;
+        m_nodes[node_idx].is_prescribed[2] = presc_z;
+    }
+}
+
+template <typename T>
 void FEMSolver3D<T>::setNodalVelocity(int node_idx, T vx, T vy, T vz) {
     if (node_idx >= 0 && node_idx < static_cast<int>(m_nodes.size())) {
         m_nodes[node_idx].v[0] = vx;
@@ -4462,10 +5251,20 @@ void FEMSolver3D<T>::applyLysmerDashpots(T dt) {
     for (const auto& facet : facets) {
         if (facet.is_eroded) continue;
 
+        const bool is_tri = (facet.node_ids[2] == facet.node_ids[3]);
+        const int num_facet_nodes = is_tri ? 3 : 4;
+        const T inv_nodes = static_cast<T>(1.0f) / static_cast<T>(num_facet_nodes);
+
         if (m_lysmer_params.filter_box) {
-            T cx = static_cast<T>(0.25f) * (m_nodes[facet.node_ids[0]].x[0] + m_nodes[facet.node_ids[1]].x[0] + m_nodes[facet.node_ids[2]].x[0] + m_nodes[facet.node_ids[3]].x[0]);
-            T cy = static_cast<T>(0.25f) * (m_nodes[facet.node_ids[0]].x[1] + m_nodes[facet.node_ids[1]].x[1] + m_nodes[facet.node_ids[2]].x[1] + m_nodes[facet.node_ids[3]].x[1]);
-            T cz = static_cast<T>(0.25f) * (m_nodes[facet.node_ids[0]].x[2] + m_nodes[facet.node_ids[1]].x[2] + m_nodes[facet.node_ids[2]].x[2] + m_nodes[facet.node_ids[3]].x[2]);
+            T cx = static_cast<T>(0.0f), cy = static_cast<T>(0.0f), cz = static_cast<T>(0.0f);
+            for (int k = 0; k < num_facet_nodes; ++k) {
+                cx += m_nodes[facet.node_ids[k]].x[0];
+                cy += m_nodes[facet.node_ids[k]].x[1];
+                cz += m_nodes[facet.node_ids[k]].x[2];
+            }
+            cx *= inv_nodes;
+            cy *= inv_nodes;
+            cz *= inv_nodes;
             T tol = static_cast<T>(m_lysmer_params.tol);
 
             bool on_bound = (std::abs(cx - static_cast<T>(m_lysmer_params.x_min)) <= tol) ||
@@ -4477,10 +5276,10 @@ void FEMSolver3D<T>::applyLysmerDashpots(T dt) {
             if (!on_bound) continue;
         }
 
-        T A_node = static_cast<T>(0.25f) * facet.area;
+        T A_node = inv_nodes * facet.area;
         T nx = facet.normal[0], ny = facet.normal[1], nz = facet.normal[2];
 
-        for (int k = 0; k < 4; ++k) {
+        for (int k = 0; k < num_facet_nodes; ++k) {
             int nid = facet.node_ids[k];
             auto& node = m_nodes[nid];
             if (node.is_eroded || node.m <= static_cast<T>(1.0e-12f)) continue;
@@ -4495,9 +5294,9 @@ void FEMSolver3D<T>::applyLysmerDashpots(T dt) {
             T fs_y = - A_node * rho * cs * shear_rel * vs_y;
             T fs_z = - A_node * rho * cs * shear_rel * vs_z;
 
-            node.a[0] += (fn * nx + fs_x) / node.m;
-            node.a[1] += (fn * ny + fs_y) / node.m;
-            node.a[2] += (fn * nz + fs_z) / node.m;
+            node.f_contact[0] += fn * nx + fs_x;
+            node.f_contact[1] += fn * ny + fs_y;
+            node.f_contact[2] += fn * nz + fs_z;
         }
     }
 }
@@ -4538,6 +5337,42 @@ T FEMSolver3D<T>::getMaxVonMisesStress() const {
         if (vm > max_vm) max_vm = vm;
     }
     return max_vm;
+}
+
+template <typename T>
+void FEMSolver3D<T>::applyMPMContact(T dt) {
+    if (!m_mpm_solver || m_mpm_solver->getParticles().empty() ||
+        m_contact_penalty_scale <= static_cast<T>(0.0f) ||
+        dt <= static_cast<T>(0.0f) || m_nodes.empty() || getSurfaceFacets().empty()) {
+        return;
+    }
+
+    const size_t n_req = m_nodes.size() * 3;
+    if (m_mpm_impulse_accum.size() != n_req) {
+        m_mpm_impulse_accum.assign(n_req, static_cast<T>(0.0f));
+    }
+
+    for (auto& node : m_nodes) {
+        node.f_contact[0] = static_cast<T>(0.0f);
+        node.f_contact[1] = static_cast<T>(0.0f);
+        node.f_contact[2] = static_cast<T>(0.0f);
+    }
+
+    m_contact_solver.setContactPenaltyScale(m_contact_penalty_scale);
+    m_contact_solver.setFrictionCoefficients(m_friction_static, m_friction_kinetic);
+    m_contact_solver.setContactDamping(m_contact_damping);
+    m_contact_solver.setSearchMethod(m_contact_search_method);
+    m_contact_solver.solveMPMContact(*this, *m_mpm_solver, dt);
+
+    for (size_t nid = 0; nid < m_nodes.size(); ++nid) {
+        m_mpm_impulse_accum[3 * nid + 0] += m_nodes[nid].f_contact[0] * dt;
+        m_mpm_impulse_accum[3 * nid + 1] += m_nodes[nid].f_contact[1] * dt;
+        m_mpm_impulse_accum[3 * nid + 2] += m_nodes[nid].f_contact[2] * dt;
+        m_nodes[nid].f_contact[0] = static_cast<T>(0.0f);
+        m_nodes[nid].f_contact[1] = static_cast<T>(0.0f);
+        m_nodes[nid].f_contact[2] = static_cast<T>(0.0f);
+    }
+    m_has_pending_mpm_impulse = true;
 }
 
 // Explicit Instantiations for Single and Double Precision

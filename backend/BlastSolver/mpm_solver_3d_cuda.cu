@@ -4221,7 +4221,9 @@ __device__ inline void update_particle_stress_constitutive(int p_idx, float dt, 
             float tr_D = tr_deps / fmaxf(1.0e-12f, dt);
             if (tr_D < 0.0f) {
                 float h_elem = cbrtf(V_p);
-                float c_solid = use_davis_solid ? mat.davis_c0 : mat.mg_c0;
+                float c_solid = (mat.solid_model == SolidReactantEOS::JWLReactant)
+                    ? JWL::computeJWLReactantSoundSpeed(v_rel, e_th, mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_omega, mat.jwlr_Cv, mat.jwlr_T0, mat.density)
+                    : (use_davis_solid ? mat.davis_c0 : mat.mg_c0);
                 float c_prod = JWL::computeJWLSoundSpeed(v_rel, fmaxf(p_prod, 1.0f), mat.jwl_A, mat.jwl_B, mat.jwl_R1, mat.jwl_R2, mat.jwl_omega, rho_ref);
                 float c_mix = (1.0f - lam_new) * fmaxf(c_solid, 0.0f) + lam_new * c_prod;
                 float b1 = mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : 0.06f;
@@ -5279,17 +5281,10 @@ void MPMSolver3DCUDA::activateSparseTilesDevice(int num_particles, bool preserve
             break;
         }
 
-        // Grow sparse tile pool using Free-Before-Reallocate + live cudaMemGetInfo guard
+        // Grow sparse tile pool using Free-Before-Reallocate + live cudaMemGetInfo adaptive clamping
         size_t needed_sz = static_cast<size_t>(needed_tiles);
         size_t new_cap = std::max(needed_sz + needed_sz / 2, m_tile_capacity + m_tile_capacity / 2);
         new_cap = std::max(std::min(new_cap, total_tiles), needed_sz);
-        size_t new_nodes = new_cap * 512;
-
-        std::cerr << "[MPM3D-CUDA] Growing sparse 8x8x8 tile pool: "
-                  << m_tile_capacity << " -> " << new_cap << " tiles ("
-                  << needed_tiles << " active tiles, "
-                  << (new_nodes * sizeof(MPMGridNode3D)) / (1024.0 * 1024.0)
-                  << " MiB d_grid)" << std::endl;
 
         if (d_grid) { cudaFree(d_grid); d_grid = nullptr; }
         if (d_grid_n) { cudaFree(d_grid_n); d_grid_n = nullptr; }
@@ -5305,18 +5300,40 @@ void MPMSolver3DCUDA::activateSparseTilesDevice(int num_particles, bool preserve
             }
         }
 
-        size_t req_bytes = new_nodes * (sizeof(MPMGridNode3D) + sizeof(float) + sizeof(int)) + new_cap * sizeof(int);
+        const size_t bytes_per_node = sizeof(MPMGridNode3D) + sizeof(float) + sizeof(int) +
+            ((m_contact_method == MPMContactMethod::MultiVelocityBardenhagen) ? sizeof(int) : 0);
+        const size_t bytes_per_tile = 512ULL * bytes_per_node + sizeof(int);
         size_t free_vram = 0, total_vram = 0;
         if (cudaMemGetInfo(&free_vram, &total_vram) == cudaSuccess) {
-            constexpr size_t kHeadroomBytes = 512ULL * 1024ULL * 1024ULL;
-            if (req_bytes + kHeadroomBytes > free_vram) {
-                throw std::runtime_error(
-                    "[MPMSolver3DCUDA] VRAM budget guard: growing sparse tile pool to " +
-                    std::to_string(new_cap) + " tiles (" + std::to_string(req_bytes / (1024 * 1024)) +
-                    " MiB) would exceed safe VRAM limit (" + std::to_string(free_vram / (1024 * 1024)) +
-                    " MiB free of " + std::to_string(total_vram / (1024 * 1024)) + " MiB total, 512 MiB headroom required).");
+            constexpr size_t kPreferredHeadroomBytes = 256ULL * 1024ULL * 1024ULL;
+            constexpr size_t kMinHeadroomBytes = 96ULL * 1024ULL * 1024ULL;
+            size_t req_bytes = new_cap * bytes_per_tile;
+            if (req_bytes + kPreferredHeadroomBytes > free_vram) {
+                size_t usable_vram = (free_vram > kPreferredHeadroomBytes)
+                    ? (free_vram - kPreferredHeadroomBytes)
+                    : ((free_vram > kMinHeadroomBytes) ? (free_vram - kMinHeadroomBytes) : 0);
+                size_t max_affordable_tiles = usable_vram / bytes_per_tile;
+                size_t min_viable_tiles = std::min(total_tiles, needed_sz + std::max<size_t>(256, needed_sz / 20));
+                if (max_affordable_tiles >= needed_sz) {
+                    new_cap = std::max(min_viable_tiles, std::min(new_cap, max_affordable_tiles));
+                    new_cap = std::min(new_cap, max_affordable_tiles);
+                } else {
+                    throw std::runtime_error(
+                        "[MPMSolver3DCUDA] VRAM budget guard: growing sparse tile pool to " +
+                        std::to_string(needed_sz) + " required tiles (" +
+                        std::to_string((needed_sz * bytes_per_tile) / (1024 * 1024)) +
+                        " MiB) exceeds available VRAM (" + std::to_string(free_vram / (1024 * 1024)) +
+                        " MiB free of " + std::to_string(total_vram / (1024 * 1024)) + " MiB total).");
+                }
             }
         }
+
+        size_t new_nodes = new_cap * 512;
+        std::cerr << "[MPM3D-CUDA] Growing sparse 8x8x8 tile pool: "
+                  << m_tile_capacity << " -> " << new_cap << " tiles ("
+                  << needed_tiles << " active tiles, "
+                  << (new_nodes * sizeof(MPMGridNode3D)) / (1024.0 * 1024.0)
+                  << " MiB d_grid)" << std::endl;
 
         m_tile_capacity = new_cap;
         m_allocated_grid_nodes = new_nodes;
@@ -6219,10 +6236,31 @@ void MPMSolver3DCUDA::launchParticleToGrid(int num_particles, bool use_bardenhag
 
         size_t new_cap = std::max(needed + needed / 2, m_mat_slot_capacity + m_mat_slot_capacity / 2);
         new_cap = std::max(std::min(new_cap, num_nodes), needed);
+        const size_t bytes_per_slot = static_cast<size_t>(std::max(1, m_num_materials)) * 10ULL * sizeof(float);
+        if (d_mat_grid_buffer) {
+            cudaFree(d_mat_grid_buffer);
+            d_mat_grid_buffer = nullptr;
+            m_allocated_mat_grid_bytes = 0;
+        }
+        size_t free_vram = 0, total_vram = 0;
+        if (cudaMemGetInfo(&free_vram, &total_vram) == cudaSuccess) {
+            constexpr size_t kPreferredHeadroomBytes = 256ULL * 1024ULL * 1024ULL;
+            constexpr size_t kMinHeadroomBytes = 96ULL * 1024ULL * 1024ULL;
+            if (new_cap * bytes_per_slot + kPreferredHeadroomBytes > free_vram) {
+                size_t usable_vram = (free_vram > kPreferredHeadroomBytes)
+                    ? (free_vram - kPreferredHeadroomBytes)
+                    : ((free_vram > kMinHeadroomBytes) ? (free_vram - kMinHeadroomBytes) : 0);
+                size_t max_affordable_slots = usable_vram / bytes_per_slot;
+                if (max_affordable_slots >= needed) {
+                    size_t min_viable = std::min(num_nodes, needed + std::max<size_t>(1024, needed / 20));
+                    new_cap = std::min(max_affordable_slots, std::max(min_viable, std::min(new_cap, max_affordable_slots)));
+                }
+            }
+        }
         std::cerr << "[MPM3D-CUDA] Growing compact multi-material slot buffer: "
                   << m_mat_slot_capacity << " -> " << new_cap << " slots ("
                   << needed << " multi-material nodes, "
-                  << (new_cap * static_cast<size_t>(std::max(1, m_num_materials)) * 10 * sizeof(float)) / (1024.0 * 1024.0)
+                  << (new_cap * bytes_per_slot) / (1024.0 * 1024.0)
                   << " MiB)" << std::endl;
         // Tags of this step are kept: the assignment pass re-labels every multi-material node.
         allocateMatSlotBuffer(new_cap, m_num_materials);

@@ -42,6 +42,11 @@ public:
     void setUncoveringMethod(FSIUncoveringMethod uncov) { m_uncovering_method = uncov; }
     void setErosionVenting(bool enable) { m_erosion_venting = enable; }
     void setVacuumState(T rho_vac, T p_vac) { m_rho_vac = rho_vac; m_p_vac = p_vac; }
+    void setMaxSubcycles(int max_sub) { m_max_subcycles = std::max(1, max_sub); }
+    int getMaxSubcycles() const { return m_max_subcycles; }
+
+    FEMSolver3D<T>* getFEMSolver() const { return m_fem_solver; }
+    CFDSolver3D* getFVSolver() const { return m_fv_solver; }
 
     // Dynamic Step execution
     void step(T cfl = static_cast<T>(0.6f));
@@ -56,6 +61,7 @@ public:
     T getAccumulatedWork() const { return m_accumulated_work_fsi; }
 
     // Surface rasterization and pressure integration routines
+    void primeInitialGeometry() { rasterizeFEMFacetsToFVGrid(); }
     void rasterizeFEMFacetsToFVGrid();
     void handleCellTransitions();
     void applyFluidPressureToStructure(T dt);
@@ -68,12 +74,14 @@ private:
     FSIPressureIntegration m_pressure_integ{FSIPressureIntegration::Gauss2x2};
     FSIUncoveringMethod m_uncovering_method{FSIUncoveringMethod::ConservativeIDW_VacuumCavity};
     bool m_erosion_venting{true};
+    int m_max_subcycles{16};
 
     T m_rho_vac{static_cast<T>(1.0e-6f)};
     T m_p_vac{static_cast<T>(1.0e-2f)};
 
     T m_sim_time{static_cast<T>(0.0f)};
     T m_last_dt{static_cast<T>(1.0e-6f)};
+    T m_last_cfl{static_cast<T>(0.6f)};
     int m_step_count{0};
     T m_accumulated_work_fsi{static_cast<T>(0.0f)};
 

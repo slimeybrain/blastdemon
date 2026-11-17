@@ -13,7 +13,7 @@
 
 using namespace Blast;
 
-void test_mpm_debris_blast_acceleration_cpu() {
+bool test_mpm_debris_blast_acceleration_cpu() {
     std::cout << "=== TEST 1: CPU Auto-Generated MPM Debris Blast Acceleration ===" << std::endl;
 
     // 1. Create a 1-element FEM Solid Hex
@@ -83,8 +83,10 @@ void test_mpm_debris_blast_acceleration_cpu() {
     fem.getElements()[0].ep_bar = 0.05f; // Exceed failure strain 0.01
     fem.evaluateErosionCriteria();
 
-    assert(fem.getElements()[0].is_eroded);
-    assert(mpm.getParticles().size() == 8);
+    if (!fem.getElements()[0].is_eroded || mpm.getParticles().size() != 8) {
+        std::cerr << "[FAIL] CPU element erosion to 8 MPM debris particles failed" << std::endl;
+        return false;
+    }
     std::cout << "  ✓ Element eroded into " << mpm.getParticles().size() << " MPM debris particles." << std::endl;
 
     // 5. Step coupler and measure debris acceleration
@@ -101,11 +103,15 @@ void test_mpm_debris_blast_acceleration_cpu() {
     avg_vx /= static_cast<float>(particles.size());
 
     std::cout << "  ✓ After 100 microseconds of supersonic blast wind, avg debris v_x = " << avg_vx << " m/s" << std::endl;
-    assert(avg_vx > 10.0f); // Must pick up substantial load and accelerate
+    if (!(avg_vx > 10.0f)) {
+        std::cerr << "[FAIL] CPU MPM debris did not accelerate under blast wind (avg_vx=" << avg_vx << ")" << std::endl;
+        return false;
+    }
     std::cout << "  ✓ CPU MPM debris acceleration test passed successfully!" << std::endl;
+    return true;
 }
 
-void test_mpm_debris_blast_acceleration_gpu() {
+bool test_mpm_debris_blast_acceleration_gpu() {
     std::cout << "=== TEST 2: GPU Auto-Generated MPM Debris Blast Acceleration & Force Preservation ===" << std::endl;
 
     // 1. Create a 1-element FEM Solid Hex on GPU
@@ -178,8 +184,10 @@ void test_mpm_debris_blast_acceleration_gpu() {
     fem_gpu.getElements()[0].ep_bar = 0.05f;
     fem_gpu.evaluateErosionCriteria();
 
-    assert(fem_gpu.getElements()[0].is_eroded);
-    assert(mpm_gpu.getParticleCount() == 8);
+    if (!fem_gpu.getElements()[0].is_eroded || mpm_gpu.getParticleCount() != 8) {
+        std::cerr << "[FAIL] GPU element erosion to 8 MPM debris particles failed" << std::endl;
+        return false;
+    }
     std::cout << "  ✓ GPU Element eroded into " << mpm_gpu.getParticleCount() << " CUDA MPM debris particles." << std::endl;
 
     // 5. Step GPU coupler and measure debris acceleration
@@ -197,13 +205,17 @@ void test_mpm_debris_blast_acceleration_gpu() {
     avg_vx_gpu /= static_cast<float>(particles_gpu.size());
 
     std::cout << "  ✓ After 100 microseconds of GPU supersonic blast wind, avg debris v_x = " << avg_vx_gpu << " m/s" << std::endl;
-    assert(avg_vx_gpu > 10.0f); // Must pick up substantial load and accelerate
+    if (!(avg_vx_gpu > 10.0f)) {
+        std::cerr << "[FAIL] GPU MPM debris did not accelerate under blast wind (avg_vx=" << avg_vx_gpu << ")" << std::endl;
+        return false;
+    }
     std::cout << "  ✓ GPU MPM debris acceleration & force preservation test passed successfully!" << std::endl;
+    return true;
 }
 
 int main() {
-    test_mpm_debris_blast_acceleration_cpu();
-    test_mpm_debris_blast_acceleration_gpu();
+    if (!test_mpm_debris_blast_acceleration_cpu()) return 1;
+    if (!test_mpm_debris_blast_acceleration_gpu()) return 1;
     std::cout << "\n=======================================================" << std::endl;
     std::cout << ">>> ALL MPM DEBRIS BLAST ACCELERATION TESTS PASSED! <<<" << std::endl;
     std::cout << "=======================================================" << std::endl;

@@ -1,9 +1,16 @@
 #include "ls_dyna_reader_3d.hpp"
 #include <iostream>
 #include <fstream>
-#include <cassert>
+#include <cmath>
 
 using namespace Blast;
+
+#define FEM_CHECK(cond) do { \
+    if (!(cond)) { \
+        std::cerr << "[FAIL] " << __FILE__ << ":" << __LINE__ << " Check failed: " << #cond << std::endl; \
+        return 1; \
+    } \
+} while (0)
 
 int main() {
     std::cout << "[TEST] Running test_fem_3d_ls_dyna_reader..." << std::endl;
@@ -37,15 +44,15 @@ int main() {
     std::vector<MaterialTable3D> mat_list;
 
     bool ok = reader.parseFile(test_k_file, nodes, elements, default_mat, mat_list);
-    assert(ok);
+    FEM_CHECK(ok);
 
     std::cout << "  Parsed Node Count = " << nodes.size() << " (Expected: 8)" << std::endl;
     std::cout << "  Parsed Element Count = " << elements.size() << " (Expected: 1)" << std::endl;
     std::cout << "  Parsed Density = " << default_mat.density << " kg/m^3" << std::endl;
 
-    assert(nodes.size() == 8);
-    assert(elements.size() == 1);
-    assert(default_mat.density == 7850.0f);
+    FEM_CHECK(nodes.size() == 8);
+    FEM_CHECK(elements.size() == 1);
+    FEM_CHECK(default_mat.density == 7850.0f);
 
     std::remove(test_k_file.c_str());
 
@@ -73,19 +80,19 @@ int main() {
     std::vector<FEMNode3D<float>> jc_nodes;
     std::vector<FEMElement3D<float>> jc_elements;
     bool ok_jc = reader.parseFile(test_jc_k_file, jc_nodes, jc_elements, jc_mat, jc_mat_list);
-    assert(ok_jc);
-    assert(jc_mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen);
-    assert(jc_mat.jc_A == 792.0e6f);
-    assert(jc_mat.jc_B == 510.0e6f);
-    assert(jc_mat.jc_n == 0.26f);
-    assert(jc_mat.jc_C == 0.014f);
-    assert(jc_mat.jc_m == 1.03f);
-    assert(jc_mat.T_melt == 1793.0f);
-    assert(jc_mat.mg_c0 == 4570.0f);
-    assert(jc_mat.mg_s == 1.49f);
-    assert(jc_mat.mg_gamma0 == 1.81f);
-    assert(jc_mat.failure_strain == 0.45f);
-    assert(jc_mat.tensile_failure_stress == 650.0e6f);
+    FEM_CHECK(ok_jc);
+    FEM_CHECK(jc_mat.material_model == MPMMaterialModel::JohnsonCookMieGruneisen);
+    FEM_CHECK(jc_mat.jc_A == 792.0e6f);
+    FEM_CHECK(jc_mat.jc_B == 510.0e6f);
+    FEM_CHECK(jc_mat.jc_n == 0.26f);
+    FEM_CHECK(jc_mat.jc_C == 0.014f);
+    FEM_CHECK(jc_mat.jc_m == 1.03f);
+    FEM_CHECK(jc_mat.T_melt == 1793.0f);
+    FEM_CHECK(jc_mat.mg_c0 == 4570.0f);
+    FEM_CHECK(jc_mat.mg_s == 1.49f);
+    FEM_CHECK(jc_mat.mg_gamma0 == 1.81f);
+    FEM_CHECK(jc_mat.failure_strain == 0.45f);
+    FEM_CHECK(jc_mat.tensile_failure_stress == 650.0e6f);
 
     std::remove(test_jc_k_file.c_str());
 
@@ -129,22 +136,22 @@ int main() {
     bool ok_shell = shell_reader.parseFile(
         test_shell_k_file, shell_nodes, shell_solids, shell_trusses, shell_beams, shells, shell_mat, shell_mat_list
     );
-    assert(ok_shell);
+    FEM_CHECK(ok_shell);
     std::cout << "  Parsed Shell Node Count = " << shell_nodes.size() << " (Expected: 4)" << std::endl;
     std::cout << "  Parsed Shell Count = " << shells.size() << " (Expected: 1)" << std::endl;
     std::cout << "  Parsed Shell Thickness = " << shells[0].thickness << " m (Expected: 0.0400)" << std::endl;
     std::cout << "  Parsed Shell Area = " << shells[0].area0 << " m^2 (Expected: 1.0)" << std::endl;
 
-    assert(shell_nodes.size() == 4);
-    assert(shell_solids.empty());
-    assert(shells.size() == 1);
-    assert(std::abs(shells[0].thickness - 0.0400f) < 1e-6f);
-    assert(std::abs(shells[0].area0 - 1.0f) < 1e-4f);
-    assert(std::abs(shells[0].e3[2] - 1.0f) < 1e-4f || std::abs(shells[0].e3[2] + 1.0f) < 1e-4f);
-    assert(shell_reader.getShellCount() == 1);
-    assert(shell_reader.getParts().at(1).num_shells == 1);
-    assert(shells[0].mat_id == 0);
-    assert(shells[0].part_id == 1);
+    FEM_CHECK(shell_nodes.size() == 4);
+    FEM_CHECK(shell_solids.empty());
+    FEM_CHECK(shells.size() == 1);
+    FEM_CHECK(std::abs(shells[0].thickness - 0.0400f) < 1e-6f);
+    FEM_CHECK(std::abs(shells[0].area0 - 1.0f) < 1e-4f);
+    FEM_CHECK(std::abs(shells[0].e3[2] - 1.0f) < 1e-4f || std::abs(shells[0].e3[2] + 1.0f) < 1e-4f);
+    FEM_CHECK(shell_reader.getShellCount() == 1);
+    FEM_CHECK(shell_reader.getParts().at(1).num_shells == 1);
+    FEM_CHECK(shells[0].mat_id == 0);
+    FEM_CHECK(shells[0].part_id == 1);
 
     // Test 6-argument convenience overload
     std::vector<FEMNode3D<float>> shell_nodes2;
@@ -155,9 +162,9 @@ int main() {
     bool ok_shell2 = shell_reader.parseFile(
         test_shell_k_file, shell_nodes2, shell_solids2, shells2, shell_mat2, shell_mat_list2
     );
-    assert(ok_shell2);
-    assert(shells2.size() == 1);
-    assert(std::abs(shells2[0].thickness - 0.0400f) < 1e-6f);
+    FEM_CHECK(ok_shell2);
+    FEM_CHECK(shells2.size() == 1);
+    FEM_CHECK(std::abs(shells2[0].thickness - 0.0400f) < 1e-6f);
 
     std::remove(test_shell_k_file.c_str());
 

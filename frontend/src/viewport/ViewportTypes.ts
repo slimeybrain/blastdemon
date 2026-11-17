@@ -24,4 +24,7 @@ export interface DiscoveredFEMPart {
     radius?: number;
     innerRadius?: number;
     height?: number;
+    rotX?: number;
+    rotY?: number;
+    rotZ?: number;
 }

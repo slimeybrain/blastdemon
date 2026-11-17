@@ -84,7 +84,10 @@ int main() {
     double vm_diff_pct = std::abs(final_vm - initial_vm) / initial_vm * 100.0;
     std::cout << "  Von Mises Stress Variation = " << vm_diff_pct << " %" << std::endl;
 
-    assert(vm_diff_pct < 0.5);
+    if (!(vm_diff_pct < 0.5)) {
+        std::cerr << "[FAIL] Von Mises stress drifted under rigid rotation by " << vm_diff_pct << " %" << std::endl;
+        return 1;
+    }
     std::cout << "[PASS] test_fem_3d_large_rotation PASSED successfully!" << std::endl;
 
     return 0;

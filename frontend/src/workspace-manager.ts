@@ -3985,6 +3985,7 @@ export class WorkspaceManager {
      * Dispatch a buffered telemetry frame across all active viewports simultaneously.
      */
     public dispatchFrame(frame: BufferedFrame, isLive: boolean): void {
+        if ((typeof document !== 'undefined' && document.hidden) || (typeof window !== 'undefined' && (window as any).__blastRenderPaused)) return;
         const activeWs = this.stateManager.getActiveWorkspace();
         const activeModelId = activeWs?.activeModelId;
         const isHistoryDisabled = this.playbackBuffer.getMaxFrames() <= 1;

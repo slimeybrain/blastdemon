@@ -90,7 +90,10 @@ int main() {
     const auto& energy = solver.getEnergyTracker();
     std::cout << "  Taylor impact completed 100 steps." << std::endl;
     std::cout << "  E_kin = " << energy.E_kin << " J, E_int = " << energy.E_int << " J, Ratio = " << energy.getEnergyRatio() << std::endl;
-    assert(energy.getEnergyRatio() > 0.35f && energy.getEnergyRatio() < 5.00f);
+    if (!(energy.getEnergyRatio() > 0.35f && energy.getEnergyRatio() < 5.00f)) {
+        std::cerr << "[FAIL] Energy ratio out of bounds: " << energy.getEnergyRatio() << std::endl;
+        return 1;
+    }
 
     std::cout << "[PASS] test_fem_3d_taylor_impact PASSED successfully." << std::endl;
     return 0;

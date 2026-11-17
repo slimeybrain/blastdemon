@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 290" width="820" height="290" role="img" aria-label="Two-Way FSI Coupling and UNDEX DAA1 Schematic">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; }
+      .panel { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1; }
+      .title { font: 700 15px "Segoe UI", system-ui, sans-serif; fill: #0f172a; }
+      .subtitle { font: 600 12px "Segoe UI", system-ui, sans-serif; fill: #334155; }
+      .label { font: 500 11px "Segoe UI", system-ui, sans-serif; fill: #1e293b; }
+      .small { font: 400 10px "Segoe UI", system-ui, sans-serif; fill: #475569; }
+      .mono { font: 500 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #0f172a; }
+      .axis { stroke: #334155; stroke-width: 1.2; }
+      .grid { stroke: #e2e8f0; stroke-width: 0.8; stroke-dasharray: 3 3; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#1e293b"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+  <rect class="bg" x="1" y="1" width="818" height="288" rx="8"/>
+
+  <text class="title" x="24" y="28">Fluid-Structure Interaction (FSI) &amp; UNDEX Doubly Asymptotic Approximation (DAA)</text>
+  <rect class="panel" x="20" y="44" width="380" height="228" rx="6"/>
+  <text class="subtitle" x="34" y="66">1. Two-Way Immersed / Ray-Marched FSI</text>
+  <rect x="40" y="88" width="340" height="140" rx="4" fill="#eff6ff" stroke="#93c5fd"/>
+  <polygon points="155,110 265,110 265,205 155,205" fill="#e2e8f0" stroke="#334155" stroke-width="1.8"/>
+  <text class="label" x="172" y="160">Solid (FEM/MPM)</text>
+  <line x1="85" y1="155" x2="150" y2="155" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow-red)"/>
+  <text class="small" x="46" y="146" fill="#dc2626">Ray-marched</text>
+  <text class="small" x="46" y="159" fill="#dc2626">p_over (2×2 GP)</text>
+  <line x1="265" y1="138" x2="320" y2="138" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <text class="small" x="272" y="128" fill="#2563eb">v_solid mask</text>
+  <text class="mono" x="34" y="254">Uncovering: 26-cell IDW + Vacuum Cavity Floor</text>
+  <rect class="panel" x="420" y="44" width="380" height="228" rx="6"/>
+  <text class="subtitle" x="434" y="66">2. UNDEX DAA1 + 4-DOF Bubble + Cavitation</text>
+  <rect x="440" y="88" width="340" height="140" rx="4" fill="#ecfeff" stroke="#67e8f9"/>
+  <circle cx="520" cy="172" r="32" fill="#fef3c7" stroke="#d97706" stroke-width="1.8"/>
+  <text class="small" x="492" y="176">Bubble R(t)</text>
+  <path d="M 556 156 A 48 48 0 0 1 556 188" fill="none" stroke="#dc2626" stroke-width="1.6"/>
+  <path d="M 566 146 A 62 62 0 0 1 566 198" fill="none" stroke="#dc2626" stroke-width="1.4" stroke-dasharray="3 2"/>
+  <rect x="630" y="110" width="125" height="90" rx="6" fill="#cbd5e1" stroke="#334155" stroke-width="1.8"/>
+  <text class="label" x="646" y="158">Wet Hull Facets</text>
+  <text class="small" x="638" y="175">(H-Matrix M_added)</text>
+  <text class="mono" x="434" y="254">p_total &lt; P_CAV (-100 kPa) ⇒ Bleich-Sandler Cutoff</text>
+</svg>

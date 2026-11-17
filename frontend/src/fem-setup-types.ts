@@ -7,7 +7,7 @@
 export type FEMSectionType = 
     | 'SolidHex8' 
     | 'SolidHex8_Full' 
-    | 'SolidHex8_SRI'
+    | 'SolidHex8_SRI' 
     | 'SolidTet4' 
     | 'SolidTet4_ANP' 
     | 'SolidTet10' 
@@ -15,6 +15,66 @@ export type FEMSectionType =
     | 'Shell4' 
     | 'Beam3D' 
     | 'Truss1D';
+
+export type FEMHourglassModel =
+    | 'Inherit'
+    | 'FlanaganBelytschkoViscous'
+    | 'FlanaganBelytschkoStiffness'
+    | 'KosloffFrazier';
+
+const SECTION_TO_TOPOLOGY: Record<string, string> = {
+    'SolidHex8': 'Hex8',
+    'SolidHex8_SRI': 'Hex8_SRI',
+    'SolidHex8_Full': 'Hex8_FullGauss8',
+    'SolidTet4': 'Tet4',
+    'SolidTet4_ANP': 'Tet4_ANP',
+    'SolidTet10': 'Tet10',
+    'SolidWedge6': 'Wedge6',
+    'Shell4': 'Shell4',
+    'Beam3D': 'Beam3D',
+    'Truss1D': 'Truss1D'
+};
+
+const TOPOLOGY_TO_SECTION: Record<string, FEMSectionType> = {
+    'Hex8': 'SolidHex8',
+    'Hex8_SRI': 'SolidHex8_SRI',
+    'Hex8_Full': 'SolidHex8_Full',
+    'Hex8_FullGauss8': 'SolidHex8_Full',
+    'Tet4': 'SolidTet4',
+    'Tet4_ANP': 'SolidTet4_ANP',
+    'Tet10': 'SolidTet10',
+    'Wedge6': 'SolidWedge6',
+    'Shell4': 'Shell4',
+    'Beam3D': 'Beam3D',
+    'Truss1D': 'Truss1D'
+};
+
+export function sectionTypeToTopology(sectionType?: string): string {
+    if (!sectionType) return 'Hex8';
+    return SECTION_TO_TOPOLOGY[sectionType] || sectionType;
+}
+
+export function topologyToSectionType(topology?: string): FEMSectionType {
+    if (!topology) return 'SolidHex8';
+    return TOPOLOGY_TO_SECTION[topology] || (topology.startsWith('Solid') || topology === 'Shell4' || topology === 'Beam3D' || topology === 'Truss1D' ? topology as FEMSectionType : 'SolidHex8');
+}
+
+export function normalizeFEMHourglassModel(val?: string): FEMHourglassModel {
+    if (!val || val === 'Inherit' || val === 'Flanagan-Belytschko') return 'Inherit';
+    if (val === 'Standard_Viscous') return 'FlanaganBelytschkoViscous';
+    if (val === 'FlanaganBelytschkoViscous' || val === 'FlanaganBelytschkoStiffness' || val === 'KosloffFrazier') {
+        return val;
+    }
+    return 'Inherit';
+}
+
+export function shapeTypeToMeshSource(shapeType?: string): string {
+    if (shapeType === 'Cylinder') return 'Cylinder Generator';
+    if (shapeType === 'STL') return 'STL File';
+    if (shapeType === 'Plate' || shapeType === 'Shell') return 'Plate Generator';
+    if (shapeType === 'LS-DYNA File') return 'LS-DYNA Keyword File';
+    return 'Box Generator';
+}
 
 export interface FEMSectionProperties {
     thickness?: number;           // Shell thickness in meters (e.g. 0.005)
@@ -29,8 +89,10 @@ export interface FEMSectionProperties {
     wall_thickness?: number;      // Pipe wall thickness in meters
     width?: number;               // Rectangular beam cross-section width in meters
     height?: number;              // Rectangular beam cross-section height in meters
-    hourglass_coeff?: number;     // Hourglass stiffness factor (default 0.10)
-    hourglass_type?: 'Flanagan-Belytschko' | 'Standard_Viscous' | 'BBar_SRI';
+    hourglass_coeff?: number;     // Optional per-part hourglass override (undefined = inherit domain)
+    hourglass_model?: FEMHourglassModel;
+    /** @deprecated Legacy field migrated into hourglass_model on load */
+    hourglass_type?: string;
 }
 
 export interface FEMPartConfig {
@@ -47,8 +109,20 @@ export interface FEMPartConfig {
     suppressed: boolean;          // Suppress/omit from solver execution
     initial_velocity: [number, number, number]; // [vx, vy, vz] in m/s
     erosion_override?: {
+        enable_strain_erosion?: boolean;
+        erosion_strain?: number;
         failure_strain?: number;
+        enable_stress_erosion?: boolean;
+        erosion_stress?: number;
         tensile_failure_stress?: number;
+        enable_damage_erosion?: boolean;
+        max_damage?: number;
+        enable_timestep_erosion?: boolean;
+        timestep_erosion_factor?: number;
+        min_volume_ratio?: number;
+        max_volume_ratio?: number;
+        enable_cohesive_splitting?: boolean;
+        cohesive_fracture_energy?: number;
         convert_to_mpm?: boolean;
     };
     num_elements: number;
@@ -76,6 +150,7 @@ export interface FEMPartConfig {
     k_file?: string;
     stl_file?: string;
     scale_factor?: number;
+    element_topology?: string;
 }
 
 export type FEMSetType = 'NODE' | 'PART' | 'SEGMENT' | 'SOLID' | 'BEAM';
@@ -168,7 +243,6 @@ export interface FEMSetupConfig {
     material_assignments: Record<number, string>; // part_id -> material key or node ID
     merge_coincident_nodes?: boolean;
     node_merge_tolerance?: number;
-    embedded_rebar_coupling?: boolean;
 }
 
 export const CAD_PALETTE = [
@@ -205,15 +279,14 @@ export function createDefaultFEMSetupConfig(): FEMSetupConfig {
                 contact_type: 'AUTOMATIC_SINGLE_SURFACE',
                 friction_static: 0.3,
                 friction_kinetic: 0.2,
-                penalty_scale: 0.10,
+                penalty_scale: 1.0,
                 active: true
             }
         ],
         materials: [],
         material_assignments: {},
         merge_coincident_nodes: false,
-        node_merge_tolerance: 1.0e-4,
-        embedded_rebar_coupling: true
+        node_merge_tolerance: 1.0e-4
     };
 }
 
@@ -263,9 +336,6 @@ export function syncModelFEMSetup(
         }
         if (domainNode.parameters.node_merge_tolerance !== undefined) {
             config.node_merge_tolerance = Number(domainNode.parameters.node_merge_tolerance);
-        }
-        if (domainNode.parameters.embedded_rebar_coupling !== undefined) {
-            config.embedded_rebar_coupling = Boolean(domainNode.parameters.embedded_rebar_coupling);
         }
     }
 
@@ -423,7 +493,8 @@ export function syncModelFEMSetup(
                     source: 'deck',
                     name: `${baseTitle} (Solid Concrete)`,
                     section_type: 'SolidHex8',
-                    section_properties: { thickness: 0.16, hourglass_type: 'Flanagan-Belytschko', hourglass_coeff: 0.10 },
+                    element_topology: 'Hex8',
+                    section_properties: { thickness: 0.16, hourglass_model: 'Inherit' },
                     material_assignment: matAssignment !== 'DEFAULT' ? matAssignment : 'DECK_MAT_1',
                     color: '#38bdf8',
                     visible: true,
@@ -477,11 +548,11 @@ export function syncModelFEMSetup(
                     source: 'deck',
                     name: 'Internal Rebar Cage (Beams)',
                     section_type: 'Beam3D',
+                    element_topology: 'Beam3D',
                     section_properties: {
                         diameter: rDiam,
                         area: Math.PI * rDiam * rDiam * 0.25,
-                        hourglass_type: 'Flanagan-Belytschko',
-                        hourglass_coeff: 0.10
+                        hourglass_model: 'Inherit'
                     },
                     material_assignment: 'DECK_MAT_2',
                     color: '#f59e0b',
@@ -512,6 +583,9 @@ export function syncModelFEMSetup(
                 rebarPart.num_elements = deckMeta.numBeamElements;
                 rebarPart.num_nodes = deckMeta.numNodes;
                 rebarPart.bounds = b;
+                if (p.rot_x !== undefined) rebarPart.rot_x = Number(p.rot_x);
+                if (p.rot_y !== undefined) rebarPart.rot_y = Number(p.rot_y);
+                if (p.rot_z !== undefined) rebarPart.rot_z = Number(p.rot_z);
             }
             continue;
         }
@@ -521,17 +595,16 @@ export function syncModelFEMSetup(
         let secType: FEMSectionType = 'SolidHex8';
         if (node.type === 'FEMBeam3D') secType = 'Beam3D';
         else if (node.type === 'FEMRebar3D') secType = 'Truss1D';
-        else if (p.shape_type === 'Plate' || p.shape_type === 'Shell') secType = 'Shell4';
+        else if (p.element_topology) secType = topologyToSectionType(String(p.element_topology));
+        else if (p.element_type) secType = topologyToSectionType(String(p.element_type));
+        else if (p.hourglass_model === 'BBar_SRI') secType = 'SolidHex8_SRI';
         else if (p.section_type) secType = p.section_type as FEMSectionType;
-        else if (p.element_type === 'Tet4') secType = 'SolidTet4';
-        else if (p.element_type === 'Tet4_ANP') secType = 'SolidTet4_ANP';
-        else if (p.element_type === 'Hex8_SRI' || p.hourglass_model === 'BBar_SRI') secType = 'SolidHex8_SRI';
-        else if (p.element_type === 'Hex8_Full') secType = 'SolidHex8_Full';
-        else if (p.element_type === 'Wedge6') secType = 'SolidWedge6';
+        else if (p.shape_type === 'STL') secType = 'SolidTet4_ANP';
+        else if (p.shape_type === 'Plate' || p.shape_type === 'Shell') secType = 'Shell4';
 
-        const nx = Math.max(1, Math.min(200, Number(p.nx ?? 10)));
-        const ny = Math.max(1, Math.min(200, Number(p.ny ?? 10)));
-        const nz = Math.max(1, Math.min(200, Number(p.nz ?? 10)));
+        const nx = Math.max(1, Number(p.nx ?? 10));
+        const ny = Math.max(1, Number(p.ny ?? 10));
+        const nz = Math.max(1, Number(p.nz ?? 10));
         const sx = Number(p.size_x ?? 1.0);
         const sy = Number(p.size_y ?? 1.0);
         const sz = Number(p.size_z ?? 1.0);
@@ -542,7 +615,7 @@ export function syncModelFEMSetup(
         const calcBounds: [number, number, number, number, number, number] = isCAD
             ? [px, px + sx, py, py + sy, pz, pz + sz]
             : [px - 0.5 * sx, px + 0.5 * sx, py - 0.5 * sy, py + 0.5 * sy, pz - 0.5 * sz, pz + 0.5 * sz];
-        const estElements = secType === 'Shell4' ? (nx * ny) : ((secType === 'Beam3D' || secType === 'Truss1D') ? nz : (nx * ny * nz));
+        const estElements = secType === 'Shell4' ? (nx * ny) : ((secType === 'Beam3D' || secType === 'Truss1D') ? nz : ((secType === 'SolidTet4' || secType === 'SolidTet4_ANP') ? 6 * nx * ny * nz : (nx * ny * nz)));
         const estNodes = secType === 'Shell4' ? ((nx + 1) * (ny + 1)) : ((secType === 'Beam3D' || secType === 'Truss1D') ? (nz + 1) : ((nx + 1) * (ny + 1) * (nz + 1)));
 
         if (existingPart) {
@@ -555,6 +628,9 @@ export function syncModelFEMSetup(
                 existingPart.shape_type = 'LS-DYNA File';
                 if (kFile) existingPart.k_file = kFile;
                 if (p.scale_factor !== undefined) existingPart.scale_factor = Number(p.scale_factor);
+                if (p.rot_x !== undefined) existingPart.rot_x = Number(p.rot_x);
+                if (p.rot_y !== undefined) existingPart.rot_y = Number(p.rot_y);
+                if (p.rot_z !== undefined) existingPart.rot_z = Number(p.rot_z);
                 if (deckMeta) {
                     existingPart.bounds = deckMeta.bounds;
                     existingPart.num_elements = deckMeta.totalElements;
@@ -578,11 +654,37 @@ export function syncModelFEMSetup(
                 existingPart.nz = nz;
                 if (p.origin_mode) existingPart.origin_mode = p.origin_mode;
                 if (p.shape_type) existingPart.shape_type = p.shape_type as any;
-                if (!existingPart.num_elements) existingPart.num_elements = estElements;
-                if (!existingPart.num_nodes) existingPart.num_nodes = estNodes;
+                existingPart.num_elements = estElements;
+                existingPart.num_nodes = estNodes;
                 existingPart.bounds = calcBounds;
             }
-            if (p.section_type) existingPart.section_type = p.section_type as any;
+            // Keep section_type and element_topology strictly aligned with zero drift:
+            // Prefer non-default node topology or explicit part formulation over stale default 'Hex8'/'SolidHex8'.
+            const nodeTopo = p.element_topology ? String(p.element_topology) : '';
+            const partTopo = existingPart.element_topology || (existingPart.section_type ? sectionTypeToTopology(existingPart.section_type) : '');
+            if (node.type === 'FEMBeam3D') {
+                existingPart.section_type = 'Beam3D';
+                existingPart.element_topology = 'Beam3D';
+            } else if (node.type === 'FEMRebar3D') {
+                existingPart.section_type = 'Truss1D';
+                existingPart.element_topology = 'Truss1D';
+            } else if (nodeTopo && (nodeTopo !== 'Hex8' || !partTopo || partTopo === 'Hex8')) {
+                existingPart.element_topology = nodeTopo;
+                existingPart.section_type = topologyToSectionType(nodeTopo);
+            } else if (partTopo) {
+                existingPart.element_topology = partTopo;
+                existingPart.section_type = topologyToSectionType(partTopo);
+                p.element_topology = partTopo;
+            } else {
+                existingPart.section_type = secType;
+                existingPart.element_topology = sectionTypeToTopology(secType);
+            }
+            if (!existingPart.section_properties) existingPart.section_properties = {};
+            existingPart.section_properties.hourglass_model = normalizeFEMHourglassModel(
+                existingPart.section_properties.hourglass_model ?? existingPart.section_properties.hourglass_type
+            );
+            delete existingPart.section_properties.hourglass_type;
+
             if (p.node1_x !== undefined) existingPart.node1 = [Number(p.node1_x), Number(p.node1_y ?? 0), Number(p.node1_z ?? 0)];
             if (p.node2_x !== undefined) existingPart.node2 = [Number(p.node2_x), Number(p.node2_y ?? 0), Number(p.node2_z ?? 0)];
             if (p.vel_x !== undefined || p.vel_y !== undefined || p.vel_z !== undefined) {
@@ -601,11 +703,12 @@ export function syncModelFEMSetup(
                 source: isLSDyna ? 'deck' : 'canvas_node',
                 name: String(p.name || p.title || node.id),
                 section_type: secType,
+                element_topology: sectionTypeToTopology(secType),
                 section_properties: {
                     thickness: Number(p.thickness ?? (isLSDyna ? 0.04 : 0.005)),
                     diameter: Number(p.diameter ?? (p.radius ? p.radius * 2 : 0.00953)),
-                    hourglass_type: (p.hourglass_model as any) || 'Flanagan-Belytschko',
-                    hourglass_coeff: Number(p.hourglass_coeff ?? 0.10)
+                    hourglass_model: normalizeFEMHourglassModel(p.hourglass_model),
+                    ...(p.hourglass_coeff !== undefined ? { hourglass_coeff: Number(p.hourglass_coeff) } : {})
                 },
                 material_assignment: matAssignment,
                 color: p.color || getPartColor(idx),
@@ -653,4 +756,128 @@ export function syncModelFEMSetup(
 
     return config;
 }
+
+/**
+ * Single canonical bidirectional synchronizer between a FEMPartConfig record and a linked
+ * canvas FEM node's parameters (FEMObject3D / FEMBeam3D / FEMRebar3D).
+ * Guarantees zero drift between section_type <-> element_topology, geometry, discretization,
+ * velocity, and visibility across Canvas, Property Grid, Pipeline Browser, and FEM Setup Modal.
+ */
+export function syncFEMPartAndNodeParams(
+    p: FEMPartConfig | Record<string, any>,
+    parameters: Record<string, any>,
+    fromPartToNode: boolean,
+    nodeType?: string
+): void {
+    if (!p || !parameters) return;
+
+    if (fromPartToNode) {
+        if (p.name) parameters['name'] = p.name;
+        if (p.nx !== undefined) parameters['nx'] = Math.max(1, Number(p.nx));
+        if (p.ny !== undefined) parameters['ny'] = Math.max(1, Number(p.ny));
+        if (p.nz !== undefined) parameters['nz'] = Math.max(1, Number(p.nz));
+        if (p.size_x !== undefined) parameters['size_x'] = Number(p.size_x);
+        if (p.size_y !== undefined) parameters['size_y'] = Number(p.size_y);
+        if (p.size_z !== undefined) parameters['size_z'] = Number(p.size_z);
+        if (p.pos_x !== undefined) parameters['pos_x'] = Number(p.pos_x);
+        if (p.pos_y !== undefined) parameters['pos_y'] = Number(p.pos_y);
+        if (p.pos_z !== undefined) parameters['pos_z'] = Number(p.pos_z);
+        if (p.rot_x !== undefined) parameters['rot_x'] = Number(p.rot_x);
+        if (p.rot_y !== undefined) parameters['rot_y'] = Number(p.rot_y);
+        if (p.rot_z !== undefined) parameters['rot_z'] = Number(p.rot_z);
+        if (p.radius !== undefined) parameters['radius'] = Number(p.radius);
+        if (p.inner_radius !== undefined) parameters['inner_radius'] = Number(p.inner_radius);
+        if (p.height !== undefined) parameters['height'] = Number(p.height);
+        if (p.origin_mode) parameters['origin_mode'] = p.origin_mode;
+        if (p.shape_type) {
+            parameters['shape_type'] = p.shape_type;
+            parameters['mesh_source'] = shapeTypeToMeshSource(p.shape_type);
+        }
+        const topo = p.section_type
+            ? sectionTypeToTopology(p.section_type)
+            : (p.element_topology || undefined);
+        if (topo) {
+            p.element_topology = topo;
+            p.section_type = topologyToSectionType(topo);
+            parameters['element_topology'] = topo;
+        }
+        if (p.stl_file !== undefined) parameters['stl_file'] = p.stl_file;
+        if (Array.isArray(p.initial_velocity) && p.initial_velocity.length >= 3) {
+            parameters['vel_x'] = Number(p.initial_velocity[0] ?? 0);
+            parameters['vel_y'] = Number(p.initial_velocity[1] ?? 0);
+            parameters['vel_z'] = Number(p.initial_velocity[2] ?? 0);
+        }
+        const vis = p.visible !== false && !p.suppressed;
+        parameters['visible'] = vis;
+        parameters['hidden'] = !vis;
+    } else {
+        if (parameters['name']) p.name = String(parameters['name']);
+        if (parameters['nx'] !== undefined) p.nx = Math.max(1, Number(parameters['nx']));
+        if (parameters['ny'] !== undefined) p.ny = Math.max(1, Number(parameters['ny']));
+        if (parameters['nz'] !== undefined) p.nz = Math.max(1, Number(parameters['nz']));
+        if (parameters['size_x'] !== undefined) p.size_x = Number(parameters['size_x']);
+        if (parameters['size_y'] !== undefined) p.size_y = Number(parameters['size_y']);
+        if (parameters['size_z'] !== undefined) p.size_z = Number(parameters['size_z']);
+        if (parameters['pos_x'] !== undefined) p.pos_x = Number(parameters['pos_x']);
+        if (parameters['pos_y'] !== undefined) p.pos_y = Number(parameters['pos_y']);
+        if (parameters['pos_z'] !== undefined) p.pos_z = Number(parameters['pos_z']);
+        if (parameters['rot_x'] !== undefined) p.rot_x = Number(parameters['rot_x']);
+        if (parameters['rot_y'] !== undefined) p.rot_y = Number(parameters['rot_y']);
+        if (parameters['rot_z'] !== undefined) p.rot_z = Number(parameters['rot_z']);
+        if (parameters['radius'] !== undefined) p.radius = Number(parameters['radius']);
+        if (parameters['inner_radius'] !== undefined) p.inner_radius = Number(parameters['inner_radius']);
+        if (parameters['height'] !== undefined) p.height = Number(parameters['height']);
+        if (parameters['origin_mode']) p.origin_mode = parameters['origin_mode'];
+        if (parameters['shape_type']) p.shape_type = parameters['shape_type'];
+        if (nodeType === 'FEMBeam3D') {
+            p.section_type = 'Beam3D';
+            p.element_topology = 'Beam3D';
+        } else if (nodeType === 'FEMRebar3D') {
+            p.section_type = 'Truss1D';
+            p.element_topology = 'Truss1D';
+        } else if (parameters['element_topology']) {
+            const topo = String(parameters['element_topology']);
+            p.element_topology = topo;
+            p.section_type = topologyToSectionType(topo);
+        }
+        if (parameters['stl_file'] !== undefined) p.stl_file = parameters['stl_file'];
+        if (parameters['vel_x'] !== undefined || parameters['vel_y'] !== undefined || parameters['vel_z'] !== undefined) {
+            p.initial_velocity = [
+                Number(parameters['vel_x'] ?? p.initial_velocity?.[0] ?? 0),
+                Number(parameters['vel_y'] ?? p.initial_velocity?.[1] ?? 0),
+                Number(parameters['vel_z'] ?? p.initial_velocity?.[2] ?? 0)
+            ];
+        }
+        if (parameters['visible'] !== undefined || parameters['hidden'] !== undefined) {
+            p.visible = parameters['visible'] !== false && !parameters['hidden'];
+        }
+        if (p.section_properties && 'hourglass_type' in p.section_properties) {
+            p.section_properties.hourglass_model = normalizeFEMHourglassModel(
+                p.section_properties.hourglass_model ?? p.section_properties.hourglass_type
+            );
+            delete p.section_properties.hourglass_type;
+        }
+
+        const shape = p.shape_type || 'Box';
+        const isTet = p.element_topology === 'Tet4_ANP' || p.element_topology === 'Tet4';
+        if (shape === 'Box') {
+            const nx = p.nx ?? 10;
+            const ny = p.ny ?? 10;
+            const nz = p.nz ?? 10;
+            p.num_elements = isTet ? (6 * nx * ny * nz) : (nx * ny * nz);
+            p.num_nodes = (nx + 1) * (ny + 1) * (nz + 1);
+            const isCAD = p.origin_mode === 'CAD Origin' || p.origin_mode === 'Min Corner';
+            const sx = isCAD ? (p.pos_x ?? 0) : ((p.pos_x ?? 0) - 0.5 * (p.size_x ?? 1));
+            const sy = isCAD ? (p.pos_y ?? 0) : ((p.pos_y ?? 0) - 0.5 * (p.size_y ?? 1));
+            const sz = isCAD ? (p.pos_z ?? 0) : ((p.pos_z ?? 0) - 0.5 * (p.size_z ?? 1));
+            p.bounds = [sx, sx + (p.size_x ?? 1), sy, sy + (p.size_y ?? 1), sz, sz + (p.size_z ?? 1)];
+        } else if (shape === 'Plate') {
+            const nx = p.nx ?? 10;
+            const ny = p.ny ?? 10;
+            p.num_elements = nx * ny;
+            p.num_nodes = (nx + 1) * (ny + 1);
+        }
+    }
+}
+
 

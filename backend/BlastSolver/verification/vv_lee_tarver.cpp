@@ -135,6 +135,42 @@ BenchmarkResult test_mixture_equilibrium() {
     return r;
 }
 
+BenchmarkResult test_thermal_equilibrium() {
+    BenchmarkResult r;
+    r.id = "VV-L1-LT-06"; r.level = 1;
+    r.title = "Pressure + temperature equilibrium closure (PBX 9501): three governing equations and limits";
+    r.tolerance_linf = 1.0e-5;
+    Blast::Mixture::ThermalParams P{kPBX9501.A, kPBX9501.B, kPBX9501.R1, kPBX9501.R2, kPBX9501.omega, kPBX9501.Cv, kPBX9501.T0,
+        kPBX9501P.A, kPBX9501P.B, kPBX9501P.R1, kPBX9501P.R2, kPBX9501P.omega, 1.0e-5 * 1.0e11, kPBX9501P.E0, kPBX9501.rho0};
+    auto cold = [](double A, double B, double R1, double R2, double V) { return A / R1 * std::exp(-R1 * V) + B / R2 * std::exp(-R2 * V); };
+    std::ostringstream d;
+    d << "Material point. rows: V, lambda, p[Pa], T[K], V_s, V_p, |ps-pp|/p, energy residual/E, volume residual, iters\n";
+    double worst = 0.0; int max_it = 0;
+    const double Vs_[3] = {0.8, 0.9, 1.0}; const double Ls_[5] = {0.01, 0.1, 0.5, 0.9, 0.99}; const double eth = 2.0e5;
+    for (double V : Vs_) for (double l : Ls_) {
+        const auto m = Blast::Mixture::thermalMixture(V, l, eth, P);
+        const double ps = P.As * std::exp(-P.R1s * m.v_s) + P.Bs * std::exp(-P.R2s * m.v_s) + P.ws * P.Cvs * m.T / m.v_s;
+        const double pp = P.Ap * std::exp(-P.R1p * m.v_p) + P.Bp * std::exp(-P.R2p * m.v_p) + P.wp * P.Cvp * m.T / m.v_p;
+        const double Es = P.Cvs * (m.T - P.T0) + cold(P.As, P.Bs, P.R1s, P.R2s, m.v_s) - cold(P.As, P.Bs, P.R1s, P.R2s, 1.0);
+        const double Ep = P.Cvp * m.T + cold(P.Ap, P.Bp, P.R1p, P.R2p, m.v_p) - P.E0;
+        const double e_res = std::abs((1.0 - l) * Es + l * Ep - P.rho0 * eth) / (P.rho0 * eth);
+        const double p_res = std::abs(ps - pp) / std::abs(m.p);
+        const double v_res = std::abs((1.0 - l) * m.v_s + l * m.v_p - V);
+        worst = std::max({worst, e_res, p_res, v_res}); max_it = std::max(max_it, m.iters);
+        d << "  " << V << " " << l << " " << m.p << " " << m.T << " " << m.v_s << " " << m.v_p << " " << p_res << " " << e_res << " " << v_res << " " << m.iters << "\n";
+    }
+    // Limits: fully reacted at V = 1, e_th = 0 gives the product start state T = (E0 - Ec_p(1)) / Cv_p (independent hand formula)
+    const auto m1 = Blast::Mixture::thermalMixture(1.0, 1.0, 0.0, P);
+    const double T_hand = (P.E0 - cold(P.Ap, P.Bp, P.R1p, P.R2p, 1.0)) / P.Cvp;
+    const double lim_err = std::abs(m1.T - T_hand) / T_hand;
+    d << "Limit lambda=1,V=1,e_th=0: T = " << m1.T << " K, hand formula " << T_hand << " K, rel err " << lim_err << "\n";
+    r.error_linf = std::max(worst, lim_err);
+    r.passed = (r.error_linf <= r.tolerance_linf) && max_it <= 80;
+    r.summary = "15 states: max residual over the 3 governing equations = " + std::to_string(worst) + "; product start-state T error = " + std::to_string(lim_err) + "; max iterations " + std::to_string(max_it);
+    r.details = d.str();
+    return r;
+}
+
 BenchmarkResult test_rate_integrator_convergence() {
     BenchmarkResult r;
     r.id = "VV-L1-LT-05"; r.level = 1;
@@ -241,6 +277,7 @@ PopResult runPopCase(const Explosive& ex, double P_in_pa, double run_exp_mm, dou
     mat.jwl_A = (float)ex.pr.A; mat.jwl_B = (float)ex.pr.B; mat.jwl_R1 = (float)ex.pr.R1; mat.jwl_R2 = (float)ex.pr.R2; mat.jwl_omega = (float)ex.pr.omega;
     mat.jwlr_A = (float)ex.r.A; mat.jwlr_B = (float)ex.r.B; mat.jwlr_R1 = (float)ex.r.R1; mat.jwlr_R2 = (float)ex.r.R2;
     mat.jwlr_omega = (float)ex.r.omega; mat.jwlr_Cv = (float)ex.r.Cv; mat.jwlr_T0 = (float)ex.r.T0;
+    mat.jwlp_Cv = 1.0e6f;   // product Cv = 1.0e-5 Mbar/K (Tables 1, 2, 4) = 1.0e6 Pa/K per initial volume
     mat.mixture_rule = 1;
     const Rates& k = ex.k;
     mat.lt_I = (float)k.I; mat.lt_a = (float)k.a; mat.lt_b = (float)k.b; mat.lt_x = (float)k.x; mat.lt_ig_max = (float)k.ig;
@@ -404,10 +441,10 @@ BenchmarkResult test_pop_plot() {
 
 } // namespace
 
-void run_lee_tarver_trace(int expl, double P_gpa, double dz_mm) {
+void run_lee_tarver_trace(int expl, double P_gpa, double dz_mm, bool reactive) {
     g_trace = true;
     const Explosive ex = makeExplosive(expl);
-    const PopResult pr = runPopCase(ex, P_gpa * 1.0e9, 20.0, dz_mm * 1.0e-3);
+    const PopResult pr = runPopCase(ex, P_gpa * 1.0e9, 20.0, dz_mm * 1.0e-3, reactive);
     g_trace = false;
     std::cout << "RESULT detonated=" << pr.detonated << " run_mm=" << pr.run_mm << " np=" << pr.np << "\n";
 }
@@ -419,6 +456,7 @@ std::vector<BenchmarkResult> run_lee_tarver_benchmarks() {
     out.push_back(test_rate_hand_value());
     out.push_back(test_mixture_equilibrium());
     out.push_back(test_rate_integrator_convergence());
+    out.push_back(test_thermal_equilibrium());
     out.push_back(test_inert_input_pressure());
     out.push_back(test_pop_plot());
     out.push_back(test_pop_convergence());

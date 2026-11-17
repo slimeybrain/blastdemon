@@ -205,6 +205,41 @@ struct ClientConnection {
     std::mutex send_mutex;
 };
 
+static std::mutex g_processes_mutex;
+static std::map<std::string, std::shared_ptr<Process>> g_active_processes;
+static std::map<std::string, std::shared_ptr<std::atomic<bool>>> g_expected_terminations;
+
+static std::mutex g_client_mutex;
+static std::shared_ptr<ClientConnection> g_active_client;
+static std::atomic<bool> g_telemetry_paused{false};
+
+static std::shared_ptr<ClientConnection> get_active_client() {
+    std::lock_guard<std::mutex> lock(g_client_mutex);
+    return g_active_client;
+}
+
+static std::mutex g_log_mutex;
+static void broker_log(const std::string& level, const std::string& modelId, const std::string& msg) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+    struct tm tm_buf{};
+#ifdef _WIN32
+    localtime_s(&tm_buf, &now_c);
+#else
+    localtime_r(&now_c, &tm_buf);
+#endif
+    char ts[32];
+    std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
+    std::string tag = modelId.empty() ? "-" : modelId;
+    std::string line = "[" + std::string(ts) + "] [" + level + "] [" + tag + "] " + msg;
+    std::cout << line << std::endl;
+    std::ofstream log_file("broker_events.log", std::ios::app);
+    if (log_file.is_open()) {
+        log_file << line << "\n";
+    }
+}
+
 // --- WebSocket Handshake ---
 std::string get_websocket_accept(const std::string& key) {
     const std::string magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -212,6 +247,7 @@ std::string get_websocket_accept(const std::string& key) {
 }
 
 void send_websocket_frame(std::shared_ptr<ClientConnection> client, const void* data, size_t len, uint8_t opcode = 0x01) {
+    if (!client) return;
     std::lock_guard<std::mutex> lock(client->send_mutex);
     if (client->fd == INVALID_SOCKET_HANDLE) return;
 
@@ -328,6 +364,12 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
     if (command == "BROWSER_LOG") {
         std::string message = payload.value("message", "");
         std::cout << "[BROWSER] " << message << std::endl;
+        return;
+    }
+
+    if (command == "SET_TELEMETRY_PAUSED") {
+        bool paused = payload.value("paused", false);
+        g_telemetry_paused.store(paused);
         return;
     }
 
@@ -845,12 +887,8 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
         return;
     }
 
-    if (command == "INIT" || command == "INIT_2D" || command == "INIT_3D" || command == "INIT_MPM" || command == "INIT_2D_MPM" || command == "INIT_3D_MPM" || command == "INIT_MPM_3D" || command == "INIT_FSI_2D" || command == "INIT_FSI_3D" || command == "INIT_FSI" || command == "INIT_FEM_3D" || command == "INIT_FEM_FSI_3D" || command == "INIT_3D_FEM") {
-        std::cout << "[DEBUG] RAW BROKER RECEIVE INIT FOR modelId " << modelId << ": " << json_str << std::endl;
-    }
-
     if (command == "STOP") {
-        std::cout << "--- STOP COMMAND RECEIVED for modelId " << modelId << " ---" << std::endl;
+        broker_log("CMD", modelId, "STOP command received");
         if (active_processes.count(modelId) && active_processes[modelId]) {
             auto target_proc = active_processes[modelId];
             std::vector<std::string> to_erase;
@@ -881,7 +919,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                     send_websocket_text(client, log_envelope.dump());
                 }
             }
-            std::cout << "Process for modelId " << modelId << " terminated by user." << std::endl;
+            broker_log("INFO", modelId, "Solver process terminated by user");
         } else {
             if (client) {
                 nlohmann::json status_envelope;
@@ -895,7 +933,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
     }
 
     if (command == "INIT" || command == "START" || command == "INIT_2D" || command == "INIT_3D" || command == "INIT_MPM" || command == "INIT_2D_MPM" || command == "INIT_3D_MPM" || command == "INIT_MPM_3D" || command == "INIT_FSI_2D" || command == "INIT_FSI_3D" || command == "INIT_FSI" || command == "INIT_FEM_3D" || command == "INIT_FEM_FSI_3D" || command == "INIT_3D_FEM") {
-        std::cout << "--- " << command << " COMMAND RECEIVED for modelId " << modelId << " ---" << std::endl;
+        broker_log("CMD", modelId, command + " received (payload: " + std::to_string(json_str.size() / 1024) + " KB)");
 
         // ── Per-model process isolation ─────────────────────────────────────────
         // Each modelId owns exactly one BlastSolver process for its entire
@@ -1001,7 +1039,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
             active_process->writeStdin(json_str + "\n\n");
             active_processes[modelId] = active_process;
 
-            std::thread([client, proc = active_process, modelId, expected_term]() {
+            std::thread([proc = active_process, modelId, expected_term]() {
                 std::vector<uint8_t> buffer(8192);
                 std::vector<uint8_t> accumulator;
                 bool solver_emitted_error = false;
@@ -1062,15 +1100,18 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
 
                                 if (accumulator.size() < header_size + payload_size) break;
 
-                                std::vector<uint8_t> ws_payload;
-                                ws_payload.reserve(modelId.size() + 1 + payload_size);
-                                ws_payload.insert(ws_payload.end(), modelId.begin(), modelId.end());
-                                ws_payload.push_back('\0');
-                                ws_payload.insert(ws_payload.end(),
-                                                  accumulator.begin() + header_size,
-                                                  accumulator.begin() + header_size + payload_size);
+                                auto cur_client = get_active_client();
+                                if (cur_client && !g_telemetry_paused.load()) {
+                                    std::vector<uint8_t> ws_payload;
+                                    ws_payload.reserve(modelId.size() + 1 + payload_size);
+                                    ws_payload.insert(ws_payload.end(), modelId.begin(), modelId.end());
+                                    ws_payload.push_back('\0');
+                                    ws_payload.insert(ws_payload.end(),
+                                                      accumulator.begin() + header_size,
+                                                      accumulator.begin() + header_size + payload_size);
 
-                                send_websocket_binary(client, ws_payload.data(), ws_payload.size());
+                                    send_websocket_binary(cur_client, ws_payload.data(), ws_payload.size());
+                                }
                                 accumulator.erase(accumulator.begin(),
                                                   accumulator.begin() + header_size + payload_size);
                             } catch (const std::exception& e) {
@@ -1087,24 +1128,46 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                                              std::distance(accumulator.begin(), nl_it));
                             if (!line.empty() && line.back() == '\r') line.pop_back();
                             if (!line.empty()) {
+                                auto cur_client = get_active_client();
+                                const bool paused = g_telemetry_paused.load();
                                 if (line.rfind("{\"type\":\"obstacles_mesh\"", 0) == 0) {
-                                    std::string modified = "{\"type\":\"obstacles_mesh\",\"modelId\":\"" + modelId + "\"," + line.substr(25);
-                                    send_websocket_text(client, modified);
+                                    if (cur_client) {
+                                        std::string modified = "{\"type\":\"obstacles_mesh\",\"modelId\":\"" + modelId + "\"," + line.substr(25);
+                                        send_websocket_text(cur_client, modified);
+                                    }
                                 } else {
                                     try {
                                         nlohmann::json log_json = nlohmann::json::parse(line);
-                                        if (log_json.value("level", "") == "ERROR" || log_json.value("type", "") == "error") {
+                                        const std::string jtype = log_json.value("type", "");
+                                        const std::string jlevel = log_json.value("level", "");
+                                        const bool is_error = (jlevel == "ERROR" || jtype == "error");
+                                        if (is_error) {
                                             solver_emitted_error = true;
+                                            broker_log("ERROR", modelId, log_json.value("message", log_json.value("summary", line)));
+                                        } else if (jtype == "log") {
+                                            std::string msg = log_json.value("message", "");
+                                            if (!msg.empty()) {
+                                                broker_log(jlevel.empty() ? "SOLVER" : jlevel, modelId, msg);
+                                            }
                                         }
-                                        log_json["modelId"] = modelId;
-                                        send_websocket_text(client, log_json.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+                                        const bool is_terminated = log_json.value("is_terminated", false);
+                                        const bool is_high_freq_telemetry =
+                                            (jtype.rfind("TELEMETRY", 0) == 0 && !is_terminated) ||
+                                            jtype == "progress" || jtype == "progress_2d" || jtype == "resource_pulse";
+                                        if (cur_client && (!paused || is_error || is_terminated || !is_high_freq_telemetry)) {
+                                            log_json["modelId"] = modelId;
+                                            send_websocket_text(cur_client, log_json.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+                                        }
                                     } catch (...) {
                                         last_non_json_line = line.size() > 512 ? line.substr(0, 512) : line;
-                                        nlohmann::json log_envelope;
-                                        log_envelope["type"] = "log";
-                                        log_envelope["modelId"] = modelId;
-                                        log_envelope["message"] = line;
-                                        send_websocket_text(client, log_envelope.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+                                        broker_log("SOLVER", modelId, last_non_json_line);
+                                        if (cur_client && !paused) {
+                                            nlohmann::json log_envelope;
+                                            log_envelope["type"] = "log";
+                                            log_envelope["modelId"] = modelId;
+                                            log_envelope["message"] = line;
+                                            send_websocket_text(cur_client, log_envelope.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+                                        }
                                     }
                                 }
                             }
@@ -1112,17 +1175,17 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                         }
                     }
                 }
-                std::cout << "Telemetry relay thread finished for modelId " << modelId << std::endl;
-
                 // Ensure child exit status / signal is reaped if not already collected
                 proc->isRunning();
                 const int exit_code = proc->getLastExitCode();
                 const int exit_signal = proc->getLastSignal();
+                broker_log("EXIT", modelId, "BlastSolver relay finished (exit_code=" + std::to_string(exit_code) + ", signal=" + std::to_string(exit_signal) + ")");
 
                 // Only emit exit diagnostics/status when termination was NOT initiated by
                 // STOP, TERMINATE*, or INIT* process replacement (which handle status synchronously).
                 const bool was_expected = (expected_term && expected_term->load());
-                if (client && !was_expected) {
+                auto cur_client = get_active_client();
+                if (cur_client && !was_expected) {
                     if (solver_emitted_error) {
                         nlohmann::json info_envelope;
                         info_envelope["type"] = "log";
@@ -1133,13 +1196,13 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                         info_envelope["message"] = (exit_signal > 0)
                             ? ("Worker process terminated by signal " + std::to_string(exit_signal) + " after reporting error.")
                             : ("Worker process exited with code " + std::to_string(exit_code) + " after reporting error.");
-                        send_websocket_text(client, info_envelope.dump());
+                        send_websocket_text(cur_client, info_envelope.dump());
                     } else {
                         nlohmann::json status_envelope;
                         status_envelope["type"] = "status";
                         status_envelope["status"] = "ERROR";
                         status_envelope["modelId"] = modelId;
-                        send_websocket_text(client, status_envelope.dump());
+                        send_websocket_text(cur_client, status_envelope.dump());
 
                         nlohmann::json log_envelope;
                         log_envelope["type"] = "log";
@@ -1160,7 +1223,7 @@ void process_json(const std::string& json_str, std::shared_ptr<ClientConnection>
                         details += "\n\nHow to fix your model:\n1. Check available GPU VRAM / system RAM if killed by SIGKILL (signal 9) or SIGABRT (signal 6).\n2. Try switching Device to CPU or reducing mesh resolution to isolate hardware/memory faults.";
                         log_envelope["details"] = details;
                         log_envelope["message"] = "BlastSolver worker " + exit_desc + (last_non_json_line.empty() ? "." : (": " + last_non_json_line));
-                        send_websocket_text(client, log_envelope.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+                        send_websocket_text(cur_client, log_envelope.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                     }
                 }
             }).detach();
@@ -1278,8 +1341,6 @@ void handle_client(SOCKET_TYPE client_fd) {
     auto client = std::make_shared<ClientConnection>();
     client->fd = client_fd;
 
-    std::map<std::string, std::shared_ptr<Process>> active_processes;
-    std::map<std::string, std::shared_ptr<std::atomic<bool>>> expected_terminations;
     char handshake_buffer[8192];
     int bytes_read = recv(client->fd, handshake_buffer, sizeof(handshake_buffer) - 1, 0);
     if (bytes_read <= 0) {
@@ -1303,6 +1364,30 @@ void handle_client(SOCKET_TYPE client_fd) {
                                    "Sec-WebSocket-Accept: " + accept_key + "\r\n\r\n";
             send(client->fd, response.c_str(), (int)response.length(), 0);
             std::cout << "WebSocket handshake complete" << std::endl;
+
+            {
+                std::lock_guard<std::mutex> lock(g_client_mutex);
+                g_active_client = client;
+            }
+            g_telemetry_paused.store(false);
+
+            {
+                std::lock_guard<std::mutex> lock(g_processes_mutex);
+                for (auto it = g_active_processes.begin(); it != g_active_processes.end(); ) {
+                    if (it->second && it->second->isRunning()) {
+                        nlohmann::json status_envelope;
+                        status_envelope["type"] = "status";
+                        status_envelope["status"] = "RUNNING";
+                        status_envelope["modelId"] = it->first;
+                        status_envelope["reattached"] = true;
+                        send_websocket_text(client, status_envelope.dump());
+                        ++it;
+                    } else {
+                        g_expected_terminations.erase(it->first);
+                        it = g_active_processes.erase(it);
+                    }
+                }
+            }
 
             std::vector<uint8_t> ws_message_accumulator;
             uint8_t current_msg_opcode = 0;
@@ -1351,7 +1436,8 @@ void handle_client(SOCKET_TYPE client_fd) {
                 if (fin) {
                     if (current_msg_opcode == 0x1) {
                         std::string message(ws_message_accumulator.begin(), ws_message_accumulator.end());
-                        process_json(message, client, active_processes, expected_terminations);
+                        std::lock_guard<std::mutex> lock(g_processes_mutex);
+                        process_json(message, client, g_active_processes, g_expected_terminations);
                     }
                     ws_message_accumulator.clear();
                     current_msg_opcode = 0;
@@ -1360,16 +1446,14 @@ void handle_client(SOCKET_TYPE client_fd) {
         }
     }
 
-    for (auto& pair : active_processes) {
-        if (pair.second) {
-            if (expected_terminations.count(pair.first) && expected_terminations[pair.first]) {
-                expected_terminations[pair.first]->store(true);
-            }
-            pair.second->terminate();
+    {
+        std::lock_guard<std::mutex> lock(g_client_mutex);
+        if (g_active_client == client) {
+            g_active_client.reset();
         }
     }
 
-    std::cout << "Client disconnected" << std::endl;
+    std::cout << "Client disconnected (active solver processes preserved)" << std::endl;
 
     {
         std::lock_guard<std::mutex> lock(client->send_mutex);

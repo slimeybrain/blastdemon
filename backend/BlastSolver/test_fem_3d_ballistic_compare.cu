@@ -87,17 +87,17 @@ int main() {
         gpu_solver.stepWithDt(dt);
 
         if ((step >= 60 && step <= 85) || step % 25 == 0) {
+            const auto& cpu_nodes = cpu_solver.getNodes();
+            const auto& gpu_nodes = gpu_solver.getNodes();
+            const auto& cpu_elems = cpu_solver.getElements();
+            const auto& gpu_elems = gpu_solver.getElements();
+
             float cpu_v = cpu_solver.getMaxVelocity();
             float gpu_v = gpu_solver.getMaxVelocity();
             float cpu_ep = cpu_solver.getMaxPlasticStrain();
             float gpu_ep = gpu_solver.getMaxPlasticStrain();
             float cpu_vm = cpu_solver.getMaxVonMisesStress();
             float gpu_vm = gpu_solver.getMaxVonMisesStress();
-
-            const auto& cpu_nodes = cpu_solver.getNodes();
-            const auto& gpu_nodes = gpu_solver.getNodes();
-            const auto& cpu_elems = cpu_solver.getElements();
-            const auto& gpu_elems = gpu_solver.getElements();
 
             float max_x_diff = 0.0f, max_v_diff = 0.0f, max_fc_diff = 0.0f;
             int max_fc_node = -1;
@@ -123,6 +123,13 @@ int main() {
                           << ") f_c=(" << gpu_nodes[max_fc_node].f_contact[0] << "," << gpu_nodes[max_fc_node].f_contact[1] << "," << gpu_nodes[max_fc_node].f_contact[2] << ")" << std::endl;
             }
             std::cout << "  GPU: Vmax=" << gpu_v << " EpMax=" << gpu_ep << " VM=" << (gpu_vm/1e6f) << " MPa" << std::endl;
+
+            if (!std::isfinite(gpu_v) || !std::isfinite(max_x_diff) || max_x_diff > 1.0e-3f) {
+                std::cerr << "[FAIL] CPU-GPU ballistic parity diverged at step " << step << " (PosDiff=" << max_x_diff << ")" << std::endl;
+                return 1;
+            }
+            (void)cpu_elems;
+            (void)gpu_elems;
         }
     }
 

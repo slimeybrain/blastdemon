@@ -37,7 +37,10 @@ void launch_fem_element_forces_kernel_3d(
     cudaStream_t stream,
     T* d_nodal_vol_cur = nullptr,
     T* d_nodal_vol_ref = nullptr,
-    T sim_time = static_cast<T>(0)
+    T sim_time = static_cast<T>(0),
+    T* d_nodal_dvol_dt = nullptr,
+    T min_volume_ratio = static_cast<T>(0.02f),
+    int* d_erosion_flag = nullptr
 );
 
 template <typename T>
@@ -93,10 +96,13 @@ void launch_fem_initial_timestep_erosion_kernel_3d(
     int num_beams,
     const MaterialTable3D* d_materials,
     FEMErosionCriteria<T> erosion_criteria,
+    BlastPhysicsParams<T> physics_params,
     int* d_node_active_count,
     int* d_erosion_flag,
     cudaStream_t stream,
-    bool enable_cohesive_splitting = false
+    bool enable_cohesive_splitting = false,
+    const int* d_face_neighbors = nullptr,
+    bool enable_nonlocal_damage = false
 );
 
 template <typename T>
@@ -152,7 +158,14 @@ void launch_fem_contact_forces_kernel_3d(
     const MaterialTable3D* d_materials,
     FEMContactSearchMethod search_method,
     int* d_cell_counts,
+    int* d_cell_offsets,
     int* d_cell_facet_ids,
+    int max_hash_entries,
+    int* d_oversized_facets,
+    int* d_oversized_count,
+    int max_oversized_facets,
+    void* d_hash_scan_temp,
+    size_t hash_scan_temp_bytes,
     uint32_t table_size,
     T base_cell_size,
     uint32_t* d_morton_codes,
@@ -190,11 +203,22 @@ void launch_fem_mpm_debris_contact_kernel_3d(
     const FEMBeam3DElement<T>* d_beams,
     int num_beams,
     const MaterialTable3D* d_materials,
+    const int* d_cell_counts,
+    const int* d_cell_offsets,
+    const int* d_cell_facet_ids,
+    int max_hash_entries,
+    const int* d_oversized_facets,
+    const int* d_oversized_count,
+    int max_oversized_facets,
+    uint32_t table_size,
+    T base_cell_size,
     T contact_penalty_scale,
     T mu_static,
     T mu_kinetic,
     T contact_damping,
     T dt,
+    T* d_mpm_impulse_accum,
+    bool accumulate_impulse,
     cudaStream_t stream
 );
 
@@ -212,6 +236,10 @@ T launch_fem_compute_step_size_kernel_3d(
     const FEMNode3D<T>* d_nodes,
     const FEMElement3D<T>* d_elements,
     int num_elements,
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
     const MaterialTable3D* d_materials,
     T cfl,
     T* d_reduction_buffer,
@@ -249,13 +277,13 @@ public:
         syncToDevice();
     }
 
-    void addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), const std::string& bc = "Free") {
-        m_cpu_solver.addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, mat, vx, vy, vz, bc);
+    void addStructuredBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), const std::string& bc = "Free", T rot_x = static_cast<T>(0), T rot_y = static_cast<T>(0), T rot_z = static_cast<T>(0)) {
+        m_cpu_solver.addStructuredBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, mat, vx, vy, vz, bc, rot_x, rot_y, rot_z);
         syncToDevice();
     }
 
-    void addStructuredCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), T inner_r = static_cast<T>(0), const std::string& bc = "Free") {
-        m_cpu_solver.addStructuredCylinderMesh(nr, nz, radius, height, pos_x, pos_y, pos_z, mat, vx, vy, vz, inner_r, bc);
+    void addStructuredCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), T inner_r = static_cast<T>(0), const std::string& bc = "Free", T rot_x = static_cast<T>(0), T rot_y = static_cast<T>(0), T rot_z = static_cast<T>(0)) {
+        m_cpu_solver.addStructuredCylinderMesh(nr, nz, radius, height, pos_x, pos_y, pos_z, mat, vx, vy, vz, inner_r, bc, rot_x, rot_y, rot_z);
         syncToDevice();
     }
 
@@ -264,13 +292,13 @@ public:
         syncToDevice();
     }
 
-    void addStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), const std::string& bc = "Free") {
-        m_cpu_solver.addStructuredTetBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, mat, vx, vy, vz, bc);
+    void addStructuredTetBoxMesh(int nx, int ny, int nz, T lx, T ly, T lz, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), const std::string& bc = "Free", T rot_x = static_cast<T>(0), T rot_y = static_cast<T>(0), T rot_z = static_cast<T>(0)) {
+        m_cpu_solver.addStructuredTetBoxMesh(nx, ny, nz, lx, ly, lz, pos_x, pos_y, pos_z, mat, vx, vy, vz, bc, rot_x, rot_y, rot_z);
         syncToDevice();
     }
 
-    void addStructuredTetCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), T inner_r = static_cast<T>(0), const std::string& bc = "Free") {
-        m_cpu_solver.addStructuredTetCylinderMesh(nr, nz, radius, height, pos_x, pos_y, pos_z, mat, vx, vy, vz, inner_r, bc);
+    void addStructuredTetCylinderMesh(int nr, int nz, T radius, T height, T pos_x, T pos_y, T pos_z, const MaterialTable3D& mat, T vx = static_cast<T>(0), T vy = static_cast<T>(0), T vz = static_cast<T>(0), T inner_r = static_cast<T>(0), const std::string& bc = "Free", T rot_x = static_cast<T>(0), T rot_y = static_cast<T>(0), T rot_z = static_cast<T>(0)) {
+        m_cpu_solver.addStructuredTetCylinderMesh(nr, nz, radius, height, pos_x, pos_y, pos_z, mat, vx, vy, vz, inner_r, bc, rot_x, rot_y, rot_z);
         syncToDevice();
     }
 
@@ -335,6 +363,16 @@ public:
         if (m_d_nodes) syncToDevice();
     }
 
+    void setNodePrescribed(int node_idx, bool presc_x, bool presc_y, bool presc_z) {
+        m_cpu_solver.setNodePrescribed(node_idx, presc_x, presc_y, presc_z);
+        if (m_d_nodes) syncToDevice();
+    }
+
+    void setNodalVelocity(int node_idx, T vx, T vy, T vz) {
+        m_cpu_solver.setNodalVelocity(node_idx, vx, vy, vz);
+        if (m_d_nodes) syncToDevice();
+    }
+
     int addNode(T x, T y, T z, T mass = static_cast<T>(1.0f)) {
         return m_cpu_solver.addNode(x, y, z, mass);
     }
@@ -347,11 +385,11 @@ public:
         m_cpu_solver.addBeam3D(n1, n2, diameter, mat, failure_strain, lsdyna_id);
     }
 
-    std::vector<FEMTrussElement3D<T>>& getTrusses() { return m_cpu_solver.getTrusses(); }
-    const std::vector<FEMTrussElement3D<T>>& getTrusses() const { return m_cpu_solver.getTrusses(); }
+    std::vector<FEMTrussElement3D<T>>& getTrusses() { syncToHost(); return m_cpu_solver.getTrusses(); }
+    const std::vector<FEMTrussElement3D<T>>& getTrusses() const { syncToHost(); return m_cpu_solver.getTrusses(); }
 
-    std::vector<FEMBeam3DElement<T>>& getBeams() { return m_cpu_solver.getBeams(); }
-    const std::vector<FEMBeam3DElement<T>>& getBeams() const { return m_cpu_solver.getBeams(); }
+    std::vector<FEMBeam3DElement<T>>& getBeams() { syncToHost(); return m_cpu_solver.getBeams(); }
+    const std::vector<FEMBeam3DElement<T>>& getBeams() const { syncToHost(); return m_cpu_solver.getBeams(); }
 
     const std::vector<MaterialTable3D>& getMaterialTables() const { return m_cpu_solver.getMaterialTables(); }
     std::vector<MaterialTable3D>& getMaterialTables() { return m_cpu_solver.getMaterialTables(); }
@@ -361,6 +399,7 @@ public:
 
     void step(T cfl = 0.6f);
     void stepWithDt(T dt);
+    void applyMPMContact(T dt);
 
     void setLysmerParams(const LysmerBoundaryParams& params) { m_cpu_solver.setLysmerParams(params); }
     const LysmerBoundaryParams& getLysmerParams() const { return m_cpu_solver.getLysmerParams(); }
@@ -411,6 +450,7 @@ public:
     void evaluateErosionCriteria();
 
 private:
+    void ensureOctaveHashCapacity(size_t facet_cap);
     FEMSolver3D<T> m_cpu_solver;
     FEMNode3D<T>* m_d_nodes{nullptr};
     FEMElement3D<T>* m_d_elements{nullptr};
@@ -424,7 +464,10 @@ private:
     T* m_d_node_normals{nullptr};
     T* m_d_nodal_vol_cur{nullptr};
     T* m_d_nodal_vol_ref{nullptr};
+    T* m_d_nodal_dvol_dt{nullptr};
+    int* m_d_face_neighbors{nullptr};
     T* m_d_reduction_buffer{nullptr};
+    size_t m_allocated_reduction_count{0};
     int* m_d_node_active_count{nullptr};
     FEMTrussElement3D<T>* m_d_trusses{nullptr};
     size_t m_allocated_trusses{0};
@@ -435,12 +478,18 @@ private:
     int* m_d_erosion_flag{nullptr};
     int* m_h_erosion_flag_pinned{nullptr};
 
-    // GPU Multi-Level Octave Spatial Hash Grid for Contact
+    // GPU Multi-Level Octave Spatial Hash Grid for Contact (Lossless CSR + Oversized Fallback)
     static constexpr int NUM_OCTAVES{4};
-    static constexpr int MAX_FACETS_PER_CELL{32};
     size_t m_spatial_grid_capacity{65536};
+    size_t m_allocated_hash_entries{0};
+    size_t m_allocated_oversized_facets{0};
+    void* m_d_hash_scan_temp{nullptr};
+    size_t m_hash_scan_temp_bytes{0};
     int* m_d_cell_counts{nullptr};
+    int* m_d_cell_offsets{nullptr};
     int* m_d_cell_facet_ids{nullptr};
+    int* m_d_oversized_facets{nullptr};
+    int* m_d_oversized_count{nullptr};
 
     // GPU Linear BVH (LBVH with 30-Bit Morton Codes)
     uint32_t* m_d_bvh_morton_codes{nullptr};
@@ -486,6 +535,17 @@ private:
     mutable T m_last_ep_max{0.0f};
     mutable FEMEnergyTracker<T> m_energy_tracker{};
     MPMSolver3DCUDA* m_cuda_mpm_solver{nullptr};
+    T* m_d_mpm_impulse_accum{nullptr};
+    bool m_has_pending_mpm_impulse{false};
+    mutable size_t m_synced_debris_particle_count{0};
+    int m_debris_mat_offset{-1};
+
+    void buildOctaveHashOnDevice();
+    void syncTopologyAfterSplitOrErosion(bool did_split);
+
+    std::vector<int> m_h_node_part_scratch;
+    std::vector<uint8_t> m_h_is_surf_node_scratch;
+    std::vector<int> m_h_surf_nodes_scratch;
 };
 
 } // namespace Blast

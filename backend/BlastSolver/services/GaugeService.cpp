@@ -770,6 +770,155 @@ void record_gauges_3d(double t) {
     global_solver_3d->recordGaugesAsync(t);
 }
 
+namespace {
+template <typename SolverT>
+void record_fem_gauges_impl(SolverT* solver, double t) {
+    if (!solver) return;
+    const auto& nodes = solver->getNodes();
+    const auto& elems = solver->getElements();
+    const auto& mats = solver->getMaterialTables();
+    if (nodes.empty()) return;
+
+    double dt = 0.0;
+    if (!global_gauge_times.empty()) {
+        dt = std::max(0.0, t - global_gauge_times.back());
+    }
+    global_gauge_times.push_back(t);
+
+    for (size_t h_idx = 0; h_idx < global_pinned_gauge_indices.size(); ++h_idx) {
+        size_t g_idx = global_pinned_gauge_indices[h_idx];
+        const auto& g = global_gauges[g_idx];
+        const double gx = g.x, gy = g.y, gz = g.z;
+
+        double p_val = 0.0, rho_val = 0.0, v_val = 0.0, vm_val = 0.0, ep_val = 0.0, dmg_val = 0.0;
+
+        if (!elems.empty()) {
+            size_t best_ei = 0;
+            double best_d2 = std::numeric_limits<double>::max();
+            bool found_elem = false;
+            for (size_t ei = 0; ei < elems.size(); ++ei) {
+                const auto& el = elems[ei];
+                if (el.is_eroded) continue;
+                const int nn = Blast::isTet4Element(el) ? 4 : 8;
+                double cx = 0.0, cy = 0.0, cz = 0.0;
+                for (int k = 0; k < nn; ++k) {
+                    int nid = el.node_ids[k];
+                    if (nid < 0 || nid >= static_cast<int>(nodes.size())) continue;
+                    cx += static_cast<double>(nodes[nid].x[0]);
+                    cy += static_cast<double>(nodes[nid].x[1]);
+                    cz += static_cast<double>(nodes[nid].x[2]);
+                }
+                const double inv_nn = 1.0 / static_cast<double>(nn);
+                cx *= inv_nn; cy *= inv_nn; cz *= inv_nn;
+                double d2 = (cx - gx) * (cx - gx) + (cy - gy) * (cy - gy) + (cz - gz) * (cz - gz);
+                if (!found_elem || d2 < best_d2) {
+                    best_d2 = d2;
+                    best_ei = ei;
+                    found_elem = true;
+                }
+            }
+            if (found_elem) {
+                const auto& el = elems[best_ei];
+                const int nn = Blast::isTet4Element(el) ? 4 : 8;
+                double vx = 0.0, vy = 0.0, vz = 0.0;
+                for (int k = 0; k < nn; ++k) {
+                    int nid = el.node_ids[k];
+                    if (nid < 0 || nid >= static_cast<int>(nodes.size())) continue;
+                    vx += static_cast<double>(nodes[nid].v[0]);
+                    vy += static_cast<double>(nodes[nid].v[1]);
+                    vz += static_cast<double>(nodes[nid].v[2]);
+                }
+                const double inv_nn = 1.0 / static_cast<double>(nn);
+                vx *= inv_nn; vy *= inv_nn; vz *= inv_nn;
+                v_val = std::sqrt(vx * vx + vy * vy + vz * vz);
+                const double s00 = static_cast<double>(el.sigma[0][0]);
+                const double s11 = static_cast<double>(el.sigma[1][1]);
+                const double s22 = static_cast<double>(el.sigma[2][2]);
+                const double s01 = static_cast<double>(el.sigma[0][1]);
+                const double s12 = static_cast<double>(el.sigma[1][2]);
+                const double s20 = static_cast<double>(el.sigma[2][0]);
+                p_val = -(s00 + s11 + s22) / 3.0;
+                const double d01 = s00 - s11, d12 = s11 - s22, d20 = s22 - s00;
+                vm_val = std::sqrt(0.5 * (d01 * d01 + d12 * d12 + d20 * d20) +
+                                   3.0 * (s01 * s01 + s12 * s12 + s20 * s20));
+                ep_val = static_cast<double>(el.ep_bar);
+                dmg_val = static_cast<double>(el.damage);
+                double rho0 = 7850.0;
+                if (el.mat_id >= 0 && el.mat_id < static_cast<int>(mats.size())) {
+                    rho0 = static_cast<double>(mats[el.mat_id].density);
+                }
+                double vol = static_cast<double>(el.V);
+                double vol0 = static_cast<double>(el.V0);
+                rho_val = (vol > 1e-18 && vol0 > 1e-18) ? (rho0 * (vol0 / vol)) : rho0;
+            }
+        }
+        if (elems.empty() || (v_val == 0.0 && vm_val == 0.0)) {
+            double best_d2 = std::numeric_limits<double>::max();
+            size_t best_ni = 0;
+            bool found_node = false;
+            for (size_t ni = 0; ni < nodes.size(); ++ni) {
+                double d2 = (static_cast<double>(nodes[ni].x[0]) - gx) * (static_cast<double>(nodes[ni].x[0]) - gx) +
+                            (static_cast<double>(nodes[ni].x[1]) - gy) * (static_cast<double>(nodes[ni].x[1]) - gy) +
+                            (static_cast<double>(nodes[ni].x[2]) - gz) * (static_cast<double>(nodes[ni].x[2]) - gz);
+                if (!found_node || d2 < best_d2) {
+                    best_d2 = d2;
+                    best_ni = ni;
+                    found_node = true;
+                }
+            }
+            if (found_node && elems.empty()) {
+                const auto& nd = nodes[best_ni];
+                v_val = std::sqrt(static_cast<double>(nd.v[0]) * nd.v[0] +
+                                  static_cast<double>(nd.v[1]) * nd.v[1] +
+                                  static_cast<double>(nd.v[2]) * nd.v[2]);
+            }
+        }
+
+        auto& hist = global_gauges_history[h_idx];
+        hist.channel_values[0].push_back(static_cast<float>(p_val));
+        hist.channel_values[1].push_back(static_cast<float>(rho_val));
+        hist.channel_values[2].push_back(static_cast<float>(v_val));
+        hist.channel_values[3].push_back(static_cast<float>(vm_val));
+        hist.channel_values[4].push_back(static_cast<float>(ep_val));
+        hist.channel_values[5].push_back(static_cast<float>(dmg_val));
+        hist.channel_values[6].push_back(0.0f);
+        hist.channel_values[7].push_back(static_cast<float>(p_val));
+
+        double impulse = 0.0;
+        if (!hist.channel_values[8].empty() && hist.channel_values[7].size() >= 2) {
+            double prev_imp = hist.channel_values[8].back();
+            double prev_op = hist.channel_values[7][hist.channel_values[7].size() - 2];
+            impulse = prev_imp + 0.5 * (prev_op + p_val) * dt;
+        }
+        hist.channel_values[8].push_back(static_cast<float>(impulse));
+    }
+}
+} // namespace
+
+void record_gauges_fem_3d(double t) {
+    std::lock_guard<std::mutex> lock(global_gauges_mutex);
+    if (global_gauges.empty() || global_gauges_history.empty()) return;
+    const std::string m_id = global_model_id.empty() ? "default_fem" : global_model_id;
+
+    if (global_fem_solvers_cuda_float.count(m_id) && global_fem_solvers_cuda_float[m_id]) {
+        record_fem_gauges_impl(global_fem_solvers_cuda_float[m_id].get(), t);
+    } else if (global_fem_solvers_cuda_double.count(m_id) && global_fem_solvers_cuda_double[m_id]) {
+        record_fem_gauges_impl(global_fem_solvers_cuda_double[m_id].get(), t);
+    } else if (global_fem_solvers_float.count(m_id) && global_fem_solvers_float[m_id]) {
+        record_fem_gauges_impl(global_fem_solvers_float[m_id].get(), t);
+    } else if (global_fem_solvers_double.count(m_id) && global_fem_solvers_double[m_id]) {
+        record_fem_gauges_impl(global_fem_solvers_double[m_id].get(), t);
+    } else if (!global_fem_solvers_cuda_float.empty()) {
+        record_fem_gauges_impl(global_fem_solvers_cuda_float.begin()->second.get(), t);
+    } else if (!global_fem_solvers_cuda_double.empty()) {
+        record_fem_gauges_impl(global_fem_solvers_cuda_double.begin()->second.get(), t);
+    } else if (!global_fem_solvers_float.empty()) {
+        record_fem_gauges_impl(global_fem_solvers_float.begin()->second.get(), t);
+    } else if (!global_fem_solvers_double.empty()) {
+        record_fem_gauges_impl(global_fem_solvers_double.begin()->second.get(), t);
+    }
+}
+
 void flush_solver_gauges_locked() {
     if (global_gauges.empty()) return;
 

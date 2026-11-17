@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; fill: #c9d1d9; }
+    .title { font-size: 16px; font-weight: 600; fill: #f0f6fc; }
+    .axis-label { font-size: 12px; fill: #8b949e; }
+    .tick { font-size: 10px; fill: #8b949e; }
+    .grid { stroke: #30363d; stroke-width: 1; stroke-dasharray: 4,4; }
+    .axis-line { stroke: #484f58; stroke-width: 1.5; }
+    .exact-curve { fill: none; stroke: #58a6ff; stroke-width: 2.5; }
+    .num-curve { fill: none; stroke: #f0883e; stroke-width: 2.0; stroke-dasharray: 6,3; }
+    .corridor-yellow { fill: rgba(210, 153, 34, 0.18); }
+    .corridor-green { fill: rgba(46, 160, 67, 0.30); }
+  </style>
+  <rect width="800" height="450" fill="#0d1117" rx="8"/>
+  <text x="400" y="30" text-anchor="middle" class="title">VV-FEM-CPL-01: Minimum MPM Projectile Z vs Time During FEM Plate Impact (m vs ms)</text>
+  <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
+  <text x="67" y="394" text-anchor="end" class="tick">0.023</text>
+  <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
+  <text x="67" y="326" text-anchor="end" class="tick">0.0278</text>
+  <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
+  <text x="67" y="258" text-anchor="end" class="tick">0.0325</text>
+  <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
+  <text x="67" y="190" text-anchor="end" class="tick">0.0372</text>
+  <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
+  <text x="67" y="122" text-anchor="end" class="tick">0.0419</text>
+  <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
+  <text x="67" y="54" text-anchor="end" class="tick">0.0467</text>
+  <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
+  <text x="75" y="408" text-anchor="middle" class="tick">0.0115</text>
+  <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
+  <text x="213" y="408" text-anchor="middle" class="tick">0.0593</text>
+  <line x1="351" y1="50" x2="351" y2="390" class="grid"/>
+  <text x="351" y="408" text-anchor="middle" class="tick">0.107</text>
+  <line x1="489" y1="50" x2="489" y2="390" class="grid"/>
+  <text x="489" y="408" text-anchor="middle" class="tick">0.155</text>
+  <line x1="627" y1="50" x2="627" y2="390" class="grid"/>
+  <text x="627" y="408" text-anchor="middle" class="tick">0.203</text>
+  <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
+  <text x="765" y="408" text-anchor="middle" class="tick">0.25</text>
+  <path class="corridor-yellow" d="M 75 344 L 108 344 L 142 344 L 176 344 L 210 344 L 244 344 L 277 344 L 311 344 L 345 344 L 379 344 L 413 344 L 447 344 L 481 344 L 514 344 L 548 344 L 582 344 L 616 344 L 650 344 L 684 344 L 718 344 L 751 344 L 765 344 L 765 380 L 751 380 L 718 380 L 684 380 L 650 380 L 616 380 L 582 380 L 548 380 L 514 380 L 481 380 L 447 380 L 413 380 L 379 380 L 345 380 L 311 380 L 277 380 L 244 380 L 210 380 L 176 380 L 142 380 L 108 380 L 75 380 Z"/>
+  <path class="corridor-green" d="M 75 358 L 108 358 L 142 358 L 176 358 L 210 358 L 244 358 L 277 358 L 311 358 L 345 358 L 379 358 L 413 358 L 447 358 L 481 358 L 514 358 L 548 358 L 582 358 L 616 358 L 650 358 L 684 358 L 718 358 L 751 358 L 765 358 L 765 365 L 751 365 L 718 365 L 684 365 L 650 365 L 616 365 L 582 365 L 548 365 L 514 365 L 481 365 L 447 365 L 413 365 L 379 365 L 345 365 L 311 365 L 277 365 L 244 365 L 210 365 L 176 365 L 142 365 L 108 365 L 75 365 Z"/>
+  <path class="exact-curve" d="M 75 362 L 108 362 L 142 362 L 176 362 L 210 362 L 244 362 L 277 362 L 311 362 L 345 362 L 379 362 L 413 362 L 447 362 L 481 362 L 514 362 L 548 362 L 582 362 L 616 362 L 650 362 L 684 362 L 718 362 L 751 362 L 765 362 "/>
+  <path class="num-curve" d="M 75 106 L 108 121 L 142 124 L 176 121 L 210 120 L 244 117 L 277 115 L 311 112 L 345 110 L 379 107 L 413 105 L 447 102 L 481 99.9 L 514 97.1 L 548 94.5 L 582 92.2 L 616 89.5 L 650 86.9 L 684 84.6 L 718 81.9 L 751 79.4 L 765 78.3 "/>
+  <circle cx="75" cy="106" r="3.5" fill="#f0883e"/>
+  <circle cx="108" cy="121" r="3.5" fill="#f0883e"/>
+  <circle cx="142" cy="124" r="3.5" fill="#f0883e"/>
+  <circle cx="176" cy="121" r="3.5" fill="#f0883e"/>
+  <circle cx="210" cy="120" r="3.5" fill="#f0883e"/>
+  <circle cx="244" cy="117" r="3.5" fill="#f0883e"/>
+  <circle cx="277" cy="115" r="3.5" fill="#f0883e"/>
+  <circle cx="311" cy="112" r="3.5" fill="#f0883e"/>
+  <circle cx="345" cy="110" r="3.5" fill="#f0883e"/>
+  <circle cx="379" cy="107" r="3.5" fill="#f0883e"/>
+  <circle cx="413" cy="105" r="3.5" fill="#f0883e"/>
+  <circle cx="447" cy="102" r="3.5" fill="#f0883e"/>
+  <circle cx="481" cy="99.9" r="3.5" fill="#f0883e"/>
+  <circle cx="514" cy="97.1" r="3.5" fill="#f0883e"/>
+  <circle cx="548" cy="94.5" r="3.5" fill="#f0883e"/>
+  <circle cx="582" cy="92.2" r="3.5" fill="#f0883e"/>
+  <circle cx="616" cy="89.5" r="3.5" fill="#f0883e"/>
+  <circle cx="650" cy="86.9" r="3.5" fill="#f0883e"/>
+  <circle cx="684" cy="84.6" r="3.5" fill="#f0883e"/>
+  <circle cx="718" cy="81.9" r="3.5" fill="#f0883e"/>
+  <circle cx="751" cy="79.4" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="78.3" r="3.5" fill="#f0883e"/>
+  <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
+  <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
+  <text x="400" y="435" text-anchor="middle" class="axis-label">Time (ms)</text>
+  <text x="20" y="225" text-anchor="middle" transform="rotate(-90 20 225)" class="axis-label">Min Projectile Z (m)</text>
+  <rect x="570" y="55" width="195" height="85" fill="#161b22" stroke="#30363d" rx="4"/>
+  <line x1="580" y1="73" x2="605" y2="73" stroke="#58a6ff" stroke-width="2.5"/>
+  <text x="612" y="77" font-size="11">Analytical / Exact</text>
+  <line x1="580" y1="93" x2="605" y2="93" stroke="#f0883e" stroke-width="2.0" stroke-dasharray="4,2"/>
+  <circle cx="592" cy="93" r="3" fill="#f0883e"/>
+  <text x="612" y="97" font-size="11">Numerical Result</text>
+  <rect x="580" y="107" width="25" height="10" fill="rgba(46,160,67,0.5)"/>
+  <text x="612" y="116" font-size="10">Acceptance Corridor ±1%</text>
+  <rect x="580" y="123" width="25" height="10" fill="rgba(210,153,34,0.3)"/>
+  <text x="612" y="132" font-size="10">Tolerance Corridor ±5%</text>
+</svg>

@@ -8,7 +8,7 @@
 
 using namespace Blast;
 
-void test_mpm_debris_hex_contact() {
+bool test_mpm_debris_hex_contact() {
     std::cout << "==========================================================" << std::endl;
     std::cout << "=== TEST 1: MPM Debris vs Intact Solid Hex FEM Contact ===" << std::endl;
     std::cout << "==========================================================" << std::endl;
@@ -65,10 +65,11 @@ void test_mpm_debris_hex_contact() {
     std::cout << "  Initial debris velocity: v_x = +100.0 m/s" << std::endl;
     std::cout << "  Post-contact velocity:   v_x = " << p_after.v[0] << " m/s" << std::endl;
 
-    // Contact penalty force must decelerate/rebound the particle (v_x < 100.0 m/s)
-    assert(p_after.v[0] < 100.0f);
+    if (!(p_after.v[0] < 100.0f)) {
+        std::cerr << "[FAIL] MPM debris did not decelerate during hex contact" << std::endl;
+        return false;
+    }
 
-    // Verify reaction force applied to front facet FEM nodes (X = 0)
     float total_fem_fx = 0.0f;
     for (const auto& node : fem_solver.getNodes()) {
         if (node.x[0] < 0.1f) {
@@ -76,12 +77,16 @@ void test_mpm_debris_hex_contact() {
         }
     }
     std::cout << "  Total FEM contact force on front facet: F_x = " << total_fem_fx << " N" << std::endl;
-    assert(total_fem_fx > 0.0f); // Positive X reaction force pushing back into the hex block
+    if (!(total_fem_fx > 0.0f)) {
+        std::cerr << "[FAIL] Expected positive FEM reaction force on front facet" << std::endl;
+        return false;
+    }
 
     std::cout << "  ✓ Debris-to-Hex Contact & Reaction Force Validation PASSED!" << std::endl;
+    return true;
 }
 
-void test_native_mpm_projectile_hex_contact() {
+bool test_native_mpm_projectile_hex_contact() {
     std::cout << "===========================================================" << std::endl;
     std::cout << "=== TEST 2: Native MPM Projectile vs FEM Solid Hex Wall ===" << std::endl;
     std::cout << "===========================================================" << std::endl;
@@ -144,15 +149,18 @@ void test_native_mpm_projectile_hex_contact() {
     std::cout << "  Initial projectile velocity: v_x = +400.0 m/s" << std::endl;
     std::cout << "  Post-impact average velocity: v_x = " << avg_vx << " m/s" << std::endl;
 
-    // Contact with solid hex plate must have strongly decelerated the particles
-    assert(avg_vx < 400.0f);
+    if (!(avg_vx < 400.0f)) {
+        std::cerr << "[FAIL] Native MPM projectile failed to decelerate against hex plate" << std::endl;
+        return false;
+    }
 
     std::cout << "  ✓ Native MPM vs Solid Hex Contact Validation PASSED!" << std::endl;
+    return true;
 }
 
 int main() {
-    test_mpm_debris_hex_contact();
-    test_native_mpm_projectile_hex_contact();
+    if (!test_mpm_debris_hex_contact()) return 1;
+    if (!test_native_mpm_projectile_hex_contact()) return 1;
     std::cout << "\n>>> ALL MPM-TO-HEX FEM CONTACT TESTS PASSED! <<<\n" << std::endl;
     return 0;
 }

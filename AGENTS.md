@@ -150,5 +150,5 @@
 - **Zero-Trust Adversarial Mandate:** The Checker subagent must operate strictly as a skeptical, adversarial auditor whose explicit mission is to actively hunt for reasons why the implementation fails, rather than seeking confirmation to issue a pass badge.
 - **Mandatory Intermediate Data Inspection:** The Checker must inspect intermediate tables, vertical profiles, and point-wise distributions. Discovering any negative pressures, zeroed gradients, or anomalous velocities in intermediate output immediately triggers an AUDIT FAILURE, regardless of whether a top-level summary assertion returned true.
 
-
-
+## 23. Mandatory Living Theory Manual Synchronization
+- **Zero Theory Drift:** Whenever a solver scheme, element formulation, constitutive model, EOS, FSI/DAA coupler, or UI node parameter is added or modified, the canonical [THEORY_MANUAL.md](file:///home/chris/antigrav/blastdemon/THEORY_MANUAL.md) MUST be updated and verified by running `python3 scripts/update_theory_manual.py --update --check` (zero dangling citations, zero raw LaTeX, all node types and SVG figures synchronized).

@@ -44,6 +44,11 @@ __global__ void fem_nodal_half_step_kernel_3d_device(
             node.a[c] = static_cast<T>(0.0f);
             continue;
         }
+        if (node.is_prescribed[c]) {
+            node.a[c] = static_cast<T>(0.0f);
+            node.x[c] += node.v[c] * dt;
+            continue;
+        }
 
         T v_h = node.v[c] + static_cast<T>(0.5f) * node.a[c] * dt;
         node.x[c] += v_h * dt;
@@ -51,37 +56,73 @@ __global__ void fem_nodal_half_step_kernel_3d_device(
     }
 }
 
-// CUDA Kernel: Pass 1 for Tet4-ANP (Bonet & Burton 1998) — Accumulate Current & Reference Nodal Volumes
+// CUDA Kernel: Pass 1 for Tet4-ANP (Bonet & Burton 1998; Puso & Solberg 2006) — Accumulate Current & Reference Nodal Volumes and Volume Rates
 template <typename T>
 __global__ void fem_anp_nodal_volumes_kernel_3d_device(
     const FEMNode3D<T>* d_nodes,
     FEMElement3D<T>* d_elements,
     int num_elements,
+    const MaterialTable3D* d_materials,
     T dt,
     T* d_nodal_vol_cur,
-    T* d_nodal_vol_ref
+    T* d_nodal_vol_ref,
+    T* d_nodal_dvol_dt
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_elements) return;
 
     FEMElement3D<T>& elem = d_elements[idx];
-    if (elem.is_eroded || !isTet4Element(elem)) return;
+    if (elem.is_eroded || !isTet4ANPElement(elem) || elem.is_detached) return;
 
-    T x_mid[4][3];
+    if (d_materials) {
+        const MaterialTable3D& mat = d_materials[elem.mat_id];
+        const bool is_energetic = (mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
+                                   mat.material_model == MPMMaterialModel::CRESTReactiveBurn ||
+                                   mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth);
+        if (is_energetic) return;
+    }
+
+    T x_cur_t[4][3], x_mid[4][3], v_t[4][3];
+    T v_center_t[3] = {static_cast<T>(0.0f), static_cast<T>(0.0f), static_cast<T>(0.0f)};
     for (int n = 0; n < 4; ++n) {
         int nid = elem.node_ids[n];
         for (int c = 0; c < 3; ++c) {
-            x_mid[n][c] = d_nodes[nid].x[c] - static_cast<T>(0.5f) * d_nodes[nid].v[c] * dt;
+            x_cur_t[n][c] = d_nodes[nid].x[c];
+            v_t[n][c] = d_nodes[nid].v[c];
+            x_mid[n][c] = x_cur_t[n][c] - static_cast<T>(0.5f) * v_t[n][c] * dt;
+            v_center_t[c] += v_t[n][c];
         }
     }
+    v_center_t[0] *= static_cast<T>(0.25f);
+    v_center_t[1] *= static_cast<T>(0.25f);
+    v_center_t[2] *= static_cast<T>(0.25f);
 
-    T V_cur = computeTet4SignedVolume(x_mid);
-    if (V_cur > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f)) {
+    T dN_cur_t[4][3] = {{static_cast<T>(0.0f)}};
+    T V_cur = static_cast<T>(0.0f);
+    computeTet4ShapeGradients(x_cur_t, dN_cur_t, V_cur);
+
+    T dN_t[4][3] = {{static_cast<T>(0.0f)}};
+    T V_mid = static_cast<T>(0.0f);
+    computeTet4ShapeGradients(x_mid, dN_t, V_mid);
+
+    if (V_cur > static_cast<T>(1.0e-18f) && V_mid > static_cast<T>(1.0e-18f) && elem.V0 > static_cast<T>(1.0e-18f)) {
         elem.V = V_cur;
+        T div_v_elem = static_cast<T>(0.0f);
+        for (int n = 0; n < 4; ++n) {
+            div_v_elem += dN_t[n][0] * (v_t[n][0] - v_center_t[0])
+                        + dN_t[n][1] * (v_t[n][1] - v_center_t[1])
+                        + dN_t[n][2] * (v_t[n][2] - v_center_t[2]);
+        }
+        T v_cur_q = static_cast<T>(0.25f) * V_cur;
+        T v_ref_q = static_cast<T>(0.25f) * elem.V0;
+        T dvol_dt_q = static_cast<T>(0.25f) * V_mid * div_v_elem;
         for (int n = 0; n < 4; ++n) {
             int nid = elem.node_ids[n];
-            atomicAdd(&d_nodal_vol_cur[nid], static_cast<T>(0.25f) * V_cur);
-            atomicAdd(&d_nodal_vol_ref[nid], static_cast<T>(0.25f) * elem.V0);
+            atomicAdd(&d_nodal_vol_cur[nid], v_cur_q);
+            atomicAdd(&d_nodal_vol_ref[nid], v_ref_q);
+            if (d_nodal_dvol_dt) {
+                atomicAdd(&d_nodal_dvol_dt[nid], dvol_dt_q);
+            }
         }
     }
 }
@@ -102,7 +143,10 @@ __global__ void fem_element_forces_kernel_3d_device(
     FEMIntegrationScheme integration_scheme,
     const T* d_nodal_vol_cur,
     const T* d_nodal_vol_ref,
-    T sim_time
+    const T* d_nodal_dvol_dt,
+    T sim_time,
+    T min_volume_ratio = static_cast<T>(0.02f),
+    int* d_erosion_flag = nullptr
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_elements) return;
@@ -133,12 +177,16 @@ __global__ void fem_element_forces_kernel_3d_device(
 
     // Subtract element centroids to preserve precision in single-precision floating point
     T x_center[3] = {0.0f, 0.0f, 0.0f};
+    T x0_center[3] = {0.0f, 0.0f, 0.0f};
     T v_center[3] = {0.0f, 0.0f, 0.0f};
     for (int n = 0; n < n_elem_nodes; ++n) {
+        int nid = elem.node_ids[n];
         x_center[0] += x_nodes[n][0]; x_center[1] += x_nodes[n][1]; x_center[2] += x_nodes[n][2];
+        x0_center[0] += d_nodes[nid].x0[0]; x0_center[1] += d_nodes[nid].x0[1]; x0_center[2] += d_nodes[nid].x0[2];
         v_center[0] += v_nodes[n][0]; v_center[1] += v_nodes[n][1]; v_center[2] += v_nodes[n][2];
     }
     x_center[0] *= inv_n_nodes; x_center[1] *= inv_n_nodes; x_center[2] *= inv_n_nodes;
+    x0_center[0] *= inv_n_nodes; x0_center[1] *= inv_n_nodes; x0_center[2] *= inv_n_nodes;
     v_center[0] *= inv_n_nodes; v_center[1] *= inv_n_nodes; v_center[2] *= inv_n_nodes;
 
     T x_mid[8][3];
@@ -154,10 +202,11 @@ __global__ void fem_element_forces_kernel_3d_device(
     }
     x_center_mid[0] *= inv_n_nodes; x_center_mid[1] *= inv_n_nodes; x_center_mid[2] *= inv_n_nodes;
 
-    T x_rel[8][3], v_rel[8][3];
+    T x_rel[8][3], x_cur_rel[8][3], v_rel[8][3];
     for (int n = 0; n < 8; ++n) {
         for (int c = 0; c < 3; ++c) {
             x_rel[n][c] = x_mid[n][c] - x_center_mid[c];
+            x_cur_rel[n][c] = x_nodes[n][c] - x_center[c];
             v_rel[n][c] = v_nodes[n][c] - v_center[c];
         }
     }
@@ -175,21 +224,27 @@ __global__ void fem_element_forces_kernel_3d_device(
         dN_dxi[i][2] = 0.125f * HEX8_XI_CUDA[i][2];
     }
 
-    T min_vol_r = static_cast<T>(0.02f);
+    const FEMIntegrationScheme elem_scheme = resolveElementIntegrationScheme(elem, integration_scheme);
+    const FEMHourglassModel elem_hg_model = resolveElementHourglassModel(elem, hg_model);
+    const T elem_hg_coeff = resolveElementHourglassCoeff(elem, hourglass_coeff);
+
+    const bool is_energetic_elem = (mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
+                                    mat.material_model == MPMMaterialModel::CRESTReactiveBurn ||
+                                    mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth);
+    T min_vol_r = is_energetic_elem
+                ? static_cast<T>(0.005f)
+                : static_cast<T>(mat.min_volume_ratio > 0.0f ? mat.min_volume_ratio : (min_volume_ratio > static_cast<T>(0.0f) ? min_volume_ratio : static_cast<T>(0.02f)));
     T cs_C = physics_params.cowper_symonds_C;
     T cs_P = physics_params.cowper_symonds_P;
     T b1 = static_cast<T>(mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : physics_params.bulk_viscosity_b1);
     T b2 = static_cast<T>(mat.bulk_viscosity_b2 > 0.0f ? mat.bulk_viscosity_b2 : physics_params.bulk_viscosity_b2);
-    const bool is_energetic_elem = (mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
-                                    mat.material_model == MPMMaterialModel::CRESTReactiveBurn ||
-                                    mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth);
     T v_rel_elem = (elem.V0 > static_cast<T>(1.0e-18f) && elem.V > static_cast<T>(0.0f))
         ? (elem.V / elem.V0) : static_cast<T>(1.0f);
     T p_elem_prev = -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f) - elem.q_visc;
     T cd = computeDilatationalWaveSpeed<T>(mat, v_rel_elem, elem.lambda, p_elem_prev, elem.e_int);
 
-    if (!is_tet4 && !is_energetic_elem && (integration_scheme == FEMIntegrationScheme::FullGauss8 || integration_scheme == FEMIntegrationScheme::SelectiveReduced)) {
-        FEMGaussPointHistory3D<T>* gp_hist_ptr = d_gp_history ? &d_gp_history[idx] : nullptr;
+    if (!is_tet4 && !is_energetic_elem && d_gp_history && (elem_scheme == FEMIntegrationScheme::FullGauss8 || elem_scheme == FEMIntegrationScheme::SelectiveReduced)) {
+        FEMGaussPointHistory3D<T>* gp_hist_ptr = &d_gp_history[idx];
         static const T gp_coords[8][3] = {
             {static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257)},
             {static_cast<T>( 0.5773502691896257), static_cast<T>(-0.5773502691896257), static_cast<T>(-0.5773502691896257)},
@@ -208,40 +263,51 @@ __global__ void fem_element_forces_kernel_3d_device(
             dN_dxi_center[i][2] = 0.125f * HEX8_XI_CUDA[i][2];
         }
 
+        T J_center_cur[3][3] = {{0.0f}};
         T J_center[3][3] = {{0.0f}};
         for (int i = 0; i < 8; ++i) {
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
+                    J_center_cur[r][c] += dN_dxi_center[i][r] * x_cur_rel[i][c];
                     J_center[r][c] += dN_dxi_center[i][r] * x_rel[i][c];
                 }
             }
         }
 
-        T detJ_center = J_center[0][0] * (J_center[1][1]*J_center[2][2] - J_center[1][2]*J_center[2][1])
-                      - J_center[0][1] * (J_center[1][0]*J_center[2][2] - J_center[1][2]*J_center[2][0])
-                      + J_center[0][2] * (J_center[1][0]*J_center[2][1] - J_center[1][1]*J_center[2][0]);
+        T detJ_center_cur = J_center_cur[0][0] * (J_center_cur[1][1]*J_center_cur[2][2] - J_center_cur[1][2]*J_center_cur[2][1])
+                          - J_center_cur[0][1] * (J_center_cur[1][0]*J_center_cur[2][2] - J_center_cur[1][2]*J_center_cur[2][0])
+                          + J_center_cur[0][2] * (J_center_cur[1][0]*J_center_cur[2][1] - J_center_cur[1][1]*J_center_cur[2][0]);
 
-        if (detJ_center <= static_cast<T>(1.0e-15f) || (elem.V0 > static_cast<T>(1.0e-18f) && (detJ_center * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
-            if (elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f)) {
-                elem.is_eroded = true;
-            }
+        if (detJ_center_cur <= static_cast<T>(0.0f) || (elem.V0 > static_cast<T>(1.0e-30f) && (detJ_center_cur * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
+            elem.V = detJ_center_cur * static_cast<T>(8.0f);
+            elem.is_eroded = true;
+            elem.sigma[0][0] = elem.sigma[1][1] = elem.sigma[2][2] = static_cast<T>(0.0f);
+            elem.sigma[0][1] = elem.sigma[1][2] = elem.sigma[2][0] = static_cast<T>(0.0f);
+            elem.s_dev[0][0] = elem.s_dev[1][1] = elem.s_dev[2][2] = static_cast<T>(0.0f);
+            elem.s_dev[0][1] = elem.s_dev[1][2] = elem.s_dev[2][0] = static_cast<T>(0.0f);
+            if (d_erosion_flag) *d_erosion_flag = 1;
             return;
         }
-        elem.V = detJ_center * static_cast<T>(8.0f);
+        elem.V = detJ_center_cur * static_cast<T>(8.0f);
 
         T div_v_center = 0.0f;
-        if (integration_scheme == FEMIntegrationScheme::SelectiveReduced) {
-            T invDetJ_center = static_cast<T>(1.0f) / detJ_center;
+        if (elem_scheme == FEMIntegrationScheme::SelectiveReduced) {
+            T detJ_center = J_center[0][0] * (J_center[1][1]*J_center[2][2] - J_center[1][2]*J_center[2][1])
+                          - J_center[0][1] * (J_center[1][0]*J_center[2][2] - J_center[1][2]*J_center[2][0])
+                          + J_center[0][2] * (J_center[1][0]*J_center[2][1] - J_center[1][1]*J_center[2][0]);
+            const T (&J_c_kin)[3][3] = (detJ_center > static_cast<T>(1.0e-15f)) ? J_center : J_center_cur;
+            const T detJ_c_kin = (detJ_center > static_cast<T>(1.0e-15f)) ? detJ_center : detJ_center_cur;
+            T invDetJ_center = static_cast<T>(1.0f) / detJ_c_kin;
             T J_inv_center[3][3];
-            J_inv_center[0][0] = (J_center[1][1]*J_center[2][2] - J_center[1][2]*J_center[2][1]) * invDetJ_center;
-            J_inv_center[0][1] = (J_center[0][2]*J_center[2][1] - J_center[0][1]*J_center[2][2]) * invDetJ_center;
-            J_inv_center[0][2] = (J_center[0][1]*J_center[1][2] - J_center[0][2]*J_center[1][1]) * invDetJ_center;
-            J_inv_center[1][0] = (J_center[1][2]*J_center[2][0] - J_center[1][0]*J_center[2][2]) * invDetJ_center;
-            J_inv_center[1][1] = (J_center[0][0]*J_center[2][2] - J_center[0][2]*J_center[2][0]) * invDetJ_center;
-            J_inv_center[1][2] = (J_center[0][2]*J_center[1][0] - J_center[0][0]*J_center[1][2]) * invDetJ_center;
-            J_inv_center[2][0] = (J_center[1][0]*J_center[2][1] - J_center[1][1]*J_center[2][0]) * invDetJ_center;
-            J_inv_center[2][1] = (J_center[0][1]*J_center[2][0] - J_center[0][0]*J_center[2][1]) * invDetJ_center;
-            J_inv_center[2][2] = (J_center[0][0]*J_center[1][1] - J_center[0][1]*J_center[1][0]) * invDetJ_center;
+            J_inv_center[0][0] = (J_c_kin[1][1]*J_c_kin[2][2] - J_c_kin[1][2]*J_c_kin[2][1]) * invDetJ_center;
+            J_inv_center[0][1] = (J_c_kin[0][2]*J_c_kin[2][1] - J_c_kin[0][1]*J_c_kin[2][2]) * invDetJ_center;
+            J_inv_center[0][2] = (J_c_kin[0][1]*J_c_kin[1][2] - J_c_kin[0][2]*J_c_kin[1][1]) * invDetJ_center;
+            J_inv_center[1][0] = (J_c_kin[1][2]*J_c_kin[2][0] - J_c_kin[1][0]*J_c_kin[2][2]) * invDetJ_center;
+            J_inv_center[1][1] = (J_c_kin[0][0]*J_c_kin[2][2] - J_c_kin[0][2]*J_c_kin[2][0]) * invDetJ_center;
+            J_inv_center[1][2] = (J_c_kin[0][2]*J_c_kin[1][0] - J_c_kin[0][0]*J_c_kin[1][2]) * invDetJ_center;
+            J_inv_center[2][0] = (J_c_kin[1][0]*J_c_kin[2][1] - J_c_kin[1][1]*J_c_kin[2][0]) * invDetJ_center;
+            J_inv_center[2][1] = (J_c_kin[0][1]*J_c_kin[2][0] - J_c_kin[0][0]*J_c_kin[2][1]) * invDetJ_center;
+            J_inv_center[2][2] = (J_c_kin[0][0]*J_c_kin[1][1] - J_c_kin[0][1]*J_c_kin[1][0]) * invDetJ_center;
 
             T dN_dx_center[8][3];
             for (int i = 0; i < 8; ++i) {
@@ -257,7 +323,7 @@ __global__ void fem_element_forces_kernel_3d_device(
                 strain_rate_center[2] += dN_dx_center[i][2] * v_rel[i][2];
             }
             div_v_center = strain_rate_center[0] + strain_rate_center[1] + strain_rate_center[2];
-            if (fabs(div_v_center) * dt < static_cast<T>(1.0e-6f)) {
+            if (fabs(div_v_center) * dt < static_cast<T>(1.0e-15f)) {
                 div_v_center = static_cast<T>(0.0f);
             }
         }
@@ -270,6 +336,8 @@ __global__ void fem_element_forces_kernel_3d_device(
         T temp_avg = 0.0f;
         T damage_avg = 0.0f;
         T V_sum = 0.0f;
+        T f_elem_total[24] = {static_cast<T>(0.0f)};
+        bool all_gp_valid = true;
 
         for (int g = 0; g < 8; ++g) {
             T dN_dxi_g[8][3];
@@ -282,38 +350,65 @@ __global__ void fem_element_forces_kernel_3d_device(
                 dN_dxi_g[i][2] = 0.125f * HEX8_XI_CUDA[i][2] * (1.0f + HEX8_XI_CUDA[i][0] * xi)  * (1.0f + HEX8_XI_CUDA[i][1] * eta);
             }
 
+            T J_g_cur[3][3] = {{0.0f}};
             T J_g[3][3] = {{0.0f}};
             for (int i = 0; i < 8; ++i) {
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
+                        J_g_cur[r][c] += dN_dxi_g[i][r] * x_cur_rel[i][c];
                         J_g[r][c] += dN_dxi_g[i][r] * x_rel[i][c];
                     }
+                }
+            }
+
+            T detJ_g_cur = J_g_cur[0][0] * (J_g_cur[1][1]*J_g_cur[2][2] - J_g_cur[1][2]*J_g_cur[2][1])
+                         - J_g_cur[0][1] * (J_g_cur[1][0]*J_g_cur[2][2] - J_g_cur[1][2]*J_g_cur[2][0])
+                         + J_g_cur[0][2] * (J_g_cur[1][0]*J_g_cur[2][1] - J_g_cur[1][1]*J_g_cur[2][0]);
+
+            if (detJ_g_cur <= static_cast<T>(1.0e-15f)) {
+                elem.is_eroded = true;
+                if (d_erosion_flag) *d_erosion_flag = 1;
+                all_gp_valid = false;
+                break;
+            }
+            V_sum += detJ_g_cur;
+            T invDetJ_g_cur = static_cast<T>(1.0f) / detJ_g_cur;
+
+            T J_inv_g_cur[3][3];
+            J_inv_g_cur[0][0] = (J_g_cur[1][1]*J_g_cur[2][2] - J_g_cur[1][2]*J_g_cur[2][1]) * invDetJ_g_cur;
+            J_inv_g_cur[0][1] = (J_g_cur[0][2]*J_g_cur[2][1] - J_g_cur[0][1]*J_g_cur[2][2]) * invDetJ_g_cur;
+            J_inv_g_cur[0][2] = (J_g_cur[0][1]*J_g_cur[1][2] - J_g_cur[0][2]*J_g_cur[1][1]) * invDetJ_g_cur;
+            J_inv_g_cur[1][0] = (J_g_cur[1][2]*J_g_cur[2][0] - J_g_cur[1][0]*J_g_cur[2][2]) * invDetJ_g_cur;
+            J_inv_g_cur[1][1] = (J_g_cur[0][0]*J_g_cur[2][2] - J_g_cur[0][2]*J_g_cur[2][0]) * invDetJ_g_cur;
+            J_inv_g_cur[1][2] = (J_g_cur[0][2]*J_g_cur[1][0] - J_g_cur[0][0]*J_g_cur[1][2]) * invDetJ_g_cur;
+            J_inv_g_cur[2][0] = (J_g_cur[1][0]*J_g_cur[2][1] - J_g_cur[1][1]*J_g_cur[2][0]) * invDetJ_g_cur;
+            J_inv_g_cur[2][1] = (J_g_cur[0][1]*J_g_cur[2][0] - J_g_cur[0][0]*J_g_cur[2][1]) * invDetJ_g_cur;
+            J_inv_g_cur[2][2] = (J_g_cur[0][0]*J_g_cur[1][1] - J_g_cur[0][1]*J_g_cur[1][0]) * invDetJ_g_cur;
+
+            T dN_dx_g_cur[8][3];
+            for (int i = 0; i < 8; ++i) {
+                for (int c = 0; c < 3; ++c) {
+                    dN_dx_g_cur[i][c] = J_inv_g_cur[c][0] * dN_dxi_g[i][0] + J_inv_g_cur[c][1] * dN_dxi_g[i][1] + J_inv_g_cur[c][2] * dN_dxi_g[i][2];
                 }
             }
 
             T detJ_g = J_g[0][0] * (J_g[1][1]*J_g[2][2] - J_g[1][2]*J_g[2][1])
                      - J_g[0][1] * (J_g[1][0]*J_g[2][2] - J_g[1][2]*J_g[2][0])
                      + J_g[0][2] * (J_g[1][0]*J_g[2][1] - J_g[1][1]*J_g[2][0]);
-
-            if (detJ_g <= static_cast<T>(1.0e-15f)) {
-                if (elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f)) {
-                    elem.is_eroded = true;
-                }
-                return;
-            }
-            V_sum += detJ_g;
-            T invDetJ_g = static_cast<T>(1.0f) / detJ_g;
+            const T (&J_g_kin)[3][3] = (detJ_g > static_cast<T>(1.0e-15f)) ? J_g : J_g_cur;
+            const T detJ_g_kin = (detJ_g > static_cast<T>(1.0e-15f)) ? detJ_g : detJ_g_cur;
+            T invDetJ_g = static_cast<T>(1.0f) / detJ_g_kin;
 
             T J_inv_g[3][3];
-            J_inv_g[0][0] = (J_g[1][1]*J_g[2][2] - J_g[1][2]*J_g[2][1]) * invDetJ_g;
-            J_inv_g[0][1] = (J_g[0][2]*J_g[2][1] - J_g[0][1]*J_g[2][2]) * invDetJ_g;
-            J_inv_g[0][2] = (J_g[0][1]*J_g[1][2] - J_g[0][2]*J_g[1][1]) * invDetJ_g;
-            J_inv_g[1][0] = (J_g[1][2]*J_g[2][0] - J_g[1][0]*J_g[2][2]) * invDetJ_g;
-            J_inv_g[1][1] = (J_g[0][0]*J_g[2][2] - J_g[0][2]*J_g[2][0]) * invDetJ_g;
-            J_inv_g[1][2] = (J_g[0][2]*J_g[1][0] - J_g[0][0]*J_g[1][2]) * invDetJ_g;
-            J_inv_g[2][0] = (J_g[1][0]*J_g[2][1] - J_g[1][1]*J_g[2][0]) * invDetJ_g;
-            J_inv_g[2][1] = (J_g[0][1]*J_g[2][0] - J_g[0][0]*J_g[2][1]) * invDetJ_g;
-            J_inv_g[2][2] = (J_g[0][0]*J_g[1][1] - J_g[0][1]*J_g[1][0]) * invDetJ_g;
+            J_inv_g[0][0] = (J_g_kin[1][1]*J_g_kin[2][2] - J_g_kin[1][2]*J_g_kin[2][1]) * invDetJ_g;
+            J_inv_g[0][1] = (J_g_kin[0][2]*J_g_kin[2][1] - J_g_kin[0][1]*J_g_kin[2][2]) * invDetJ_g;
+            J_inv_g[0][2] = (J_g_kin[0][1]*J_g_kin[1][2] - J_g_kin[0][2]*J_g_kin[1][1]) * invDetJ_g;
+            J_inv_g[1][0] = (J_g_kin[1][2]*J_g_kin[2][0] - J_g_kin[1][0]*J_g_kin[2][2]) * invDetJ_g;
+            J_inv_g[1][1] = (J_g_kin[0][0]*J_g_kin[2][2] - J_g_kin[0][2]*J_g_kin[2][0]) * invDetJ_g;
+            J_inv_g[1][2] = (J_g_kin[0][2]*J_g_kin[1][0] - J_g_kin[0][0]*J_g_kin[1][2]) * invDetJ_g;
+            J_inv_g[2][0] = (J_g_kin[1][0]*J_g_kin[2][1] - J_g_kin[1][1]*J_g_kin[2][0]) * invDetJ_g;
+            J_inv_g[2][1] = (J_g_kin[0][1]*J_g_kin[2][0] - J_g_kin[0][0]*J_g_kin[2][1]) * invDetJ_g;
+            J_inv_g[2][2] = (J_g_kin[0][0]*J_g_kin[1][1] - J_g_kin[0][1]*J_g_kin[1][0]) * invDetJ_g;
 
             T dN_dx_g[8][3];
             for (int i = 0; i < 8; ++i) {
@@ -333,7 +428,7 @@ __global__ void fem_element_forces_kernel_3d_device(
             }
 
             T div_v_g = strain_rate_g[0] + strain_rate_g[1] + strain_rate_g[2];
-            if (fabs(div_v_g) * dt < static_cast<T>(1.0e-6f)) {
+            if (fabs(div_v_g) * dt < static_cast<T>(1.0e-15f)) {
                 div_v_g = static_cast<T>(0.0f);
             }
 
@@ -343,10 +438,10 @@ __global__ void fem_element_forces_kernel_3d_device(
                        : static_cast<T>(0.0f);
 
             T d_dev_g[3][3];
-            T active_div_v = (integration_scheme == FEMIntegrationScheme::SelectiveReduced) ? div_v_center : div_v_g;
-            d_dev_g[0][0] = strain_rate_g[0] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * active_div_v;
-            d_dev_g[1][1] = strain_rate_g[1] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * active_div_v;
-            d_dev_g[2][2] = strain_rate_g[2] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * active_div_v;
+            T active_div_v = (elem_scheme == FEMIntegrationScheme::SelectiveReduced) ? div_v_center : div_v_g;
+            d_dev_g[0][0] = strain_rate_g[0] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * div_v_g;
+            d_dev_g[1][1] = strain_rate_g[1] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * div_v_g;
+            d_dev_g[2][2] = strain_rate_g[2] - static_cast<T>(1.0f)/static_cast<T>(3.0f) * div_v_g;
             d_dev_g[0][1] = d_dev_g[1][0] = static_cast<T>(0.5f) * strain_rate_g[3];
             d_dev_g[1][2] = d_dev_g[2][1] = static_cast<T>(0.5f) * strain_rate_g[4];
             d_dev_g[2][0] = d_dev_g[0][2] = static_cast<T>(0.5f) * strain_rate_g[5];
@@ -356,7 +451,8 @@ __global__ void fem_element_forces_kernel_3d_device(
                                              ^ (static_cast<uint32_t>(elem.node_ids[6]) * 19349663u)
                                              ^ (static_cast<uint32_t>(idx) * 83492791u)
                                              ^ (static_cast<uint32_t>(g) * 374761393u);
-            T het_factor_g = computeFEMWeibullFactor<T>(elem_seed_g, physics_params);
+            T L_corr_g = fmax(static_cast<T>(3.0f) * h_e_g, static_cast<T>(mat.nonlocal_radius));
+            T het_factor_g = computeFEMWeibullFactor<T>(elem_seed_g, physics_params, x0_center[0], x0_center[1], x0_center[2], L_corr_g, &mat);
 
             T L_g[3][3] = {{static_cast<T>(0.0f)}};
             for (int i = 0; i < 8; ++i) {
@@ -445,7 +541,7 @@ __global__ void fem_element_forces_kernel_3d_device(
             }
 
             T J_vol_g = static_cast<T>(1.0f);
-            if (integration_scheme == FEMIntegrationScheme::SelectiveReduced) {
+            if (elem_scheme == FEMIntegrationScheme::SelectiveReduced) {
                 J_vol_g = (elem.V0 > static_cast<T>(1.0e-18f)) ? (elem.V / elem.V0) : static_cast<T>(1.0f);
             } else if (gp_hist_ptr) {
                 J_vol_g = gp_hist_ptr->F_gp[g][0][0] * (gp_hist_ptr->F_gp[g][1][1]*gp_hist_ptr->F_gp[g][2][2] - gp_hist_ptr->F_gp[g][1][2]*gp_hist_ptr->F_gp[g][2][1])
@@ -471,14 +567,13 @@ __global__ void fem_element_forces_kernel_3d_device(
                 }
 
                 for (int i = 0; i < 8; ++i) {
-                    int nid = elem.node_ids[i];
-                    T f_x = (dN_dx_g[i][0] * sigma_g[0][0] + dN_dx_g[i][1] * sigma_g[0][1] + dN_dx_g[i][2] * sigma_g[0][2]) * detJ_g;
-                    T f_y = (dN_dx_g[i][0] * sigma_g[1][0] + dN_dx_g[i][1] * sigma_g[1][1] + dN_dx_g[i][2] * sigma_g[1][2]) * detJ_g;
-                    T f_z = (dN_dx_g[i][0] * sigma_g[2][0] + dN_dx_g[i][1] * sigma_g[2][1] + dN_dx_g[i][2] * sigma_g[2][2]) * detJ_g;
+                    T f_x = (dN_dx_g_cur[i][0] * sigma_g[0][0] + dN_dx_g_cur[i][1] * sigma_g[0][1] + dN_dx_g_cur[i][2] * sigma_g[0][2]) * detJ_g_cur;
+                    T f_y = (dN_dx_g_cur[i][0] * sigma_g[1][0] + dN_dx_g_cur[i][1] * sigma_g[1][1] + dN_dx_g_cur[i][2] * sigma_g[1][2]) * detJ_g_cur;
+                    T f_z = (dN_dx_g_cur[i][0] * sigma_g[2][0] + dN_dx_g_cur[i][1] * sigma_g[2][1] + dN_dx_g_cur[i][2] * sigma_g[2][2]) * detJ_g_cur;
 
-                    atomicAdd(&d_nodes[nid].f_int[0], f_x);
-                    atomicAdd(&d_nodes[nid].f_int[1], f_y);
-                    atomicAdd(&d_nodes[nid].f_int[2], f_z);
+                    f_elem_total[i * 3 + 0] += f_x;
+                    f_elem_total[i * 3 + 1] += f_y;
+                    f_elem_total[i * 3 + 2] += f_z;
                 }
 
                 for (int r = 0; r < 3; ++r) {
@@ -492,6 +587,19 @@ __global__ void fem_element_forces_kernel_3d_device(
                 damage_avg += 0.125f * gp_hist_ptr->damage_gp[g];
                 lambda_avg += 0.125f * gp_hist_ptr->lambda_gp[g];
                 e_int_avg += 0.125f * gp_hist_ptr->e_int_gp[g];
+            }
+        }
+
+        if (!all_gp_valid) {
+            return;
+        }
+
+        if (!elem.is_eroded) {
+            for (int i = 0; i < 8; ++i) {
+                int nid = elem.node_ids[i];
+                atomicAdd(&d_nodes[nid].f_int[0], f_elem_total[i * 3 + 0]);
+                atomicAdd(&d_nodes[nid].f_int[1], f_elem_total[i * 3 + 1]);
+                atomicAdd(&d_nodes[nid].f_int[2], f_elem_total[i * 3 + 2]);
             }
         }
 
@@ -528,13 +636,17 @@ __global__ void fem_element_forces_kernel_3d_device(
     }
 
     T dN_dx[8][3] = {{0.0f}};
+    T dN_dx_mid[8][3] = {{0.0f}};
     T J_anp = static_cast<T>(1.0f);
     if (is_tet4) {
-        T x_tet[4][3];
+        T x_tet[4][3], x_tet_mid[4][3];
         for (int n = 0; n < 4; ++n) {
-            x_tet[n][0] = x_rel[n][0];
-            x_tet[n][1] = x_rel[n][1];
-            x_tet[n][2] = x_rel[n][2];
+            x_tet[n][0] = x_cur_rel[n][0];
+            x_tet[n][1] = x_cur_rel[n][1];
+            x_tet[n][2] = x_cur_rel[n][2];
+            x_tet_mid[n][0] = x_rel[n][0];
+            x_tet_mid[n][1] = x_rel[n][1];
+            x_tet_mid[n][2] = x_rel[n][2];
         }
         T dN_tet[4][3] = {{0.0f}};
         T V_tet = static_cast<T>(0.0f);
@@ -544,16 +656,30 @@ __global__ void fem_element_forces_kernel_3d_device(
             dN_dx[n][1] = dN_tet[n][1];
             dN_dx[n][2] = dN_tet[n][2];
         }
-        T min_vol_r = static_cast<T>(0.02f);
-        if (V_tet <= static_cast<T>(1.0e-15f) || (elem.V0 > static_cast<T>(1.0e-18f) && (V_tet / elem.V0) <= min_vol_r)) {
-            if (elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f)) {
-                elem.is_eroded = true;
-            }
+        if (V_tet <= static_cast<T>(0.0f) || (elem.V0 > static_cast<T>(1.0e-30f) && (V_tet / elem.V0) <= min_vol_r)) {
+            elem.V = V_tet;
+            elem.is_eroded = true;
+            elem.sigma[0][0] = elem.sigma[1][1] = elem.sigma[2][2] = static_cast<T>(0.0f);
+            elem.sigma[0][1] = elem.sigma[1][2] = elem.sigma[2][0] = static_cast<T>(0.0f);
+            elem.s_dev[0][0] = elem.s_dev[1][1] = elem.s_dev[2][2] = static_cast<T>(0.0f);
+            elem.s_dev[0][1] = elem.s_dev[1][2] = elem.s_dev[2][0] = static_cast<T>(0.0f);
+            if (d_erosion_flag) *d_erosion_flag = 1;
             return;
         }
         elem.V = V_tet;
 
-        if (!elem.is_detached && d_nodal_vol_cur && d_nodal_vol_ref) {
+        T dN_tet_mid[4][3] = {{0.0f}};
+        T V_tet_mid = static_cast<T>(0.0f);
+        computeTet4ShapeGradients(x_tet_mid, dN_tet_mid, V_tet_mid);
+        const T (&dN_kin)[4][3] = (V_tet_mid > static_cast<T>(1.0e-18f)) ? dN_tet_mid : dN_tet;
+        for (int n = 0; n < 4; ++n) {
+            dN_dx_mid[n][0] = dN_kin[n][0];
+            dN_dx_mid[n][1] = dN_kin[n][1];
+            dN_dx_mid[n][2] = dN_kin[n][2];
+        }
+
+        T v_rel_local = (elem.V0 > static_cast<T>(1.0e-18f)) ? (elem.V / elem.V0) : static_cast<T>(1.0f);
+        if (isTet4ANPElement(elem) && !elem.is_detached && !is_energetic_elem && d_nodal_vol_cur && d_nodal_vol_ref) {
             T j_sum = static_cast<T>(0.0f);
             int valid_a = 0;
             for (int n = 0; n < 4; ++n) {
@@ -563,9 +689,14 @@ __global__ void fem_element_forces_kernel_3d_device(
                     valid_a++;
                 }
             }
-            J_anp = (valid_a > 0) ? (j_sum / static_cast<T>(valid_a)) : (elem.V / elem.V0);
+            if (valid_a > 0) {
+                T j_avg = j_sum / static_cast<T>(valid_a);
+                J_anp = static_cast<T>(0.85f) * j_avg + static_cast<T>(0.15f) * v_rel_local;
+            } else {
+                J_anp = v_rel_local;
+            }
         } else {
-            J_anp = (elem.V0 > static_cast<T>(1.0e-18f)) ? (elem.V / elem.V0) : static_cast<T>(1.0f);
+            J_anp = v_rel_local;
         }
     } else {
         for (int i = 0; i < 8; ++i) {
@@ -574,12 +705,14 @@ __global__ void fem_element_forces_kernel_3d_device(
             dN_dxi[i][2] = 0.125f * HEX8_XI_CUDA[i][2];
         }
 
-        // Compute Jacobian matrix J (3x3)
+        // Compute current Jacobian matrix J (3x3) at t^{n+1} and midpoint J_mid at t^{n+1/2}
         T J[3][3] = {{0.0f}};
+        T J_mid[3][3] = {{0.0f}};
         for (int i = 0; i < 8; ++i) {
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
-                    J[r][c] += dN_dxi[i][r] * x_rel[i][c];
+                    J[r][c] += dN_dxi[i][r] * x_cur_rel[i][c];
+                    J_mid[r][c] += dN_dxi[i][r] * x_rel[i][c];
                 }
             }
         }
@@ -588,12 +721,15 @@ __global__ void fem_element_forces_kernel_3d_device(
                - J[0][1] * (J[1][0]*J[2][2] - J[1][2]*J[2][0])
                + J[0][2] * (J[1][0]*J[2][1] - J[1][1]*J[2][0]);
 
-        min_vol_r = static_cast<T>(0.02f);
-        if (detJ <= static_cast<T>(1.0e-15f) || (elem.V0 > static_cast<T>(1.0e-18f) && (detJ * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
-            if (elem.damage > static_cast<T>(0.70f) || elem.ep_bar > static_cast<T>(0.15f)) {
-                elem.is_eroded = true;
-            }
-            return; // Skip force generation for inverted or severely crushed elements
+        if (detJ <= static_cast<T>(0.0f) || (elem.V0 > static_cast<T>(1.0e-30f) && (detJ * static_cast<T>(8.0f) / elem.V0) <= min_vol_r)) {
+            elem.V = detJ * static_cast<T>(8.0f);
+            elem.is_eroded = true;
+            elem.sigma[0][0] = elem.sigma[1][1] = elem.sigma[2][2] = static_cast<T>(0.0f);
+            elem.sigma[0][1] = elem.sigma[1][2] = elem.sigma[2][0] = static_cast<T>(0.0f);
+            elem.s_dev[0][0] = elem.s_dev[1][1] = elem.s_dev[2][2] = static_cast<T>(0.0f);
+            elem.s_dev[0][1] = elem.s_dev[1][2] = elem.s_dev[2][0] = static_cast<T>(0.0f);
+            if (d_erosion_flag) *d_erosion_flag = 1;
+            return; // Skip force generation and cleanly erode inverted or severely crushed elements
         }
 
         T invDetJ = static_cast<T>(1.0f) / detJ;
@@ -612,46 +748,81 @@ __global__ void fem_element_forces_kernel_3d_device(
         J_inv[2][1] = (J[0][1]*J[2][0] - J[0][0]*J[2][1]) * invDetJ;
         J_inv[2][2] = (J[0][0]*J[1][1] - J[0][1]*J[1][0]) * invDetJ;
 
-        // Spatial shape function derivatives dN_dx[8][3]
+        // Spatial shape function derivatives dN_dx[8][3] at t^{n+1}
         for (int i = 0; i < 8; ++i) {
             for (int c = 0; c < 3; ++c) {
                 dN_dx[i][c] = J_inv[c][0] * dN_dxi[i][0] + J_inv[c][1] * dN_dxi[i][1] + J_inv[c][2] * dN_dxi[i][2];
             }
         }
+
+        T detJ_mid = J_mid[0][0] * (J_mid[1][1]*J_mid[2][2] - J_mid[1][2]*J_mid[2][1])
+                   - J_mid[0][1] * (J_mid[1][0]*J_mid[2][2] - J_mid[1][2]*J_mid[2][0])
+                   + J_mid[0][2] * (J_mid[1][0]*J_mid[2][1] - J_mid[1][1]*J_mid[2][0]);
+        if (detJ_mid > static_cast<T>(1.0e-15f)) {
+            T invDetJ_mid = static_cast<T>(1.0f) / detJ_mid;
+            T J_inv_mid[3][3];
+            J_inv_mid[0][0] = (J_mid[1][1]*J_mid[2][2] - J_mid[1][2]*J_mid[2][1]) * invDetJ_mid;
+            J_inv_mid[0][1] = (J_mid[0][2]*J_mid[2][1] - J_mid[0][1]*J_mid[2][2]) * invDetJ_mid;
+            J_inv_mid[0][2] = (J_mid[0][1]*J_mid[1][2] - J_mid[0][2]*J_mid[1][1]) * invDetJ_mid;
+            J_inv_mid[1][0] = (J_mid[1][2]*J_mid[2][0] - J_mid[1][0]*J_mid[2][2]) * invDetJ_mid;
+            J_inv_mid[1][1] = (J_mid[0][0]*J_mid[2][2] - J_mid[0][2]*J_mid[2][0]) * invDetJ_mid;
+            J_inv_mid[1][2] = (J_mid[0][2]*J_mid[1][0] - J_mid[0][0]*J_mid[1][2]) * invDetJ_mid;
+            J_inv_mid[2][0] = (J_mid[1][0]*J_mid[2][1] - J_mid[1][1]*J_mid[2][0]) * invDetJ_mid;
+            J_inv_mid[2][1] = (J_mid[0][1]*J_mid[2][0] - J_mid[0][0]*J_mid[2][1]) * invDetJ_mid;
+            J_inv_mid[2][2] = (J_mid[0][0]*J_mid[1][1] - J_mid[0][1]*J_mid[1][0]) * invDetJ_mid;
+            for (int i = 0; i < 8; ++i) {
+                for (int c = 0; c < 3; ++c) {
+                    dN_dx_mid[i][c] = J_inv_mid[c][0] * dN_dxi[i][0] + J_inv_mid[c][1] * dN_dxi[i][1] + J_inv_mid[c][2] * dN_dxi[i][2];
+                }
+            }
+        } else {
+            for (int i = 0; i < 8; ++i) {
+                for (int c = 0; c < 3; ++c) {
+                    dN_dx_mid[i][c] = dN_dx[i][c];
+                }
+            }
+        }
         J_anp = (elem.V0 > static_cast<T>(1.0e-18f)) ? (elem.V / elem.V0) : static_cast<T>(1.0f);
     }
 
-    // Strain rate tensor components
+    // Strain rate tensor components (midpoint kinematics across [t^n, t^{n+1}])
     T strain_rate[6] = {0.0f};
     for (int i = 0; i < n_elem_nodes; ++i) {
-        strain_rate[0] += dN_dx[i][0] * v_rel[i][0];
-        strain_rate[1] += dN_dx[i][1] * v_rel[i][1];
-        strain_rate[2] += dN_dx[i][2] * v_rel[i][2];
-        strain_rate[3] += dN_dx[i][1] * v_rel[i][0] + dN_dx[i][0] * v_rel[i][1];
-        strain_rate[4] += dN_dx[i][2] * v_rel[i][1] + dN_dx[i][1] * v_rel[i][2];
-        strain_rate[5] += dN_dx[i][0] * v_rel[i][2] + dN_dx[i][2] * v_rel[i][0];
+        strain_rate[0] += dN_dx_mid[i][0] * v_rel[i][0];
+        strain_rate[1] += dN_dx_mid[i][1] * v_rel[i][1];
+        strain_rate[2] += dN_dx_mid[i][2] * v_rel[i][2];
+        strain_rate[3] += dN_dx_mid[i][1] * v_rel[i][0] + dN_dx_mid[i][0] * v_rel[i][1];
+        strain_rate[4] += dN_dx_mid[i][2] * v_rel[i][1] + dN_dx_mid[i][1] * v_rel[i][2];
+        strain_rate[5] += dN_dx_mid[i][0] * v_rel[i][2] + dN_dx_mid[i][2] * v_rel[i][0];
     }
     T div_v = strain_rate[0] + strain_rate[1] + strain_rate[2];
-    if (is_tet4 && !elem.is_detached && dt > static_cast<T>(1.0e-14f)) {
-        T F_det_prev = elem.F[0][0] * (elem.F[1][1]*elem.F[2][2] - elem.F[1][2]*elem.F[2][1])
-                     - elem.F[0][1] * (elem.F[1][0]*elem.F[2][2] - elem.F[1][2]*elem.F[2][0])
-                     + elem.F[0][2] * (elem.F[1][0]*elem.F[2][1] - elem.F[1][1]*elem.F[2][0]);
-        if (F_det_prev > static_cast<T>(0.05f) && J_anp > static_cast<T>(0.05f)) {
-            T div_v_anp = (J_anp - F_det_prev) / (dt * static_cast<T>(0.5f) * (J_anp + F_det_prev));
-            T d_vol_corr = (div_v_anp - div_v) / static_cast<T>(3.0f);
+    if (is_tet4 && !is_energetic_elem && !elem.is_detached && d_nodal_vol_cur && d_nodal_dvol_dt) {
+        T div_v_anp_sum = static_cast<T>(0.0f);
+        int valid_anp = 0;
+        for (int n = 0; n < 4; ++n) {
+            int nid = elem.node_ids[n];
+            if (nid >= 0 && nid < num_nodes && d_nodal_vol_cur[nid] > static_cast<T>(1.0e-18f)) {
+                div_v_anp_sum += d_nodal_dvol_dt[nid] / d_nodal_vol_cur[nid];
+                valid_anp++;
+            }
+        }
+        if (valid_anp > 0) {
+            T div_v_anp = div_v_anp_sum / static_cast<T>(valid_anp);
+            T div_v_eff = static_cast<T>(0.85f) * div_v_anp + static_cast<T>(0.15f) * div_v;
+            T d_vol_corr = (div_v_eff - div_v) / static_cast<T>(3.0f);
             strain_rate[0] += d_vol_corr;
             strain_rate[1] += d_vol_corr;
             strain_rate[2] += d_vol_corr;
-            div_v = div_v_anp;
+            div_v = div_v_eff;
         }
     }
-    if (fabs(div_v) * dt < static_cast<T>(1.0e-6f)) {
+    if (fabs(div_v) * dt < static_cast<T>(1.0e-15f)) {
         div_v = static_cast<T>(0.0f);
     }
 
     // Artificial Bulk Viscosity Pressure q
     T h_e = is_tet4
-          ? computeTet4CharacteristicLength(x_rel, elem.V > static_cast<T>(1.0e-18f) ? elem.V : static_cast<T>(1.0e-18f))
+          ? computeTet4CharacteristicLength(x_cur_rel, elem.V > static_cast<T>(1.0e-18f) ? elem.V : static_cast<T>(1.0e-18f))
           : cbrt(elem.V > static_cast<T>(1.0e-18f) ? elem.V : static_cast<T>(1.0e-18f));
     T p_constit = -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f) - elem.q_visc;
     T v_rel_1pt = is_tet4
@@ -660,8 +831,9 @@ __global__ void fem_element_forces_kernel_3d_device(
     cd = computeDilatationalWaveSpeed<T>(mat, v_rel_1pt, elem.lambda, p_constit, elem.e_int);
     b1 = static_cast<T>(mat.bulk_viscosity_b1 > 0.0f ? mat.bulk_viscosity_b1 : physics_params.bulk_viscosity_b1);
     b2 = static_cast<T>(mat.bulk_viscosity_b2 > 0.0f ? mat.bulk_viscosity_b2 : physics_params.bulk_viscosity_b2);
+    T rho_curr = density / fmax(static_cast<T>(0.05f), v_rel_1pt);
     T q_visc = (div_v < static_cast<T>(0.0f))
-             ? (density * (-b1 * h_e * div_v * cd + b2 * h_e * h_e * div_v * div_v))
+             ? (rho_curr * (-b1 * h_e * div_v * cd + b2 * h_e * h_e * div_v * div_v))
              : static_cast<T>(0.0f);
     elem.q_visc = q_visc;
 
@@ -690,7 +862,10 @@ __global__ void fem_element_forces_kernel_3d_device(
     T T_room = static_cast<T>(mat.T_room > 0.0f ? mat.T_room : 293.0f);
 
     T ep_val = (elem.ep_bar > static_cast<T>(0.0f)) ? elem.ep_bar : static_cast<T>(0.0f);
-    T sigma_hard = A_mat + (B_mat > static_cast<T>(0.0f) ? B_mat * pow(ep_val, n_exp) : static_cast<T>(0.0f));
+    T hard_term = (B_mat > static_cast<T>(0.0f) && ep_val > static_cast<T>(0.0f))
+        ? (B_mat * (n_exp > static_cast<T>(0.0f) ? pow(ep_val, n_exp) : static_cast<T>(1.0f)))
+        : static_cast<T>(0.0f);
+    T sigma_hard = A_mat + hard_term;
 
     T strain_rate_factor = static_cast<T>(1.0f);
     if (ep_dot > static_cast<T>(1.0e-3f)) {
@@ -707,17 +882,28 @@ __global__ void fem_element_forces_kernel_3d_device(
     if (m_exp > static_cast<T>(0.0f) && T_melt > T_room) {
         T T_star = (elem.temperature - T_room) / (T_melt - T_room);
         T_star = (T_star < static_cast<T>(0.0f)) ? static_cast<T>(0.0f) : ((T_star > static_cast<T>(1.0f)) ? static_cast<T>(1.0f) : T_star);
-        thermal_factor = static_cast<T>(1.0f) - pow(T_star, m_exp);
-        if (thermal_factor < static_cast<T>(0.01f)) thermal_factor = static_cast<T>(0.01f);
+        if (T_star > static_cast<T>(0.0f)) {
+            thermal_factor = static_cast<T>(1.0f) - pow(T_star, m_exp);
+            if (thermal_factor < static_cast<T>(0.01f)) thermal_factor = static_cast<T>(0.01f);
+        }
     }
-    dynamic_yield = (sigma_hard * strain_rate_factor * thermal_factor > static_cast<T>(1.0e6f)) ? (sigma_hard * strain_rate_factor * thermal_factor) : static_cast<T>(1.0e6f);
+    uint32_t user_seed_1pt = static_cast<uint32_t>(physics_params.random_seed) * 2654435761u;
+    uint32_t elem_seed_1pt = user_seed_1pt ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u)
+                                           ^ (static_cast<uint32_t>(elem.node_ids[is_tet4 ? 3 : 6]) * 19349663u)
+                                           ^ (static_cast<uint32_t>(idx) * 83492791u);
+    T L_corr_1pt = fmax(static_cast<T>(3.0f) * h_e, static_cast<T>(mat.nonlocal_radius));
+    T het_factor_1pt = computeFEMWeibullFactor<T>(elem_seed_1pt, physics_params, x0_center[0], x0_center[1], x0_center[2], L_corr_1pt, &mat);
+    dynamic_yield = fmax(static_cast<T>(1.0f), sigma_hard * strain_rate_factor * thermal_factor * het_factor_1pt);
+    if (elem.is_detached) {
+        dynamic_yield *= static_cast<T>(0.15f);
+    }
 
-    // 1. Calculate Velocity Gradient Tensor L[3][3]
+    // 1. Calculate Velocity Gradient Tensor L[3][3] (midpoint kinematics)
     T L[3][3] = {{static_cast<T>(0.0f)}};
     for (int i = 0; i < n_elem_nodes; ++i) {
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
-                L[r][c] += v_rel[i][r] * dN_dx[i][c];
+                L[r][c] += v_rel[i][r] * dN_dx_mid[i][c];
             }
         }
     }
@@ -801,11 +987,11 @@ __global__ void fem_element_forces_kernel_3d_device(
             }
         }
     }
-    if (is_tet4 && !elem.is_detached) {
+    if (is_tet4 && !is_energetic_elem && !elem.is_detached) {
         T F_det_new = F_new[0][0] * (F_new[1][1]*F_new[2][2] - F_new[1][2]*F_new[2][1])
                     - F_new[0][1] * (F_new[1][0]*F_new[2][2] - F_new[1][2]*F_new[2][0])
                     + F_new[0][2] * (F_new[1][0]*F_new[2][1] - F_new[1][1]*F_new[2][0]);
-        if (F_det_new > static_cast<T>(1.0e-6f) && J_anp > static_cast<T>(1.0e-6f)) {
+        if (F_det_new > static_cast<T>(1.0e-12f) && J_anp > static_cast<T>(1.0e-12f)) {
             T scale_F = cbrt(J_anp / F_det_new);
             for (int r = 0; r < 3; ++r) {
                 for (int c = 0; c < 3; ++c) {
@@ -824,7 +1010,7 @@ __global__ void fem_element_forces_kernel_3d_device(
     T vol_strain = is_tet4
                  ? (J_anp - static_cast<T>(1.0f))
                  : ((elem.V0 > static_cast<T>(1.0e-18f)) ? (elem.V / elem.V0 - static_cast<T>(1.0f)) : static_cast<T>(0.0f));
-    if (fabs(vol_strain) < static_cast<T>(1.0e-6f)) {
+    if (fabs(vol_strain) < static_cast<T>(1.0e-14f)) {
         vol_strain = static_cast<T>(0.0f);
     }
 
@@ -861,7 +1047,7 @@ __global__ void fem_element_forces_kernel_3d_device(
         bool use_davis_prod = !awe && ((mat.product_model == DetonationProductEOS::DavisProduct) ||
                               (mat.material_model == MPMMaterialModel::CRESTReactiveBurn));
 
-        float p_curr_comp = static_cast<float>(-(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f) + q_visc);
+        float p_curr_comp = static_cast<float>(-(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f));
         if (p_curr_comp < 0.0f) p_curr_comp = 0.0f;
 
         if (awe) {
@@ -902,7 +1088,8 @@ __global__ void fem_element_forces_kernel_3d_device(
                 mat.crest_b2, mat.crest_c2, mat.crest_c3, mat.crest_m2,
                 mat.crest_s0, mat.crest_s_threshold);
         } else if (is_lt_kinetics) {
-            const float e_th_lt = static_cast<float>(elem.e_int) - lam_curr * mat.detonation_energy;
+            const float q_heat_lt = use_davis_prod ? mat.davis_q_det : mat.detonation_energy;
+            const float e_th_lt = fmaxf(0.0f, static_cast<float>(elem.e_int) - lam_curr * q_heat_lt);
             float p_react_trial = (mat.solid_model == SolidReactantEOS::JWLReactant)
                 ? JWL::computeJWLReactantPressure(v_rel_f, e_th_lt, mat.jwlr_A, mat.jwlr_B, mat.jwlr_R1, mat.jwlr_R2, mat.jwlr_omega, mat.jwlr_Cv, mat.jwlr_T0, mat.density)
                 : use_davis_solid
@@ -1003,21 +1190,12 @@ __global__ void fem_element_forces_kernel_3d_device(
         }
         if (elem.is_detached) {
             if (p_hydro < static_cast<T>(0.0f)) p_hydro = static_cast<T>(0.0f);
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    elem.s_dev[r][c] *= static_cast<T>(0.2f);
-                }
-            }
         }
     } else {
         T J_vol_elem = is_tet4
             ? J_anp
             : ((elem.V0 > static_cast<T>(1.0e-18f) && elem.V > static_cast<T>(0.0f)) ? (elem.V / elem.V0) : static_cast<T>(1.0f));
-        uint32_t user_seed = static_cast<uint32_t>(physics_params.random_seed) * 2654435761u;
-        uint32_t elem_seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u)
-                                       ^ (static_cast<uint32_t>(elem.node_ids[n_elem_nodes - 1]) * 19349663u)
-                                       ^ (static_cast<uint32_t>(idx) * 83492791u);
-        T weibull_fac = computeFEMWeibullFactor<T>(elem_seed, physics_params);
+        T weibull_fac = het_factor_1pt;
         runFEMConstitutivePoint<T>(
             mat, physics_params, elem.F, d_dev, div_v, J_vol_elem, dt,
             h_e, q_visc, weibull_fac, elem.is_detached,
@@ -1097,17 +1275,6 @@ __global__ void fem_element_forces_kernel_3d_device(
             }
         }
 
-        T x0_center[3] = {0.0f, 0.0f, 0.0f};
-        for (int n = 0; n < 8; ++n) {
-            int nid = elem.node_ids[n];
-            x0_center[0] += d_nodes[nid].x0[0];
-            x0_center[1] += d_nodes[nid].x0[1];
-            x0_center[2] += d_nodes[nid].x0[2];
-        }
-        x0_center[0] *= static_cast<T>(0.125f);
-        x0_center[1] *= static_cast<T>(0.125f);
-        x0_center[2] *= static_cast<T>(0.125f);
-
         T u_rel[8][3];
         for (int n = 0; n < 8; ++n) {
             int nid = elem.node_ids[n];
@@ -1129,8 +1296,19 @@ __global__ void fem_element_forces_kernel_3d_device(
             }
         }
 
-        T viscous_factor = static_cast<T>(0.05f) * hourglass_coeff * density * cd * h_e * h_e;
-        T stiffness_factor = static_cast<T>(0.25f) * hourglass_coeff * E * h_e;
+        T viscous_factor = static_cast<T>(0.05f) * elem_hg_coeff * density * cd * h_e * h_e;
+        T stiffness_factor = static_cast<T>(0.25f) * elem_hg_coeff * E * h_e;
+        T nu_kf = nu;
+        if (nu_kf > static_cast<T>(0.45f)) nu_kf = static_cast<T>(0.45f);
+        if (nu_kf < static_cast<T>(0.0f)) nu_kf = static_cast<T>(0.0f);
+        T G_kf = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu_kf));
+        T lambda_kf = (E * nu_kf) / ((static_cast<T>(1.0f) + nu_kf) * (static_cast<T>(1.0f) - static_cast<T>(2.0f) * nu_kf));
+        T b_norm_sq = static_cast<T>(0.0f);
+        for (int n = 0; n < 8; ++n) {
+            b_norm_sq += dN_dx[n][0] * dN_dx[n][0] + dN_dx[n][1] * dN_dx[n][1] + dN_dx[n][2] * dN_dx[n][2];
+        }
+        T c_stiff_kf = static_cast<T>(0.5f) * elem_hg_coeff * (lambda_kf + static_cast<T>(2.0f) * G_kf) * elem.V * b_norm_sq;
+        const bool is_kf_hg = (elem_hg_model == FEMHourglassModel::KosloffFrazier || elem_scheme == FEMIntegrationScheme::OnePointKF);
 
         for (int alpha = 0; alpha < 4; ++alpha) {
             T sub[3] = {0.0f, 0.0f, 0.0f};
@@ -1156,9 +1334,11 @@ __global__ void fem_element_forces_kernel_3d_device(
             for (int n = 0; n < 8; ++n) {
                 int nid = elem.node_ids[n];
                 for (int c = 0; c < 3; ++c) {
-                    T f_hg = (hg_model == FEMHourglassModel::FlanaganBelytschkoViscous)
-                             ? viscous_factor * gamma_ortho[n] * q_vel[c]
-                             : stiffness_factor * gamma_ortho[n] * q_disp[c];
+                    T f_hg = (elem_hg_model == FEMHourglassModel::FlanaganBelytschkoViscous && !is_kf_hg)
+                             ? gamma_ortho[n] * (viscous_factor * q_vel[c] + static_cast<T>(0.10f) * stiffness_factor * q_disp[c])
+                             : (is_kf_hg
+                                ? gamma_ortho[n] * (c_stiff_kf * q_disp[c] + static_cast<T>(0.15f) * viscous_factor * q_vel[c])
+                                : gamma_ortho[n] * (stiffness_factor * q_disp[c] + static_cast<T>(0.25f) * viscous_factor * q_vel[c]));
                     atomicAdd(&d_nodes[nid].f_int[c], f_hg);
                 }
             }
@@ -1185,6 +1365,10 @@ __global__ void fem_nodal_full_step_kernel_3d_device(
             node.a[c] = static_cast<T>(0.0f);
             continue;
         }
+        if (node.is_prescribed[c]) {
+            node.a[c] = static_cast<T>(0.0f);
+            continue;
+        }
 
         T f_net = node.f_ext[c] - node.f_int[c] + node.f_contact[c];
         node.a[c] = f_net / node.m;
@@ -1201,7 +1385,7 @@ __global__ void fem_nodal_full_step_kernel_3d_device(
     }
 }
 
-// CUDA Kernel: Erosion Check (Negative volume, min_volume_ratio, plastic strain, tensile stress, timestep ratio)
+// CUDA Kernel: Erosion Check (Negative volume, min_volume_ratio, max_volume_ratio, damage, plastic strain, tensile stress, timestep ratio)
 template <typename T>
 __global__ void fem_initial_timestep_erosion_kernel_3d_device(
     FEMNode3D<T>* d_nodes,
@@ -1210,7 +1394,10 @@ __global__ void fem_initial_timestep_erosion_kernel_3d_device(
     const MaterialTable3D* d_materials,
     FEMErosionCriteria<T> erosion_criteria,
     int* d_erosion_flag,
-    bool enable_cohesive_splitting
+    bool enable_cohesive_splitting,
+    const int* d_face_neighbors,
+    bool enable_nonlocal_damage,
+    BlastPhysicsParams<T> physics_params = BlastPhysicsParams<T>{}
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_elements) return;
@@ -1220,6 +1407,27 @@ __global__ void fem_initial_timestep_erosion_kernel_3d_device(
 
     const bool is_tet4 = isTet4Element(elem);
     const MaterialTable3D& mat = d_materials[elem.mat_id];
+
+    const bool is_energetic = (mat.material_model == MPMMaterialModel::JWLProgrammedBurn ||
+                               mat.material_model == MPMMaterialModel::CRESTReactiveBurn ||
+                               mat.material_model == MPMMaterialModel::LeeTarverIgnitionGrowth);
+    if (is_energetic) {
+        T v_rel_e = (elem.V0 > static_cast<T>(1.0e-18f) && elem.V > static_cast<T>(0.0f))
+            ? (elem.V / elem.V0) : static_cast<T>(0.0f);
+        if (elem.V <= static_cast<T>(1.0e-18f) ||
+            v_rel_e <= static_cast<T>(0.005f) ||
+            v_rel_e >= static_cast<T>(25.0f)) {
+            elem.is_eroded = true;
+            elem.mpm_converted = true;
+            elem.sigma[0][0] = elem.sigma[1][1] = elem.sigma[2][2] = static_cast<T>(0.0f);
+            elem.sigma[0][1] = elem.sigma[1][2] = elem.sigma[2][0] = static_cast<T>(0.0f);
+            elem.s_dev[0][0] = elem.s_dev[1][1] = elem.s_dev[2][2] = static_cast<T>(0.0f);
+            elem.s_dev[0][1] = elem.s_dev[1][2] = elem.s_dev[2][0] = static_cast<T>(0.0f);
+            if (d_erosion_flag) *d_erosion_flag = 1;
+        }
+        return;
+    }
+
     T v_rel_e = (elem.V0 > static_cast<T>(1.0e-18f) && elem.V > static_cast<T>(0.0f))
         ? (elem.V / elem.V0) : static_cast<T>(1.0f);
     T p_el_e = -(elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f) - elem.q_visc;
@@ -1236,14 +1444,30 @@ __global__ void fem_initial_timestep_erosion_kernel_3d_device(
     T L_e = is_tet4 ? computeTet4CharacteristicLength(x_curr, V_cur) : computeHex8CharacteristicLength(x_curr, V_cur);
     T current_dt = L_e / cd;
 
+    bool severe_crush = false;
     bool newly_eroded = false;
-    T min_vol_r = erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) ? erosion_criteria.min_volume_ratio : static_cast<T>(0.02f);
-    if (elem.V <= static_cast<T>(1.0e-18f) || (elem.V0 > static_cast<T>(1.0e-18f) && (elem.V / elem.V0) <= min_vol_r)) {
-        newly_eroded = true;
+    const bool global_overrides = (erosion_criteria.enable_strain_erosion ||
+                                   erosion_criteria.enable_stress_erosion ||
+                                   erosion_criteria.enable_damage_erosion ||
+                                   erosion_criteria.enable_timestep_erosion);
+    const T mat_min_vol = static_cast<T>(mat.min_volume_ratio > 0.0f ? mat.min_volume_ratio : 0.02f);
+    const T min_vol_r = (global_overrides && erosion_criteria.min_volume_ratio > static_cast<T>(0.0f) && mat.min_volume_ratio == 0.02f)
+        ? erosion_criteria.min_volume_ratio : mat_min_vol;
+    if (elem.V <= static_cast<T>(0.0f) || (elem.V0 > static_cast<T>(1.0e-30f) && (elem.V / elem.V0) <= min_vol_r)) {
+        severe_crush = true;
+    }
+
+    const T mat_max_vol = static_cast<T>(mat.max_volume_ratio > 1.0f ? mat.max_volume_ratio : 0.0f);
+    const T max_vol_r = (global_overrides && erosion_criteria.max_volume_ratio > static_cast<T>(1.0f) && mat.max_volume_ratio == 5.00f)
+        ? erosion_criteria.max_volume_ratio : mat_max_vol;
+    if (max_vol_r > static_cast<T>(1.0f) && elem.V0 > static_cast<T>(1.0e-30f) && (elem.V / elem.V0) >= max_vol_r) {
+        severe_crush = true;
     }
 
     bool check_dt = (mat.enable_timestep_erosion || erosion_criteria.enable_timestep_erosion);
-    T eta = (mat.timestep_erosion_factor > static_cast<T>(1.0e-5f)) ? static_cast<T>(mat.timestep_erosion_factor) : erosion_criteria.timestep_erosion_factor;
+    T eta = static_cast<T>((mat.enable_timestep_erosion && mat.timestep_erosion_factor > 1.0e-5f)
+        ? mat.timestep_erosion_factor
+        : (erosion_criteria.timestep_erosion_factor > static_cast<T>(1.0e-5f) ? erosion_criteria.timestep_erosion_factor : static_cast<T>(mat.timestep_erosion_factor)));
     if (check_dt && eta > static_cast<T>(1.0e-5f)) {
         T dt0_eff = elem.dt0;
         if (dt0_eff <= static_cast<T>(1.0e-12f) || dt0_eff >= static_cast<T>(1.0e20f)) {
@@ -1255,54 +1479,157 @@ __global__ void fem_initial_timestep_erosion_kernel_3d_device(
                 x_0[n][2] = d_nodes[nid].x0[2];
             }
             T L_e0 = is_tet4 ? computeTet4CharacteristicLength(x_0, elem.V0) : computeHex8CharacteristicLength(x_0, elem.V0);
-            dt0_eff = L_e0 / cd;
+            T cd0 = computeDilatationalWaveSpeed<T>(mat);
+            dt0_eff = L_e0 / cd0;
         }
         if (current_dt <= eta * dt0_eff) {
-            newly_eroded = true;
+            severe_crush = true;
+        }
+    }
+
+    const int n_self = is_tet4 ? 4 : 8;
+    const T inv_n_self = is_tet4 ? static_cast<T>(0.25f) : static_cast<T>(0.125f);
+    T c_self[3] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
+    for (int n = 0; n < n_self; ++n) {
+        int nid = elem.node_ids[n];
+        c_self[0] += d_nodes[nid].x0[0];
+        c_self[1] += d_nodes[nid].x0[1];
+        c_self[2] += d_nodes[nid].x0[2];
+    }
+    c_self[0] *= inv_n_self; c_self[1] *= inv_n_self; c_self[2] *= inv_n_self;
+
+    T ep_eval = elem.ep_bar;
+    if (enable_nonlocal_damage && d_face_neighbors != nullptr && mat.nonlocal_radius > 1.0e-4f) {
+        T w_self = elem.V0 > static_cast<T>(0.0f) ? elem.V0 : static_cast<T>(1.0f);
+        T ep_sum = elem.ep_bar * w_self;
+        T w_sum = w_self;
+        T R_nl = static_cast<T>(mat.nonlocal_radius);
+        T R_sq = fmax(static_cast<T>(1.0e-12f), R_nl * R_nl);
+        for (int f = 0; f < 6; ++f) {
+            int nb = d_face_neighbors[idx * 6 + f];
+            if (nb >= 0 && nb < num_elements && !d_elements[nb].is_eroded) {
+                const auto& nb_elem = d_elements[nb];
+                const bool nb_tet = isTet4Element(nb_elem);
+                const int n_nb = nb_tet ? 4 : 8;
+                const T inv_n_nb = nb_tet ? static_cast<T>(0.25f) : static_cast<T>(0.125f);
+                T c_nb[3] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
+                for (int n = 0; n < n_nb; ++n) {
+                    int nid = nb_elem.node_ids[n];
+                    c_nb[0] += d_nodes[nid].x0[0];
+                    c_nb[1] += d_nodes[nid].x0[1];
+                    c_nb[2] += d_nodes[nid].x0[2];
+                }
+                c_nb[0] *= inv_n_nb; c_nb[1] *= inv_n_nb; c_nb[2] *= inv_n_nb;
+                T dx = c_self[0] - c_nb[0];
+                T dy = c_self[1] - c_nb[1];
+                T dz = c_self[2] - c_nb[2];
+                T dist_sq = dx * dx + dy * dy + dz * dz;
+                T w_gauss = exp(-dist_sq / R_sq);
+                T w_nb = w_gauss * (nb_elem.V0 > static_cast<T>(0.0f) ? nb_elem.V0 : static_cast<T>(1.0f));
+                ep_sum += nb_elem.ep_bar * w_nb;
+                w_sum += w_nb;
+            }
+        }
+        if (w_sum > static_cast<T>(0.0f)) {
+            ep_eval = ep_sum / w_sum;
+        }
+    }
+
+    uint32_t user_seed = static_cast<uint32_t>(physics_params.random_seed) * 2654435761u;
+    uint32_t elem_seed = user_seed ^ (static_cast<uint32_t>(elem.node_ids[0]) * 73856093u)
+                                   ^ (static_cast<uint32_t>(elem.node_ids[is_tet4 ? 3 : 6]) * 19349663u)
+                                   ^ (static_cast<uint32_t>(idx) * 83492791u);
+    T L_corr_er = fmax(static_cast<T>(3.0f) * L_e, static_cast<T>(mat.nonlocal_radius));
+    T het_factor = computeFEMWeibullFactor<T>(elem_seed, physics_params, c_self[0], c_self[1], c_self[2], L_corr_er, &mat);
+
+    T aniso_factor = static_cast<T>(1.0f);
+    const bool use_aniso = mat.enable_anisotropy || physics_params.enable_anisotropy;
+    const T aniso_ratio_val = mat.enable_anisotropy ? static_cast<T>(mat.anisotropy_ratio) : physics_params.anisotropy_ratio;
+    if (use_aniso && fabs(aniso_ratio_val - static_cast<T>(1.0f)) > static_cast<T>(1.0e-4f)) {
+        T ax = mat.enable_anisotropy ? static_cast<T>(mat.anisotropy_dir[0]) : physics_params.anisotropy_dir[0];
+        T ay = mat.enable_anisotropy ? static_cast<T>(mat.anisotropy_dir[1]) : physics_params.anisotropy_dir[1];
+        T az = mat.enable_anisotropy ? static_cast<T>(mat.anisotropy_dir[2]) : physics_params.anisotropy_dir[2];
+        T alen = sqrt(ax * ax + ay * ay + az * az);
+        if (alen > static_cast<T>(1.0e-6f)) {
+            ax /= alen; ay /= alen; az /= alen;
+            T s_axial = elem.sigma[0][0] * ax * ax + elem.sigma[1][1] * ay * ay + elem.sigma[2][2] * az * az +
+                        static_cast<T>(2.0f) * (elem.sigma[0][1] * ax * ay + elem.sigma[1][2] * ay * az + elem.sigma[2][0] * az * ax);
+            T s_norm = sqrt(elem.sigma[0][0]*elem.sigma[0][0] + elem.sigma[1][1]*elem.sigma[1][1] + elem.sigma[2][2]*elem.sigma[2][2] +
+                            static_cast<T>(2.0f)*(elem.sigma[0][1]*elem.sigma[0][1] + elem.sigma[1][2]*elem.sigma[1][2] + elem.sigma[2][0]*elem.sigma[2][0]));
+            if (s_norm > static_cast<T>(1.0e-6f)) {
+                T xi = fmin(static_cast<T>(1.0f), fabs(s_axial) / s_norm);
+                aniso_factor = static_cast<T>(1.0f) + (aniso_ratio_val - static_cast<T>(1.0f)) * (static_cast<T>(1.0f) - xi * xi);
+            }
         }
     }
 
     bool is_concrete = (mat.material_model == MPMMaterialModel::RHTConcrete ||
                         mat.material_model == MPMMaterialModel::KCConcrete ||
                         mat.material_model == MPMMaterialModel::CSCMConcrete);
+    const bool cohesive_active = mat.enable_cohesive_splitting || enable_cohesive_splitting;
 
-    if (is_concrete) {
-        T conc_erosion_strain = static_cast<T>((mat.erosion_strain >= 0.02f) ? mat.erosion_strain : (erosion_criteria.failure_strain >= 0.02f ? erosion_criteria.failure_strain : 0.10f));
-        bool damage_saturated = (elem.damage >= static_cast<T>(0.95f));
-        if (damage_saturated && elem.ep_bar >= conc_erosion_strain) {
-            newly_eroded = true;
-        }
-    } else {
-        if (mat.enable_strain_erosion || erosion_criteria.enable_strain_erosion) {
-            T fail_strain = static_cast<T>(
-                (mat.enable_strain_erosion && mat.erosion_strain > 0.0f) ? mat.erosion_strain :
-                ((mat.enable_strain_erosion && mat.failure_strain > 0.0f) ? mat.failure_strain :
-                 (erosion_criteria.failure_strain > 0.0f ? erosion_criteria.failure_strain :
-                  (mat.erosion_strain > 0.0f ? mat.erosion_strain : mat.failure_strain))));
-            if (fail_strain > static_cast<T>(0.0f) && elem.ep_bar >= fail_strain) {
-                newly_eroded = true;
-            }
-        }
-    }
-
-    if (mat.enable_stress_erosion || erosion_criteria.enable_stress_erosion) {
-        T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
-        T fail_stress = static_cast<T>(mat.erosion_stress > 0.0f ? mat.erosion_stress : (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : erosion_criteria.tensile_failure_stress));
-        if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
-            if (!is_concrete || elem.damage >= static_cast<T>(0.95f)) {
-                newly_eroded = true;
-            }
-        }
-    }
-
-    if (newly_eroded) {
-        const bool is_inverted = (elem.V <= static_cast<T>(1.0e-18f) || (elem.V0 > static_cast<T>(1.0e-18f) && (elem.V / elem.V0) <= min_vol_r));
-        if (enable_cohesive_splitting && !is_inverted) {
-            if (!elem.is_detached) {
-                elem.damage = fmax(elem.damage, static_cast<T>(0.99f));
-                if (d_erosion_flag) {
-                    *d_erosion_flag = 1;
+    if (!(cohesive_active && elem.is_detached)) {
+        if (mat.enable_strain_erosion || erosion_criteria.enable_strain_erosion || cohesive_active) {
+            if (is_concrete) {
+                T conc_erosion_strain = static_cast<T>(
+                    (mat.enable_strain_erosion && mat.erosion_strain > 0.0f) ? mat.erosion_strain :
+                    (erosion_criteria.failure_strain > 0.0f ? erosion_criteria.failure_strain :
+                     (mat.erosion_strain > 0.0f ? mat.erosion_strain : 0.10f))) * het_factor * aniso_factor;
+                bool damage_saturated = (elem.damage >= static_cast<T>(0.95f));
+                if ((damage_saturated && ep_eval >= conc_erosion_strain) || (elem.ep_bar >= static_cast<T>(1.5f) * conc_erosion_strain)) {
+                    newly_eroded = true;
                 }
+            } else {
+                T fail_strain = static_cast<T>(
+                    (mat.enable_strain_erosion && mat.erosion_strain > 0.0f) ? mat.erosion_strain :
+                    ((mat.enable_strain_erosion && mat.failure_strain > 0.0f) ? mat.failure_strain :
+                     (erosion_criteria.failure_strain > 0.0f ? erosion_criteria.failure_strain :
+                      (mat.erosion_strain > 0.0f ? mat.erosion_strain : mat.failure_strain)))) * het_factor * aniso_factor;
+                if (fail_strain > static_cast<T>(0.0f) && (ep_eval >= fail_strain || elem.ep_bar >= static_cast<T>(2.0f) * fail_strain)) {
+                    newly_eroded = true;
+                }
+            }
+        }
+
+        if (mat.enable_damage_erosion || erosion_criteria.enable_damage_erosion || cohesive_active) {
+            T max_dmg = static_cast<T>((mat.enable_damage_erosion && mat.max_damage > 0.0f)
+                ? mat.max_damage
+                : ((erosion_criteria.max_damage > static_cast<T>(0.0f)) ? erosion_criteria.max_damage : static_cast<T>(mat.max_damage > 0.0f ? mat.max_damage : 0.99f)));
+            if (elem.damage >= max_dmg) {
+                newly_eroded = true;
+            }
+        }
+
+        if (mat.enable_stress_erosion || erosion_criteria.enable_stress_erosion || cohesive_active) {
+            T mean_s = (elem.sigma[0][0] + elem.sigma[1][1] + elem.sigma[2][2]) / static_cast<T>(3.0f);
+            T fail_stress = static_cast<T>(
+                (mat.enable_stress_erosion && mat.erosion_stress > 0.0f) ? mat.erosion_stress :
+                ((mat.enable_stress_erosion && mat.tensile_failure_stress > 0.0f) ? mat.tensile_failure_stress :
+                 (mat.erosion_stress > 0.0f ? mat.erosion_stress :
+                  (mat.tensile_failure_stress > 0.0f ? mat.tensile_failure_stress : erosion_criteria.tensile_failure_stress)))) * het_factor * aniso_factor;
+            if (fail_stress > static_cast<T>(0.0f) && mean_s >= fail_stress) {
+                if (!is_concrete || elem.damage >= static_cast<T>(0.95f)) {
+                    newly_eroded = true;
+                }
+            }
+        }
+    }
+
+    if (severe_crush) {
+        elem.is_eroded = true;
+        elem.sigma[0][0] = elem.sigma[1][1] = elem.sigma[2][2] = static_cast<T>(0.0f);
+        elem.sigma[0][1] = elem.sigma[1][2] = elem.sigma[2][0] = static_cast<T>(0.0f);
+        elem.s_dev[0][0] = elem.s_dev[1][1] = elem.s_dev[2][2] = static_cast<T>(0.0f);
+        elem.s_dev[0][1] = elem.s_dev[1][2] = elem.s_dev[2][0] = static_cast<T>(0.0f);
+        if (d_erosion_flag) {
+            *d_erosion_flag = 1;
+        }
+    } else if (newly_eroded) {
+        if (cohesive_active && !elem.is_detached) {
+            elem.damage = static_cast<T>(1.0f);
+            elem.decay_step = 10;
+            if (d_erosion_flag) {
+                *d_erosion_flag = 1;
             }
         } else {
             elem.is_eroded = true;
@@ -1431,6 +1758,23 @@ __global__ void fem_reset_nodal_contact_forces_kernel_device(
     }
 }
 
+template <typename T>
+__global__ void fem_flush_mpm_impulse_kernel_3d_device(
+    FEMNode3D<T>* d_nodes,
+    int num_nodes,
+    T* d_mpm_impulse_accum,
+    T inv_dt
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_nodes || !d_mpm_impulse_accum) return;
+    d_nodes[idx].f_contact[0] += d_mpm_impulse_accum[idx * 3 + 0] * inv_dt;
+    d_nodes[idx].f_contact[1] += d_mpm_impulse_accum[idx * 3 + 1] * inv_dt;
+    d_nodes[idx].f_contact[2] += d_mpm_impulse_accum[idx * 3 + 2] * inv_dt;
+    d_mpm_impulse_accum[idx * 3 + 0] = static_cast<T>(0.0f);
+    d_mpm_impulse_accum[idx * 3 + 1] = static_cast<T>(0.0f);
+    d_mpm_impulse_accum[idx * 3 + 2] = static_cast<T>(0.0f);
+}
+
 // CUDA Kernel: Dynamically update surface facet normals and areas on GPU
 template <typename T>
 __global__ void fem_update_surface_facets_kernel_3d_device(
@@ -1471,13 +1815,12 @@ __global__ void fem_update_surface_facets_kernel_3d_device(
         facet.area = static_cast<T>(0.5f) * len;
 
         if (d_node_normals) {
-            T weighted_n[3] = {facet.area * facet.normal[0], facet.area * facet.normal[1], facet.area * facet.normal[2]};
             int n_corners = (facet.node_ids[2] == facet.node_ids[3]) ? 3 : 4;
             for (int k = 0; k < n_corners; ++k) {
                 int nid = facet.node_ids[k];
-                atomicAdd(&d_node_normals[nid * 3 + 0], weighted_n[0]);
-                atomicAdd(&d_node_normals[nid * 3 + 1], weighted_n[1]);
-                atomicAdd(&d_node_normals[nid * 3 + 2], weighted_n[2]);
+                atomicAdd(&d_node_normals[nid * 3 + 0], facet.normal[0]);
+                atomicAdd(&d_node_normals[nid * 3 + 1], facet.normal[1]);
+                atomicAdd(&d_node_normals[nid * 3 + 2], facet.normal[2]);
             }
         }
     }
@@ -1626,25 +1969,18 @@ __device__ inline void fem_evaluate_candidate_facet_contact(
     if (facet.node_ids[0] == nid || facet.node_ids[1] == nid ||
         facet.node_ids[2] == nid || facet.node_ids[3] == nid) return;
 
-    // Exclude nodes belonging to the facet's own parent element, and filter monolithic self-contact
+    (void)n_part;
+    // Exclude nodes belonging to the facet's own parent element, and enforce surface normal opposition
     if (facet.element_id >= 0 && facet.element_id < num_elements) {
         const auto& f_elem = d_elements[facet.element_id];
         if (f_elem.is_eroded) return;
         for (int k = 0; k < 8; ++k) {
             if (f_elem.node_ids[k] == nid) return;
         }
-        if (n_part >= 0 && facet.part_id >= 0 && n_part == facet.part_id && !f_elem.is_detached) {
-            if (has_node_norm) {
-                T dot_norm = n_node[0]*facet.normal[0] + n_node[1]*facet.normal[1] + n_node[2]*facet.normal[2];
-                if (dot_norm > static_cast<T>(0.0f)) return;
-            }
-        }
-    } else if (n_part >= 0 && facet.part_id >= 0 && n_part == facet.part_id) {
-        if (has_node_norm) {
-            T dot_norm = n_node[0]*facet.normal[0] + n_node[1]*facet.normal[1] + n_node[2]*facet.normal[2];
-            if (dot_norm > static_cast<T>(0.0f)) return;
-        }
     }
+    if (!has_node_norm) return;
+    T dot_norm = n_node[0]*facet.normal[0] + n_node[1]*facet.normal[1] + n_node[2]*facet.normal[2];
+    if (dot_norm > static_cast<T>(-0.15f)) return;
 
     if (node.x[0] < facet.bbox_min[0] || node.x[0] > facet.bbox_max[0] ||
         node.x[1] < facet.bbox_min[1] || node.x[1] > facet.bbox_max[1] ||
@@ -1718,7 +2054,7 @@ __device__ inline void fem_evaluate_candidate_facet_contact(
     if (facet.element_id >= 0 && facet.element_id < num_elements) {
         T elem_V = d_elements[facet.element_id].V;
         if (elem_V > static_cast<T>(1.0e-30f) && facet.area > static_cast<T>(1.0e-24f)) {
-            h_elem = elem_V / facet.area;
+            h_elem = (is_tri ? static_cast<T>(3.0f) : static_cast<T>(1.0f)) * elem_V / facet.area;
         }
     }
     T max_penetration = static_cast<T>(0.35f) * h_elem;
@@ -1742,8 +2078,8 @@ __device__ inline void fem_evaluate_candidate_facet_contact(
                 ? (f_elem.V / f_elem.V0) : static_cast<T>(1.0f);
             K_master = Blast::Materials::getEffectiveBulkModulus<T>(mat, v_rel_m);
             T p_elem_master = -(f_elem.sigma[0][0] + f_elem.sigma[1][1] + f_elem.sigma[2][2]) / static_cast<T>(3.0f);
-            if (p_elem_master * static_cast<T>(4.0f) > K_master) {
-                K_master = p_elem_master * static_cast<T>(4.0f);
+            if (p_elem_master * static_cast<T>(3.0f) > K_master) {
+                K_master = p_elem_master * static_cast<T>(3.0f);
             }
         }
 
@@ -1769,9 +2105,6 @@ __device__ inline void fem_evaluate_candidate_facet_contact(
         T v_rel_n = (node.v[0] - vf0)*contact_normal[0] + (node.v[1] - vf1)*contact_normal[1] + (node.v[2] - vf2)*contact_normal[2];
 
         T f_spring = k_stiff * eff_penetration;
-        if (v_rel_n >= static_cast<T>(0.0f)) {
-            f_spring *= static_cast<T>(0.10f); // Suppress static spring push on separating faces
-        }
 
         T f_damp = static_cast<T>(0.0f);
         if (v_rel_n < static_cast<T>(0.0f)) {
@@ -1787,8 +2120,8 @@ __device__ inline void fem_evaluate_candidate_facet_contact(
             int mid = f_elem.mat_id;
             T sigma_y = static_cast<T>(d_materials[mid].yield_stress > 0.0f ? d_materials[mid].yield_stress : 400.0e6f);
             T p_elem_master = -(f_elem.sigma[0][0] + f_elem.sigma[1][1] + f_elem.sigma[2][2]) / static_cast<T>(3.0f);
-            if (p_elem_master > sigma_y) sigma_y = p_elem_master;
-            T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
+            T p_cap = (p_elem_master > static_cast<T>(1.5f) * sigma_y) ? p_elem_master : static_cast<T>(1.5f) * sigma_y;
+            T f_mat_cap = p_cap * facet.area;
             if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
         }
         if (f_total > f_max) f_total = f_max;
@@ -1879,22 +2212,16 @@ __device__ inline void fem_apply_contact_response(
     }
 }
 
-// CUDA Kernel: Insert surface facet bounding boxes into multi-level octave spatial hash grid
+// Compute octave level and integer cell bounds for a facet AABB. Returns true if oversized (span > 4 in any axis).
 template <typename T>
-__global__ void fem_build_octave_hash_grid_kernel_3d_device(
-    const FEMFacet3D<T>* __restrict__ d_facets,
-    int num_facets,
+__device__ inline bool fem_compute_facet_octave_bounds(
+    const FEMFacet3D<T>& facet,
     T base_cell_size,
-    int* __restrict__ d_cell_counts,
-    int* __restrict__ d_cell_facet_ids,
-    uint32_t table_size
+    int& lvl_out,
+    int& min_cx, int& max_cx,
+    int& min_cy, int& max_cy,
+    int& min_cz, int& max_cz
 ) {
-    int f = blockIdx.x * blockDim.x + threadIdx.x;
-    if (f >= num_facets) return;
-
-    const FEMFacet3D<T>& facet = d_facets[f];
-    if (facet.is_eroded) return;
-
     T dx = facet.bbox_max[0] - facet.bbox_min[0];
     T dy = facet.bbox_max[1] - facet.bbox_min[1];
     T dz = facet.bbox_max[2] - facet.bbox_min[2];
@@ -1904,36 +2231,100 @@ __global__ void fem_build_octave_hash_grid_kernel_3d_device(
     if (max_d > base_cell_size * static_cast<T>(4.0f)) lvl = 3;
     else if (max_d > base_cell_size * static_cast<T>(2.0f)) lvl = 2;
     else if (max_d > base_cell_size) lvl = 1;
-    else lvl = 0;
+    lvl_out = lvl;
 
     T cell_size = base_cell_size * static_cast<T>(1 << lvl);
     T inv_cs = static_cast<T>(1.0f) / cell_size;
 
-    int min_cx = static_cast<int>(floor(facet.bbox_min[0] * inv_cs));
-    int max_cx = static_cast<int>(floor(facet.bbox_max[0] * inv_cs));
-    int min_cy = static_cast<int>(floor(facet.bbox_min[1] * inv_cs));
-    int max_cy = static_cast<int>(floor(facet.bbox_max[1] * inv_cs));
-    int min_cz = static_cast<int>(floor(facet.bbox_min[2] * inv_cs));
-    int max_cz = static_cast<int>(floor(facet.bbox_max[2] * inv_cs));
+    min_cx = static_cast<int>(floor(facet.bbox_min[0] * inv_cs));
+    max_cx = static_cast<int>(floor(facet.bbox_max[0] * inv_cs));
+    min_cy = static_cast<int>(floor(facet.bbox_min[1] * inv_cs));
+    max_cy = static_cast<int>(floor(facet.bbox_max[1] * inv_cs));
+    min_cz = static_cast<int>(floor(facet.bbox_min[2] * inv_cs));
+    max_cz = static_cast<int>(floor(facet.bbox_max[2] * inv_cs));
 
-    if (max_cx > min_cx + 1) max_cx = min_cx + 1;
-    if (max_cy > min_cy + 1) max_cy = min_cy + 1;
-    if (max_cz > min_cz + 1) max_cz = min_cz + 1;
+    return ((max_cx - min_cx + 1) > 4 ||
+            (max_cy - min_cy + 1) > 4 ||
+            (max_cz - min_cz + 1) > 4);
+}
+
+// CUDA Kernel (Pass 1): Count bucket hits and record oversized facets into flat list
+template <typename T>
+__global__ void fem_count_octave_hash_grid_kernel_3d_device(
+    const FEMFacet3D<T>* __restrict__ d_facets,
+    int num_facets,
+    T base_cell_size,
+    int* __restrict__ d_cell_counts,
+    int* __restrict__ d_oversized_facets,
+    int* __restrict__ d_oversized_count,
+    int max_oversized_facets,
+    uint32_t table_size
+) {
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= num_facets) return;
+
+    const FEMFacet3D<T>& facet = d_facets[f];
+    if (facet.is_eroded) return;
+
+    int lvl = 0, min_cx = 0, max_cx = 0, min_cy = 0, max_cy = 0, min_cz = 0, max_cz = 0;
+    if (fem_compute_facet_octave_bounds(facet, base_cell_size, lvl, min_cx, max_cx, min_cy, max_cy, min_cz, max_cz)) {
+        if (d_oversized_facets && d_oversized_count) {
+            int oslot = ::atomicAdd(d_oversized_count, 1);
+            if (oslot >= 0 && oslot < max_oversized_facets) {
+                d_oversized_facets[oslot] = f;
+            }
+        }
+        return;
+    }
 
     for (int cz = min_cz; cz <= max_cz; ++cz) {
         for (int cy = min_cy; cy <= max_cy; ++cy) {
             for (int cx = min_cx; cx <= max_cx; ++cx) {
                 uint32_t bucket = hashCoords3D(cx, cy, cz, table_size) + lvl * table_size;
-                int slot = ::atomicAdd(&d_cell_counts[bucket], 1);
-                if (slot < 32) {
-                    d_cell_facet_ids[bucket * 32 + slot] = f;
+                ::atomicAdd(&d_cell_counts[bucket], 1);
+            }
+        }
+    }
+}
+
+// CUDA Kernel (Pass 2): Scatter facet IDs into CSR array using scanned bucket offsets
+template <typename T>
+__global__ void fem_scatter_octave_hash_grid_kernel_3d_device(
+    const FEMFacet3D<T>* __restrict__ d_facets,
+    int num_facets,
+    T base_cell_size,
+    int* __restrict__ d_cell_counts,
+    const int* __restrict__ d_cell_offsets,
+    int* __restrict__ d_cell_facet_ids,
+    int max_hash_entries,
+    uint32_t table_size
+) {
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= num_facets) return;
+
+    const FEMFacet3D<T>& facet = d_facets[f];
+    if (facet.is_eroded) return;
+
+    int lvl = 0, min_cx = 0, max_cx = 0, min_cy = 0, max_cy = 0, min_cz = 0, max_cz = 0;
+    if (fem_compute_facet_octave_bounds(facet, base_cell_size, lvl, min_cx, max_cx, min_cy, max_cy, min_cz, max_cz)) {
+        return;
+    }
+
+    for (int cz = min_cz; cz <= max_cz; ++cz) {
+        for (int cy = min_cy; cy <= max_cy; ++cy) {
+            for (int cx = min_cx; cx <= max_cx; ++cx) {
+                uint32_t bucket = hashCoords3D(cx, cy, cz, table_size) + lvl * table_size;
+                int local_slot = ::atomicAdd(&d_cell_counts[bucket], 1);
+                int entry_idx = d_cell_offsets[bucket] + local_slot;
+                if (entry_idx >= 0 && entry_idx < max_hash_entries) {
+                    d_cell_facet_ids[entry_idx] = f;
                 }
             }
         }
     }
 }
 
-// CUDA Kernel: Penalty Surface Contact and Coulomb Friction using Multi-Level Octave Spatial Hash Grid
+// CUDA Kernel: Penalty Surface Contact and Coulomb Friction using Lossless Multi-Level CSR Octave Hash Grid
 template <typename T>
 __global__ void fem_contact_forces_octave_grid_kernel_3d_device(
     FEMNode3D<T>* d_nodes,
@@ -1950,7 +2341,12 @@ __global__ void fem_contact_forces_octave_grid_kernel_3d_device(
     const T* d_node_normals,
     const MaterialTable3D* d_materials,
     const int* __restrict__ d_cell_counts,
+    const int* __restrict__ d_cell_offsets,
     const int* __restrict__ d_cell_facet_ids,
+    int max_hash_entries,
+    const int* __restrict__ d_oversized_facets,
+    const int* __restrict__ d_oversized_count,
+    int max_oversized_facets,
     uint32_t table_size,
     T base_cell_size,
     T contact_penalty_scale,
@@ -2013,10 +2409,12 @@ __global__ void fem_contact_forces_octave_grid_kernel_3d_device(
                 for (int dx = -1; dx <= 1; ++dx) {
                     uint32_t bucket = hashCoords3D(ncx + dx, ncy + dy, ncz + dz, table_size) + lvl * table_size;
                     int count = d_cell_counts[bucket];
-                    if (count > 32) count = 32;
+                    int start = d_cell_offsets[bucket];
 
                     for (int slot = 0; slot < count; ++slot) {
-                        int f = d_cell_facet_ids[bucket * 32 + slot];
+                        int entry_idx = start + slot;
+                        if (entry_idx < 0 || entry_idx >= max_hash_entries) break;
+                        int f = d_cell_facet_ids[entry_idx];
                         fem_evaluate_candidate_facet_contact<T>(
                             f, nid, node, n_part, has_node_norm, n_node,
                             d_facets, num_facets, d_nodes, d_elements, num_elements,
@@ -2026,6 +2424,21 @@ __global__ void fem_contact_forces_octave_grid_kernel_3d_device(
                     }
                 }
             }
+        }
+    }
+
+    // Evaluate oversized facets that exceeded 4 cells per axis
+    int num_over = d_oversized_count ? *d_oversized_count : 0;
+    if (num_over > max_oversized_facets) num_over = max_oversized_facets;
+    if (d_oversized_facets) {
+        for (int oi = 0; oi < num_over; ++oi) {
+            int f = d_oversized_facets[oi];
+            fem_evaluate_candidate_facet_contact<T>(
+                f, nid, node, n_part, has_node_norm, n_node,
+                d_facets, num_facets, d_nodes, d_elements, num_elements,
+                d_materials, K_slave_node, contact_penalty_scale, contact_damping,
+                dt, best_f_total, best_nx, best_ny, best_nz, best_fid, best_N, best_m_pair
+            );
         }
     }
 
@@ -2192,7 +2605,9 @@ __global__ void fem_build_lbvh_aabbs_kernel_3d_device(
             return;
         }
 
-        // Second child: both children are guaranteed to have completed and fenced their AABBs
+        // Second child: both children are guaranteed to have completed and fenced their AABBs.
+        // Read sibling internal nodes via volatile pointer so L1 cache never returns stale AABBs.
+        const volatile LBVHNode3D<T>* v_nodes = nodes;
         int left = nodes[parent].left_child;
         int right = nodes[parent].right_child;
 
@@ -2204,8 +2619,8 @@ __global__ void fem_build_lbvh_aabbs_kernel_3d_device(
             min_box[0] = f.bbox_min[0]; min_box[1] = f.bbox_min[1]; min_box[2] = f.bbox_min[2];
             max_box[0] = f.bbox_max[0]; max_box[1] = f.bbox_max[1]; max_box[2] = f.bbox_max[2];
         } else {
-            min_box[0] = nodes[left].aabb_min[0]; min_box[1] = nodes[left].aabb_min[1]; min_box[2] = nodes[left].aabb_min[2];
-            max_box[0] = nodes[left].aabb_max[0]; max_box[1] = nodes[left].aabb_max[1]; max_box[2] = nodes[left].aabb_max[2];
+            min_box[0] = v_nodes[left].aabb_min[0]; min_box[1] = v_nodes[left].aabb_min[1]; min_box[2] = v_nodes[left].aabb_min[2];
+            max_box[0] = v_nodes[left].aabb_max[0]; max_box[1] = v_nodes[left].aabb_max[1]; max_box[2] = v_nodes[left].aabb_max[2];
         }
 
         if (right < 0) {
@@ -2218,12 +2633,18 @@ __global__ void fem_build_lbvh_aabbs_kernel_3d_device(
             max_box[1] = (max_box[1] > f.bbox_max[1]) ? max_box[1] : f.bbox_max[1];
             max_box[2] = (max_box[2] > f.bbox_max[2]) ? max_box[2] : f.bbox_max[2];
         } else {
-            min_box[0] = (min_box[0] < nodes[right].aabb_min[0]) ? min_box[0] : nodes[right].aabb_min[0];
-            min_box[1] = (min_box[1] < nodes[right].aabb_min[1]) ? min_box[1] : nodes[right].aabb_min[1];
-            min_box[2] = (min_box[2] < nodes[right].aabb_min[2]) ? min_box[2] : nodes[right].aabb_min[2];
-            max_box[0] = (max_box[0] > nodes[right].aabb_max[0]) ? max_box[0] : nodes[right].aabb_max[0];
-            max_box[1] = (max_box[1] > nodes[right].aabb_max[1]) ? max_box[1] : nodes[right].aabb_max[1];
-            max_box[2] = (max_box[2] > nodes[right].aabb_max[2]) ? max_box[2] : nodes[right].aabb_max[2];
+            T rmin0 = v_nodes[right].aabb_min[0];
+            T rmin1 = v_nodes[right].aabb_min[1];
+            T rmin2 = v_nodes[right].aabb_min[2];
+            T rmax0 = v_nodes[right].aabb_max[0];
+            T rmax1 = v_nodes[right].aabb_max[1];
+            T rmax2 = v_nodes[right].aabb_max[2];
+            min_box[0] = (min_box[0] < rmin0) ? min_box[0] : rmin0;
+            min_box[1] = (min_box[1] < rmin1) ? min_box[1] : rmin1;
+            min_box[2] = (min_box[2] < rmin2) ? min_box[2] : rmin2;
+            max_box[0] = (max_box[0] > rmax0) ? max_box[0] : rmax0;
+            max_box[1] = (max_box[1] > rmax1) ? max_box[1] : rmax1;
+            max_box[2] = (max_box[2] > rmax2) ? max_box[2] : rmax2;
         }
 
         nodes[parent].aabb_min[0] = min_box[0];
@@ -2232,6 +2653,7 @@ __global__ void fem_build_lbvh_aabbs_kernel_3d_device(
         nodes[parent].aabb_max[0] = max_box[0];
         nodes[parent].aabb_max[1] = max_box[1];
         nodes[parent].aabb_max[2] = max_box[2];
+        __threadfence();
 
         int next_parent = nodes[parent].parent;
         if (next_parent < 0) {
@@ -2344,6 +2766,213 @@ __global__ void fem_contact_forces_lbvh_kernel_3d_device(
     );
 }
 
+// Device helper: evaluate candidate FEM boundary facet against an MPM particle
+template <typename T>
+__device__ inline void fem_eval_mpm_facet_candidate(
+    int f,
+    float px, float py, float pz,
+    float pvx, float pvy, float pvz,
+    float pm,
+    float r_debris,
+    T total_pad,
+    const FEMNode3D<T>* d_nodes,
+    const FEMElement3D<T>* d_elements,
+    int num_elements,
+    const FEMFacet3D<T>* d_facets,
+    const MaterialTable3D* d_materials,
+    T contact_penalty_scale,
+    T contact_damping,
+    T dt_safe,
+    T& best_f_total,
+    T& best_nx, T& best_ny, T& best_nz,
+    int& best_fid,
+    T best_N[4],
+    T& best_m_pair,
+    T& best_dist_n,
+    T& best_r_eff,
+    T& best_capture_depth,
+    T& best_v_rel_n
+) {
+    const FEMFacet3D<T>& facet = d_facets[f];
+    if (facet.is_eroded) return;
+
+    if (px < facet.bbox_min[0] - total_pad || px > facet.bbox_max[0] + total_pad ||
+        py < facet.bbox_min[1] - total_pad || py > facet.bbox_max[1] + total_pad ||
+        pz < facet.bbox_min[2] - total_pad || pz > facet.bbox_max[2] + total_pad) return;
+
+    const auto& n0 = d_nodes[facet.node_ids[0]];
+    const auto& n1 = d_nodes[facet.node_ids[1]];
+    const auto& n2 = d_nodes[facet.node_ids[2]];
+    const auto& n3 = d_nodes[facet.node_ids[3]];
+    const bool is_tri = (facet.node_ids[2] == facet.node_ids[3]);
+
+    T e1[3] = {n1.x[0] - n0.x[0], n1.x[1] - n0.x[1], n1.x[2] - n0.x[2]};
+    T e3[3] = {n3.x[0] - n0.x[0], n3.x[1] - n0.x[1], n3.x[2] - n0.x[2]};
+    T dx_v0[3] = {static_cast<T>(px) - n0.x[0], static_cast<T>(py) - n0.x[1], static_cast<T>(pz) - n0.x[2]};
+
+    T len1_sq = e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2];
+    T len3_sq = e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2];
+    T dot_e1_e3 = e1[0]*e3[0] + e1[1]*e3[1] + e1[2]*e3[2];
+
+    T det_tangent = len1_sq * len3_sq - dot_e1_e3 * dot_e1_e3;
+    T u_param = static_cast<T>(0.5f), v_param = static_cast<T>(0.5f);
+
+    if (fabs(det_tangent) > static_cast<T>(1.0e-12f)) {
+        T proj1 = dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2];
+        T proj3 = dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2];
+        T inv_det = static_cast<T>(1.0f) / det_tangent;
+        u_param = (proj1 * len3_sq - proj3 * dot_e1_e3) * inv_det;
+        v_param = (proj3 * len1_sq - proj1 * dot_e1_e3) * inv_det;
+    } else {
+        u_param = (len1_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2]) / len1_sq) : static_cast<T>(0.5f);
+        v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
+    }
+
+    if (u_param < static_cast<T>(-0.08f) || u_param > static_cast<T>(1.08f) ||
+        v_param < static_cast<T>(-0.08f) || v_param > static_cast<T>(1.08f)) return;
+    if (is_tri && (u_param + v_param > static_cast<T>(1.08f))) return;
+
+    T u_clamped = u_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (u_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : u_param);
+    T v_clamped = v_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (v_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : v_param);
+
+    T N_shape[4];
+    if (is_tri) {
+        if (u_clamped + v_clamped > static_cast<T>(1.0f)) {
+            T s = u_clamped + v_clamped;
+            u_clamped /= s;
+            v_clamped /= s;
+        }
+        N_shape[0] = static_cast<T>(1.0f) - u_clamped - v_clamped;
+        N_shape[1] = u_clamped;
+        N_shape[2] = v_clamped;
+        N_shape[3] = static_cast<T>(0.0f);
+    } else {
+        N_shape[0] = (static_cast<T>(1.0f) - u_clamped) * (static_cast<T>(1.0f) - v_clamped);
+        N_shape[1] = u_clamped * (static_cast<T>(1.0f) - v_clamped);
+        N_shape[2] = u_clamped * v_clamped;
+        N_shape[3] = (static_cast<T>(1.0f) - u_clamped) * v_clamped;
+    }
+
+    T x_surf[3] = {
+        N_shape[0]*n0.x[0] + N_shape[1]*n1.x[0] + N_shape[2]*n2.x[0] + N_shape[3]*n3.x[0],
+        N_shape[0]*n0.x[1] + N_shape[1]*n1.x[1] + N_shape[2]*n2.x[1] + N_shape[3]*n3.x[1],
+        N_shape[0]*n0.x[2] + N_shape[1]*n1.x[2] + N_shape[2]*n2.x[2] + N_shape[3]*n3.x[2]
+    };
+
+    T contact_normal[3] = {facet.normal[0], facet.normal[1], facet.normal[2]};
+    T dx_surf[3] = {static_cast<T>(px) - x_surf[0], static_cast<T>(py) - x_surf[1], static_cast<T>(pz) - x_surf[2]};
+    T dist_n = dx_surf[0]*contact_normal[0] + dx_surf[1]*contact_normal[1] + dx_surf[2]*contact_normal[2];
+
+    T h_elem = sqrt(facet.area > static_cast<T>(1.0e-24f) ? facet.area : static_cast<T>(1.0e-24f));
+    if (facet.element_id >= 0 && facet.element_id < num_elements) {
+        T elem_V = d_elements[facet.element_id].V;
+        if (elem_V > static_cast<T>(1.0e-30f) && facet.area > static_cast<T>(1.0e-24f)) {
+            h_elem = (is_tri ? static_cast<T>(3.0f) : static_cast<T>(1.0f)) * elem_V / facet.area;
+        }
+    }
+
+    T r_eff = (static_cast<T>(r_debris) < static_cast<T>(0.25f) * h_elem)
+            ? static_cast<T>(r_debris) : (static_cast<T>(0.25f) * h_elem);
+
+    T dx_t0 = dx_surf[0] - dist_n * contact_normal[0];
+    T dx_t1 = dx_surf[1] - dist_n * contact_normal[1];
+    T dx_t2 = dx_surf[2] - dist_n * contact_normal[2];
+    T d_tangent_sq = dx_t0*dx_t0 + dx_t1*dx_t1 + dx_t2*dx_t2;
+    T d_tan_tol_sq = (static_cast<T>(0.25f) * h_elem * h_elem > static_cast<T>(2.0f) * r_eff * r_eff)
+                   ? static_cast<T>(0.25f) * h_elem * h_elem : static_cast<T>(2.0f) * r_eff * r_eff;
+    if (d_tangent_sq > d_tan_tol_sq) return;
+
+    T vf0 = N_shape[0]*n0.v[0] + N_shape[1]*n1.v[0] + N_shape[2]*n2.v[0] + N_shape[3]*n3.v[0];
+    T vf1 = N_shape[0]*n0.v[1] + N_shape[1]*n1.v[1] + N_shape[2]*n2.v[1] + N_shape[3]*n3.v[1];
+    T vf2 = N_shape[0]*n0.v[2] + N_shape[1]*n1.v[2] + N_shape[2]*n2.v[2] + N_shape[3]*n3.v[2];
+    T v_rel_n = (static_cast<T>(pvx) - vf0)*contact_normal[0] +
+                (static_cast<T>(pvy) - vf1)*contact_normal[1] +
+                (static_cast<T>(pvz) - vf2)*contact_normal[2];
+
+    // Unidirectional compressive gate: ignore separating or back-face exiting particles
+    if (v_rel_n > static_cast<T>(0.0f)) return;
+
+    T capture_depth = static_cast<T>(0.50f) * h_elem;
+    T v_sweep = static_cast<T>(1.5f) * fabs(v_rel_n) * dt_safe;
+    if (v_sweep > capture_depth) capture_depth = v_sweep;
+    T r_floor = static_cast<T>(2.0f) * r_eff;
+    if (r_floor > capture_depth) capture_depth = r_floor;
+
+    if (dist_n < r_eff && dist_n > -capture_depth) {
+        T penetration = r_eff - dist_n;
+        T eff_penetration = (penetration < capture_depth) ? penetration : capture_depth;
+
+        T K_master = static_cast<T>(160.0e9f);
+        T p_elem_master = static_cast<T>(0.0f);
+        if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
+            const auto& f_elem = d_elements[facet.element_id];
+            int mid = f_elem.mat_id;
+            const MaterialTable3D& mat = d_materials[mid];
+            T v_rel_m = (f_elem.V0 > static_cast<T>(1.0e-18f) && f_elem.V > static_cast<T>(0.0f))
+                ? (f_elem.V / f_elem.V0) : static_cast<T>(1.0f);
+            K_master = Blast::Materials::getEffectiveBulkModulus<T>(mat, v_rel_m);
+            p_elem_master = -(f_elem.sigma[0][0] + f_elem.sigma[1][1] + f_elem.sigma[2][2]) / static_cast<T>(3.0f);
+            if (p_elem_master < static_cast<T>(0.0f)) p_elem_master = static_cast<T>(0.0f);
+            if (p_elem_master * static_cast<T>(3.0f) > K_master) {
+                K_master = p_elem_master * static_cast<T>(3.0f);
+            }
+        }
+
+        T m_facet_avg = is_tri
+            ? ((n0.m + n1.m + n2.m) / static_cast<T>(3.0f))
+            : (static_cast<T>(0.25f) * (n0.m + n1.m + n2.m + n3.m));
+        T p_m = static_cast<T>(pm);
+        T m_sum = p_m + m_facet_avg;
+        T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (p_m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
+
+        T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
+        T k_geom = contact_penalty_scale * (static_cast<T>(0.10f) * K_master) * h_elem;
+        T k_stiff = (k_geom < k_dyn) ? k_geom : k_dyn;
+        if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
+        T f_spring = k_stiff * eff_penetration;
+
+        T f_damp = static_cast<T>(0.0f);
+        if (v_rel_n < static_cast<T>(0.0f)) {
+            T c = static_cast<T>(2.0f) * contact_damping * sqrt(k_stiff * m_pair);
+            f_damp = -c * v_rel_n;
+        }
+
+        T f_total = f_spring + f_damp;
+        T v_limit = (static_cast<T>(1.5f) * fabs(v_rel_n) > static_cast<T>(1.0f)) ? static_cast<T>(1.5f) * fabs(v_rel_n) : static_cast<T>(1.0f);
+        T f_max = m_pair * v_limit / dt_safe;
+        if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
+            const auto& f_elem = d_elements[facet.element_id];
+            int mid = f_elem.mat_id;
+            T sigma_y = static_cast<T>(d_materials[mid].yield_stress > 0.0f ? d_materials[mid].yield_stress : 400.0e6f);
+            T facet_a = facet.area > static_cast<T>(1.0e-12f) ? facet.area : static_cast<T>(1.0e-12f);
+            T area_frac = (static_cast<T>(4.0f) * r_eff * r_eff) / facet_a;
+            if (area_frac > static_cast<T>(1.0f)) area_frac = static_cast<T>(1.0f);
+            if (area_frac < static_cast<T>(0.10f)) area_frac = static_cast<T>(0.10f);
+            T p_cap = (p_elem_master > static_cast<T>(1.5f) * sigma_y) ? p_elem_master : static_cast<T>(1.5f) * sigma_y;
+            T f_mat_cap = p_cap * facet.area * area_frac;
+            if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
+        }
+        if (f_total > f_max) f_total = f_max;
+
+        if (f_total > best_f_total) {
+            best_f_total = f_total;
+            best_nx = contact_normal[0];
+            best_ny = contact_normal[1];
+            best_nz = contact_normal[2];
+            best_fid = f;
+            best_N[0] = N_shape[0];
+            best_N[1] = N_shape[1];
+            best_N[2] = N_shape[2];
+            best_N[3] = N_shape[3];
+            best_m_pair = m_pair;
+            best_dist_n = dist_n;
+            best_r_eff = r_eff;
+            best_capture_depth = capture_depth;
+            best_v_rel_n = v_rel_n;
+        }
+    }
+}
+
 // CUDA Kernel: Penalty Contact between MPM Debris Particles and Intact FEM Facets & Rebars
 template <typename T>
 __global__ void fem_contact_mpm_debris_kernel_3d_device(
@@ -2360,11 +2989,22 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
     const FEMBeam3DElement<T>* d_beams,
     int num_beams,
     const MaterialTable3D* d_materials,
+    const int* __restrict__ d_cell_counts,
+    const int* __restrict__ d_cell_offsets,
+    const int* __restrict__ d_cell_facet_ids,
+    int max_hash_entries,
+    const int* __restrict__ d_oversized_facets,
+    const int* __restrict__ d_oversized_count,
+    int max_oversized_facets,
+    uint32_t table_size,
+    T base_cell_size,
     T contact_penalty_scale,
     T mu_static,
     T mu_kinetic,
     T contact_damping,
-    T dt
+    T dt,
+    T* d_mpm_impulse_accum,
+    bool accumulate_impulse
 ) {
     int p_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (p_idx >= num_particles) return;
@@ -2372,191 +3012,92 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
     float px = soa.x[0][p_idx];
     float py = soa.x[1][p_idx];
     float pz = soa.x[2][p_idx];
+    float pvx = soa.v[0][p_idx];
+    float pvy = soa.v[1][p_idx];
+    float pvz = soa.v[2][p_idx];
     float pm = soa.m[p_idx];
     if (pm <= 0.0f) return;
 
     float r_debris = soa.lp[0][p_idx] > 0.0f ? soa.lp[0][p_idx] : 0.002f;
     T dt_safe = (dt > static_cast<T>(1.0e-12f)) ? dt : static_cast<T>(1.0e-12f);
-    T v_pad = (fabs(soa.v[0][p_idx]) + fabs(soa.v[1][p_idx]) + fabs(soa.v[2][p_idx])) * dt_safe;
-    T total_pad = static_cast<T>(r_debris) + v_pad + static_cast<T>(0.005f);
+    T v_pad = (fabs(pvx) + fabs(pvy) + fabs(pvz)) * dt_safe;
+    T cell_ref = (base_cell_size > static_cast<T>(0.0f)) ? base_cell_size : static_cast<T>(0.02f);
+    T r_broad = (static_cast<T>(r_debris) < static_cast<T>(0.5f) * cell_ref) ? static_cast<T>(r_debris) : static_cast<T>(0.5f) * cell_ref;
+    T total_pad = r_broad + v_pad + static_cast<T>(0.005f);
 
     T best_f_total = static_cast<T>(0.0f);
     T best_nx = static_cast<T>(0.0f), best_ny = static_cast<T>(0.0f), best_nz = static_cast<T>(0.0f);
     int best_fid = -1;
     T best_N[4] = {0, 0, 0, 0};
     T best_m_pair = static_cast<T>(0.0f);
+    T best_dist_n = static_cast<T>(0.0f);
+    T best_r_eff = static_cast<T>(r_debris);
+    T best_capture_depth = static_cast<T>(0.0f);
+    T best_v_rel_n = static_cast<T>(0.0f);
 
-    // 1. Facet Contact Evaluation (Solid Hex / Tet4 boundary facets)
-    for (int f = 0; f < num_facets; ++f) {
-        const FEMFacet3D<T>& facet = d_facets[f];
-        if (facet.is_eroded) continue;
+    const bool use_hash = (d_cell_counts != nullptr && d_cell_offsets != nullptr &&
+                           d_cell_facet_ids != nullptr && table_size > 0 &&
+                           base_cell_size > static_cast<T>(0.0f));
 
-        // Broad-phase AABB test with velocity-aware padding
-        if (px < facet.bbox_min[0] - total_pad || px > facet.bbox_max[0] + total_pad ||
-            py < facet.bbox_min[1] - total_pad || py > facet.bbox_max[1] + total_pad ||
-            pz < facet.bbox_min[2] - total_pad || pz > facet.bbox_max[2] + total_pad) continue;
+    if (num_facets > 0) {
+        if (use_hash) {
+            for (int lvl = 0; lvl < 4; ++lvl) {
+                T cell_size = base_cell_size * static_cast<T>(1 << lvl);
+                T inv_cs = static_cast<T>(1.0f) / cell_size;
+                int pcx = static_cast<int>(floor(static_cast<T>(px) * inv_cs));
+                int pcy = static_cast<int>(floor(static_cast<T>(py) * inv_cs));
+                int pcz = static_cast<int>(floor(static_cast<T>(pz) * inv_cs));
 
-        const auto& n0 = d_nodes[facet.node_ids[0]];
-        const auto& n1 = d_nodes[facet.node_ids[1]];
-        const auto& n2 = d_nodes[facet.node_ids[2]];
-        const auto& n3 = d_nodes[facet.node_ids[3]];
-        const bool is_tri = (facet.node_ids[2] == facet.node_ids[3]);
+                #pragma unroll 1
+                for (int dz = -1; dz <= 1; ++dz) {
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            uint32_t bucket = hashCoords3D(pcx + dx, pcy + dy, pcz + dz, table_size) + lvl * table_size;
+                            int count = d_cell_counts[bucket];
+                            int start = d_cell_offsets[bucket];
 
-        T e1[3] = {n1.x[0] - n0.x[0], n1.x[1] - n0.x[1], n1.x[2] - n0.x[2]};
-        T e3[3] = {n3.x[0] - n0.x[0], n3.x[1] - n0.x[1], n3.x[2] - n0.x[2]};
-        T dx_v0[3] = {static_cast<T>(px) - n0.x[0], static_cast<T>(py) - n0.x[1], static_cast<T>(pz) - n0.x[2]};
-
-        T len1_sq = e1[0]*e1[0] + e1[1]*e1[1] + e1[2]*e1[2];
-        T len3_sq = e3[0]*e3[0] + e3[1]*e3[1] + e3[2]*e3[2];
-        T dot_e1_e3 = e1[0]*e3[0] + e1[1]*e3[1] + e1[2]*e3[2];
-
-        T det_tangent = len1_sq * len3_sq - dot_e1_e3 * dot_e1_e3;
-        T u_param = static_cast<T>(0.5f), v_param = static_cast<T>(0.5f);
-
-        if (fabs(det_tangent) > static_cast<T>(1.0e-12f)) {
-            T proj1 = dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2];
-            T proj3 = dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2];
-            T inv_det = static_cast<T>(1.0f) / det_tangent;
-            u_param = (proj1 * len3_sq - proj3 * dot_e1_e3) * inv_det;
-            v_param = (proj3 * len1_sq - proj1 * dot_e1_e3) * inv_det;
-        } else {
-            u_param = (len1_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e1[0] + dx_v0[1]*e1[1] + dx_v0[2]*e1[2]) / len1_sq) : static_cast<T>(0.5f);
-            v_param = (len3_sq > static_cast<T>(1.0e-12f)) ? ((dx_v0[0]*e3[0] + dx_v0[1]*e3[1] + dx_v0[2]*e3[2]) / len3_sq) : static_cast<T>(0.5f);
-        }
-
-        if (u_param < static_cast<T>(-0.08f) || u_param > static_cast<T>(1.08f) ||
-            v_param < static_cast<T>(-0.08f) || v_param > static_cast<T>(1.08f)) continue;
-        if (is_tri && (u_param + v_param > static_cast<T>(1.08f))) continue;
-
-        T u_clamped = u_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (u_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : u_param);
-        T v_clamped = v_param < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (v_param > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : v_param);
-
-        T N_shape[4];
-        if (is_tri) {
-            if (u_clamped + v_clamped > static_cast<T>(1.0f)) {
-                T s = u_clamped + v_clamped;
-                u_clamped /= s;
-                v_clamped /= s;
-            }
-            N_shape[0] = static_cast<T>(1.0f) - u_clamped - v_clamped;
-            N_shape[1] = u_clamped;
-            N_shape[2] = v_clamped;
-            N_shape[3] = static_cast<T>(0.0f);
-        } else {
-            N_shape[0] = (static_cast<T>(1.0f) - u_clamped) * (static_cast<T>(1.0f) - v_clamped);
-            N_shape[1] = u_clamped * (static_cast<T>(1.0f) - v_clamped);
-            N_shape[2] = u_clamped * v_clamped;
-            N_shape[3] = (static_cast<T>(1.0f) - u_clamped) * v_clamped;
-        }
-
-        T x_surf[3] = {
-            N_shape[0]*n0.x[0] + N_shape[1]*n1.x[0] + N_shape[2]*n2.x[0] + N_shape[3]*n3.x[0],
-            N_shape[0]*n0.x[1] + N_shape[1]*n1.x[1] + N_shape[2]*n2.x[1] + N_shape[3]*n3.x[1],
-            N_shape[0]*n0.x[2] + N_shape[1]*n1.x[2] + N_shape[2]*n2.x[2] + N_shape[3]*n3.x[2]
-        };
-
-        T contact_normal[3] = {facet.normal[0], facet.normal[1], facet.normal[2]};
-        T dx_surf[3] = {static_cast<T>(px) - x_surf[0], static_cast<T>(py) - x_surf[1], static_cast<T>(pz) - x_surf[2]};
-        T dist_n = dx_surf[0]*contact_normal[0] + dx_surf[1]*contact_normal[1] + dx_surf[2]*contact_normal[2];
-
-        T h_elem = sqrt(facet.area > static_cast<T>(1.0e-24f) ? facet.area : static_cast<T>(1.0e-24f));
-        if (facet.element_id >= 0 && facet.element_id < num_elements) {
-            T elem_V = d_elements[facet.element_id].V;
-            if (elem_V > static_cast<T>(1.0e-30f) && facet.area > static_cast<T>(1.0e-24f)) {
-                h_elem = elem_V / facet.area;
-            }
-        }
-
-        // Tangential offset check with mesh-adaptive and particle radius tolerance
-        T dx_t0 = dx_surf[0] - dist_n * contact_normal[0];
-        T dx_t1 = dx_surf[1] - dist_n * contact_normal[1];
-        T dx_t2 = dx_surf[2] - dist_n * contact_normal[2];
-        T d_tangent_sq = dx_t0*dx_t0 + dx_t1*dx_t1 + dx_t2*dx_t2;
-        T d_tan_tol_sq = (static_cast<T>(0.25f) * h_elem * h_elem > static_cast<T>(2.0f) * static_cast<T>(r_debris) * static_cast<T>(r_debris))
-                       ? static_cast<T>(0.25f) * h_elem * h_elem : static_cast<T>(2.0f) * static_cast<T>(r_debris) * static_cast<T>(r_debris);
-        if (d_tangent_sq > d_tan_tol_sq) continue;
-
-        T vf0 = N_shape[0]*n0.v[0] + N_shape[1]*n1.v[0] + N_shape[2]*n2.v[0] + N_shape[3]*n3.v[0];
-        T vf1 = N_shape[0]*n0.v[1] + N_shape[1]*n1.v[1] + N_shape[2]*n2.v[1] + N_shape[3]*n3.v[1];
-        T vf2 = N_shape[0]*n0.v[2] + N_shape[1]*n1.v[2] + N_shape[2]*n2.v[2] + N_shape[3]*n3.v[2];
-        T v_rel_n = (static_cast<T>(soa.v[0][p_idx]) - vf0)*contact_normal[0] +
-                    (static_cast<T>(soa.v[1][p_idx]) - vf1)*contact_normal[1] +
-                    (static_cast<T>(soa.v[2][p_idx]) - vf2)*contact_normal[2];
-
-        // Velocity-aware continuous capture threshold: prevents high-speed particles from skipping over contact zone
-        T capture_depth = static_cast<T>(0.50f) * h_elem;
-        T v_sweep = static_cast<T>(1.5f) * fabs(v_rel_n) * dt_safe;
-        if (v_sweep > capture_depth) capture_depth = v_sweep;
-        T r_floor = static_cast<T>(2.0f) * static_cast<T>(r_debris);
-        if (r_floor > capture_depth) capture_depth = r_floor;
-
-        if (dist_n < static_cast<T>(r_debris) && dist_n > -capture_depth) {
-            T penetration = static_cast<T>(r_debris) - dist_n;
-            T eff_penetration = (penetration < capture_depth) ? penetration : capture_depth;
-
-            T K_master = static_cast<T>(160.0e9f);
-            if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
-                const auto& f_elem = d_elements[facet.element_id];
-                int mid = f_elem.mat_id;
-                const MaterialTable3D& mat = d_materials[mid];
-                T v_rel_m = (f_elem.V0 > static_cast<T>(1.0e-18f) && f_elem.V > static_cast<T>(0.0f))
-                    ? (f_elem.V / f_elem.V0) : static_cast<T>(1.0f);
-                K_master = Blast::Materials::getEffectiveBulkModulus<T>(mat, v_rel_m);
-                T p_elem_master = -(f_elem.sigma[0][0] + f_elem.sigma[1][1] + f_elem.sigma[2][2]) / static_cast<T>(3.0f);
-                if (p_elem_master * static_cast<T>(4.0f) > K_master) {
-                    K_master = p_elem_master * static_cast<T>(4.0f);
+                            for (int slot = 0; slot < count; ++slot) {
+                                int entry_idx = start + slot;
+                                if (entry_idx < 0 || entry_idx >= max_hash_entries) break;
+                                int f = d_cell_facet_ids[entry_idx];
+                                if (f < 0 || f >= num_facets) continue;
+                                fem_eval_mpm_facet_candidate<T>(
+                                    f, px, py, pz, pvx, pvy, pvz, pm, r_debris, total_pad,
+                                    d_nodes, d_elements, num_elements, d_facets, d_materials,
+                                    contact_penalty_scale, contact_damping, dt_safe,
+                                    best_f_total, best_nx, best_ny, best_nz, best_fid, best_N,
+                                    best_m_pair, best_dist_n, best_r_eff, best_capture_depth, best_v_rel_n
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
-            T m_facet_avg = is_tri
-                ? ((n0.m + n1.m + n2.m) / static_cast<T>(3.0f))
-                : (static_cast<T>(0.25f) * (n0.m + n1.m + n2.m + n3.m));
-            T p_m = static_cast<T>(pm);
-            T m_sum = p_m + m_facet_avg;
-            T m_pair = (m_sum > static_cast<T>(1.0e-30f)) ? (p_m * m_facet_avg / m_sum) : static_cast<T>(1.0e-30f);
-
-            // Self-adaptive dynamic mass-time matched stiffness + bulk modulus stiffness (Dimensionless scale)
-            T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
-            T k_geom = (static_cast<T>(0.10f) * K_master) * h_elem;
-            T k_base = (k_geom < k_dyn) ? k_geom : k_dyn;
-            T k_stiff = contact_penalty_scale * k_base;
-            if (k_stiff < static_cast<T>(1.0e5f)) k_stiff = static_cast<T>(1.0e5f);
-            T f_spring = k_stiff * eff_penetration;
-            if (v_rel_n >= static_cast<T>(0.0f)) {
-                f_spring *= static_cast<T>(0.10f); // Suppress static spring push on separating/resting particles
+            int num_over = d_oversized_count ? *d_oversized_count : 0;
+            if (num_over > max_oversized_facets) num_over = max_oversized_facets;
+            if (d_oversized_facets) {
+                for (int oi = 0; oi < num_over; ++oi) {
+                    int f = d_oversized_facets[oi];
+                    if (f < 0 || f >= num_facets) continue;
+                    fem_eval_mpm_facet_candidate<T>(
+                        f, px, py, pz, pvx, pvy, pvz, pm, r_debris, total_pad,
+                        d_nodes, d_elements, num_elements, d_facets, d_materials,
+                        contact_penalty_scale, contact_damping, dt_safe,
+                        best_f_total, best_nx, best_ny, best_nz, best_fid, best_N,
+                        best_m_pair, best_dist_n, best_r_eff, best_capture_depth, best_v_rel_n
+                    );
+                }
             }
-
-            T f_damp = static_cast<T>(0.0f);
-            if (v_rel_n < static_cast<T>(0.0f)) {
-                T c = static_cast<T>(2.0f) * contact_damping * sqrt(k_stiff * m_pair);
-                f_damp = -c * v_rel_n;
-            }
-
-            T f_total = f_spring + f_damp;
-            T v_limit = (static_cast<T>(1.5f) * fabs(v_rel_n) > static_cast<T>(1.0f)) ? static_cast<T>(1.5f) * fabs(v_rel_n) : static_cast<T>(1.0f);
-            T f_max = m_pair * v_limit / dt_safe;
-            if (facet.element_id >= 0 && facet.element_id < num_elements && d_materials) {
-                const auto& f_elem = d_elements[facet.element_id];
-                int mid = f_elem.mat_id;
-                T sigma_y = static_cast<T>(d_materials[mid].yield_stress > 0.0f ? d_materials[mid].yield_stress : 400.0e6f);
-                T p_elem_master = -(f_elem.sigma[0][0] + f_elem.sigma[1][1] + f_elem.sigma[2][2]) / static_cast<T>(3.0f);
-                if (p_elem_master > sigma_y) sigma_y = p_elem_master;
-                T f_mat_cap = static_cast<T>(1.5f) * sigma_y * facet.area;
-                if (f_max > f_mat_cap && f_mat_cap > static_cast<T>(1.0e3f)) f_max = f_mat_cap;
-            }
-            if (f_total > f_max) f_total = f_max;
-
-            if (f_total > best_f_total) {
-                best_f_total = f_total;
-                best_nx = contact_normal[0];
-                best_ny = contact_normal[1];
-                best_nz = contact_normal[2];
-                best_fid = f;
-                best_N[0] = N_shape[0];
-                best_N[1] = N_shape[1];
-                best_N[2] = N_shape[2];
-                best_N[3] = N_shape[3];
-                best_m_pair = m_pair;
+        } else {
+            for (int f = 0; f < num_facets; ++f) {
+                fem_eval_mpm_facet_candidate<T>(
+                    f, px, py, pz, pvx, pvy, pvz, pm, r_debris, total_pad,
+                    d_nodes, d_elements, num_elements, d_facets, d_materials,
+                    contact_penalty_scale, contact_damping, dt_safe,
+                    best_f_total, best_nx, best_ny, best_nz, best_fid, best_N,
+                    best_m_pair, best_dist_n, best_r_eff, best_capture_depth, best_v_rel_n
+                );
             }
         }
     }
@@ -2568,11 +3109,32 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
         const auto& n2 = d_nodes[facet.node_ids[2]];
         const auto& n3 = d_nodes[facet.node_ids[3]];
 
+        // Enforce positional non-penetration for penetrating particles
+        if (best_dist_n < static_cast<T>(0.0f) && best_v_rel_n <= static_cast<T>(0.0f)) {
+            T target_clearance = static_cast<T>(0.05f) * best_r_eff;
+            T corr = target_clearance - best_dist_n;
+            if (corr > best_capture_depth) corr = best_capture_depth;
+            if (corr > static_cast<T>(0.0f)) {
+                px += static_cast<float>(corr * best_nx);
+                py += static_cast<float>(corr * best_ny);
+                pz += static_cast<float>(corr * best_nz);
+                soa.x[0][p_idx] = px;
+                soa.x[1][p_idx] = py;
+                soa.x[2][p_idx] = pz;
+            }
+        }
+
         T vf0 = best_N[0]*n0.v[0] + best_N[1]*n1.v[0] + best_N[2]*n2.v[0] + best_N[3]*n3.v[0];
         T vf1 = best_N[0]*n0.v[1] + best_N[1]*n1.v[1] + best_N[2]*n2.v[1] + best_N[3]*n3.v[1];
         T vf2 = best_N[0]*n0.v[2] + best_N[1]*n1.v[2] + best_N[2]*n2.v[2] + best_N[3]*n3.v[2];
 
-        T v_rel[3] = {static_cast<T>(soa.v[0][p_idx]) - vf0, static_cast<T>(soa.v[1][p_idx]) - vf1, static_cast<T>(soa.v[2][p_idx]) - vf2};
+        T v_before[3] = {
+            static_cast<T>(pvx),
+            static_cast<T>(pvy),
+            static_cast<T>(pvz)
+        };
+
+        T v_rel[3] = {v_before[0] - vf0, v_before[1] - vf1, v_before[2] - vf2};
         T v_rel_n = v_rel[0]*best_nx + v_rel[1]*best_ny + v_rel[2]*best_nz;
 
         T v_rel_t[3] = {
@@ -2602,15 +3164,14 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
         };
 
         T v_post[3] = {
-            static_cast<T>(soa.v[0][p_idx]) + (f_tot[0] * dt_safe) / pm,
-            static_cast<T>(soa.v[1][p_idx]) + (f_tot[1] * dt_safe) / pm,
-            static_cast<T>(soa.v[2][p_idx]) + (f_tot[2] * dt_safe) / pm
+            v_before[0] + (f_tot[0] * dt_safe) / pm,
+            v_before[1] + (f_tot[1] * dt_safe) / pm,
+            v_before[2] + (f_tot[2] * dt_safe) / pm
         };
 
-        // Kinematic non-penetration cap: The normal velocity imparted by a solid facet
-        // can never exceed the moving facet's own normal velocity plus allowable physical restitution.
+        // Kinematic non-penetration outbound velocity cap
         T v_post_rel_n = (v_post[0] - vf0)*best_nx + (v_post[1] - vf1)*best_ny + (v_post[2] - vf2)*best_nz;
-        T max_outbound_vn = (fabs(v_rel_n) > static_cast<T>(5.0f)) ? static_cast<T>(0.5f) * fabs(v_rel_n) : static_cast<T>(5.0f);
+        T max_outbound_vn = (fabs(v_rel_n) > static_cast<T>(5.0f)) ? (static_cast<T>(0.5f) * fabs(v_rel_n)) : static_cast<T>(5.0f);
         if (v_post_rel_n > max_outbound_vn) {
             T excess_vn = v_post_rel_n - max_outbound_vn;
             v_post[0] -= excess_vn * best_nx;
@@ -2621,14 +3182,30 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
         soa.v[0][p_idx] = static_cast<float>(v_post[0]);
         soa.v[1][p_idx] = static_cast<float>(v_post[1]);
         soa.v[2][p_idx] = static_cast<float>(v_post[2]);
+        pvx = static_cast<float>(v_post[0]);
+        pvy = static_cast<float>(v_post[1]);
+        pvz = static_cast<float>(v_post[2]);
+
+        // Exact Newton's 3rd Law reaction force based on actual velocity change
+        T f_react[3] = {
+            static_cast<T>(pm) * (v_post[0] - v_before[0]) / dt_safe,
+            static_cast<T>(pm) * (v_post[1] - v_before[1]) / dt_safe,
+            static_cast<T>(pm) * (v_post[2] - v_before[2]) / dt_safe
+        };
 
         #pragma unroll
         for (int k = 0; k < 4; ++k) {
             int fnid = facet.node_ids[k];
             T N_k = best_N[k];
-            atomicAdd(&d_nodes[fnid].f_contact[0], -N_k * f_tot[0]);
-            atomicAdd(&d_nodes[fnid].f_contact[1], -N_k * f_tot[1]);
-            atomicAdd(&d_nodes[fnid].f_contact[2], -N_k * f_tot[2]);
+            if (accumulate_impulse && d_mpm_impulse_accum) {
+                atomicAdd(&d_mpm_impulse_accum[fnid * 3 + 0], -N_k * f_react[0] * dt_safe);
+                atomicAdd(&d_mpm_impulse_accum[fnid * 3 + 1], -N_k * f_react[1] * dt_safe);
+                atomicAdd(&d_mpm_impulse_accum[fnid * 3 + 2], -N_k * f_react[2] * dt_safe);
+            } else {
+                atomicAdd(&d_nodes[fnid].f_contact[0], -N_k * f_react[0]);
+                atomicAdd(&d_nodes[fnid].f_contact[1], -N_k * f_react[1]);
+                atomicAdd(&d_nodes[fnid].f_contact[2], -N_k * f_react[2]);
+            }
         }
     }
 
@@ -2638,11 +3215,17 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
             const FEMTrussElement3D<T>& truss = d_trusses[tr];
             if (truss.is_eroded) continue;
 
-            const auto& n1 = d_nodes[truss.node_ids[0]];
-            const auto& n2 = d_nodes[truss.node_ids[1]];
+            int tid0 = truss.node_ids[0];
+            int tid1 = truss.node_ids[1];
+            if (tid0 < 0 || tid0 >= num_nodes || tid1 < 0 || tid1 >= num_nodes) continue;
+            const auto& n1 = d_nodes[tid0];
+            const auto& n2 = d_nodes[tid1];
+            if (n1.is_eroded || n2.is_eroded) continue;
 
             T r_rebar = sqrt(truss.A > static_cast<T>(1.0e-12f) ? (truss.A / static_cast<T>(3.1415926535f)) : static_cast<T>(0.0001f));
-            T R_contact = r_rebar + static_cast<T>(r_debris);
+            T r_rebar_eff = (static_cast<T>(r_debris) < (static_cast<T>(2.0f) * r_rebar + static_cast<T>(0.005f)))
+                          ? static_cast<T>(r_debris) : (static_cast<T>(2.0f) * r_rebar + static_cast<T>(0.005f));
+            T R_contact = r_rebar + r_rebar_eff;
 
             T ab[3] = {n2.x[0] - n1.x[0], n2.x[1] - n1.x[1], n2.x[2] - n1.x[2]};
             T ap[3] = {static_cast<T>(px) - n1.x[0], static_cast<T>(py) - n1.x[1], static_cast<T>(pz) - n1.x[2]};
@@ -2666,7 +3249,7 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
                 (static_cast<T>(1.0f) - t_proj) * n1.v[1] + t_proj * n2.v[1],
                 (static_cast<T>(1.0f) - t_proj) * n1.v[2] + t_proj * n2.v[2]
             };
-            T v_rel[3] = {static_cast<T>(soa.v[0][p_idx]) - v_seg[0], static_cast<T>(soa.v[1][p_idx]) - v_seg[1], static_cast<T>(soa.v[2][p_idx]) - v_seg[2]};
+            T v_rel[3] = {static_cast<T>(pvx) - v_seg[0], static_cast<T>(pvy) - v_seg[1], static_cast<T>(pvz) - v_seg[2]};
 
             T dist = sqrt(dist_sq > static_cast<T>(1.0e-20f) ? dist_sq : static_cast<T>(1.0e-20f));
             T n_dir[3] = {
@@ -2675,6 +3258,7 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
                 dist > static_cast<T>(1.0e-8f) ? (d_vec[2] / dist) : static_cast<T>(0.0f)
             };
             T v_n = v_rel[0]*n_dir[0] + v_rel[1]*n_dir[1] + v_rel[2]*n_dir[2];
+            if (v_n > static_cast<T>(0.0f)) continue;
 
             T capture_depth = R_contact;
             T v_sweep = static_cast<T>(1.5f) * fabs(v_n) * dt_safe;
@@ -2685,17 +3269,23 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
                 if (delta <= static_cast<T>(0.0f) && v_n < static_cast<T>(0.0f)) delta = -v_n * dt_safe * static_cast<T>(0.5f);
                 if (delta > static_cast<T>(0.0f)) {
                     T K_steel = static_cast<T>(200.0e9f);
-                    T m_pair = static_cast<T>(pm);
+                    if (d_materials && truss.mat_id >= 0 && d_materials[truss.mat_id].youngs_modulus > 0.0f) {
+                        K_steel = static_cast<T>(d_materials[truss.mat_id].youngs_modulus);
+                    }
+                    T m_seg_avg = static_cast<T>(0.5f) * (n1.m + n2.m);
+                    T m_sum_seg = static_cast<T>(pm) + m_seg_avg;
+                    T m_pair = (m_sum_seg > static_cast<T>(1.0e-30f))
+                        ? (static_cast<T>(pm) * m_seg_avg / m_sum_seg)
+                        : static_cast<T>(1.0e-30f);
 
-                    // Self-adaptive dynamic mass-time matched stiffness
                     T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
-                    T k_geom = (static_cast<T>(0.10f) * K_steel) * r_rebar;
-                    T k_base = (k_geom < k_dyn) ? k_geom : k_dyn;
-                    T k_pen = contact_penalty_scale * k_base;
+                    T L_seg = sqrt(ab_len_sq);
+                    T seg_area = static_cast<T>(3.1415926535f) * r_rebar * r_rebar;
+                    T k_geom = contact_penalty_scale * ((static_cast<T>(0.10f) * K_steel * seg_area) / (L_seg > static_cast<T>(1.0e-12f) ? L_seg : static_cast<T>(1.0e-12f)));
+                    T k_pen = (k_geom < k_dyn) ? k_geom : k_dyn;
                     if (k_pen < static_cast<T>(1.0e5f)) k_pen = static_cast<T>(1.0e5f);
 
                     T f_norm_mag = k_pen * delta;
-
                     if (v_n < static_cast<T>(0.0f)) {
                         T c_damp = static_cast<T>(2.0f) * contact_damping * sqrt(k_pen * m_pair);
                         f_norm_mag -= c_damp * v_n;
@@ -2706,17 +3296,194 @@ __global__ void fem_contact_mpm_debris_kernel_3d_device(
                     if (f_norm_mag > f_max) f_norm_mag = f_max;
                     if (f_norm_mag < static_cast<T>(0.0f)) f_norm_mag = static_cast<T>(0.0f);
 
-                    soa.v[0][p_idx] += static_cast<float>((f_norm_mag * n_dir[0] * dt_safe) / pm);
-                    soa.v[1][p_idx] += static_cast<float>((f_norm_mag * n_dir[1] * dt_safe) / pm);
-                    soa.v[2][p_idx] += static_cast<float>((f_norm_mag * n_dir[2] * dt_safe) / pm);
+                    T v_rel_t[3] = {
+                        v_rel[0] - v_n * n_dir[0],
+                        v_rel[1] - v_n * n_dir[1],
+                        v_rel[2] - v_n * n_dir[2]
+                    };
+                    T vt_mag = sqrt(v_rel_t[0]*v_rel_t[0] + v_rel_t[1]*v_rel_t[1] + v_rel_t[2]*v_rel_t[2]);
+                    T f_fric[3] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
+                    if (vt_mag > static_cast<T>(1.0e-6f) && (mu_static > static_cast<T>(0.0f) || mu_kinetic > static_cast<T>(0.0f))) {
+                        T mu_eff = mu_kinetic + (mu_static - mu_kinetic) * exp(-static_cast<T>(10.0f) * vt_mag);
+                        T f_fric_mag = mu_eff * f_norm_mag;
+                        T f_stick = m_pair * vt_mag / dt_safe;
+                        if (f_fric_mag > f_stick) f_fric_mag = f_stick;
+                        f_fric[0] = -f_fric_mag * (v_rel_t[0] / vt_mag);
+                        f_fric[1] = -f_fric_mag * (v_rel_t[1] / vt_mag);
+                        f_fric[2] = -f_fric_mag * (v_rel_t[2] / vt_mag);
+                    }
 
-                    atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[0], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[0]);
-                    atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[1], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[1]);
-                    atomicAdd(&d_nodes[truss.node_ids[0]].f_contact[2], -(static_cast<T>(1.0f) - t_proj) * f_norm_mag * n_dir[2]);
+                    T f_tot_seg[3] = {
+                        f_norm_mag * n_dir[0] + f_fric[0],
+                        f_norm_mag * n_dir[1] + f_fric[1],
+                        f_norm_mag * n_dir[2] + f_fric[2]
+                    };
 
-                    atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[0], -t_proj * f_norm_mag * n_dir[0]);
-                    atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[1], -t_proj * f_norm_mag * n_dir[1]);
-                    atomicAdd(&d_nodes[truss.node_ids[1]].f_contact[2], -t_proj * f_norm_mag * n_dir[2]);
+                    pvx += static_cast<float>((f_tot_seg[0] * dt_safe) / pm);
+                    pvy += static_cast<float>((f_tot_seg[1] * dt_safe) / pm);
+                    pvz += static_cast<float>((f_tot_seg[2] * dt_safe) / pm);
+                    soa.v[0][p_idx] = pvx;
+                    soa.v[1][p_idx] = pvy;
+                    soa.v[2][p_idx] = pvz;
+
+                    const T w0 = static_cast<T>(1.0f) - t_proj;
+                    const T w1 = t_proj;
+                    if (accumulate_impulse && d_mpm_impulse_accum) {
+                        atomicAdd(&d_mpm_impulse_accum[tid0 * 3 + 0], -w0 * f_tot_seg[0] * dt_safe);
+                        atomicAdd(&d_mpm_impulse_accum[tid0 * 3 + 1], -w0 * f_tot_seg[1] * dt_safe);
+                        atomicAdd(&d_mpm_impulse_accum[tid0 * 3 + 2], -w0 * f_tot_seg[2] * dt_safe);
+                        atomicAdd(&d_mpm_impulse_accum[tid1 * 3 + 0], -w1 * f_tot_seg[0] * dt_safe);
+                        atomicAdd(&d_mpm_impulse_accum[tid1 * 3 + 1], -w1 * f_tot_seg[1] * dt_safe);
+                        atomicAdd(&d_mpm_impulse_accum[tid1 * 3 + 2], -w1 * f_tot_seg[2] * dt_safe);
+                    } else {
+                        atomicAdd(&d_nodes[tid0].f_contact[0], -w0 * f_tot_seg[0]);
+                        atomicAdd(&d_nodes[tid0].f_contact[1], -w0 * f_tot_seg[1]);
+                        atomicAdd(&d_nodes[tid0].f_contact[2], -w0 * f_tot_seg[2]);
+                        atomicAdd(&d_nodes[tid1].f_contact[0], -w1 * f_tot_seg[0]);
+                        atomicAdd(&d_nodes[tid1].f_contact[1], -w1 * f_tot_seg[1]);
+                        atomicAdd(&d_nodes[tid1].f_contact[2], -w1 * f_tot_seg[2]);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. 3D Timoshenko Beam Contact Evaluation (if beams present)
+    if (d_beams && num_beams > 0) {
+        for (int b = 0; b < num_beams; ++b) {
+            const FEMBeam3DElement<T>& beam = d_beams[b];
+            if (beam.is_eroded) continue;
+
+            int bid0 = beam.node_ids[0];
+            int bid1 = beam.node_ids[1];
+            if (bid0 < 0 || bid0 >= num_nodes || bid1 < 0 || bid1 >= num_nodes) continue;
+            const auto& n1 = d_nodes[bid0];
+            const auto& n2 = d_nodes[bid1];
+            if (n1.is_eroded || n2.is_eroded) continue;
+
+            T r_rebar = (beam.d > static_cast<T>(0.0f))
+                ? (static_cast<T>(0.5f) * beam.d)
+                : sqrt(beam.A > static_cast<T>(1.0e-12f) ? (beam.A / static_cast<T>(3.1415926535f)) : static_cast<T>(0.0001f));
+            T r_rebar_eff = (static_cast<T>(r_debris) < (static_cast<T>(2.0f) * r_rebar + static_cast<T>(0.005f)))
+                          ? static_cast<T>(r_debris) : (static_cast<T>(2.0f) * r_rebar + static_cast<T>(0.005f));
+            T R_contact = r_rebar + r_rebar_eff;
+
+            T ab[3] = {n2.x[0] - n1.x[0], n2.x[1] - n1.x[1], n2.x[2] - n1.x[2]};
+            T ap[3] = {static_cast<T>(px) - n1.x[0], static_cast<T>(py) - n1.x[1], static_cast<T>(pz) - n1.x[2]};
+            T ab_len_sq = ab[0]*ab[0] + ab[1]*ab[1] + ab[2]*ab[2];
+            if (ab_len_sq <= static_cast<T>(1.0e-16f)) continue;
+
+            T t_proj = (ap[0]*ab[0] + ap[1]*ab[1] + ap[2]*ab[2]) / ab_len_sq;
+            t_proj = t_proj < static_cast<T>(0.0f) ? static_cast<T>(0.0f) : (t_proj > static_cast<T>(1.0f) ? static_cast<T>(1.0f) : t_proj);
+
+            T x_seg[3] = {
+                n1.x[0] + t_proj * ab[0],
+                n1.x[1] + t_proj * ab[1],
+                n1.x[2] + t_proj * ab[2]
+            };
+
+            T d_vec[3] = {static_cast<T>(px) - x_seg[0], static_cast<T>(py) - x_seg[1], static_cast<T>(pz) - x_seg[2]};
+            T dist_sq = d_vec[0]*d_vec[0] + d_vec[1]*d_vec[1] + d_vec[2]*d_vec[2];
+
+            T v_seg[3] = {
+                (static_cast<T>(1.0f) - t_proj) * n1.v[0] + t_proj * n2.v[0],
+                (static_cast<T>(1.0f) - t_proj) * n1.v[1] + t_proj * n2.v[1],
+                (static_cast<T>(1.0f) - t_proj) * n1.v[2] + t_proj * n2.v[2]
+            };
+            T v_rel[3] = {static_cast<T>(pvx) - v_seg[0], static_cast<T>(pvy) - v_seg[1], static_cast<T>(pvz) - v_seg[2]};
+
+            T dist = sqrt(dist_sq > static_cast<T>(1.0e-20f) ? dist_sq : static_cast<T>(1.0e-20f));
+            T n_dir[3] = {
+                dist > static_cast<T>(1.0e-8f) ? (d_vec[0] / dist) : static_cast<T>(0.0f),
+                dist > static_cast<T>(1.0e-8f) ? (d_vec[1] / dist) : static_cast<T>(1.0f),
+                dist > static_cast<T>(1.0e-8f) ? (d_vec[2] / dist) : static_cast<T>(0.0f)
+            };
+            T v_n = v_rel[0]*n_dir[0] + v_rel[1]*n_dir[1] + v_rel[2]*n_dir[2];
+            if (v_n > static_cast<T>(0.0f)) continue;
+
+            T capture_depth = R_contact;
+            T v_sweep = static_cast<T>(1.5f) * fabs(v_n) * dt_safe;
+            if (v_sweep > capture_depth) capture_depth = v_sweep;
+
+            if (dist < capture_depth) {
+                T delta = R_contact - dist;
+                if (delta <= static_cast<T>(0.0f) && v_n < static_cast<T>(0.0f)) delta = -v_n * dt_safe * static_cast<T>(0.5f);
+                if (delta > static_cast<T>(0.0f)) {
+                    T K_steel = static_cast<T>(200.0e9f);
+                    if (d_materials && beam.mat_id >= 0 && d_materials[beam.mat_id].youngs_modulus > 0.0f) {
+                        K_steel = static_cast<T>(d_materials[beam.mat_id].youngs_modulus);
+                    }
+                    T m_seg_avg = static_cast<T>(0.5f) * (n1.m + n2.m);
+                    T m_sum_seg = static_cast<T>(pm) + m_seg_avg;
+                    T m_pair = (m_sum_seg > static_cast<T>(1.0e-30f))
+                        ? (static_cast<T>(pm) * m_seg_avg / m_sum_seg)
+                        : static_cast<T>(1.0e-30f);
+
+                    T k_dyn = static_cast<T>(0.50f) * m_pair / (dt_safe * dt_safe);
+                    T L_seg = sqrt(ab_len_sq);
+                    T seg_area = static_cast<T>(3.1415926535f) * r_rebar * r_rebar;
+                    T k_geom = contact_penalty_scale * ((static_cast<T>(0.10f) * K_steel * seg_area) / (L_seg > static_cast<T>(1.0e-12f) ? L_seg : static_cast<T>(1.0e-12f)));
+                    T k_pen = (k_geom < k_dyn) ? k_geom : k_dyn;
+                    if (k_pen < static_cast<T>(1.0e5f)) k_pen = static_cast<T>(1.0e5f);
+
+                    T f_norm_mag = k_pen * delta;
+                    if (v_n < static_cast<T>(0.0f)) {
+                        T c_damp = static_cast<T>(2.0f) * contact_damping * sqrt(k_pen * m_pair);
+                        f_norm_mag -= c_damp * v_n;
+                    }
+
+                    T v_limit = (static_cast<T>(1.5f) * fabs(v_n) > static_cast<T>(1.0f)) ? static_cast<T>(1.5f) * fabs(v_n) : static_cast<T>(1.0f);
+                    T f_max = m_pair * v_limit / dt_safe;
+                    if (f_norm_mag > f_max) f_norm_mag = f_max;
+                    if (f_norm_mag < static_cast<T>(0.0f)) f_norm_mag = static_cast<T>(0.0f);
+
+                    T v_rel_t[3] = {
+                        v_rel[0] - v_n * n_dir[0],
+                        v_rel[1] - v_n * n_dir[1],
+                        v_rel[2] - v_n * n_dir[2]
+                    };
+                    T vt_mag = sqrt(v_rel_t[0]*v_rel_t[0] + v_rel_t[1]*v_rel_t[1] + v_rel_t[2]*v_rel_t[2]);
+                    T f_fric[3] = {static_cast<T>(0), static_cast<T>(0), static_cast<T>(0)};
+                    if (vt_mag > static_cast<T>(1.0e-6f) && (mu_static > static_cast<T>(0.0f) || mu_kinetic > static_cast<T>(0.0f))) {
+                        T mu_eff = mu_kinetic + (mu_static - mu_kinetic) * exp(-static_cast<T>(10.0f) * vt_mag);
+                        T f_fric_mag = mu_eff * f_norm_mag;
+                        T f_stick = m_pair * vt_mag / dt_safe;
+                        if (f_fric_mag > f_stick) f_fric_mag = f_stick;
+                        f_fric[0] = -f_fric_mag * (v_rel_t[0] / vt_mag);
+                        f_fric[1] = -f_fric_mag * (v_rel_t[1] / vt_mag);
+                        f_fric[2] = -f_fric_mag * (v_rel_t[2] / vt_mag);
+                    }
+
+                    T f_tot_seg[3] = {
+                        f_norm_mag * n_dir[0] + f_fric[0],
+                        f_norm_mag * n_dir[1] + f_fric[1],
+                        f_norm_mag * n_dir[2] + f_fric[2]
+                    };
+
+                    pvx += static_cast<float>((f_tot_seg[0] * dt_safe) / pm);
+                    pvy += static_cast<float>((f_tot_seg[1] * dt_safe) / pm);
+                    pvz += static_cast<float>((f_tot_seg[2] * dt_safe) / pm);
+                    soa.v[0][p_idx] = pvx;
+                    soa.v[1][p_idx] = pvy;
+                    soa.v[2][p_idx] = pvz;
+
+                    const T w0 = static_cast<T>(1.0f) - t_proj;
+                    const T w1 = t_proj;
+                    if (accumulate_impulse && d_mpm_impulse_accum) {
+                        atomicAdd(&d_mpm_impulse_accum[bid0 * 3 + 0], -w0 * f_tot_seg[0] * dt_safe);
+                        atomicAdd(&d_mpm_impulse_accum[bid0 * 3 + 1], -w0 * f_tot_seg[1] * dt_safe);
+                        atomicAdd(&d_mpm_impulse_accum[bid0 * 3 + 2], -w0 * f_tot_seg[2] * dt_safe);
+                        atomicAdd(&d_mpm_impulse_accum[bid1 * 3 + 0], -w1 * f_tot_seg[0] * dt_safe);
+                        atomicAdd(&d_mpm_impulse_accum[bid1 * 3 + 1], -w1 * f_tot_seg[1] * dt_safe);
+                        atomicAdd(&d_mpm_impulse_accum[bid1 * 3 + 2], -w1 * f_tot_seg[2] * dt_safe);
+                    } else {
+                        atomicAdd(&d_nodes[bid0].f_contact[0], -w0 * f_tot_seg[0]);
+                        atomicAdd(&d_nodes[bid0].f_contact[1], -w0 * f_tot_seg[1]);
+                        atomicAdd(&d_nodes[bid0].f_contact[2], -w0 * f_tot_seg[2]);
+                        atomicAdd(&d_nodes[bid1].f_contact[0], -w1 * f_tot_seg[0]);
+                        atomicAdd(&d_nodes[bid1].f_contact[1], -w1 * f_tot_seg[1]);
+                        atomicAdd(&d_nodes[bid1].f_contact[2], -w1 * f_tot_seg[2]);
+                    }
                 }
             }
         }
@@ -2731,6 +3498,10 @@ __global__ void fem_compute_step_size_kernel_3d_device(
     const FEMNode3D<T>* d_nodes,
     const FEMElement3D<T>* d_elements,
     int num_elements,
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
     const MaterialTable3D* d_materials,
     T cfl,
     T* d_block_min_dt
@@ -2743,7 +3514,7 @@ __global__ void fem_compute_step_size_kernel_3d_device(
 
     T dt_elem = static_cast<T>(1.0e30f);
 
-    if (e < num_elements) {
+    if (e < num_elements && d_elements) {
         const FEMElement3D<T>& elem = d_elements[e];
         if (!elem.is_eroded) {
             T x_curr[8][3];
@@ -2766,6 +3537,53 @@ __global__ void fem_compute_step_size_kernel_3d_device(
 
             if (cd > static_cast<T>(1.0e-6f)) {
                 dt_elem = cfl * (L_e / cd);
+            }
+        }
+    }
+
+    if (d_trusses && e < num_trusses) {
+        const FEMTrussElement3D<T>& tr = d_trusses[e];
+        if (!tr.is_eroded && tr.L0 > static_cast<T>(1.0e-9f)) {
+            int n1 = tr.node_ids[0];
+            int n2 = tr.node_ids[1];
+            T dx = d_nodes[n2].x[0] - d_nodes[n1].x[0];
+            T dy = d_nodes[n2].x[1] - d_nodes[n1].x[1];
+            T dz = d_nodes[n2].x[2] - d_nodes[n1].x[2];
+            T L = sqrt(dx*dx + dy*dy + dz*dz);
+            if (L <= static_cast<T>(1.0e-9f)) L = tr.L0;
+
+            const MaterialTable3D& mat = d_materials[tr.mat_id];
+            T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+            T rho = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
+            T cd = sqrt(E / rho);
+            if (cd > static_cast<T>(1.0e-6f)) {
+                T dt_tr = cfl * (L / cd);
+                if (dt_tr < dt_elem) dt_elem = dt_tr;
+            }
+        }
+    }
+
+    if (d_beams && e < num_beams) {
+        const FEMBeam3DElement<T>& bm = d_beams[e];
+        if (!bm.is_eroded && bm.L0 > static_cast<T>(1.0e-9f)) {
+            int n1 = bm.node_ids[0];
+            int n2 = bm.node_ids[1];
+            T dx = d_nodes[n2].x[0] - d_nodes[n1].x[0];
+            T dy = d_nodes[n2].x[1] - d_nodes[n1].x[1];
+            T dz = d_nodes[n2].x[2] - d_nodes[n1].x[2];
+            T L = sqrt(dx*dx + dy*dy + dz*dz);
+            if (L <= static_cast<T>(1.0e-9f)) L = bm.L0;
+
+            const MaterialTable3D& mat = d_materials[bm.mat_id];
+            T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
+            T rho = static_cast<T>(mat.density > 0.0f ? mat.density : 7850.0f);
+            T cd = sqrt(E / rho);
+            if (cd > static_cast<T>(1.0e-6f)) {
+                T dt_axial = cfl * (L / cd);
+                T d_safe = bm.d > static_cast<T>(1.0e-6f) ? bm.d : static_cast<T>(0.01f);
+                T dt_bend = cfl * (L * L) / (static_cast<T>(3.464f) * d_safe * cd);
+                T dt_bm = (dt_axial < dt_bend) ? dt_axial : dt_bend;
+                if (dt_bm < dt_elem) dt_elem = dt_bm;
             }
         }
     }
@@ -2851,7 +3669,10 @@ void launch_fem_element_forces_kernel_3d(
     cudaStream_t stream,
     T* d_nodal_vol_cur,
     T* d_nodal_vol_ref,
-    T current_time
+    T current_time,
+    T* d_nodal_dvol_dt,
+    T min_volume_ratio,
+    int* d_erosion_flag
 ) {
     if (num_elements <= 0) return;
     int block_size = 256;
@@ -2859,14 +3680,18 @@ void launch_fem_element_forces_kernel_3d(
     if (d_nodal_vol_cur && d_nodal_vol_ref && num_nodes > 0) {
         cudaMemsetAsync(d_nodal_vol_cur, 0, sizeof(T) * num_nodes, stream);
         cudaMemsetAsync(d_nodal_vol_ref, 0, sizeof(T) * num_nodes, stream);
+        if (d_nodal_dvol_dt) {
+            cudaMemsetAsync(d_nodal_dvol_dt, 0, sizeof(T) * num_nodes, stream);
+        }
         fem_anp_nodal_volumes_kernel_3d_device<T><<<grid_size, block_size, 0, stream>>>(
-            d_nodes, d_elements, num_elements, dt, d_nodal_vol_cur, d_nodal_vol_ref
+            d_nodes, d_elements, num_elements, d_materials, dt, d_nodal_vol_cur, d_nodal_vol_ref, d_nodal_dvol_dt
         );
     }
     fem_element_forces_kernel_3d_device<T><<<grid_size, block_size, 0, stream>>>(
         d_nodes, num_nodes, d_elements, num_elements, d_gp_history, d_materials,
         physics_params, dt, hourglass_coeff, hg_model, integration_scheme,
-        d_nodal_vol_cur, d_nodal_vol_ref, current_time
+        d_nodal_vol_cur, d_nodal_vol_ref, d_nodal_dvol_dt, current_time,
+        min_volume_ratio, d_erosion_flag
     );
 }
 
@@ -2910,19 +3735,20 @@ void launch_fem_initial_timestep_erosion_kernel_3d(
     int num_beams,
     const MaterialTable3D* d_materials,
     FEMErosionCriteria<T> erosion_criteria,
+    BlastPhysicsParams<T> physics_params,
     int* d_node_active_count,
     int* d_erosion_flag,
     cudaStream_t stream,
-    bool enable_cohesive_splitting
+    bool enable_cohesive_splitting,
+    const int* d_face_neighbors,
+    bool enable_nonlocal_damage
 ) {
     if (num_elements <= 0) return;
-    if (d_erosion_flag) {
-        cudaMemsetAsync(d_erosion_flag, 0, sizeof(int), stream);
-    }
     int block_size = 256;
     int grid_size = (num_elements + block_size - 1) / block_size;
     fem_initial_timestep_erosion_kernel_3d_device<T><<<grid_size, block_size, 0, stream>>>(
-        d_nodes, d_elements, num_elements, d_materials, erosion_criteria, d_erosion_flag, enable_cohesive_splitting
+        d_nodes, d_elements, num_elements, d_materials, erosion_criteria, d_erosion_flag,
+        enable_cohesive_splitting, d_face_neighbors, enable_nonlocal_damage, physics_params
     );
 }
 
@@ -3003,7 +3829,14 @@ void launch_fem_contact_forces_kernel_3d(
     const MaterialTable3D* d_materials,
     FEMContactSearchMethod search_method,
     int* d_cell_counts,
+    int* d_cell_offsets,
     int* d_cell_facet_ids,
+    int max_hash_entries,
+    int* d_oversized_facets,
+    int* d_oversized_count,
+    int max_oversized_facets,
+    void* d_hash_scan_temp,
+    size_t hash_scan_temp_bytes,
     uint32_t table_size,
     T base_cell_size,
     uint32_t* d_morton_codes,
@@ -3051,7 +3884,7 @@ void launch_fem_contact_forces_kernel_3d(
             d_bvh_temp_storage, bvh_temp_storage_bytes,
             d_morton_codes, d_morton_codes_alt,
             d_facet_indices_in, d_sorted_facet_ids,
-            num_facets, 0, 30, stream
+            num_facets, 0, 32, stream
         );
 
         if (num_facets > 1) {
@@ -3079,20 +3912,41 @@ void launch_fem_contact_forces_kernel_3d(
             );
         }
     } else {
-        // Multi-Level Octave Spatial Hash Grid (4 octaves)
-        if (d_cell_counts && d_cell_facet_ids && table_size > 0) {
-            cudaMemsetAsync(d_cell_counts, 0, sizeof(int) * 4 * table_size, stream);
+        // Lossless Multi-Level CSR Octave Spatial Hash Grid (4 octaves + oversized list)
+        if (d_cell_counts && d_cell_offsets && d_cell_facet_ids &&
+            d_hash_scan_temp && hash_scan_temp_bytes > 0 && d_oversized_count && table_size > 0) {
+            const int total_buckets = 4 * static_cast<int>(table_size);
             int facet_grid_size = (num_facets + block_size - 1) / block_size;
-            fem_build_octave_hash_grid_kernel_3d_device<T><<<facet_grid_size, block_size, 0, stream>>>(
-                d_facets, num_facets, base_cell_size, d_cell_counts, d_cell_facet_ids, table_size
+
+            cudaMemsetAsync(d_cell_counts, 0, sizeof(int) * total_buckets, stream);
+            cudaMemsetAsync(d_oversized_count, 0, sizeof(int), stream);
+            fem_count_octave_hash_grid_kernel_3d_device<T><<<facet_grid_size, block_size, 0, stream>>>(
+                d_facets, num_facets, base_cell_size, d_cell_counts,
+                d_oversized_facets, d_oversized_count, max_oversized_facets, table_size
+            );
+
+            size_t scan_bytes = hash_scan_temp_bytes;
+            cub::DeviceScan::ExclusiveSum(
+                d_hash_scan_temp, scan_bytes,
+                d_cell_counts, d_cell_offsets,
+                total_buckets, stream
+            );
+
+            cudaMemsetAsync(d_cell_counts, 0, sizeof(int) * total_buckets, stream);
+            fem_scatter_octave_hash_grid_kernel_3d_device<T><<<facet_grid_size, block_size, 0, stream>>>(
+                d_facets, num_facets, base_cell_size, d_cell_counts, d_cell_offsets,
+                d_cell_facet_ids, max_hash_entries, table_size
+            );
+
+            fem_contact_forces_octave_grid_kernel_3d_device<T><<<sn_grid_size, block_size, 0, stream>>>(
+                d_nodes, num_nodes, d_elements, num_elements, d_facets, num_facets,
+                d_surface_nodes, num_surface_nodes, d_node_part_id, d_part_mat_id, max_parts,
+                d_node_normals, d_materials, d_cell_counts, d_cell_offsets, d_cell_facet_ids,
+                max_hash_entries, d_oversized_facets, d_oversized_count, max_oversized_facets,
+                table_size, base_cell_size,
+                contact_penalty_scale, mu_static, mu_kinetic, contact_damping, dt
             );
         }
-        fem_contact_forces_octave_grid_kernel_3d_device<T><<<sn_grid_size, block_size, 0, stream>>>(
-            d_nodes, num_nodes, d_elements, num_elements, d_facets, num_facets,
-            d_surface_nodes, num_surface_nodes, d_node_part_id, d_part_mat_id, max_parts,
-            d_node_normals, d_materials, d_cell_counts, d_cell_facet_ids, table_size, base_cell_size,
-            contact_penalty_scale, mu_static, mu_kinetic, contact_damping, dt
-        );
     }
 }
 
@@ -3111,20 +3965,36 @@ void launch_fem_mpm_debris_contact_kernel_3d(
     const FEMBeam3DElement<T>* d_beams,
     int num_beams,
     const MaterialTable3D* d_materials,
+    const int* d_cell_counts,
+    const int* d_cell_offsets,
+    const int* d_cell_facet_ids,
+    int max_hash_entries,
+    const int* d_oversized_facets,
+    const int* d_oversized_count,
+    int max_oversized_facets,
+    uint32_t table_size,
+    T base_cell_size,
     T contact_penalty_scale,
     T mu_static,
     T mu_kinetic,
     T contact_damping,
     T dt,
+    T* d_mpm_impulse_accum,
+    bool accumulate_impulse,
     cudaStream_t stream
 ) {
-    if (num_particles <= 0 || (num_facets <= 0 && num_trusses <= 0)) return;
+    if (contact_penalty_scale <= static_cast<T>(0.0f)) return;
+    if (num_particles <= 0 || (num_facets <= 0 && num_trusses <= 0 && num_beams <= 0)) return;
     int block_size = 256;
     int grid_size = (num_particles + block_size - 1) / block_size;
     fem_contact_mpm_debris_kernel_3d_device<T><<<grid_size, block_size, 0, stream>>>(
         soa, num_particles, d_nodes, num_nodes, d_elements, num_elements,
         d_facets, num_facets, d_trusses, num_trusses, d_beams, num_beams,
-        d_materials, contact_penalty_scale, mu_static, mu_kinetic, contact_damping, dt
+        d_materials, d_cell_counts, d_cell_offsets, d_cell_facet_ids,
+        max_hash_entries, d_oversized_facets, d_oversized_count,
+        max_oversized_facets, table_size, base_cell_size,
+        contact_penalty_scale, mu_static, mu_kinetic, contact_damping, dt,
+        d_mpm_impulse_accum, accumulate_impulse
     );
 }
 
@@ -3133,17 +4003,23 @@ T launch_fem_compute_step_size_kernel_3d(
     const FEMNode3D<T>* d_nodes,
     const FEMElement3D<T>* d_elements,
     int num_elements,
+    const FEMTrussElement3D<T>* d_trusses,
+    int num_trusses,
+    const FEMBeam3DElement<T>* d_beams,
+    int num_beams,
     const MaterialTable3D* d_materials,
     T cfl,
     T* d_reduction_buffer,
     cudaStream_t stream
 ) {
-    if (num_elements <= 0) return static_cast<T>(1.0e-6f);
+    int max_count = std::max({num_elements, num_trusses, num_beams});
+    if (max_count <= 0) return static_cast<T>(1.0e-6f);
     int block_size = 256;
-    int grid_size = (num_elements + block_size - 1) / block_size;
-    
+    int grid_size = (max_count + block_size - 1) / block_size;
+
     fem_compute_step_size_kernel_3d_device<T><<<grid_size, block_size, sizeof(T) * block_size, stream>>>(
-        d_nodes, d_elements, num_elements, d_materials, cfl, d_reduction_buffer
+        d_nodes, d_elements, num_elements, d_trusses, num_trusses, d_beams, num_beams,
+        d_materials, cfl, d_reduction_buffer
     );
 
     if (grid_size > 1) {
@@ -3175,6 +4051,7 @@ template <typename T>
 FEMSolver3DCUDA<T>::~FEMSolver3DCUDA() {
     if (m_h_erosion_flag_pinned) { cudaFreeHost(m_h_erosion_flag_pinned); m_h_erosion_flag_pinned = nullptr; }
     if (m_d_nodes) { cudaFree(m_d_nodes); m_d_nodes = nullptr; }
+    if (m_d_mpm_impulse_accum) { cudaFree(m_d_mpm_impulse_accum); m_d_mpm_impulse_accum = nullptr; }
     if (m_d_elements) { cudaFree(m_d_elements); m_d_elements = nullptr; }
     if (m_d_gp_history) { cudaFree(m_d_gp_history); m_d_gp_history = nullptr; }
     if (m_d_materials) { cudaFree(m_d_materials); m_d_materials = nullptr; }
@@ -3187,9 +4064,15 @@ FEMSolver3DCUDA<T>::~FEMSolver3DCUDA() {
     if (m_d_node_active_count) { cudaFree(m_d_node_active_count); m_d_node_active_count = nullptr; }
     if (m_d_nodal_vol_cur) { cudaFree(m_d_nodal_vol_cur); m_d_nodal_vol_cur = nullptr; }
     if (m_d_nodal_vol_ref) { cudaFree(m_d_nodal_vol_ref); m_d_nodal_vol_ref = nullptr; }
+    if (m_d_nodal_dvol_dt) { cudaFree(m_d_nodal_dvol_dt); m_d_nodal_dvol_dt = nullptr; }
+    if (m_d_face_neighbors) { cudaFree(m_d_face_neighbors); m_d_face_neighbors = nullptr; }
     if (m_d_erosion_flag) { cudaFree(m_d_erosion_flag); m_d_erosion_flag = nullptr; }
     if (m_d_cell_counts) { cudaFree(m_d_cell_counts); m_d_cell_counts = nullptr; }
+    if (m_d_cell_offsets) { cudaFree(m_d_cell_offsets); m_d_cell_offsets = nullptr; }
     if (m_d_cell_facet_ids) { cudaFree(m_d_cell_facet_ids); m_d_cell_facet_ids = nullptr; }
+    if (m_d_oversized_facets) { cudaFree(m_d_oversized_facets); m_d_oversized_facets = nullptr; }
+    if (m_d_oversized_count) { cudaFree(m_d_oversized_count); m_d_oversized_count = nullptr; }
+    if (m_d_hash_scan_temp) { cudaFree(m_d_hash_scan_temp); m_d_hash_scan_temp = nullptr; }
     if (m_d_bvh_morton_codes) { cudaFree(m_d_bvh_morton_codes); m_d_bvh_morton_codes = nullptr; }
     if (m_d_bvh_morton_codes_alt) { cudaFree(m_d_bvh_morton_codes_alt); m_d_bvh_morton_codes_alt = nullptr; }
     if (m_d_bvh_sorted_facet_ids) { cudaFree(m_d_bvh_sorted_facet_ids); m_d_bvh_sorted_facet_ids = nullptr; }
@@ -3216,36 +4099,79 @@ void FEMSolver3DCUDA<T>::setErosionCriteria(const FEMErosionCriteria<T>& criteri
 }
 
 template <typename T>
+void FEMSolver3DCUDA<T>::ensureOctaveHashCapacity(size_t facet_cap) {
+    const size_t total_buckets = m_spatial_grid_capacity * NUM_OCTAVES;
+    if (!m_d_cell_counts) {
+        cudaMalloc(&m_d_cell_counts, sizeof(int) * total_buckets);
+        cudaMalloc(&m_d_cell_offsets, sizeof(int) * total_buckets);
+        cudaMalloc(&m_d_oversized_count, sizeof(int));
+        m_hash_scan_temp_bytes = 0;
+        cub::DeviceScan::ExclusiveSum(
+            nullptr, m_hash_scan_temp_bytes,
+            m_d_cell_counts, m_d_cell_offsets,
+            static_cast<int>(total_buckets), m_cuda_stream
+        );
+        if (m_d_hash_scan_temp) cudaFree(m_d_hash_scan_temp);
+        cudaMalloc(&m_d_hash_scan_temp, m_hash_scan_temp_bytes > 0 ? m_hash_scan_temp_bytes : 256);
+    }
+    size_t req_over = std::max(facet_cap, static_cast<size_t>(4096));
+    if (req_over > m_allocated_oversized_facets) {
+        if (m_d_oversized_facets) cudaFree(m_d_oversized_facets);
+        m_allocated_oversized_facets = std::max(req_over * 2, m_allocated_oversized_facets * 2);
+        cudaMalloc(&m_d_oversized_facets, sizeof(int) * m_allocated_oversized_facets);
+    }
+    size_t req_entries = std::max(static_cast<size_t>(8388608), (facet_cap + 4096) * 64);
+    if (req_entries > m_allocated_hash_entries) {
+        if (m_d_cell_facet_ids) cudaFree(m_d_cell_facet_ids);
+        m_allocated_hash_entries = std::max(req_entries, m_allocated_hash_entries * 2);
+        cudaMalloc(&m_d_cell_facet_ids, sizeof(int) * m_allocated_hash_entries);
+    }
+}
+
+template <typename T>
 void FEMSolver3DCUDA<T>::syncToDevice() {
     const auto& nodes = m_cpu_solver.getNodes();
     const auto& elements = m_cpu_solver.getElements();
+    const auto& trusses = m_cpu_solver.getTrusses();
+    const auto& beams = m_cpu_solver.getBeams();
     const auto& materials = m_cpu_solver.getMaterialTables();
     const auto& facets = m_cpu_solver.getSurfaceFacets();
 
-    if (nodes.empty() || elements.empty()) return;
+    if (nodes.empty() || (elements.empty() && trusses.empty() && beams.empty())) return;
 
     if (nodes.size() > m_allocated_nodes) {
         if (m_d_nodes) cudaFree(m_d_nodes);
+        if (m_d_mpm_impulse_accum) cudaFree(m_d_mpm_impulse_accum);
         if (m_d_node_part_id) cudaFree(m_d_node_part_id);
         if (m_d_node_normals) cudaFree(m_d_node_normals);
         if (m_d_node_active_count) cudaFree(m_d_node_active_count);
         if (m_d_nodal_vol_cur) cudaFree(m_d_nodal_vol_cur);
         if (m_d_nodal_vol_ref) cudaFree(m_d_nodal_vol_ref);
-        m_allocated_nodes = nodes.size() + 1024;
+        if (m_d_nodal_dvol_dt) cudaFree(m_d_nodal_dvol_dt);
+        m_allocated_nodes = std::max(nodes.size() * 2, m_allocated_nodes * 2 + 1024);
         cudaMalloc(&m_d_nodes, sizeof(FEMNode3D<T>) * m_allocated_nodes);
+        cudaMalloc(&m_d_mpm_impulse_accum, sizeof(T) * m_allocated_nodes * 3);
         cudaMalloc(&m_d_node_part_id, sizeof(int) * m_allocated_nodes);
         cudaMalloc(&m_d_node_normals, sizeof(T) * m_allocated_nodes * 3);
         cudaMalloc(&m_d_node_active_count, sizeof(int) * m_allocated_nodes);
         cudaMalloc(&m_d_nodal_vol_cur, sizeof(T) * m_allocated_nodes);
         cudaMalloc(&m_d_nodal_vol_ref, sizeof(T) * m_allocated_nodes);
+        cudaMalloc(&m_d_nodal_dvol_dt, sizeof(T) * m_allocated_nodes);
     }
+    if (m_d_mpm_impulse_accum && m_allocated_nodes > 0) {
+        cudaMemsetAsync(m_d_mpm_impulse_accum, 0, sizeof(T) * m_allocated_nodes * 3, m_cuda_stream);
+    }
+    m_has_pending_mpm_impulse = false;
     if (!m_d_erosion_flag) {
         cudaMalloc(&m_d_erosion_flag, sizeof(int));
     }
+    cudaMemsetAsync(m_d_erosion_flag, 0, sizeof(int), m_cuda_stream);
+    if (m_h_erosion_flag_pinned) *m_h_erosion_flag_pinned = 0;
+
     cudaMemcpyAsync(m_d_nodes, nodes.data(), sizeof(FEMNode3D<T>) * nodes.size(), cudaMemcpyHostToDevice, m_cuda_stream);
 
     // Compute node-to-part mapping on CPU and copy to GPU
-    std::vector<int> h_node_part(nodes.size(), -1);
+    m_h_node_part_scratch.assign(nodes.size(), -1);
     m_max_part_id = -1;
     for (const auto& elem : elements) {
         if (elem.is_eroded) continue;
@@ -3253,11 +4179,11 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
         for (int k = 0; k < 8; ++k) {
             int nid = elem.node_ids[k];
             if (nid >= 0 && nid < static_cast<int>(nodes.size())) {
-                h_node_part[nid] = elem.part_id;
+                m_h_node_part_scratch[nid] = elem.part_id;
             }
         }
     }
-    cudaMemcpyAsync(m_d_node_part_id, h_node_part.data(), sizeof(int) * nodes.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+    cudaMemcpyAsync(m_d_node_part_id, m_h_node_part_scratch.data(), sizeof(int) * nodes.size(), cudaMemcpyHostToDevice, m_cuda_stream);
 
     // Build part-to-material mapping table on GPU for O(1) contact stiffness lookup
     if (m_max_part_id >= 0) {
@@ -3276,19 +4202,46 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
         cudaMemcpyAsync(m_d_part_mat_id, h_part_mat.data(), sizeof(int) * (m_max_part_id + 1), cudaMemcpyHostToDevice, m_cuda_stream);
     }
 
+    size_t max_elem_count = std::max({elements.size(), trusses.size(), beams.size(), static_cast<size_t>(1)});
     if (elements.size() > m_allocated_elements) {
         if (m_d_elements) cudaFree(m_d_elements);
-        if (m_d_reduction_buffer) cudaFree(m_d_reduction_buffer);
+        if (m_d_face_neighbors) cudaFree(m_d_face_neighbors);
         m_allocated_elements = elements.size();
         cudaMalloc(&m_d_elements, sizeof(FEMElement3D<T>) * m_allocated_elements);
-        int grid_size = (m_allocated_elements + 255) / 256;
-        cudaMalloc(&m_d_reduction_buffer, sizeof(T) * (grid_size > 0 ? grid_size : 1));
+        cudaMalloc(&m_d_face_neighbors, sizeof(int) * m_allocated_elements * 6);
     }
-    cudaMemcpyAsync(m_d_elements, elements.data(), sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+    size_t target_red_count = (std::max(max_elem_count, m_allocated_elements) + 255) / 256;
+    if (target_red_count < 1) target_red_count = 1;
+    if (!m_d_reduction_buffer || target_red_count > m_allocated_reduction_count) {
+        if (m_d_reduction_buffer) cudaFree(m_d_reduction_buffer);
+        m_allocated_reduction_count = target_red_count;
+        cudaMalloc(&m_d_reduction_buffer, sizeof(T) * m_allocated_reduction_count);
+    }
+    if (!elements.empty()) {
+        cudaMemcpyAsync(m_d_elements, elements.data(), sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+        const auto& face_neighbors = m_cpu_solver.getFaceNeighbors();
+        if (m_d_face_neighbors && face_neighbors.size() >= elements.size() * 6) {
+            cudaMemcpyAsync(m_d_face_neighbors, face_neighbors.data(), sizeof(int) * elements.size() * 6, cudaMemcpyHostToDevice, m_cuda_stream);
+        } else if (m_d_face_neighbors) {
+            cudaMemsetAsync(m_d_face_neighbors, 0xFF, sizeof(int) * elements.size() * 6, m_cuda_stream);
+        }
+    }
 
-    // Conditionally allocate and copy Gauss point history only for 8-point Gauss schemes
-    if (m_cpu_solver.getIntegrationScheme() == FEMIntegrationScheme::FullGauss8 ||
-        m_cpu_solver.getIntegrationScheme() == FEMIntegrationScheme::SelectiveReduced) {
+    // Conditionally allocate and copy Gauss point history when global or per-part 8-point Gauss schemes are used
+    bool need_gp_hist = (m_cpu_solver.getIntegrationScheme() == FEMIntegrationScheme::FullGauss8 ||
+                         m_cpu_solver.getIntegrationScheme() == FEMIntegrationScheme::SelectiveReduced);
+    if (!need_gp_hist) {
+        for (const auto& elem : elements) {
+            if (!elem.is_eroded) {
+                FEMIntegrationScheme es = resolveElementIntegrationScheme(elem, m_cpu_solver.getIntegrationScheme());
+                if (es == FEMIntegrationScheme::FullGauss8 || es == FEMIntegrationScheme::SelectiveReduced) {
+                    need_gp_hist = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (need_gp_hist) {
         m_cpu_solver.ensureGaussPointHistory();
         const auto& gp_hist = m_cpu_solver.getGaussPointHistory();
         if (!gp_hist.empty()) {
@@ -3311,7 +4264,6 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
     }
 
     // Allocate and copy 1D trusses and 3D beams to GPU
-    const auto& trusses = m_cpu_solver.getTrusses();
     if (trusses.size() > m_allocated_trusses) {
         if (m_d_trusses) cudaFree(m_d_trusses);
         m_allocated_trusses = trusses.size() + 128;
@@ -3321,7 +4273,6 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
         cudaMemcpyAsync(m_d_trusses, trusses.data(), sizeof(FEMTrussElement3D<T>) * trusses.size(), cudaMemcpyHostToDevice, m_cuda_stream);
     }
 
-    const auto& beams = m_cpu_solver.getBeams();
     if (beams.size() > m_allocated_beams) {
         if (m_d_beams) cudaFree(m_d_beams);
         m_allocated_beams = beams.size() + 128;
@@ -3345,18 +4296,15 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
     size_t target_facets_cap = std::max(facets.size() * 2, elements.size() * 3);
     if (target_facets_cap > m_allocated_facets) {
         if (m_d_facets) cudaFree(m_d_facets);
-        m_allocated_facets = target_facets_cap + 4096;
+        m_allocated_facets = std::max(target_facets_cap + 4096, m_allocated_facets * 2);
         cudaMalloc(&m_d_facets, sizeof(FEMFacet3D<T>) * m_allocated_facets);
     }
     if (!facets.empty()) {
         cudaMemcpyAsync(m_d_facets, facets.data(), sizeof(FEMFacet3D<T>) * facets.size(), cudaMemcpyHostToDevice, m_cuda_stream);
     }
 
-    // Allocate GPU spatial grid buffers for contact (4 octaves)
-    if (!m_d_cell_counts) {
-        cudaMalloc(&m_d_cell_counts, sizeof(int) * m_spatial_grid_capacity * NUM_OCTAVES);
-        cudaMalloc(&m_d_cell_facet_ids, sizeof(int) * m_spatial_grid_capacity * NUM_OCTAVES * MAX_FACETS_PER_CELL);
-    }
+    // Allocate GPU spatial grid buffers for contact (4 octaves, CSR + oversized list)
+    ensureOctaveHashCapacity(target_facets_cap);
 
     // Allocate GPU Linear BVH buffers for contact
     if (target_facets_cap > m_allocated_bvh_facets) {
@@ -3368,7 +4316,7 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
         if (m_d_bvh_leaf_parents) cudaFree(m_d_bvh_leaf_parents);
         if (m_d_bvh_flags) cudaFree(m_d_bvh_flags);
 
-        m_allocated_bvh_facets = target_facets_cap + 4096;
+        m_allocated_bvh_facets = std::max(target_facets_cap + 4096, m_allocated_bvh_facets * 2);
         cudaMalloc(&m_d_bvh_morton_codes, sizeof(uint32_t) * m_allocated_bvh_facets);
         cudaMalloc(&m_d_bvh_morton_codes_alt, sizeof(uint32_t) * m_allocated_bvh_facets);
         cudaMalloc(&m_d_bvh_sorted_facet_ids, sizeof(int) * m_allocated_bvh_facets);
@@ -3383,7 +4331,7 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
             nullptr, m_bvh_temp_storage_bytes,
             m_d_bvh_morton_codes, m_d_bvh_morton_codes_alt,
             m_d_bvh_facet_indices_in, m_d_bvh_sorted_facet_ids,
-            static_cast<int>(m_allocated_bvh_facets), 0, 30, m_cuda_stream
+            static_cast<int>(m_allocated_bvh_facets), 0, 32, m_cuda_stream
         );
         if (m_d_bvh_temp_storage) cudaFree(m_d_bvh_temp_storage);
         cudaMalloc(&m_d_bvh_temp_storage, m_bvh_temp_storage_bytes);
@@ -3426,31 +4374,33 @@ void FEMSolver3DCUDA<T>::syncToDevice() {
     m_base_cell_size = min_edge * static_cast<T>(1.2f);
 
     // Extract surface node indices on CPU and copy to GPU
-    std::vector<bool> is_surf_node(nodes.size(), false);
+    m_h_is_surf_node_scratch.assign(nodes.size(), 0);
     for (const auto& f : facets) {
         if (f.is_eroded) continue;
         for (int k = 0; k < 4; ++k) {
             if (f.node_ids[k] >= 0 && f.node_ids[k] < static_cast<int>(nodes.size())) {
-                is_surf_node[f.node_ids[k]] = true;
+                m_h_is_surf_node_scratch[f.node_ids[k]] = 1;
             }
         }
     }
-    std::vector<int> surf_nodes;
-    surf_nodes.reserve(nodes.size() / 2);
+    m_h_surf_nodes_scratch.clear();
+    if (m_h_surf_nodes_scratch.capacity() < nodes.size()) {
+        m_h_surf_nodes_scratch.reserve(nodes.size());
+    }
     for (size_t i = 0; i < nodes.size(); ++i) {
-        if (is_surf_node[i]) {
-            surf_nodes.push_back(static_cast<int>(i));
+        if (m_h_is_surf_node_scratch[i]) {
+            m_h_surf_nodes_scratch.push_back(static_cast<int>(i));
         }
     }
-    m_num_surface_nodes = surf_nodes.size();
-    size_t target_nodes_cap = std::max(surf_nodes.size() * 2, nodes.size());
+    m_num_surface_nodes = m_h_surf_nodes_scratch.size();
+    size_t target_nodes_cap = std::max(m_h_surf_nodes_scratch.size() * 2, nodes.size());
     if (target_nodes_cap > m_allocated_surface_nodes) {
         if (m_d_surface_nodes) cudaFree(m_d_surface_nodes);
-        m_allocated_surface_nodes = target_nodes_cap + 1024;
+        m_allocated_surface_nodes = std::max(target_nodes_cap + 1024, m_allocated_surface_nodes * 2);
         cudaMalloc(&m_d_surface_nodes, sizeof(int) * m_allocated_surface_nodes);
     }
-    if (!surf_nodes.empty()) {
-        cudaMemcpyAsync(m_d_surface_nodes, surf_nodes.data(), sizeof(int) * surf_nodes.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+    if (!m_h_surf_nodes_scratch.empty()) {
+        cudaMemcpyAsync(m_d_surface_nodes, m_h_surf_nodes_scratch.data(), sizeof(int) * m_h_surf_nodes_scratch.size(), cudaMemcpyHostToDevice, m_cuda_stream);
     }
 
     cudaStreamSynchronize(m_cuda_stream);
@@ -3463,11 +4413,23 @@ void FEMSolver3DCUDA<T>::syncToHost() const {
     if (!m_gpu_dirty) return;
     auto& nodes = const_cast<std::vector<FEMNode3D<T>>&>(m_cpu_solver.getNodes());
     auto& elements = const_cast<std::vector<FEMElement3D<T>>&>(m_cpu_solver.getElements());
+    auto& trusses = const_cast<std::vector<FEMTrussElement3D<T>>&>(m_cpu_solver.getTrusses());
+    auto& beams = const_cast<std::vector<FEMBeam3DElement<T>>&>(m_cpu_solver.getBeams());
+    auto& rot_nodes = const_cast<std::vector<FEMNodeRotationalState3D<T>>&>(m_cpu_solver.getRotationalNodes());
     if (m_d_nodes && !nodes.empty()) {
         cudaMemcpyAsync(nodes.data(), m_d_nodes, sizeof(FEMNode3D<T>) * nodes.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
     }
     if (m_d_elements && !elements.empty()) {
         cudaMemcpyAsync(elements.data(), m_d_elements, sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
+    }
+    if (m_d_trusses && !trusses.empty()) {
+        cudaMemcpyAsync(trusses.data(), m_d_trusses, sizeof(FEMTrussElement3D<T>) * trusses.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
+    }
+    if (m_d_beams && !beams.empty()) {
+        cudaMemcpyAsync(beams.data(), m_d_beams, sizeof(FEMBeam3DElement<T>) * beams.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
+    }
+    if (m_d_rot_nodes && !rot_nodes.empty()) {
+        cudaMemcpyAsync(rot_nodes.data(), m_d_rot_nodes, sizeof(FEMNodeRotationalState3D<T>) * rot_nodes.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
     }
     if (m_d_gp_history) {
         auto& gp_hist = const_cast<std::vector<FEMGaussPointHistory3D<T>>&>(m_cpu_solver.getGaussPointHistory());
@@ -3486,6 +4448,230 @@ void FEMSolver3DCUDA<T>::syncToHost() const {
     m_last_ep_max = m_cpu_solver.getMaxPlasticStrain();
     m_energy_tracker = m_cpu_solver.getEnergyTracker();
     m_gpu_dirty = false;
+}
+
+template <typename T>
+static void flush_fem_debris_to_cuda_mpm(
+    FEMSolver3D<T>& cpu_solver,
+    MPMSolver3DCUDA* cuda_mpm,
+    size_t& synced_debris_count,
+    int& debris_mat_offset
+);
+
+template <typename T>
+void FEMSolver3DCUDA<T>::syncTopologyAfterSplitOrErosion(bool did_split) {
+    auto& nodes = m_cpu_solver.getNodes();
+    auto& elements = m_cpu_solver.getElements();
+    if (nodes.empty() || elements.empty()) return;
+
+    // Download only nodes and elements (skip trusses, beams, rot_nodes, gp_history, and CPU energy/maxima)
+    if (m_d_nodes) {
+        cudaMemcpyAsync(nodes.data(), m_d_nodes, sizeof(FEMNode3D<T>) * nodes.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
+    }
+    if (m_d_elements) {
+        cudaMemcpyAsync(elements.data(), m_d_elements, sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
+    }
+    cudaStreamSynchronize(m_cuda_stream);
+
+    if (did_split) {
+        m_cpu_solver.splitFracturedElementNodes();
+        m_cpu_solver.processErodedElementsToMPM();
+        m_cpu_solver.updateNodeErosionStatus();
+        m_cpu_solver.invalidateSurfaceFacets();
+        const auto& new_facets = m_cpu_solver.getSurfaceFacets();
+
+        if (nodes.size() > m_allocated_nodes) {
+            if (m_d_nodes) cudaFree(m_d_nodes);
+            if (m_d_mpm_impulse_accum) cudaFree(m_d_mpm_impulse_accum);
+            if (m_d_node_part_id) cudaFree(m_d_node_part_id);
+            if (m_d_node_normals) cudaFree(m_d_node_normals);
+            if (m_d_node_active_count) cudaFree(m_d_node_active_count);
+            if (m_d_nodal_vol_cur) cudaFree(m_d_nodal_vol_cur);
+            if (m_d_nodal_vol_ref) cudaFree(m_d_nodal_vol_ref);
+            if (m_d_nodal_dvol_dt) cudaFree(m_d_nodal_dvol_dt);
+            m_allocated_nodes = std::max(nodes.size() * 2, m_allocated_nodes * 2 + 1024);
+            cudaMalloc(&m_d_nodes, sizeof(FEMNode3D<T>) * m_allocated_nodes);
+            cudaMalloc(&m_d_mpm_impulse_accum, sizeof(T) * m_allocated_nodes * 3);
+            cudaMalloc(&m_d_node_part_id, sizeof(int) * m_allocated_nodes);
+            cudaMalloc(&m_d_node_normals, sizeof(T) * m_allocated_nodes * 3);
+            cudaMalloc(&m_d_node_active_count, sizeof(int) * m_allocated_nodes);
+            cudaMalloc(&m_d_nodal_vol_cur, sizeof(T) * m_allocated_nodes);
+            cudaMalloc(&m_d_nodal_vol_ref, sizeof(T) * m_allocated_nodes);
+            cudaMalloc(&m_d_nodal_dvol_dt, sizeof(T) * m_allocated_nodes);
+            cudaMemsetAsync(m_d_mpm_impulse_accum, 0, sizeof(T) * m_allocated_nodes * 3, m_cuda_stream);
+        }
+
+        cudaMemcpyAsync(m_d_nodes, nodes.data(), sizeof(FEMNode3D<T>) * nodes.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+        cudaMemcpyAsync(m_d_elements, elements.data(), sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+
+        const auto& face_neighbors = m_cpu_solver.getFaceNeighbors();
+        if (m_d_face_neighbors && face_neighbors.size() >= elements.size() * 6) {
+            cudaMemcpyAsync(m_d_face_neighbors, face_neighbors.data(), sizeof(int) * elements.size() * 6, cudaMemcpyHostToDevice, m_cuda_stream);
+        }
+
+        m_h_node_part_scratch.assign(nodes.size(), -1);
+        for (const auto& elem : elements) {
+            if (elem.is_eroded) continue;
+            for (int k = 0; k < 8; ++k) {
+                int nid = elem.node_ids[k];
+                if (nid >= 0 && nid < static_cast<int>(nodes.size())) {
+                    m_h_node_part_scratch[nid] = elem.part_id;
+                }
+            }
+        }
+        cudaMemcpyAsync(m_d_node_part_id, m_h_node_part_scratch.data(), sizeof(int) * nodes.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+
+        m_num_surface_facets = new_facets.size();
+        size_t target_facets_cap = std::max(new_facets.size() * 2, elements.size() * 3);
+        if (target_facets_cap > m_allocated_facets) {
+            if (m_d_facets) cudaFree(m_d_facets);
+            m_allocated_facets = std::max(target_facets_cap + 4096, m_allocated_facets * 2);
+            cudaMalloc(&m_d_facets, sizeof(FEMFacet3D<T>) * m_allocated_facets);
+            ensureOctaveHashCapacity(m_allocated_facets);
+        }
+        if (target_facets_cap > m_allocated_bvh_facets) {
+            if (m_d_bvh_morton_codes) cudaFree(m_d_bvh_morton_codes);
+            if (m_d_bvh_morton_codes_alt) cudaFree(m_d_bvh_morton_codes_alt);
+            if (m_d_bvh_sorted_facet_ids) cudaFree(m_d_bvh_sorted_facet_ids);
+            if (m_d_bvh_facet_indices_in) cudaFree(m_d_bvh_facet_indices_in);
+            if (m_d_bvh_nodes) cudaFree(m_d_bvh_nodes);
+            if (m_d_bvh_leaf_parents) cudaFree(m_d_bvh_leaf_parents);
+            if (m_d_bvh_flags) cudaFree(m_d_bvh_flags);
+
+            m_allocated_bvh_facets = std::max(target_facets_cap + 4096, m_allocated_bvh_facets * 2);
+            cudaMalloc(&m_d_bvh_morton_codes, sizeof(uint32_t) * m_allocated_bvh_facets);
+            cudaMalloc(&m_d_bvh_morton_codes_alt, sizeof(uint32_t) * m_allocated_bvh_facets);
+            cudaMalloc(&m_d_bvh_sorted_facet_ids, sizeof(int) * m_allocated_bvh_facets);
+            cudaMalloc(&m_d_bvh_facet_indices_in, sizeof(int) * m_allocated_bvh_facets);
+            cudaMalloc(&m_d_bvh_nodes, sizeof(LBVHNode3D<T>) * m_allocated_bvh_facets);
+            cudaMalloc(&m_d_bvh_leaf_parents, sizeof(int) * m_allocated_bvh_facets);
+            cudaMalloc(&m_d_bvh_flags, sizeof(int) * (m_allocated_bvh_facets + 1));
+
+            m_bvh_temp_storage_bytes = 0;
+            cub::DeviceRadixSort::SortPairs(
+                nullptr, m_bvh_temp_storage_bytes,
+                m_d_bvh_morton_codes, m_d_bvh_morton_codes_alt,
+                m_d_bvh_facet_indices_in, m_d_bvh_sorted_facet_ids,
+                static_cast<int>(m_allocated_bvh_facets), 0, 32, m_cuda_stream
+            );
+            if (m_d_bvh_temp_storage) cudaFree(m_d_bvh_temp_storage);
+            cudaMalloc(&m_d_bvh_temp_storage, m_bvh_temp_storage_bytes);
+        }
+        if (!new_facets.empty()) {
+            cudaMemcpyAsync(m_d_facets, new_facets.data(), sizeof(FEMFacet3D<T>) * new_facets.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+        }
+
+        // Refresh bounding box and surface nodes
+        T bb_min_x = static_cast<T>(1.0e30f), bb_min_y = static_cast<T>(1.0e30f), bb_min_z = static_cast<T>(1.0e30f);
+        T bb_max_x = static_cast<T>(-1.0e30f), bb_max_y = static_cast<T>(-1.0e30f), bb_max_z = static_cast<T>(-1.0e30f);
+        for (const auto& node : nodes) {
+            if (node.is_eroded) continue;
+            if (node.x[0] < bb_min_x) bb_min_x = node.x[0];
+            if (node.x[0] > bb_max_x) bb_max_x = node.x[0];
+            if (node.x[1] < bb_min_y) bb_min_y = node.x[1];
+            if (node.x[1] > bb_max_y) bb_max_y = node.x[1];
+            if (node.x[2] < bb_min_z) bb_min_z = node.x[2];
+            if (node.x[2] > bb_max_z) bb_max_z = node.x[2];
+        }
+        if (bb_min_x < bb_max_x) {
+            T pad_x = std::max(static_cast<T>(0.05f) * (bb_max_x - bb_min_x), static_cast<T>(0.01f));
+            T pad_y = std::max(static_cast<T>(0.05f) * (bb_max_y - bb_min_y), static_cast<T>(0.01f));
+            T pad_z = std::max(static_cast<T>(0.05f) * (bb_max_z - bb_min_z), static_cast<T>(0.01f));
+            m_bbox_min[0] = bb_min_x - pad_x; m_bbox_max[0] = bb_max_x + pad_x;
+            m_bbox_min[1] = bb_min_y - pad_y; m_bbox_max[1] = bb_max_y + pad_y;
+            m_bbox_min[2] = bb_min_z - pad_z; m_bbox_max[2] = bb_max_z + pad_z;
+        }
+
+        m_h_is_surf_node_scratch.assign(nodes.size(), 0);
+        for (const auto& f : new_facets) {
+            if (f.is_eroded) continue;
+            for (int k = 0; k < 4; ++k) {
+                if (f.node_ids[k] >= 0 && f.node_ids[k] < static_cast<int>(nodes.size())) {
+                    m_h_is_surf_node_scratch[f.node_ids[k]] = 1;
+                }
+            }
+        }
+        m_h_surf_nodes_scratch.clear();
+        if (m_h_surf_nodes_scratch.capacity() < nodes.size()) {
+            m_h_surf_nodes_scratch.reserve(nodes.size());
+        }
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (m_h_is_surf_node_scratch[i]) {
+                m_h_surf_nodes_scratch.push_back(static_cast<int>(i));
+            }
+        }
+        m_num_surface_nodes = m_h_surf_nodes_scratch.size();
+        size_t target_nodes_cap = std::max(m_h_surf_nodes_scratch.size() * 2, nodes.size());
+        if (target_nodes_cap > m_allocated_surface_nodes) {
+            if (m_d_surface_nodes) cudaFree(m_d_surface_nodes);
+            m_allocated_surface_nodes = std::max(target_nodes_cap + 1024, m_allocated_surface_nodes * 2);
+            cudaMalloc(&m_d_surface_nodes, sizeof(int) * m_allocated_surface_nodes);
+        }
+        if (!m_h_surf_nodes_scratch.empty()) {
+            cudaMemcpyAsync(m_d_surface_nodes, m_h_surf_nodes_scratch.data(), sizeof(int) * m_h_surf_nodes_scratch.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+        }
+
+        flush_fem_debris_to_cuda_mpm<T>(m_cpu_solver, m_cuda_mpm_solver, m_synced_debris_particle_count, m_debris_mat_offset);
+        cudaStreamSynchronize(m_cuda_stream);
+    } else {
+        const int num_nodes = static_cast<int>(nodes.size());
+        const int num_elements = static_cast<int>(elements.size());
+        const int num_trusses = static_cast<int>(m_cpu_solver.getTrusses().size());
+        const int num_beams = static_cast<int>(m_cpu_solver.getBeams().size());
+
+        m_cpu_solver.processErodedElementsToMPM();
+        cudaMemcpyAsync(m_d_elements, elements.data(), sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+        flush_fem_debris_to_cuda_mpm<T>(m_cpu_solver, m_cuda_mpm_solver, m_synced_debris_particle_count, m_debris_mat_offset);
+        launch_fem_update_orphan_nodes_erosion_kernel_3d<T>(
+            m_d_nodes, num_nodes, m_d_elements, num_elements,
+            m_d_trusses, num_trusses, m_d_beams, num_beams,
+            m_d_node_active_count, m_cuda_stream
+        );
+        m_cpu_solver.invalidateSurfaceFacets();
+        const auto& new_facets = m_cpu_solver.getSurfaceFacets();
+
+        m_num_surface_facets = new_facets.size();
+        if (new_facets.size() > m_allocated_facets) {
+            if (m_d_facets) cudaFree(m_d_facets);
+            m_allocated_facets = std::max(new_facets.size() * 2, m_allocated_facets * 2);
+            cudaMalloc(&m_d_facets, sizeof(FEMFacet3D<T>) * m_allocated_facets);
+            ensureOctaveHashCapacity(m_allocated_facets);
+        }
+        if (!new_facets.empty()) {
+            cudaMemcpyAsync(m_d_facets, new_facets.data(), sizeof(FEMFacet3D<T>) * new_facets.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+        }
+
+        m_h_is_surf_node_scratch.assign(nodes.size(), 0);
+        for (const auto& f : new_facets) {
+            if (f.is_eroded) continue;
+            for (int k = 0; k < 4; ++k) {
+                if (f.node_ids[k] >= 0 && f.node_ids[k] < static_cast<int>(nodes.size())) {
+                    m_h_is_surf_node_scratch[f.node_ids[k]] = 1;
+                }
+            }
+        }
+        m_h_surf_nodes_scratch.clear();
+        if (m_h_surf_nodes_scratch.capacity() < nodes.size()) {
+            m_h_surf_nodes_scratch.reserve(nodes.size());
+        }
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (m_h_is_surf_node_scratch[i]) {
+                m_h_surf_nodes_scratch.push_back(static_cast<int>(i));
+            }
+        }
+        m_num_surface_nodes = m_h_surf_nodes_scratch.size();
+        if (m_num_surface_nodes > m_allocated_surface_nodes) {
+            if (m_d_surface_nodes) cudaFree(m_d_surface_nodes);
+            m_allocated_surface_nodes = std::max(m_num_surface_nodes * 2, m_allocated_surface_nodes * 2);
+            cudaMalloc(&m_d_surface_nodes, sizeof(int) * m_allocated_surface_nodes);
+        }
+        if (!m_h_surf_nodes_scratch.empty()) {
+            cudaMemcpyAsync(m_d_surface_nodes, m_h_surf_nodes_scratch.data(), sizeof(int) * m_h_surf_nodes_scratch.size(), cudaMemcpyHostToDevice, m_cuda_stream);
+        }
+        cudaStreamSynchronize(m_cuda_stream);
+    }
+
+    m_topology_dirty = false;
 }
 
 template <typename T>
@@ -3588,29 +4774,58 @@ void FEMSolver3DCUDA<T>::extractTelemetry(std::vector<float>& h_node_data, std::
         h_facet_data.resize((prev_facets + n_trusses + n_beams) * 8);
         for (size_t t = 0; t < n_trusses; ++t) {
             const auto& tr = trusses[t];
-            h_facet_data[(prev_facets + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
-            h_facet_data[(prev_facets + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
-            h_facet_data[(prev_facets + t) * 8 + 2] = -1.0f;
-            h_facet_data[(prev_facets + t) * 8 + 3] = -1.0f;
-            h_facet_data[(prev_facets + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
-            h_facet_data[(prev_facets + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
-            h_facet_data[(prev_facets + t) * 8 + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
-            h_facet_data[(prev_facets + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
+            if (tr.is_eroded) {
+                h_facet_data[(prev_facets + t) * 8 + 0] = -1.0f;
+                h_facet_data[(prev_facets + t) * 8 + 1] = -1.0f;
+                h_facet_data[(prev_facets + t) * 8 + 2] = -1.0f;
+                h_facet_data[(prev_facets + t) * 8 + 3] = -1.0f;
+                h_facet_data[(prev_facets + t) * 8 + 4] = 0.0f;
+                h_facet_data[(prev_facets + t) * 8 + 5] = 0.0f;
+                h_facet_data[(prev_facets + t) * 8 + 6] = 0.0f;
+                h_facet_data[(prev_facets + t) * 8 + 7] = 1.0f;
+            } else {
+                h_facet_data[(prev_facets + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
+                h_facet_data[(prev_facets + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
+                h_facet_data[(prev_facets + t) * 8 + 2] = -1.0f;
+                h_facet_data[(prev_facets + t) * 8 + 3] = -1.0f;
+                h_facet_data[(prev_facets + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
+                h_facet_data[(prev_facets + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
+                h_facet_data[(prev_facets + t) * 8 + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
+                h_facet_data[(prev_facets + t) * 8 + 7] = 0.0f;
+            }
         }
         size_t beam_offset = prev_facets + n_trusses;
         for (size_t b = 0; b < n_beams; ++b) {
             const auto& bm = beams[b];
-            float sig = static_cast<float>(bm.ep_bar > 0.0f ? (500.0e6f + 2.0e9f * bm.ep_bar) : 0.0f);
-            float moment = static_cast<float>(bm.kappa2 * bm.kappa2 + bm.kappa3 * bm.kappa3);
-            if (moment > 0.0f) moment = std::sqrt(moment);
-            h_facet_data[(beam_offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
-            h_facet_data[(beam_offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
-            h_facet_data[(beam_offset + b) * 8 + 2] = -1.0f;
-            h_facet_data[(beam_offset + b) * 8 + 3] = -1.0f;
-            h_facet_data[(beam_offset + b) * 8 + 4] = sig;
-            h_facet_data[(beam_offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
-            h_facet_data[(beam_offset + b) * 8 + 6] = moment;
-            h_facet_data[(beam_offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
+            if (bm.is_eroded) {
+                h_facet_data[(beam_offset + b) * 8 + 0] = -1.0f;
+                h_facet_data[(beam_offset + b) * 8 + 1] = -1.0f;
+                h_facet_data[(beam_offset + b) * 8 + 2] = -1.0f;
+                h_facet_data[(beam_offset + b) * 8 + 3] = -1.0f;
+                h_facet_data[(beam_offset + b) * 8 + 4] = 0.0f;
+                h_facet_data[(beam_offset + b) * 8 + 5] = 0.0f;
+                h_facet_data[(beam_offset + b) * 8 + 6] = 0.0f;
+                h_facet_data[(beam_offset + b) * 8 + 7] = 1.0f;
+            } else {
+                double A_safe = bm.A > static_cast<T>(1.0e-12f) ? static_cast<double>(bm.A) : 1.0e-6;
+                double I2_safe = bm.I2 > static_cast<T>(1.0e-16f) ? static_cast<double>(bm.I2) : 1.0e-12;
+                double I3_safe = bm.I3 > static_cast<T>(1.0e-16f) ? static_cast<double>(bm.I3) : I2_safe;
+                double d_safe = bm.d > static_cast<T>(1.0e-6f) ? static_cast<double>(bm.d) : 0.01;
+                double W2 = I2_safe / (0.5 * d_safe);
+                double W3 = I3_safe / (0.5 * d_safe);
+                double M_bend = std::hypot(static_cast<double>(bm.M2) / W2, static_cast<double>(bm.M3) / W3);
+                double M_res = std::hypot(static_cast<double>(bm.M2), static_cast<double>(bm.M3));
+                float sig = static_cast<float>(std::abs(static_cast<double>(bm.N)) / A_safe + M_bend);
+                float moment = static_cast<float>(M_res);
+                h_facet_data[(beam_offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
+                h_facet_data[(beam_offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
+                h_facet_data[(beam_offset + b) * 8 + 2] = -1.0f;
+                h_facet_data[(beam_offset + b) * 8 + 3] = -1.0f;
+                h_facet_data[(beam_offset + b) * 8 + 4] = sig;
+                h_facet_data[(beam_offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
+                h_facet_data[(beam_offset + b) * 8 + 6] = moment;
+                h_facet_data[(beam_offset + b) * 8 + 7] = 0.0f;
+            }
         }
     }
     m_last_vm_max = static_cast<T>(max_vm);
@@ -3621,23 +4836,141 @@ void FEMSolver3DCUDA<T>::extractTelemetry(std::vector<float>& h_node_data, std::
         m_cuda_mpm_solver->syncParticlesToHost();
         if (m_cpu_solver.getMPMSolver()) {
             m_cpu_solver.getMPMSolver()->getParticles() = m_cuda_mpm_solver->getParticles();
+            m_synced_debris_particle_count = m_cpu_solver.getMPMSolver()->getParticles().size();
         }
     }
+}
+
+template <typename T>
+__global__ void fem_rot_nodal_half_step_kernel_3d_device(
+    FEMNodeRotationalState3D<T>* d_rot_nodes,
+    int num_rot_nodes,
+    T dt
+) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= num_rot_nodes) return;
+
+    FEMNodeRotationalState3D<T>& rn = d_rot_nodes[r];
+    for (int c = 0; c < 3; ++c) {
+        if (rn.is_fixed[c]) {
+            rn.omega[c] = static_cast<T>(0.0f);
+            rn.alpha[c] = static_cast<T>(0.0f);
+        } else if (rn.I_rot > static_cast<T>(1.0e-12f)) {
+            rn.omega[c] += static_cast<T>(0.5f) * rn.alpha[c] * dt;
+        }
+        rn.m_int[c] = static_cast<T>(0.0f);
+    }
+}
+
+template <typename T>
+__global__ void fem_rot_nodal_full_step_kernel_3d_device(
+    FEMNodeRotationalState3D<T>* d_rot_nodes,
+    int num_rot_nodes,
+    T dt
+) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= num_rot_nodes) return;
+
+    FEMNodeRotationalState3D<T>& rn = d_rot_nodes[r];
+    if (rn.I_rot > static_cast<T>(1.0e-12f)) {
+        T invI = static_cast<T>(1.0f) / rn.I_rot;
+        for (int c = 0; c < 3; ++c) {
+            if (rn.is_fixed[c]) {
+                rn.omega[c] = static_cast<T>(0.0f);
+                rn.alpha[c] = static_cast<T>(0.0f);
+            } else {
+                rn.alpha[c] = (rn.m_ext[c] - rn.m_int[c]) * invI;
+                rn.omega[c] += static_cast<T>(0.5f) * rn.alpha[c] * dt;
+            }
+        }
+    }
+}
+
+template <typename T>
+static void flush_fem_debris_to_cuda_mpm(
+    FEMSolver3D<T>& cpu_solver,
+    MPMSolver3DCUDA* cuda_mpm,
+    size_t& synced_debris_count,
+    int& debris_mat_offset
+) {
+    if (!cuda_mpm || !cpu_solver.getMPMSolver()) return;
+    const auto& cpu_particles = cpu_solver.getMPMSolver()->getParticles();
+    if (cpu_particles.size() <= synced_debris_count) return;
+
+    std::vector<MPMParticle3D> new_pts(cpu_particles.begin() + synced_debris_count, cpu_particles.end());
+    auto& mpm_mats = cuda_mpm->getMaterialTables();
+    const auto& fem_mats = cpu_solver.getMaterialTables();
+    if (!fem_mats.empty()) {
+        if (mpm_mats.empty()) {
+            mpm_mats = fem_mats;
+            debris_mat_offset = 0;
+            cuda_mpm->uploadMaterialTableToDevice();
+        } else if (debris_mat_offset < 0) {
+            debris_mat_offset = static_cast<int>(mpm_mats.size());
+            mpm_mats.insert(mpm_mats.end(), fem_mats.begin(), fem_mats.end());
+            cuda_mpm->uploadMaterialTableToDevice();
+        }
+        if (debris_mat_offset > 0) {
+            for (auto& pt : new_pts) {
+                if (pt.object_id >= 0) pt.object_id += debris_mat_offset;
+                if (pt.material_id >= 0) pt.material_id += debris_mat_offset;
+            }
+        }
+    }
+    cuda_mpm->addParticlesDirect(new_pts);
+    synced_debris_count = cpu_particles.size();
+}
+
+template <typename T>
+void FEMSolver3DCUDA<T>::buildOctaveHashOnDevice() {
+    if (m_num_surface_facets == 0 || !m_d_facets || !m_d_cell_counts || !m_d_cell_offsets ||
+        !m_d_cell_facet_ids || !m_d_hash_scan_temp || m_hash_scan_temp_bytes == 0 ||
+        !m_d_oversized_count || m_spatial_grid_capacity == 0) {
+        return;
+    }
+    const int num_facets = static_cast<int>(m_num_surface_facets);
+    const uint32_t table_size = static_cast<uint32_t>(m_spatial_grid_capacity);
+    const int total_buckets = 4 * static_cast<int>(table_size);
+    const int block_size = 256;
+    const int facet_grid_size = (num_facets + block_size - 1) / block_size;
+
+    cudaMemsetAsync(m_d_cell_counts, 0, sizeof(int) * total_buckets, m_cuda_stream);
+    cudaMemsetAsync(m_d_oversized_count, 0, sizeof(int), m_cuda_stream);
+    fem_count_octave_hash_grid_kernel_3d_device<T><<<facet_grid_size, block_size, 0, m_cuda_stream>>>(
+        m_d_facets, num_facets, m_base_cell_size, m_d_cell_counts,
+        m_d_oversized_facets, m_d_oversized_count, static_cast<int>(m_allocated_oversized_facets), table_size
+    );
+
+    size_t scan_bytes = m_hash_scan_temp_bytes;
+    cub::DeviceScan::ExclusiveSum(
+        m_d_hash_scan_temp, scan_bytes,
+        m_d_cell_counts, m_d_cell_offsets,
+        total_buckets, m_cuda_stream
+    );
+
+    cudaMemsetAsync(m_d_cell_counts, 0, sizeof(int) * total_buckets, m_cuda_stream);
+    fem_scatter_octave_hash_grid_kernel_3d_device<T><<<facet_grid_size, block_size, 0, m_cuda_stream>>>(
+        m_d_facets, num_facets, m_base_cell_size, m_d_cell_counts, m_d_cell_offsets,
+        m_d_cell_facet_ids, static_cast<int>(m_allocated_hash_entries), table_size
+    );
 }
 
 template <typename T>
 void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
     auto& nodes = m_cpu_solver.getNodes();
     auto& elements = m_cpu_solver.getElements();
-    if (nodes.empty() || elements.empty()) return;
+    const auto& trusses = m_cpu_solver.getTrusses();
+    const auto& beams = m_cpu_solver.getBeams();
+    if (nodes.empty() || (elements.empty() && trusses.empty() && beams.empty())) return;
 
-    if (!m_d_nodes || !m_d_elements) {
+    if (!m_d_nodes || (!elements.empty() && !m_d_elements) || (!trusses.empty() && !m_d_trusses) || (!beams.empty() && !m_d_beams)) {
         syncToDevice();
     }
 
     m_last_dt = dt;
     m_sim_time += dt;
     m_step_count++;
+    m_cpu_solver.setSimTime(m_sim_time);
 
     // Fire any delayed detonators whose delay has been reached
     bool det_fired = false;
@@ -3645,7 +4978,9 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
         if (!det.fired && m_sim_time >= static_cast<T>(det.time_delay)) {
             if (!det_fired) {
                 cudaMemcpyAsync(nodes.data(), m_d_nodes, sizeof(FEMNode3D<T>) * nodes.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
-                cudaMemcpyAsync(elements.data(), m_d_elements, sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
+                if (!elements.empty()) {
+                    cudaMemcpyAsync(elements.data(), m_d_elements, sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
+                }
                 cudaStreamSynchronize(m_cuda_stream);
                 det_fired = true;
             }
@@ -3654,62 +4989,92 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
             det.fired = true;
         }
     }
-    if (det_fired) {
+    if (det_fired && !elements.empty()) {
         cudaMemcpyAsync(m_d_elements, elements.data(), sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyHostToDevice, m_cuda_stream);
     }
 
     int num_nodes = static_cast<int>(nodes.size());
     int num_elements = static_cast<int>(elements.size());
-    int num_trusses = static_cast<int>(m_cpu_solver.getTrusses().size());
-    int num_beams = static_cast<int>(m_cpu_solver.getBeams().size());
+    int num_trusses = static_cast<int>(trusses.size());
+    int num_beams = static_cast<int>(beams.size());
     int num_rot_nodes = static_cast<int>(m_cpu_solver.getRotationalNodes().size());
 
     // 1. Half-Step Velocity & Nodal Position Update on GPU (2nd-Order Velocity-Verlet)
     launch_fem_nodal_half_step_kernel_3d<T>(m_d_nodes, num_nodes, dt, m_cuda_stream);
+    if (m_d_rot_nodes && num_rot_nodes > 0) {
+        int block_size = 256;
+        int rot_grid = (num_rot_nodes + block_size - 1) / block_size;
+        fem_rot_nodal_half_step_kernel_3d_device<T><<<rot_grid, block_size, 0, m_cuda_stream>>>(
+            m_d_rot_nodes, num_rot_nodes, dt
+        );
+    }
 
     // 2. Penalty Surface Contact Handling using GPU Spatial Grid (100% on GPU!)
-    if (m_cpu_solver.getContactPenaltyScale() > static_cast<T>(0.0f) && m_num_surface_facets > 0 && m_num_surface_nodes > 0) {
+    const bool need_debris_contact = (m_cuda_mpm_solver && m_cuda_mpm_solver->getParticleCount() > 0 &&
+                                      m_cpu_solver.getContactPenaltyScale() > static_cast<T>(0.0f));
+    if (m_cpu_solver.getContactPenaltyScale() > static_cast<T>(0.0f) &&
+        m_num_surface_facets > 0 && (m_num_surface_nodes > 0 || need_debris_contact)) {
         launch_fem_update_surface_facets_kernel_3d<T>(
             m_d_nodes, num_nodes, m_d_elements, num_elements, m_d_facets, static_cast<int>(m_num_surface_facets), m_d_node_normals, m_cuda_stream
         );
 
-        launch_fem_contact_forces_kernel_3d<T>(
-            m_d_nodes, num_nodes,
-            m_d_elements, num_elements,
-            m_d_facets, static_cast<int>(m_num_surface_facets),
-            m_d_surface_nodes, static_cast<int>(m_num_surface_nodes),
-            m_d_node_part_id,
-            m_d_part_mat_id,
-            m_max_part_id,
-            m_d_node_normals,
-            m_d_materials,
-            m_cpu_solver.getContactSearchMethod(),
-            m_d_cell_counts,
-            m_d_cell_facet_ids,
-            static_cast<uint32_t>(m_spatial_grid_capacity),
-            m_base_cell_size,
-            m_d_bvh_morton_codes,
-            m_d_bvh_morton_codes_alt,
-            m_d_bvh_sorted_facet_ids,
-            m_d_bvh_facet_indices_in,
-            m_d_bvh_nodes,
-            m_d_bvh_leaf_parents,
-            m_d_bvh_flags,
-            m_d_bvh_temp_storage,
-            m_bvh_temp_storage_bytes,
-            m_bbox_min[0], m_bbox_max[0],
-            m_bbox_min[1], m_bbox_max[1],
-            m_bbox_min[2], m_bbox_max[2],
-            m_cpu_solver.getContactPenaltyScale(),
-            m_cpu_solver.getFrictionStatic(),
-            m_cpu_solver.getFrictionKinetic(),
-            m_cpu_solver.getContactDamping(),
-            dt,
-            m_cuda_stream
-        );
+        if (m_num_surface_nodes > 0) {
+            launch_fem_contact_forces_kernel_3d<T>(
+                m_d_nodes, num_nodes,
+                m_d_elements, num_elements,
+                m_d_facets, static_cast<int>(m_num_surface_facets),
+                m_d_surface_nodes, static_cast<int>(m_num_surface_nodes),
+                m_d_node_part_id,
+                m_d_part_mat_id,
+                m_max_part_id,
+                m_d_node_normals,
+                m_d_materials,
+                m_cpu_solver.getContactSearchMethod(),
+                m_d_cell_counts,
+                m_d_cell_offsets,
+                m_d_cell_facet_ids,
+                static_cast<int>(m_allocated_hash_entries),
+                m_d_oversized_facets,
+                m_d_oversized_count,
+                static_cast<int>(m_allocated_oversized_facets),
+                m_d_hash_scan_temp,
+                m_hash_scan_temp_bytes,
+                static_cast<uint32_t>(m_spatial_grid_capacity),
+                m_base_cell_size,
+                m_d_bvh_morton_codes,
+                m_d_bvh_morton_codes_alt,
+                m_d_bvh_sorted_facet_ids,
+                m_d_bvh_facet_indices_in,
+                m_d_bvh_nodes,
+                m_d_bvh_leaf_parents,
+                m_d_bvh_flags,
+                m_d_bvh_temp_storage,
+                m_bvh_temp_storage_bytes,
+                m_bbox_min[0], m_bbox_max[0],
+                m_bbox_min[1], m_bbox_max[1],
+                m_bbox_min[2], m_bbox_max[2],
+                m_cpu_solver.getContactPenaltyScale(),
+                m_cpu_solver.getFrictionStatic(),
+                m_cpu_solver.getFrictionKinetic(),
+                m_cpu_solver.getContactDamping(),
+                dt,
+                m_cuda_stream
+            );
+        }
 
         // 2b. Penalty MPM Debris-to-FEM Facet & Rebar Contact on GPU
-        if (m_cuda_mpm_solver && m_cuda_mpm_solver->getParticleCount() > 0) {
+        if (m_has_pending_mpm_impulse && m_d_mpm_impulse_accum) {
+            T inv_dt = (dt > static_cast<T>(1.0e-15f)) ? (static_cast<T>(1.0f) / dt) : static_cast<T>(0.0f);
+            int block_size = 256;
+            int grid_size = (num_nodes + block_size - 1) / block_size;
+            fem_flush_mpm_impulse_kernel_3d_device<T><<<grid_size, block_size, 0, m_cuda_stream>>>(
+                m_d_nodes, num_nodes, m_d_mpm_impulse_accum, inv_dt
+            );
+            m_has_pending_mpm_impulse = false;
+        } else if (need_debris_contact) {
+            if (m_num_surface_nodes == 0 || m_cpu_solver.getContactSearchMethod() == FEMContactSearchMethod::LinearBVH) {
+                buildOctaveHashOnDevice();
+            }
             launch_fem_mpm_debris_contact_kernel_3d<T>(
                 m_cuda_mpm_solver->getDeviceParticlesSoA(),
                 static_cast<int>(m_cuda_mpm_solver->getParticleCount()),
@@ -3719,11 +5084,22 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
                 m_d_trusses, num_trusses,
                 m_d_beams, num_beams,
                 m_d_materials,
+                m_d_cell_counts,
+                m_d_cell_offsets,
+                m_d_cell_facet_ids,
+                static_cast<int>(m_allocated_hash_entries),
+                m_d_oversized_facets,
+                m_d_oversized_count,
+                static_cast<int>(m_allocated_oversized_facets),
+                static_cast<uint32_t>(m_spatial_grid_capacity),
+                m_base_cell_size,
                 m_cpu_solver.getContactPenaltyScale(),
                 m_cpu_solver.getFrictionStatic(),
                 m_cpu_solver.getFrictionKinetic(),
                 m_cpu_solver.getContactDamping(),
                 dt,
+                nullptr,
+                false,
                 m_cuda_stream
             );
         }
@@ -3738,17 +5114,50 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
                 m_d_nodes, num_nodes, m_d_elements, num_elements, m_d_facets, static_cast<int>(m_num_surface_facets), m_d_node_normals, m_cuda_stream
             );
         }
+        if (m_has_pending_mpm_impulse && m_d_mpm_impulse_accum) {
+            if (m_cpu_solver.getContactPenaltyScale() > static_cast<T>(0.0f)) {
+                T inv_dt = (dt > static_cast<T>(1.0e-15f)) ? (static_cast<T>(1.0f) / dt) : static_cast<T>(0.0f);
+                fem_flush_mpm_impulse_kernel_3d_device<T><<<grid_size, block_size, 0, m_cuda_stream>>>(
+                    m_d_nodes, num_nodes, m_d_mpm_impulse_accum, inv_dt
+                );
+            } else if (m_allocated_nodes > 0) {
+                cudaMemsetAsync(m_d_mpm_impulse_accum, 0, sizeof(T) * m_allocated_nodes * 3, m_cuda_stream);
+            }
+            m_has_pending_mpm_impulse = false;
+        } else if (need_debris_contact && (num_trusses > 0 || num_beams > 0)) {
+            launch_fem_mpm_debris_contact_kernel_3d<T>(
+                m_cuda_mpm_solver->getDeviceParticlesSoA(),
+                static_cast<int>(m_cuda_mpm_solver->getParticleCount()),
+                m_d_nodes, num_nodes,
+                m_d_elements, num_elements,
+                m_d_facets, static_cast<int>(m_num_surface_facets),
+                m_d_trusses, num_trusses,
+                m_d_beams, num_beams,
+                m_d_materials,
+                nullptr, nullptr, nullptr, 0, nullptr, nullptr, 0, 0, static_cast<T>(0.0f),
+                m_cpu_solver.getContactPenaltyScale(),
+                m_cpu_solver.getFrictionStatic(),
+                m_cpu_solver.getFrictionKinetic(),
+                m_cpu_solver.getContactDamping(),
+                dt,
+                nullptr,
+                false,
+                m_cuda_stream
+            );
+        }
     }
 
     // 3. Reset nodal internal forces on GPU
     launch_fem_reset_nodal_forces_kernel_3d<T>(m_d_nodes, num_nodes, m_cuda_stream);
 
     // 4. Compute Hex8 / Tet4-ANP Element Stresses and Hourglass Forces on GPU
+    const auto& erosion = m_cpu_solver.getErosionCriteria();
     launch_fem_element_forces_kernel_3d<T>(
         m_d_nodes, num_nodes, m_d_elements, num_elements, m_d_gp_history, m_d_materials,
         m_cpu_solver.getPhysicsParams(), dt, m_cpu_solver.getHourglassCoeff(),
         m_cpu_solver.getHourglassModel(), m_cpu_solver.getIntegrationScheme(), m_cuda_stream,
-        m_d_nodal_vol_cur, m_d_nodal_vol_ref, m_sim_time
+        m_d_nodal_vol_cur, m_d_nodal_vol_ref, m_sim_time, m_d_nodal_dvol_dt,
+        erosion.min_volume_ratio, m_d_erosion_flag
     );
 
     // 4b. Compute 1D Rebar Truss and Beam Forces on GPU
@@ -3773,103 +5182,44 @@ void FEMSolver3DCUDA<T>::stepWithDt(T dt) {
 
     // 5. Central Difference Kinematic Acceleration & Full Velocity Update on GPU
     launch_fem_nodal_full_step_kernel_3d<T>(m_d_nodes, num_nodes, dt, m_cuda_stream);
+    if (m_d_rot_nodes && num_rot_nodes > 0) {
+        int block_size = 256;
+        int rot_grid = (num_rot_nodes + block_size - 1) / block_size;
+        fem_rot_nodal_full_step_kernel_3d_device<T><<<rot_grid, block_size, 0, m_cuda_stream>>>(
+            m_d_rot_nodes, num_rot_nodes, dt
+        );
+    }
 
     // 6. Erosion & Option C Cohesive Splitting Evaluation on GPU
-    const auto& erosion = m_cpu_solver.getErosionCriteria();
     const bool enable_cohesive_splitting = m_cpu_solver.getPhysicsParams().enable_cohesive_splitting;
-    bool has_erosion = (erosion.enable_strain_erosion || erosion.enable_stress_erosion || erosion.enable_timestep_erosion || enable_cohesive_splitting);
-    if (has_erosion) {
+    bool any_cohesive_splitting = enable_cohesive_splitting;
+    if (!any_cohesive_splitting) {
+        for (const auto& mt : m_cpu_solver.getMaterialTables()) {
+            if (mt.enable_cohesive_splitting) { any_cohesive_splitting = true; break; }
+        }
+    }
+    const bool enable_nonlocal_damage = m_cpu_solver.getPhysicsParams().enable_nonlocal_damage;
+    if (num_elements > 0) {
         launch_fem_initial_timestep_erosion_kernel_3d<T>(
             m_d_nodes, num_nodes, m_d_elements, num_elements,
             m_d_trusses, num_trusses, m_d_beams, num_beams,
-            m_d_materials, erosion, m_d_node_active_count, m_d_erosion_flag, m_cuda_stream,
-            enable_cohesive_splitting
+            m_d_materials, erosion, m_cpu_solver.getPhysicsParams(),
+            m_d_node_active_count, m_d_erosion_flag, m_cuda_stream,
+            enable_cohesive_splitting, m_d_face_neighbors, enable_nonlocal_damage
         );
+    }
 
-        int check_interval = enable_cohesive_splitting ? 2 : 10;
+    if (num_elements > 0) {
+        const int check_interval = 4;
         if (m_d_erosion_flag && m_h_erosion_flag_pinned && (m_step_count % check_interval == 0)) {
             cudaMemcpyAsync(m_h_erosion_flag_pinned, m_d_erosion_flag, sizeof(int), cudaMemcpyDeviceToHost, m_cuda_stream);
             cudaStreamSynchronize(m_cuda_stream);
-        }
 
-        if (m_h_erosion_flag_pinned && *m_h_erosion_flag_pinned != 0) {
-            *m_h_erosion_flag_pinned = 0;
-            m_topology_dirty = true;
-            // Sync element erosion state and node kinematic states back to CPU
-            cudaMemcpyAsync(elements.data(), m_d_elements, sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
-            cudaMemcpyAsync(nodes.data(), m_d_nodes, sizeof(FEMNode3D<T>) * nodes.size(), cudaMemcpyDeviceToHost, m_cuda_stream);
-            cudaStreamSynchronize(m_cuda_stream);
-
-            if (enable_cohesive_splitting) {
-                m_cpu_solver.splitFracturedElementNodes();
-                m_cpu_solver.processErodedElementsToMPM();
-                m_cpu_solver.invalidateSurfaceFacets();
-                syncToDevice();
-                if (m_cuda_mpm_solver && m_cpu_solver.getMPMSolver()) {
-                    const auto& cpu_particles = m_cpu_solver.getMPMSolver()->getParticles();
-                    if (cpu_particles.size() > m_cuda_mpm_solver->getParticleCount()) {
-                        std::vector<MPMParticle3D> new_pts(cpu_particles.begin() + m_cuda_mpm_solver->getParticleCount(), cpu_particles.end());
-                        m_cuda_mpm_solver->getMaterialTables() = m_cpu_solver.getMPMSolver()->getMaterialTables();
-                        m_cuda_mpm_solver->addParticlesDirect(new_pts);
-                    }
-                }
-            } else {
-                m_cpu_solver.processErodedElementsToMPM();
-                cudaMemcpyAsync(m_d_elements, elements.data(), sizeof(FEMElement3D<T>) * elements.size(), cudaMemcpyHostToDevice, m_cuda_stream);
-                if (m_cuda_mpm_solver && m_cpu_solver.getMPMSolver()) {
-                    const auto& cpu_particles = m_cpu_solver.getMPMSolver()->getParticles();
-                    if (cpu_particles.size() > m_cuda_mpm_solver->getParticleCount()) {
-                        std::vector<MPMParticle3D> new_pts(cpu_particles.begin() + m_cuda_mpm_solver->getParticleCount(), cpu_particles.end());
-                        m_cuda_mpm_solver->getMaterialTables() = m_cpu_solver.getMPMSolver()->getMaterialTables();
-                        m_cuda_mpm_solver->addParticlesDirect(new_pts);
-                    }
-                }
-                // Neutralize orphan nodes on GPU after MPM debris conversion has inherited true kinetic velocities
-                launch_fem_update_orphan_nodes_erosion_kernel_3d<T>(
-                    m_d_nodes, num_nodes, m_d_elements, num_elements,
-                    m_d_trusses, num_trusses, m_d_beams, num_beams,
-                    m_d_node_active_count, m_cuda_stream
-                );
-                m_cpu_solver.invalidateSurfaceFacets();
-                const auto& new_facets = m_cpu_solver.getSurfaceFacets();
-
-                m_num_surface_facets = new_facets.size();
-                if (new_facets.size() > m_allocated_facets) {
-                    if (m_d_facets) cudaFree(m_d_facets);
-                    m_allocated_facets = std::max(new_facets.size() * 2, m_allocated_facets * 2);
-                    cudaMalloc(&m_d_facets, sizeof(FEMFacet3D<T>) * m_allocated_facets);
-                }
-                if (!new_facets.empty()) {
-                    cudaMemcpyAsync(m_d_facets, new_facets.data(), sizeof(FEMFacet3D<T>) * new_facets.size(), cudaMemcpyHostToDevice, m_cuda_stream);
-                }
-
-                // Extract surface nodes
-                std::vector<bool> is_surf_node(nodes.size(), false);
-                for (const auto& f : new_facets) {
-                    if (f.is_eroded) continue;
-                    for (int k = 0; k < 4; ++k) {
-                        if (f.node_ids[k] >= 0 && f.node_ids[k] < static_cast<int>(nodes.size())) {
-                            is_surf_node[f.node_ids[k]] = true;
-                        }
-                    }
-                }
-                std::vector<int> surf_nodes;
-                surf_nodes.reserve(nodes.size() / 2);
-                for (size_t i = 0; i < nodes.size(); ++i) {
-                    if (is_surf_node[i]) {
-                        surf_nodes.push_back(static_cast<int>(i));
-                    }
-                }
-                m_num_surface_nodes = surf_nodes.size();
-                if (m_num_surface_nodes > m_allocated_surface_nodes) {
-                    if (m_d_surface_nodes) cudaFree(m_d_surface_nodes);
-                    m_allocated_surface_nodes = std::max(m_num_surface_nodes * 2, m_allocated_surface_nodes * 2);
-                    cudaMalloc(&m_d_surface_nodes, sizeof(int) * m_allocated_surface_nodes);
-                }
-                if (!surf_nodes.empty()) {
-                    cudaMemcpyAsync(m_d_surface_nodes, surf_nodes.data(), sizeof(int) * surf_nodes.size(), cudaMemcpyHostToDevice, m_cuda_stream);
-                }
-                cudaStreamSynchronize(m_cuda_stream);
+            if (*m_h_erosion_flag_pinned != 0) {
+                *m_h_erosion_flag_pinned = 0;
+                cudaMemsetAsync(m_d_erosion_flag, 0, sizeof(int), m_cuda_stream);
+                m_topology_dirty = true;
+                syncTopologyAfterSplitOrErosion(any_cohesive_splitting);
             }
         }
     }
@@ -3881,16 +5231,20 @@ template <typename T>
 size_t FEMSolver3DCUDA<T>::getAllocatedVRAM() const {
     size_t total = 0;
     if (m_d_nodes) total += sizeof(FEMNode3D<T>) * m_allocated_nodes;
+    if (m_d_mpm_impulse_accum) total += sizeof(T) * m_allocated_nodes * 3;
     if (m_d_node_part_id) total += sizeof(int) * m_allocated_nodes;
     if (m_d_node_normals) total += sizeof(T) * m_allocated_nodes * 3;
     if (m_d_node_active_count) total += sizeof(int) * m_allocated_nodes;
     if (m_d_nodal_vol_cur) total += sizeof(T) * m_allocated_nodes;
     if (m_d_nodal_vol_ref) total += sizeof(T) * m_allocated_nodes;
+    if (m_d_nodal_dvol_dt) total += sizeof(T) * m_allocated_nodes;
+    if (m_d_face_neighbors) total += sizeof(int) * m_allocated_elements * 6;
     if (m_d_erosion_flag) total += sizeof(int);
     if (m_d_part_mat_id) total += sizeof(int) * m_allocated_part_mat_id;
     if (m_d_elements) total += sizeof(FEMElement3D<T>) * m_allocated_elements;
     if (m_d_reduction_buffer) {
-        int grid_size = (m_allocated_elements + 255) / 256;
+        size_t max_elem = std::max({m_allocated_elements, m_allocated_trusses, m_allocated_beams, static_cast<size_t>(1)});
+        int grid_size = static_cast<int>((max_elem + 255) / 256);
         total += sizeof(T) * (grid_size > 0 ? grid_size : 1);
     }
     if (m_d_gp_history) total += sizeof(FEMGaussPointHistory3D<T>) * m_allocated_gp_history;
@@ -3900,7 +5254,11 @@ size_t FEMSolver3DCUDA<T>::getAllocatedVRAM() const {
     if (m_d_rot_nodes) total += sizeof(FEMNodeRotationalState3D<T>) * m_allocated_rot_nodes;
     if (m_d_facets) total += sizeof(FEMFacet3D<T>) * m_allocated_facets;
     if (m_d_cell_counts) total += sizeof(int) * m_spatial_grid_capacity * NUM_OCTAVES;
-    if (m_d_cell_facet_ids) total += sizeof(int) * m_spatial_grid_capacity * NUM_OCTAVES * MAX_FACETS_PER_CELL;
+    if (m_d_cell_offsets) total += sizeof(int) * m_spatial_grid_capacity * NUM_OCTAVES;
+    if (m_d_cell_facet_ids) total += sizeof(int) * m_allocated_hash_entries;
+    if (m_d_oversized_facets) total += sizeof(int) * m_allocated_oversized_facets;
+    if (m_d_oversized_count) total += sizeof(int);
+    if (m_d_hash_scan_temp) total += m_hash_scan_temp_bytes;
     if (m_d_bvh_morton_codes) total += sizeof(uint32_t) * m_allocated_bvh_facets;
     if (m_d_bvh_morton_codes_alt) total += sizeof(uint32_t) * m_allocated_bvh_facets;
     if (m_d_bvh_sorted_facet_ids) total += sizeof(int) * m_allocated_bvh_facets;
@@ -3917,11 +5275,14 @@ size_t FEMSolver3DCUDA<T>::getAllocatedVRAM() const {
 
 template <typename T>
 T FEMSolver3DCUDA<T>::computeStepSize(T cfl) {
-    if (!m_d_nodes || !m_d_elements) {
+    if (!m_d_nodes) {
         syncToDevice();
     }
     return launch_fem_compute_step_size_kernel_3d<T>(
-        m_d_nodes, m_d_elements, static_cast<int>(m_cpu_solver.getElements().size()),
+        m_d_nodes,
+        m_d_elements, static_cast<int>(m_cpu_solver.getElements().size()),
+        m_d_trusses, static_cast<int>(m_cpu_solver.getTrusses().size()),
+        m_d_beams, static_cast<int>(m_cpu_solver.getBeams().size()),
         m_d_materials, cfl, m_d_reduction_buffer, m_cuda_stream
     );
 }
@@ -3931,6 +5292,57 @@ void FEMSolver3DCUDA<T>::step(T cfl) {
     m_last_cfl = cfl;
     T dt = computeStepSize(cfl);
     stepWithDt(dt);
+}
+
+template <typename T>
+void FEMSolver3DCUDA<T>::applyMPMContact(T dt) {
+    if (dt <= static_cast<T>(0.0f)) return;
+    if (!m_cuda_mpm_solver || m_cuda_mpm_solver->getParticleCount() == 0) return;
+    if (m_cpu_solver.getContactPenaltyScale() <= static_cast<T>(0.0f)) return;
+    int num_nodes = static_cast<int>(m_cpu_solver.getNodes().size());
+    int num_elements = static_cast<int>(m_cpu_solver.getElements().size());
+    int num_trusses = static_cast<int>(m_cpu_solver.getTrusses().size());
+    int num_beams = static_cast<int>(m_cpu_solver.getBeams().size());
+    if (m_num_surface_facets == 0 && num_trusses == 0 && num_beams == 0) return;
+    if (!m_d_nodes || !m_d_mpm_impulse_accum) syncToDevice();
+    if (m_num_surface_facets > 0 && m_d_facets) {
+        int f_block = 256;
+        int f_grid = (static_cast<int>(m_num_surface_facets) + f_block - 1) / f_block;
+        fem_update_surface_facets_kernel_3d_device<T><<<f_grid, f_block, 0, m_cuda_stream>>>(
+            m_d_nodes, m_d_elements, num_elements,
+            m_d_facets, static_cast<int>(m_num_surface_facets), m_d_node_normals
+        );
+        buildOctaveHashOnDevice();
+    }
+    launch_fem_mpm_debris_contact_kernel_3d<T>(
+        m_cuda_mpm_solver->getDeviceParticlesSoA(),
+        static_cast<int>(m_cuda_mpm_solver->getParticleCount()),
+        m_d_nodes, num_nodes,
+        m_d_elements, num_elements,
+        m_d_facets, static_cast<int>(m_num_surface_facets),
+        m_d_trusses, num_trusses,
+        m_d_beams, num_beams,
+        m_d_materials,
+        m_d_cell_counts,
+        m_d_cell_offsets,
+        m_d_cell_facet_ids,
+        static_cast<int>(m_allocated_hash_entries),
+        m_d_oversized_facets,
+        m_d_oversized_count,
+        static_cast<int>(m_allocated_oversized_facets),
+        static_cast<uint32_t>(m_spatial_grid_capacity),
+        m_base_cell_size,
+        m_cpu_solver.getContactPenaltyScale(),
+        m_cpu_solver.getFrictionStatic(),
+        m_cpu_solver.getFrictionKinetic(),
+        m_cpu_solver.getContactDamping(),
+        dt,
+        m_d_mpm_impulse_accum,
+        true,
+        m_cuda_stream
+    );
+    m_has_pending_mpm_impulse = true;
+    cudaStreamSynchronize(m_cuda_stream);
 }
 
 template <typename T>
@@ -3968,6 +5380,12 @@ __global__ void fem_truss_forces_kernel_3d_device(
     T axial_edot = (dvx * e1[0] + dvy * e1[1] + dvz * e1[2]) * invL;
 
     const MaterialTable3D& mat = d_materials[truss.mat_id];
+    if (mat.enable_timestep_erosion && mat.timestep_erosion_factor > 1.0e-5f &&
+        L <= static_cast<T>(mat.timestep_erosion_factor) * truss.L0) {
+        truss.is_eroded = true;
+        truss.sigma = static_cast<T>(0.0f);
+        return;
+    }
     T sigma = static_cast<T>(0.0f);
     T current_yield = static_cast<T>(0.0f);
     bool eroded_truss = false;
@@ -3979,6 +5397,7 @@ __global__ void fem_truss_forces_kernel_3d_device(
 
     if (eroded_truss) {
         truss.is_eroded = true;
+        truss.sigma = static_cast<T>(0.0f);
         return;
     }
 
@@ -4051,6 +5470,20 @@ __global__ void fem_beam_forces_kernel_3d_device(
     T axial_edot = (dv[0]*e1[0] + dv[1]*e1[1] + dv[2]*e1[2]) * invL;
 
     const MaterialTable3D& mat = d_materials[beam.mat_id];
+    if (mat.enable_timestep_erosion && mat.timestep_erosion_factor > 1.0e-5f) {
+        T d_val = beam.d > static_cast<T>(1.0e-6f) ? beam.d : static_cast<T>(0.012f);
+        T dt0_ax = beam.L0;
+        T dt0_bn = (beam.L0 * beam.L0) / (static_cast<T>(3.464f) * d_val);
+        T dt0_eff = dt0_ax < dt0_bn ? dt0_ax : dt0_bn;
+        T dt_ax = L;
+        T dt_bn = (L * L) / (static_cast<T>(3.464f) * d_val);
+        T dt_eff = dt_ax < dt_bn ? dt_ax : dt_bn;
+        if (dt0_eff > static_cast<T>(0.0f) && dt_eff <= static_cast<T>(mat.timestep_erosion_factor) * dt0_eff) {
+            beam.is_eroded = true;
+            beam.N = beam.V2 = beam.V3 = beam.M2 = beam.M3 = beam.T_tor = static_cast<T>(0.0f);
+            return;
+        }
+    }
     T E = static_cast<T>(mat.youngs_modulus > 0.0f ? mat.youngs_modulus : 200.0e9f);
     T nu = static_cast<T>(mat.poissons_ratio > 0.0f ? mat.poissons_ratio : 0.30f);
     T G = E / (static_cast<T>(2.0f) * (static_cast<T>(1.0f) + nu));
@@ -4064,6 +5497,7 @@ __global__ void fem_beam_forces_kernel_3d_device(
         beam.failure_strain, eroded_beam);
     if (eroded_beam) {
         beam.is_eroded = true;
+        beam.N = beam.V2 = beam.V3 = beam.M2 = beam.M3 = beam.T_tor = static_cast<T>(0.0f);
         return;
     }
     T N = sigma * beam.A;
@@ -4080,6 +5514,59 @@ __global__ void fem_beam_forces_kernel_3d_device(
         w2[1] = d_rot_nodes[r2].omega[1];
         w2[2] = d_rot_nodes[r2].omega[2];
     }
+
+    // Co-rotate transverse triad (beam.e2, beam.e3) with current axis e1 and axial twist
+    T e1_old[3] = {
+        beam.e2[1]*beam.e3[2] - beam.e2[2]*beam.e3[1],
+        beam.e2[2]*beam.e3[0] - beam.e2[0]*beam.e3[2],
+        beam.e2[0]*beam.e3[1] - beam.e2[1]*beam.e3[0]
+    };
+    T c_axis = e1_old[0]*e1[0] + e1_old[1]*e1[1] + e1_old[2]*e1[2];
+    T v_axis[3] = {
+        e1_old[1]*e1[2] - e1_old[2]*e1[1],
+        e1_old[2]*e1[0] - e1_old[0]*e1[2],
+        e1_old[0]*e1[1] - e1_old[1]*e1[0]
+    };
+    if (c_axis > static_cast<T>(-0.999999f)) {
+        T k_rot = static_cast<T>(1.0f) / (static_cast<T>(1.0f) + c_axis);
+        T vx_e2[3] = {
+            v_axis[1]*beam.e2[2] - v_axis[2]*beam.e2[1],
+            v_axis[2]*beam.e2[0] - v_axis[0]*beam.e2[2],
+            v_axis[0]*beam.e2[1] - v_axis[1]*beam.e2[0]
+        };
+        T v_dot_e2 = v_axis[0]*beam.e2[0] + v_axis[1]*beam.e2[1] + v_axis[2]*beam.e2[2];
+        for (int c = 0; c < 3; ++c) {
+            beam.e2[c] = beam.e2[c] * c_axis + vx_e2[c] + v_axis[c] * (v_dot_e2 * k_rot);
+        }
+    }
+    T dtheta_twist = static_cast<T>(0.5f) * ((w1[0]*e1[0] + w1[1]*e1[1] + w1[2]*e1[2]) +
+                                             (w2[0]*e1[0] + w2[1]*e1[1] + w2[2]*e1[2])) * dt;
+    if (fabs(dtheta_twist) > static_cast<T>(1.0e-12f)) {
+        T ct = cos(dtheta_twist);
+        T st = sin(dtheta_twist);
+        T e1_x_e2[3] = {
+            e1[1]*beam.e2[2] - e1[2]*beam.e2[1],
+            e1[2]*beam.e2[0] - e1[0]*beam.e2[2],
+            e1[0]*beam.e2[1] - e1[1]*beam.e2[0]
+        };
+        for (int c = 0; c < 3; ++c) {
+            beam.e2[c] = beam.e2[c] * ct + e1_x_e2[c] * st;
+        }
+    }
+    // Re-orthonormalize (e1, beam.e2, beam.e3)
+    T dot12 = beam.e2[0]*e1[0] + beam.e2[1]*e1[1] + beam.e2[2]*e1[2];
+    beam.e2[0] -= dot12 * e1[0];
+    beam.e2[1] -= dot12 * e1[1];
+    beam.e2[2] -= dot12 * e1[2];
+    T e2_norm = sqrt(beam.e2[0]*beam.e2[0] + beam.e2[1]*beam.e2[1] + beam.e2[2]*beam.e2[2]);
+    if (e2_norm > static_cast<T>(1.0e-12f)) {
+        beam.e2[0] /= e2_norm;
+        beam.e2[1] /= e2_norm;
+        beam.e2[2] /= e2_norm;
+    }
+    beam.e3[0] = e1[1]*beam.e2[2] - e1[2]*beam.e2[1];
+    beam.e3[1] = e1[2]*beam.e2[0] - e1[0]*beam.e2[2];
+    beam.e3[2] = e1[0]*beam.e2[1] - e1[1]*beam.e2[0];
 
     T dw[3] = { w2[0] - w1[0], w2[1] - w1[1], w2[2] - w1[2] };
     T dot_kappa2 = (dw[0]*beam.e2[0] + dw[1]*beam.e2[1] + dw[2]*beam.e2[2]) * invL;
@@ -4106,34 +5593,53 @@ __global__ void fem_beam_forces_kernel_3d_device(
     T V3 = 0.0f;
 
     if (d_rot_nodes && r1 >= 0 && r1 < num_rot_nodes && r2 >= 0 && r2 < num_rot_nodes) {
-        T w_mag_sq = w1[0]*w1[0] + w1[1]*w1[1] + w1[2]*w1[2] + w2[0]*w2[0] + w2[1]*w2[1] + w2[2]*w2[2];
-        if (w_mag_sq > static_cast<T>(1.0e-12f)) {
-            T w_rel[3] = { w_avg[0] - omega_rigid[0], w_avg[1] - omega_rigid[1], w_avg[2] - omega_rigid[2] };
-            dot_gamma12 = w_rel[0]*beam.e3[0] + w_rel[1]*beam.e3[1] + w_rel[2]*beam.e3[2];
-            dot_gamma13 = -(w_rel[0]*beam.e2[0] + w_rel[1]*beam.e2[1] + w_rel[2]*beam.e2[2]);
-            beam.gamma12 += dot_gamma12 * dt;
-            beam.gamma13 += dot_gamma13 * dt;
-            T kappa_shear = static_cast<T>(0.90f);
-            V2 = kappa_shear * G * beam.A * beam.gamma12;
-            V3 = kappa_shear * G * beam.A * beam.gamma13;
-        }
+        T w_rel[3] = { w_avg[0] - omega_rigid[0], w_avg[1] - omega_rigid[1], w_avg[2] - omega_rigid[2] };
+        dot_gamma12 = -(w_rel[0]*beam.e3[0] + w_rel[1]*beam.e3[1] + w_rel[2]*beam.e3[2]);
+        dot_gamma13 = w_rel[0]*beam.e2[0] + w_rel[1]*beam.e2[1] + w_rel[2]*beam.e2[2];
+        beam.gamma12 += dot_gamma12 * dt;
+        beam.gamma13 += dot_gamma13 * dt;
+        T kappa_shear = static_cast<T>(0.90f);
+        V2 = kappa_shear * G * beam.A * beam.gamma12;
+        V3 = kappa_shear * G * beam.A * beam.gamma13;
     }
 
     T M2 = E * beam.I2 * beam.kappa2;
     T M3 = E * beam.I3 * beam.kappa3;
     T M_res = sqrt(M2*M2 + M3*M3);
     T Mp = beam.Zp * current_yield;
-    if (M_res > Mp && M_res > static_cast<T>(1.0e-12f)) {
+    if (Mp > static_cast<T>(0.0f) && M_res > Mp && M_res > static_cast<T>(1.0e-12f)) {
         T scale_m = Mp / M_res;
         M2 *= scale_m;
         M3 *= scale_m;
+        T dkappa2_p = beam.kappa2 * (static_cast<T>(1.0f) - scale_m);
+        T dkappa3_p = beam.kappa3 * (static_cast<T>(1.0f) - scale_m);
+        beam.kappa2 *= scale_m;
+        beam.kappa3 *= scale_m;
+        T dkappa_p = sqrt(dkappa2_p * dkappa2_p + dkappa3_p * dkappa3_p);
+        T y_max = static_cast<T>(0.5f) * (beam.d > static_cast<T>(1.0e-6f) ? beam.d : sqrt(beam.A));
+        beam.ep_bar += dkappa_p * y_max;
+        T eff_fail = (beam.failure_strain > static_cast<T>(0.0f))
+            ? beam.failure_strain
+            : static_cast<T>(mat.failure_strain > 0.0f ? mat.failure_strain : mat.erosion_strain);
+        if (eff_fail > static_cast<T>(0.0f) && beam.ep_bar >= eff_fail) {
+            beam.is_eroded = true;
+            beam.N = beam.V2 = beam.V3 = beam.M2 = beam.M3 = beam.T_tor = static_cast<T>(0.0f);
+            return;
+        }
     }
 
     T T_tor = G * beam.J * beam.kappa_tor;
 
-    T f2_x = N * e1[0];
-    T f2_y = N * e1[1];
-    T f2_z = N * e1[2];
+    beam.N = N;
+    beam.V2 = V2;
+    beam.V3 = V3;
+    beam.M2 = M2;
+    beam.M3 = M3;
+    beam.T_tor = T_tor;
+
+    T f2_x = N * e1[0] + V2 * beam.e2[0] + V3 * beam.e3[0];
+    T f2_y = N * e1[1] + V2 * beam.e2[1] + V3 * beam.e3[1];
+    T f2_z = N * e1[2] + V2 * beam.e2[2] + V3 * beam.e3[2];
 
     atomicAdd(&d_nodes[n2].f_int[0], f2_x);
     atomicAdd(&d_nodes[n2].f_int[1], f2_y);
@@ -4146,9 +5652,9 @@ __global__ void fem_beam_forces_kernel_3d_device(
     if (d_rot_nodes) {
         T half_L = static_cast<T>(0.5f) * L;
         T V_cross[3] = {
-            -V3 * beam.e2[0] + V2 * beam.e3[0],
-            -V3 * beam.e2[1] + V2 * beam.e3[1],
-            -V3 * beam.e2[2] + V2 * beam.e3[2]
+            V3 * beam.e2[0] - V2 * beam.e3[0],
+            V3 * beam.e2[1] - V2 * beam.e3[1],
+            V3 * beam.e2[2] - V2 * beam.e3[2]
         };
 
         T m2_x = T_tor * e1[0] + M2 * beam.e2[0] + M3 * beam.e3[0] + half_L * V_cross[0];
@@ -4205,10 +5711,21 @@ __global__ void fem_lysmer_dashpots_kernel_3d_device(
     const FEMFacet3D<T>& facet = d_facets[f];
     if (facet.is_eroded) return;
 
+    const bool is_tri = (facet.node_ids[2] == facet.node_ids[3]);
+    const int num_facet_nodes = is_tri ? 3 : 4;
+    const T inv_nodes = static_cast<T>(1.0f) / static_cast<T>(num_facet_nodes);
+
     if (params.filter_box) {
-        T cx = static_cast<T>(0.25f) * (d_nodes[facet.node_ids[0]].x[0] + d_nodes[facet.node_ids[1]].x[0] + d_nodes[facet.node_ids[2]].x[0] + d_nodes[facet.node_ids[3]].x[0]);
-        T cy = static_cast<T>(0.25f) * (d_nodes[facet.node_ids[0]].x[1] + d_nodes[facet.node_ids[1]].x[1] + d_nodes[facet.node_ids[2]].x[1] + d_nodes[facet.node_ids[3]].x[1]);
-        T cz = static_cast<T>(0.25f) * (d_nodes[facet.node_ids[0]].x[2] + d_nodes[facet.node_ids[1]].x[2] + d_nodes[facet.node_ids[2]].x[2] + d_nodes[facet.node_ids[3]].x[2]);
+        T cx = static_cast<T>(0.0f), cy = static_cast<T>(0.0f), cz = static_cast<T>(0.0f);
+        for (int k = 0; k < num_facet_nodes; ++k) {
+            const int nid = facet.node_ids[k];
+            cx += d_nodes[nid].x[0];
+            cy += d_nodes[nid].x[1];
+            cz += d_nodes[nid].x[2];
+        }
+        cx *= inv_nodes;
+        cy *= inv_nodes;
+        cz *= inv_nodes;
         T tol = static_cast<T>(params.tol);
 
         bool on_bound = (fabs(cx - static_cast<T>(params.x_min)) <= tol) ||
@@ -4226,10 +5743,10 @@ __global__ void fem_lysmer_dashpots_kernel_3d_device(
     T norm_rel = static_cast<T>(params.normal_relaxation);
     T shear_rel = static_cast<T>(params.shear_relaxation);
 
-    T A_node = static_cast<T>(0.25f) * facet.area;
+    T A_node = inv_nodes * facet.area;
     T nx = facet.normal[0], ny = facet.normal[1], nz = facet.normal[2];
 
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < num_facet_nodes; ++k) {
         int nid = facet.node_ids[k];
         const auto& node = d_nodes[nid];
         if (node.is_eroded || node.m <= static_cast<T>(1.0e-12f)) continue;
@@ -4274,8 +5791,8 @@ void launch_fem_lysmer_dashpots_kernel_3d(
 template void launch_fem_reset_nodal_forces_kernel_3d<float>(FEMNode3D<float>*, int, cudaStream_t);
 template void launch_fem_reset_nodal_forces_kernel_3d<double>(FEMNode3D<double>*, int, cudaStream_t);
 
-template void launch_fem_element_forces_kernel_3d<float>(FEMNode3D<float>*, int, FEMElement3D<float>*, int, FEMGaussPointHistory3D<float>*, const MaterialTable3D*, BlastPhysicsParams<float>, float, float, FEMHourglassModel, FEMIntegrationScheme, cudaStream_t, float*, float*, float);
-template void launch_fem_element_forces_kernel_3d<double>(FEMNode3D<double>*, int, FEMElement3D<double>*, int, FEMGaussPointHistory3D<double>*, const MaterialTable3D*, BlastPhysicsParams<double>, double, double, FEMHourglassModel, FEMIntegrationScheme, cudaStream_t, double*, double*, double);
+template void launch_fem_element_forces_kernel_3d<float>(FEMNode3D<float>*, int, FEMElement3D<float>*, int, FEMGaussPointHistory3D<float>*, const MaterialTable3D*, BlastPhysicsParams<float>, float, float, FEMHourglassModel, FEMIntegrationScheme, cudaStream_t, float*, float*, float, float*, float, int*);
+template void launch_fem_element_forces_kernel_3d<double>(FEMNode3D<double>*, int, FEMElement3D<double>*, int, FEMGaussPointHistory3D<double>*, const MaterialTable3D*, BlastPhysicsParams<double>, double, double, FEMHourglassModel, FEMIntegrationScheme, cudaStream_t, double*, double*, double, double*, double, int*);
 
 template void launch_fem_truss_forces_kernel_3d<float>(FEMNode3D<float>*, int, FEMTrussElement3D<float>*, int, const MaterialTable3D*, float, cudaStream_t);
 template void launch_fem_truss_forces_kernel_3d<double>(FEMNode3D<double>*, int, FEMTrussElement3D<double>*, int, const MaterialTable3D*, double, cudaStream_t);
@@ -4289,8 +5806,8 @@ template void launch_fem_nodal_half_step_kernel_3d<double>(FEMNode3D<double>*, i
 template void launch_fem_nodal_full_step_kernel_3d<float>(FEMNode3D<float>*, int, float, cudaStream_t);
 template void launch_fem_nodal_full_step_kernel_3d<double>(FEMNode3D<double>*, int, double, cudaStream_t);
 
-template void launch_fem_initial_timestep_erosion_kernel_3d<float>(FEMNode3D<float>*, int, FEMElement3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, const MaterialTable3D*, FEMErosionCriteria<float>, int*, int*, cudaStream_t, bool);
-template void launch_fem_initial_timestep_erosion_kernel_3d<double>(FEMNode3D<double>*, int, FEMElement3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, const MaterialTable3D*, FEMErosionCriteria<double>, int*, int*, cudaStream_t, bool);
+template void launch_fem_initial_timestep_erosion_kernel_3d<float>(FEMNode3D<float>*, int, FEMElement3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, const MaterialTable3D*, FEMErosionCriteria<float>, BlastPhysicsParams<float>, int*, int*, cudaStream_t, bool, const int*, bool);
+template void launch_fem_initial_timestep_erosion_kernel_3d<double>(FEMNode3D<double>*, int, FEMElement3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, const MaterialTable3D*, FEMErosionCriteria<double>, BlastPhysicsParams<double>, int*, int*, cudaStream_t, bool, const int*, bool);
 
 template void launch_fem_update_orphan_nodes_erosion_kernel_3d<float>(FEMNode3D<float>*, int, const FEMElement3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, int*, cudaStream_t);
 template void launch_fem_update_orphan_nodes_erosion_kernel_3d<double>(FEMNode3D<double>*, int, const FEMElement3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, int*, cudaStream_t);
@@ -4301,7 +5818,7 @@ template void launch_fem_update_surface_facets_kernel_3d<double>(FEMNode3D<doubl
 template void launch_fem_contact_forces_kernel_3d<float>(
     FEMNode3D<float>*, int, const FEMElement3D<float>*, int, const FEMFacet3D<float>*, int,
     const int*, int, const int*, const int*, int, const float*, const MaterialTable3D*,
-    FEMContactSearchMethod, int*, int*, uint32_t, float,
+    FEMContactSearchMethod, int*, int*, int*, int, int*, int*, int, void*, size_t, uint32_t, float,
     uint32_t*, uint32_t*, int*, int*, LBVHNode3D<float>*, int*, int*, void*, size_t&,
     float, float, float, float, float, float,
     float, float, float, float, float, cudaStream_t
@@ -4309,17 +5826,17 @@ template void launch_fem_contact_forces_kernel_3d<float>(
 template void launch_fem_contact_forces_kernel_3d<double>(
     FEMNode3D<double>*, int, const FEMElement3D<double>*, int, const FEMFacet3D<double>*, int,
     const int*, int, const int*, const int*, int, const double*, const MaterialTable3D*,
-    FEMContactSearchMethod, int*, int*, uint32_t, double,
+    FEMContactSearchMethod, int*, int*, int*, int, int*, int*, int, void*, size_t, uint32_t, double,
     uint32_t*, uint32_t*, int*, int*, LBVHNode3D<double>*, int*, int*, void*, size_t&,
     double, double, double, double, double, double,
     double, double, double, double, double, cudaStream_t
 );
 
-template void launch_fem_mpm_debris_contact_kernel_3d<float>(MPMParticle3DSoA, int, FEMNode3D<float>*, int, const FEMElement3D<float>*, int, const FEMFacet3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, const MaterialTable3D*, float, float, float, float, float, cudaStream_t);
-template void launch_fem_mpm_debris_contact_kernel_3d<double>(MPMParticle3DSoA, int, FEMNode3D<double>*, int, const FEMElement3D<double>*, int, const FEMFacet3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, const MaterialTable3D*, double, double, double, double, double, cudaStream_t);
+template void launch_fem_mpm_debris_contact_kernel_3d<float>(MPMParticle3DSoA, int, FEMNode3D<float>*, int, const FEMElement3D<float>*, int, const FEMFacet3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, const MaterialTable3D*, const int*, const int*, const int*, int, const int*, const int*, int, uint32_t, float, float, float, float, float, float, float*, bool, cudaStream_t);
+template void launch_fem_mpm_debris_contact_kernel_3d<double>(MPMParticle3DSoA, int, FEMNode3D<double>*, int, const FEMElement3D<double>*, int, const FEMFacet3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, const MaterialTable3D*, const int*, const int*, const int*, int, const int*, const int*, int, uint32_t, double, double, double, double, double, double, double*, bool, cudaStream_t);
 
-template float launch_fem_compute_step_size_kernel_3d<float>(const FEMNode3D<float>*, const FEMElement3D<float>*, int, const MaterialTable3D*, float, float*, cudaStream_t);
-template double launch_fem_compute_step_size_kernel_3d<double>(const FEMNode3D<double>*, const FEMElement3D<double>*, int, const MaterialTable3D*, double, double*, cudaStream_t);
+template float launch_fem_compute_step_size_kernel_3d<float>(const FEMNode3D<float>*, const FEMElement3D<float>*, int, const FEMTrussElement3D<float>*, int, const FEMBeam3DElement<float>*, int, const MaterialTable3D*, float, float*, cudaStream_t);
+template double launch_fem_compute_step_size_kernel_3d<double>(const FEMNode3D<double>*, const FEMElement3D<double>*, int, const FEMTrussElement3D<double>*, int, const FEMBeam3DElement<double>*, int, const MaterialTable3D*, double, double*, cudaStream_t);
 
 template void launch_fem_lysmer_dashpots_kernel_3d<float>(FEMNode3D<float>*, const FEMFacet3D<float>*, int, const LysmerBoundaryParams&, cudaStream_t);
 template void launch_fem_lysmer_dashpots_kernel_3d<double>(FEMNode3D<double>*, const FEMFacet3D<double>*, int, const LysmerBoundaryParams&, cudaStream_t);
@@ -4328,17 +5845,11 @@ template <typename T>
 void FEMSolver3DCUDA<T>::evaluateErosionCriteria() {
     m_cpu_solver.evaluateErosionCriteria();
     syncToDevice();
-    if (m_cuda_mpm_solver && m_cpu_solver.getMPMSolver()) {
-        const auto& cpu_particles = m_cpu_solver.getMPMSolver()->getParticles();
-        if (cpu_particles.size() > m_cuda_mpm_solver->getParticleCount()) {
-            std::vector<MPMParticle3D> new_pts(cpu_particles.begin() + m_cuda_mpm_solver->getParticleCount(), cpu_particles.end());
-            m_cuda_mpm_solver->getMaterialTables() = m_cpu_solver.getMaterialTables();
-            m_cuda_mpm_solver->addParticlesDirect(new_pts);
-        }
-    }
+    flush_fem_debris_to_cuda_mpm<T>(m_cpu_solver, m_cuda_mpm_solver, m_synced_debris_particle_count, m_debris_mat_offset);
 }
 
 template class FEMSolver3DCUDA<float>;
 template class FEMSolver3DCUDA<double>;
 
 } // namespace Blast
+

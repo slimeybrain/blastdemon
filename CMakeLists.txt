@@ -31,9 +31,13 @@ else()
         $<$<COMPILE_LANGUAGE:CXX>:-march=native>
         $<$<COMPILE_LANGUAGE:CUDA>:-O3>
         $<$<COMPILE_LANGUAGE:CUDA>:-march=native>
+        $<$<COMPILE_LANGUAGE:CUDA>:--threads=4>
         $<$<COMPILE_LANGUAGE:CUDA>:--diag-suppress=177,550,2190,20012>
     )
 endif()
+
+# Cap concurrent heavy nvcc compilations when using Ninja to prevent OOM while keeping C++ fully parallel
+set_property(GLOBAL PROPERTY JOB_POOLS cuda_compile=2)
 
 # OpenMP for CPU solver parallelism
 find_package(OpenMP)
@@ -113,6 +117,20 @@ add_library(BlastSolverCore STATIC
     backend/BlastSolver/PhaseTrackingParticles3D_cuda.cu
     # VTK output writer
     backend/BlastSolver/VTKWriter.cpp
+)
+
+set_source_files_properties(
+    backend/BlastSolver/mpm_solver_3d_cuda.cu
+    backend/BlastSolver/fem_fsi_coupler_3d_cuda.cu
+    backend/BlastSolver/fem_solver_3d_cuda.cu
+    backend/BlastSolver/cfd_solver_2d_cuda.cu
+    backend/BlastSolver/cfd_solver_2d_amr_cuda.cu
+    backend/BlastSolver/cfd_solver_3d_cuda_f32_single.cu
+    backend/BlastSolver/cfd_solver_3d_cuda_f32_multi.cu
+    backend/BlastSolver/cfd_solver_3d_cuda_f64_single.cu
+    backend/BlastSolver/cfd_solver_3d_cuda_f64_multi.cu
+    backend/BlastSolver/PhaseTrackingParticles3D_cuda.cu
+    PROPERTIES JOB_POOL_COMPILE cuda_compile
 )
 
 target_include_directories(BlastSolverCore PUBLIC
@@ -198,6 +216,7 @@ add_executable(blast_verify
     backend/BlastSolver/verification/vv_mpm_sparse_grid.cpp
     backend/BlastSolver/verification/vv_lee_tarver.cpp
     backend/BlastSolver/verification/vv_mat_audit.cpp
+    backend/BlastSolver/verification/vv_fem_coupling_fixes.cpp
 )
 target_include_directories(blast_verify PRIVATE
     backend/BlastSolver
@@ -286,4 +305,20 @@ if(BUILD_TESTS)
     add_test_executable_if_exists(test_phase_tracking_adaptive backend/BlastSolver/test_phase_tracking_adaptive.cu)
     add_test_executable_if_exists(test_detonator_delay_diag backend/BlastSolver/test_detonator_delay_diag.cpp)
 endif()
+
+# Living Theory Manual sync & audit targets
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_custom_target(update_theory_manual
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/update_theory_manual.py --update
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Regenerating SVG figures and syncing THEORY_MANUAL.md"
+    )
+    add_custom_target(theory_check
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/update_theory_manual.py --check
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Auditing THEORY_MANUAL.md citations, figures, Directive 7, and node coverage"
+    )
+endif()
+
 

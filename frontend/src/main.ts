@@ -45,6 +45,48 @@ window.addEventListener('load', () => {
             }
         }
     }, 1000);
+
+    let lastRafTick = performance.now();
+    let renderPausedState = false;
+    const tickRafHeartbeat = () => {
+        lastRafTick = performance.now();
+        if (renderPausedState && !document.hidden) {
+            applyRenderPauseState(false);
+        }
+        requestAnimationFrame(tickRafHeartbeat);
+    };
+    const applyRenderPauseState = (paused: boolean) => {
+        if (renderPausedState === paused) return;
+        renderPausedState = paused;
+        (window as any).__blastRenderPaused = paused;
+        const net = (window as any).networkManager;
+        if (net && net.isConnected()) {
+            net.send({ command: "SET_TELEMETRY_PAUSED", paused });
+        }
+        const lm = (window as any).layoutManager;
+        if (lm && lm.components) {
+            lm.components.forEach((comp: any) => {
+                if (comp.type === 'TELEMETRY_3D' && comp.instance && typeof comp.instance.setPageVisibility === 'function') {
+                    comp.instance.setPageVisibility(paused);
+                } else if ((comp.type === 'VIEWPORT' || comp.type === 'MULTI_VIEW_STAGE') && comp.instance && Array.isArray(comp.instance.panes)) {
+                    comp.instance.panes.forEach((p: any) => {
+                        if (p.viewType === '3D_VIEWPORT' && p.instance && typeof p.instance.setPageVisibility === 'function') {
+                            p.instance.setPageVisibility(paused);
+                        }
+                    });
+                }
+            });
+        }
+    };
+    requestAnimationFrame(tickRafHeartbeat);
+    setInterval(() => {
+        const rafStalled = (performance.now() - lastRafTick) > 2500;
+        applyRenderPauseState(document.hidden || rafStalled);
+    }, 1000);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) lastRafTick = performance.now();
+        applyRenderPauseState(document.hidden);
+    });
 });
 
 console.error = function(...args) {
@@ -3340,6 +3382,9 @@ networkManager.onMessage(async (data) => {
                     stateManager.setBinaryTelemetry(targetModelId, payloadBuffer, targetModelId);
                 }
             }
+            if ((typeof document !== 'undefined' && document.hidden) || (typeof window !== 'undefined' && (window as any).__blastRenderPaused)) {
+                return;
+            }
             const curStep = (targetModelId ? stateManager.getModelStep(targetModelId) : 0) || 0;
             const curTime = (targetModelId ? stateManager.getModelSimTime(targetModelId) : 0) || 0;
             const curDt = (targetModelId ? stateManager.getModelDt(targetModelId) : 0) || 0;
@@ -3615,6 +3660,10 @@ networkManager.onMessage(async (data) => {
                     return;
                 }
                 stateManager.setModelStatus(modelId, incomingStatus);
+                if (dataJson.reattached) {
+                    stateManager.pushTelemetry(modelId, `[SYSTEM] Re-attached to active BlastSolver process (${incomingStatus}).`, modelId);
+                    transportController.updateModelStatusDisplay?.();
+                }
                 if (incomingStatus === 'TERMINATED' || incomingStatus === 'ERROR') {
                     autoRunInFlight.delete(modelId);
                     pipelineAutoRunPending.delete(modelId);
@@ -3637,22 +3686,14 @@ networkManager.onMessage(async (data) => {
                 pausedByUserModels.delete(modelId);
                 lastRunCmdTimeByModel.delete(modelId);
 
-                if (isExecCmd && !autoRecoveryRetryModels.has(modelId)) {
-                    autoRecoveryRetryModels.add(modelId);
-                    stateManager.pushTelemetry(modelId, `[SYSTEM] Solver worker unavailable (${reason || rejectedCmd}); auto-reinitializing and retrying execution.`);
-                    stateManager.setModelStatus(modelId, 'UNINITIALIZED');
-                    const retryAction = rejectedCmd.startsWith('STEP') ? 'STEP' : 'EXEC_ALL';
-                    executeModelCommand(modelId, retryAction, { forceRestart: true, isAutoRecovery: true }, false, true);
-                } else {
-                    if (isExecCmd) {
-                        autoRecoveryRetryModels.delete(modelId);
-                        stateManager.pushTelemetry(modelId, `[ERROR] Command ${rejectedCmd} rejected by Broker (${reason}): ${dataJson.message || 'Solver process inactive.'}`);
-                        stateManager.setModelStatus(modelId, 'ERROR');
-                    } else if (stateManager.getModelStatus(modelId) === 'RUNNING' || stateManager.getModelStatus(modelId) === 'PAUSED') {
-                        stateManager.setModelStatus(modelId, 'TERMINATED');
-                    }
-                    transportController.updateModelStatusDisplay?.();
+                if (isExecCmd) {
+                    autoRecoveryRetryModels.delete(modelId);
+                    stateManager.pushTelemetry(modelId, `[ERROR] Command ${rejectedCmd} rejected by Broker (${reason}): ${dataJson.message || 'Solver process inactive.'}`);
+                    stateManager.setModelStatus(modelId, 'ERROR');
+                } else if (stateManager.getModelStatus(modelId) === 'RUNNING' || stateManager.getModelStatus(modelId) === 'PAUSED') {
+                    stateManager.setModelStatus(modelId, 'TERMINATED');
                 }
+                transportController.updateModelStatusDisplay?.();
             }
             return;
         }

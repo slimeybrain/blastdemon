@@ -12,7 +12,8 @@ import {
 } from './mpm-presets.js';
 import { isAirMaterialNode } from './serialization.js';
 import { classifyError, ModelErrorEntry } from './error-diagnostics.js';
-import { canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, getQuantityStyle } from './contour-style.js';
+import { canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, getQuantityStyle, syncLegacyParamsToQuantityStyles } from './contour-style.js';
+import { syncFEMPartAndNodeParams, sectionTypeToTopology, topologyToSectionType } from './fem-setup-types.js';
 export { canonicalizeQuantity, DEFAULT_QUANTITY_RANGES };
 
 export function syncMPMMaterialParameters(node: Node, parameters: Record<string, any>, updatedKey?: string): void {
@@ -485,148 +486,28 @@ export function syncFEMObjectParameters(
     updatedKey?: string,
     model?: { nodes: Node[], connections: Connection[] } | null
 ): void {
+    const findMatchingNodeForPart = (part: any, listLen: number) => {
+        if (!model || !model.nodes) return null;
+        return (part.node_id ? model.nodes.find(n => n.id === part.node_id) : null)
+            || model.nodes.find(n => n.id === part.id || n.parameters?.name === part.name)
+            || (listLen === 1 ? model.nodes.find(n => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D') : null);
+    };
+
     if (node.type === 'FEMDomain3D' || node.type === 'FEMFSICoupler3D') {
         const setup = parameters['fem_setup'];
-        if (setup && typeof setup === 'object' && Array.isArray(setup.parts) && model && model.nodes) {
+        if (setup && typeof setup === 'object' && Array.isArray(setup.parts)) {
             for (const part of setup.parts) {
-                const targetNode = (part.node_id ? model.nodes.find(n => n.id === part.node_id) : null)
-                    || model.nodes.find(n => n.id === part.id || n.parameters?.name === part.name)
-                    || (setup.parts.length === 1 ? model.nodes.find(n => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D') : null);
+                const targetNode = findMatchingNodeForPart(part, setup.parts.length);
                 if (targetNode && targetNode.type === 'FEMObject3D') {
-                    if (updatedKey === 'fem_setup') {
-                        if (part.nx !== undefined) targetNode.parameters['nx'] = Math.max(1, Math.min(100, Number(part.nx)));
-                        if (part.ny !== undefined) targetNode.parameters['ny'] = Math.max(1, Math.min(100, Number(part.ny)));
-                        if (part.nz !== undefined) targetNode.parameters['nz'] = Math.max(1, Math.min(100, Number(part.nz)));
-                        if (part.size_x !== undefined) targetNode.parameters['size_x'] = Number(part.size_x);
-                        if (part.size_y !== undefined) targetNode.parameters['size_y'] = Number(part.size_y);
-                        if (part.size_z !== undefined) targetNode.parameters['size_z'] = Number(part.size_z);
-                        if (part.pos_x !== undefined) targetNode.parameters['pos_x'] = Number(part.pos_x);
-                        if (part.pos_y !== undefined) targetNode.parameters['pos_y'] = Number(part.pos_y);
-                        if (part.pos_z !== undefined) targetNode.parameters['pos_z'] = Number(part.pos_z);
-                        if (part.radius !== undefined) targetNode.parameters['radius'] = Number(part.radius);
-                        if (part.inner_radius !== undefined) targetNode.parameters['inner_radius'] = Number(part.inner_radius);
-                        if (part.height !== undefined) targetNode.parameters['height'] = Number(part.height);
-                        if (part.origin_mode) targetNode.parameters['origin_mode'] = part.origin_mode;
-                        if (part.shape_type) targetNode.parameters['shape_type'] = part.shape_type;
-                    } else {
-                        // Canvas node is the SSOT: sync FROM targetNode INTO part so part never clobbers user edits!
-                        if (targetNode.parameters['nx'] !== undefined) part.nx = Math.max(1, Math.min(100, Number(targetNode.parameters['nx'])));
-                        else if (part.nx !== undefined) targetNode.parameters['nx'] = Math.max(1, Math.min(100, Number(part.nx)));
-
-                        if (targetNode.parameters['ny'] !== undefined) part.ny = Math.max(1, Math.min(100, Number(targetNode.parameters['ny'])));
-                        else if (part.ny !== undefined) targetNode.parameters['ny'] = Math.max(1, Math.min(100, Number(part.ny)));
-
-                        if (targetNode.parameters['nz'] !== undefined) part.nz = Math.max(1, Math.min(100, Number(targetNode.parameters['nz'])));
-                        else if (part.nz !== undefined) targetNode.parameters['nz'] = Math.max(1, Math.min(100, Number(part.nz)));
-
-                        if (targetNode.parameters['size_x'] !== undefined) part.size_x = Number(targetNode.parameters['size_x']);
-                        else if (part.size_x !== undefined) targetNode.parameters['size_x'] = Number(part.size_x);
-
-                        if (targetNode.parameters['size_y'] !== undefined) part.size_y = Number(targetNode.parameters['size_y']);
-                        else if (part.size_y !== undefined) targetNode.parameters['size_y'] = Number(part.size_y);
-
-                        if (targetNode.parameters['size_z'] !== undefined) part.size_z = Number(targetNode.parameters['size_z']);
-                        else if (part.size_z !== undefined) targetNode.parameters['size_z'] = Number(part.size_z);
-
-                        if (targetNode.parameters['pos_x'] !== undefined) part.pos_x = Number(targetNode.parameters['pos_x']);
-                        else if (part.pos_x !== undefined) targetNode.parameters['pos_x'] = Number(part.pos_x);
-
-                        if (targetNode.parameters['pos_y'] !== undefined) part.pos_y = Number(targetNode.parameters['pos_y']);
-                        else if (part.pos_y !== undefined) targetNode.parameters['pos_y'] = Number(part.pos_y);
-
-                        if (targetNode.parameters['pos_z'] !== undefined) part.pos_z = Number(targetNode.parameters['pos_z']);
-                        else if (part.pos_z !== undefined) targetNode.parameters['pos_z'] = Number(part.pos_z);
-
-                        if (targetNode.parameters['radius'] !== undefined) part.radius = Number(targetNode.parameters['radius']);
-                        else if (part.radius !== undefined) targetNode.parameters['radius'] = Number(part.radius);
-
-                        if (targetNode.parameters['inner_radius'] !== undefined) part.inner_radius = Number(targetNode.parameters['inner_radius']);
-                        else if (part.inner_radius !== undefined) targetNode.parameters['inner_radius'] = Number(part.inner_radius);
-
-                        if (targetNode.parameters['height'] !== undefined) part.height = Number(targetNode.parameters['height']);
-                        else if (part.height !== undefined) targetNode.parameters['height'] = Number(part.height);
-
-                        if (targetNode.parameters['origin_mode']) part.origin_mode = targetNode.parameters['origin_mode'];
-                        else if (part.origin_mode) targetNode.parameters['origin_mode'] = part.origin_mode;
-
-                        if (targetNode.parameters['shape_type']) part.shape_type = targetNode.parameters['shape_type'];
-                        else if (part.shape_type) targetNode.parameters['shape_type'] = part.shape_type;
-                    }
+                    syncFEMPartAndNodeParams(part, targetNode.parameters, updatedKey === 'fem_setup', targetNode.type);
                 }
             }
         }
-        if (Array.isArray(parameters['fem_parts']) && model && model.nodes) {
+        if (Array.isArray(parameters['fem_parts'])) {
             for (const part of parameters['fem_parts']) {
-                const targetNode = (part.node_id ? model.nodes.find(n => n.id === part.node_id) : null)
-                    || model.nodes.find(n => n.id === part.id || n.parameters?.name === part.name)
-                    || (parameters['fem_parts'].length === 1 ? model.nodes.find(n => n.type === 'FEMObject3D' || n.type === 'LSDynaImporter3D' || n.type === 'FEMBeam3D' || n.type === 'FEMRebar3D') : null);
+                const targetNode = findMatchingNodeForPart(part, parameters['fem_parts'].length);
                 if (targetNode && targetNode.type === 'FEMObject3D') {
-                    if (updatedKey === 'fem_parts') {
-                        if (part.nx !== undefined) targetNode.parameters['nx'] = Math.max(1, Math.min(100, Number(part.nx)));
-                        if (part.ny !== undefined) targetNode.parameters['ny'] = Math.max(1, Math.min(100, Number(part.ny)));
-                        if (part.nz !== undefined) targetNode.parameters['nz'] = Math.max(1, Math.min(100, Number(part.nz)));
-                        if (part.size_x !== undefined) targetNode.parameters['size_x'] = Number(part.size_x);
-                        if (part.size_y !== undefined) targetNode.parameters['size_y'] = Number(part.size_y);
-                        if (part.size_z !== undefined) targetNode.parameters['size_z'] = Number(part.size_z);
-                        if (part.pos_x !== undefined) targetNode.parameters['pos_x'] = Number(part.pos_x);
-                        if (part.pos_y !== undefined) targetNode.parameters['pos_y'] = Number(part.pos_y);
-                        if (part.pos_z !== undefined) targetNode.parameters['pos_z'] = Number(part.pos_z);
-                        if (part.radius !== undefined) targetNode.parameters['radius'] = Number(part.radius);
-                        if (part.inner_radius !== undefined) targetNode.parameters['inner_radius'] = Number(part.inner_radius);
-                        if (part.height !== undefined) targetNode.parameters['height'] = Number(part.height);
-                        if (part.origin_mode) targetNode.parameters['origin_mode'] = part.origin_mode;
-                        if (part.shape_type) targetNode.parameters['shape_type'] = part.shape_type;
-                        if (part.element_topology) targetNode.parameters['element_topology'] = part.element_topology;
-                        if (part.stl_file !== undefined) targetNode.parameters['stl_file'] = part.stl_file;
-                    } else {
-                        if (targetNode.parameters['nx'] !== undefined) part.nx = Math.max(1, Math.min(100, Number(targetNode.parameters['nx'])));
-                        else if (part.nx !== undefined) targetNode.parameters['nx'] = Math.max(1, Math.min(100, Number(part.nx)));
-
-                        if (targetNode.parameters['ny'] !== undefined) part.ny = Math.max(1, Math.min(100, Number(targetNode.parameters['ny'])));
-                        else if (part.ny !== undefined) targetNode.parameters['ny'] = Math.max(1, Math.min(100, Number(part.ny)));
-
-                        if (targetNode.parameters['nz'] !== undefined) part.nz = Math.max(1, Math.min(100, Number(targetNode.parameters['nz'])));
-                        else if (part.nz !== undefined) targetNode.parameters['nz'] = Math.max(1, Math.min(100, Number(part.nz)));
-
-                        if (targetNode.parameters['size_x'] !== undefined) part.size_x = Number(targetNode.parameters['size_x']);
-                        else if (part.size_x !== undefined) targetNode.parameters['size_x'] = Number(part.size_x);
-
-                        if (targetNode.parameters['size_y'] !== undefined) part.size_y = Number(targetNode.parameters['size_y']);
-                        else if (part.size_y !== undefined) targetNode.parameters['size_y'] = Number(part.size_y);
-
-                        if (targetNode.parameters['size_z'] !== undefined) part.size_z = Number(targetNode.parameters['size_z']);
-                        else if (part.size_z !== undefined) targetNode.parameters['size_z'] = Number(part.size_z);
-
-                        if (targetNode.parameters['pos_x'] !== undefined) part.pos_x = Number(targetNode.parameters['pos_x']);
-                        else if (part.pos_x !== undefined) targetNode.parameters['pos_x'] = Number(part.pos_x);
-
-                        if (targetNode.parameters['pos_y'] !== undefined) part.pos_y = Number(targetNode.parameters['pos_y']);
-                        else if (part.pos_y !== undefined) targetNode.parameters['pos_y'] = Number(part.pos_y);
-
-                        if (targetNode.parameters['pos_z'] !== undefined) part.pos_z = Number(targetNode.parameters['pos_z']);
-                        else if (part.pos_z !== undefined) targetNode.parameters['pos_z'] = Number(part.pos_z);
-
-                        if (targetNode.parameters['radius'] !== undefined) part.radius = Number(targetNode.parameters['radius']);
-                        else if (part.radius !== undefined) targetNode.parameters['radius'] = Number(part.radius);
-
-                        if (targetNode.parameters['inner_radius'] !== undefined) part.inner_radius = Number(targetNode.parameters['inner_radius']);
-                        else if (part.inner_radius !== undefined) targetNode.parameters['inner_radius'] = Number(part.inner_radius);
-
-                        if (targetNode.parameters['height'] !== undefined) part.height = Number(targetNode.parameters['height']);
-                        else if (part.height !== undefined) targetNode.parameters['height'] = Number(part.height);
-
-                        if (targetNode.parameters['origin_mode']) part.origin_mode = targetNode.parameters['origin_mode'];
-                        else if (part.origin_mode) targetNode.parameters['origin_mode'] = part.origin_mode;
-
-                        if (targetNode.parameters['shape_type']) part.shape_type = targetNode.parameters['shape_type'];
-                        else if (part.shape_type) targetNode.parameters['shape_type'] = part.shape_type;
-
-                        if (targetNode.parameters['element_topology']) part.element_topology = targetNode.parameters['element_topology'];
-                        else if (part.element_topology) targetNode.parameters['element_topology'] = part.element_topology;
-
-                        if (targetNode.parameters['stl_file'] !== undefined) part.stl_file = targetNode.parameters['stl_file'];
-                        else if (part.stl_file !== undefined) targetNode.parameters['stl_file'] = part.stl_file;
-                    }
+                    syncFEMPartAndNodeParams(part, targetNode.parameters, updatedKey === 'fem_parts', targetNode.type);
                 }
             }
         }
@@ -647,7 +528,9 @@ export function syncFEMObjectParameters(
                     parameters['stl_file'] = stlNode.parameters['stl_file'];
                     parameters['shape_type'] = 'STL';
                     parameters['mesh_source'] = 'STL File';
-                    parameters['element_topology'] = 'Tet4_ANP';
+                    if (!parameters['element_topology'] || parameters['element_topology'] === 'Hex8') {
+                        parameters['element_topology'] = 'Tet4_ANP';
+                    }
                 }
             }
         }
@@ -660,7 +543,9 @@ export function syncFEMObjectParameters(
         } else if (shape === 'STL' || shape === 'STL File' || parameters['stl_file']) {
             parameters['mesh_source'] = 'STL File';
             parameters['shape_type'] = 'STL';
-            parameters['element_topology'] = 'Tet4_ANP';
+            if (!parameters['element_topology'] || parameters['element_topology'] === 'Hex8') {
+                parameters['element_topology'] = 'Tet4_ANP';
+            }
         } else if (shape === 'LS-DYNA File' || shape === 'LS-DYNA Keyword File' || parameters['k_file']) {
             parameters['mesh_source'] = 'LS-DYNA Keyword File';
             parameters['shape_type'] = 'LS-DYNA File';
@@ -676,7 +561,9 @@ export function syncFEMObjectParameters(
         } else if (src === 'STL File' || parameters['stl_file'] || parameters['shape_type'] === 'STL') {
             parameters['shape_type'] = 'STL';
             parameters['mesh_source'] = 'STL File';
-            parameters['element_topology'] = 'Tet4_ANP';
+            if (!parameters['element_topology'] || parameters['element_topology'] === 'Hex8') {
+                parameters['element_topology'] = 'Tet4_ANP';
+            }
         } else if (src === 'LS-DYNA Keyword File' || parameters['k_file'] || parameters['shape_type'] === 'LS-DYNA File') {
             parameters['shape_type'] = 'LS-DYNA File';
             parameters['mesh_source'] = 'LS-DYNA Keyword File';
@@ -695,82 +582,26 @@ export function syncFEMObjectParameters(
         }
     }
 
-    if (parameters['nx'] !== undefined) parameters['nx'] = Math.max(1, Math.min(100, parseInt(parameters['nx'], 10) || 1));
-    if (parameters['ny'] !== undefined) parameters['ny'] = Math.max(1, Math.min(100, parseInt(parameters['ny'], 10) || 1));
-    if (parameters['nz'] !== undefined) parameters['nz'] = Math.max(1, Math.min(100, parseInt(parameters['nz'], 10) || 1));
+    if (parameters['nx'] !== undefined) parameters['nx'] = Math.max(1, parseInt(parameters['nx'], 10) || 1);
+    if (parameters['ny'] !== undefined) parameters['ny'] = Math.max(1, parseInt(parameters['ny'], 10) || 1);
+    if (parameters['nz'] !== undefined) parameters['nz'] = Math.max(1, parseInt(parameters['nz'], 10) || 1);
 
-    // Bidirectional sync with embedded fem_setup configuration
-    const syncPartWithParams = (p: any, fromPartToNode: boolean) => {
-        if (!p) return;
-        if (fromPartToNode) {
-            if (p.nx !== undefined) parameters['nx'] = Number(p.nx);
-            if (p.ny !== undefined) parameters['ny'] = Number(p.ny);
-            if (p.nz !== undefined) parameters['nz'] = Number(p.nz);
-            if (p.size_x !== undefined) parameters['size_x'] = Number(p.size_x);
-            if (p.size_y !== undefined) parameters['size_y'] = Number(p.size_y);
-            if (p.size_z !== undefined) parameters['size_z'] = Number(p.size_z);
-            if (p.pos_x !== undefined) parameters['pos_x'] = Number(p.pos_x);
-            if (p.pos_y !== undefined) parameters['pos_y'] = Number(p.pos_y);
-            if (p.pos_z !== undefined) parameters['pos_z'] = Number(p.pos_z);
-            if (p.radius !== undefined) parameters['radius'] = Number(p.radius);
-            if (p.inner_radius !== undefined) parameters['inner_radius'] = Number(p.inner_radius);
-            if (p.height !== undefined) parameters['height'] = Number(p.height);
-            if (p.origin_mode) parameters['origin_mode'] = p.origin_mode;
-            if (p.shape_type) parameters['shape_type'] = p.shape_type;
-            if (p.element_topology) parameters['element_topology'] = p.element_topology;
-            if (p.stl_file !== undefined) parameters['stl_file'] = p.stl_file;
-        } else {
-            if (parameters['nx'] !== undefined) p.nx = Number(parameters['nx']);
-            if (parameters['ny'] !== undefined) p.ny = Number(parameters['ny']);
-            if (parameters['nz'] !== undefined) p.nz = Number(parameters['nz']);
-            if (parameters['size_x'] !== undefined) p.size_x = Number(parameters['size_x']);
-            if (parameters['size_y'] !== undefined) p.size_y = Number(parameters['size_y']);
-            if (parameters['size_z'] !== undefined) p.size_z = Number(parameters['size_z']);
-            if (parameters['pos_x'] !== undefined) p.pos_x = Number(parameters['pos_x']);
-            if (parameters['pos_y'] !== undefined) p.pos_y = Number(parameters['pos_y']);
-            if (parameters['pos_z'] !== undefined) p.pos_z = Number(parameters['pos_z']);
-            if (parameters['radius'] !== undefined) p.radius = Number(parameters['radius']);
-            if (parameters['inner_radius'] !== undefined) p.inner_radius = Number(parameters['inner_radius']);
-            if (parameters['height'] !== undefined) p.height = Number(parameters['height']);
-            if (parameters['origin_mode']) p.origin_mode = parameters['origin_mode'];
-            if (parameters['shape_type']) p.shape_type = parameters['shape_type'];
-            if (parameters['element_topology']) p.element_topology = parameters['element_topology'];
-            if (parameters['stl_file'] !== undefined) p.stl_file = parameters['stl_file'];
-
-            const shape = p.shape_type || 'Box';
-            const isTet = p.element_topology === 'Tet4_ANP' || p.element_topology === 'Tet4';
-            if (shape === 'Box') {
-                const nx = p.nx ?? 10;
-                const ny = p.ny ?? 10;
-                const nz = p.nz ?? 10;
-                p.num_elements = isTet ? (6 * nx * ny * nz) : (nx * ny * nz);
-                p.num_nodes = (nx + 1) * (ny + 1) * (nz + 1);
-                const isCAD = p.origin_mode === 'CAD Origin' || p.origin_mode === 'Min Corner';
-                const sx = isCAD ? (p.pos_x ?? 0) : ((p.pos_x ?? 0) - 0.5 * (p.size_x ?? 1));
-                const sy = isCAD ? (p.pos_y ?? 0) : ((p.pos_y ?? 0) - 0.5 * (p.size_y ?? 1));
-                const sz = isCAD ? (p.pos_z ?? 0) : ((p.pos_z ?? 0) - 0.5 * (p.size_z ?? 1));
-                p.bounds = [sx, sx + (p.size_x ?? 1), sy, sy + (p.size_y ?? 1), sz, sz + (p.size_z ?? 1)];
-            } else if (shape === 'Plate') {
-                const nx = p.nx ?? 10;
-                const ny = p.ny ?? 10;
-                p.num_elements = nx * ny;
-                p.num_nodes = (nx + 1) * (ny + 1);
-            }
-        }
-    };
+    // Bidirectional sync with embedded fem_setup & fem_parts configuration via canonical SSOT helper
+    const findMatchingPart = (list: any[]) =>
+        list.find((pt: any) => pt.node_id === node.id || pt.id === node.id || pt.name === node.parameters?.name || pt.name === node.id)
+        || (list.length === 1 ? list[0] : null);
 
     if (parameters['fem_setup'] && typeof parameters['fem_setup'] === 'object' && Array.isArray(parameters['fem_setup'].parts)) {
-        const parts = parameters['fem_setup'].parts;
-        const matchingPart = parts.find((pt: any) => pt.node_id === node.id || pt.id === node.id || pt.name === node.parameters?.name || pt.name === node.id) || (parts.length === 1 ? parts[0] : null);
+        const matchingPart = findMatchingPart(parameters['fem_setup'].parts);
         if (matchingPart) {
-            syncPartWithParams(matchingPart, updatedKey === 'fem_setup');
+            syncFEMPartAndNodeParams(matchingPart, parameters, updatedKey === 'fem_setup', node.type);
         }
     }
 
     if (Array.isArray(parameters['fem_parts'])) {
-        const matchingPart = parameters['fem_parts'].find((pt: any) => pt.node_id === node.id || pt.id === node.id || pt.name === node.parameters?.name || pt.name === node.id) || (parameters['fem_parts'].length === 1 ? parameters['fem_parts'][0] : null);
+        const matchingPart = findMatchingPart(parameters['fem_parts']);
         if (matchingPart) {
-            syncPartWithParams(matchingPart, false);
+            syncFEMPartAndNodeParams(matchingPart, parameters, updatedKey === 'fem_parts', node.type);
         }
     }
 
@@ -779,15 +610,15 @@ export function syncFEMObjectParameters(
             if (otherNode.id !== node.id && (otherNode.type === 'FEMDomain3D' || otherNode.type === 'FEMFSICoupler3D')) {
                 const setup = otherNode.parameters?.['fem_setup'];
                 if (setup && typeof setup === 'object' && Array.isArray(setup.parts)) {
-                    const matchingPart = setup.parts.find((pt: any) => pt.node_id === node.id || pt.id === node.id || pt.name === node.parameters?.name || pt.name === node.id) || (setup.parts.length === 1 ? setup.parts[0] : null);
+                    const matchingPart = findMatchingPart(setup.parts);
                     if (matchingPart) {
-                        syncPartWithParams(matchingPart, false);
+                        syncFEMPartAndNodeParams(matchingPart, parameters, false, node.type);
                     }
                 }
                 if (Array.isArray(otherNode.parameters?.['fem_parts'])) {
-                    const matchingPart = otherNode.parameters['fem_parts'].find((pt: any) => pt.node_id === node.id || pt.id === node.id || pt.name === node.parameters?.name || pt.name === node.id) || (otherNode.parameters['fem_parts'].length === 1 ? otherNode.parameters['fem_parts'][0] : null);
+                    const matchingPart = findMatchingPart(otherNode.parameters['fem_parts']);
                     if (matchingPart) {
-                        syncPartWithParams(matchingPart, false);
+                        syncFEMPartAndNodeParams(matchingPart, parameters, false, node.type);
                     }
                 }
             }
@@ -1293,8 +1124,14 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         erosion_strain: 0.20,
         enable_stress_erosion: false,
         erosion_stress: 400.0e6,
+        enable_damage_erosion: false,
+        max_damage: 1.0,
         enable_timestep_erosion: false,
         timestep_erosion_factor: 0.10,
+        min_volume_ratio: 0.02,
+        max_volume_ratio: 5.0,
+        enable_cohesive_splitting: false,
+        cohesive_fracture_energy: 18000.0,
         enable_density_erosion: false,
         erosion_min_density: 0.0,
         erosion_min_density_ratio: 0.05,
@@ -2055,40 +1892,28 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'FEMDomain3D': {
         device: 'cpu',
         precision: 'single',
+        connected_detonators: '',
         rebar_formulation: 'TimoshenkoBeam3D',
         merge_coincident_nodes: false,
         node_merge_tolerance: 1.0e-4,
-        embedded_rebar_coupling: true,
-        failure_strain: 0.20,
-        tensile_failure_stress: 400.0e6,
-        timestep_erosion_factor: 0.10,
-        min_volume_ratio: 0.02,
-        enable_strain_erosion: true,
         integration_scheme: 'OnePointFB',
         hourglass_model: 'FlanaganBelytschkoViscous',
         hourglass_coeff: 0.10,
+        bulk_viscosity_b1: 0.06,
+        bulk_viscosity_b2: 1.20,
         contact_search_method: 'Hierarchical Octave Hash Grid',
-        contact_penalty_scale: 0.1,
+        contact_penalty_scale: 1.0,
+        contact_damping: 0.2,
         friction_static: 0.3,
         friction_kinetic: 0.2,
         convert_failed_elements_to_mpm: false,
         mpm_particles_per_failed_element: 8,
-        material_heterogeneity: 0.08,
-        enable_heterogeneity: false,
-        enable_anisotropy: false,
-        anisotropy_ratio: 1.0,
-        anisotropy_axis: 'X',
-        anisotropy_dir_x: 1.0,
-        anisotropy_dir_y: 0.0,
-        anisotropy_dir_z: 0.0,
         debris_velocity_smoothing: 0.50,
         debris_clumping: 0.60,
         debris_max_clump_size: 8,
         random_seed: 42,
         enable_directional_crack_band: true,
         enable_nonlocal_damage: true,
-        enable_cohesive_splitting: false,
-        cohesive_fracture_energy: 1000.0,
         cfl: 0.6,
         endtime: 1.0
     },
@@ -2108,6 +1933,19 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         rot_x: 0.0, rot_y: 0.0, rot_z: 0.0,
         stl_file: '',
         k_file: '',
+        erosion_source: 'Inherit Material',
+        enable_strain_erosion: false,
+        erosion_strain: 0.20,
+        enable_stress_erosion: false,
+        erosion_stress: 400.0e6,
+        enable_damage_erosion: false,
+        max_damage: 1.0,
+        enable_timestep_erosion: false,
+        timestep_erosion_factor: 0.10,
+        min_volume_ratio: 0.02,
+        max_volume_ratio: 5.0,
+        enable_cohesive_splitting: false,
+        cohesive_fracture_energy: 1000.0,
         visible: true,
         hidden: false
     },
@@ -2122,16 +1960,26 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
     'FEMBeam3D': {
         visible: true,
         hidden: false,
+        target_domain: '',
+        material: '',
         node1_x: 0, node1_y: 0, node1_z: 0,
         node2_x: 1, node2_y: 0, node2_z: 0,
-        radius: 0.01
+        radius: 0.01,
+        diameter: 0.02,
+        cross_section_area: 3.14159265e-4,
+        failure_strain: 0.20
     },
     'FEMRebar3D': {
         visible: true,
         hidden: false,
+        target_domain: '',
+        material: '',
         node1_x: 0, node1_y: 0, node1_z: 0,
         node2_x: 1, node2_y: 0, node2_z: 0,
-        radius: 0.008
+        radius: 0.008,
+        diameter: 0.016,
+        cross_section_area: 2.0106193e-4,
+        failure_strain: 0.20
     },
     'Obstacle3D': {
         visible: true,
@@ -5914,10 +5762,10 @@ export class StateManager {
 
         // 7. Auto-heal Background Grid connections
         let meshNodes = model.nodes.filter(n => isDomainMesh3DNode(n.type) || isDomainMesh2DNode(n.type) || n.type === 'DomainMesh');
-        const has3DSolver = model.nodes.some(n => ['CFDSolver3D', 'MPMDomain3D', 'MarineHarbourDomain', 'FEMDomain3D'].includes(n.type));
+        const has3DSolver = model.nodes.some(n => ['CFDSolver3D', 'MPMDomain3D', 'MarineHarbourDomain'].includes(n.type));
         const has3DMesh = meshNodes.some(n => isDomainMesh3DNode(n.type));
         if (has3DSolver && !has3DMesh) {
-            const solver = model.nodes.find(n => ['MarineHarbourDomain', 'CFDSolver3D', 'MPMDomain3D', 'FEMDomain3D'].includes(n.type))!;
+            const solver = model.nodes.find(n => ['MarineHarbourDomain', 'CFDSolver3D', 'MPMDomain3D'].includes(n.type))!;
             const newMeshId = this.getUniqueNodeId('DomainMesh3D', tempExistingIds);
             tempExistingIds.add(newMeshId);
             const newMesh: Node = {
@@ -5939,7 +5787,7 @@ export class StateManager {
             const isMesh3D = isDomainMesh3DNode(mesh.type);
             const isMesh2D = isDomainMesh2DNode(mesh.type);
             const targetSolvers = model.nodes.filter(s => isMesh3D 
-                ? ['MPMDomain3D', 'CFDSolver3D', 'FEMDomain3D', 'MarineHarbourDomain'].includes(s.type)
+                ? ['MPMDomain3D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(s.type)
                 : (isMesh2D ? ['MPMDomain2D', 'CFDSolver2D'].includes(s.type) : s.type === 'CFDSolver'));
             for (const solver of targetSolvers) {
                 const isConnected = model.connections.some(c => c.fromNode === mesh.id && c.toNode === solver.id && c.toPort === 'mesh');
@@ -7075,12 +6923,14 @@ export class StateManager {
                 delete node.parameters['amr_tile_size'];
             }
             if (node.type === 'FEMDomain3D') {
-                delete node.parameters['failure_strain'];
-                delete node.parameters['tensile_failure_stress'];
-                delete node.parameters['bulk_viscosity_b1'];
-                delete node.parameters['bulk_viscosity_b2'];
-                delete node.parameters['timestep_erosion_factor'];
                 delete node.parameters['contact_stiffness'];
+                delete node.parameters['contact_penalty'];
+                delete node.parameters['friction_coefficient'];
+                delete node.parameters['subcycles'];
+                delete node.parameters['domain_size_x'];
+                delete node.parameters['domain_size_y'];
+                delete node.parameters['domain_size_z'];
+                delete node.parameters['cfl_factor'];
             }
             if (node.type === 'FEMFSICoupler3D') {
                 delete node.parameters['steps'];
@@ -7630,32 +7480,17 @@ function syncQuantityRanges(node: Node, parameters: Record<string, any>, merged:
         merged.quantity_ranges = { ...DEFAULT_QUANTITY_RANGES };
     }
 
+    syncLegacyParamsToQuantityStyles(merged, parameters, node.parameters);
+
     const slices = merged.slices || [];
     const focusedIdx = merged.focusedSliceIndex !== undefined ? merged.focusedSliceIndex : 0;
     const slice = slices[focusedIdx] || slices[0] || { quantities: ['pressure'] };
     const rawQty = slice.quantities?.[0] || 'pressure';
     const cQty = canonicalizeQuantity(rawQty);
 
-    if (parameters.quantity_styles === undefined && (parameters.min_val !== undefined || parameters.max_val !== undefined)) {
-        const currentMin = parameters.min_val !== undefined ? parameters.min_val : merged.min_val;
-        const currentMax = parameters.max_val !== undefined ? parameters.max_val : merged.max_val;
-        merged.quantity_ranges[cQty] = [currentMin, currentMax];
-        merged.quantity_ranges[rawQty] = [currentMin, currentMax];
-        if (cQty === 'velocity') merged.quantity_ranges['speed'] = [currentMin, currentMax];
-        if (cQty === 'peak_overpressure') merged.quantity_ranges['overpressure'] = [currentMin, currentMax];
-        if (cQty === 'peak_impulse') merged.quantity_ranges['impulse'] = [currentMin, currentMax];
-        if (cQty === 'plastic_strain') merged.quantity_ranges['plasticStrain'] = [currentMin, currentMax];
-        if (cQty === 'vonMises') merged.quantity_ranges['von_mises'] = [currentMin, currentMax];
-        const prevStyle = getQuantityStyle(merged, cQty);
-        merged.quantity_styles = {
-            ...(merged.quantity_styles || {}),
-            [cQty]: { ...prevStyle, minVal: Number(currentMin), maxVal: Number(currentMax) }
-        };
-    } else {
-        const style = getQuantityStyle(merged, cQty);
-        merged.min_val = style.minVal;
-        merged.max_val = style.maxVal;
-    }
+    const style = getQuantityStyle(merged, cQty);
+    merged.min_val = style.minVal;
+    merged.max_val = style.maxVal;
 }
 
 

@@ -193,6 +193,7 @@ struct MaterialTable3D {
     float jwlr_omega{0.8867f};           // Gruneisen omega
     float jwlr_Cv{2.7806e6f};            // Cv (Pa/K, per initial volume)
     float jwlr_T0{298.0f};               // Reference temperature (K)
+    float jwlp_Cv{1.0e6f};               // Detonation-product heat capacity per INITIAL volume (Pa/K); LLNL 1.0e-5 Mbar/K = 1.0e6 Pa/K
     int   mixture_rule{1};               // 0 = linear blend, 1 = pressure equilibrium (volume additive)
 
     // Artificial Bulk Viscosity & Timestep Erosion Parameters
@@ -205,7 +206,11 @@ struct MaterialTable3D {
     float erosion_strain{0.50f};          // Plastic strain erosion threshold (ep_bar >= erosion_strain)
     bool enable_stress_erosion{false};
     float erosion_stress{600.0e6f};       // Tensile hydrostatic stress threshold (Pa)
+    bool enable_damage_erosion{false};
+    float max_damage{1.0f};               // Cumulative damage erosion threshold (damage >= max_damage)
     bool enable_timestep_erosion{false};
+    float min_volume_ratio{0.02f};        // V / V0 minimum compression ratio limit
+    float max_volume_ratio{5.00f};        // V / V0 maximum expansion ratio limit
     bool enable_density_erosion{false};   // Enable low-density particle erosion (e.g. expanded gas / cavitating fluid)
     float erosion_min_density{0.0f};      // Minimum physical density threshold rho_min (kg/m^3)
     float erosion_min_density_ratio{0.0f};// Minimum relative density ratio rho / rho0 in [0, 1]
@@ -214,6 +219,8 @@ struct MaterialTable3D {
     // Directional Crack Band & Non-Local Damage Regularization
     bool directional_crack_band{true};   // Bažant crack band angle normalization against mesh bias
     float nonlocal_radius{0.05f};         // Non-local damage interaction radius (m) (0.05m for concrete, 0.0 for metals)
+    bool enable_cohesive_splitting{false};// Topological cohesive facet node-splitting per material
+    float cohesive_fracture_energy{1000.0f}; // Mode-I/II cohesive fracture energy G_c (J/m^2)
 
     // Hyperelastic Material Parameters (Yeoh & Mooney-Rivlin)
     float yeoh_c10{0.57e6f};             // Pa
@@ -251,7 +258,7 @@ struct MaterialTable3D {
     bool enable_anisotropy{false};        // Enable directional material anisotropy (false = isotropic)
     float anisotropy_ratio{1.0f};         // Transverse-to-longitudinal yield strength ratio (0.5 to 2.0, 1.0 = isotropic)
     float anisotropy_dir[3]{1.0f, 0.0f, 0.0f}; // Primary material orientation / rolling / fiber axis vector
-    float jc_d1{0.0f};                   // Johnson-Cook damage parameter D1 (0 = fall back to failure_strain)
+    float jc_d1{0.0f};                   // Johnson-Cook damage parameter D1 (shape of triaxiality dependence; failure_strain sets magnitude, failure_strain=0 selects absolute D1+D2*exp(D3*sigma*))
     float jc_d2{0.0f};                   // Johnson-Cook damage parameter D2
     float jc_d3{0.0f};                   // Johnson-Cook damage parameter D3
     float jc_d4{0.0f};                   // Johnson-Cook damage parameter D4

@@ -9,6 +9,6 @@ namespace Blast::VV {
 std::vector<BenchmarkResult> run_lee_tarver_benchmarks();
 
 // Diagnostic: dumps the x-t / pmax / lambda trace of one pop-plot case (explosive 0=PBX9501,1=C-4,2=CompB).
-void run_lee_tarver_trace(int expl, double P_gpa, double dz_mm);
+void run_lee_tarver_trace(int expl, double P_gpa, double dz_mm, bool reactive = true);
 
 } // namespace Blast::VV

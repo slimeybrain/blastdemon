@@ -2,10 +2,16 @@
 #include "ls_dyna_reader_3d.hpp"
 #include <iostream>
 #include <fstream>
-#include <cassert>
 #include <cmath>
 
 using namespace Blast;
+
+#define FEM_CHECK(cond) do { \
+    if (!(cond)) { \
+        std::cerr << "[FAIL] " << __FILE__ << ":" << __LINE__ << " Check failed: " << #cond << std::endl; \
+        return 1; \
+    } \
+} while (0)
 
 int main() {
     std::cout << "[TEST] Running test_fem_3d_ls_dyna_transform..." << std::endl;
@@ -40,9 +46,9 @@ int main() {
     std::vector<MaterialTable3D> mat_list;
 
     bool ok = reader.parseFile(test_k_file, nodes, elements, default_mat, mat_list);
-    assert(ok);
-    assert(nodes.size() == 8);
-    assert(elements.size() == 1);
+    FEM_CHECK(ok);
+    FEM_CHECK(nodes.size() == 8);
+    FEM_CHECK(elements.size() == 1);
 
     float pos_x = 0.5f, pos_y = 1.0f, pos_z = 2.0f;
     float vel_x = 250.0f, vel_y = -50.0f, vel_z = 10.0f;
@@ -75,20 +81,20 @@ int main() {
     }
 
     // Verify node 1001 (originally 0,0,0) is now at (0.5, 1.0, 2.0)
-    assert(std::abs(nodes[0].x[0] - 0.5f) < 1e-5f);
-    assert(std::abs(nodes[0].x[1] - 1.0f) < 1e-5f);
-    assert(std::abs(nodes[0].x[2] - 2.0f) < 1e-5f);
+    FEM_CHECK(std::abs(nodes[0].x[0] - 0.5f) < 1e-5f);
+    FEM_CHECK(std::abs(nodes[0].x[1] - 1.0f) < 1e-5f);
+    FEM_CHECK(std::abs(nodes[0].x[2] - 2.0f) < 1e-5f);
 
     // Verify node 1007 (originally 0.1, 0.1, 0.1) is now at (0.6, 1.1, 2.1)
-    assert(std::abs(nodes[6].x[0] - 0.6f) < 1e-5f);
-    assert(std::abs(nodes[6].x[1] - 1.1f) < 1e-5f);
-    assert(std::abs(nodes[6].x[2] - 2.1f) < 1e-5f);
+    FEM_CHECK(std::abs(nodes[6].x[0] - 0.6f) < 1e-5f);
+    FEM_CHECK(std::abs(nodes[6].x[1] - 1.1f) < 1e-5f);
+    FEM_CHECK(std::abs(nodes[6].x[2] - 2.1f) < 1e-5f);
 
     // Verify velocities
     for (const auto& nd : nodes) {
-        assert(std::abs(nd.v[0] - 250.0f) < 1e-5f);
-        assert(std::abs(nd.v[1] - (-50.0f)) < 1e-5f);
-        assert(std::abs(nd.v[2] - 10.0f) < 1e-5f);
+        FEM_CHECK(std::abs(nd.v[0] - 250.0f) < 1e-5f);
+        FEM_CHECK(std::abs(nd.v[1] - (-50.0f)) < 1e-5f);
+        FEM_CHECK(std::abs(nd.v[2] - 10.0f) < 1e-5f);
     }
 
     // Verify base nodes (z = 2.0) are fixed
@@ -96,17 +102,17 @@ int main() {
     for (const auto& nd : nodes) {
         if (nd.is_fixed[0] && nd.is_fixed[1] && nd.is_fixed[2]) {
             fixed_count++;
-            assert(std::abs(nd.x[2] - 2.0f) < 1e-5f);
+            FEM_CHECK(std::abs(nd.x[2] - 2.0f) < 1e-5f);
         }
     }
-    assert(fixed_count == 4);
+    FEM_CHECK(fixed_count == 4);
 
     // 2. Initialize FEM solver and append transformed nodes
     FEMSolver3D<float> solver;
     solver.appendNodesAndElements(nodes, elements, default_mat);
 
-    assert(solver.getNodes().size() == 8);
-    assert(solver.getElements().size() == 1);
+    FEM_CHECK(solver.getNodes().size() == 8);
+    FEM_CHECK(solver.getElements().size() == 1);
 
     // Step the solver forward in time
     for (int step = 0; step < 10; ++step) {
@@ -115,11 +121,11 @@ int main() {
 
     const auto& solver_nodes = solver.getNodes();
     // Verify that top nodes moved due to initial velocity
-    assert(solver_nodes[4].x[0] > 0.5f);
+    FEM_CHECK(solver_nodes[4].x[0] > 0.5f);
     // Verify that base nodes stayed fixed at x = 0.5, y = 1.0, z = 2.0
-    assert(std::abs(solver_nodes[0].x[0] - 0.5f) < 1e-5f);
-    assert(std::abs(solver_nodes[0].x[1] - 1.0f) < 1e-5f);
-    assert(std::abs(solver_nodes[0].x[2] - 2.0f) < 1e-5f);
+    FEM_CHECK(std::abs(solver_nodes[0].x[0] - 0.5f) < 1e-5f);
+    FEM_CHECK(std::abs(solver_nodes[0].x[1] - 1.0f) < 1e-5f);
+    FEM_CHECK(std::abs(solver_nodes[0].x[2] - 2.0f) < 1e-5f);
 
     std::remove(test_k_file.c_str());
 

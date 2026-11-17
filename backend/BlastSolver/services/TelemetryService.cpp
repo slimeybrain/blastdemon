@@ -1267,6 +1267,56 @@ static inline void appendCompactMPMParticle(
     out.push_back(bitsToFloat(word7));
 }
 
+static void packMPMParticlesTelemetry(
+    std::vector<float>& out,
+    const std::vector<Blast::MPMParticle3D>& particles,
+    const std::vector<Blast::MaterialTable3D>& mat_tables)
+{
+    out.clear();
+    if (particles.empty()) return;
+
+    const size_t total_particles = particles.size();
+    size_t stride = 1;
+    const int user_stride = global_mpm_particle_stride.load();
+    if (user_stride > 1) {
+        stride = static_cast<size_t>(user_stride);
+    }
+    const size_t visual_count = (total_particles + stride - 1) / stride;
+    out.reserve(visual_count * 8);
+
+    for (size_t idx = 0; idx < total_particles; idx += stride) {
+        const auto& p = particles[idx];
+        if (p.m <= 0.0f || p.state == 2) continue;
+
+        const float s00 = p.sigma[0][0], s11 = p.sigma[1][1], s22 = p.sigma[2][2];
+        const float s01 = p.sigma[0][1], s02 = p.sigma[0][2], s12 = p.sigma[1][2];
+        const float press = -(s00 + s11 + s22) / 3.0f;
+        const float diff_xy = s00 - s11, diff_yz = s11 - s22, diff_zx = s22 - s00;
+        const float von_mises = std::sqrt(std::max(0.0f,
+            0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) +
+            3.0f * (s01 * s01 + s12 * s12 + s02 * s02)));
+
+        float den = 2400.0f;
+        float ep_or_lambda = p.ep_bar;
+        if (p.object_id >= 0 && p.object_id < static_cast<int>(mat_tables.size())) {
+            const auto& mat_tbl = mat_tables[p.object_id];
+            den = mat_tbl.density;
+            const bool is_energetic = (mat_tbl.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn ||
+                                       mat_tbl.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn ||
+                                       mat_tbl.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth);
+            if (is_energetic) {
+                ep_or_lambda = p.lambda;
+            }
+        }
+
+        appendCompactMPMParticle(out,
+            p.x[0], p.x[1], p.x[2],
+            p.v[0], p.v[1], p.v[2],
+            von_mises, press, ep_or_lambda, den,
+            p.damage, p.has_failed, p.object_id, p.cluster_id);
+    }
+}
+
 void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool include_particles) {
     if (!global_solver_mpm_3d && !global_solver_mpm_3d_cuda) return;
 
@@ -1415,42 +1465,14 @@ void emit_telemetry_mpm_3d(double elapsed, bool is_terminated, int step, bool in
 
     if (include_particles) {
         const auto& particles = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
-        size_t total_particles = particles.size();
-        size_t stride = 1;
-        int user_stride = global_mpm_particle_stride.load();
-        if (user_stride > 1) {
-            stride = static_cast<size_t>(user_stride);
-        }
-        size_t visual_count = (total_particles + stride - 1) / stride;
-        payload->mpm_particles.reserve(visual_count * 8);
-        for (size_t idx = 0; idx < total_particles; idx += stride) {
-            const auto& p = particles[idx];
-            if (p.m <= 0.0f || p.state == 2) continue;
-            float s00 = p.sigma[0][0], s11 = p.sigma[1][1], s22 = p.sigma[2][2];
-            float s01 = p.sigma[0][1], s02 = p.sigma[0][2], s12 = p.sigma[1][2];
-            float press = -(s00 + s11 + s22) / 3.0f;
-            float dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
-            float vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0f * (s01 * s01 + s02 * s02 + s12 * s12);
-            float von_mises = std::sqrt(std::max(0.0f, 1.5f * vm_sq));
-
-            const auto& mat_tbl = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTable(p.object_id) : global_solver_mpm_3d->getMaterialTable(p.object_id);
-            float den = mat_tbl.density;
-            bool is_energetic = (mat_tbl.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn ||
-                                 mat_tbl.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn ||
-                                 mat_tbl.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth);
-            float ep_or_lambda = is_energetic ? p.lambda : p.ep_bar;
-            appendCompactMPMParticle(payload->mpm_particles,
-                p.x[0], p.x[1], p.x[2],
-                p.v[0], p.v[1], p.v[2],
-                von_mises, press, ep_or_lambda, den,
-                p.damage, p.has_failed, p.object_id, p.cluster_id);
-        }
+        const auto& mat_tables = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTables() : global_solver_mpm_3d->getMaterialTables();
+        packMPMParticlesTelemetry(payload->mpm_particles, particles, mat_tables);
     }
 
     global_async_telemetry.push(std::move(payload));
 }
 
-void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
+void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step, bool include_mpm_particles) {
     std::string m_id = global_model_id.empty() ? "default_fem" : global_model_id;
 
     Blast::FEMSolver3DCUDA<float>* cuda_fem_float = nullptr;
@@ -1490,50 +1512,14 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
         payload->fem_sig_max = static_cast<double>(cuda_fem_float->getMaxVonMisesStress());
         payload->fem_ep_max = static_cast<double>(cuda_fem_float->getMaxPlasticStrain());
 
-        Blast::MPMSolver3DCUDA* mpm_sol_cuda = cuda_fem_float->getCUDAMPMSolver() ? cuda_fem_float->getCUDAMPMSolver() : global_solver_mpm_3d_cuda.get();
-        Blast::MPMSolver3D* mpm_sol = cuda_fem_float->getMPMSolver() ? cuda_fem_float->getMPMSolver() : global_solver_mpm_3d.get();
-        if (mpm_sol_cuda && mpm_sol_cuda->getParticleCount() > 0) {
-            mpm_sol_cuda->syncParticlesToHost();
-            const auto& pts = mpm_sol_cuda->getParticles();
-            payload->mpm_particles.clear();
-            payload->mpm_particles.reserve(pts.size() * 8);
-            for (size_t i = 0; i < pts.size(); ++i) {
-                if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-                float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
-                float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
-                float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
-                float p_vm = std::sqrt(std::max(0.0f, 0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) + 3.0f * (sxy * sxy + syz * syz + sxz * sxz)));
-                float p_press = -(sxx + syy + szz) / 3.0f;
-                float den = 2400.0f;
-                if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol_cuda->getMaterialTables().size())) {
-                    den = mpm_sol_cuda->getMaterialTables()[pts[i].object_id].density;
-                }
-                appendCompactMPMParticle(payload->mpm_particles,
-                    pts[i].x[0], pts[i].x[1], pts[i].x[2],
-                    pts[i].v[0], pts[i].v[1], pts[i].v[2],
-                    p_vm, p_press, pts[i].ep_bar, den,
-                    pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
-            }
-        } else if (mpm_sol && !mpm_sol->getParticles().empty()) {
-            const auto& pts = mpm_sol->getParticles();
-            payload->mpm_particles.clear();
-            payload->mpm_particles.reserve(pts.size() * 8);
-            for (size_t i = 0; i < pts.size(); ++i) {
-                if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-                float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
-                float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
-                float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
-                float p_vm = std::sqrt(std::max(0.0f, 0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) + 3.0f * (sxy * sxy + syz * syz + sxz * sxz)));
-                float p_press = -(sxx + syy + szz) / 3.0f;
-                float den = 2400.0f;
-                if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol->getMaterialTables().size())) {
-                    den = mpm_sol->getMaterialTables()[pts[i].object_id].density;
-                }
-                appendCompactMPMParticle(payload->mpm_particles,
-                    pts[i].x[0], pts[i].x[1], pts[i].x[2],
-                    pts[i].v[0], pts[i].v[1], pts[i].v[2],
-                    p_vm, p_press, pts[i].ep_bar, den,
-                    pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
+        if (include_mpm_particles) {
+            Blast::MPMSolver3DCUDA* mpm_sol_cuda = cuda_fem_float->getCUDAMPMSolver() ? cuda_fem_float->getCUDAMPMSolver() : global_solver_mpm_3d_cuda.get();
+            Blast::MPMSolver3D* mpm_sol = cuda_fem_float->getMPMSolver() ? cuda_fem_float->getMPMSolver() : global_solver_mpm_3d.get();
+            if (mpm_sol_cuda && mpm_sol_cuda->getParticleCount() > 0) {
+                mpm_sol_cuda->syncParticlesToHost();
+                packMPMParticlesTelemetry(payload->mpm_particles, mpm_sol_cuda->getParticles(), mpm_sol_cuda->getMaterialTables());
+            } else if (mpm_sol && !mpm_sol->getParticles().empty()) {
+                packMPMParticlesTelemetry(payload->mpm_particles, mpm_sol->getParticles(), mpm_sol->getMaterialTables());
             }
         }
 
@@ -1578,50 +1564,14 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
         payload->fem_sig_max = cuda_fem_double->getMaxVonMisesStress();
         payload->fem_ep_max = cuda_fem_double->getMaxPlasticStrain();
 
-        Blast::MPMSolver3DCUDA* mpm_sol_cuda = cuda_fem_double->getCUDAMPMSolver() ? cuda_fem_double->getCUDAMPMSolver() : global_solver_mpm_3d_cuda.get();
-        Blast::MPMSolver3D* mpm_sol = cuda_fem_double->getMPMSolver() ? cuda_fem_double->getMPMSolver() : global_solver_mpm_3d.get();
-        if (mpm_sol_cuda && mpm_sol_cuda->getParticleCount() > 0) {
-            mpm_sol_cuda->syncParticlesToHost();
-            const auto& pts = mpm_sol_cuda->getParticles();
-            payload->mpm_particles.clear();
-            payload->mpm_particles.reserve(pts.size() * 8);
-            for (size_t i = 0; i < pts.size(); ++i) {
-                if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-                float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
-                float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
-                float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
-                float p_vm = std::sqrt(std::max(0.0f, 0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) + 3.0f * (sxy * sxy + syz * syz + sxz * sxz)));
-                float p_press = -(sxx + syy + szz) / 3.0f;
-                float den = 2400.0f;
-                if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol_cuda->getMaterialTables().size())) {
-                    den = mpm_sol_cuda->getMaterialTables()[pts[i].object_id].density;
-                }
-                appendCompactMPMParticle(payload->mpm_particles,
-                    pts[i].x[0], pts[i].x[1], pts[i].x[2],
-                    pts[i].v[0], pts[i].v[1], pts[i].v[2],
-                    p_vm, p_press, pts[i].ep_bar, den,
-                    pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
-            }
-        } else if (mpm_sol && !mpm_sol->getParticles().empty()) {
-            const auto& pts = mpm_sol->getParticles();
-            payload->mpm_particles.clear();
-            payload->mpm_particles.reserve(pts.size() * 8);
-            for (size_t i = 0; i < pts.size(); ++i) {
-                if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-                float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
-                float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
-                float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
-                float p_vm = std::sqrt(std::max(0.0f, 0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) + 3.0f * (sxy * sxy + syz * syz + sxz * sxz)));
-                float p_press = -(sxx + syy + szz) / 3.0f;
-                float den = 2400.0f;
-                if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol->getMaterialTables().size())) {
-                    den = mpm_sol->getMaterialTables()[pts[i].object_id].density;
-                }
-                appendCompactMPMParticle(payload->mpm_particles,
-                    pts[i].x[0], pts[i].x[1], pts[i].x[2],
-                    pts[i].v[0], pts[i].v[1], pts[i].v[2],
-                    p_vm, p_press, pts[i].ep_bar, den,
-                    pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
+        if (include_mpm_particles) {
+            Blast::MPMSolver3DCUDA* mpm_sol_cuda = cuda_fem_double->getCUDAMPMSolver() ? cuda_fem_double->getCUDAMPMSolver() : global_solver_mpm_3d_cuda.get();
+            Blast::MPMSolver3D* mpm_sol = cuda_fem_double->getMPMSolver() ? cuda_fem_double->getMPMSolver() : global_solver_mpm_3d.get();
+            if (mpm_sol_cuda && mpm_sol_cuda->getParticleCount() > 0) {
+                mpm_sol_cuda->syncParticlesToHost();
+                packMPMParticlesTelemetry(payload->mpm_particles, mpm_sol_cuda->getParticles(), mpm_sol_cuda->getMaterialTables());
+            } else if (mpm_sol && !mpm_sol->getParticles().empty()) {
+                packMPMParticlesTelemetry(payload->mpm_particles, mpm_sol->getParticles(), mpm_sol->getMaterialTables());
             }
         }
 
@@ -1722,6 +1672,17 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
             for (size_t f = 0; f < n_facets; ++f) {
                 const auto& facet = facets[f];
                 int elem_idx = facet.element_id;
+                if (elem_idx >= 0 && elem_idx < (int)elements.size() && elements[elem_idx].is_eroded) {
+                    payload->fem_facet_data[f * 8 + 0] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 1] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 2] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 3] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 4] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 5] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 6] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 7] = -1.0f;
+                    continue;
+                }
                 float vm = 0.0f, ep = 0.0f, press = 0.0f, dmg = 0.0f;
                 if (elem_idx >= 0 && elem_idx < (int)elements.size()) {
                     const auto& elem = elements[elem_idx];
@@ -1748,30 +1709,60 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
             const auto& trusses = fem_float->getTrusses();
             for (size_t t = 0; t < n_trusses; ++t) {
                 const auto& tr = trusses[t];
-                payload->fem_facet_data[(offset + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
-                payload->fem_facet_data[(offset + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
-                payload->fem_facet_data[(offset + t) * 8 + 2] = -1.0f;
-                payload->fem_facet_data[(offset + t) * 8 + 3] = -1.0f;
-                payload->fem_facet_data[(offset + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
-                payload->fem_facet_data[(offset + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
-                payload->fem_facet_data[(offset + t) * 8 + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
-                payload->fem_facet_data[(offset + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
+                const size_t base = (offset + t) * 8;
+                if (tr.is_eroded) {
+                    payload->fem_facet_data[base + 0] = -1.0f;
+                    payload->fem_facet_data[base + 1] = -1.0f;
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = 0.0f;
+                    payload->fem_facet_data[base + 5] = 0.0f;
+                    payload->fem_facet_data[base + 6] = 0.0f;
+                    payload->fem_facet_data[base + 7] = 1.0f;
+                } else {
+                    payload->fem_facet_data[base + 0] = static_cast<float>(tr.node_ids[0]);
+                    payload->fem_facet_data[base + 1] = static_cast<float>(tr.node_ids[1]);
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = static_cast<float>(std::abs(tr.sigma));
+                    payload->fem_facet_data[base + 5] = static_cast<float>(tr.ep_bar);
+                    payload->fem_facet_data[base + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
+                    payload->fem_facet_data[base + 7] = 0.0f;
+                }
             }
             offset += n_trusses;
             const auto& beams = fem_float->getBeams();
             for (size_t b = 0; b < n_beams; ++b) {
                 const auto& bm = beams[b];
-                float sig = static_cast<float>(bm.ep_bar > 0.0f ? (500.0e6f + 2.0e9f * bm.ep_bar) : 0.0f);
-                float moment = static_cast<float>(bm.kappa2 * bm.kappa2 + bm.kappa3 * bm.kappa3);
-                if (moment > 0.0f) moment = std::sqrt(moment);
-                payload->fem_facet_data[(offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
-                payload->fem_facet_data[(offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
-                payload->fem_facet_data[(offset + b) * 8 + 2] = -1.0f;
-                payload->fem_facet_data[(offset + b) * 8 + 3] = -1.0f;
-                payload->fem_facet_data[(offset + b) * 8 + 4] = sig;
-                payload->fem_facet_data[(offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
-                payload->fem_facet_data[(offset + b) * 8 + 6] = moment;
-                payload->fem_facet_data[(offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
+                const size_t base = (offset + b) * 8;
+                if (bm.is_eroded) {
+                    payload->fem_facet_data[base + 0] = -1.0f;
+                    payload->fem_facet_data[base + 1] = -1.0f;
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = 0.0f;
+                    payload->fem_facet_data[base + 5] = 0.0f;
+                    payload->fem_facet_data[base + 6] = 0.0f;
+                    payload->fem_facet_data[base + 7] = 1.0f;
+                } else {
+                    float A_safe = (bm.A > 1.0e-12f) ? bm.A : 1.0e-6f;
+                    float I2_safe = (bm.I2 > 1.0e-16f) ? bm.I2 : 1.0e-12f;
+                    float I3_safe = (bm.I3 > 1.0e-16f) ? bm.I3 : I2_safe;
+                    float d_safe = (bm.d > 1.0e-6f) ? bm.d : 0.01f;
+                    float W2 = I2_safe / (0.5f * d_safe);
+                    float W3 = I3_safe / (0.5f * d_safe);
+                    float M_bend = std::hypot(bm.M2 / W2, bm.M3 / W3);
+                    float M_res = std::hypot(bm.M2, bm.M3);
+                    float sig = std::abs(bm.N) / A_safe + M_bend;
+                    payload->fem_facet_data[base + 0] = static_cast<float>(bm.node_ids[0]);
+                    payload->fem_facet_data[base + 1] = static_cast<float>(bm.node_ids[1]);
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = sig;
+                    payload->fem_facet_data[base + 5] = static_cast<float>(bm.ep_bar);
+                    payload->fem_facet_data[base + 6] = M_res;
+                    payload->fem_facet_data[base + 7] = 0.0f;
+                }
             }
         } else {
             const auto& facets = fem_double->getSurfaceFacets();
@@ -1779,13 +1770,25 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
             for (size_t f = 0; f < n_facets; ++f) {
                 const auto& facet = facets[f];
                 int elem_idx = facet.element_id;
+                if (elem_idx >= 0 && elem_idx < (int)elements.size() && elements[elem_idx].is_eroded) {
+                    payload->fem_facet_data[f * 8 + 0] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 1] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 2] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 3] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 4] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 5] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 6] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 7] = -1.0f;
+                    continue;
+                }
                 float vm = 0.0f, ep = 0.0f, press = 0.0f, dmg = 0.0f;
                 if (elem_idx >= 0 && elem_idx < (int)elements.size()) {
                     const auto& elem = elements[elem_idx];
                     double s00 = elem.sigma[0][0], s11 = elem.sigma[1][1], s22 = elem.sigma[2][2];
                     double s01 = elem.sigma[0][1], s02 = elem.sigma[0][2], s12 = elem.sigma[1][2];
-                    press = static_cast<float>(-(s00 + s11 + s22) / 3.0);
-                    double dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
+                    double press_d = -(s00 + s11 + s22) / 3.0;
+                    press = static_cast<float>(press_d);
+                    double dev00 = s00 + press_d, dev11 = s11 + press_d, dev22 = s22 + press_d;
                     double vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0 * (s01 * s01 + s02 * s02 + s12 * s12);
                     vm = static_cast<float>(std::sqrt(std::max(0.0, 1.5 * vm_sq)));
                     ep = static_cast<float>(elem.ep_bar);
@@ -1805,78 +1808,81 @@ void emit_telemetry_fem_3d(double elapsed, bool is_terminated, int step) {
             const auto& trusses = fem_double->getTrusses();
             for (size_t t = 0; t < n_trusses; ++t) {
                 const auto& tr = trusses[t];
-                payload->fem_facet_data[(offset + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
-                payload->fem_facet_data[(offset + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
-                payload->fem_facet_data[(offset + t) * 8 + 2] = -1.0f;
-                payload->fem_facet_data[(offset + t) * 8 + 3] = -1.0f;
-                payload->fem_facet_data[(offset + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
-                payload->fem_facet_data[(offset + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
-                payload->fem_facet_data[(offset + t) * 8 + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
-                payload->fem_facet_data[(offset + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
+                const size_t base = (offset + t) * 8;
+                if (tr.is_eroded) {
+                    payload->fem_facet_data[base + 0] = -1.0f;
+                    payload->fem_facet_data[base + 1] = -1.0f;
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = 0.0f;
+                    payload->fem_facet_data[base + 5] = 0.0f;
+                    payload->fem_facet_data[base + 6] = 0.0f;
+                    payload->fem_facet_data[base + 7] = 1.0f;
+                } else {
+                    payload->fem_facet_data[base + 0] = static_cast<float>(tr.node_ids[0]);
+                    payload->fem_facet_data[base + 1] = static_cast<float>(tr.node_ids[1]);
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = static_cast<float>(std::abs(tr.sigma));
+                    payload->fem_facet_data[base + 5] = static_cast<float>(tr.ep_bar);
+                    payload->fem_facet_data[base + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
+                    payload->fem_facet_data[base + 7] = 0.0f;
+                }
             }
             offset += n_trusses;
             const auto& beams = fem_double->getBeams();
             for (size_t b = 0; b < n_beams; ++b) {
                 const auto& bm = beams[b];
-                float sig = static_cast<float>(bm.ep_bar > 0.0 ? (500.0e6 + 2.0e9 * bm.ep_bar) : 0.0);
-                float moment = static_cast<float>(bm.kappa2 * bm.kappa2 + bm.kappa3 * bm.kappa3);
-                if (moment > 0.0f) moment = std::sqrt(moment);
-                payload->fem_facet_data[(offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
-                payload->fem_facet_data[(offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
-                payload->fem_facet_data[(offset + b) * 8 + 2] = -1.0f;
-                payload->fem_facet_data[(offset + b) * 8 + 3] = -1.0f;
-                payload->fem_facet_data[(offset + b) * 8 + 4] = sig;
-                payload->fem_facet_data[(offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
-                payload->fem_facet_data[(offset + b) * 8 + 6] = moment;
-                payload->fem_facet_data[(offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
+                const size_t base = (offset + b) * 8;
+                if (bm.is_eroded) {
+                    payload->fem_facet_data[base + 0] = -1.0f;
+                    payload->fem_facet_data[base + 1] = -1.0f;
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = 0.0f;
+                    payload->fem_facet_data[base + 5] = 0.0f;
+                    payload->fem_facet_data[base + 6] = 0.0f;
+                    payload->fem_facet_data[base + 7] = 1.0f;
+                } else {
+                    double A_safe = (bm.A > 1.0e-12) ? bm.A : 1.0e-6;
+                    double I2_safe = (bm.I2 > 1.0e-16) ? bm.I2 : 1.0e-12;
+                    double I3_safe = (bm.I3 > 1.0e-16) ? bm.I3 : I2_safe;
+                    double d_safe = (bm.d > 1.0e-6) ? bm.d : 0.01;
+                    double W2 = I2_safe / (0.5 * d_safe);
+                    double W3 = I3_safe / (0.5 * d_safe);
+                    double M_bend = std::hypot(bm.M2 / W2, bm.M3 / W3);
+                    double M_res = std::hypot(bm.M2, bm.M3);
+                    float sig = static_cast<float>(std::abs(bm.N) / A_safe + M_bend);
+                    payload->fem_facet_data[base + 0] = static_cast<float>(bm.node_ids[0]);
+                    payload->fem_facet_data[base + 1] = static_cast<float>(bm.node_ids[1]);
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = sig;
+                    payload->fem_facet_data[base + 5] = static_cast<float>(bm.ep_bar);
+                    payload->fem_facet_data[base + 6] = static_cast<float>(M_res);
+                    payload->fem_facet_data[base + 7] = 0.0f;
+                }
             }
         }
     }
 
-    Blast::MPMSolver3DCUDA* mpm_sol_cuda = global_solver_mpm_3d_cuda.get();
-    Blast::MPMSolver3D* mpm_sol = fem_float ? fem_float->getMPMSolver() : (fem_double ? fem_double->getMPMSolver() : global_solver_mpm_3d.get());
-    if (mpm_sol_cuda && mpm_sol_cuda->getParticleCount() > 0) {
-        mpm_sol_cuda->syncParticlesToHost();
-        const auto& pts = mpm_sol_cuda->getParticles();
-        payload->mpm_particles.clear();
-        payload->mpm_particles.reserve(pts.size() * 8);
-        for (size_t i = 0; i < pts.size(); ++i) {
-            if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-            float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
-            float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
-            float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
-            float p_vm = std::sqrt(std::max(0.0f, 0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) + 3.0f * (sxy * sxy + syz * syz + sxz * sxz)));
-            float p_press = -(sxx + syy + szz) / 3.0f;
-            float den = 2400.0f;
-            if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol_cuda->getMaterialTables().size())) {
-                den = mpm_sol_cuda->getMaterialTables()[pts[i].object_id].density;
-            }
-            appendCompactMPMParticle(payload->mpm_particles,
-                pts[i].x[0], pts[i].x[1], pts[i].x[2],
-                pts[i].v[0], pts[i].v[1], pts[i].v[2],
-                p_vm, p_press, pts[i].ep_bar, den,
-                pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
+    if (include_mpm_particles) {
+        Blast::MPMSolver3DCUDA* mpm_sol_cuda = global_solver_mpm_3d_cuda.get();
+        Blast::MPMSolver3D* mpm_sol = fem_float ? fem_float->getMPMSolver() : (fem_double ? fem_double->getMPMSolver() : global_solver_mpm_3d.get());
+        if (mpm_sol_cuda && mpm_sol_cuda->getParticleCount() > 0) {
+            mpm_sol_cuda->syncParticlesToHost();
+            packMPMParticlesTelemetry(payload->mpm_particles, mpm_sol_cuda->getParticles(), mpm_sol_cuda->getMaterialTables());
+        } else if (mpm_sol && !mpm_sol->getParticles().empty()) {
+            packMPMParticlesTelemetry(payload->mpm_particles, mpm_sol->getParticles(), mpm_sol->getMaterialTables());
         }
-    } else if (mpm_sol && !mpm_sol->getParticles().empty()) {
-        const auto& pts = mpm_sol->getParticles();
-        payload->mpm_particles.clear();
-        payload->mpm_particles.reserve(pts.size() * 8);
-        for (size_t i = 0; i < pts.size(); ++i) {
-            if (pts[i].m <= 0.0f || pts[i].state == 2) continue;
-            float sxx = pts[i].sigma[0][0], syy = pts[i].sigma[1][1], szz = pts[i].sigma[2][2];
-            float sxy = pts[i].sigma[0][1], syz = pts[i].sigma[1][2], sxz = pts[i].sigma[0][2];
-            float diff_xy = sxx - syy, diff_yz = syy - szz, diff_zx = szz - sxx;
-            float p_vm = std::sqrt(std::max(0.0f, 0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) + 3.0f * (sxy * sxy + syz * syz + sxz * sxz)));
-            float p_press = -(sxx + syy + szz) / 3.0f;
-            float den = 2400.0f;
-            if (pts[i].object_id >= 0 && pts[i].object_id < static_cast<int>(mpm_sol->getMaterialTables().size())) {
-                den = mpm_sol->getMaterialTables()[pts[i].object_id].density;
-            }
-            appendCompactMPMParticle(payload->mpm_particles,
-                pts[i].x[0], pts[i].x[1], pts[i].x[2],
-                pts[i].v[0], pts[i].v[1], pts[i].v[2],
-                p_vm, p_press, pts[i].ep_bar, den,
-                pts[i].damage, pts[i].has_failed, pts[i].object_id, pts[i].cluster_id);
+    }
+
+    {
+        std::lock_guard<std::mutex> g_lock(global_gauges_mutex);
+        if (!global_gauges.empty() && !global_gauge_times.empty()) {
+            payload->has_gauges = true;
+            payload->gauge_times = global_gauge_times;
+            payload->gauges_history = global_gauges_history;
         }
     }
 
@@ -1915,42 +1921,13 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
 
     if ((global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) ||
         (global_solver_mpm_3d && !global_solver_mpm_3d->getParticles().empty())) {
-        if (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0 && global_solver_mpm_3d_cuda->getStepCount() > 0) {
+        const bool use_cuda = (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0);
+        if (use_cuda && global_solver_mpm_3d_cuda->getStepCount() > 0) {
             global_solver_mpm_3d_cuda->syncParticlesToHost();
         }
-        const auto& particles = (global_solver_mpm_3d_cuda && global_solver_mpm_3d_cuda->getParticleCount() > 0) ?
-            global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
-        if (!particles.empty()) {
-            size_t total_particles = particles.size();
-            size_t stride = 1;
-            int user_stride = global_mpm_particle_stride.load();
-            if (user_stride > 1) {
-                stride = static_cast<size_t>(user_stride);
-            }
-            size_t visual_count = (total_particles + stride - 1) / stride;
-            payload->mpm_particles.reserve(visual_count * 8);
-            for (size_t idx = 0; idx < total_particles; idx += stride) {
-                const auto& p = particles[idx];
-                if (p.m <= 0.0f || p.state == 2) continue;
-                float diff_xy = p.sigma[0][0] - p.sigma[1][1];
-                float diff_yz = p.sigma[1][1] - p.sigma[2][2];
-                float diff_zx = p.sigma[2][2] - p.sigma[0][0];
-                float s_xy = p.sigma[0][1]; float s_yz = p.sigma[1][2]; float s_zx = p.sigma[2][0];
-                float von_mises = std::sqrt(0.5f * (diff_xy * diff_xy + diff_yz * diff_yz + diff_zx * diff_zx) +
-                                            3.0f * (s_xy * s_xy + s_yz * s_yz + s_zx * s_zx));
-                float press = - (p.sigma[0][0] + p.sigma[1][1] + p.sigma[2][2]) / 3.0f;
-                const auto& mat_tbl = global_solver_mpm_3d_cuda ? global_solver_mpm_3d_cuda->getMaterialTable(p.object_id) : global_solver_mpm_3d->getMaterialTable(p.object_id);
-                float den = mat_tbl.density;
-                bool is_energetic = (mat_tbl.material_model == Blast::MPMMaterialModel::JWLProgrammedBurn ||
-                                     mat_tbl.material_model == Blast::MPMMaterialModel::CRESTReactiveBurn ||
-                                     mat_tbl.material_model == Blast::MPMMaterialModel::LeeTarverIgnitionGrowth);
-                appendCompactMPMParticle(payload->mpm_particles,
-                    p.x[0], p.x[1], p.x[2],
-                    p.v[0], p.v[1], p.v[2],
-                    von_mises, press, is_energetic ? p.lambda : p.ep_bar, den,
-                    p.damage, p.has_failed, p.object_id, p.cluster_id);
-            }
-        }
+        const auto& particles = use_cuda ? global_solver_mpm_3d_cuda->getParticles() : global_solver_mpm_3d->getParticles();
+        const auto& mat_tables = use_cuda ? global_solver_mpm_3d_cuda->getMaterialTables() : global_solver_mpm_3d->getMaterialTables();
+        packMPMParticlesTelemetry(payload->mpm_particles, particles, mat_tables);
     }
 
     if (global_phase_particles_3d && global_phase_particles_3d->getParticleCount() > 0) {
@@ -2034,6 +2011,17 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
             for (size_t f = 0; f < n_facets; ++f) {
                 const auto& facet = facets[f];
                 int elem_idx = facet.element_id;
+                if (elem_idx >= 0 && elem_idx < (int)elements.size() && elements[elem_idx].is_eroded) {
+                    payload->fem_facet_data[f * 8 + 0] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 1] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 2] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 3] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 4] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 5] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 6] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 7] = -1.0f;
+                    continue;
+                }
                 float vm = 0.0f, ep = 0.0f, press = 0.0f, dmg = 0.0f;
                 if (elem_idx >= 0 && elem_idx < (int)elements.size()) {
                     const auto& elem = elements[elem_idx];
@@ -2057,29 +2045,59 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
             }
             for (size_t t = 0; t < trusses.size(); ++t) {
                 const auto& tr = trusses[t];
-                payload->fem_facet_data[(n_facets + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
-                payload->fem_facet_data[(n_facets + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
-                payload->fem_facet_data[(n_facets + t) * 8 + 2] = -1.0f;
-                payload->fem_facet_data[(n_facets + t) * 8 + 3] = -1.0f;
-                payload->fem_facet_data[(n_facets + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
-                payload->fem_facet_data[(n_facets + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
-                payload->fem_facet_data[(n_facets + t) * 8 + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
-                payload->fem_facet_data[(n_facets + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
+                const size_t base = (n_facets + t) * 8;
+                if (tr.is_eroded) {
+                    payload->fem_facet_data[base + 0] = -1.0f;
+                    payload->fem_facet_data[base + 1] = -1.0f;
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = 0.0f;
+                    payload->fem_facet_data[base + 5] = 0.0f;
+                    payload->fem_facet_data[base + 6] = 0.0f;
+                    payload->fem_facet_data[base + 7] = 1.0f;
+                } else {
+                    payload->fem_facet_data[base + 0] = static_cast<float>(tr.node_ids[0]);
+                    payload->fem_facet_data[base + 1] = static_cast<float>(tr.node_ids[1]);
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = static_cast<float>(std::abs(tr.sigma));
+                    payload->fem_facet_data[base + 5] = static_cast<float>(tr.ep_bar);
+                    payload->fem_facet_data[base + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
+                    payload->fem_facet_data[base + 7] = 0.0f;
+                }
             }
             size_t beam_offset = n_facets + trusses.size();
             for (size_t b = 0; b < beams.size(); ++b) {
                 const auto& bm = beams[b];
-                float sig = static_cast<float>(bm.ep_bar > 0.0f ? (500.0e6f + 2.0e9f * bm.ep_bar) : 0.0f);
-                float moment = static_cast<float>(bm.kappa2 * bm.kappa2 + bm.kappa3 * bm.kappa3);
-                if (moment > 0.0f) moment = std::sqrt(moment);
-                payload->fem_facet_data[(beam_offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
-                payload->fem_facet_data[(beam_offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
-                payload->fem_facet_data[(beam_offset + b) * 8 + 2] = -1.0f;
-                payload->fem_facet_data[(beam_offset + b) * 8 + 3] = -1.0f;
-                payload->fem_facet_data[(beam_offset + b) * 8 + 4] = sig;
-                payload->fem_facet_data[(beam_offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
-                payload->fem_facet_data[(beam_offset + b) * 8 + 6] = moment;
-                payload->fem_facet_data[(beam_offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
+                const size_t base = (beam_offset + b) * 8;
+                if (bm.is_eroded) {
+                    payload->fem_facet_data[base + 0] = -1.0f;
+                    payload->fem_facet_data[base + 1] = -1.0f;
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = 0.0f;
+                    payload->fem_facet_data[base + 5] = 0.0f;
+                    payload->fem_facet_data[base + 6] = 0.0f;
+                    payload->fem_facet_data[base + 7] = 1.0f;
+                } else {
+                    double A_safe = (bm.A > 1.0e-12f) ? static_cast<double>(bm.A) : 1.0e-6;
+                    double I2_safe = (bm.I2 > 1.0e-16f) ? static_cast<double>(bm.I2) : 1.0e-12;
+                    double I3_safe = (bm.I3 > 1.0e-16f) ? static_cast<double>(bm.I3) : I2_safe;
+                    double d_safe = (bm.d > 1.0e-6f) ? static_cast<double>(bm.d) : 0.01;
+                    double W2 = I2_safe / (0.5 * d_safe);
+                    double W3 = I3_safe / (0.5 * d_safe);
+                    double M_bend = std::hypot(static_cast<double>(bm.M2) / W2, static_cast<double>(bm.M3) / W3);
+                    double M_res = std::hypot(static_cast<double>(bm.M2), static_cast<double>(bm.M3));
+                    float sig = static_cast<float>(std::abs(static_cast<double>(bm.N)) / A_safe + M_bend);
+                    payload->fem_facet_data[base + 0] = static_cast<float>(bm.node_ids[0]);
+                    payload->fem_facet_data[base + 1] = static_cast<float>(bm.node_ids[1]);
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = sig;
+                    payload->fem_facet_data[base + 5] = static_cast<float>(bm.ep_bar);
+                    payload->fem_facet_data[base + 6] = static_cast<float>(M_res);
+                    payload->fem_facet_data[base + 7] = 0.0f;
+                }
             }
         }
         payload->fem_v_max = static_cast<double>(fem_float->getMaxVelocity());
@@ -2115,15 +2133,27 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
             for (size_t f = 0; f < n_facets; ++f) {
                 const auto& facet = facets[f];
                 int elem_idx = facet.element_id;
+                if (elem_idx >= 0 && elem_idx < (int)elements.size() && elements[elem_idx].is_eroded) {
+                    payload->fem_facet_data[f * 8 + 0] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 1] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 2] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 3] = -1.0f;
+                    payload->fem_facet_data[f * 8 + 4] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 5] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 6] = 0.0f;
+                    payload->fem_facet_data[f * 8 + 7] = -1.0f;
+                    continue;
+                }
                 float vm = 0.0f, ep = 0.0f, press = 0.0f, dmg = 0.0f;
                 if (elem_idx >= 0 && elem_idx < (int)elements.size()) {
                     const auto& elem = elements[elem_idx];
-                    float s00 = static_cast<float>(elem.sigma[0][0]), s11 = static_cast<float>(elem.sigma[1][1]), s22 = static_cast<float>(elem.sigma[2][2]);
-                    float s01 = static_cast<float>(elem.sigma[0][1]), s02 = static_cast<float>(elem.sigma[0][2]), s12 = static_cast<float>(elem.sigma[1][2]);
-                    press = -(s00 + s11 + s22) / 3.0f;
-                    float dev00 = s00 + press, dev11 = s11 + press, dev22 = s22 + press;
-                    float vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0f * (s01 * s01 + s02 * s02 + s12 * s12);
-                    vm = std::sqrt(std::max(0.0f, 1.5f * vm_sq));
+                    double s00 = elem.sigma[0][0], s11 = elem.sigma[1][1], s22 = elem.sigma[2][2];
+                    double s01 = elem.sigma[0][1], s02 = elem.sigma[0][2], s12 = elem.sigma[1][2];
+                    double press_d = -(s00 + s11 + s22) / 3.0;
+                    press = static_cast<float>(press_d);
+                    double dev00 = s00 + press_d, dev11 = s11 + press_d, dev22 = s22 + press_d;
+                    double vm_sq = dev00 * dev00 + dev11 * dev11 + dev22 * dev22 + 2.0 * (s01 * s01 + s02 * s02 + s12 * s12);
+                    vm = static_cast<float>(std::sqrt(std::max(0.0, 1.5 * vm_sq)));
                     ep = static_cast<float>(elem.ep_bar);
                     dmg = static_cast<float>(elem.damage);
                 }
@@ -2138,29 +2168,59 @@ void emit_telemetry_3d(double elapsed, bool is_terminated, int step) {
             }
             for (size_t t = 0; t < trusses.size(); ++t) {
                 const auto& tr = trusses[t];
-                payload->fem_facet_data[(n_facets + t) * 8 + 0] = static_cast<float>(tr.node_ids[0]);
-                payload->fem_facet_data[(n_facets + t) * 8 + 1] = static_cast<float>(tr.node_ids[1]);
-                payload->fem_facet_data[(n_facets + t) * 8 + 2] = -1.0f;
-                payload->fem_facet_data[(n_facets + t) * 8 + 3] = -1.0f;
-                payload->fem_facet_data[(n_facets + t) * 8 + 4] = static_cast<float>(std::abs(tr.sigma));
-                payload->fem_facet_data[(n_facets + t) * 8 + 5] = static_cast<float>(tr.ep_bar);
-                payload->fem_facet_data[(n_facets + t) * 8 + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
-                payload->fem_facet_data[(n_facets + t) * 8 + 7] = tr.is_eroded ? 1.0f : 0.0f;
+                const size_t base = (n_facets + t) * 8;
+                if (tr.is_eroded) {
+                    payload->fem_facet_data[base + 0] = -1.0f;
+                    payload->fem_facet_data[base + 1] = -1.0f;
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = 0.0f;
+                    payload->fem_facet_data[base + 5] = 0.0f;
+                    payload->fem_facet_data[base + 6] = 0.0f;
+                    payload->fem_facet_data[base + 7] = 1.0f;
+                } else {
+                    payload->fem_facet_data[base + 0] = static_cast<float>(tr.node_ids[0]);
+                    payload->fem_facet_data[base + 1] = static_cast<float>(tr.node_ids[1]);
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = static_cast<float>(std::abs(tr.sigma));
+                    payload->fem_facet_data[base + 5] = static_cast<float>(tr.ep_bar);
+                    payload->fem_facet_data[base + 6] = static_cast<float>(std::abs(tr.sigma * tr.A));
+                    payload->fem_facet_data[base + 7] = 0.0f;
+                }
             }
             size_t beam_offset = n_facets + trusses.size();
             for (size_t b = 0; b < beams.size(); ++b) {
                 const auto& bm = beams[b];
-                float sig = static_cast<float>(bm.ep_bar > 0.0 ? (500.0e6 + 2.0e9 * bm.ep_bar) : 0.0);
-                float moment = static_cast<float>(bm.kappa2 * bm.kappa2 + bm.kappa3 * bm.kappa3);
-                if (moment > 0.0f) moment = std::sqrt(moment);
-                payload->fem_facet_data[(beam_offset + b) * 8 + 0] = static_cast<float>(bm.node_ids[0]);
-                payload->fem_facet_data[(beam_offset + b) * 8 + 1] = static_cast<float>(bm.node_ids[1]);
-                payload->fem_facet_data[(beam_offset + b) * 8 + 2] = -1.0f;
-                payload->fem_facet_data[(beam_offset + b) * 8 + 3] = -1.0f;
-                payload->fem_facet_data[(beam_offset + b) * 8 + 4] = sig;
-                payload->fem_facet_data[(beam_offset + b) * 8 + 5] = static_cast<float>(bm.ep_bar);
-                payload->fem_facet_data[(beam_offset + b) * 8 + 6] = moment;
-                payload->fem_facet_data[(beam_offset + b) * 8 + 7] = bm.is_eroded ? 1.0f : 0.0f;
+                const size_t base = (beam_offset + b) * 8;
+                if (bm.is_eroded) {
+                    payload->fem_facet_data[base + 0] = -1.0f;
+                    payload->fem_facet_data[base + 1] = -1.0f;
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = 0.0f;
+                    payload->fem_facet_data[base + 5] = 0.0f;
+                    payload->fem_facet_data[base + 6] = 0.0f;
+                    payload->fem_facet_data[base + 7] = 1.0f;
+                } else {
+                    double A_safe = (bm.A > 1.0e-12) ? bm.A : 1.0e-6;
+                    double I2_safe = (bm.I2 > 1.0e-16) ? bm.I2 : 1.0e-12;
+                    double I3_safe = (bm.I3 > 1.0e-16) ? bm.I3 : I2_safe;
+                    double d_safe = (bm.d > 1.0e-6) ? bm.d : 0.01;
+                    double W2 = I2_safe / (0.5 * d_safe);
+                    double W3 = I3_safe / (0.5 * d_safe);
+                    double M_bend = std::hypot(bm.M2 / W2, bm.M3 / W3);
+                    double M_res = std::hypot(bm.M2, bm.M3);
+                    float sig = static_cast<float>(std::abs(bm.N) / A_safe + M_bend);
+                    payload->fem_facet_data[base + 0] = static_cast<float>(bm.node_ids[0]);
+                    payload->fem_facet_data[base + 1] = static_cast<float>(bm.node_ids[1]);
+                    payload->fem_facet_data[base + 2] = -1.0f;
+                    payload->fem_facet_data[base + 3] = -1.0f;
+                    payload->fem_facet_data[base + 4] = sig;
+                    payload->fem_facet_data[base + 5] = static_cast<float>(bm.ep_bar);
+                    payload->fem_facet_data[base + 6] = static_cast<float>(M_res);
+                    payload->fem_facet_data[base + 7] = 0.0f;
+                }
             }
         }
         payload->fem_v_max = fem_double->getMaxVelocity();

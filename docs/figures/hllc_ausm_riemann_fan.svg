@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 320" width="820" height="320" role="img" aria-label="Riemann Wave Fan and AUSM+ Splitting Schematic">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; }
+      .panel { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1; }
+      .title { font: 700 15px "Segoe UI", system-ui, sans-serif; fill: #0f172a; }
+      .subtitle { font: 600 12px "Segoe UI", system-ui, sans-serif; fill: #334155; }
+      .label { font: 500 11px "Segoe UI", system-ui, sans-serif; fill: #1e293b; }
+      .small { font: 400 10px "Segoe UI", system-ui, sans-serif; fill: #475569; }
+      .mono { font: 500 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #0f172a; }
+      .axis { stroke: #334155; stroke-width: 1.2; }
+      .grid { stroke: #e2e8f0; stroke-width: 0.8; stroke-dasharray: 3 3; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#1e293b"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+  <rect class="bg" x="1" y="1" width="818" height="318" rx="8"/>
+
+  <text class="title" x="24" y="28">Eulerian Interface Fluxes: Riemann Wave-Fan vs. AUSM+ Mach/Pressure Splitting</text>
+  <rect class="panel" x="20" y="44" width="380" height="256" rx="6"/>
+  <text class="subtitle" x="34" y="66">1. Compressible Riemann Wave-Fan (x - t Plane)</text>
+  <line class="axis" x1="50" y1="255" x2="380" y2="255" marker-end="url(#arrow)"/>
+  <line class="axis" x1="215" y1="255" x2="215" y2="85" marker-end="url(#arrow)"/>
+  <text class="label" x="368" y="272">x</text>
+  <text class="label" x="223" y="92">t</text>
+  <line x1="215" y1="255" x2="85" y2="110" stroke="#2563eb" stroke-width="2.2"/>
+  <line x1="215" y1="255" x2="265" y2="105" stroke="#16a34a" stroke-width="2" stroke-dasharray="5 3"/>
+  <line x1="215" y1="255" x2="345" y2="115" stroke="#dc2626" stroke-width="2.5"/>
+  <text class="label" x="75" y="205">State W_L</text>
+  <text class="small" x="68" y="220">(ρ_L, u_L, p_L, α_kL)</text>
+  <text class="label" x="305" y="205">State W_R</text>
+  <text class="small" x="295" y="220">(ρ_R, u_R, p_R, α_kR)</text>
+  <text class="label" x="150" y="135" fill="#2563eb">W_L*</text>
+  <text class="label" x="262" y="135" fill="#dc2626">W_R*</text>
+  <text class="small" x="62" y="102" fill="#2563eb">S_L = u_L - c_L</text>
+  <text class="small" x="235" y="98" fill="#16a34a">S_* (Contact)</text>
+  <text class="small" x="315" y="108" fill="#dc2626">S_R = u_R + c_R</text>
+  <text class="mono" x="38" y="286">Rusanov: s_max = max(|u_L|+c_L, |u_R|+c_R)</text>
+  <rect class="panel" x="420" y="44" width="380" height="256" rx="6"/>
+  <text class="subtitle" x="434" y="66">2. AUSM+ Split Mach M±(M) &amp; Pressure P±(M)</text>
+  <line class="grid" x1="525" y1="95" x2="525" y2="245"/>
+  <line class="grid" x1="715" y1="95" x2="715" y2="245"/>
+  <line class="axis" x1="465" y1="245" x2="780" y2="245" marker-end="url(#arrow)"/>
+  <line class="axis" x1="620" y1="245" x2="620" y2="90" marker-end="url(#arrow)"/>
+  <text class="small" x="515" y="259">-1</text>
+  <text class="small" x="617" y="259">0</text>
+  <text class="small" x="711" y="259">+1</text>
+  <text class="label" x="768" y="260">M</text>
+  <polyline fill="none" stroke="#2563eb" stroke-width="2.2" points="477.5,245.0 482.2,245.0 487.0,245.0 491.8,245.0 496.5,245.0 501.2,245.0 506.0,245.0 510.8,245.0 515.5,245.0 520.2,245.0 525.0,245.0 529.8,245.0 534.5,244.9 539.2,244.6 544.0,244.2 548.8,243.5 553.5,242.5 558.2,241.2 563.0,239.5 567.8,237.5 572.5,235.2 577.2,232.5 582.0,229.5 586.8,226.2 591.5,222.7 596.2,218.9 601.0,214.8 605.8,210.7 610.5,206.3 615.2,201.9 620.0,197.5 624.8,193.1 629.5,188.7 634.2,184.3 639.0,180.2 643.8,176.1 648.5,172.3 653.2,168.8 658.0,165.5 662.8,162.5 667.5,159.8 672.2,157.5 677.0,155.5 681.8,153.8 686.5,152.5 691.2,151.5 696.0,150.8 700.8,150.4 705.5,150.1 710.2,150.0 715.0,150.0 719.8,150.0 724.5,150.0 729.2,150.0 734.0,150.0 738.8,150.0 743.5,150.0 748.2,150.0 753.0,150.0 757.8,150.0 762.5,150.0"/>
+  <polyline fill="none" stroke="#dc2626" stroke-width="2.2" points="477.5,245.0 482.2,245.0 487.0,245.0 491.8,245.0 496.5,245.0 501.2,245.0 506.0,245.0 510.8,245.0 515.5,245.0 520.2,245.0 525.0,245.0 529.8,244.8 534.5,244.3 539.2,243.6 544.0,242.5 548.8,241.2 553.5,239.8 558.2,238.1 563.0,236.3 567.8,234.4 572.5,232.4 577.2,230.3 582.0,228.1 586.8,225.8 591.5,223.5 596.2,221.2 601.0,218.9 605.8,216.5 610.5,214.1 615.2,211.7 620.0,209.4 624.8,207.0 629.5,204.6 634.2,202.2 639.0,199.9 643.8,197.5 648.5,195.0 653.2,192.6 658.0,190.1 662.8,187.5 667.5,184.9 672.2,182.2 677.0,179.3 681.8,176.4 686.5,173.3 691.2,170.0 696.0,166.5 700.8,162.8 705.5,158.8 710.2,154.6 715.0,150.0 719.8,145.2 724.5,140.5 729.2,135.8 734.0,131.0 738.8,126.2 743.5,121.5 748.2,116.8 753.0,112.0 757.8,107.2 762.5,102.5"/>
+  <line x1="440" y1="115" x2="462" y2="115" stroke="#2563eb" stroke-width="2.2"/>
+  <text class="small" x="468" y="119">P+(M) (5th-order, α=3/16)</text>
+  <line x1="440" y1="133" x2="462" y2="133" stroke="#dc2626" stroke-width="2.2"/>
+  <text class="small" x="468" y="137">M+(M) (4th-order, β=1/8)</text>
+  <text class="mono" x="436" y="286">Harten Entropy Fix applied if λ_L &lt; 0 &lt; λ_R</text>
+</svg>

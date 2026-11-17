@@ -1,6 +1,6 @@
 # BlastDaemon Enterprise CFD & Multi-Physics Framework — Architecture
 
-This document is the master technical reference for the BlastDaemon codebase. It describes every layer of the system: core architectural mandates, build system, backend process isolation, multi-physics solver mathematics (Eulerian CFD, Lagrangian MPM, and Lagrangian Hexahedral FEM), two-way Fluid-Structure Interaction (FSI) couplers, IPC and networking protocols, frontend Directed Acyclic Graph (DAG) state management, UI panel subsystems, and the development lifecycle.
+This document is the master technical reference for the BlastDaemon codebase. It describes every layer of the system: core architectural mandates, build system, backend process isolation, multi-physics solver mathematics (Eulerian CFD, Lagrangian MPM, and Lagrangian Hexahedral FEM), two-way Fluid-Structure Interaction (FSI) couplers, IPC and networking protocols, frontend Directed Acyclic Graph (DAG) state management, UI panel subsystems, and the development lifecycle. For exhaustive governing equations, constitutive formulations, literature citations, and the auto-synchronized parameter registry, see [THEORY_MANUAL.md](file:///home/chris/antigrav/blastdemon/THEORY_MANUAL.md).
 
 ---
 

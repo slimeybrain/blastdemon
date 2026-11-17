@@ -26,6 +26,7 @@ struct LeeTarverParams {
     // Unreacted-explosive JWL (SolidReactantEOS::JWLReactant)
     float jwlr_A{7.32e14f}, jwlr_B{-5.2654e9f}, jwlr_R1{14.1f}, jwlr_R2{1.41f};
     float jwlr_omega{0.8867f}, jwlr_Cv{2.7806e6f}, jwlr_T0{298.0f};
+    float jwlp_Cv{1.0e6f};
     int   mixture_rule{1};
 
     // Works for MaterialTable3D and the 2D particle struct (identical field names).
@@ -35,7 +36,7 @@ struct LeeTarverParams {
         m.lt_G1 = G1; m.lt_c = c; m.lt_d = d; m.lt_y = y; m.lt_growth_max = growth_max;
         m.lt_G2 = G2; m.lt_e = e; m.lt_g = g; m.lt_z = z; m.lt_comp_min = comp_min;
         m.jwlr_A = jwlr_A; m.jwlr_B = jwlr_B; m.jwlr_R1 = jwlr_R1; m.jwlr_R2 = jwlr_R2;
-        m.jwlr_omega = jwlr_omega; m.jwlr_Cv = jwlr_Cv; m.jwlr_T0 = jwlr_T0;
+        m.jwlr_omega = jwlr_omega; m.jwlr_Cv = jwlr_Cv; m.jwlr_T0 = jwlr_T0; m.jwlp_Cv = jwlp_Cv;
         m.mixture_rule = mixture_rule;
     }
 };
@@ -54,7 +55,7 @@ inline void validateLeeTarverSI(const LeeTarverParams& p) {
             "(G1*(1e9)^y = " + std::to_string(rate_g) + " /s, G2*(1e10)^z = " + std::to_string(rate_c) +
             " /s). Coefficients must be SI: I [1/s], G1 [1/(s Pa^y)], G2 [1/(s Pa^z)]. "
             "LLNL values (Mbar, us) must be converted: G[SI] = G[LLNL] * 1e6 * (1e-11)^n.");
-    if (!(p.jwlr_Cv > 0.0f) || !(p.jwlr_T0 > 0.0f) || !(p.jwlr_R1 > 0.0f) || !(p.jwlr_R2 > 0.0f))
+    if (!(p.jwlp_Cv > 0.0f) || !(p.jwlr_Cv > 0.0f) || !(p.jwlr_T0 > 0.0f) || !(p.jwlr_R1 > 0.0f) || !(p.jwlr_R2 > 0.0f))
         throw std::invalid_argument("Unreacted JWL: Cv, T0, R1 and R2 must be positive (SI: Cv in Pa/K)");
     if (p.mixture_rule != 0 && p.mixture_rule != 1)
         throw std::invalid_argument("mixture_rule must be 0 (linear blend) or 1 (pressure equilibrium)");
@@ -99,6 +100,7 @@ inline LeeTarverParams readLeeTarverParams(const nlohmann::json& obj, bool valid
     p.jwlr_omega = static_cast<float>(get_json_double(obj, "jwlr_omega", p.jwlr_omega));
     p.jwlr_Cv = static_cast<float>(get_json_double(obj, "jwlr_Cv", p.jwlr_Cv));
     p.jwlr_T0 = static_cast<float>(get_json_double(obj, "jwlr_T0", p.jwlr_T0));
+    p.jwlp_Cv = static_cast<float>(get_json_double(obj, "jwlp_Cv", p.jwlp_Cv));
     p.mixture_rule = parseMixtureRule(obj, p.mixture_rule);
     if (validate) validateLeeTarverSI(p);
     return p;

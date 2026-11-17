@@ -5,7 +5,7 @@
 
 using namespace Blast;
 
-void test_elastic_wave_no_spurious_erosion() {
+bool test_elastic_wave_no_spurious_erosion() {
     std::cout << "--- Subtest: Elastic Wave Propagation (No Spurious Erosion) ---" << std::endl;
     FEMSolver3D<float> solver;
 
@@ -41,14 +41,18 @@ void test_elastic_wave_no_spurious_erosion() {
         solver.stepWithDt(dt);
 
         for (const auto& elem : solver.getElements()) {
-            assert(!elem.is_eroded && "Element should NOT erode during elastic wave propagation!");
+            if (elem.is_eroded) {
+                std::cerr << "[FAIL] Element eroded unexpectedly during elastic wave propagation at step " << step << std::endl;
+                return false;
+            }
         }
     }
 
     std::cout << "  [PASS] 0 / " << initial_elems << " elements eroded under elastic stress wave." << std::endl;
+    return true;
 }
 
-void test_severe_crush_timestep_erosion() {
+bool test_severe_crush_timestep_erosion() {
     std::cout << "--- Subtest: Severe Element Crushing (Targeted Timestep Erosion) ---" << std::endl;
     FEMSolver3D<float> solver;
 
@@ -96,8 +100,12 @@ void test_severe_crush_timestep_erosion() {
     }
 
     std::cout << "  Eroded elements count after severe impact: " << eroded_count << std::endl;
-    assert(eroded_count > 0 && "Severely crushed elements should erode under timestep erosion!");
+    if (eroded_count <= 0) {
+        std::cerr << "[FAIL] Severely crushed elements should erode under timestep erosion!" << std::endl;
+        return false;
+    }
     std::cout << "  [PASS] Timestep erosion successfully caught severely crushed elements." << std::endl;
+    return true;
 }
 
 int main() {
@@ -105,8 +113,8 @@ int main() {
     std::cout << "[TEST] Running test_fem_3d_timestep_erosion..." << std::endl;
     std::cout << "==================================================" << std::endl;
 
-    test_elastic_wave_no_spurious_erosion();
-    test_severe_crush_timestep_erosion();
+    if (!test_elastic_wave_no_spurious_erosion()) return 1;
+    if (!test_severe_crush_timestep_erosion()) return 1;
 
     std::cout << "==================================================" << std::endl;
     std::cout << "[PASS] ALL TIMESTEP EROSION TESTS PASSED!" << std::endl;

@@ -1,13 +1,17 @@
+#include "fem_solver_3d.hpp"
+
 #ifndef FEM_CONTACT_3D_HPP
 #define FEM_CONTACT_3D_HPP
 
-#include "fem_solver_3d.hpp"
 #include <vector>
 #include <unordered_map>
 #include <cmath>
 #include <cstdint>
 
 namespace Blast {
+
+template <typename T>
+class FEMSolver3D;
 
 template <typename T>
 struct ContactPairCandidate {
@@ -22,7 +26,7 @@ public:
     ~FEMContact3D() = default;
 
     void setContactPenaltyScale(T scale) { m_penalty_scale = scale; }
-    void setContactStiffness(T k_stiff) { m_penalty_scale = (k_stiff > static_cast<T>(100.0f)) ? static_cast<T>(1.0f) : k_stiff; }
+    void setContactStiffness(T k_stiff) { m_penalty_scale = k_stiff; }
     T getContactPenaltyScale() const { return m_penalty_scale; }
     void setFrictionCoefficients(T mu_static, T mu_kinetic) {
         m_mu_static = mu_static;
@@ -32,6 +36,8 @@ public:
     T getFrictionKinetic() const { return m_mu_kinetic; }
     void setContactDamping(T damping) { m_contact_damping = std::max(static_cast<T>(0.0f), std::min(static_cast<T>(1.0f), damping)); }
     T getContactDamping() const { return m_contact_damping; }
+    void setSearchMethod(FEMContactSearchMethod method) { m_search_method = method; }
+    FEMContactSearchMethod getSearchMethod() const { return m_search_method; }
 
     void solveContact(FEMSolver3D<T>& solver, T dt);
     void solveMPMRebarContact(FEMSolver3D<T>& fem_solver, MPMSolver3D& mpm_solver, T dt);
@@ -49,14 +55,19 @@ private:
     T m_mu_kinetic{0.2f};
     T m_contact_damping{0.2f};
     T m_cell_size{0.05f};
+    FEMContactSearchMethod m_search_method{FEMContactSearchMethod::HierarchicalOctaveGrid};
 
     // Pre-allocated spatial grid buffers to guarantee zero in-loop allocation
     std::unordered_map<int64_t, std::vector<int>> m_bucket_nodes;
     std::unordered_map<int64_t, std::vector<int>> m_bucket_facets;
+    std::vector<int> m_oversized_facets;
+    std::vector<int> m_facet_seen_stamp;
+    int m_pair_stamp{0};
     std::vector<ContactPairCandidate<T>> m_candidate_pairs;
 
     std::vector<bool> m_is_surface_node;
     std::vector<int> m_node_part_id;
+    std::vector<T> m_part_bulk_modulus;
     std::vector<std::vector<int>> m_node_facets;
     std::vector<std::array<std::array<T, 3>, 4>> m_facet_corner_normals;
     std::vector<T> m_node_f_mag;

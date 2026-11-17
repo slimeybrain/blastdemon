@@ -2,14 +2,20 @@
 #include "fem_contact_3d.hpp"
 #include "ls_dyna_reader_3d.hpp"
 #include <iostream>
-#include <cassert>
 #include <cmath>
 #include <fstream>
 #include <sstream>
 
 using namespace Blast;
 
-void test_1d_axial_truss() {
+#define FEM_CHECK(cond) do { \
+    if (!(cond)) { \
+        std::cerr << "[FAIL] " << __FILE__ << ":" << __LINE__ << " Check failed: " << #cond << std::endl; \
+        return false; \
+    } \
+} while (0)
+
+bool test_1d_axial_truss() {
     std::cout << "[TEST] Running 1D Axial Truss Formulation Verification..." << std::endl;
 
     FEMSolver3D<double> solver;
@@ -30,8 +36,8 @@ void test_1d_axial_truss() {
     solver.addTruss(n0, n1, area, steel_mat, steel_mat.failure_strain);
 
     // 1. Verify zero rotational DOFs allocated
-    assert(solver.getRotationalNodes().empty());
-    assert(solver.getTrusses().size() == 1);
+    FEM_CHECK(solver.getRotationalNodes().empty());
+    FEM_CHECK(solver.getTrusses().size() == 1);
     std::cout << "  ✓ Zero rotational DOFs allocated for 1D truss" << std::endl;
 
     // 2. Elastic tension test: stretch by 1 mm (strain = 1e-3, stress = 200 MPa < 500 MPa)
@@ -44,9 +50,9 @@ void test_1d_axial_truss() {
     double expected_stress = 200.0e9 * 0.001; // 200 MPa
     double expected_force = expected_stress * area; // ~22.62 kN
 
-    assert(std::abs(truss.sigma - expected_stress) / expected_stress < 1.0e-4);
-    assert(std::abs(nodes[1].f_int[0] - expected_force) / expected_force < 1.0e-4);
-    assert(std::abs(nodes[0].f_int[0] + expected_force) / expected_force < 1.0e-4);
+    FEM_CHECK(std::abs(truss.sigma - expected_stress) / expected_stress < 1.0e-4);
+    FEM_CHECK(std::abs(nodes[1].f_int[0] - expected_force) / expected_force < 1.0e-4);
+    FEM_CHECK(std::abs(nodes[0].f_int[0] + expected_force) / expected_force < 1.0e-4);
     std::cout << "  ✓ Elastic axial stiffness and internal force accumulation verified (N = " << expected_force << " N)" << std::endl;
 
     // 3. Plastic yield test: stretch by 5 mm (strain = 5e-3, elastic trial = 1000 MPa > 500 MPa)
@@ -54,18 +60,19 @@ void test_1d_axial_truss() {
     solver.computeTrussForces1D(dt);
     double dep = (1000.0e6 - 500.0e6) / (200.0e9 + 2.0e9);
     double expected_plastic_stress = 500.0e6 + 2.0e9 * dep;
-    assert(std::abs(truss.sigma - expected_plastic_stress) / expected_plastic_stress < 1.0e-3);
-    assert(truss.ep_bar > 0.0 && !truss.is_eroded);
+    FEM_CHECK(std::abs(truss.sigma - expected_plastic_stress) / expected_plastic_stress < 1.0e-3);
+    FEM_CHECK(truss.ep_bar > 0.0 && !truss.is_eroded);
     std::cout << "  ✓ Bilinear elastoplastic yielding with hardening verified (sigma_y = " << truss.sigma * 1e-6 << " MPa, ep_bar = " << truss.ep_bar << ")" << std::endl;
 
     // 4. Failure erosion test: stretch beyond failure strain (strain = 0.20 > 0.15)
     nodes[1].x[0] = 1.20;
     solver.computeTrussForces1D(dt);
-    assert(solver.getTrusses()[0].is_eroded);
+    FEM_CHECK(solver.getTrusses()[0].is_eroded);
     std::cout << "  ✓ Plastic failure strain erosion verified" << std::endl;
+    return true;
 }
 
-void test_3d_timoshenko_beam() {
+bool test_3d_timoshenko_beam() {
     std::cout << "[TEST] Running 3D Timoshenko Beam Formulation Verification..." << std::endl;
 
     FEMSolver3D<double> solver;
@@ -84,40 +91,90 @@ void test_3d_timoshenko_beam() {
     solver.addBeam3D(n0, n1, diameter, steel_mat, steel_mat.failure_strain);
 
     // 1. Verify sparse rotational DOFs allocated ONLY for the 2 beam nodes
-    assert(solver.getBeams().size() == 1);
-    assert(solver.getRotationalNodes().size() == 2);
+    FEM_CHECK(solver.getBeams().size() == 1);
+    FEM_CHECK(solver.getRotationalNodes().size() == 2);
     std::cout << "  ✓ Sparse rotational table allocated exactly 2 rotational nodes (m_rot_nodes = " << solver.getRotationalNodes().size() << ")" << std::endl;
 
     const auto& beam = solver.getBeams()[0];
     // 2. Verify orthonormal cross-section triad (e1 along X, e2, e3 orthogonal in Y-Z plane)
-    assert(std::abs(beam.e2[0]) < 1.0e-6 && std::abs(beam.e3[0]) < 1.0e-6);
+    FEM_CHECK(std::abs(beam.e2[0]) < 1.0e-6 && std::abs(beam.e3[0]) < 1.0e-6);
     double dot_e23 = beam.e2[0]*beam.e3[0] + beam.e2[1]*beam.e3[1] + beam.e2[2]*beam.e3[2];
-    assert(std::abs(dot_e23) < 1.0e-6);
+    FEM_CHECK(std::abs(dot_e23) < 1.0e-6);
     std::cout << "  ✓ Initial co-rotational triad e1, e2, e3 is orthonormal" << std::endl;
 
     // 3. Cantilever bending moment test
     auto& rot_nodes = solver.getRotationalNodes();
     double dt = 1.0e-6;
-    // Apply curvature rate by setting angular velocity omega_z at node 1
     rot_nodes[1].omega[2] = 1.0; // 1 rad/s about Z-axis
     solver.computeBeamForces3D(dt);
 
-    assert(solver.getBeams()[0].kappa3 > 0.0);
-    assert(std::abs(rot_nodes[1].m_int[2]) > 0.0);
+    FEM_CHECK(solver.getBeams()[0].kappa3 > 0.0);
+    FEM_CHECK(std::abs(rot_nodes[1].m_int[2]) > 0.0);
     std::cout << "  ✓ Bending moment and angular momentum accumulation verified (M_z = " << rot_nodes[1].m_int[2] << " N*m)" << std::endl;
 
-    // 4. Plastic moment capacity cap verification (Pure bending with zero transverse shear)
+    // 4. Transverse shear force + static/dynamic moment equilibrium test
+    {
+        FEMSolver3D<double> shear_solver;
+        int sn0 = shear_solver.addNode(0.0, 0.0, 0.0, 1.0);
+        int sn1 = shear_solver.addNode(1.0, 0.0, 0.0, 1.0);
+        shear_solver.addBeam3D(sn0, sn1, diameter, steel_mat, steel_mat.failure_strain);
+        auto& snodes = shear_solver.getNodes();
+        snodes[1].v[1] = 2.0; // 2 m/s transverse tip velocity in +Y
+        shear_solver.computeBeamForces3D(1.0e-5);
+        const auto& srot = shear_solver.getRotationalNodes();
+        // Force on n1 must oppose +Y motion (f_int > 0 because a = (f_ext - f_int)/m)
+        FEM_CHECK(snodes[1].f_int[1] > 10.0);
+        // Linear force sum = 0
+        for (int c = 0; c < 3; ++c) {
+            FEM_CHECK(std::abs(snodes[0].f_int[c] + snodes[1].f_int[c]) < 1.0e-6);
+        }
+        // Moment equilibrium: m1 + m2 + (x2 - x1) x f2 = 0
+        double rx = snodes[1].x[0] - snodes[0].x[0];
+        double ry = snodes[1].x[1] - snodes[0].x[1];
+        double rz = snodes[1].x[2] - snodes[0].x[2];
+        double rxf[3] = {
+            ry * snodes[1].f_int[2] - rz * snodes[1].f_int[1],
+            rz * snodes[1].f_int[0] - rx * snodes[1].f_int[2],
+            rx * snodes[1].f_int[1] - ry * snodes[1].f_int[0]
+        };
+        for (int c = 0; c < 3; ++c) {
+            FEM_CHECK(std::abs(srot[0].m_int[c] + srot[1].m_int[c] + rxf[c]) < 1.0e-6);
+        }
+        std::cout << "  ✓ Transverse shear force (f_y=" << snodes[1].f_int[1] << " N) and rotational moment equilibrium verified" << std::endl;
+
+        // 5. Large 90-degree beam co-rotation triad orthonormality check
+        for (int step = 1; step <= 20; ++step) {
+            double th = (0.5 * M_PI) * (static_cast<double>(step) / 20.0);
+            snodes[1].x[0] = std::cos(th);
+            snodes[1].x[1] = std::sin(th);
+            snodes[1].x[2] = 0.0;
+            shear_solver.computeBeamForces3D(1.0e-5);
+        }
+        const auto& sbeam = shear_solver.getBeams()[0];
+        double e1[3] = { snodes[1].x[0] - snodes[0].x[0], snodes[1].x[1] - snodes[0].x[1], snodes[1].x[2] - snodes[0].x[2] };
+        double d12 = e1[0]*sbeam.e2[0] + e1[1]*sbeam.e2[1] + e1[2]*sbeam.e2[2];
+        double d13 = e1[0]*sbeam.e3[0] + e1[1]*sbeam.e3[1] + e1[2]*sbeam.e3[2];
+        double d23 = sbeam.e2[0]*sbeam.e3[0] + sbeam.e2[1]*sbeam.e3[1] + sbeam.e2[2]*sbeam.e3[2];
+        double n2 = std::sqrt(sbeam.e2[0]*sbeam.e2[0] + sbeam.e2[1]*sbeam.e2[1] + sbeam.e2[2]*sbeam.e2[2]);
+        double n3 = std::sqrt(sbeam.e3[0]*sbeam.e3[0] + sbeam.e3[1]*sbeam.e3[1] + sbeam.e3[2]*sbeam.e3[2]);
+        FEM_CHECK(std::abs(d12) < 1.0e-5 && std::abs(d13) < 1.0e-5 && std::abs(d23) < 1.0e-5);
+        FEM_CHECK(std::abs(n2 - 1.0) < 1.0e-5 && std::abs(n3 - 1.0) < 1.0e-5);
+        std::cout << "  ✓ Large 90-deg co-rotational triad orthonormality preserved" << std::endl;
+    }
+
+    // 6. Plastic moment capacity cap verification (Pure bending with zero transverse shear)
     rot_nodes[0].omega[2] = -1.0e6;
     rot_nodes[1].omega[2] = 1.0e6; // Force huge curvature with w_avg = 0
     solver.computeBeamForces3D(dt);
     double Mp_expected = beam.Zp * 500.0e6; // Mp = Zp * sigma_y
     double M_actual = std::abs(rot_nodes[1].m_int[2]);
     // Internal moment in pure bending should be strictly capped at Mp
-    assert(M_actual <= Mp_expected * 1.01 && M_actual >= Mp_expected * 0.99);
+    FEM_CHECK(M_actual <= Mp_expected * 1.01 && M_actual >= Mp_expected * 0.99);
     std::cout << "  ✓ Plastic moment capacity limit enforced (Mp = " << Mp_expected << " N*m, M_actual = " << M_actual << " N*m)" << std::endl;
+    return true;
 }
 
-void test_ls_dyna_rebar_ingestion() {
+bool test_ls_dyna_rebar_ingestion() {
     std::cout << "[TEST] Running LS-DYNA Beam & Truss Keyword Reader Verification..." << std::endl;
 
     std::string test_deck = 
@@ -162,17 +219,18 @@ void test_ls_dyna_rebar_ingestion() {
     std::vector<MaterialTable3D> mats;
 
     bool ok = reader.parseFile(temp_k_path, nodes, elements, trusses, beams, default_mat, mats);
-    assert(ok);
-    assert(nodes.size() == 4);
-    assert(trusses.size() == 1); // ELFORM=3 mapped to 1D Axial Truss
-    assert(beams.size() == 1);   // ELFORM=1 mapped to 3D Timoshenko Beam
-    assert(std::abs(trusses[0].A - M_PI * 0.012 * 0.012 * 0.25) < 1.0e-7);
-    assert(std::abs(beams[0].d - 0.020) < 1.0e-6);
+    FEM_CHECK(ok);
+    FEM_CHECK(nodes.size() == 4);
+    FEM_CHECK(trusses.size() == 1); // ELFORM=3 mapped to 1D Axial Truss
+    FEM_CHECK(beams.size() == 1);   // ELFORM=1 mapped to 3D Timoshenko Beam
+    FEM_CHECK(std::abs(trusses[0].A - M_PI * 0.012 * 0.012 * 0.25) < 1.0e-7);
+    FEM_CHECK(std::abs(beams[0].d - 0.020) < 1.0e-6);
 
     std::cout << "  ✓ Ingested " << trusses.size() << " 1D truss element(s) and " << beams.size() << " 3D beam element(s) from LS-DYNA deck" << std::endl;
+    return true;
 }
 
-void test_rebar_uncovering_during_concrete_erosion() {
+bool test_rebar_uncovering_during_concrete_erosion() {
     std::cout << "[TEST] Running Concrete Solid Erosion with Embedded Rebar Retention..." << std::endl;
 
     FEMSolver3D<double> solver;
@@ -216,19 +274,20 @@ void test_rebar_uncovering_during_concrete_erosion() {
 
     // Verify that nodes 2..7 with no rebar are eroded, while rebar nodes 0 and 1 remain active!
     const auto& nodes = solver.getNodes();
-    assert(!nodes[0].is_eroded);
-    assert(!nodes[1].is_eroded);
-    assert(nodes[2].is_eroded);
-    assert(nodes[3].is_eroded);
-    assert(nodes[4].is_eroded);
-    assert(nodes[5].is_eroded);
-    assert(nodes[6].is_eroded);
-    assert(nodes[7].is_eroded);
+    FEM_CHECK(!nodes[0].is_eroded);
+    FEM_CHECK(!nodes[1].is_eroded);
+    FEM_CHECK(nodes[2].is_eroded);
+    FEM_CHECK(nodes[3].is_eroded);
+    FEM_CHECK(nodes[4].is_eroded);
+    FEM_CHECK(nodes[5].is_eroded);
+    FEM_CHECK(nodes[6].is_eroded);
+    FEM_CHECK(nodes[7].is_eroded);
 
     std::cout << "  ✓ Rebar nodes 0 & 1 retained active structure after concrete solid erosion" << std::endl;
+    return true;
 }
 
-void test_timestep_acoustic_limits() {
+bool test_timestep_acoustic_limits() {
     std::cout << "[TEST] Running Timestep Stability & Courant Calculation..." << std::endl;
 
     FEMSolver3D<double> solver;
@@ -244,11 +303,12 @@ void test_timestep_acoustic_limits() {
     // cd = sqrt(200e9 / 7850) = ~5047 m/s
     // dt_axial = 0.1 / 5047 = ~1.98e-5 s
     // dt_cfl = 0.67 * min(...)
-    assert(dt > 0.0 && dt < 1.0e-4);
+    FEM_CHECK(dt > 0.0 && dt < 1.0e-4);
     std::cout << "  ✓ Computed stable explicit timestep: dt = " << dt * 1e6 << " microseconds" << std::endl;
+    return true;
 }
 
-void test_fem_to_mpm_conversion() {
+bool test_fem_to_mpm_conversion() {
     std::cout << "[TEST] Running Failed Concrete Elements to MPM Debris Conversion..." << std::endl;
 
     FEMSolver3D<double> fem_solver;
@@ -291,18 +351,19 @@ void test_fem_to_mpm_conversion() {
     fem_solver.setNodesAndElements(hex_nodes_vec, elements, concrete_mat);
 
     // Verify MPM solver initial particle count is 0
-    assert(mpm_solver->getParticles().empty());
+    FEM_CHECK(mpm_solver->getParticles().empty());
 
-    // Trigger plastic failure on the concrete solid element
+    // Trigger plastic & damage failure on the concrete solid element
     fem_solver.getElements()[0].ep_bar = 0.10; // Exceeds 0.05 failure strain
+    fem_solver.getElements()[0].damage = 1.0;  // Exceeds 0.95 concrete damage threshold
     fem_solver.evaluateErosionCriteria();
 
     // 1. Verify element is eroded
-    assert(fem_solver.getElements()[0].is_eroded);
+    FEM_CHECK(fem_solver.getElements()[0].is_eroded);
 
     // 2. Verify exactly 8 MPM particles were generated
     const auto& particles = mpm_solver->getParticles();
-    assert(particles.size() == 8);
+    FEM_CHECK(particles.size() == 8);
 
     // 3. Verify total mass and volume conservation (M = 2400 kg, V = 1.0 m^3)
     double total_mass = 0.0;
@@ -313,24 +374,25 @@ void test_fem_to_mpm_conversion() {
         total_vol += p.V;
         total_px += p.m * p.v[0];
         // Check bounds (within [0, 1] in all axes)
-        assert(p.x[0] >= 0.0 && p.x[0] <= 1.0);
-        assert(p.x[1] >= 0.0 && p.x[1] <= 1.0);
-        assert(p.x[2] >= 0.0 && p.x[2] <= 1.0);
+        FEM_CHECK(p.x[0] >= 0.0 && p.x[0] <= 1.0);
+        FEM_CHECK(p.x[1] >= 0.0 && p.x[1] <= 1.0);
+        FEM_CHECK(p.x[2] >= 0.0 && p.x[2] <= 1.0);
         // Check velocity
-        assert(std::abs(p.v[0] - 50.0) < 1.0e-3);
+        FEM_CHECK(std::abs(p.v[0] - 50.0) < 1.0e-3);
     }
-    assert(std::abs(total_mass - 2400.0) < 1.0e-3);
-    assert(std::abs(total_vol - 1.0) < 1.0e-3);
-    assert(std::abs(total_px - 2400.0 * 50.0) < 1.0e-2);
+    FEM_CHECK(std::abs(total_mass - 2400.0) < 1.0e-3);
+    FEM_CHECK(std::abs(total_vol - 1.0) < 1.0e-3);
+    FEM_CHECK(std::abs(total_px - 2400.0 * 50.0) < 1.0e-2);
     std::cout << "  ✓ Transferred " << particles.size() << " MPM debris particles with exact mass (" << total_mass << " kg), volume (" << total_vol << " m^3), and momentum (" << total_px << " kg*m/s) conservation" << std::endl;
 
     // 4. Advance MPM solver step to ensure successful grid transfer and continuum physics
     mpm_solver->stepWithDt(1.0e-4);
-    assert(mpm_solver->getParticles().size() == 8);
+    FEM_CHECK(mpm_solver->getParticles().size() == 8);
     std::cout << "  ✓ Debris particles successfully advanced through MPM background grid" << std::endl;
+    return true;
 }
 
-void test_mpm_debris_rebar_contact() {
+bool test_mpm_debris_rebar_contact() {
     std::cout << "[TEST] Running Line-to-Sphere Rebar vs MPM Debris Contact..." << std::endl;
 
     FEMSolver3D<double> fem_solver;
@@ -364,17 +426,18 @@ void test_mpm_debris_rebar_contact() {
     const auto& nodes = fem_solver.getNodes();
 
     // 1. Particle velocity should be pushed back in +X direction
-    assert(particles[0].v[0] > -50.0f);
+    FEM_CHECK(particles[0].v[0] > -50.0f);
 
     // 2. Reaction forces on rebar nodes should be in -X direction (opposing particle velocity)
-    assert(nodes[n0].f_contact[0] < 0.0);
-    assert(nodes[n1].f_contact[0] < 0.0);
+    FEM_CHECK(nodes[n0].f_contact[0] < 0.0);
+    FEM_CHECK(nodes[n1].f_contact[0] < 0.0);
 
     // 3. Since particle is at Y = 0.5 (exact midpoint), reaction forces on n0 and n1 should be equal
-    assert(std::abs(nodes[n0].f_contact[0] - nodes[n1].f_contact[0]) < 1.0e-3);
+    FEM_CHECK(std::abs(nodes[n0].f_contact[0] - nodes[n1].f_contact[0]) < 1.0e-3);
 
     std::cout << "  ✓ Debris particle rebounded (vx: -50 m/s -> " << particles[0].v[0] << " m/s)" << std::endl;
     std::cout << "  ✓ Symmetric reaction force applied to rebar nodes: F_x = " << nodes[n0].f_contact[0] << " N" << std::endl;
+    return true;
 }
 
 int main() {
@@ -382,13 +445,13 @@ int main() {
     std::cout << "=== BLASTDAEMON FEM 3D REBAR & BEAM TEST SUITE ===" << std::endl;
     std::cout << "======================================================" << std::endl;
 
-    test_1d_axial_truss();
-    test_3d_timoshenko_beam();
-    test_ls_dyna_rebar_ingestion();
-    test_rebar_uncovering_during_concrete_erosion();
-    test_timestep_acoustic_limits();
-    test_fem_to_mpm_conversion();
-    test_mpm_debris_rebar_contact();
+    if (!test_1d_axial_truss()) return 1;
+    if (!test_3d_timoshenko_beam()) return 1;
+    if (!test_ls_dyna_rebar_ingestion()) return 1;
+    if (!test_rebar_uncovering_during_concrete_erosion()) return 1;
+    if (!test_timestep_acoustic_limits()) return 1;
+    if (!test_fem_to_mpm_conversion()) return 1;
+    if (!test_mpm_debris_rebar_contact()) return 1;
 
     std::cout << "======================================================" << std::endl;
     std::cout << ">>> ALL REBAR AND BEAM TESTS PASSED SUCCESSFULLY! <<<" << std::endl;

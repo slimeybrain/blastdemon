@@ -844,6 +844,50 @@ export class FEMDeckParser {
      * Procedural assembly mesh generator that builds a true multi-part finite element mesh
      * directly from the model's actual component parts, shapes, dimensions, and spatial coordinates.
      */
+    private static rotateCoordSliceEuler(
+        coords: number[] | Float32Array,
+        startIdx: number,
+        cxPivot: number, cyPivot: number, czPivot: number,
+        rotXDeg: number, rotYDeg: number, rotZDeg: number
+    ): [number, number, number, number, number, number] {
+        const hasRot = Math.abs(rotXDeg) > 1e-6 || Math.abs(rotYDeg) > 1e-6 || Math.abs(rotZDeg) > 1e-6;
+        const degToRad = Math.PI / 180.0;
+        const cx = Math.cos(rotXDeg * degToRad), sx = Math.sin(rotXDeg * degToRad);
+        const cy = Math.cos(rotYDeg * degToRad), sy = Math.sin(rotYDeg * degToRad);
+        const cz = Math.cos(rotZDeg * degToRad), sz = Math.sin(rotZDeg * degToRad);
+
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+        let minZ = Infinity, maxZ = -Infinity;
+
+        for (let i = startIdx; i < coords.length; i += 3) {
+            let x = coords[i];
+            let y = coords[i + 1];
+            let z = coords[i + 2];
+            if (hasRot) {
+                const u = x - cxPivot;
+                const v = y - cyPivot;
+                const w = z - czPivot;
+                const v1 = cx * v - sx * w;
+                const w1 = sx * v + cx * w;
+                const u2 = cy * u + sy * w1;
+                const w2 = -sy * u + cy * w1;
+                const u3 = cz * u2 - sz * v1;
+                const v3 = sz * u2 + cz * v1;
+                x = cxPivot + u3;
+                y = cyPivot + v3;
+                z = czPivot + w2;
+                coords[i] = x;
+                coords[i + 1] = y;
+                coords[i + 2] = z;
+            }
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+            if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+        }
+        return [minX, maxX, minY, maxY, minZ, maxZ];
+    }
+
     public static generateAssemblyPreview(parts: FEMPartConfig[]): ParsedFEMPreview {
         if (!parts || parts.length === 0) {
             return this.generateParametricBox(4, 4, 4, 1.0, 1.0, 1.0, 0, 0, 0);
@@ -855,7 +899,20 @@ export class FEMDeckParser {
             const kFile = dynaParts[0].k_file || 'concrete_cubicle_30mm.k';
             const meta = getLSDynaDeckMeta(kFile);
             if (meta) {
-                return this.generateKnownDeckPreview(meta, dynaParts[0].name);
+                const prev = this.generateKnownDeckPreview(meta, dynaParts[0].name);
+                const dp = dynaParts[0];
+                const rx = Number(dp.rot_x ?? 0);
+                const ry = Number(dp.rot_y ?? 0);
+                const rz = Number(dp.rot_z ?? 0);
+                if (Math.abs(rx) > 1e-6 || Math.abs(ry) > 1e-6 || Math.abs(rz) > 1e-6) {
+                    const b = prev.globalBounds;
+                    prev.globalBounds = this.rotateCoordSliceEuler(
+                        prev.nodeCoords, 0,
+                        (b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5, (b[4] + b[5]) * 0.5,
+                        rx, ry, rz
+                    );
+                }
+                return prev;
             }
         }
 
@@ -908,7 +965,25 @@ export class FEMDeckParser {
                             lsdynaId: globalElemId++
                         });
                     }
-                    part.bounds = deckPrev.globalBounds;
+                    const rx = Number(part.rot_x ?? 0);
+                    const ry = Number(part.rot_y ?? 0);
+                    const rz = Number(part.rot_z ?? 0);
+                    const b = deckPrev.globalBounds;
+                    if (Math.abs(rx) > 1e-6 || Math.abs(ry) > 1e-6 || Math.abs(rz) > 1e-6) {
+                        part.bounds = this.rotateCoordSliceEuler(
+                            allCoords, partStartNode * 3,
+                            (b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5, (b[4] + b[5]) * 0.5,
+                            rx, ry, rz
+                        );
+                        globalMinX = Math.min(globalMinX, part.bounds[0]);
+                        globalMaxX = Math.max(globalMaxX, part.bounds[1]);
+                        globalMinY = Math.min(globalMinY, part.bounds[2]);
+                        globalMaxY = Math.max(globalMaxY, part.bounds[3]);
+                        globalMinZ = Math.min(globalMinZ, part.bounds[4]);
+                        globalMaxZ = Math.max(globalMaxZ, part.bounds[5]);
+                    } else {
+                        part.bounds = b;
+                    }
                     part.num_elements = elements.length - partStartElem;
                     part.num_nodes = deckPrev.nodeCoords.length / 3;
                     continue;
@@ -919,9 +994,14 @@ export class FEMDeckParser {
                 const sx = Math.max(0.0001, Number(part.size_x ?? 1.0));
                 const sy = Math.max(0.0001, Number(part.size_y ?? 1.0));
                 const sz = Math.max(0.0001, Number(part.size_z ?? 1.0));
-                const nx = Math.max(1, Math.min(100, Number(part.nx ?? 10)));
-                const ny = Math.max(1, Math.min(100, Number(part.ny ?? 10)));
-                const nz = Math.max(1, Math.min(100, Number(part.nz ?? 10)));
+                const nxTrue = Math.max(1, Number(part.nx ?? 10));
+                const nyTrue = Math.max(1, Number(part.ny ?? 10));
+                const nzTrue = Math.max(1, Number(part.nz ?? 10));
+                const totalTrue = nxTrue * nyTrue * nzTrue;
+                const prevScale = totalTrue > 50000 ? Math.cbrt(50000 / totalTrue) : 1.0;
+                const nx = Math.max(1, Math.round(nxTrue * prevScale));
+                const ny = Math.max(1, Math.round(nyTrue * prevScale));
+                const nz = Math.max(1, Math.round(nzTrue * prevScale));
 
                 const dx = sx / nx;
                 const dy = sy / ny;
@@ -977,15 +1057,36 @@ export class FEMDeckParser {
                     }
                 }
 
-                part.bounds = [startX, startX + sx, startY, startY + sy, startZ, startZ + sz];
-                part.num_elements = nx * ny * nz;
-                part.num_nodes = (nx + 1) * (ny + 1) * (nz + 1);
+                const rx = Number(part.rot_x ?? 0);
+                const ry = Number(part.rot_y ?? 0);
+                const rz = Number(part.rot_z ?? 0);
+                if (Math.abs(rx) > 1e-6 || Math.abs(ry) > 1e-6 || Math.abs(rz) > 1e-6) {
+                    const pivX = isCADOrigin ? startX : px;
+                    const pivY = isCADOrigin ? startY : py;
+                    const pivZ = isCADOrigin ? startZ : pz;
+                    part.bounds = this.rotateCoordSliceEuler(allCoords, partStartNode * 3, pivX, pivY, pivZ, rx, ry, rz);
+                    globalMinX = Math.min(globalMinX, part.bounds[0]);
+                    globalMaxX = Math.max(globalMaxX, part.bounds[1]);
+                    globalMinY = Math.min(globalMinY, part.bounds[2]);
+                    globalMaxY = Math.max(globalMaxY, part.bounds[3]);
+                    globalMinZ = Math.min(globalMinZ, part.bounds[4]);
+                    globalMaxZ = Math.max(globalMaxZ, part.bounds[5]);
+                } else {
+                    part.bounds = [startX, startX + sx, startY, startY + sy, startZ, startZ + sz];
+                }
+                part.num_elements = nxTrue * nyTrue * nzTrue;
+                part.num_nodes = (nxTrue + 1) * (nyTrue + 1) * (nzTrue + 1);
             } else if (shape === 'Cylinder') {
                 const r = Math.max(0.0001, Number(part.radius ?? 0.1));
                 const h = Math.max(0.0001, Number(part.height ?? 0.2));
-                const nr = Math.max(1, Math.min(16, Number(part.nx ?? 2)));
-                const ntheta = Math.max(8, Math.min(32, Number(part.ny ?? 4) * 2));
-                const nz = Math.max(1, Math.min(50, Number(part.nz ?? 4)));
+                const nrTrue = Math.max(1, Number(part.nx ?? 2));
+                const nthetaTrue = Math.max(4, Number(part.ny ?? 4) * 2);
+                const nzTrue = Math.max(1, Number(part.nz ?? 4));
+                const cylTotal = nrTrue * nthetaTrue * nzTrue;
+                const cylScale = cylTotal > 50000 ? Math.cbrt(50000 / cylTotal) : 1.0;
+                const nr = Math.max(1, Math.round(nrTrue * cylScale));
+                const ntheta = Math.max(8, Math.round(nthetaTrue * cylScale));
+                const nz = Math.max(1, Math.round(nzTrue * cylScale));
                 const dz = h / nz;
 
                 const isCADOrigin = part.origin_mode === 'CAD Origin' || part.origin_mode === 'Min Corner';
@@ -1066,20 +1167,42 @@ export class FEMDeckParser {
                     }
                 }
 
-                part.bounds = [px - r, px + r, py - r, py + r, startZ, startZ + h];
+                const rx = Number(part.rot_x ?? 0);
+                const ry = Number(part.rot_y ?? 0);
+                const rz = Number(part.rot_z ?? 0);
+                if (Math.abs(rx) > 1e-6 || Math.abs(ry) > 1e-6 || Math.abs(rz) > 1e-6) {
+                    const pivZ = isCADOrigin ? startZ : pz;
+                    part.bounds = this.rotateCoordSliceEuler(allCoords, partStartNode * 3, px, py, pivZ, rx, ry, rz);
+                    globalMinX = Math.min(globalMinX, part.bounds[0]);
+                    globalMaxX = Math.max(globalMaxX, part.bounds[1]);
+                    globalMinY = Math.min(globalMinY, part.bounds[2]);
+                    globalMaxY = Math.max(globalMaxY, part.bounds[3]);
+                    globalMinZ = Math.min(globalMinZ, part.bounds[4]);
+                    globalMaxZ = Math.max(globalMaxZ, part.bounds[5]);
+                } else {
+                    part.bounds = [px - r, px + r, py - r, py + r, startZ, startZ + h];
+                }
             } else if (shape === 'Plate' || part.section_type === 'Shell4') {
                 const sx = Math.max(0.0001, Number(part.size_x ?? 0.1));
                 const sy = Math.max(0.0001, Number(part.size_y ?? 0.1));
-                const nx = Math.max(1, Math.min(20, Number(part.nx ?? 4)));
-                const ny = Math.max(1, Math.min(20, Number(part.ny ?? 4)));
+                const nxTrue = Math.max(1, Number(part.nx ?? 4));
+                const nyTrue = Math.max(1, Number(part.ny ?? 4));
+                const plateTotal = nxTrue * nyTrue;
+                const plateScale = plateTotal > 50000 ? Math.sqrt(50000 / plateTotal) : 1.0;
+                const nx = Math.max(1, Math.round(nxTrue * plateScale));
+                const ny = Math.max(1, Math.round(nyTrue * plateScale));
                 const dx = sx / nx;
                 const dy = sy / ny;
+
+                const isCADOrigin = part.origin_mode === 'CAD Origin' || part.origin_mode === 'Min Corner';
+                const startX = isCADOrigin ? px : (px - 0.5 * sx);
+                const startY = isCADOrigin ? py : (py - 0.5 * sy);
 
                 const nodeOffset = nodeIndexToId.length;
                 for (let j = 0; j <= ny; j++) {
                     for (let i = 0; i <= nx; i++) {
-                        const x = px + i * dx;
-                        const y = py + j * dy;
+                        const x = startX + i * dx;
+                        const y = startY + j * dy;
                         const z = pz;
 
                         allCoords.push(x, y, z);
@@ -1110,14 +1233,29 @@ export class FEMDeckParser {
                     }
                 }
 
-                part.bounds = [px, px + sx, py, py + sy, pz, pz];
-                part.num_elements = nx * ny;
-                part.num_nodes = (nx + 1) * (ny + 1);
+                const rx = Number(part.rot_x ?? 0);
+                const ry = Number(part.rot_y ?? 0);
+                const rz = Number(part.rot_z ?? 0);
+                if (Math.abs(rx) > 1e-6 || Math.abs(ry) > 1e-6 || Math.abs(rz) > 1e-6) {
+                    const pivX = isCADOrigin ? startX : px;
+                    const pivY = isCADOrigin ? startY : py;
+                    part.bounds = this.rotateCoordSliceEuler(allCoords, partStartNode * 3, pivX, pivY, pz, rx, ry, rz);
+                    globalMinX = Math.min(globalMinX, part.bounds[0]);
+                    globalMaxX = Math.max(globalMaxX, part.bounds[1]);
+                    globalMinY = Math.min(globalMinY, part.bounds[2]);
+                    globalMaxY = Math.max(globalMaxY, part.bounds[3]);
+                    globalMinZ = Math.min(globalMinZ, part.bounds[4]);
+                    globalMaxZ = Math.max(globalMaxZ, part.bounds[5]);
+                } else {
+                    part.bounds = [startX, startX + sx, startY, startY + sy, pz, pz];
+                }
+                part.num_elements = nxTrue * nyTrue;
+                part.num_nodes = (nxTrue + 1) * (nyTrue + 1);
             } else {
                 // Beam / Rebar
                 const p1 = part.node1 ?? [px, py, pz];
                 const p2 = part.node2 ?? [px + Number(part.size_x ?? 0.5), py, pz];
-                const nSeg = Math.max(1, Math.min(15, Number(part.nz ?? 4)));
+                const nSeg = Math.max(1, Number(part.nz ?? 4));
 
                 const nodeOffset = nodeIndexToId.length;
                 for (let i = 0; i <= nSeg; i++) {
@@ -1150,6 +1288,24 @@ export class FEMDeckParser {
                     Math.min(p1[1], p2[1]), Math.max(p1[1], p2[1]),
                     Math.min(p1[2], p2[2]), Math.max(p1[2], p2[2])
                 ];
+            }
+
+            const rx = Number(part.rot_x ?? 0);
+            const ry = Number(part.rot_y ?? 0);
+            const rz = Number(part.rot_z ?? 0);
+            if ((Math.abs(rx) > 1e-6 || Math.abs(ry) > 1e-6 || Math.abs(rz) > 1e-6) && part.bounds) {
+                const b = part.bounds;
+                part.bounds = this.rotateCoordSliceEuler(
+                    allCoords, partStartNode * 3,
+                    (b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5, (b[4] + b[5]) * 0.5,
+                    rx, ry, rz
+                );
+                globalMinX = Math.min(globalMinX, part.bounds[0]);
+                globalMaxX = Math.max(globalMaxX, part.bounds[1]);
+                globalMinY = Math.min(globalMinY, part.bounds[2]);
+                globalMaxY = Math.max(globalMaxY, part.bounds[3]);
+                globalMinZ = Math.min(globalMinZ, part.bounds[4]);
+                globalMaxZ = Math.max(globalMaxZ, part.bounds[5]);
             }
 
             part.num_elements = elements.length - partStartElem;
@@ -1729,7 +1885,7 @@ export class FEMDeckParser {
                 section_type: 'SolidHex8',
                 section_properties: {
                     thickness: 0.04,
-                    hourglass_type: 'Flanagan-Belytschko',
+                    hourglass_model: 'Inherit',
                     hourglass_coeff: 0.10
                 },
                 material_assignment: 'Concrete_Damage_Rel3',
@@ -1759,7 +1915,7 @@ export class FEMDeckParser {
                 section_properties: {
                     diameter: 0.00953,
                     area: Math.PI * Math.pow(0.00953, 2) * 0.25,
-                    hourglass_type: 'Flanagan-Belytschko',
+                    hourglass_model: 'Inherit',
                     hourglass_coeff: 0.10
                 },
                 material_assignment: 'Steel_PiecewiseLinearPlasticity',
@@ -1786,7 +1942,7 @@ export class FEMDeckParser {
                 part_id: 1,
                 name: baseName,
                 section_type: 'SolidHex8',
-                section_properties: { thickness: 0.05, hourglass_type: 'Flanagan-Belytschko', hourglass_coeff: 0.10 },
+                section_properties: { thickness: 0.05, hourglass_model: 'Inherit', hourglass_coeff: 0.10 },
                 material_assignment: 'DEFAULT',
                 color: '#38bdf8',
                 visible: true,
@@ -2152,7 +2308,7 @@ export class FEMDeckParser {
                 part_id: 1,
                 name: `${baseTitle} (Solid Concrete)`,
                 section_type: 'SolidHex8',
-                section_properties: { thickness: t, hourglass_type: 'Flanagan-Belytschko', hourglass_coeff: 0.10 },
+                section_properties: { thickness: t, hourglass_model: 'Inherit', hourglass_coeff: 0.10 },
                 material_assignment: 'DECK_MAT_1',
                 color: '#38bdf8',
                 visible: true,
@@ -2175,7 +2331,7 @@ export class FEMDeckParser {
                 section_properties: {
                     diameter: meta.rebarDiameter || 0.00953,
                     area: Math.PI * Math.pow(meta.rebarDiameter || 0.00953, 2) * 0.25,
-                    hourglass_type: 'Flanagan-Belytschko',
+                    hourglass_model: 'Inherit',
                     hourglass_coeff: 0.10
                 },
                 material_assignment: 'DECK_MAT_2',

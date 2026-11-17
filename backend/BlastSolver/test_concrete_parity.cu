@@ -52,7 +52,7 @@ __global__ void kernelTestConcreteStress(
 }
 
 template <typename Real>
-void runParityTest(const std::string& model_name, int model_type) {
+bool runParityTest(const std::string& model_name, int model_type) {
     std::cout << "Testing CPU vs GPU Parity for " << model_name << " (" << (sizeof(Real) == 4 ? "Float" : "Double") << ")..." << std::endl;
 
     MaterialTable3D mat;
@@ -186,9 +186,14 @@ void runParityTest(const std::string& model_name, int model_type) {
     std::cout << "  Max Stress Difference: " << max_stress_diff << " Pa, Max Damage Difference: " << max_damage_diff << std::endl;
     Real tol = sizeof(Real) == 4 ? static_cast<Real>(1.0e-2) : static_cast<Real>(1.0e-5);
     Real stress_tol = sizeof(Real) == 4 ? static_cast<Real>(1.0e4) : static_cast<Real>(1.0); // 10 kPa for float (0.01% of 100 MPa), 1 Pa for double
-    assert(max_damage_diff < tol);
-    assert(max_stress_diff < stress_tol);
+    if (!(max_damage_diff < tol) || !(max_stress_diff < stress_tol)) {
+        std::cerr << "[FAIL] CPU vs GPU parity exceeded tolerance for " << model_name
+                  << " (max_damage_diff=" << max_damage_diff << " >= " << tol
+                  << ", max_stress_diff=" << max_stress_diff << " >= " << stress_tol << ")" << std::endl;
+        return false;
+    }
     std::cout << "  [PASS] CPU vs GPU Parity for " << model_name << " verified.\n" << std::endl;
+    return true;
 }
 
 int main() {
@@ -204,16 +209,16 @@ int main() {
     }
 
     // 1. RHT
-    runParityTest<float>("RHT Concrete", 0);
-    runParityTest<double>("RHT Concrete", 0);
+    if (!runParityTest<float>("RHT Concrete", 0)) return 1;
+    if (!runParityTest<double>("RHT Concrete", 0)) return 1;
 
     // 2. K&C
-    runParityTest<float>("Karagozian & Case (K&C)", 1);
-    runParityTest<double>("Karagozian & Case (K&C)", 1);
+    if (!runParityTest<float>("Karagozian & Case (K&C)", 1)) return 1;
+    if (!runParityTest<double>("Karagozian & Case (K&C)", 1)) return 1;
 
     // 3. CSCM
-    runParityTest<float>("CSCM Concrete", 2);
-    runParityTest<double>("CSCM Concrete", 2);
+    if (!runParityTest<float>("CSCM Concrete", 2)) return 1;
+    if (!runParityTest<double>("CSCM Concrete", 2)) return 1;
 
     std::cout << "=================================================================" << std::endl;
     std::cout << "   ALL CONCRETE CPU vs GPU PARITY TESTS PASSED!                 " << std::endl;

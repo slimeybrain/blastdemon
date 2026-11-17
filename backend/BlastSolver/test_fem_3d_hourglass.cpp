@@ -24,11 +24,11 @@ int main() {
         nodes[i].lsdyna_id = i + 1;
     }
 
-    // Perturb nodes with an hourglass deformation mode (alternate z perturbation)
-    nodes[0].x[2] += 0.05f;
-    nodes[1].x[2] -= 0.05f;
-    nodes[2].x[2] += 0.05f;
-    nodes[3].x[2] -= 0.05f;
+    // Perturb nodes with an hourglass deformation mode (alternate z perturbation + velocity)
+    nodes[0].x[2] += 0.05f; nodes[0].v[2] =  5.0f;
+    nodes[1].x[2] -= 0.05f; nodes[1].v[2] = -5.0f;
+    nodes[2].x[2] += 0.05f; nodes[2].v[2] =  5.0f;
+    nodes[3].x[2] -= 0.05f; nodes[3].v[2] = -5.0f;
 
     std::vector<FEMElement3D<float>> elements(1);
     for (int i = 0; i < 8; ++i) elements[0].node_ids[i] = i;
@@ -40,10 +40,22 @@ int main() {
     mat.poissons_ratio = 0.30f;
 
     solver.setNodesAndElements(nodes, elements, mat);
-    solver.stepWithDt(1.0e-7f);
+    for (int step = 0; step < 10; ++step) {
+        solver.stepWithDt(1.0e-6f);
+    }
 
     const auto& energy = solver.getEnergyTracker();
-    std::cout << "  Recorded Hourglass Energy E_hg = " << energy.E_hg << " J" << std::endl;
+    const auto& nodes_out = solver.getNodes();
+    std::cout << "  Recorded Hourglass Energy E_hg = " << energy.E_hg << " J, Node 0 f_int_z = " << nodes_out[0].f_int[2] << " N" << std::endl;
+
+    if (!std::isfinite(energy.E_hg) || energy.E_hg <= 0.0f) {
+        std::cerr << "[FAIL] Expected positive hourglass stabilization work E_hg > 0, got " << energy.E_hg << std::endl;
+        return 1;
+    }
+    if (!(nodes_out[0].f_int[2] > 0.0f && nodes_out[1].f_int[2] < 0.0f)) {
+        std::cerr << "[FAIL] Hourglass forces did not oppose Z hourglass perturbation" << std::endl;
+        return 1;
+    }
 
     std::cout << "[PASS] test_fem_3d_hourglass PASSED successfully." << std::endl;
     return 0;

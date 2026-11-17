@@ -1501,7 +1501,7 @@ export class GraphRenderer {
                 name: 'FEM Structural (3D)',
                 items: [
                     { label: '3D Explicit FEM Solver Domain', type: 'FEMDomain3D' },
-                    { label: '3D FEM Structural Body', type: 'FEMObject3D', defaultParams: { mesh_source: 'Box Generator' } },
+                    { label: '3D FEM Structural Body', type: 'FEMObject3D', defaultParams: { shape_type: 'Box' } },
                     { label: '3D FEM Beam Framework', type: 'FEMBeam3D' },
                     { label: '3D FEM Rebar Reinforcement', type: 'FEMRebar3D' },
                     { label: 'LS-DYNA Keyword Deck (*.k)', type: 'LSDynaImporter3D' }
@@ -5117,7 +5117,8 @@ export class GraphRenderer {
                 'hourglass_model': ['FlanaganBelytschkoStiffness', 'FlanaganBelytschkoViscous', 'KosloffFrazier'],
                 'contact_search_method': ['Hierarchical Octave Hash Grid', 'Linear BVH (Morton Code)'],
                 'mesh_source': ['Box Generator', 'Cylinder Generator', 'Plate Generator', 'STL File', 'LS-DYNA Keyword File'],
-                'element_topology': ['Hex8', 'Tet4_ANP'],
+                'element_topology': ['Hex8', 'Hex8_SRI', 'Hex8_FullGauss8', 'Tet4', 'Tet4_ANP'],
+                'erosion_source': ['Inherit Material', 'Override Object'],
                 'fsi_algorithm': ['CutCellPenalty', 'ImmersedBoundary', 'DirectMassCoupled'],
                 'trigger_type': ['Step Interval', 'Time Interval'],
                 'ascii_delimiter': ['Comma', 'Tab', 'Space'],
@@ -5337,15 +5338,18 @@ export class GraphRenderer {
                 const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
                 const candidateNodes = owningModel ? owningModel.nodes : (state ? state.nodes : []);
                 const is3D = node.type.endsWith('3D');
+                const isFEMChild = node.type === 'FEMObject3D' || node.type === 'FEMBeam3D' || node.type === 'FEMRebar3D' || node.type === 'LSDynaImporter3D';
                 const targetDomains = candidateNodes.filter(n => node.type === 'MPMContactCoupler3D'
                     ? (n.type === 'MPMDomain3D' || n.type === 'MarineHarbourDomain')
-                    : (is3D
-                        ? ['MPMDomain3D', 'MPMContactCoupler3D', 'MarineHarbourDomain', 'CFDSolver3D'].includes(n.type)
-                        : ['MPMDomain2D', 'CFDSolver2D'].includes(n.type)));
+                    : (isFEMChild
+                        ? ['FEMDomain3D', 'MarineHarbourDomain'].includes(n.type)
+                        : (is3D
+                            ? ['MPMDomain3D', 'MPMContactCoupler3D', 'MarineHarbourDomain', 'CFDSolver3D'].includes(n.type)
+                            : ['MPMDomain2D', 'CFDSolver2D'].includes(n.type))));
 
                 let currentDomainId = node.parameters['target_domain'] || '';
                 if (!currentDomainId && state) {
-                    const conn = state.connections.find(c => (c.fromNode === node.id && (c.toPort === 'in' || c.toPort === 'objects' || c.toPort === 'couplers')) || (c.toNode === node.id && c.fromPort === 'in'));
+                    const conn = state.connections.find(c => (c.fromNode === node.id && (c.toPort === 'in' || c.toPort === 'objects' || c.toPort === 'mesh' || c.toPort === 'couplers' || c.toPort === 'elements' || c.toPort === 'parts')) || (c.toNode === node.id && c.fromPort === 'in'));
                     if (conn) currentDomainId = conn.toNode === node.id ? conn.fromNode : conn.toNode;
                 }
 
@@ -5369,9 +5373,12 @@ export class GraphRenderer {
                     (newVal) => {
                         this.stateManager.updateNodeParameters(node.id, { target_domain: newVal });
                         if (state) {
-                            state.connections = state.connections.filter(c => !(c.fromNode === node.id && (c.toPort === 'in' || c.toPort === 'objects' || c.toPort === 'couplers')));
+                            state.connections = state.connections.filter(c => !(c.fromNode === node.id && (c.toPort === 'in' || c.toPort === 'objects' || c.toPort === 'mesh' || c.toPort === 'couplers' || c.toPort === 'elements' || c.toPort === 'parts')));
                             if (newVal) {
-                                const toPort = node.type === 'MPMContactCoupler3D' ? 'couplers' : 'objects';
+                                const targetDom = candidateNodes.find(n => n.id === newVal);
+                                const toPort = targetDom?.type === 'FEMDomain3D'
+                                    ? 'mesh'
+                                    : (node.type === 'MPMContactCoupler3D' ? 'couplers' : (targetDom?.type === 'MarineHarbourDomain' && isFEMChild ? 'elements' : 'objects'));
                                 state.connections.push({
                                     fromNode: node.id,
                                     fromPort: 'out',
@@ -5396,9 +5403,9 @@ export class GraphRenderer {
                 const targetSolvers = candidateNodes.filter(n => {
                     if (node.type === 'Charge1D') return n.type === 'CFDSolver';
                     if (node.type === 'Charge2D') return n.type === 'CFDSolver2D';
-                    if (node.type === 'Charge3D') return n.type === 'CFDSolver3D' || n.type === 'MarineHarbourDomain';
+                    if (node.type === 'Charge3D') return ['CFDSolver3D', 'MarineHarbourDomain', 'FEMDomain3D', 'MPMDomain3D'].includes(n.type);
                     const is3D = node.type === 'DetonatorLocation3D' || node.type === 'TriggerLocation3D';
-                    return is3D ? ['MPMDomain3D', 'CFDSolver3D', 'MarineHarbourDomain'].includes(n.type) : ['MPMDomain2D', 'CFDSolver2D', 'CFDSolver'].includes(n.type);
+                    return is3D ? ['MPMDomain3D', 'CFDSolver3D', 'MarineHarbourDomain', 'FEMDomain3D', 'FEMObject3D', 'MPMObject3D', 'Charge3D'].includes(n.type) : ['MPMDomain2D', 'CFDSolver2D', 'CFDSolver', 'Charge2D', 'Charge1D'].includes(n.type);
                 });
 
                 const targetPort = isCharge ? 'charge' : 'detonator';
@@ -5851,10 +5858,10 @@ export class GraphRenderer {
                             'dem_friction', 'dem_restitution', 'dem_contact_scale', 'dem_velocity_threshold',
                             'sdf_barrier_restitution', 'sdf_barrier_friction', 'sdf_barrier_skin',
                             // FEM keys
-                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy', 'node_merge_tolerance',
-                            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'beamMinVal', 'beamMaxVal',
+                            'hourglass_coeff', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor', 'min_volume_ratio', 'max_volume_ratio', 'max_damage', 'contact_stiffness', 'contact_penalty_scale', 'friction_static', 'friction_kinetic', 'contact_damping', 'cohesive_fracture_energy', 'node_merge_tolerance',
+                            'mpm_particles_per_failed_element', 'material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed', 'rebar_diameter', 'rebar_area', 'beamRadius', 'beam_radius', 'beam_area', 'diameter', 'cross_section_area', 'beamMinVal', 'beamMaxVal',
                             'rebarRadius', 'viewport_refresh_rate', 'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
-                            'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'uncovering_tolerance',
+                            'femMinVal', 'femMaxVal', 'femOpacity', 'femContourLevels', 'sliceContourLevels', 'beamContourLevels', 'mpmContourLevels', 'vacuum_density', 'vacuum_pressure', 'fsi_rho_vac', 'fsi_p_vac', 'uncovering_tolerance',
                             // Concrete Core & Models (RHT, K&C, CSCM)
                             'fc', 'ft', 'G_f', 'moisture_content', 'dif_cap_compression', 'dif_cap_tension',
                             'rht_A', 'rht_N', 'rht_B', 'rht_M', 'rht_Q0', 'rht_BQ', 'rht_D1', 'rht_D2',
@@ -6092,12 +6099,14 @@ export class GraphRenderer {
                             updates['preset'] = 'Custom';
                             updates['provenance'] = 'user';
                         } else if (node.type === 'FEMObject3D' && (key === 'shape_type' || key === 'mesh_source')) {
+                            const curTopo = node.parameters['element_topology'];
+                            const isHexOrUnset = !curTopo || curTopo === 'Hex8' || curTopo === 'Hex8_SRI' || curTopo === 'Hex8_FullGauss8';
                             if (key === 'shape_type') {
                                 updates['mesh_source'] = newVal === 'Cylinder' ? 'Cylinder Generator' : (newVal === 'STL' ? 'STL File' : (newVal === 'Plate' ? 'Plate Generator' : (newVal === 'LS-DYNA File' ? 'LS-DYNA Keyword File' : 'Box Generator')));
-                                if (newVal === 'STL') updates['element_topology'] = 'Tet4_ANP';
+                                if (newVal === 'STL' && isHexOrUnset) updates['element_topology'] = 'Tet4_ANP';
                             } else if (key === 'mesh_source') {
                                 updates['shape_type'] = newVal === 'Cylinder Generator' ? 'Cylinder' : (newVal === 'STL File' ? 'STL' : (newVal === 'Plate Generator' ? 'Plate' : (newVal === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
-                                if (newVal === 'STL File') updates['element_topology'] = 'Tet4_ANP';
+                                if (newVal === 'STL File' && isHexOrUnset) updates['element_topology'] = 'Tet4_ANP';
                             }
                         } else if (node.type === 'MPMObject3D' && ((key === 'shape_type' && newVal === 'STL') || (key === 'origin_mode' && newVal === 'CAD Origin'))) {
                             if (key === 'shape_type' && newVal === 'STL') {

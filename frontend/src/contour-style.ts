@@ -468,6 +468,18 @@ export function applyQuantityStyleUpdate(
         });
     }
 
+    if (canonicalizeQuantity(params.quantity || 'pressure') === cQty) {
+        updates.colormap = nextStyle.colormap;
+        updates.auto_scale = nextStyle.autoScale;
+        updates.log_scale = nextStyle.logScale;
+        updates.min_val = nextStyle.minVal;
+        updates.max_val = nextStyle.maxVal;
+        updates.sliceContourLevels = nextStyle.contourLevels;
+        updates.sliceSmoothContours = nextStyle.smoothContours;
+        updates.interpolate = nextStyle.interpolate;
+        updates.show_colorbar = nextStyle.showColorbar;
+    }
+
     if (canonicalizeQuantity(params.stl_quantity || 'pressure') === cQty) {
         updates.stl_colormap = nextStyle.colormap;
         updates.stl_auto_scale = nextStyle.autoScale;
@@ -500,6 +512,7 @@ export function applyQuantityStyleUpdate(
         updates.mpmParticleMaxVal = nextStyle.maxVal;
         updates.mpmContourLevels = nextStyle.contourLevels;
         updates.mpmSmoothContours = nextStyle.smoothContours;
+        updates.mpmParticleInterpolate = nextStyle.interpolate;
         updates.mpmParticleShowColorbar = nextStyle.showColorbar;
     }
 
@@ -528,6 +541,286 @@ export function applyQuantityStyleUpdate(
 
     return { canonicalQty: cQty, nextStyle, updates };
 }
+
+/**
+ * Synchronizes any legacy per-layer or dictionary parameter edits (`incoming`) into
+ * `merged.quantity_styles` and keeps all per-layer mirror properties consistent.
+ * This prevents stale `quantity_styles` entries from clobbering edits made via
+ * PropertyEditor, PropertyGrid, TransportController, or legacy viewport setters.
+ */
+export function syncLegacyParamsToQuantityStyles(
+    merged: Record<string, any>,
+    incoming: Record<string, any> | undefined | null,
+    prevParams?: Record<string, any> | null
+): void {
+    if (!merged || !incoming) return;
+
+    // If caller explicitly constructed `quantity_styles` via applyQuantityStyleUpdate,
+    // still ensure any layer whose quantity changed is hydrated from its new quantity style.
+    const applyPatch = (rawQty: string, patch: Partial<QuantityContourStyle>) => {
+        if (!rawQty || Object.keys(patch).length === 0) return;
+        const { updates } = applyQuantityStyleUpdate(merged, rawQty, patch);
+        Object.assign(merged, updates);
+    };
+
+    if (incoming.quantity_styles === undefined) {
+        // 1. Per-quantity dictionary patches
+        if (incoming.quantity_colormaps && typeof incoming.quantity_colormaps === 'object') {
+            for (const [k, cmap] of Object.entries(incoming.quantity_colormaps)) {
+                if (typeof cmap === 'string') {
+                    const prevCmap = prevParams?.quantity_colormaps?.[k];
+                    if (prevCmap !== cmap) applyPatch(k, { colormap: normalizeColormapId(cmap) });
+                }
+            }
+        }
+        if (incoming.quantity_ranges && typeof incoming.quantity_ranges === 'object') {
+            for (const [k, rng] of Object.entries(incoming.quantity_ranges)) {
+                if (Array.isArray(rng) && rng.length >= 2) {
+                    const prevRng = prevParams?.quantity_ranges?.[k];
+                    if (!prevRng || prevRng[0] !== rng[0] || prevRng[1] !== rng[1]) {
+                        applyPatch(k, { minVal: Number(rng[0]), maxVal: Number(rng[1]) });
+                    }
+                }
+            }
+        }
+        if (incoming.quantity_auto_scales && typeof incoming.quantity_auto_scales === 'object') {
+            for (const [k, autoV] of Object.entries(incoming.quantity_auto_scales)) {
+                const prevAuto = prevParams?.quantity_auto_scales?.[k];
+                if (prevAuto !== autoV) applyPatch(k, { autoScale: Boolean(autoV) });
+            }
+        }
+        if (incoming.quantity_log_scales && typeof incoming.quantity_log_scales === 'object') {
+            for (const [k, logV] of Object.entries(incoming.quantity_log_scales)) {
+                const prevLog = prevParams?.quantity_log_scales?.[k];
+                if (prevLog !== logV) applyPatch(k, { logScale: Boolean(logV) });
+            }
+        }
+        if (incoming.colorbar_quantities_visible && typeof incoming.colorbar_quantities_visible === 'object') {
+            for (const [k, visV] of Object.entries(incoming.colorbar_quantities_visible)) {
+                const prevVis = prevParams?.colorbar_quantities_visible?.[k];
+                if (prevVis !== visV) applyPatch(k, { showColorbar: Boolean(visV) });
+            }
+        }
+
+        // 2. Slices array changes
+        if (Array.isArray(incoming.slices)) {
+            const prevSlices: any[] = Array.isArray(prevParams?.slices) ? prevParams!.slices : [];
+            incoming.slices.forEach((s: any, idx: number) => {
+                if (!s || typeof s !== 'object') return;
+                const prevS = prevSlices[idx];
+                const sQty = canonicalizeQuantity(s.quantities?.[0] || s.quantity || merged.quantity || 'pressure');
+                const prevSQty = prevS ? canonicalizeQuantity(prevS.quantities?.[0] || prevS.quantity || prevParams?.quantity || 'pressure') : sQty;
+
+                if (prevS && prevSQty !== sQty) {
+                    // Quantity switched on this slice -> hydrate slice from new quantity style
+                    const st = getQuantityStyle(merged, sQty);
+                    s.colormap = st.colormap;
+                    s.auto_scale = st.autoScale;
+                    s.log_scale = st.logScale;
+                    s.min_val = st.minVal;
+                    s.max_val = st.maxVal;
+                    s.contour_levels = st.contourLevels;
+                    s.smooth_contours = st.smoothContours;
+                    s.interpolate = st.interpolate;
+                    s.show_colorbar = st.showColorbar;
+                } else {
+                    const patch: Partial<QuantityContourStyle> = {};
+                    const curSt = getQuantityStyle(merged, sQty);
+                    if (s.colormap !== undefined && (prevS ? s.colormap !== prevS.colormap : normalizeColormapId(s.colormap) !== curSt.colormap)) {
+                        patch.colormap = normalizeColormapId(s.colormap);
+                    }
+                    if (s.auto_scale !== undefined && (prevS ? s.auto_scale !== prevS.auto_scale : Boolean(s.auto_scale) !== curSt.autoScale)) {
+                        patch.autoScale = Boolean(s.auto_scale);
+                    }
+                    if (s.log_scale !== undefined && (prevS ? s.log_scale !== prevS.log_scale : Boolean(s.log_scale) !== curSt.logScale)) {
+                        patch.logScale = Boolean(s.log_scale);
+                    }
+                    if (s.min_val !== undefined && (prevS ? s.min_val !== prevS.min_val : Number(s.min_val) !== curSt.minVal)) {
+                        patch.minVal = Number(s.min_val);
+                    }
+                    if (s.max_val !== undefined && (prevS ? s.max_val !== prevS.max_val : Number(s.max_val) !== curSt.maxVal)) {
+                        patch.maxVal = Number(s.max_val);
+                    }
+                    if (s.contour_levels !== undefined && (prevS ? s.contour_levels !== prevS.contour_levels : Number(s.contour_levels) !== curSt.contourLevels)) {
+                        patch.contourLevels = Number(s.contour_levels);
+                    }
+                    if (s.smooth_contours !== undefined && (prevS ? s.smooth_contours !== prevS.smooth_contours : Boolean(s.smooth_contours) !== curSt.smoothContours)) {
+                        patch.smoothContours = Boolean(s.smooth_contours);
+                    }
+                    if (s.interpolate !== undefined && (prevS ? s.interpolate !== prevS.interpolate : Boolean(s.interpolate) !== curSt.interpolate)) {
+                        patch.interpolate = Boolean(s.interpolate);
+                    }
+                    if (s.show_colorbar !== undefined && (prevS ? s.show_colorbar !== prevS.show_colorbar : Boolean(s.show_colorbar) !== curSt.showColorbar)) {
+                        patch.showColorbar = Boolean(s.show_colorbar);
+                    }
+                    if (Object.keys(patch).length > 0) {
+                        applyPatch(sQty, patch);
+                    }
+                }
+            });
+        }
+
+        // 3. Global / focused slice primary fields
+        const slices = Array.isArray(merged.slices) ? merged.slices : [];
+        const focusedIdx = merged.focusedSliceIndex !== undefined ? merged.focusedSliceIndex : 0;
+        const focusedSlice = slices[focusedIdx] || slices[0];
+        const primaryQty = canonicalizeQuantity(incoming.quantity || focusedSlice?.quantities?.[0] || merged.quantity || 'pressure');
+        const primaryPatch: Partial<QuantityContourStyle> = {};
+        if (incoming.colormap !== undefined) primaryPatch.colormap = normalizeColormapId(incoming.colormap);
+        if (incoming.auto_scale !== undefined) primaryPatch.autoScale = Boolean(incoming.auto_scale);
+        if (incoming.log_scale !== undefined) primaryPatch.logScale = Boolean(incoming.log_scale);
+        if (incoming.min_val !== undefined) primaryPatch.minVal = Number(incoming.min_val);
+        if (incoming.max_val !== undefined) primaryPatch.maxVal = Number(incoming.max_val);
+        if (incoming.sliceContourLevels !== undefined) primaryPatch.contourLevels = Number(incoming.sliceContourLevels);
+        if (incoming.sliceSmoothContours !== undefined) primaryPatch.smoothContours = Boolean(incoming.sliceSmoothContours);
+        if (incoming.interpolate !== undefined) primaryPatch.interpolate = Boolean(incoming.interpolate);
+        if (incoming.show_colorbar !== undefined) primaryPatch.showColorbar = Boolean(incoming.show_colorbar);
+        if (Object.keys(primaryPatch).length > 0) {
+            applyPatch(primaryQty, primaryPatch);
+        }
+
+        // 4. FEM layer fields
+        const femQty = canonicalizeQuantity(merged.femQuantity || 'vonMises');
+        const femPatch: Partial<QuantityContourStyle> = {};
+        if (incoming.femColormap !== undefined) femPatch.colormap = normalizeColormapId(incoming.femColormap);
+        if (incoming.femAutoScale !== undefined) femPatch.autoScale = Boolean(incoming.femAutoScale);
+        if (incoming.femLogScale !== undefined) femPatch.logScale = Boolean(incoming.femLogScale);
+        if (incoming.femMinVal !== undefined) femPatch.minVal = Number(incoming.femMinVal);
+        if (incoming.femMaxVal !== undefined) femPatch.maxVal = Number(incoming.femMaxVal);
+        if (incoming.femContourLevels !== undefined) femPatch.contourLevels = Number(incoming.femContourLevels);
+        if (incoming.femSmoothContours !== undefined) femPatch.smoothContours = Boolean(incoming.femSmoothContours);
+        if (incoming.femInterpolate !== undefined) femPatch.interpolate = Boolean(incoming.femInterpolate);
+        if (incoming.femShowColorbar !== undefined) femPatch.showColorbar = Boolean(incoming.femShowColorbar);
+        if (Object.keys(femPatch).length > 0) {
+            applyPatch(femQty, femPatch);
+        }
+
+        // 5. MPM layer fields
+        const mpmQty = canonicalizeQuantity(merged.mpmParticleQuantity || 'vonMises');
+        const mpmPatch: Partial<QuantityContourStyle> = {};
+        if (incoming.mpmParticleColormap !== undefined) mpmPatch.colormap = normalizeColormapId(incoming.mpmParticleColormap);
+        if (incoming.mpmParticleAutoScale !== undefined) mpmPatch.autoScale = Boolean(incoming.mpmParticleAutoScale);
+        if (incoming.mpmParticleLogScale !== undefined) mpmPatch.logScale = Boolean(incoming.mpmParticleLogScale);
+        if (incoming.mpmParticleMinVal !== undefined) mpmPatch.minVal = Number(incoming.mpmParticleMinVal);
+        if (incoming.mpmParticleMaxVal !== undefined) mpmPatch.maxVal = Number(incoming.mpmParticleMaxVal);
+        if (incoming.mpmContourLevels !== undefined) mpmPatch.contourLevels = Number(incoming.mpmContourLevels);
+        if (incoming.mpmSmoothContours !== undefined) mpmPatch.smoothContours = Boolean(incoming.mpmSmoothContours);
+        if (incoming.mpmParticleInterpolate !== undefined) mpmPatch.interpolate = Boolean(incoming.mpmParticleInterpolate);
+        if (incoming.mpmParticleShowColorbar !== undefined) mpmPatch.showColorbar = Boolean(incoming.mpmParticleShowColorbar);
+        if (Object.keys(mpmPatch).length > 0) {
+            applyPatch(mpmQty, mpmPatch);
+        }
+
+        // 6. Beam layer fields
+        const beamQty = canonicalizeQuantity(merged.beamQuantity || 'plasticStrain');
+        const beamPatch: Partial<QuantityContourStyle> = {};
+        if (incoming.beamColormap !== undefined) beamPatch.colormap = normalizeColormapId(incoming.beamColormap);
+        if (incoming.beamAutoScale !== undefined) beamPatch.autoScale = Boolean(incoming.beamAutoScale);
+        if (incoming.beamLogScale !== undefined) beamPatch.logScale = Boolean(incoming.beamLogScale);
+        if (incoming.beamMinVal !== undefined) beamPatch.minVal = Number(incoming.beamMinVal);
+        if (incoming.beamMaxVal !== undefined) beamPatch.maxVal = Number(incoming.beamMaxVal);
+        if (incoming.beamContourLevels !== undefined) beamPatch.contourLevels = Number(incoming.beamContourLevels);
+        if (incoming.beamSmoothContours !== undefined) beamPatch.smoothContours = Boolean(incoming.beamSmoothContours);
+        if (incoming.beamShowColorbar !== undefined) beamPatch.showColorbar = Boolean(incoming.beamShowColorbar);
+        if (Object.keys(beamPatch).length > 0) {
+            applyPatch(beamQty, beamPatch);
+        }
+
+        // 7. STL layer fields
+        const stlQty = canonicalizeQuantity(merged.stl_quantity || 'pressure');
+        const stlPatch: Partial<QuantityContourStyle> = {};
+        if (incoming.stl_colormap !== undefined) stlPatch.colormap = normalizeColormapId(incoming.stl_colormap);
+        if (incoming.stl_auto_scale !== undefined) stlPatch.autoScale = Boolean(incoming.stl_auto_scale);
+        if (incoming.stl_log_scale !== undefined) stlPatch.logScale = Boolean(incoming.stl_log_scale);
+        if (incoming.stl_min_val !== undefined) stlPatch.minVal = Number(incoming.stl_min_val);
+        if (incoming.stl_max_val !== undefined) stlPatch.maxVal = Number(incoming.stl_max_val);
+        if (incoming.stl_contour_levels !== undefined) stlPatch.contourLevels = Number(incoming.stl_contour_levels);
+        if (incoming.stl_smooth_contours !== undefined) stlPatch.smoothContours = Boolean(incoming.stl_smooth_contours);
+        if (incoming.stl_sampling_mode !== undefined) stlPatch.interpolate = incoming.stl_sampling_mode !== 'nearest';
+        if (incoming.stl_show_colorbar !== undefined) stlPatch.showColorbar = Boolean(incoming.stl_show_colorbar);
+        if (Object.keys(stlPatch).length > 0) {
+            applyPatch(stlQty, stlPatch);
+        }
+
+        // 8. Obstacles layer fields
+        const obsQty = canonicalizeQuantity(merged.obstacles_quantity || 'pressure');
+        const obsPatch: Partial<QuantityContourStyle> = {};
+        if (incoming.obstacles_colormap !== undefined) obsPatch.colormap = normalizeColormapId(incoming.obstacles_colormap);
+        if (incoming.obstacles_auto_scale !== undefined) obsPatch.autoScale = Boolean(incoming.obstacles_auto_scale);
+        if (incoming.obstacles_log_scale !== undefined) obsPatch.logScale = Boolean(incoming.obstacles_log_scale);
+        if (incoming.obstacles_min_val !== undefined) obsPatch.minVal = Number(incoming.obstacles_min_val);
+        if (incoming.obstacles_max_val !== undefined) obsPatch.maxVal = Number(incoming.obstacles_max_val);
+        if (incoming.obstacles_contour_levels !== undefined) obsPatch.contourLevels = Number(incoming.obstacles_contour_levels);
+        if (incoming.obstacles_smooth_contours !== undefined) obsPatch.smoothContours = Boolean(incoming.obstacles_smooth_contours);
+        if (incoming.obstacles_interpolate !== undefined) obsPatch.interpolate = Boolean(incoming.obstacles_interpolate);
+        if (incoming.obstacles_show_colorbar !== undefined) obsPatch.showColorbar = Boolean(incoming.obstacles_show_colorbar);
+        if (Object.keys(obsPatch).length > 0) {
+            applyPatch(obsQty, obsPatch);
+        }
+    }
+
+    // Hydrate mirror properties whenever a layer's quantity itself was changed
+    if (incoming.femQuantity !== undefined) {
+        const st = getQuantityStyle(merged, merged.femQuantity);
+        if (incoming.femColormap === undefined) merged.femColormap = st.colormap;
+        if (incoming.femAutoScale === undefined) merged.femAutoScale = st.autoScale;
+        if (incoming.femLogScale === undefined) merged.femLogScale = st.logScale;
+        if (incoming.femMinVal === undefined) merged.femMinVal = st.minVal;
+        if (incoming.femMaxVal === undefined) merged.femMaxVal = st.maxVal;
+        if (incoming.femContourLevels === undefined) merged.femContourLevels = st.contourLevels;
+        if (incoming.femSmoothContours === undefined) merged.femSmoothContours = st.smoothContours;
+        if (incoming.femInterpolate === undefined) merged.femInterpolate = st.interpolate;
+        if (incoming.femShowColorbar === undefined) merged.femShowColorbar = st.showColorbar;
+    }
+    if (incoming.mpmParticleQuantity !== undefined) {
+        const st = getQuantityStyle(merged, merged.mpmParticleQuantity);
+        if (incoming.mpmParticleColormap === undefined) merged.mpmParticleColormap = st.colormap;
+        if (incoming.mpmParticleAutoScale === undefined) merged.mpmParticleAutoScale = st.autoScale;
+        if (incoming.mpmParticleLogScale === undefined) merged.mpmParticleLogScale = st.logScale;
+        if (incoming.mpmParticleMinVal === undefined) merged.mpmParticleMinVal = st.minVal;
+        if (incoming.mpmParticleMaxVal === undefined) merged.mpmParticleMaxVal = st.maxVal;
+        if (incoming.mpmContourLevels === undefined) merged.mpmContourLevels = st.contourLevels;
+        if (incoming.mpmSmoothContours === undefined) merged.mpmSmoothContours = st.smoothContours;
+        if (incoming.mpmParticleInterpolate === undefined) merged.mpmParticleInterpolate = st.interpolate;
+        if (incoming.mpmParticleShowColorbar === undefined) merged.mpmParticleShowColorbar = st.showColorbar;
+    }
+    if (incoming.beamQuantity !== undefined) {
+        const st = getQuantityStyle(merged, merged.beamQuantity);
+        if (incoming.beamColormap === undefined) merged.beamColormap = st.colormap;
+        if (incoming.beamAutoScale === undefined) merged.beamAutoScale = st.autoScale;
+        if (incoming.beamLogScale === undefined) merged.beamLogScale = st.logScale;
+        if (incoming.beamMinVal === undefined) merged.beamMinVal = st.minVal;
+        if (incoming.beamMaxVal === undefined) merged.beamMaxVal = st.maxVal;
+        if (incoming.beamContourLevels === undefined) merged.beamContourLevels = st.contourLevels;
+        if (incoming.beamSmoothContours === undefined) merged.beamSmoothContours = st.smoothContours;
+        if (incoming.beamShowColorbar === undefined) merged.beamShowColorbar = st.showColorbar;
+    }
+    if (incoming.stl_quantity !== undefined) {
+        const st = getQuantityStyle(merged, merged.stl_quantity);
+        if (incoming.stl_colormap === undefined) merged.stl_colormap = st.colormap;
+        if (incoming.stl_auto_scale === undefined) merged.stl_auto_scale = st.autoScale;
+        if (incoming.stl_log_scale === undefined) merged.stl_log_scale = st.logScale;
+        if (incoming.stl_min_val === undefined) merged.stl_min_val = st.minVal;
+        if (incoming.stl_max_val === undefined) merged.stl_max_val = st.maxVal;
+        if (incoming.stl_contour_levels === undefined) merged.stl_contour_levels = st.contourLevels;
+        if (incoming.stl_smooth_contours === undefined) merged.stl_smooth_contours = st.smoothContours;
+        if (incoming.stl_sampling_mode === undefined) merged.stl_sampling_mode = st.interpolate ? 'linear' : 'nearest';
+        if (incoming.stl_show_colorbar === undefined) merged.stl_show_colorbar = st.showColorbar;
+    }
+    if (incoming.obstacles_quantity !== undefined) {
+        const st = getQuantityStyle(merged, merged.obstacles_quantity);
+        if (incoming.obstacles_colormap === undefined) merged.obstacles_colormap = st.colormap;
+        if (incoming.obstacles_auto_scale === undefined) merged.obstacles_auto_scale = st.autoScale;
+        if (incoming.obstacles_log_scale === undefined) merged.obstacles_log_scale = st.logScale;
+        if (incoming.obstacles_min_val === undefined) merged.obstacles_min_val = st.minVal;
+        if (incoming.obstacles_max_val === undefined) merged.obstacles_max_val = st.maxVal;
+        if (incoming.obstacles_contour_levels === undefined) merged.obstacles_contour_levels = st.contourLevels;
+        if (incoming.obstacles_smooth_contours === undefined) merged.obstacles_smooth_contours = st.smoothContours;
+        if (incoming.obstacles_interpolate === undefined) merged.obstacles_interpolate = st.interpolate;
+        if (incoming.obstacles_show_colorbar === undefined) merged.obstacles_show_colorbar = st.showColorbar;
+    }
+}
+
 
 export function formatQuantityStyleSummary(style: QuantityContourStyle): string {
     const cmapLabel = getColormapLabel(style.colormap);

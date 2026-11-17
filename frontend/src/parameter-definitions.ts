@@ -1666,11 +1666,11 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     },
     'failure_strain': {
         key: 'failure_strain',
-        label: 'Compressive Yield Strain (ε_c0)',
+        label: 'Failure Strain (JC fracture strain at σ*=1/3 / concrete ε_c0)',
         unit: 'dim',
         category: 'Material Failure',
-        shortDesc: 'Peak compressive yield microstrain at unconfined fc (typically 0.0030–0.0040)',
-        detailedDesc: 'Unconfined peak compressive strain (typically 0.0035 / 0.35%) marking the onset of microcracking and strain softening. For concrete models (RHT, K&C, CSCM), this governs yield surface evolution and damage progression. It does NOT delete or erode elements. Element deletion is governed strictly by Erosion Plastic Strain Cutoff (erosion_strain).'
+        shortDesc: 'Metals (Johnson-Cook): fracture strain at triaxiality 1/3. Concrete: peak compressive strain (~0.0035).',
+        detailedDesc: 'Metals (Johnson-Cook): the equivalent plastic strain at fracture for uniaxial-tension triaxiality σ*=1/3, scaled by rate and temperature. If jc_d1/jc_d2/jc_d3 are non-zero they only set the SHAPE of the triaxiality dependence: eps_f = failure_strain × D(σ*)/D(1/3) × rate × temperature. Set failure_strain = 0 to use the absolute locus eps_f = D1 + D2·exp(D3·σ*) instead. Damage D accumulates as Δε_p/eps_f and the particle fails at D ≥ 1. If enable_strain_erosion is on, erosion_strain replaces failure_strain as the magnitude. Concrete (RHT, K&C, CSCM): unconfined peak compressive strain (typically 0.0035) governing softening; does not erode elements.'
     },
     'tensile_failure_stress': {
         key: 'tensile_failure_stress',
@@ -1679,6 +1679,13 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'Material Failure',
         shortDesc: 'Maximum hydrostatic tensile stress limit',
         detailedDesc: 'Hydrostatic spall tension limit (Pa). Hydrostatic pressures exceeding this tensile threshold trigger spall micro-void nucleation and cavitation.'
+    },
+    'erosion_source': {
+        key: 'erosion_source',
+        label: 'Erosion Policy Source',
+        category: 'Material Failure',
+        shortDesc: 'Select Material inheritance or per-object erosion override',
+        detailedDesc: 'Controls whether this FEM body inherits failure and erosion thresholds from its assigned Material node ("Inherit Material") or applies custom per-object thresholds ("Override Object"). Erosion is never forced globally by FEMDomain3D.'
     },
     'enable_strain_erosion': {
         key: 'enable_strain_erosion',
@@ -1715,7 +1722,7 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         label: 'Timestep Degradation Erosion',
         category: 'Material Failure',
         shortDesc: 'Erode highly compressed elements causing timestep collapse',
-        detailedDesc: 'Protects explicit time integration by deleting severely compressed elements whose stable CFL timestep drops below a critical fraction.'
+        detailedDesc: 'Protects explicit time integration by deleting severely compressed or crushed elements whose stable CFL timestep Δt drops below timestep_erosion_factor × Δt₀.'
     },
     'timestep_erosion_factor': {
         key: 'timestep_erosion_factor',
@@ -1723,7 +1730,38 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         unit: 'dim',
         category: 'Material Failure',
         shortDesc: 'Timestep reduction threshold factor (e.g. 0.10)',
-        detailedDesc: 'Fraction of initial stable timestep (e.g. 0.10 = 10%) below which an element is eroded to avoid grinding solver progress to a halt.'
+        detailedDesc: 'Fraction of initial rest-state stable timestep (e.g. 0.10 = 10%) below which an element is permanently eroded (bypassing cohesive node splitting) to prevent explicit timestep collapse.'
+    },
+    'min_volume_ratio': {
+        key: 'min_volume_ratio',
+        label: 'Minimum Element Volume Ratio (J_min)',
+        unit: 'dim',
+        category: 'Material Failure',
+        shortDesc: 'Lower Jacobian threshold for extreme compression / inversion protection',
+        detailedDesc: 'Minimum allowed relative element volume ratio J = V / V₀ (typically 0.02). Elements compressed or distorted below this ratio unconditionally erode regardless of accumulated damage to prevent negative Jacobians and explicit CFL collapse.'
+    },
+    'max_volume_ratio': {
+        key: 'max_volume_ratio',
+        label: 'Maximum Element Volume Ratio (J_max)',
+        unit: 'dim',
+        category: 'Material Failure',
+        shortDesc: 'Upper Jacobian threshold for extreme element expansion / stretch erosion',
+        detailedDesc: 'Maximum allowed relative element volume ratio J = V / V₀ (typically 5.0). Applied when material/object erosion criteria are active to remove severely distended elements.'
+    },
+    'enable_damage_erosion': {
+        key: 'enable_damage_erosion',
+        label: 'Enable Damage-Based Erosion',
+        category: 'Material Failure',
+        shortDesc: 'Erode elements once scalar continuum damage exceeds max_damage',
+        detailedDesc: 'Enables element deletion whenever the isotropic or tensile continuum damage variable D >= max_damage, independently of ultimate plastic strain.'
+    },
+    'max_damage': {
+        key: 'max_damage',
+        label: 'Maximum Damage Threshold (D_max)',
+        unit: 'dim',
+        category: 'Material Failure',
+        shortDesc: 'Critical scalar damage D in [0, 1] triggering damage erosion',
+        detailedDesc: 'Dimensionless continuum damage cutoff (typically 1.0) at which damaged FEM elements are eroded when enable_damage_erosion is enabled.'
     },
     'enable_density_erosion': {
         key: 'enable_density_erosion',
@@ -2756,17 +2794,17 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     // --- FEM Structural Mechanics ---
     'integration_scheme': {
         key: 'integration_scheme',
-        label: 'FEM Element Integration Scheme',
+        label: 'Domain Default Integration Scheme',
         category: 'FEM Structural Dynamics',
-        shortDesc: 'Gauss quadrature formulation for hexahedra',
-        detailedDesc: 'OnePointFB (1-point reduced integration with Flanagan-Belytschko hourglass stabilization - fastest and standard for explicit blast dynamics), OnePointKF (Kosloff-Frazier), FullGauss8 (8-point exact integration - avoids hourglassing but prone to shear locking), or SelectiveReduced (B-bar formulation).'
+        shortDesc: 'Default Gauss quadrature formulation for hexahedral bodies/parts',
+        detailedDesc: 'Domain-wide default hexahedral quadrature unless overridden per FEM Body or FEM Part (e.g. Hex8_SRI / SolidHex8_SRI): OnePointFB (1-pt reduced + Flanagan-Belytschko hourglass), OnePointKF (1-pt + Kosloff-Frazier), FullGauss8 (8-pt exact quadrature), or SelectiveReduced (B-bar locking-free volumetric/deviatoric split).'
     },
     'hourglass_model': {
         key: 'hourglass_model',
         label: 'Hourglass Stabilization Model',
         category: 'FEM Structural Dynamics',
-        shortDesc: 'Anti-hourglass zero-energy mode control',
-        detailedDesc: 'FlanaganBelytschkoStiffness (orthogonal physical stiffness hourglass control), FlanaganBelytschkoViscous (velocity-based damping), or KosloffFrazier.'
+        shortDesc: 'Domain default anti-hourglass zero-energy mode control (1-pt Hex8)',
+        detailedDesc: 'Domain-wide default hourglass model for 1-point reduced Hex8 elements unless overridden per FEM Part: FlanaganBelytschkoStiffness (orthogonal physical stiffness), FlanaganBelytschkoViscous (velocity-based damping), or KosloffFrazier.'
     },
     'hourglass_coeff': {
         key: 'hourglass_coeff',
@@ -2791,6 +2829,14 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'FEM Structural Dynamics',
         shortDesc: 'Normalized Courant contact penalty fraction (0.01 to 1.0)',
         detailedDesc: 'Fraction of the maximum Courant-stable penalty stiffness (0.1 = 10% for soft contact, 1.0 = 100% of maximum stable stiffness). Mathematically bounded against explicit timestep divergence.'
+    },
+    'contact_damping': {
+        key: 'contact_damping',
+        label: 'Contact Damping Ratio (ζ_c)',
+        unit: 'dim',
+        category: 'FEM Structural Dynamics',
+        shortDesc: 'Critical contact damping fraction (0.0 = elastic bounce, 1.0 = critical arrest)',
+        detailedDesc: 'Viscous normal contact damping ratio ζ_c applied during approach (v_rel_n < 0) via c = 2 * ζ_c * √(k_stiff * m_pair). Controls restitution and suppresses high-frequency contact chatter at FEM-MPM and FEM-FEM interfaces.'
     },
     'friction_static': {
         key: 'friction_static',
@@ -2872,12 +2918,12 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
     },
     'element_topology': {
         key: 'element_topology',
-        label: 'Solid / Shell Element Topology',
-        allowedValues: ['Hex8', 'Hex8_SRI', 'Hex8_Full', 'Tet4', 'Tet4_ANP', 'Wedge6', 'Shell4'],
+        label: 'Solid Element Formulation / Topology',
+        allowedValues: ['Hex8', 'Hex8_SRI', 'Hex8_FullGauss8', 'Tet4', 'Tet4_ANP'],
         defaultVal: 'Hex8',
         category: 'FEM Structural Dynamics',
-        shortDesc: 'Element formulation: Hex8, Hex8_SRI (B-Bar), Tet4_ANP (Average Nodal Pressure), Wedge6, or Shell4',
-        detailedDesc: 'Selects the 3D Lagrangian finite element topology and volumetric stabilization: Hex8 (1-point Flanagan-Belytschko hourglass control), Hex8_SRI (Selective Reduced Integration / Hughes B-Bar locking-free), Hex8_Full (8-point 2x2x2 Gauss quadrature), Tet4 (standard 4-node linear tetrahedron), Tet4_ANP (2-pass Bonet-Burton Average Nodal Pressure stabilization eliminating volumetric locking), Wedge6 (6-node pentahedral prism), or Shell4 (4-node Belytschko-Tsay co-rotational Mindlin-Reissner shell).'
+        shortDesc: 'Hex8 (Domain Default), Hex8_SRI (B-Bar), Hex8_FullGauss8, Tet4, or Tet4_ANP',
+        detailedDesc: 'Per-body/part Lagrangian solid element topology and formulation override: Hex8 (inherits FEMDomain3D integration_scheme, default 1-pt reduced), Hex8_SRI (Selective Reduced Integration / Hughes B-Bar locking-free), Hex8_FullGauss8 (8-pt full Gauss quadrature), Tet4 (4-node P1 linear tetrahedron), or Tet4_ANP (2-pass Average Nodal Pressure).'
     },
     'merge_coincident_nodes': {
         key: 'merge_coincident_nodes',
@@ -2895,14 +2941,6 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: 'FEM Structural Dynamics',
         shortDesc: 'Spatial distance threshold for welding coincident nodes across parts',
         detailedDesc: 'Maximum Euclidean distance (meters) within which boundary nodes belonging to adjacent FEM parts or imported meshes are merged into a single shared node when Merge Coincident Assembly Nodes is enabled.'
-    },
-    'embedded_rebar_coupling': {
-        key: 'embedded_rebar_coupling',
-        label: 'Constrained / Embedded Rebar Coupling',
-        defaultVal: true,
-        category: 'FEM Structural Dynamics',
-        shortDesc: 'Couple non-coincident 1D beam/truss reinforcement to host 3D solid elements',
-        detailedDesc: 'Automatically couples 1D beam and truss reinforcement nodes (FEMBeam3D, FEMRebar3D, or imported rebar cages) that lie inside 3D solid elements via isoparametric shape-function kinematic/force interpolation (*CONSTRAINED_LAGRANGE_IN_SOLID / embedded reinforcement) even when rebar and solid mesh nodes do not coincide.'
     },
     'enable_cohesive_splitting': {
         key: 'enable_cohesive_splitting',
@@ -4011,6 +4049,86 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         category: '3D FEM Structural Mesh',
         shortDesc: 'Nominal diameter of circular beam/rebar reinforcement bars',
         detailedDesc: 'Specifies the circular cross-section diameter (in meters) for structural reinforcement bars. In the Kim et al. (2022) Vented Concrete Cubicle model, the simulation uses 9.53 mm (0.00953 m, area = 71.33 mm²) corresponding to the HD10 rebar specification. Automatically updates cross-sectional area A = π × d² / 4 and principal moments of inertia I2, I3, and J.'
+    },
+    'diameter': {
+        key: 'diameter',
+        label: 'Cross-Section Outer Diameter',
+        unit: 'm',
+        category: '3D FEM Structural Mesh',
+        shortDesc: 'Outer circular cross-section diameter for 1D beams and rebars',
+        detailedDesc: 'Specifies the circular rod/bar outer diameter d (in meters) on FEMBeam3D and FEMRebar3D elements (d = 2 × radius), automatically deriving cross-sectional area A = π × (d/2)² and flexural inertia.'
+    },
+    'cross_section_area': {
+        key: 'cross_section_area',
+        label: 'Cross-Sectional Area (A)',
+        unit: 'm²',
+        category: '3D FEM Structural Mesh',
+        shortDesc: 'Structural beam/truss cross-sectional area',
+        detailedDesc: 'Explicit cross-sectional area A (m²) for standalone 3D Timoshenko beam and truss rebar members. Overrides A = π × r² when specified.'
+    },
+    'beam_area': {
+        key: 'beam_area',
+        label: 'Beam Cross-Sectional Area',
+        unit: 'm²',
+        category: '3D FEM Structural Mesh',
+        shortDesc: 'Cross-sectional area of structural frame beams',
+        detailedDesc: 'Cross-sectional area A (m²) for structural frame beam members used in axial stiffness EA/L and fiber stress evaluation.'
+    },
+    'rebar_area': {
+        key: 'rebar_area',
+        label: 'Rebar Cross-Sectional Area',
+        unit: 'm²',
+        category: '3D FEM Structural Mesh',
+        shortDesc: 'Cross-sectional steel area of embedded reinforcement bar',
+        detailedDesc: 'Cross-sectional area A (m²) of an individual reinforcement bar used for axial stiffness EA/L and bond/embedded coupling forces.'
+    },
+    'node1_x': {
+        key: 'node1_x',
+        label: 'Start Endpoint X',
+        unit: 'm',
+        category: '3D FEM Structural Mesh',
+        shortDesc: 'Global X coordinate of structural beam/rebar start node',
+        detailedDesc: 'Initial global X position (meters) of endpoint node 1 for standalone 3D FEM beam or rebar elements.'
+    },
+    'node1_y': {
+        key: 'node1_y',
+        label: 'Start Endpoint Y',
+        unit: 'm',
+        category: '3D FEM Structural Mesh',
+        shortDesc: 'Global Y coordinate of structural beam/rebar start node',
+        detailedDesc: 'Initial global Y position (meters) of endpoint node 1 for standalone 3D FEM beam or rebar elements.'
+    },
+    'node1_z': {
+        key: 'node1_z',
+        label: 'Start Endpoint Z',
+        unit: 'm',
+        category: '3D FEM Structural Mesh',
+        shortDesc: 'Global Z coordinate of structural beam/rebar start node',
+        detailedDesc: 'Initial global Z position (meters) of endpoint node 1 for standalone 3D FEM beam or rebar elements.'
+    },
+    'node2_x': {
+        key: 'node2_x',
+        label: 'End Endpoint X',
+        unit: 'm',
+        category: '3D FEM Structural Mesh',
+        shortDesc: 'Global X coordinate of structural beam/rebar end node',
+        detailedDesc: 'Initial global X position (meters) of endpoint node 2 for standalone 3D FEM beam or rebar elements.'
+    },
+    'node2_y': {
+        key: 'node2_y',
+        label: 'End Endpoint Y',
+        unit: 'm',
+        category: '3D FEM Structural Mesh',
+        shortDesc: 'Global Y coordinate of structural beam/rebar end node',
+        detailedDesc: 'Initial global Y position (meters) of endpoint node 2 for standalone 3D FEM beam or rebar elements.'
+    },
+    'node2_z': {
+        key: 'node2_z',
+        label: 'End Endpoint Z',
+        unit: 'm',
+        category: '3D FEM Structural Mesh',
+        shortDesc: 'Global Z coordinate of structural beam/rebar end node',
+        detailedDesc: 'Initial global Z position (meters) of endpoint node 2 for standalone 3D FEM beam or rebar elements.'
     },
     'viewport_refresh_rate': {
         key: 'viewport_refresh_rate',
@@ -5901,6 +6019,7 @@ export function getSolverScope(key: string, nodeType?: string): SolverScope {
     if (mpmOnlyKeys.includes(key)) return 'MPM';
 
     const femOnlyKeys = [
+        'erosion_source', 'enable_damage_erosion', 'max_damage', 'min_volume_ratio', 'max_volume_ratio',
         'enable_timestep_erosion', 'timestep_erosion_factor', 'hourglass_coeff', 'contact_search_method', 'contact_penalty_scale', 
         'friction_static', 'friction_kinetic', 'integration_scheme', 'hourglass_model', 
         'rebar_formulation', 'mpm_particles_per_failed_element', 'convert_failed_elements_to_mpm', 
@@ -6250,7 +6369,9 @@ export function getParamKeysForNode(
                 'directional_crack_band', 'nonlocal_radius',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor'
+                'enable_damage_erosion', 'max_damage',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio'
             ];
         } else if (matModel === 'Geological Cap (MAT_025)' || matModel === 'Geological Cap') {
             keys = [
@@ -6262,7 +6383,9 @@ export function getParamKeysForNode(
                 'directional_crack_band', 'nonlocal_radius',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor'
+                'enable_damage_erosion', 'max_damage',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio'
             ];
         } else if (matModel === 'Hoek-Brown Rock') {
             keys = [
@@ -6274,7 +6397,9 @@ export function getParamKeysForNode(
                 'directional_crack_band', 'nonlocal_radius',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor'
+                'enable_damage_erosion', 'max_damage',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio'
             ];
         } else if (matModel === 'Crushable Foam') {
             keys = [
@@ -6284,7 +6409,9 @@ export function getParamKeysForNode(
                 'dp_tensile_cutoff', 'failure_strain',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
-                'enable_timestep_erosion', 'timestep_erosion_factor'
+                'enable_damage_erosion', 'max_damage',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio'
             ];
         } else if (matModel === 'Johnson-Holmquist JH-2') {
             keys = [
@@ -6296,7 +6423,9 @@ export function getParamKeysForNode(
                 'failure_strain', 'tensile_failure_stress',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume'
             ];
         } else if (isEnergetic) {
@@ -6335,7 +6464,8 @@ export function getParamKeysForNode(
             keys.push(
                 'afterburn_enabled', 'afterburn_energy', 'afterburn_fuel_fraction', 'afterburn_stoich_ratio',
                 'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
-                'afterburn_ambient_o2_fraction'
+                'afterburn_ambient_o2_fraction',
+                'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio', 'erode_to_fv_grid'
             );
         } else if (matModel === 'Hyperelastic (Yeoh)') {
             keys = ['material_model', 'preset', 'transfer_scheme', 'density', 'yeoh_c10', 'yeoh_c20', 'yeoh_c30', 'k_bulk'];
@@ -6344,23 +6474,37 @@ export function getParamKeysForNode(
         } else if (matModel === 'Concrete Damage Plasticity (CDP)') {
             keys = [
                 'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'cdp_f_t0', 'cdp_f_c0', 'cdp_g_f', 'cdp_l_ch',
-                'enable_strain_erosion', 'erosion_strain'
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio'
             ];
         } else if (matModel === 'Hill48 Orthotropic') {
             keys = [
                 'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'hill_F', 'hill_G', 'hill_H', 'hill_L', 'hill_M', 'hill_N', 'hill_sigma_y0',
-                'enable_strain_erosion', 'erosion_strain'
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio'
             ];
         } else if (matModel === 'Tait Water') {
             keys = [
                 'material_model', 'preset', 'transfer_scheme', 'density', 'initial_temperature',
                 'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0',
                 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str',
-                'bulk_viscosity_b1', 'bulk_viscosity_b2'
+                'bulk_viscosity_b1', 'bulk_viscosity_b2',
+                'enable_density_erosion', 'erosion_min_density', 'erosion_min_density_ratio', 'erode_to_fv_grid'
             ];
         } else if (matModel === 'Linear Elastic') {
             keys = [
                 'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'tensile_failure_stress',
+                'enable_strain_erosion', 'erosion_strain',
+                'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
+                'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
@@ -6375,7 +6519,9 @@ export function getParamKeysForNode(
                 'mg_gamma0', 'mg_c0', 'mg_s',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
@@ -6389,7 +6535,9 @@ export function getParamKeysForNode(
                 'failure_strain', 'tensile_failure_stress',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
@@ -6404,7 +6552,9 @@ export function getParamKeysForNode(
                 'rht_p_crush', 'rht_p_lock', 'rht_alpha0', 'rht_n_comp', 'rht_betac', 'rht_deltat', 'rht_f_el_c',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
@@ -6423,7 +6573,9 @@ export function getParamKeysForNode(
             keys.push(
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             );
@@ -6437,7 +6589,9 @@ export function getParamKeysForNode(
                 'cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
@@ -6451,7 +6605,9 @@ export function getParamKeysForNode(
                 'directional_crack_band', 'nonlocal_radius',
                 'enable_strain_erosion', 'erosion_strain',
                 'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage',
                 'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio',
                 'enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume',
                 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'
             ];
@@ -6502,27 +6658,33 @@ export function getParamKeysForNode(
         keys = [
             'device', 'precision', 'connected_detonators', 'cfl', 'endtime',
             'integration_scheme', 'hourglass_model', 'hourglass_coeff',
-            'merge_coincident_nodes', 'node_merge_tolerance', 'embedded_rebar_coupling',
-            'enable_cohesive_splitting', 'cohesive_fracture_energy',
+            'bulk_viscosity_b1', 'bulk_viscosity_b2',
+            'merge_coincident_nodes', 'node_merge_tolerance',
             'enable_directional_crack_band', 'enable_nonlocal_damage',
-            'enable_heterogeneity', 'material_heterogeneity',
-            'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z',
             'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size', 'random_seed',
             'rebar_formulation', 'convert_failed_elements_to_mpm', 'mpm_particles_per_failed_element',
-            'contact_search_method', 'contact_penalty_scale', 'friction_static', 'friction_kinetic',
-            'damping_alpha', 'mass_scaling_dt', 'max_aspect_ratio', 'contact_smoothing',
-            'nonlocal_radius', 'stress_update_stride', 'stress_extrapolation',
-            'energy_balance_logging', 'adaptive_remesh_interval', 'strain_limit_element_deletion',
-            'shell_formulation', 'solid_element_formulation', 'incompatible_modes',
-            'b_bar_stabilization', 'drill_dof_stabilization', 'initial_temperature'
+            'contact_search_method', 'contact_penalty_scale', 'contact_damping', 'friction_static', 'friction_kinetic'
         ];
     } else if (nodeType === 'FEMObject3D') {
         keys = [
-            'material', 'element_topology', 'shape_type', 'mesh_source', 'origin_mode', 'boundary_condition',
+            'material', 'element_topology', 'shape_type', 'origin_mode', 'boundary_condition',
             'pos_x', 'pos_y', 'pos_z', 'size_x', 'size_y', 'size_z',
             'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz',
             'stl_file', 'k_file', 'scale_x', 'scale_y', 'scale_z', 'rot_x', 'rot_y', 'rot_z',
-            'vel_x', 'vel_y', 'vel_z', 'bulk_viscosity_b1', 'bulk_viscosity_b2', 'timestep_erosion_factor'
+            'vel_x', 'vel_y', 'vel_z',
+            'erosion_source',
+            'enable_strain_erosion', 'erosion_strain',
+            'enable_stress_erosion', 'erosion_stress',
+            'enable_damage_erosion', 'max_damage',
+            'enable_timestep_erosion', 'timestep_erosion_factor',
+            'min_volume_ratio', 'max_volume_ratio',
+            'enable_cohesive_splitting', 'cohesive_fracture_energy'
+        ];
+    } else if (nodeType === 'FEMBeam3D' || nodeType === 'FEMRebar3D') {
+        keys = [
+            'target_domain', 'material',
+            'node1_x', 'node1_y', 'node1_z', 'node2_x', 'node2_y', 'node2_z',
+            'radius', 'diameter', 'cross_section_area', 'failure_strain'
         ];
     } else if (nodeType === 'FEMFSICoupler3D') {
         keys = ['cfl', 'endtime', 'coupling_scheme', 'pressure_integration', 'uncovering_method', 'erosion_venting', 'vacuum_density', 'vacuum_pressure'];
@@ -6759,7 +6921,8 @@ export function shouldSkipNodeParameter(
         if (!ctx.hasMPM && key === 'transfer_scheme') return true;
         if (!ctx.hasFEM && !ctx.hasMPM && [
             'enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress',
-            'enable_timestep_erosion', 'timestep_erosion_factor', 'enable_heterogeneity', 'weibull_modulus',
+            'enable_damage_erosion', 'max_damage', 'enable_timestep_erosion', 'timestep_erosion_factor',
+            'min_volume_ratio', 'max_volume_ratio', 'enable_heterogeneity', 'weibull_modulus',
             'weibull_scale', 'weibull_ref_volume', 'enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis',
             'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z', 'directional_crack_band', 'nonlocal_radius'
         ].includes(key)) return true;
@@ -6784,7 +6947,12 @@ export function shouldSkipNodeParameter(
         }
 
         if (matModel === 'Linear Elastic') {
-            if (!['material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'tensile_failure_stress'].includes(key)) {
+            if (![
+                'material_model', 'preset', 'transfer_scheme', 'density', 'youngs_modulus', 'poissons_ratio', 'tensile_failure_stress',
+                'enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress',
+                'enable_damage_erosion', 'max_damage', 'enable_timestep_erosion', 'timestep_erosion_factor',
+                'min_volume_ratio', 'max_volume_ratio'
+            ].includes(key)) {
                 return true;
             }
         }
@@ -6928,7 +7096,7 @@ export function shouldSkipNodeParameter(
             if (['kc_auto_generate', 'kc_a0', 'kc_a1', 'kc_a2', 'kc_a0y', 'kc_a1y', 'kc_a2y', 'kc_a1r', 'kc_a2r', 'kc_b1', 'kc_omega'].includes(key)) return true;
             if (['cscm_alpha', 'cscm_theta', 'cscm_lambda', 'cscm_beta', 'cscm_R', 'cscm_X0', 'cscm_W', 'cscm_D1', 'cscm_D2'].includes(key)) return true;
             if (['sg_Y0', 'sg_Ymax', 'sg_beta', 'sg_n', 'sg_bp', 'sg_bT', 'foam_plateau_stress', 'foam_densification_strain', 'foam_alpha', 'foam_hardening', 'jh2_sigma_hel', 'jh2_p_hel', 'jh2_t_max', 'jh2_A', 'jh2_N', 'jh2_B', 'jh2_M', 'jh2_C', 'jh2_D1', 'jh2_D2', 'jh2_K1', 'jh2_K2', 'jh2_K3', 'jh2_beta', 'hb_sigma_ci', 'hb_mi', 'hb_gsi', 'hb_D', 'cap_X0', 'cap_W', 'cap_D1', 'cap_D2', 'cap_R'].includes(key)) return true;
-            if (['enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress', 'enable_timestep_erosion', 'timestep_erosion_factor'].includes(key)) return true;
+            if (['enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress', 'enable_damage_erosion', 'max_damage', 'enable_timestep_erosion', 'timestep_erosion_factor', 'min_volume_ratio', 'max_volume_ratio'].includes(key)) return true;
             if (['enable_heterogeneity', 'weibull_modulus', 'weibull_scale', 'weibull_ref_volume'].includes(key)) return true;
             if (['enable_anisotropy', 'anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'].includes(key)) return true;
         } else {
@@ -6946,6 +7114,7 @@ export function shouldSkipNodeParameter(
 
         if (key === 'erosion_strain' && !parameters['enable_strain_erosion']) return true;
         if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
+        if (key === 'max_damage' && !parameters['enable_damage_erosion']) return true;
         if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
         if ((key === 'erosion_min_density' || key === 'erosion_min_density_ratio' || key === 'erode_to_fv_grid') && !parameters['enable_density_erosion']) return true;
         if (key === 'nonlocal_radius' && !parameters['directional_crack_band']) return true;
@@ -7010,7 +7179,8 @@ export function shouldSkipNodeParameter(
         if (key === 'node_merge_tolerance' && !parameters['merge_coincident_nodes']) return true;
         if (key === 'cohesive_fracture_energy' && !parameters['enable_cohesive_splitting']) return true;
         if (key === 'mpm_particles_per_failed_element' && !parameters['convert_failed_elements_to_mpm']) return true;
-        if (['material_heterogeneity', 'debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size'].includes(key) && !parameters['enable_heterogeneity']) return true;
+        if (key === 'material_heterogeneity' && !parameters['enable_heterogeneity']) return true;
+        if (['debris_velocity_smoothing', 'debris_clumping', 'debris_max_clump_size'].includes(key) && !parameters['convert_failed_elements_to_mpm']) return true;
         if (['anisotropy_ratio', 'anisotropy_axis', 'anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'].includes(key) && !parameters['enable_anisotropy']) return true;
         if (['anisotropy_dir_x', 'anisotropy_dir_y', 'anisotropy_dir_z'].includes(key) && parameters['anisotropy_axis'] !== 'Custom') return true;
         if (key === 'nonlocal_radius' && !parameters['enable_directional_crack_band']) return true;
@@ -7018,13 +7188,22 @@ export function shouldSkipNodeParameter(
         if (key === 'mesh_source') return true;
         const shape = parameters['shape_type'] || (parameters['mesh_source'] === 'Cylinder Generator' ? 'Cylinder' : (parameters['mesh_source'] === 'STL Surface Mesh' ? 'STL' : (parameters['mesh_source'] === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
         if (shape === 'Box' || shape === 'Plate') {
-            if (['radius', 'inner_radius', 'height', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'rot_x', 'rot_y', 'rot_z'].includes(key)) return true;
+            if (['radius', 'inner_radius', 'height', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
         } else if (shape === 'Cylinder') {
-            if (['size_x', 'size_y', 'size_z', 'ny', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z', 'rot_x', 'rot_y', 'rot_z'].includes(key)) return true;
+            if (['size_x', 'size_y', 'size_z', 'ny', 'k_file', 'stl_file', 'scale_x', 'scale_y', 'scale_z'].includes(key)) return true;
         } else if (shape === 'STL') {
             if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'k_file'].includes(key)) return true;
         } else if (shape === 'LS-DYNA File') {
-            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'origin_mode', 'stl_file', 'rot_x', 'rot_y', 'rot_z'].includes(key)) return true;
+            if (['size_x', 'size_y', 'size_z', 'radius', 'inner_radius', 'height', 'nx', 'ny', 'nz', 'origin_mode', 'stl_file'].includes(key)) return true;
+        }
+        const objErosionOverride = parameters['erosion_source'] === 'Override Object';
+        const objErosionKeys = ['enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress', 'enable_damage_erosion', 'max_damage', 'enable_timestep_erosion', 'timestep_erosion_factor', 'min_volume_ratio', 'max_volume_ratio'];
+        if (!objErosionOverride && objErosionKeys.includes(key)) return true;
+        if (objErosionOverride) {
+            if (key === 'erosion_strain' && !parameters['enable_strain_erosion']) return true;
+            if (key === 'erosion_stress' && !parameters['enable_stress_erosion']) return true;
+            if (key === 'max_damage' && !parameters['enable_damage_erosion']) return true;
+            if (key === 'timestep_erosion_factor' && !parameters['enable_timestep_erosion']) return true;
         }
     } else if (nodeType === 'FEMFSICoupler3D') {
         if ((key === 'vacuum_density' || key === 'vacuum_pressure') && !parameters['erosion_venting']) return true;
@@ -7189,7 +7368,7 @@ export function getNodeSectionInfo(
         if (key === 'stl_file') return { title: 'CAD FILE & VOXELIZATION', color: '#569cd6', defaultCollapsed: false };
         if (key === 'origin_mode') return { title: 'TRANSFORM & ORIENTATION', color: '#c084fc', defaultCollapsed: false };
     } else if (nodeType === 'FEMDomain3D') {
-        if (key === 'integration_scheme') return { title: 'ELEMENT FORMULATION', color: '#38bdf8', defaultCollapsed: false };
+        if (key === 'integration_scheme') return { title: 'ELEMENT FORMULATION & VISCOSITY', color: '#38bdf8', defaultCollapsed: false };
         if (key === 'enable_cohesive_splitting' || (key === 'enable_directional_crack_band' && parameters['enable_cohesive_splitting'] === undefined)) return { title: 'COHESIVE FRACTURE & DAMAGE REGULARIZATION', color: '#38bdf8', defaultCollapsed: true };
         if (key === 'rebar_formulation') return { title: 'CONTACT & REBAR', color: '#38bdf8', defaultCollapsed: true };
         if (key === 'enable_heterogeneity') return { title: 'MICROSTRUCTURE & DEBRIS', color: '#c084fc', defaultCollapsed: true };
@@ -7207,8 +7386,18 @@ export function getNodeSectionInfo(
         if (key === 'stl_file' || key === 'k_file' || key === 'scale_x' || key === 'rot_x') {
             return { title: 'EXTERNAL CAD & LS-DYNA INGESTION', color: '#38bdf8', defaultCollapsed: true };
         }
-        if (key === 'vel_x' || key === 'bulk_viscosity_b1' || key === 'timestep_erosion_factor') {
+        if (key === 'vel_x') {
             return { title: 'INITIAL VELOCITY & DYNAMICS', color: '#38bdf8', defaultCollapsed: true };
+        }
+        if (key === 'erosion_source' || key === 'enable_strain_erosion' || key === 'min_volume_ratio') {
+            return { title: 'OBJECT EROSION OVERRIDE', color: '#f59e0b', defaultCollapsed: true };
+        }
+    } else if (nodeType === 'FEMBeam3D' || nodeType === 'FEMRebar3D') {
+        if (key === 'target_domain' || key === 'material') {
+            return { title: 'DOMAIN & MATERIAL ASSIGNMENT', color: '#38bdf8', defaultCollapsed: false };
+        }
+        if (key === 'node1_x' || key === 'node2_x' || key === 'radius' || key === 'diameter' || key === 'cross_section_area' || key === 'failure_strain') {
+            return { title: '3D ENDPOINTS, CROSS-SECTION & FAILURE', color: '#38bdf8', defaultCollapsed: false };
         }
     } else if (nodeType === 'FEMFSICoupler3D' || nodeType === 'FSICoupler2D' || nodeType === 'FSICoupler3D') {
         if (key === 'coupling_scheme') return { title: 'FSI INTERFACE FORMULATION', color: '#22d3ee', defaultCollapsed: false };

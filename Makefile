@@ -2,22 +2,24 @@
 # Automatically harnesses ccache, parallel cores, and streamlined target scoping
 
 BUILD_DIR ?= build
-MAX_JOBS ?= 8
+MAX_JOBS ?= 4
 NPROC ?= $(shell nproc 2>/dev/null || echo 4)
 JOBS ?= $(shell echo $$(( $(NPROC) > $(MAX_JOBS) ? $(MAX_JOBS) : $(NPROC) )))
+NINJA := $(shell command -v ninja 2>/dev/null)
+CMAKE_GEN := $(if $(and $(NINJA),$(wildcard $(BUILD_DIR)/CMakeCache.txt)),,$(if $(NINJA),-G Ninja,))
 
 .PHONY: all default clean frontend verify tests help Broker BlastSolver blastcli BlastStudio blast_verify cfd fem mpm verify-quick
 
 # Default target builds primary production deliverables in parallel
 default:
-	@cmake -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
+	@cmake -B $(BUILD_DIR) $(CMAKE_GEN) -DCMAKE_BUILD_TYPE=Release
 	@cmake --build $(BUILD_DIR) -j $(JOBS)
 
 all: default
 
 # Direct target aliases (e.g. `make BlastSolver`, `make Broker`, `make blastcli`, `make blast_verify`)
 Broker BlastSolver blastcli BlastStudio blast_verify:
-	@cmake -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
+	@cmake -B $(BUILD_DIR) $(CMAKE_GEN) -DCMAKE_BUILD_TYPE=Release
 	@cmake --build $(BUILD_DIR) --target $@ -j $(JOBS)
 
 # Living Verification Compendium execution
