@@ -51,6 +51,15 @@ int main(int argc, char** argv) {
         return (fem_fail == 0) ? 0 : 1;
     }
 
+    if (argc > 1 && std::string(argv[1]) == "--mpm-sparse") {
+        int spr_fail = 0;
+        for (const auto& b : Blast::VV::run_mpm_sparse_grid_benchmarks()) {
+            if (!b.pending && !b.passed) spr_fail++;
+            std::cout << b.id << " " << (b.pending ? "PENDING" : (b.passed ? "PASS" : "FAIL")) << " | " << b.summary << "\n" << b.details << "\n\n";
+        }
+        return (spr_fail == 0) ? 0 : 1;
+    }
+
     // Run Level 1
     std::cout << "[RUNNING] Level 1: Unit & Single-Element / Constitutive Benchmarks...\n";
     auto l1 = Blast::VV::run_level_1_benchmarks();

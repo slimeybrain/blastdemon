@@ -1145,35 +1145,55 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::computeFluxes(double dt, std::v
                                 return Flux3DT<RealType, IsMultiMaterial>{};
                             }
                             if (solid_L || solid_R) {
-                                // Physically correct inviscid slip-wall boundary flux.
-                                // Static wall: zero mass/energy flux, pure pressure in normal direction.
-                                // Moving wall (FSI): p_wall * vn_wall work term (zero for static obstacles)
                                 auto sL1 = sample_func(xL, yL, zL, gx, gy, gz, dir);
                                 auto sR1 = sample_func(xR, yR, zR, gx, gy, gz, dir);
-                                const auto& s_fluid = solid_L ? sR1 : sL1;
+                                auto s_fluid = solid_L ? sR1 : sL1;
+                                int s_gx = solid_L ? xL : xR;
+                                int s_gy = solid_L ? yL : yR;
+                                int s_gz = solid_L ? zL : zR;
+                                int f_gz = solid_L ? zR : zL;
+                                int ntx_dim = (nx + 7) / 8, nty_dim = (ny + 7) / 8;
+                                int s_t_idx = (s_gx / 8) + (s_gy / 8) * ntx_dim + (s_gz / 8) * ntx_dim * nty_dim;
+                                int s_c_idx = (s_gx % 8) + (s_gy % 8) * 8 + (s_gz % 8) * 64;
+
+                                RealType vw_x = (RealType)0.0, vw_y = (RealType)0.0, vw_z = (RealType)0.0;
+                                if (!solid_vel_tiles.empty() && s_t_idx >= 0 && s_t_idx < (int)solid_vel_tiles.size()) {
+                                    vw_x = (RealType)solid_vel_tiles[s_t_idx].vx[s_c_idx];
+                                    vw_y = (RealType)solid_vel_tiles[s_t_idx].vy[s_c_idx];
+                                    vw_z = (RealType)solid_vel_tiles[s_t_idx].vz[s_c_idx];
+                                }
+
+                                RealType vn_wall = (dir == 0) ? vw_x : ((dir == 1) ? vw_y : vw_z);
+                                RealType vn_fluid = (dir == 0) ? s_fluid.ux : ((dir == 1) ? s_fluid.uy : s_fluid.uz);
+                                RealType n_out = solid_R ? (RealType)1.0 : (RealType)(-1.0);
+                                RealType v_rel = n_out * (vn_fluid - vn_wall);
                                 RealType p_wall = s_fluid.p;
-                                RealType vn_wall = (RealType)0.0;
-                                if (!solid_vel_tiles.empty()) {
-                                    int s_gx = solid_L ? xL : xR;
-                                    int s_gy = solid_L ? yL : yR;
-                                    int s_gz = solid_L ? zL : zR;
-                                    int tx = s_gx / 8, ty = s_gy / 8, tz = s_gz / 8;
-                                    int ntx_dim = (nx + 7) / 8, nty_dim = (ny + 7) / 8;
-                                    int t_idx = tx + ty * ntx_dim + tz * ntx_dim * nty_dim;
-                                    int cx = s_gx % 8, cy = s_gy % 8, cz = s_gz % 8;
-                                    int c_idx = cx + cy * 8 + cz * 64;
-                                    if (t_idx >= 0 && t_idx < (int)solid_vel_tiles.size()) {
-                                        vn_wall = (dir == 0) ? (RealType)solid_vel_tiles[t_idx].vx[c_idx] :
-                                                  ((dir == 1) ? (RealType)solid_vel_tiles[t_idx].vy[c_idx] : (RealType)solid_vel_tiles[t_idx].vz[c_idx]);
+                                if (v_rel > (RealType)0.0) {
+                                    RealType rho_f = std::max((RealType)1e-6, s_fluid.rho);
+                                    RealType p_f = std::max((RealType)1.0, s_fluid.p);
+                                    RealType g_eff = gamma_r;
+                                    RealType c_f = std::sqrt(g_eff * p_f / rho_f);
+                                    if constexpr (IsMultiMaterial) {
+                                        if (this->is_water_tait_val) {
+                                            c_f = MultiMat::getMixtureSoundSpeedTait<RealType>(
+                                                s_fluid.p, rho_f, s_fluid.alpha1, s_fluid.alpha2, s_fluid.arho1, s_fluid.arho2,
+                                                this->tait_water_params, currentMaterials.products, currentMaterials.unreacted);
+                                        } else {
+                                            c_f = MultiMat::getMixtureSoundSpeed<RealType>(
+                                                s_fluid.p, rho_f, s_fluid.alpha1, s_fluid.alpha2, s_fluid.arho1, s_fluid.arho2,
+                                                g_eff, currentMaterials.products, currentMaterials.unreacted);
+                                        }
+                                        c_f = std::max((RealType)1.0, c_f);
                                     }
+                                    RealType b_sh = (RealType)0.25 * (g_eff + (RealType)1.0) * v_rel;
+                                    RealType w_s = b_sh + std::sqrt(b_sh * b_sh + c_f * c_f);
+                                    p_wall = s_fluid.p + rho_f * w_s * v_rel;
                                 }
                                 Flux3DT<RealType, IsMultiMaterial> flx{};
-                                flx.rho = (RealType)0.0;
                                 flx.rhoux = (dir == 0) ? p_wall : (RealType)0.0;
                                 flx.rhouy = (dir == 1) ? p_wall : (RealType)0.0;
                                 flx.rhouz = (dir == 2) ? p_wall : (RealType)0.0;
-                                flx.E = p_wall * vn_wall;
-                                flx.v_face = vn_wall;
+                                flx.E     = p_wall * vn_wall;
                                 return flx;
                             }
                             auto sL2 = sample_func(xLL, yLL, zLL, gx, gy, gz, dir);
@@ -3449,7 +3469,31 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
                 bool prev_is_solid = has_prev && ((prev_mask_pool[t_idx].words[c_idx >> 6] & (1ULL << (c_idx & 63))) != 0);
                 bool curr_is_solid = (mask[cfd_idx] != 0);
 
-                geom_pool[t_idx].cells[c_idx].is_boundary = curr_is_solid;
+                if (curr_is_solid) {
+                    float gx_sum = 0.0f, gy_sum = 0.0f, gz_sum = 0.0f;
+                    for (int dk = -1; dk <= 1; ++dk) {
+                        int nk = std::clamp(gz + dk, 0, nz - 1);
+                        for (int dj = -1; dj <= 1; ++dj) {
+                            int nj = std::clamp(gy + dj, 0, ny - 1);
+                            for (int di = -1; di <= 1; ++di) {
+                                if (di == 0 && dj == 0 && dk == 0) continue;
+                                int ni = std::clamp(gx + di, 0, nx - 1);
+                                float val = (mask[ni + nj * nx + nk * nx * ny] != 0) ? 1.0f : 0.0f;
+                                float w = 1.0f / static_cast<float>(di * di + dj * dj + dk * dk);
+                                gx_sum += w * static_cast<float>(di) * val;
+                                gy_sum += w * static_cast<float>(dj) * val;
+                                gz_sum += w * static_cast<float>(dk) * val;
+                            }
+                        }
+                    }
+                    float g_len = std::sqrt(gx_sum * gx_sum + gy_sum * gy_sum + gz_sum * gz_sum);
+                    float nx_n = (g_len > 1.0e-6f) ? (-gx_sum / g_len) : 0.0f;
+                    float ny_n = (g_len > 1.0e-6f) ? (-gy_sum / g_len) : 0.0f;
+                    float nz_n = (g_len > 1.0e-6f) ? (-gz_sum / g_len) : 0.0f;
+                    geom_pool[t_idx].cells[c_idx] = pack_geometry_payload(true, nx_n, ny_n, nz_n, 1.0f);
+                } else {
+                    geom_pool[t_idx].cells[c_idx] = pack_geometry_payload(false, 0.0f, 0.0f, 0.0f, 0.0f);
+                }
 
                 // Freshly uncovered cell: WAS solid, NOW fluid
                 if (prev_is_solid && !curr_is_solid) {
@@ -3473,9 +3517,10 @@ void CFDSolver3DImpl<RealType, IsMultiMaterial>::setSolidMask(const uint8_t* mas
                                 int nz_c = gz + dz_n;
                                 if (nx_c >= 0 && nx_c < nx && ny_c >= 0 && ny_c < ny && nz_c >= 0 && nz_c < nz) {
                                     int nflat = nx_c + ny_c * nx + nz_c * nx * ny;
-                                    if (mask[nflat] == 0) {
-                                        int nt_idx = (nx_c >> 3) + (ny_c >> 3) * n_tiles_x + (nz_c >> 3) * n_tiles_x * n_tiles_y;
-                                        int nc_idx = (nx_c & 7) + (ny_c & 7) * 8 + (nz_c & 7) * 64;
+                                    int nt_idx = (nx_c >> 3) + (ny_c >> 3) * n_tiles_x + (nz_c >> 3) * n_tiles_x * n_tiles_y;
+                                    int nc_idx = (nx_c & 7) + (ny_c & 7) * 8 + (nz_c & 7) * 64;
+                                    bool n_prev_solid = has_prev && ((prev_mask_pool[nt_idx].words[nc_idx >> 6] & (1ULL << (nc_idx & 63))) != 0);
+                                    if (mask[nflat] == 0 && !n_prev_solid) {
                                         RealType dist_sq = (RealType)(dx_n * dx_n + dy_n * dy_n + dz_n * dz_n);
                                         RealType w = (RealType)1.0 / dist_sq;
 

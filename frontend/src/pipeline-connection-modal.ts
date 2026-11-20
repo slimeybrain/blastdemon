@@ -1,5 +1,5 @@
 import { Node, Model, Connection, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
-import { StateManager, isExplosiveMaterialNode, isWaterMaterialNode, isSeabedMaterialNode, isSolidMaterialNode } from './state-manager.js';
+import { StateManager, isExplosiveMaterialNode, isWaterMaterialNode, isSeabedMaterialNode, isSolidMaterialNode, formatMaterialSummary } from './state-manager.js';
 import { isAirMaterialNode } from './serialization.js';
 
 /**
@@ -895,10 +895,7 @@ export class PipelineConnectionModal {
                 this.saveConnections(updated);
             },
             (mat) => {
-                const model = mat.parameters?.material_model || 'Material';
-                const preset = mat.parameters?.preset;
-                const summary = preset === 'Custom' ? `${model} (Custom)` : (preset || model);
-                return `${mat.parameters?.name || mat.id} — ${summary}`;
+                return `${mat.parameters?.name || mat.id} — ${formatMaterialSummary(mat)}`;
             }
         );
         card.appendChild(matRow);

@@ -14,7 +14,9 @@ export function isJWLMaterialNode(node: any): boolean {
     if (!node || node.type !== 'Material') return false;
     const model = node.parameters?.material_model;
     const type = node.parameters?.material_type;
-    return model === 'JWL Detonation Gas' || type === 'JWL Charge' || model === 'JWL';
+    return model === 'JWL Detonation Gas' || model === 'JWL Programmed Burn' ||
+           model === 'CREST Reactive Burn' || model === 'Lee-Tarver Ignition & Growth' ||
+           type === 'JWL Charge' || model === 'JWL';
 }
 
 export function isIdealGasMaterialNode(node: any): boolean {
@@ -1088,7 +1090,7 @@ export function resolveRemapInheritance(
                 material_type: isIdeal ? 'Ideal Gas Charge' : (matNode?.parameters?.material_type ?? 'JWL Charge'),
                 is_ideal_gas: isIdeal,
                 composition: String(matNode?.parameters?.composition ?? 'TNT'),
-                preset: matNode?.parameters?.preset ?? matNode?.parameters?.composition,
+                preset: (matNode?.parameters?.preset === 'Custom' && matNode?.parameters?.base_preset) ? matNode.parameters.base_preset : (matNode?.parameters?.preset ?? matNode?.parameters?.composition),
                 rho,
                 detonation_energy: Number(matNode?.parameters?.detonation_energy ?? matNode?.parameters?.ideal_e_0 ?? 4290000),
                 det_vel: Number(matNode?.parameters?.det_vel ?? 6930),
@@ -1130,7 +1132,7 @@ export function resolveRemapInheritance(
         emptySummary.airSourceModelId = effectiveModelId || null;
         emptySummary.airSourceModelName = (state as any).name || effectiveModelId || 'Current Model';
         emptySummary.airParams = {
-            preset: String(localAirNode.parameters.preset || localAirNode.parameters.material_model || 'Air'),
+            preset: String((localAirNode.parameters.preset === 'Custom' && localAirNode.parameters.base_preset) ? localAirNode.parameters.base_preset : (localAirNode.parameters.preset || localAirNode.parameters.material_model || 'Air')),
             gamma,
             ideal_R,
             atm_pressure: atm_p,
@@ -1158,7 +1160,7 @@ export function resolveRemapInheritance(
                 emptySummary.airSourceModelId = mId;
                 emptySummary.airSourceModelName = mName;
                 emptySummary.airParams = {
-                    preset: String(airNode.parameters.preset || airNode.parameters.material_model || 'Air'),
+                    preset: String((airNode.parameters.preset === 'Custom' && airNode.parameters.base_preset) ? airNode.parameters.base_preset : (airNode.parameters.preset || airNode.parameters.material_model || 'Air')),
                     gamma,
                     ideal_R,
                     atm_pressure: atm_p,
@@ -2843,7 +2845,9 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const mpmDomain = state.nodes.find(n => n.type === 'MPMDomain2D');
         if (mpmDomain) {
             Object.entries(mpmDomain.parameters).forEach(([key, value]) => {
-                if (key !== 'cfl' && key !== 'endtime') {
+                if (key === 'space_time_scheme') {
+                    flattenedParams['mpm_space_time_scheme'] = value;
+                } else if (key !== 'cfl' && key !== 'endtime') {
                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 }
             });
@@ -3169,7 +3173,9 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         const mpmDomain = mpmConn ? state.nodes.find(n => n.id === mpmConn.fromNode) : state.nodes.find(n => n.type === 'MPMDomain3D');
         if (mpmDomain) {
             Object.entries(mpmDomain.parameters).forEach(([key, value]) => {
-                if (key !== 'cfl' && key !== 'endtime') {
+                if (key === 'space_time_scheme') {
+                    flattenedParams['mpm_space_time_scheme'] = value;
+                } else if (key !== 'cfl' && key !== 'endtime') {
                     flattenedParams[key] = numericKeys.includes(key) ? Number(value) : value;
                 }
             });
@@ -3218,7 +3224,27 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
         }
 
-        serializeMPMObjectsWithSleeve(state, solverNode3D, mpmDomain, flattenedParams, numericKeys, modelFilename);
+        const serializedMpmObjs = serializeMPMObjectsWithSleeve(state, solverNode3D, mpmDomain, flattenedParams, numericKeys, modelFilename);
+        if (flattenedParams['jwl_A'] === undefined && flattenedParams['rho'] === undefined && Array.isArray(serializedMpmObjs)) {
+            const isEnergeticModel = (m: any) =>
+                m === 'JWL Programmed Burn' || m === 'CREST Reactive Burn' ||
+                m === 'Lee-Tarver Ignition & Growth' || m === 'JWL Detonation Gas' || m === 'JWL';
+            const energeticObj = serializedMpmObjs.find(o => isEnergeticModel(o?.material_model) && o?.erode_to_fv_grid) ||
+                                 serializedMpmObjs.find(o => isEnergeticModel(o?.material_model));
+            if (energeticObj) {
+                if (energeticObj.density !== undefined && Number(energeticObj.density) > 100.0) {
+                    flattenedParams['rho'] = Number(energeticObj.density);
+                }
+                [...JWL_KEYS, ...AFTERBURN_KEYS].forEach(k => {
+                    if (k !== 'rho' && energeticObj[k] !== undefined && flattenedParams[k] === undefined) {
+                        flattenedParams[k] = energeticObj[k];
+                    }
+                });
+                if (flattenedParams['charge_radius'] === undefined) {
+                    flattenedParams['charge_radius'] = 0;
+                }
+            }
+        }
 
         if (mpmDomain) {
             const isDetNode = (n: any) => n && (n.type === 'DetonatorLocation3D' || n.type === 'DetonatorLocation' || n.type === 'TriggerLocation3D' || n.type === 'TriggerLocation');
@@ -3339,7 +3365,7 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
         flattenedParams['ambient_rho'] = p / (idealR * Math.max(1.0, t));
         if (!flattenedParams['device']) flattenedParams['device'] = 'cpu';
 
-        // Re-apply CFD solver's device/precision/init_mode parameters to ensure they take precedence
+        // Re-apply CFD solver's device/precision/init_mode/scheme parameters to ensure they take precedence (Directives 11 & 12)
         if (solverNode3D) {
             if (!isRemap3D && solverNode3D.parameters.init_mode !== undefined) {
                 flattenedParams['init_mode'] = solverNode3D.parameters.init_mode;
@@ -3354,6 +3380,24 @@ export function serializeForSolver(state: SimulationState, command: string = "IN
             }
             if (solverNode3D.parameters.precision !== undefined) {
                 flattenedParams['precision'] = solverNode3D.parameters.precision;
+            }
+            if (solverNode3D.parameters.space_time_scheme !== undefined) {
+                flattenedParams['space_time_scheme'] = solverNode3D.parameters.space_time_scheme;
+            }
+            if (solverNode3D.parameters.flux_scheme !== undefined) {
+                flattenedParams['flux_scheme'] = solverNode3D.parameters.flux_scheme;
+            }
+            if (solverNode3D.parameters.spatial_order !== undefined) {
+                flattenedParams['spatial_order'] = Number(solverNode3D.parameters.spatial_order);
+            }
+            if (solverNode3D.parameters.temporal_order !== undefined) {
+                flattenedParams['temporal_order'] = Number(solverNode3D.parameters.temporal_order);
+            }
+            if (couplerNode?.parameters?.cfl === undefined && solverNode3D.parameters.cfl !== undefined) {
+                flattenedParams['cfl'] = Number(solverNode3D.parameters.cfl);
+            }
+            if (couplerNode?.parameters?.endtime === undefined && solverNode3D.parameters.endtime !== undefined) {
+                flattenedParams['endtime'] = Number(solverNode3D.parameters.endtime);
             }
         }
     } else if (command === "INIT_FEM_FSI_3D") {

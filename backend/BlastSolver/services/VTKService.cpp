@@ -256,6 +256,21 @@ void write_vtk_outputs(int step, double time) {
 
     try {
         std::filesystem::create_directories(out_dir);
+        if (step == 0 && time <= 0.0 && !global_vtk_config.custom_filename.empty()) {
+            Blast::AsyncVTKWriter::getInstance().flush();
+            const std::string prefix = global_vtk_config.custom_filename + "_";
+            for (const auto& entry : std::filesystem::directory_iterator(out_dir)) {
+                if (!entry.is_regular_file()) continue;
+                const std::string fname = entry.path().filename().string();
+                if (fname.rfind(prefix, 0) == 0) {
+                    const std::string ext = entry.path().extension().string();
+                    if (ext == ".vtu" || ext == ".vts" || ext == ".vtm" || ext == ".pvd" || ext == ".h5" || ext == ".xdmf") {
+                        std::error_code ec;
+                        std::filesystem::remove(entry.path(), ec);
+                    }
+                }
+            }
+        }
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] Failed to create directory: " << out_dir << " - " << e.what() << std::endl;
     }

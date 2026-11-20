@@ -38,9 +38,9 @@
   <text x="627" y="408" text-anchor="middle" class="tick">0.8</text>
   <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
   <text x="765" y="408" text-anchor="middle" class="tick">1</text>
-  <path class="corridor-yellow" d="M 75 -2.44e+06 L 765 -2.44e+06 L 765 2.44e+06 L 75 2.44e+06 Z"/>
-  <path class="corridor-green" d="M 75 -4.87e+05 L 765 -4.87e+05 L 765 4.87e+05 L 75 4.87e+05 Z"/>
-  <path class="exact-curve" d="M 75 102 L 765 102 "/>
+  <path class="corridor-yellow" d="M 75 -2.63e+06 L 765 -2.63e+06 L 765 2.63e+06 L 75 2.63e+06 Z"/>
+  <path class="corridor-green" d="M 75 -5.25e+05 L 765 -5.25e+05 L 765 5.26e+05 L 75 5.26e+05 Z"/>
+  <path class="exact-curve" d="M 75 78.3 L 765 78.3 "/>
   <path class="num-curve" d="M 75 78.3 L 765 362 "/>
   <circle cx="75" cy="78.3" r="3.5" fill="#f0883e"/>
   <circle cx="765" cy="362" r="3.5" fill="#f0883e"/>

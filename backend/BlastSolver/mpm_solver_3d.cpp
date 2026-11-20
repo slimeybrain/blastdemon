@@ -1492,6 +1492,7 @@ void MPMSolver3D::particleToGrid() {
         auto& node = m_grid[idx];
         node.m = 0.0f;
         node.m_solid = 0.0f;
+        node.v_solid = 0.0f;
         node.m_energetic = 0.0f;
         node.m_reacted = 0.0f;
         node.v_energetic = 0.0f;
@@ -1570,6 +1571,8 @@ void MPMSolver3D::particleToGrid() {
         (void)dev_xx; (void)dev_yy; (void)dev_zz; (void)vm_stress;
 
         int eff_scheme = (p.transfer_scheme >= 0) ? p.transfer_scheme : ((p_mat_table.transfer_scheme >= 0) ? p_mat_table.transfer_scheme : static_cast<int>(m_transfer_scheme));
+        const float p_V_eff = (p.V > 1.0e-30f) ? p.V : (p.m / std::max(p_mat_table.density, 1000.0f));
+        const float p_v_solid = (is_solid_mat || is_energetic) ? p_V_eff : 0.0f;
 
         if (eff_scheme == static_cast<int>(MPMTransferScheme::RadialMLS)) {
             const float inv_dx = 1.0f / m_dx, inv_dy = 1.0f / m_dy, inv_dz = 1.0f / m_dz;
@@ -1729,6 +1732,9 @@ void MPMSolver3D::particleToGrid() {
                         if (is_solid_mat) {
                             node.m_solid += p.m * weight;
                         }
+                        if (p_v_solid > 0.0f) {
+                            node.v_solid += p_v_solid * weight;
+                        }
                         if (is_energetic) {
                             node.m_energetic += p.m * weight;
                             node.m_reacted += p.m * weight * p.lambda;
@@ -1849,6 +1855,9 @@ void MPMSolver3D::particleToGrid() {
                         node.w_sum += weight;
                         if (is_solid_mat) {
                             node.m_solid += p.m * weight;
+                        }
+                        if (p_v_solid > 0.0f) {
+                            node.v_solid += p_v_solid * weight;
                         }
                         if (is_energetic) {
                             node.m_energetic += p.m * weight;
@@ -2006,6 +2015,9 @@ void MPMSolver3D::particleToGrid() {
                         node.w_sum += weight;
                         if (is_solid_mat) {
                             node.m_solid += p.m * weight;
+                        }
+                        if (p_v_solid > 0.0f) {
+                            node.v_solid += p_v_solid * weight;
                         }
                         if (is_energetic) {
                             node.m_energetic += p.m * weight;
@@ -2262,6 +2274,11 @@ void MPMSolver3D::updateGridKinematicsBardenhagen(float dt) {
         int active_count = 0;
         float m_ref = (node.w_sum > 1.0e-20f) ? (node.m / node.w_sum) : std::max(avg_p_mass, 1.0e-12f);
         float m_tol = 1.0e-8f * m_ref;
+        int multi_mat_count = 0;
+        for (int m = 0; m < m_num_materials; ++m) {
+            if (m_mat_fields[m].m[node_idx] > MPMGridNode3D::MIN_MASS) multi_mat_count++;
+        }
+        const float cell_vol_f = std::max(m_dx * m_dy * m_dz, 1.0e-20f);
         for (int m = 0; m < m_num_materials; ++m) {
             auto& mf = m_mat_fields[m];
             float mat_mass = mf.m[node_idx];
@@ -2275,7 +2292,19 @@ void MPMSolver3D::updateGridKinematicsBardenhagen(float dt) {
                 mf.dv[1][node_idx] = mf.p[1][node_idx] * inv_m;
                 mf.dv[2][node_idx] = mf.p[2][node_idx] * inv_m;
 
-                float reg = (mat_mass * mat_mass) / (mat_mass * mat_mass + m_tol * m_tol);
+                float m_tol_mat = m_tol;
+                if (multi_mat_count >= 2) {
+                    int obj_id = (m < static_cast<int>(m_mat_to_obj.size())) ? m_mat_to_obj[m] : (m + 1);
+                    int eff_mat_scheme = (obj_id < static_cast<int>(m_material_tables.size()) && m_material_tables[obj_id].transfer_scheme >= 0)
+                        ? m_material_tables[obj_id].transfer_scheme : static_cast<int>(m_transfer_scheme);
+                    if (eff_mat_scheme == static_cast<int>(MPMTransferScheme::Standard)) {
+                        float rho_m = (obj_id < static_cast<int>(m_material_tables.size()) && m_material_tables[obj_id].density > 1.0e-6f)
+                            ? m_material_tables[obj_id].density : 7850.0f;
+                        float m_p_mat = std::max(0.125f * rho_m * cell_vol_f, 1.0e-20f);
+                        m_tol_mat = std::max(m_tol_mat, 0.05f * m_p_mat);
+                    }
+                }
+                float reg = (mat_mass * mat_mass) / (mat_mass * mat_mass + m_tol_mat * m_tol_mat);
 
                 // Include external force apportioned by mass
                 float f_ext_x = (node.m > MPMGridNode3D::MIN_MASS) ? (node.f_ext[0] * (mat_mass / node.m)) : 0.0f;
@@ -3296,11 +3325,14 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
                             float dist_y = node_y - py;
                             float dist_z = node_z - pz;
 
+                            float p_m_ref = std::max(p.m, 1.0e-20f);
                             bool is_contact_node = is_multi_mat && ((node.m - m_val) > 1.0e-5f * node.m);
+                            bool is_engaged_contact = is_contact_node &&
+                                                      (m_val > 0.05f * p_m_ref) &&
+                                                      ((node.m - m_val) > 0.01f * p_m_ref);
                             float reg_dv_node = 1.0f;
-                            if (!is_contact_node && is_standard) {
-                                float p_m_ref = std::max(p.m, 1.0e-20f);
-                                float w_node_support = (node.w_sum > 1.0e-20f) ? node.w_sum : (m_val / p_m_ref);
+                            if (!is_engaged_contact && is_standard) {
+                                float w_node_support = (!is_contact_node && node.w_sum > 1.0e-20f) ? node.w_sum : (m_val / p_m_ref);
                                 float reg_dv = std::min(1.0f, std::min(w_node_support, m_val / p_m_ref));
                                 reg_dv_node = reg_dv;
                                 w_min_stencil = std::min(w_min_stencil, reg_dv);
@@ -3380,7 +3412,7 @@ MPMSolver3D::MPMGatheredKinematics3D MPMSolver3D::gatherParticleKinematics(const
                             A_mat[2][2] += weight * rel_vz * dist_z;
 
                             float m_ref_p = std::max(0.15f * p.m, 1.0e-20f);
-                            float w_grad = is_contact_node ? 1.0f : (is_standard ? (reg_dv_node * reg_dv_node) : std::min(1.0f, m_val / m_ref_p));
+                            float w_grad = is_engaged_contact ? 1.0f : (is_standard ? (reg_dv_node * reg_dv_node) : std::min(1.0f, m_val / m_ref_p));
                             float wg = weight * w_grad;
                             v_grad_x += wg * eff_vx;
                             v_grad_y += wg * eff_vy;

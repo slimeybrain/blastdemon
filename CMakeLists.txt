@@ -1,4 +1,32 @@
 cmake_minimum_required(VERSION 3.20)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+endif()
+
+# Detect concrete local GPU compute capability (e.g., 120 -> 120-real) before project()
+# so nvcc receives explicit -gencode flags that ccache can direct-hit (unlike -arch=native).
+if(NOT DEFINED BLAST_CUDA_ARCH_OVERRIDE)
+    execute_process(
+        COMMAND nvidia-smi --query-gpu=compute_cap --format=csv,noheader
+        OUTPUT_VARIABLE _NVIDIA_SMI_CAP
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(_NVIDIA_SMI_CAP)
+        string(REGEX MATCH "^[0-9]+\\.[0-9]+" _FIRST_GPU_CAP "${_NVIDIA_SMI_CAP}")
+        string(REPLACE "." "" _DETECTED_CUDA_ARCH "${_FIRST_GPU_CAP}")
+    endif()
+endif()
+
+if(BLAST_CUDA_ARCH_OVERRIDE)
+    set(CMAKE_CUDA_ARCHITECTURES "${BLAST_CUDA_ARCH_OVERRIDE}")
+elseif(_DETECTED_CUDA_ARCH)
+    set(CMAKE_CUDA_ARCHITECTURES "${_DETECTED_CUDA_ARCH}-real")
+else()
+    set(CMAKE_CUDA_ARCHITECTURES native)
+endif()
+
 project(BlastDaemon CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -7,16 +35,22 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-# Target the best available GPU architecture automatically
-set(CMAKE_CUDA_ARCHITECTURES native)
+# Ensure concrete architecture overrides any stale default cached before GPU upgrade
+if(BLAST_CUDA_ARCH_OVERRIDE)
+    set(CMAKE_CUDA_ARCHITECTURES "${BLAST_CUDA_ARCH_OVERRIDE}")
+elseif(_DETECTED_CUDA_ARCH)
+    set(CMAKE_CUDA_ARCHITECTURES "${_DETECTED_CUDA_ARCH}-real")
+endif()
+message(STATUS "Targeting CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math")
 
-# Compiler caching for near-zero rebuild times
+# Compiler caching for near-zero rebuild times (with PCH & CUDA direct-mode support)
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
-    set(CMAKE_CUDA_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
-    message(STATUS "ccache found and enabled for CXX and CUDA: ${CCACHE_PROGRAM}")
+    set(_CCACHE_OPTS "sloppiness=pch_defines,time_macros,include_file_mtime,include_file_ctime")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM};${_CCACHE_OPTS}")
+    set(CMAKE_CUDA_COMPILER_LAUNCHER "${CCACHE_PROGRAM};${_CCACHE_OPTS}")
+    message(STATUS "ccache found and enabled for CXX (PCH-aware) and CUDA: ${CCACHE_PROGRAM}")
 endif()
 
 
@@ -27,17 +61,19 @@ else()
     add_compile_options(
         $<$<COMPILE_LANGUAGE:CXX>:-Wall>
         $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
-        $<$<COMPILE_LANGUAGE:CXX>:-O3>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:>>:-O3>
         $<$<COMPILE_LANGUAGE:CXX>:-march=native>
-        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<BOOL:${CCACHE_PROGRAM}>:$<$<COMPILE_LANGUAGE:CXX>:-fpch-preprocess>>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:>>:-O3>
         $<$<COMPILE_LANGUAGE:CUDA>:-march=native>
-        $<$<COMPILE_LANGUAGE:CUDA>:--threads=4>
+        $<$<COMPILE_LANGUAGE:CUDA>:--threads=0>
+        $<$<COMPILE_LANGUAGE:CUDA>:--split-compile=0>
         $<$<COMPILE_LANGUAGE:CUDA>:--diag-suppress=177,550,2190,20012>
     )
 endif()
 
 # Cap concurrent heavy nvcc compilations when using Ninja to prevent OOM while keeping C++ fully parallel
-set_property(GLOBAL PROPERTY JOB_POOLS cuda_compile=2)
+set_property(GLOBAL PROPERTY JOB_POOLS cuda_compile=4)
 
 # OpenMP for CPU solver parallelism
 find_package(OpenMP)
@@ -146,11 +182,8 @@ target_include_directories(BlastSolverCore PUBLIC
     ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 
-set_target_properties(BlastSolverCore PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-)
 target_compile_options(BlastSolverCore PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
 )
 
 # Precompiled headers for near-instant CXX incremental build times
@@ -172,7 +205,6 @@ target_precompile_headers(BlastSolverCore PRIVATE
 if(OpenMP_CXX_FOUND)
     target_link_libraries(BlastSolverCore PUBLIC OpenMP::OpenMP_CXX)
     target_compile_options(BlastSolverCore PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:${OpenMP_CXX_FLAGS}>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler -fopenmp>
     )
     message(STATUS "OpenMP found and enabled for BlastSolverCore.")
@@ -192,11 +224,13 @@ endif()
 # Main Solver (Worker Executable)
 add_executable(BlastSolver backend/BlastSolver/main.cpp)
 target_link_libraries(BlastSolver PRIVATE BlastSolverCore)
+target_precompile_headers(BlastSolver REUSE_FROM BlastSolverCore)
 
 # BlastCLI - Standalone C++20 Multi-Physics CLI Runner
 add_executable(blastcli backend/BlastCLI/main.cpp)
 target_include_directories(blastcli PRIVATE backend/BlastSolver/include)
 target_link_libraries(blastcli PRIVATE BlastSolverCore)
+target_precompile_headers(blastcli REUSE_FROM BlastSolverCore)
 
 # BlastStudio - Standalone Desktop Shell
 add_executable(BlastStudio backend/BlastStudio/main.cpp)
@@ -226,6 +260,7 @@ target_include_directories(blast_verify PRIVATE
     backend/BlastSolver/verification
 )
 target_link_libraries(blast_verify PRIVATE BlastSolverCore)
+target_precompile_headers(blast_verify REUSE_FROM BlastSolverCore)
 
 # Optional standalone test binaries (default: OFF, build with -DBUILD_TESTS=ON)
 option(BUILD_TESTS "Build standalone test executables" OFF)
@@ -240,7 +275,7 @@ if(BUILD_TESTS)
     macro(add_test_executable_if_exists target_name source_file)
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source_file}")
             add_executable(${target_name} EXCLUDE_FROM_ALL ${source_file})
-            target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -O3>)
+            target_compile_options(${target_name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
             target_link_libraries(${target_name} PRIVATE BlastSolverCore)
             add_dependencies(all_tests ${target_name})
         endif()
@@ -266,6 +301,8 @@ if(BUILD_TESTS)
             backend/BlastSolver/verification/vv_framework.cpp)
     endif()
     add_test_executable_if_exists(test_fsi_3d backend/BlastSolver/test_fsi_3d.cu)
+    add_test_executable_if_exists(test_fsi_gap_conservation backend/BlastSolver/test_fsi_gap_conservation.cu)
+    add_test_executable_if_exists(test_fsi_phase1_baseline backend/BlastSolver/test_fsi_phase1_baseline.cu)
     add_test_executable_if_exists(test_fem_3d_element_math backend/BlastSolver/test_fem_3d_element_math.cpp)
     add_test_executable_if_exists(test_fem_3d_hourglass backend/BlastSolver/test_fem_3d_hourglass.cpp)
     add_test_executable_if_exists(test_fem_3d_taylor_impact backend/BlastSolver/test_fem_3d_taylor_impact.cpp)

@@ -146,4 +146,18 @@ struct SolidVelocityTile3D {
     float vz[TILE_CELLS_3D];
 };
 
+template <typename RealType>
+struct FluidFractionTile3D {
+    RealType alpha_f[TILE_CELLS_3D];      // Open fluid volume fraction in [0, 1]
+    RealType alpha_f_prev[TILE_CELLS_3D]; // Open fluid fraction at previous FSI step
+    RealType alpha_tmp[TILE_CELLS_3D];    // Scratch buffer for P2G solid sum / uncover demand / erosion volume
+};
+
+struct FluidDragTile3D {
+    float fx[TILE_CELLS_3D];    // Force density applied to fluid (-F_drag / V_cell) [N/m^3]
+    float fy[TILE_CELLS_3D];
+    float fz[TILE_CELLS_3D];
+    float power[TILE_CELLS_3D]; // Mechanical power density applied to fluid (-F_drag . v_s / V_cell) [W/m^3]
+};
+
 #endif // CFD_TILE_HPP

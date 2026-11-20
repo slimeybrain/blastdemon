@@ -1,5 +1,5 @@
 import { SimulationState, Node, Connection, Port, NodeType, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
-import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, getMaterialDisplayHTML, isExplosiveMaterialNode, syncMPMMaterialParameters, getCompatibleMaterialsForNode, resolveResourcePath } from './state-manager.js';
+import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, getMaterialDisplayHTML, isExplosiveMaterialNode, syncMPMMaterialParameters, formatMaterialSummary, getCompatibleMaterialsForNode, resolveResourcePath } from './state-manager.js';
 import { Telemetry3DViewport } from './telemetry-3d-viewport.js';
 import { validateSimulationState } from './validation.js';
 import { HostFileBrowserModal, FileFilterPreset, showRecentFoldersQuickMenu, recordRecentFolder } from './host-file-browser.js';
@@ -5231,9 +5231,7 @@ export class GraphRenderer {
                 const options = [
                     { value: '', label: '(None / Disconnected)' },
                     ...matNodes.map(mat => {
-                        const matModel = mat.parameters?.material_model || 'Material';
-                        const preset = mat.parameters?.preset;
-                        const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                        const matSummary = formatMaterialSummary(mat);
                         return {
                             value: mat.id,
                             label: `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 6)}] (${matSummary})`
@@ -5271,9 +5269,7 @@ export class GraphRenderer {
                 const options = [
                     { value: '', label: '(None / Disconnected)' },
                     ...matNodes.map(mat => {
-                        const matModel = mat.parameters?.material_model || 'Material';
-                        const preset = mat.parameters?.preset;
-                        const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                        const matSummary = formatMaterialSummary(mat);
                         return {
                             value: mat.id,
                             label: `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 6)}] (${matSummary})`
@@ -5453,9 +5449,7 @@ export class GraphRenderer {
                 const options = [
                     { value: '', label: '(None / Disconnected)' },
                     ...matNodes.map(mat => {
-                        const matModel = mat.parameters?.material_model || 'Material';
-                        const preset = mat.parameters?.preset;
-                        const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                        const matSummary = formatMaterialSummary(mat);
                         return {
                             value: mat.id,
                             label: `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 6)}] (${matSummary})`
@@ -6206,7 +6200,7 @@ export class GraphRenderer {
                         updates['ambient_rho'] = Number(newVal);
                         updates['preset'] = 'Custom';
                         updates['provenance'] = 'user';
-                    } else if (node.type === 'Material' && !['preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
+                    } else if (node.type === 'Material' && !['preset', 'base_preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
                         updates['preset'] = 'Custom';
                         updates['provenance'] = 'user';
                     }

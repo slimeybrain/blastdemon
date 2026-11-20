@@ -520,6 +520,7 @@ struct alignas(32) MPMGridNode3D {
     float plastic_strain{0.0f}; // Interpolated plastic strain for smoothing (4B)
     float pressure{0.0f};       // Mass-weighted continuum pressure (Pa) for zonal coupling and telemetry (4B)
     float m_solid{0.0f};        // Solid mass excluding fluid TaitWater (4B)
+    float v_solid{0.0f};        // Condensed-phase intact solid & unreacted HE volume (sum N_i V_p) (4B)
     float m_energetic{0.0f};    // Energetic gaseous explosive mass (4B)
     float m_reacted{0.0f};      // Reacted JWL explosive mass (4B)
     float v_energetic{0.0f};    // Shape-weighted volume of energetic particles (sum N_i V_p) (4B)
@@ -529,6 +530,7 @@ struct alignas(32) MPMGridNode3D {
     float t_star{0.0f};         // Mass-weighted homologous temperature T* in [0, 1] (4B)
     float q_fric{0.0f};         // Contact frictional heating specific energy increment (J/kg) (4B)
     float w_sum{0.0f};          // Dimensionless nodal shape-function support completeness sum_p N_I(x_p) (4B)
+    float ke_p2g_raw{0.0f};     // APIC incoming scatter KE -> P2G projection dissipation J/kg (fits inside 96B alignas(32) padding)
 
     static constexpr float MIN_MASS = 1.0e-20f;
     float v(int i) const { return m > MIN_MASS ? p[i] / m : 0.0f; }

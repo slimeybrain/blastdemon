@@ -15,13 +15,13 @@
   <rect width="800" height="450" fill="#0d1117" rx="8"/>
   <text x="400" y="30" text-anchor="middle" class="title">VV-L2-CMP-03: Interface-band particle vx, dense (reference) vs compact storage</text>
   <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
-  <text x="67" y="394" text-anchor="end" class="tick">-4.2</text>
+  <text x="67" y="394" text-anchor="end" class="tick">-4.16</text>
   <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
-  <text x="67" y="326" text-anchor="end" class="tick">-1.12</text>
+  <text x="67" y="326" text-anchor="end" class="tick">-1.09</text>
   <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
-  <text x="67" y="258" text-anchor="end" class="tick">1.96</text>
+  <text x="67" y="258" text-anchor="end" class="tick">1.97</text>
   <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
-  <text x="67" y="190" text-anchor="end" class="tick">5.03</text>
+  <text x="67" y="190" text-anchor="end" class="tick">5.04</text>
   <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
   <text x="67" y="122" text-anchor="end" class="tick">8.11</text>
   <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
@@ -38,10 +38,10 @@
   <text x="627" y="408" text-anchor="middle" class="tick">0.435</text>
   <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
   <text x="765" y="408" text-anchor="middle" class="tick">0.455</text>
-  <path class="corridor-yellow" d="M 75 365 L 144 317 L 213 254 L 282 202 L 351 175 L 420 117 L 489 67.4 L 558 76.6 L 627 78.5 L 696 74.8 L 765 297 L 765 297 L 696 95.9 L 627 99.3 L 558 97.6 L 489 89.3 L 420 135 L 351 187 L 282 211 L 213 258 L 144 315 L 75 358 Z"/>
-  <path class="corridor-green" d="M 75 362 L 144 316 L 213 255 L 282 206 L 351 180 L 420 124 L 489 76.1 L 558 85 L 627 86.8 L 696 83.2 L 765 297 L 765 297 L 696 87.5 L 627 91 L 558 89.2 L 489 80.5 L 420 128 L 351 182 L 282 208 L 213 256 L 144 316 L 75 361 Z"/>
-  <path class="exact-curve" d="M 75 362 L 144 316 L 213 256 L 282 207 L 351 181 L 420 126 L 489 78.3 L 558 87.1 L 627 88.9 L 696 85.3 L 765 297 "/>
-  <path class="num-curve" d="M 75 362 L 144 316 L 213 256 L 282 207 L 351 181 L 420 126 L 489 78.3 L 558 87.1 L 627 88.9 L 696 85.3 L 765 297 "/>
+  <path class="corridor-yellow" d="M 75 365 L 144 317 L 213 254 L 282 202 L 351 175 L 420 118 L 489 67.4 L 558 76.9 L 627 80.3 L 696 77.5 L 765 298 L 765 298 L 696 98.5 L 627 101 L 558 97.9 L 489 89.3 L 420 135 L 351 186 L 282 211 L 213 258 L 144 315 L 75 358 Z"/>
+  <path class="corridor-green" d="M 75 362 L 144 316 L 213 255 L 282 206 L 351 179 L 420 125 L 489 76.1 L 558 85.3 L 627 88.5 L 696 85.9 L 765 298 L 765 298 L 696 90.1 L 627 92.7 L 558 89.5 L 489 80.5 L 420 128 L 351 182 L 282 207 L 213 256 L 144 316 L 75 361 Z"/>
+  <path class="exact-curve" d="M 75 362 L 144 316 L 213 256 L 282 207 L 351 181 L 420 126 L 489 78.3 L 558 87.4 L 627 90.6 L 696 88 L 765 298 "/>
+  <path class="num-curve" d="M 75 362 L 144 316 L 213 256 L 282 207 L 351 181 L 420 126 L 489 78.3 L 558 87.4 L 627 90.6 L 696 88 L 765 298 "/>
   <circle cx="75" cy="362" r="3.5" fill="#f0883e"/>
   <circle cx="144" cy="316" r="3.5" fill="#f0883e"/>
   <circle cx="213" cy="256" r="3.5" fill="#f0883e"/>
@@ -49,10 +49,10 @@
   <circle cx="351" cy="181" r="3.5" fill="#f0883e"/>
   <circle cx="420" cy="126" r="3.5" fill="#f0883e"/>
   <circle cx="489" cy="78.3" r="3.5" fill="#f0883e"/>
-  <circle cx="558" cy="87.1" r="3.5" fill="#f0883e"/>
-  <circle cx="627" cy="88.9" r="3.5" fill="#f0883e"/>
-  <circle cx="696" cy="85.3" r="3.5" fill="#f0883e"/>
-  <circle cx="765" cy="297" r="3.5" fill="#f0883e"/>
+  <circle cx="558" cy="87.4" r="3.5" fill="#f0883e"/>
+  <circle cx="627" cy="90.6" r="3.5" fill="#f0883e"/>
+  <circle cx="696" cy="88" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="298" r="3.5" fill="#f0883e"/>
   <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
   <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
   <text x="400" y="435" text-anchor="middle" class="axis-label">Cell centre x (m)</text>

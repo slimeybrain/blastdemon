@@ -15,17 +15,17 @@
   <rect width="800" height="450" fill="#0d1117" rx="8"/>
   <text x="400" y="30" text-anchor="middle" class="title">VV-L2-CMP-08: max equivalent plastic strain, conformal spinning sleeve (tie OFF = reference, tie ON = result)</text>
   <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
-  <text x="67" y="394" text-anchor="end" class="tick">-0.000725</text>
+  <text x="67" y="394" text-anchor="end" class="tick">-1</text>
   <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
-  <text x="67" y="326" text-anchor="end" class="tick">0.00101</text>
+  <text x="67" y="326" text-anchor="end" class="tick">-0.6</text>
   <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
-  <text x="67" y="258" text-anchor="end" class="tick">0.00275</text>
+  <text x="67" y="258" text-anchor="end" class="tick">-0.2</text>
   <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
-  <text x="67" y="190" text-anchor="end" class="tick">0.00449</text>
+  <text x="67" y="190" text-anchor="end" class="tick">0.2</text>
   <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
-  <text x="67" y="122" text-anchor="end" class="tick">0.00623</text>
+  <text x="67" y="122" text-anchor="end" class="tick">0.6</text>
   <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
-  <text x="67" y="54" text-anchor="end" class="tick">0.00797</text>
+  <text x="67" y="54" text-anchor="end" class="tick">1</text>
   <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
   <text x="75" y="408" text-anchor="middle" class="tick">2.5</text>
   <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
@@ -38,26 +38,26 @@
   <text x="627" y="408" text-anchor="middle" class="tick">32.5</text>
   <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
   <text x="765" y="408" text-anchor="middle" class="tick">40</text>
-  <path class="corridor-yellow" d="M 75 362 L 121 362 L 167 362 L 213 362 L 259 362 L 305 362 L 351 362 L 397 362 L 443 362 L 489 362 L 535 362 L 581 362 L 627 64.2 L 673 64.2 L 719 64.2 L 765 64.2 L 765 92.5 L 719 92.5 L 673 92.5 L 627 92.5 L 581 362 L 535 362 L 489 362 L 443 362 L 397 362 L 351 362 L 305 362 L 259 362 L 213 362 L 167 362 L 121 362 L 75 362 Z"/>
-  <path class="corridor-green" d="M 75 362 L 121 362 L 167 362 L 213 362 L 259 362 L 305 362 L 351 362 L 397 362 L 443 362 L 489 362 L 535 362 L 581 362 L 627 75.5 L 673 75.5 L 719 75.5 L 765 75.5 L 765 81.2 L 719 81.2 L 673 81.2 L 627 81.2 L 581 362 L 535 362 L 489 362 L 443 362 L 397 362 L 351 362 L 305 362 L 259 362 L 213 362 L 167 362 L 121 362 L 75 362 Z"/>
-  <path class="exact-curve" d="M 75 362 L 121 362 L 167 362 L 213 362 L 259 362 L 305 362 L 351 362 L 397 362 L 443 362 L 489 362 L 535 362 L 581 362 L 627 78.3 L 673 78.3 L 719 78.3 L 765 78.3 "/>
-  <path class="num-curve" d="M 75 362 L 121 362 L 167 362 L 213 362 L 259 362 L 305 362 L 351 362 L 397 362 L 443 362 L 489 362 L 535 362 L 581 362 L 627 362 L 673 362 L 719 362 L 765 362 "/>
-  <circle cx="75" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="121" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="167" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="213" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="259" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="305" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="351" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="397" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="443" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="489" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="535" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="581" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="627" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="673" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="719" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="765" cy="362" r="3.5" fill="#f0883e"/>
+  <path class="corridor-yellow" d="M 75 220 L 121 220 L 167 220 L 213 220 L 259 220 L 305 220 L 351 220 L 397 220 L 443 220 L 489 220 L 535 220 L 581 220 L 627 220 L 673 220 L 719 220 L 765 220 L 765 220 L 719 220 L 673 220 L 627 220 L 581 220 L 535 220 L 489 220 L 443 220 L 397 220 L 351 220 L 305 220 L 259 220 L 213 220 L 167 220 L 121 220 L 75 220 Z"/>
+  <path class="corridor-green" d="M 75 220 L 121 220 L 167 220 L 213 220 L 259 220 L 305 220 L 351 220 L 397 220 L 443 220 L 489 220 L 535 220 L 581 220 L 627 220 L 673 220 L 719 220 L 765 220 L 765 220 L 719 220 L 673 220 L 627 220 L 581 220 L 535 220 L 489 220 L 443 220 L 397 220 L 351 220 L 305 220 L 259 220 L 213 220 L 167 220 L 121 220 L 75 220 Z"/>
+  <path class="exact-curve" d="M 75 220 L 121 220 L 167 220 L 213 220 L 259 220 L 305 220 L 351 220 L 397 220 L 443 220 L 489 220 L 535 220 L 581 220 L 627 220 L 673 220 L 719 220 L 765 220 "/>
+  <path class="num-curve" d="M 75 220 L 121 220 L 167 220 L 213 220 L 259 220 L 305 220 L 351 220 L 397 220 L 443 220 L 489 220 L 535 220 L 581 220 L 627 220 L 673 220 L 719 220 L 765 220 "/>
+  <circle cx="75" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="121" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="167" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="213" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="259" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="305" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="351" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="397" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="443" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="489" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="535" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="581" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="627" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="673" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="719" cy="220" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="220" r="3.5" fill="#f0883e"/>
   <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
   <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
   <text x="400" y="435" text-anchor="middle" class="axis-label">Time (us)</text>

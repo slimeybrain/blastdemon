@@ -1,4 +1,4 @@
-import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, resolveFEMCounts, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, getMaterialDisplayHTML, syncMPMMaterialParameters, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, isExplosiveMaterialNode, isWaterMaterialNode, isSeabedMaterialNode, isSolidMaterialNode, resolveResourcePath } from './state-manager.js';
+import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, resolveFEMCounts, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, getMaterialDisplayHTML, syncMPMMaterialParameters, formatMaterialSummary, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, isExplosiveMaterialNode, isWaterMaterialNode, isSeabedMaterialNode, isSolidMaterialNode, resolveResourcePath } from './state-manager.js';
 import { isAirMaterialNode } from './serialization.js';
 import { getMemoryDisplayHTML } from './memory-validator.js';
 import { Node, SimulationState, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
@@ -2639,9 +2639,7 @@ export class PropertyEditor {
             matNodes.forEach(mat => {
                 const option = document.createElement('option');
                 option.value = mat.id;
-                const matModel = mat.parameters.material_model || 'Material';
-                const preset = mat.parameters.preset;
-                const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters.composition || mat.parameters.material_type || matModel);
+                const matSummary = formatMaterialSummary(mat);
                 option.textContent = `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 8)}] (${matSummary})`;
                 if (mat.id === currentMatId) {
                     option.selected = true;
@@ -2698,9 +2696,7 @@ export class PropertyEditor {
             matNodes.forEach(mat => {
                 const option = document.createElement('option');
                 option.value = mat.id;
-                const matModel = mat.parameters?.material_model || 'Material';
-                const preset = mat.parameters?.preset;
-                const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                const matSummary = formatMaterialSummary(mat);
                 option.textContent = `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 8)}] (${matSummary})`;
                 if (mat.id === currentWaterId) {
                     option.selected = true;
@@ -2758,9 +2754,7 @@ export class PropertyEditor {
             matNodes.forEach(mat => {
                 const option = document.createElement('option');
                 option.value = mat.id;
-                const matModel = mat.parameters?.material_model || 'Material';
-                const preset = mat.parameters?.preset;
-                const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                const matSummary = formatMaterialSummary(mat);
                 option.textContent = `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 8)}] (${matSummary})`;
                 if (mat.id === currentSeabedId) {
                     option.selected = true;
@@ -3143,9 +3137,7 @@ export class PropertyEditor {
             matNodes.forEach(mat => {
                 const option = document.createElement('option');
                 option.value = mat.id;
-                const matModel = mat.parameters?.material_model || 'Material';
-                const preset = mat.parameters?.preset;
-                const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                const matSummary = formatMaterialSummary(mat);
                 option.textContent = `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 8)}] (${matSummary})`;
                 if (mat.id === currentMatId) {
                     option.selected = true;
@@ -5118,7 +5110,7 @@ export class PropertyEditor {
                     if (node.parameters['detonation_energy'] === undefined) updates['detonation_energy'] = 4.29e6;
                 }
             }
-        } else if (node.type === 'Material' && !['preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
+        } else if (node.type === 'Material' && !['preset', 'base_preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
             updates['preset'] = 'Custom';
             updates['provenance'] = 'user';
         } else if (node.type === 'STLGeometry') {

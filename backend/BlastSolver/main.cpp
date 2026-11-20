@@ -3409,10 +3409,8 @@ void init_3d_thread_func(nlohmann::json msg) {
             return;
         }
 
-        std::cout << "[DEBUG] Voxelization finished. Generating obstacle mesh..." << std::endl;
         // Generate obstacle faces mesh and pass them to solver
         generateObstacleMesh(nx, ny, nz, cellSize, xmin, ymin, zmin);
-        std::cout << "[DEBUG] Obstacle mesh generated with " << global_obstacle_faces.size() << " faces. Uploading..." << std::endl;
         local_solver_3d->uploadObstacleFaces(global_obstacle_faces);
 
         // Check if a REMAP command arrived while voxelization was running
@@ -3433,15 +3431,12 @@ void init_3d_thread_func(nlohmann::json msg) {
             }
         }
 
-        std::cout << "[DEBUG] Obstacle faces uploaded. Committing solver..." << std::endl;
         // Commit to global solver
         global_solver_3d = std::move(local_solver_3d);
 
-        std::cout << "[DEBUG] Solver committed. Sending mesh to frontend..." << std::endl;
         // Broadcast obstacle mesh JSON to frontend
         sendObstacleMeshToFrontend(msg.value("modelId", ""));
 
-        std::cout << "[DEBUG] Mesh sent. Initializing phase tracking particles and gauges..." << std::endl;
         setup_phase_tracking_particles_3d(msg);
         init_gauges(msg);
         if (applied_pending_remap) {
@@ -5303,7 +5298,8 @@ void worker_fsi_3d_thread_func() {
                                 if (g_is_stratified_fsi.load() && z_node < g_strat_fsi_params.seabed_surface_z) {
                                     continue;
                                 }
-                                if (node.m_solid > 1.0e-8f) {
+                                const float mpm_cell_vol_thresh = 0.14f * static_cast<float>(dx * dy * dz);
+                                if (node.v_solid >= mpm_cell_vol_thresh) {
                                     int ci = static_cast<int>(std::floor((x_node - cfd_xmin) / cfd_dx));
                                     int cj = static_cast<int>(std::floor((y_node - cfd_ymin) / cfd_dy));
                                     int ck = static_cast<int>(std::floor((z_node - cfd_zmin) / cfd_dz));
@@ -5329,6 +5325,7 @@ void worker_fsi_3d_thread_func() {
                     bool use_bulk = !pfield.empty();
 
                     // Inject fluid pressure gradient as external force into populated grid nodes
+                    const float mpm_solid_vol_thresh = 0.14f * static_cast<float>(dx * dy * dz);
                     for (int i = 0; i < mpm_nx; ++i) {
                         for (int j = 0; j < mpm_ny; ++j) {
                             for (int k = 0; k < mpm_nz; ++k) {
@@ -5339,7 +5336,7 @@ void worker_fsi_3d_thread_func() {
                                     auto is_fluid = [&](int xi, int yi, int zi) -> bool {
                                         if (xi < 0 || xi >= mpm_nx || yi < 0 || yi >= mpm_ny || zi < 0 || zi >= mpm_nz) return false;
                                         const long long n_slot = resolve_host_slot(xi, yi, zi);
-                                        return (n_slot < 0) ? true : (grid[n_slot].m_solid <= 1.0e-8f);
+                                        return (n_slot < 0) ? true : (grid[n_slot].v_solid < mpm_solid_vol_thresh);
                                     };
 
                                     auto pidx_mpm = [&](int xi, int yi, int zi) -> double {
@@ -5358,7 +5355,7 @@ void worker_fsi_3d_thread_func() {
                                     };
 
                                     double f_x = 0.0, f_y = 0.0, f_z = 0.0;
-                                    if (node.m_solid > 1.0e-8f) {
+                                    if (node.v_solid >= mpm_solid_vol_thresh) {
                                         // Solid boundary node: surface pressure from fluid neighbor cells
                                         if (is_fluid(i-1, j, k)) f_x += pidx_mpm(i-1, j, k);
                                         if (is_fluid(i+1, j, k)) f_x -= pidx_mpm(i+1, j, k);
@@ -6260,9 +6257,56 @@ void worker_fem_fsi_3d_thread_func() {
 }
 
 MultiMat::MaterialSet parseMaterialSet(const nlohmann::json& msg) {
-    std::string composition = msg.value("composition", "TNT");
-    std::string preset = msg.value("preset", "");
+    const nlohmann::json* jwl_src = &msg;
+    bool has_explicit_top_jwl = msg.contains("rho") || msg.contains("high_rho") ||
+                                msg.contains("jwl_A") || msg.contains("composition");
+    if (!has_explicit_top_jwl && msg.contains("density") && !msg.contains("ambient_rho")) {
+        if (get_json_double(msg, "density", 0.0) > 100.0) {
+            has_explicit_top_jwl = true;
+        }
+    }
+
+    auto is_energetic_mat_json = [](const nlohmann::json& obj) -> bool {
+        if (!obj.is_object()) return false;
+        std::string mm = obj.value("material_model", "");
+        std::string mt = obj.value("material_type", "");
+        return (mm == "JWL Programmed Burn" || mm == "JWLProgrammedBurn" ||
+                mm == "CREST Reactive Burn" || mm == "CRESTReactiveBurn" ||
+                mm == "Lee-Tarver Ignition & Growth" || mm == "LeeTarverIgnitionGrowth" ||
+                mm == "JWL Detonation Gas" || mm == "JWL" || mt == "JWL Charge");
+    };
+
+    if (!has_explicit_top_jwl) {
+        const nlohmann::json* fallback_energetic = nullptr;
+        if (msg.contains("mpm_objects") && msg["mpm_objects"].is_array()) {
+            for (const auto& obj : msg["mpm_objects"]) {
+                if (is_energetic_mat_json(obj)) {
+                    if (!fallback_energetic) fallback_energetic = &obj;
+                    if (get_json_bool(obj, "erode_to_fv_grid", false)) {
+                        jwl_src = &obj;
+                        fallback_energetic = &obj;
+                        break;
+                    }
+                }
+            }
+        }
+        if (jwl_src == &msg && fallback_energetic) {
+            jwl_src = fallback_energetic;
+        }
+        if (jwl_src == &msg && msg.contains("fem_materials") && msg["fem_materials"].is_array()) {
+            for (const auto& fm : msg["fem_materials"]) {
+                if (is_energetic_mat_json(fm)) {
+                    jwl_src = &fm;
+                    break;
+                }
+            }
+        }
+    }
+
+    std::string composition = jwl_src->value("composition", msg.value("composition", ""));
+    std::string preset = jwl_src->value("preset", "");
     if (composition.empty() && !preset.empty()) composition = preset;
+    if (composition.empty()) composition = "TNT";
 
     MultiMat::MaterialSet matSet = MultiMat::TNT;
 
@@ -6290,43 +6334,69 @@ MultiMat::MaterialSet parseMaterialSet(const nlohmann::json& msg) {
         matSet = MultiMat::TNT;
     }
 
-    // Allow explicit parameter overrides in JSON message to take precedence
+    // Resolve condensed explosive reference density rho0 without ever mistaking ambient air
+    // density (~1.225 kg/m^3 from AIR_KEYS) for solid explosive crystal density.
     double rho_val = matSet.products.rho0;
-    if (msg.contains("rho")) rho_val = get_json_double(msg, "rho", rho_val);
-    else if (msg.contains("density")) rho_val = get_json_double(msg, "density", rho_val);
+    if (jwl_src->contains("rho")) {
+        rho_val = get_json_double(*jwl_src, "rho", rho_val);
+    } else if (jwl_src->contains("high_rho")) {
+        rho_val = get_json_double(*jwl_src, "high_rho", rho_val);
+    } else if (jwl_src->contains("density")) {
+        double d_cand = get_json_double(*jwl_src, "density", 0.0);
+        if (d_cand > 100.0) {
+            rho_val = d_cand;
+        }
+    }
 
     if (rho_val > 0.0) {
         matSet.products.rho0 = rho_val;
         matSet.unreacted.rho0 = rho_val;
     }
 
-    if (msg.contains("jwl_A")) matSet.products.A = get_json_double(msg, "jwl_A", matSet.products.A);
-    if (msg.contains("jwl_B")) matSet.products.B = get_json_double(msg, "jwl_B", matSet.products.B);
-    if (msg.contains("jwl_R1")) matSet.products.R1 = get_json_double(msg, "jwl_R1", matSet.products.R1);
-    if (msg.contains("jwl_R2")) matSet.products.R2 = get_json_double(msg, "jwl_R2", matSet.products.R2);
-    if (msg.contains("jwl_omega")) matSet.products.omega = get_json_double(msg, "jwl_omega", matSet.products.omega);
-    if (msg.contains("det_vel")) matSet.det_vel = get_json_double(msg, "det_vel", matSet.det_vel);
-    if (msg.contains("detonation_energy")) matSet.detonation_energy = get_json_double(msg, "detonation_energy", matSet.detonation_energy);
-    if (msg.contains("initial_temperature")) {
-        double T_init = get_json_double(msg, "initial_temperature", 288.15);
+    if (jwl_src->contains("jwl_A")) matSet.products.A = get_json_double(*jwl_src, "jwl_A", matSet.products.A);
+    else if (jwl_src->contains("lt_A")) matSet.products.A = get_json_double(*jwl_src, "lt_A", matSet.products.A);
+    if (jwl_src->contains("jwl_B")) matSet.products.B = get_json_double(*jwl_src, "jwl_B", matSet.products.B);
+    else if (jwl_src->contains("lt_B")) matSet.products.B = get_json_double(*jwl_src, "lt_B", matSet.products.B);
+    if (jwl_src->contains("jwl_R1")) matSet.products.R1 = get_json_double(*jwl_src, "jwl_R1", matSet.products.R1);
+    else if (jwl_src->contains("lt_R1")) matSet.products.R1 = get_json_double(*jwl_src, "lt_R1", matSet.products.R1);
+    if (jwl_src->contains("jwl_R2")) matSet.products.R2 = get_json_double(*jwl_src, "jwl_R2", matSet.products.R2);
+    else if (jwl_src->contains("lt_R2")) matSet.products.R2 = get_json_double(*jwl_src, "lt_R2", matSet.products.R2);
+    if (jwl_src->contains("jwl_omega")) matSet.products.omega = get_json_double(*jwl_src, "jwl_omega", matSet.products.omega);
+    else if (jwl_src->contains("lt_omega")) matSet.products.omega = get_json_double(*jwl_src, "lt_omega", matSet.products.omega);
+    if (jwl_src->contains("det_vel")) matSet.det_vel = get_json_double(*jwl_src, "det_vel", matSet.det_vel);
+    if (jwl_src->contains("detonation_energy")) matSet.detonation_energy = get_json_double(*jwl_src, "detonation_energy", matSet.detonation_energy);
+
+    if (jwl_src->contains("initial_temperature") || msg.contains("initial_temperature")) {
+        double T_init = jwl_src->contains("initial_temperature")
+                      ? get_json_double(*jwl_src, "initial_temperature", 288.15)
+                      : get_json_double(msg, "initial_temperature", 288.15);
         matSet.unreacted.T0 = T_init;
         matSet.products.T0 = T_init;
     }
 
+    auto has_ab = [&](const char* k) { return jwl_src->contains(k) || msg.contains(k); };
+    auto get_ab_d = [&](const char* k, double def) {
+        return jwl_src->contains(k) ? get_json_double(*jwl_src, k, def) : get_json_double(msg, k, def);
+    };
+    auto get_ab_b = [&](const char* k, bool def) {
+        return jwl_src->contains(k) ? get_json_bool(*jwl_src, k, def) : get_json_bool(msg, k, def);
+    };
+
     // Afterburn parameters override
-    if (msg.contains("afterburn_enabled")) matSet.afterburn.enabled = get_json_bool(msg, "afterburn_enabled", matSet.afterburn.enabled);
-    if (msg.contains("afterburn_energy")) matSet.afterburn.Q_ab = get_json_double(msg, "afterburn_energy", matSet.afterburn.Q_ab);
-    if (msg.contains("afterburn_fuel_fraction")) matSet.afterburn.f_fuel = get_json_double(msg, "afterburn_fuel_fraction", matSet.afterburn.f_fuel);
-    if (msg.contains("afterburn_stoich_ratio")) matSet.afterburn.s_ratio = get_json_double(msg, "afterburn_stoich_ratio", matSet.afterburn.s_ratio);
-    if (msg.contains("afterburn_ignition_temp")) matSet.afterburn.T_ign = get_json_double(msg, "afterburn_ignition_temp", matSet.afterburn.T_ign);
-    if (msg.contains("afterburn_tau_chem")) matSet.afterburn.tau_chem = get_json_double(msg, "afterburn_tau_chem", matSet.afterburn.tau_chem);
-    if (msg.contains("afterburn_c_mix")) matSet.afterburn.C_mix = get_json_double(msg, "afterburn_c_mix", matSet.afterburn.C_mix);
-    if (msg.contains("afterburn_c_edc")) matSet.afterburn.C_edc = get_json_double(msg, "afterburn_c_edc", matSet.afterburn.C_edc);
-    if (msg.contains("afterburn_tau_expansion")) matSet.afterburn.tau_expansion = get_json_double(msg, "afterburn_tau_expansion", matSet.afterburn.tau_expansion);
-    else if (msg.contains("tau_expansion")) matSet.afterburn.tau_expansion = get_json_double(msg, "tau_expansion", matSet.afterburn.tau_expansion);
-    else if (msg.contains("t_expansion")) matSet.afterburn.tau_expansion = get_json_double(msg, "t_expansion", matSet.afterburn.tau_expansion);
+    if (has_ab("afterburn_enabled")) matSet.afterburn.enabled = get_ab_b("afterburn_enabled", matSet.afterburn.enabled);
+    if (has_ab("afterburn_energy")) matSet.afterburn.Q_ab = get_ab_d("afterburn_energy", matSet.afterburn.Q_ab);
+    if (has_ab("afterburn_fuel_fraction")) matSet.afterburn.f_fuel = get_ab_d("afterburn_fuel_fraction", matSet.afterburn.f_fuel);
+    if (has_ab("afterburn_stoich_ratio")) matSet.afterburn.s_ratio = get_ab_d("afterburn_stoich_ratio", matSet.afterburn.s_ratio);
+    if (has_ab("afterburn_ignition_temp")) matSet.afterburn.T_ign = get_ab_d("afterburn_ignition_temp", matSet.afterburn.T_ign);
+    if (has_ab("afterburn_tau_chem")) matSet.afterburn.tau_chem = get_ab_d("afterburn_tau_chem", matSet.afterburn.tau_chem);
+    if (has_ab("afterburn_c_mix")) matSet.afterburn.C_mix = get_ab_d("afterburn_c_mix", matSet.afterburn.C_mix);
+    if (has_ab("afterburn_c_edc")) matSet.afterburn.C_edc = get_ab_d("afterburn_c_edc", matSet.afterburn.C_edc);
+    if (has_ab("afterburn_tau_expansion")) matSet.afterburn.tau_expansion = get_ab_d("afterburn_tau_expansion", matSet.afterburn.tau_expansion);
+    else if (has_ab("tau_expansion")) matSet.afterburn.tau_expansion = get_ab_d("tau_expansion", matSet.afterburn.tau_expansion);
+    else if (has_ab("t_expansion")) matSet.afterburn.tau_expansion = get_ab_d("t_expansion", matSet.afterburn.tau_expansion);
     if (msg.contains("afterburn_ambient_o2_fraction")) matSet.afterburn.ambient_o2_fraction = get_json_double(msg, "afterburn_ambient_o2_fraction", matSet.afterburn.ambient_o2_fraction);
     else if (msg.contains("ambient_o2_fraction")) matSet.afterburn.ambient_o2_fraction = get_json_double(msg, "ambient_o2_fraction", matSet.afterburn.ambient_o2_fraction);
+    else if (jwl_src->contains("afterburn_ambient_o2_fraction")) matSet.afterburn.ambient_o2_fraction = get_json_double(*jwl_src, "afterburn_ambient_o2_fraction", matSet.afterburn.ambient_o2_fraction);
     else if (msg.contains("ambient_preset") || msg.contains("preset")) {
         std::string amb_pre = msg.value("ambient_preset", msg.value("preset", ""));
         std::string amb_lower = amb_pre;
@@ -6341,8 +6411,8 @@ MultiMat::MaterialSet parseMaterialSet(const nlohmann::json& msg) {
             matSet.afterburn.ambient_o2_fraction = 0.233;
         }
     }
-    if (msg.contains("afterburn_delay")) matSet.afterburn.induction_delay = get_json_double(msg, "afterburn_delay", matSet.afterburn.induction_delay);
-    else if (msg.contains("afterburn_induction_delay")) matSet.afterburn.induction_delay = get_json_double(msg, "afterburn_induction_delay", matSet.afterburn.induction_delay);
+    if (has_ab("afterburn_delay")) matSet.afterburn.induction_delay = get_ab_d("afterburn_delay", matSet.afterburn.induction_delay);
+    else if (has_ab("afterburn_induction_delay")) matSet.afterburn.induction_delay = get_ab_d("afterburn_induction_delay", matSet.afterburn.induction_delay);
 
     MultiMat::initializePrecalculatedTerms(matSet);
     return matSet;
@@ -8411,7 +8481,7 @@ int main() {
 
                     std::string transfer_scheme = msg.value("transfer_scheme", "BSpline");
                     std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
-                    std::string space_time_scheme = msg.value("space_time_scheme", "Leapfrog");
+                    std::string space_time_scheme = msg.value("mpm_space_time_scheme", msg.value("space_time_scheme", "Leapfrog"));
                     global_solver_mpm_2d->setTransferScheme(parseTransferScheme(transfer_scheme));
                     auto st_2d_fsi = (space_time_scheme == "RK2") ? Blast::MPMTimeIntegrationScheme::RK2 :
                                      ((space_time_scheme == "USF") ? Blast::MPMTimeIntegrationScheme::USF :
@@ -8578,7 +8648,6 @@ int main() {
                     std::string material_type = msg.value("material_type", "");
                     bool is_ideal_gas_3d = (get_json_bool(msg, "is_ideal_gas", false) || init_mode == "Ideal Gas" || explosive_type == "MaterialIdealGas" || material_type == "Ideal Gas Charge");
                     bool is_multimat = !is_ideal_gas_3d;
-                    std::cout << "[DEBUG] INIT_FSI_3D: device=" << device << " init_mode=" << init_mode << " explosive_type=" << explosive_type << " material_type=" << material_type << " is_ideal_gas_3d=" << is_ideal_gas_3d << " is_multimat=" << is_multimat << std::endl;
 
                     bool is_cuda_cfd = is_cuda_device(device);
                     bool is_double = (precision == "double");
@@ -8605,7 +8674,15 @@ int main() {
                     float mpm_dx = static_cast<float>(mpm_cellSize);
                     float mpm_dy = static_cast<float>(mpm_cellSize);
                     float mpm_dz = static_cast<float>(mpm_cellSize);
-                    bool is_sparse_mpm = get_json_bool(msg, "mpm_sparse_grid", get_json_bool(msg, "sparse_grid", false));
+                    bool is_sparse_mpm = get_json_bool(msg, "mpm_sparse_grid", get_json_bool(msg, "sparse_grid", get_json_bool(msg, "use_sparse_grid", false)));
+                    if (!is_sparse_mpm && is_cuda_cfd && !msg.contains("mpm_sparse_grid") && !msg.contains("sparse_grid")) {
+                        std::string wm_chk = msg.value("water_discretization_mode", "Pure_FV");
+                        bool zonal_chk = (wm_chk == "Spherical_MPM_Sleeve" || wm_chk == "Full_Column_MPM_Cylinder");
+                        size_t total_mpm_nodes = static_cast<size_t>(mpm_nx) * static_cast<size_t>(mpm_ny) * static_cast<size_t>(mpm_nz);
+                        if (!zonal_chk && total_mpm_nodes >= 262144ULL) {
+                            is_sparse_mpm = true;
+                        }
+                    }
                     size_t est_mpm_particles = estimateMPMTotalParticles(msg, mpm_dx, mpm_dy, mpm_dz);
                     auto est_mpm = Blast::estimateMPM3DMemory(mpm_nx, mpm_ny, mpm_nz, est_mpm_particles, is_cuda_cfd, is_sparse_mpm);
 
@@ -8768,7 +8845,7 @@ int main() {
 
                     std::string transfer_scheme = msg.value("transfer_scheme", "BSpline");
                     std::string velocity_scheme = msg.value("velocity_scheme", "APIC");
-                    std::string space_time_scheme = msg.value("space_time_scheme", "Leapfrog");
+                    std::string space_time_scheme = msg.value("mpm_space_time_scheme", msg.value("space_time_scheme", "Leapfrog"));
                     auto ts = parseTransferScheme(transfer_scheme);
                     auto vs = (velocity_scheme == "PIC") ? Blast::MPMVelocityScheme::PIC :
                               ((velocity_scheme == "FLIP") ? Blast::MPMVelocityScheme::FLIP : Blast::MPMVelocityScheme::APIC);
@@ -9311,9 +9388,6 @@ int main() {
                         global_solver_mpm_3d_cuda->particleToGridDeviceOnly();
                         if (is_zonal && global_solver_3d) {
                             global_solver_3d->coupleZonalHandoffWithMPMGPU(global_solver_mpm_3d_cuda.get());
-                            auto cv = global_solver_3d->getCellValues(0, 0, 59);
-                            std::printf("[INIT_CHECK ijk=0,0,59] p=%.4e rho=%.4e E=%.4e a1=%.4e a2=%.4e a3=%.4e\n",
-                                        cv[0], cv[1], cv[3], cv[4], cv[5], cv[6]);
                         }
                     } else {
                         global_solver_mpm_3d->particleToGrid();

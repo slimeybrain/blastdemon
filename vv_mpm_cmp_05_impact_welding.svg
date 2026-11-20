@@ -15,17 +15,17 @@
   <rect width="800" height="450" fill="#0d1117" rx="8"/>
   <text x="400" y="30" text-anchor="middle" class="title">VV-L2-CMP-05: 3D MPM Multi-Metal Impact Welding Flyer Velocity Convergence to v_cm</text>
   <line x1="75" y1="390" x2="765" y2="390" class="grid"/>
-  <text x="67" y="394" text-anchor="end" class="tick">193</text>
+  <text x="67" y="394" text-anchor="end" class="tick">191</text>
   <line x1="75" y1="322" x2="765" y2="322" class="grid"/>
-  <text x="67" y="326" text-anchor="end" class="tick">216</text>
+  <text x="67" y="326" text-anchor="end" class="tick">219</text>
   <line x1="75" y1="254" x2="765" y2="254" class="grid"/>
-  <text x="67" y="258" text-anchor="end" class="tick">238</text>
+  <text x="67" y="258" text-anchor="end" class="tick">246</text>
   <line x1="75" y1="186" x2="765" y2="186" class="grid"/>
-  <text x="67" y="190" text-anchor="end" class="tick">261</text>
+  <text x="67" y="190" text-anchor="end" class="tick">273</text>
   <line x1="75" y1="118" x2="765" y2="118" class="grid"/>
-  <text x="67" y="122" text-anchor="end" class="tick">284</text>
+  <text x="67" y="122" text-anchor="end" class="tick">301</text>
   <line x1="75" y1="50" x2="765" y2="50" class="grid"/>
-  <text x="67" y="54" text-anchor="end" class="tick">306</text>
+  <text x="67" y="54" text-anchor="end" class="tick">328</text>
   <line x1="75" y1="50" x2="75" y2="390" class="grid"/>
   <text x="75" y="408" text-anchor="middle" class="tick">0.6</text>
   <line x1="213" y1="50" x2="213" y2="390" class="grid"/>
@@ -38,30 +38,30 @@
   <text x="627" y="408" text-anchor="middle" class="tick">9.72</text>
   <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
   <text x="765" y="408" text-anchor="middle" class="tick">12</text>
-  <path class="corridor-yellow" d="M 75 331 L 111 331 L 148 331 L 184 331 L 220 331 L 257 331 L 293 331 L 329 331 L 366 331 L 402 331 L 438 331 L 474 331 L 511 331 L 547 331 L 583 331 L 620 331 L 656 331 L 692 331 L 729 331 L 765 331 L 765 392 L 729 392 L 692 392 L 656 392 L 620 392 L 583 392 L 547 392 L 511 392 L 474 392 L 438 392 L 402 392 L 366 392 L 329 392 L 293 392 L 257 392 L 220 392 L 184 392 L 148 392 L 111 392 L 75 392 Z"/>
-  <path class="corridor-green" d="M 75 356 L 111 356 L 148 356 L 184 356 L 220 356 L 257 356 L 293 356 L 329 356 L 366 356 L 402 356 L 438 356 L 474 356 L 511 356 L 547 356 L 583 356 L 620 356 L 656 356 L 692 356 L 729 356 L 765 356 L 765 368 L 729 368 L 692 368 L 656 368 L 620 368 L 583 368 L 547 368 L 511 368 L 474 368 L 438 368 L 402 368 L 366 368 L 329 368 L 293 368 L 257 368 L 220 368 L 184 368 L 148 368 L 111 368 L 75 368 Z"/>
+  <path class="corridor-yellow" d="M 75 336 L 111 336 L 148 336 L 184 336 L 220 336 L 257 336 L 293 336 L 329 336 L 366 336 L 402 336 L 438 336 L 474 336 L 511 336 L 547 336 L 583 336 L 620 336 L 656 336 L 692 336 L 729 336 L 765 336 L 765 387 L 729 387 L 692 387 L 656 387 L 620 387 L 583 387 L 547 387 L 511 387 L 474 387 L 438 387 L 402 387 L 366 387 L 329 387 L 293 387 L 257 387 L 220 387 L 184 387 L 148 387 L 111 387 L 75 387 Z"/>
+  <path class="corridor-green" d="M 75 357 L 111 357 L 148 357 L 184 357 L 220 357 L 257 357 L 293 357 L 329 357 L 366 357 L 402 357 L 438 357 L 474 357 L 511 357 L 547 357 L 583 357 L 620 357 L 656 357 L 692 357 L 729 357 L 765 357 L 765 367 L 729 367 L 692 367 L 656 367 L 620 367 L 583 367 L 547 367 L 511 367 L 474 367 L 438 367 L 402 367 L 366 367 L 329 367 L 293 367 L 257 367 L 220 367 L 184 367 L 148 367 L 111 367 L 75 367 Z"/>
   <path class="exact-curve" d="M 75 362 L 111 362 L 148 362 L 184 362 L 220 362 L 257 362 L 293 362 L 329 362 L 366 362 L 402 362 L 438 362 L 474 362 L 511 362 L 547 362 L 583 362 L 620 362 L 656 362 L 692 362 L 729 362 L 765 362 "/>
-  <path class="num-curve" d="M 75 78.3 L 111 262 L 148 330 L 184 315 L 220 297 L 257 283 L 293 274 L 329 267 L 366 263 L 402 261 L 438 262 L 474 264 L 511 269 L 547 275 L 583 283 L 620 292 L 656 302 L 692 311 L 729 318 L 765 324 "/>
+  <path class="num-curve" d="M 75 78.3 L 111 207 L 148 294 L 184 314 L 220 314 L 257 314 L 293 314 L 329 315 L 366 316 L 402 317 L 438 319 L 474 321 L 511 324 L 547 329 L 583 333 L 620 335 L 656 338 L 692 342 L 729 344 L 765 346 "/>
   <circle cx="75" cy="78.3" r="3.5" fill="#f0883e"/>
-  <circle cx="111" cy="262" r="3.5" fill="#f0883e"/>
-  <circle cx="148" cy="330" r="3.5" fill="#f0883e"/>
-  <circle cx="184" cy="315" r="3.5" fill="#f0883e"/>
-  <circle cx="220" cy="297" r="3.5" fill="#f0883e"/>
-  <circle cx="257" cy="283" r="3.5" fill="#f0883e"/>
-  <circle cx="293" cy="274" r="3.5" fill="#f0883e"/>
-  <circle cx="329" cy="267" r="3.5" fill="#f0883e"/>
-  <circle cx="366" cy="263" r="3.5" fill="#f0883e"/>
-  <circle cx="402" cy="261" r="3.5" fill="#f0883e"/>
-  <circle cx="438" cy="262" r="3.5" fill="#f0883e"/>
-  <circle cx="474" cy="264" r="3.5" fill="#f0883e"/>
-  <circle cx="511" cy="269" r="3.5" fill="#f0883e"/>
-  <circle cx="547" cy="275" r="3.5" fill="#f0883e"/>
-  <circle cx="583" cy="283" r="3.5" fill="#f0883e"/>
-  <circle cx="620" cy="292" r="3.5" fill="#f0883e"/>
-  <circle cx="656" cy="302" r="3.5" fill="#f0883e"/>
-  <circle cx="692" cy="311" r="3.5" fill="#f0883e"/>
-  <circle cx="729" cy="318" r="3.5" fill="#f0883e"/>
-  <circle cx="765" cy="324" r="3.5" fill="#f0883e"/>
+  <circle cx="111" cy="207" r="3.5" fill="#f0883e"/>
+  <circle cx="148" cy="294" r="3.5" fill="#f0883e"/>
+  <circle cx="184" cy="314" r="3.5" fill="#f0883e"/>
+  <circle cx="220" cy="314" r="3.5" fill="#f0883e"/>
+  <circle cx="257" cy="314" r="3.5" fill="#f0883e"/>
+  <circle cx="293" cy="314" r="3.5" fill="#f0883e"/>
+  <circle cx="329" cy="315" r="3.5" fill="#f0883e"/>
+  <circle cx="366" cy="316" r="3.5" fill="#f0883e"/>
+  <circle cx="402" cy="317" r="3.5" fill="#f0883e"/>
+  <circle cx="438" cy="319" r="3.5" fill="#f0883e"/>
+  <circle cx="474" cy="321" r="3.5" fill="#f0883e"/>
+  <circle cx="511" cy="324" r="3.5" fill="#f0883e"/>
+  <circle cx="547" cy="329" r="3.5" fill="#f0883e"/>
+  <circle cx="583" cy="333" r="3.5" fill="#f0883e"/>
+  <circle cx="620" cy="335" r="3.5" fill="#f0883e"/>
+  <circle cx="656" cy="338" r="3.5" fill="#f0883e"/>
+  <circle cx="692" cy="342" r="3.5" fill="#f0883e"/>
+  <circle cx="729" cy="344" r="3.5" fill="#f0883e"/>
+  <circle cx="765" cy="346" r="3.5" fill="#f0883e"/>
   <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
   <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>
   <text x="400" y="435" text-anchor="middle" class="axis-label">Time (us)</text>

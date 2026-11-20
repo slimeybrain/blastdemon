@@ -14,7 +14,151 @@ import { isAirMaterialNode } from './serialization.js';
 import { classifyError, ModelErrorEntry } from './error-diagnostics.js';
 import { canonicalizeQuantity, DEFAULT_QUANTITY_RANGES, getQuantityStyle, syncLegacyParamsToQuantityStyles } from './contour-style.js';
 import { syncFEMPartAndNodeParams, sectionTypeToTopology, topologyToSectionType } from './fem-setup-types.js';
+import { getParamKeysForNode, shouldSkipNodeParameter, getParameterInfo } from './parameter-definitions.js';
 export { canonicalizeQuantity, DEFAULT_QUANTITY_RANGES };
+
+export interface MaterialPresetDiffItem {
+    key: string;
+    label: string;
+    currentVal: any;
+    standardVal: any;
+}
+
+export interface MaterialPresetDiff {
+    basePreset: string | null;
+    isModified: boolean;
+    modifiedParams: MaterialPresetDiffItem[];
+}
+
+const PRESET_METADATA_KEYS = new Set([
+    'reference', 'category', 'provenance', 'test_method', 'description', 'notes', 'tags',
+    'material_model', 'material_type', 'preset', 'base_preset', 'composition', 'name', 'color',
+    'transfer_scheme', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target',
+    'domain_target', 'body_target', 'afterburn_provenance'
+]);
+
+function getStandardPresetValue(presetData: Record<string, any>, key: string, matModel: string): any {
+    if (presetData[key] !== undefined) return presetData[key];
+    if (matModel === 'Ideal Gas' || matModel === 'Air') {
+        if (key === 'initial_temperature') return presetData['atm_temperature'] ?? 288.15;
+        if (key === 'ideal_gamma') return presetData['gamma'] ?? 1.4;
+        if (key === 'gamma') return presetData['ideal_gamma'] ?? 1.4;
+    } else if (matModel === 'Ideal Gas Charge') {
+        if (key === 'initial_temperature') {
+            const e0 = Number(presetData['ideal_e_0'] ?? presetData['detonation_energy'] ?? 4.29e6);
+            const g = Number(presetData['ideal_gamma'] ?? 1.4);
+            const r = Number(presetData['ideal_R'] ?? 287.058);
+            const cv = r / Math.max(0.01, g - 1.0);
+            return e0 / cv;
+        }
+        if (key === 'detonation_energy') return presetData['ideal_e_0'] ?? presetData['detonation_energy'];
+    } else if (matModel === 'JWL Detonation Gas' || matModel === 'JWL Charge') {
+        if (key === 'density') return presetData['rho'] ?? presetData['density'];
+        if (key === 'rho') return presetData['density'] ?? presetData['rho'];
+        if (key === 'initial_temperature') return presetData['T_room'] ?? 288.15;
+    } else {
+        if (key === 'initial_temperature') return presetData['T_room'] ?? 288.15;
+    }
+    return undefined;
+}
+
+function valuesDiffer(a: any, b: any): boolean {
+    if (typeof a === 'boolean' || typeof b === 'boolean') {
+        return Boolean(a) !== Boolean(b);
+    }
+    const na = Number(a);
+    const nb = Number(b);
+    if (a !== '' && b !== '' && a !== null && b !== null && !isNaN(na) && !isNaN(nb)) {
+        const tol = 1e-9 * Math.max(1.0, Math.abs(na), Math.abs(nb));
+        return Math.abs(na - nb) > tol;
+    }
+    return String(a ?? '') !== String(b ?? '');
+}
+
+export function getMaterialPresetDiff(parameters: Record<string, any> | undefined): MaterialPresetDiff {
+    if (!parameters) return { basePreset: null, isModified: false, modifiedParams: [] };
+    const presetVal = parameters['preset'];
+    const rawBase = parameters['base_preset'];
+    const basePreset = (typeof rawBase === 'string' && rawBase !== 'Custom' && MPM_MATERIAL_PRESETS[rawBase])
+        ? rawBase
+        : (typeof presetVal === 'string' && presetVal !== 'Custom' && MPM_MATERIAL_PRESETS[presetVal] ? presetVal : null);
+
+    if (!basePreset) {
+        return {
+            basePreset: null,
+            isModified: presetVal === 'Custom',
+            modifiedParams: []
+        };
+    }
+
+    const presetData = MPM_MATERIAL_PRESETS[basePreset] as Record<string, any>;
+    const matModel = String(parameters['material_model'] || 'Hypoelastic');
+    const candidateKeys = getParamKeysForNode('Material', parameters);
+    const modifiedParams: MaterialPresetDiffItem[] = [];
+
+    for (const key of candidateKeys) {
+        if (PRESET_METADATA_KEYS.has(key)) continue;
+        if (shouldSkipNodeParameter(key, 'Material', parameters)) continue;
+        const curVal = parameters[key];
+        if (curVal === undefined) continue;
+        const stdVal = getStandardPresetValue(presetData, key, matModel);
+        if (stdVal === undefined) continue;
+        if (valuesDiffer(curVal, stdVal)) {
+            const info = getParameterInfo(key, 'Material');
+            modifiedParams.push({
+                key,
+                label: info?.label || key,
+                currentVal: curVal,
+                standardVal: stdVal
+            });
+        }
+    }
+
+    return {
+        basePreset,
+        isModified: presetVal === 'Custom' || modifiedParams.length > 0,
+        modifiedParams
+    };
+}
+
+export function formatMaterialSummary(matNode: Node | undefined | null): string {
+    if (!matNode) return 'Material';
+    const p = matNode.parameters || {};
+    const matModel = p['material_model'] || 'Material';
+    const preset = p['preset'];
+    const diff = getMaterialPresetDiff(p);
+    if (diff.basePreset && (preset === 'Custom' || diff.modifiedParams.length > 0)) {
+        return `${diff.basePreset} (Modified)`;
+    }
+    if (preset === 'Custom') {
+        return `${matModel} (Custom)`;
+    }
+    return preset || p['composition'] || p['material_type'] || matModel;
+}
+
+function finalizeMaterialPresetState(parameters: Record<string, any>, updatedKey: string | undefined, isModifiedParam: boolean): void {
+    if (updatedKey === 'preset' && parameters['preset'] === 'Custom') {
+        delete parameters['base_preset'];
+        delete parameters['reference'];
+        delete parameters['test_method'];
+        parameters['provenance'] = 'user';
+        return;
+    }
+    const curPreset = parameters['preset'];
+    if (typeof curPreset === 'string' && curPreset !== 'Custom' && MPM_MATERIAL_PRESETS[curPreset]) {
+        parameters['base_preset'] = curPreset;
+    }
+    if (isModifiedParam) {
+        const diff = getMaterialPresetDiff(parameters);
+        if (diff.basePreset && diff.modifiedParams.length === 0) {
+            parameters['preset'] = diff.basePreset;
+            parameters['provenance'] = MPM_MATERIAL_PRESETS[diff.basePreset]?.provenance || 'experimental';
+        } else {
+            parameters['preset'] = 'Custom';
+            parameters['provenance'] = 'user';
+        }
+    }
+}
 
 export function syncMPMMaterialParameters(node: Node, parameters: Record<string, any>, updatedKey?: string): void {
     if (node.type !== 'Material' && (node.type as any) !== 'MPMMaterialSteel' && (node.type as any) !== 'MPMMaterial' && (node.type as any) !== 'MaterialSteel') {
@@ -66,6 +210,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
                 for (const [k, v] of Object.entries(pData)) {
                     if (k !== 'reference' && k !== 'category') parameters[k] = v;
                 }
+                parameters['initial_temperature'] = pData.T_room ?? 293.0;
                 if (pData.composition) {
                     parameters['composition'] = pData.composition;
                 }
@@ -113,9 +258,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'afterburn_ignition_temp', 'afterburn_tau_chem', 'afterburn_c_edc', 'afterburn_tau_expansion',
             'afterburn_ambient_o2_fraction'
         ];
-        if (updatedKey && jwlKeys.includes(updatedKey)) {
-            parameters['preset'] = 'Custom';
-        }
+        finalizeMaterialPresetState(parameters, updatedKey, Boolean(updatedKey && jwlKeys.includes(updatedKey)));
         return;
     }
 
@@ -134,6 +277,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
                 for (const [k, v] of Object.entries(pData)) {
                     if (k !== 'reference' && k !== 'category') parameters[k] = v;
                 }
+                parameters['initial_temperature'] = pData.atm_temperature ?? 288.15;
             }
         }
 
@@ -172,9 +316,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         parameters['ambient_rho'] = parameters['density'];
 
         const airKeys = ['atm_pressure', 'atm_temperature', 'initial_temperature', 'gamma', 'ideal_gamma', 'ideal_R', 'density'];
-        if (updatedKey && airKeys.includes(updatedKey)) {
-            parameters['preset'] = 'Custom';
-        }
+        finalizeMaterialPresetState(parameters, updatedKey, Boolean(updatedKey && airKeys.includes(updatedKey)));
         return;
     }
 
@@ -196,6 +338,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
                 if (pData.composition) {
                     parameters['composition'] = pData.composition;
                 }
+                parameters['initial_temperature'] = undefined;
             }
         }
 
@@ -228,9 +371,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         }
 
         const igKeys = ['ideal_rho_0', 'ideal_e_0', 'initial_temperature', 'ideal_gamma', 'ideal_R'];
-        if (updatedKey && igKeys.includes(updatedKey)) {
-            parameters['preset'] = 'Custom';
-        }
+        finalizeMaterialPresetState(parameters, updatedKey, Boolean(updatedKey && igKeys.includes(updatedKey)));
         return;
     }
 
@@ -263,6 +404,10 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             if (presetData.solid_model) parameters['solid_model'] = presetData.solid_model;
             if (presetData.burn_model) parameters['burn_model'] = presetData.burn_model;
             if (presetData.product_model) parameters['product_model'] = presetData.product_model;
+            parameters['initial_temperature'] = presetData.T_room ?? presetData.davis_t0 ?? 293.0;
+            parameters['base_preset'] = presetName;
+        } else if (updatedKey === 'preset' && presetName === 'Custom') {
+            finalizeMaterialPresetState(parameters, updatedKey, false);
         }
     } else {
         const materialKeys = [
@@ -307,10 +452,6 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
             'tait_gamma', 'tait_B', 'tait_rho0', 'tait_c0', 'tait_p_cav', 'tait_p0', 'tait_viscosity', 'tait_gruneisen', 'tait_variant', 'tait_variant_str',
             'solid_model', 'burn_model', 'product_model'
         ];
-        if (updatedKey && materialKeys.includes(updatedKey)) {
-            parameters['preset'] = 'Custom';
-            parameters['provenance'] = 'user';
-        }
         if (parameters['initial_temperature'] === undefined) {
             parameters['initial_temperature'] = parameters['T_room'] ?? 288.15;
         }
@@ -320,6 +461,7 @@ export function syncMPMMaterialParameters(node: Node, parameters: Record<string,
         } else if (updatedKey === 'T_room') {
             parameters['initial_temperature'] = parameters['T_room'];
         }
+        finalizeMaterialPresetState(parameters, updatedKey, Boolean(updatedKey && materialKeys.includes(updatedKey)));
     }
 
     if (modelName === 'JWL Programmed Burn') {
@@ -1153,7 +1295,7 @@ export const NODE_DEFAULT_PARAMETERS: Record<string, Record<string, any>> = {
         jc_m: 1.03,
         T_melt: 1793.0,
         T_room: 293.0,
-        initial_temperature: 288.15,
+        initial_temperature: 293.0,
         Cp: 486.0,
         mg_gamma0: 1.81,
         mg_c0: 4570.0,
@@ -4030,6 +4172,12 @@ export class StateManager {
                 for (const [key, value] of Object.entries(merged)) {
                     if (node.parameters[key] !== value) {
                         node.parameters[key] = value;
+                        changed = true;
+                    }
+                }
+                for (const removedKey of ['base_preset', 'reference', 'test_method']) {
+                    if (!(removedKey in merged) && removedKey in node.parameters) {
+                        delete node.parameters[removedKey];
                         changed = true;
                     }
                 }
@@ -9198,9 +9346,22 @@ export function getMaterialDisplayHTML(node: Node, state?: SimulationState): str
     const isEnergetic = isExplosiveMaterialNode(node);
 
     const presetName = p['preset'] || 'Custom';
+    const diff = getMaterialPresetDiff(p);
     const provenance = p['provenance'] || (presetName === 'Custom' ? 'user' : 'default');
     const testMethod = p['test_method'] || '';
     const reference = p['reference'] || '';
+
+    const fmtVal = (v: any): string => {
+        if (typeof v === 'boolean') return v ? 'Enabled' : 'Disabled';
+        const n = Number(v);
+        if (v !== '' && v !== null && !isNaN(n)) {
+            if (n === 0) return '0';
+            const abs = Math.abs(n);
+            if (abs >= 1e5 || abs < 1e-3) return n.toExponential(3);
+            return Number(n.toPrecision(5)).toString();
+        }
+        return String(v ?? '');
+    };
 
     let provBadge = '';
     let provColor = '#ef4444';
@@ -9208,7 +9369,14 @@ export function getMaterialDisplayHTML(node: Node, state?: SimulationState): str
     let provBorder = 'rgba(239, 68, 68, 0.4)';
     let provTitle = 'Uncalibrated Default Values: Parameters are heuristic or placeholder defaults.';
 
-    if (provenance === 'experimental') {
+    if (diff.basePreset && diff.isModified) {
+        const modCount = diff.modifiedParams.length;
+        provColor = '#f59e0b';
+        provBg = 'rgba(245, 158, 11, 0.14)';
+        provBorder = 'rgba(245, 158, 11, 0.45)';
+        provBadge = modCount > 0 ? `🟠 Modified (${modCount})` : '🟠 Modified';
+        provTitle = `Modified from preset "${diff.basePreset}" (${modCount} non-standard parameter${modCount === 1 ? '' : 's'}).`;
+    } else if (provenance === 'experimental') {
         provColor = '#22c55e';
         provBg = 'rgba(34, 197, 94, 0.12)';
         provBorder = 'rgba(34, 197, 94, 0.4)';
@@ -9225,9 +9393,21 @@ export function getMaterialDisplayHTML(node: Node, state?: SimulationState): str
         provBg = 'rgba(56, 189, 248, 0.12)';
         provBorder = 'rgba(56, 189, 248, 0.4)';
         provBadge = '🔵 Custom';
-        provTitle = 'User Modified: Based on preset or custom entries altered by the user.';
+        provTitle = 'Standalone Custom Material: Detached from any preset origin.';
     } else {
         provBadge = '🔴 Uncalibrated';
+    }
+
+    let modifiedBannerHTML = '';
+    if (diff.basePreset && diff.isModified) {
+        const chips = diff.modifiedParams.map(m =>
+            `<span style="display:inline-flex;align-items:center;gap:3px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.35);border-radius:3px;padding:1px 5px;font-size:9.5px;color:#fde68a;" title="Standard (${diff.basePreset}): ${fmtVal(m.standardVal)}"><b>${m.key}</b>: ${fmtVal(m.currentVal)} <span style="color:#94a3b8;">(std: ${fmtVal(m.standardVal)})</span></span>`
+        ).join('');
+        modifiedBannerHTML = `
+        <div style="margin-top: 5px; padding: 4px 6px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 3px; font-size: 10px; line-height: 1.3;">
+            <div style="color: #fbbf24; font-weight: 600; margin-bottom: ${diff.modifiedParams.length > 0 ? '3px' : '0'};">Based on: <span style="color: #f8fafc;">${diff.basePreset}</span></div>
+            ${diff.modifiedParams.length > 0 ? `<div style="display:flex;flex-wrap:wrap;gap:3px;">${chips}</div>` : ''}
+        </div>`;
     }
 
     let detonatorWarning = '';
@@ -9287,8 +9467,11 @@ export function getMaterialDisplayHTML(node: Node, state?: SimulationState): str
         </div>`;
     }
 
+    const isTrulyCustom = presetName === 'Custom' && !diff.basePreset;
+    const specLineHTML = `<div style="margin-top: 3px; font-size: 10px; color: #cbd5e1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="Active constitutive formulation: ${matModel}"><b>Spec:</b> <span style="color: #f8fafc;">${matModel}</span>${(!diff.isModified && presetName !== 'Custom') ? ` <span style="color:#94a3b8;">· ${presetName}</span>` : ''}</div>`;
+
     let metaHTML = '';
-    if (reference || testMethod) {
+    if (!isTrulyCustom && (reference || testMethod)) {
         metaHTML = `
         <div style="margin-top: 4px; font-size: 9.5px; color: #94a3b8; display: flex; flex-direction: column; gap: 1px; line-height: 1.25;">
             ${testMethod ? `<div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${testMethod}"><b>Test:</b> ${testMethod}</div>` : ''}
@@ -9302,6 +9485,8 @@ export function getMaterialDisplayHTML(node: Node, state?: SimulationState): str
             <span style="font-weight: 700; color: #f1f5f9; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${isEnergetic ? '💥 Energetic Material Spec' : '🧱 Material Specification'}</span>
             <span style="background: ${provBg}; border: 1px solid ${provBorder}; color: ${provColor}; border-radius: 3px; padding: 1px 5px; font-size: 9.5px; font-weight: 600; white-space: nowrap; flex-shrink: 0;" title="${provTitle}">${provBadge}</span>
         </div>
+        ${specLineHTML}
+        ${modifiedBannerHTML}
         ${metaHTML}
         ${pillarsHTML}
         ${detonatorWarning}

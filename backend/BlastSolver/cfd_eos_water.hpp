@@ -4,7 +4,7 @@
 #include <algorithm>
 
 #ifdef __CUDACC__
-#define HD_EOS_FUNC __host__ __device__
+#define HD_EOS_FUNC __host__ __device__ inline
 #else
 #define HD_EOS_FUNC inline
 #endif
@@ -89,30 +89,45 @@ struct TaitEOSWater {
         return (val < low) ? low : ((val > high) ? high : val);
     }
 
+    // Positive-base power helper: avoids non-inlined libdevice __pow(double, double) subroutine
+    // whose sm_120 SASS clobbers caller uniform registers across CALL.REL.NOINC.
+    template <typename T>
+    HD_EOS_FUNC static T pos_pow(T base, T exponent) {
+#if defined(__CUDA_ARCH__)
+        if (base <= static_cast<T>(0.0)) return static_cast<T>(0.0);
+        if constexpr (sizeof(T) == sizeof(float)) {
+            return ::powf(base, exponent);
+        } else {
+            return ::exp(exponent * ::log(base));
+        }
+#else
+        using std::pow;
+        return pow(base, exponent);
+#endif
+    }
+
     // --- 1. Isentropic / Barotropic Modified Tait (Cole 1948) ---
     template <typename T>
     HD_EOS_FUNC static T compute_pressure_isentropic(T rho, T B_val = static_cast<T>(B), T gamma_val = static_cast<T>(GAMMA),
                                                      T rho0_val = static_cast<T>(RHO0), T p_cav_val = static_cast<T>(P_CAV),
                                                      T p0_val = static_cast<T>(0.0)) {
-        using std::pow;
         using std::max;
         T rho_safe = max(static_cast<T>(1.0), rho);
         T r0 = max(static_cast<T>(1.0), rho0_val);
         T rho_ratio = clamp_val(rho_safe / r0, static_cast<T>(0.05), static_cast<T>(10.0));
-        T p = B_val * (pow(rho_ratio, gamma_val) - static_cast<T>(1.0)) + p0_val;
+        T p = B_val * (pos_pow(rho_ratio, gamma_val) - static_cast<T>(1.0)) + p0_val;
         return max(p_cav_val, p);
     }
 
     template <typename T>
     HD_EOS_FUNC static T compute_sound_speed_isentropic(T rho, T B_val = static_cast<T>(B), T gamma_val = static_cast<T>(GAMMA),
                                                         T rho0_val = static_cast<T>(RHO0)) {
-        using std::pow;
         using std::sqrt;
         using std::max;
         T rho_safe = max(static_cast<T>(1.0), rho);
         T r0 = max(static_cast<T>(1.0), rho0_val);
         T rho_ratio = clamp_val(rho_safe / r0, static_cast<T>(0.05), static_cast<T>(10.0));
-        T c2 = (B_val * gamma_val / r0) * pow(rho_ratio, gamma_val - static_cast<T>(1.0));
+        T c2 = (B_val * gamma_val / r0) * pos_pow(rho_ratio, gamma_val - static_cast<T>(1.0));
         T c = sqrt(max(static_cast<T>(10.0), c2));
         return clamp_val(c, static_cast<T>(10.0), static_cast<T>(50000.0));
     }
@@ -120,7 +135,6 @@ struct TaitEOSWater {
     template <typename T>
     HD_EOS_FUNC static T compute_energy_isentropic(T rho, T B_val = static_cast<T>(B), T gamma_val = static_cast<T>(GAMMA),
                                                    T rho0_val = static_cast<T>(RHO0)) {
-        using std::pow;
         using std::max;
         T rho_safe = max(static_cast<T>(1.0), rho);
         T r0 = max(static_cast<T>(1.0), rho0_val);
@@ -130,7 +144,7 @@ struct TaitEOSWater {
             return static_cast<T>(0.0);
         }
         T gm1 = gamma_val - static_cast<T>(1.0);
-        T term1 = (static_cast<T>(1.0) / gm1) * pow(rho_ratio, gm1);
+        T term1 = (static_cast<T>(1.0) / gm1) * pos_pow(rho_ratio, gm1);
         T term2 = static_cast<T>(1.0) / rho_ratio;
         T term3 = gamma_val / gm1;
         return (B_val / r0) * (term1 + term2 - term3);
@@ -139,11 +153,10 @@ struct TaitEOSWater {
     template <typename T>
     HD_EOS_FUNC static T compute_density_isentropic(T p, T B_val = static_cast<T>(B), T gamma_val = static_cast<T>(GAMMA),
                                                      T rho0_val = static_cast<T>(RHO0), T p0_val = static_cast<T>(0.0)) {
-        using std::pow;
         using std::max;
         T r0 = max(static_cast<T>(1.0), rho0_val);
         T p_eff = max(static_cast<T>(0.0), p - p0_val + B_val);
-        return r0 * pow(p_eff / B_val, static_cast<T>(1.0) / gamma_val);
+        return r0 * pos_pow(p_eff / B_val, static_cast<T>(1.0) / gamma_val);
     }
 
     template <typename T>
@@ -151,13 +164,12 @@ struct TaitEOSWater {
                                                       T& p_out, T& rho_out, T& e_out,
                                                       T B_val = static_cast<T>(B), T gamma_val = static_cast<T>(GAMMA),
                                                       T rho0_val = static_cast<T>(RHO0)) {
-        using std::pow;
         using std::max;
         T depth = max(static_cast<T>(0.0), z_surface - z);
         T gm1 = gamma_val - static_cast<T>(1.0);
         T factor = static_cast<T>(1.0) + (gm1 / gamma_val) * (rho0_val * g_acc * depth) / B_val;
         factor = max(static_cast<T>(1.0e-6), factor);
-        rho_out = rho0_val * pow(factor, static_cast<T>(1.0) / gm1);
+        rho_out = rho0_val * pos_pow(factor, static_cast<T>(1.0) / gm1);
         p_out = compute_pressure_isentropic(rho_out, B_val, gamma_val, rho0_val, static_cast<T>(P_CAV), p_atm);
         e_out = compute_energy_isentropic(rho_out, B_val, gamma_val, rho0_val);
     }
@@ -189,13 +201,12 @@ struct TaitEOSWater {
     template <typename T>
     HD_EOS_FUNC static T compute_sound_speed_caloric(T rho, T p, T e, T B_val = static_cast<T>(B), T gamma_val = static_cast<T>(GAMMA),
                                                      T rho0_val = static_cast<T>(RHO0), T gruneisen_val = static_cast<T>(GRUNEISEN)) {
-        using std::pow;
         using std::sqrt;
         using std::max;
         T rho_safe = max(static_cast<T>(1.0), rho);
         T r0 = max(static_cast<T>(1.0), rho0_val);
         T rho_ratio = clamp_val(rho_safe / r0, static_cast<T>(0.05), static_cast<T>(10.0));
-        T c2_isen = (B_val * gamma_val / r0) * pow(rho_ratio, gamma_val - static_cast<T>(1.0));
+        T c2_isen = (B_val * gamma_val / r0) * pos_pow(rho_ratio, gamma_val - static_cast<T>(1.0));
         T e_isen = compute_energy_isentropic(rho_safe, B_val, gamma_val, r0);
         T c2 = c2_isen + (gruneisen_val / (rho_safe + static_cast<T>(1e-9))) * p + gruneisen_val * (e - e_isen);
         T c = sqrt(max(static_cast<T>(10.0), c2));

@@ -123,6 +123,20 @@ inline double getEnergy3D(double p, double rho, const CellState3D<IsMultiMateria
     }
 }
 
+// Conservation ledger over genuine FLUID cells only: in-domain cells that are not flagged as
+// solid (is_boundary) by the FSI mask. Unlike getConservationTotals() this excludes the
+// penalty-mirrored states stored inside solid-masked cells and any tile padding, so it is the
+// correct quantity to audit across moving-solid coupling and cell covering/uncovering.
+struct CFDFluidLedger3D {
+    bool valid = false;            // false when the solver backend does not implement the ledger
+    double mass = 0.0;             // sum(rho * dV)                       [kg]
+    double momentum[3] = {0.0, 0.0, 0.0}; // sum(rho * u_i * dV)          [kg m/s]
+    double energy = 0.0;           // sum(E * dV), E = rho*e + 0.5*rho*u^2 [J]
+    double jwl_mass = 0.0;         // sum(arho1 * dV) (multi-material only) [kg]
+    double fluid_volume = 0.0;     // sum(dV) over fluid cells            [m^3]
+    long long fluid_cells = 0;     // number of fluid cells counted
+};
+
 struct CFDBulkSnapshot3D {
     int nx = 0, ny = 0, nz = 0;
     double cellSize = 0.0;
@@ -304,6 +318,11 @@ public:
     virtual void setSolidMask(const uint8_t*) {}
     virtual void setSolidVelocities(const double*) {}
     virtual std::pair<double, double> getConservationTotals() const = 0;
+    // Fluid-only conservation audit (excludes solid-masked + padding cells). Default: unsupported.
+    virtual CFDFluidLedger3D getFluidLedger() const { return CFDFluidLedger3D{}; }
+    // Diagnostic: dense host copy (index = i + j*nx + k*nx*ny) of the solid flag and conserved density.
+    // Returns false when unsupported. Read-only; intended for verification tooling, not for step loops.
+    virtual bool downloadFluidDiagnostics(std::vector<uint8_t>& /*solid*/, std::vector<double>& /*rho*/) const { return false; }
 };
 
 class CFDSolver3DImplBase : public CFDSolver3D {

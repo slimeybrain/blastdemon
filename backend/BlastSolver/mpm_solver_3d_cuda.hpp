@@ -49,8 +49,11 @@ public:
 
     void initializeGrid(int nx, int ny, int nz, float dx, float dy, float dz, float xmin = 0.0f, float ymin = 0.0f, float zmin = 0.0f);
     void setTransferScheme(MPMTransferScheme scheme) { m_transfer_scheme = scheme; }
+    MPMTransferScheme getTransferScheme() const { return m_transfer_scheme; }
     void setVelocityScheme(MPMVelocityScheme scheme) { m_velocity_scheme = scheme; }
+    MPMVelocityScheme getVelocityScheme() const { return m_velocity_scheme; }
     void setTimeScheme(MPMTimeIntegrationScheme scheme) { m_time_scheme = scheme; }
+    MPMTimeIntegrationScheme getTimeScheme() const { return m_time_scheme; }
     void setSmoothPlasticStrain(bool smooth) { m_smooth_plastic_strain = smooth; }
     bool getSmoothPlasticStrain() const { return m_smooth_plastic_strain; }
     void setFlipBlend(float alpha) { m_flip_blend = alpha; }
@@ -260,6 +263,8 @@ public:
     void storeFSIForces();
     // Clear the persisted FSI forces (call at the start of each FSI timestep before building new forces)
     void clearFSIForces();
+    // Conservatively scatter per-particle forces (3 floats/particle) onto MPM nodal f_ext using active shape functions
+    void scatterParticleForcesToGridGPU(const float* d_part_forces_xyz, size_t num_particles);
 
     std::vector<MaterialTable3D>& getMaterialTables() { return m_material_tables; }
     const std::vector<MaterialTable3D>& getMaterialTables() const { return m_material_tables; }

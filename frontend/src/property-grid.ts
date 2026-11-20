@@ -5,7 +5,7 @@
  * popover documentation tooltips, and mandatory model invalidation triggers.
  */
 
-import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, resolveMeshCounts, resolveMPMCounts, resolveFEMCounts, resolveGeometryCounts, resolveCouplerCounts, resolveTelemetryCounts, syncMPMMaterialParameters, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, getSliceAxisLabel, resolveResourcePath, getLSDynaDeckMeta } from './state-manager.js';
+import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getEntityStatsHTML, resolveMeshCounts, resolveMPMCounts, resolveFEMCounts, resolveGeometryCounts, resolveCouplerCounts, resolveTelemetryCounts, syncMPMMaterialParameters, getMaterialPresetDiff, formatMaterialSummary, MaterialPresetDiffItem, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS, getCompatibleMaterialsForNode, resolveSliceDomainBounds, canonicalizeQuantity, getSliceAxisLabel, resolveResourcePath, getLSDynaDeckMeta } from './state-manager.js';
 import { Node, NodeType, SimulationState, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { HostFileBrowserModal, FileFilterPreset, showRecentFoldersQuickMenu, recordRecentFolder } from './host-file-browser.js';
 import { GaugeManagerModal } from './gauge-manager-modal.js';
@@ -3891,9 +3891,15 @@ export class PropertyGrid {
             } else if (groupId === 'mpm_seeding' || groupId === 'mpm_geom') {
                 if (groupId === 'mpm_seeding') {
                     const mpmCounts = resolveMPMCounts(node, state ?? undefined);
-                    table.appendChild(this.createStatRow('Discretized Particles', `${mpmCounts.estParticles?.toLocaleString()} pts (PPC = ${mpmCounts.ppc})`, '#c084fc'));
-                    table.appendChild(this.createStatRow('Particle Grid Spacing', `${((mpmCounts.p_dx ?? 0.01) * 1000).toFixed(2)} mm`, '#4ec9b0'));
-                    table.appendChild(this.createStatRow('Particle Memory', `RAM ${(mpmCounts.ramMB ?? 0).toFixed(2)} MB · VRAM ${(mpmCounts.vramMB ?? 0).toFixed(2)} MB`, '#38bdf8'));
+                    const pRow = this.createStatRow('Discretized Particles', `${mpmCounts.estParticles?.toLocaleString()} pts (PPC = ${mpmCounts.ppc})`, '#c084fc');
+                    pRow.dataset.mpmStat = 'particles';
+                    table.appendChild(pRow);
+                    const sRow = this.createStatRow('Particle Grid Spacing', `${((mpmCounts.p_dx ?? 0.01) * 1000).toFixed(2)} mm`, '#4ec9b0');
+                    sRow.dataset.mpmStat = 'spacing';
+                    table.appendChild(sRow);
+                    const mRow = this.createStatRow('Particle Memory', `RAM ${(mpmCounts.ramMB ?? 0).toFixed(2)} MB · VRAM ${(mpmCounts.vramMB ?? 0).toFixed(2)} MB`, '#38bdf8');
+                    mRow.dataset.mpmStat = 'memory';
+                    table.appendChild(mRow);
                     if (mpmCounts.shapeType === 'STL' && mpmCounts.stlMeta) {
                         table.appendChild(this.createStatRow('STL Triangle Count', `${mpmCounts.stlMeta.triangleCount.toLocaleString()} tris`, '#facc15'));
                     }
@@ -3977,6 +3983,13 @@ export class PropertyGrid {
 
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
             const isHarbourModel = isDomainMesh3DNode(node.type) && owningModel?.nodes.some((n: any) => n.type === 'MarineHarbourDomain' || n.parameters?.init_mode === 'Hydrostatic_Stratified_3D');
+            const matDiffMap = new Map<string, MaterialPresetDiffItem>();
+            if (node.type === 'Material') {
+                const diff = getMaterialPresetDiff(node.parameters);
+                if (diff.basePreset) {
+                    diff.modifiedParams.forEach(m => matDiffMap.set(m.key, m));
+                }
+            }
 
             for (const param of params) {
                 const widget = this.createWidgetForParam(node, param.key, param.value);
@@ -3988,6 +4001,9 @@ export class PropertyGrid {
                 }
                 
                 const row = this.createTableRow(labelText, widget, param.key, node.type, info?.unit);
+                if (node.type === 'Material') {
+                    this.applyRowModifiedState(row, matDiffMap.get(param.key), node);
+                }
                 table.appendChild(row);
             }
 
@@ -3996,6 +4012,84 @@ export class PropertyGrid {
         }
 
         return accordion;
+    }
+
+    private formatStandardPresetVal(val: any): string {
+        if (typeof val === 'boolean') return val ? 'Enabled' : 'Disabled';
+        const n = Number(val);
+        if (val !== '' && val !== null && !isNaN(n)) {
+            if (n === 0) return '0';
+            const abs = Math.abs(n);
+            if (abs >= 1e5 || abs < 1e-3) return n.toExponential(3);
+            return Number(n.toPrecision(5)).toString();
+        }
+        return String(val ?? '');
+    }
+
+    private applyRowModifiedState(row: HTMLTableRowElement, modItem: MaterialPresetDiffItem | undefined, node: Node): void {
+        const labelCell = row.querySelector('.property-label-cell');
+        const valueCell = row.querySelector('.property-value-cell');
+        if (!labelCell || !valueCell) return;
+
+        const isCurrentlyModified = row.classList.contains('property-row-modified');
+        if (!modItem && !isCurrentlyModified) return;
+
+        const activeEl = document.activeElement as HTMLElement | null;
+        const hadFocus = Boolean(activeEl && valueCell.contains(activeEl));
+
+        // Clean previous modified markers
+        row.classList.remove('property-row-modified');
+        labelCell.querySelector('.property-modified-badge')?.remove();
+        valueCell.querySelector('.property-revert-btn')?.remove();
+        const existingWrap = valueCell.querySelector('.property-value-mod-wrap');
+        if (existingWrap) {
+            const child = existingWrap.firstElementChild;
+            if (child) valueCell.appendChild(child);
+            existingWrap.remove();
+        }
+
+        if (!modItem) {
+            if (hadFocus && activeEl) activeEl.focus();
+            return;
+        }
+
+        row.classList.add('property-row-modified');
+        const baseName = node.parameters['base_preset'] || 'Preset';
+        const stdStr = this.formatStandardPresetVal(modItem.standardVal);
+
+        const badge = document.createElement('span');
+        badge.className = 'property-modified-badge';
+        badge.textContent = 'NON-STD';
+        badge.title = `Modified from ${baseName} standard: ${stdStr}`;
+        labelCell.appendChild(badge);
+
+        const existingWidget = valueCell.firstElementChild as HTMLElement | null;
+        if (existingWidget) {
+            const wrap = document.createElement('div');
+            wrap.className = 'property-value-mod-wrap';
+            wrap.style.display = 'flex';
+            wrap.style.alignItems = 'center';
+            wrap.style.gap = '4px';
+            wrap.style.width = '100%';
+            existingWidget.style.flex = '1';
+            existingWidget.style.minWidth = '0';
+            wrap.appendChild(existingWidget);
+
+            const revertBtn = document.createElement('button');
+            revertBtn.type = 'button';
+            revertBtn.className = 'property-revert-btn';
+            revertBtn.textContent = '↺';
+            revertBtn.title = `Revert to ${baseName} standard (${stdStr})`;
+            revertBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                this.updateNodeParam(node, modItem.key, modItem.standardVal);
+                this.render(true);
+            });
+            wrap.appendChild(revertBtn);
+            valueCell.appendChild(wrap);
+            if (hadFocus && activeEl) activeEl.focus();
+        }
     }
 
     private createTableRow(
@@ -4140,9 +4234,7 @@ export class PropertyGrid {
             matNodes.forEach(mat => {
                 const opt = document.createElement('option');
                 opt.value = mat.id;
-                const matModel = mat.parameters?.material_model || 'Material';
-                const preset = mat.parameters?.preset;
-                const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                const matSummary = formatMaterialSummary(mat);
                 opt.textContent = `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 8)}] (${matSummary})`;
                 if (mat.id === currentWaterId) {
                     opt.selected = true;
@@ -4198,9 +4290,7 @@ export class PropertyGrid {
             matNodes.forEach(mat => {
                 const opt = document.createElement('option');
                 opt.value = mat.id;
-                const matModel = mat.parameters?.material_model || 'Material';
-                const preset = mat.parameters?.preset;
-                const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                const matSummary = formatMaterialSummary(mat);
                 opt.textContent = `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 8)}] (${matSummary})`;
                 if (mat.id === currentSeabedId) {
                     opt.selected = true;
@@ -4687,9 +4777,7 @@ export class PropertyGrid {
             matNodes.forEach(mat => {
                 const opt = document.createElement('option');
                 opt.value = mat.id;
-                const matModel = mat.parameters?.material_model || 'Material';
-                const preset = mat.parameters?.preset;
-                const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                const matSummary = formatMaterialSummary(mat);
                 opt.textContent = `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 8)}] (${matSummary})`;
                 if (mat.id === currentMatId) {
                     opt.selected = true;
@@ -5110,9 +5198,39 @@ export class PropertyGrid {
 
         if (key === 'preset' && node.type === 'Material') {
             const groups = getCategorizedPresetsForModel(currentMatModel);
-            return this.createCategorizedDropdown(groups, String(value ?? ''), (val) => {
+            const diff = getMaterialPresetDiff(node.parameters);
+            const modBase = (diff.isModified && diff.basePreset) ? diff.basePreset : null;
+            const select = this.createCategorizedDropdown(groups, String(value ?? ''), (val) => {
+                if (val === '__modified__') return;
                 this.updateNodeParam(node, key, val);
-            });
+            }, modBase);
+            select.dataset.paramKey = 'preset';
+
+            if (diff.basePreset) {
+                const wrap = document.createElement('div');
+                wrap.style.display = 'flex';
+                wrap.style.alignItems = 'center';
+                wrap.style.gap = '4px';
+                wrap.style.width = '100%';
+                select.style.flex = '1';
+                select.style.minWidth = '0';
+                wrap.appendChild(select);
+
+                const detachBtn = document.createElement('button');
+                detachBtn.type = 'button';
+                detachBtn.className = 'property-detach-btn';
+                detachBtn.textContent = 'Make Custom';
+                detachBtn.title = `Disconnect from "${diff.basePreset}" origin and convert to standalone Custom material (keeps all current values)`;
+                detachBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    this.updateNodeParam(node, 'preset', 'Custom');
+                    this.render(true);
+                });
+                wrap.appendChild(detachBtn);
+                return wrap;
+            }
+            return select;
         }
 
         const allowedOptions = dropdowns[key] || PARAMETER_DEFINITIONS[key]?.allowedValues;
@@ -5456,7 +5574,8 @@ export class PropertyGrid {
     private createCategorizedDropdown(
         groups: { category: string; presets: string[] }[],
         selected: string,
-        onChange: (val: string) => void
+        onChange: (val: string) => void,
+        modifiedFromPreset?: string | null
     ): HTMLSelectElement {
         const select = document.createElement('select');
         select.className = 'property-select';
@@ -5465,6 +5584,16 @@ export class PropertyGrid {
         const normSelected = normalize(selectedStr);
 
         let matchFound = false;
+        if (modifiedFromPreset) {
+            const modEl = document.createElement('option');
+            modEl.value = '__modified__';
+            modEl.textContent = `Modified: ${modifiedFromPreset}`;
+            modEl.selected = true;
+            modEl.disabled = true;
+            select.appendChild(modEl);
+            matchFound = true;
+        }
+
         groups.forEach(g => {
             const optgroup = document.createElement('optgroup');
             optgroup.label = g.category;
@@ -5472,7 +5601,7 @@ export class PropertyGrid {
                 const el = document.createElement('option');
                 el.value = opt;
                 el.textContent = opt;
-                const isMatch = (
+                const isMatch = !modifiedFromPreset && (
                     opt === selectedStr ||
                     opt.toLowerCase() === selectedStr.toLowerCase() ||
                     (normSelected !== '' && normalize(opt) === normSelected)
@@ -5981,8 +6110,15 @@ export class PropertyGrid {
         const updates: Record<string, any> = { [key]: value };
 
         if (node.type === 'Material' && key === 'preset') {
+            if (value === 'Custom') {
+                delete node.parameters['base_preset'];
+                delete node.parameters['reference'];
+                delete node.parameters['test_method'];
+                updates['provenance'] = 'user';
+            }
             const presetData = MPM_MATERIAL_PRESETS[value];
             if (presetData) {
+                updates['base_preset'] = value;
                 Object.assign(updates, presetData);
                 if (presetData.category === 'Ideal Gas Presets') {
                     updates['material_type'] = 'Air';
@@ -6287,7 +6423,7 @@ export class PropertyGrid {
                     if (node.parameters['detonation_energy'] === undefined) updates['detonation_energy'] = 4.29e6;
                 }
             }
-        } else if (node.type === 'Material' && !['preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
+        } else if (node.type === 'Material' && !['preset', 'base_preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
             updates['preset'] = 'Custom';
             updates['provenance'] = 'user';
         } else if (key === 'space_time_scheme') {
@@ -6358,6 +6494,10 @@ export class PropertyGrid {
         } else {
             this.stateManager.updateNodeParameters(node.id, updates);
             const owningModel = this.stateManager.getModelForNode(node.id) || this.stateManager.getActiveModel();
+            const syncedNode = owningModel?.nodes.find(n => n.id === node.id);
+            if (syncedNode) {
+                node.parameters = { ...syncedNode.parameters };
+            }
             if (owningModel && (key === 'water_discretization_mode' || key === 'seabed_mesh_type')) {
                 this.stateManager.setModelStatus(owningModel.id, 'UNINITIALIZED');
             }
@@ -6389,6 +6529,12 @@ export class PropertyGrid {
         if (!targetId) return;
         const state = this.stateManager.getCurrentState();
         let targetNode = state?.nodes.find(n => n.id === targetId);
+        if (!targetNode) {
+            for (const m of this.stateManager.getAllModels()) {
+                targetNode = m.nodes.find(n => n.id === targetId);
+                if (targetNode) break;
+            }
+        }
         if (!targetNode && node) {
             targetNode = node;
         }
@@ -6431,6 +6577,43 @@ export class PropertyGrid {
                 valEl.textContent = `${(meshCounts.volume ?? 0).toFixed(4)} m³`;
             }
         });
+
+        // 3. Live-update Material non-standard parameter row highlights and preset dropdown
+        if (targetNode.type === 'Material') {
+            const diff = getMaterialPresetDiff(targetNode.parameters);
+            const modMap = new Map<string, MaterialPresetDiffItem>();
+            if (diff.basePreset) {
+                diff.modifiedParams.forEach(m => modMap.set(m.key, m));
+            }
+            const rows = this.rootElement.querySelectorAll('.property-row[data-param-key]') as NodeListOf<HTMLTableRowElement>;
+            rows.forEach(row => {
+                const pKey = row.dataset.paramKey;
+                if (pKey) {
+                    this.applyRowModifiedState(row, modMap.get(pKey), targetNode!);
+                }
+            });
+            const presetSel = this.rootElement.querySelector('select[data-param-key="preset"]') as HTMLSelectElement | null;
+            if (presetSel) {
+                const existingModOpt = presetSel.querySelector('option[value="__modified__"]') as HTMLOptionElement | null;
+                if (diff.isModified && diff.basePreset) {
+                    if (!existingModOpt) {
+                        const modEl = document.createElement('option');
+                        modEl.value = '__modified__';
+                        modEl.textContent = `Modified: ${diff.basePreset}`;
+                        modEl.disabled = true;
+                        presetSel.insertBefore(modEl, presetSel.firstChild);
+                        modEl.selected = true;
+                    } else {
+                        existingModOpt.textContent = `Modified: ${diff.basePreset}`;
+                        existingModOpt.selected = true;
+                    }
+                } else if (existingModOpt) {
+                    existingModOpt.remove();
+                    const curPreset = String(targetNode.parameters['preset'] ?? '');
+                    if (curPreset) presetSel.value = curPreset;
+                }
+            }
+        }
     }
 
     public syncValuesInPlace(node?: Node): void {
@@ -6484,6 +6667,9 @@ export class PropertyGrid {
                         }
                     } else if (input.tagName === 'SELECT') {
                         const sel = input as HTMLSelectElement;
+                        if (key === 'preset' && sel.querySelector('option[value="__modified__"]')) {
+                            return;
+                        }
                         let strVal = String(value ?? '');
                         let hasEnabledDisabled = false;
                         for (let i = 0; i < sel.options.length; i++) {
@@ -6533,6 +6719,18 @@ export class PropertyGrid {
             const slice = slices[selectedSliceIdx];
             if (slice) {
                 this.syncSliceControlsInPlace(slice);
+            }
+        }
+        if (node && (node.type === 'MPMObject3D' || node.type === 'MPMObject2D')) {
+            const pRow = this.rootElement.querySelector('[data-mpm-stat="particles"] td:last-child');
+            const sRow = this.rootElement.querySelector('[data-mpm-stat="spacing"] td:last-child');
+            const mRow = this.rootElement.querySelector('[data-mpm-stat="memory"] td:last-child');
+            if (pRow || sRow || mRow) {
+                const state = this.stateManager.getCurrentState();
+                const mpmCounts = resolveMPMCounts(node, state ?? undefined);
+                if (pRow) pRow.textContent = `${mpmCounts.estParticles?.toLocaleString()} pts (PPC = ${mpmCounts.ppc})`;
+                if (sRow) sRow.textContent = `${((mpmCounts.p_dx ?? 0.01) * 1000).toFixed(2)} mm`;
+                if (mRow) mRow.textContent = `RAM ${(mpmCounts.ramMB ?? 0).toFixed(2)} MB · VRAM ${(mpmCounts.vramMB ?? 0).toFixed(2)} MB`;
             }
         }
     }

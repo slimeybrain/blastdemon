@@ -1514,6 +1514,13 @@ export const PARAMETER_DEFINITIONS: Record<string, ParameterDefinition> = {
         shortDesc: 'Pre-calibrated empirical parameters from literature for the selected model',
         detailedDesc: 'Loads peer-reviewed, laboratory-calibrated material properties dynamically filtered for the active constitutive formulation: structural & armor steels (A36, S275, S355, S460, 1006, 1020, AISI 4150, AISI 4340 and heat-treated variants [Penetrator Nose 55-58 HRC, Shell Base 32-36 HRC, Annealed, Normalized, Q&T 315-650°C], Krupp E22, US Class 4 RHA [WWII AXS-488 / 240 HB], HY-80, HY-100, RHA [MIL-A-12560], Armox, Weldox, stainless steels), light alloys, concrete/masonry grades, soils & geomaterials (marine clay, silty clay, saturated mud/slurry, sand, granite, basalt, sandstone, limestone, shale, ice), soft materials & bio-surrogates (10% & 20% ballistic gelatins, hydrodynamic water, silicone tissue simulant, hydrogel), polymers, ceramics, unreacted explosive solids, CFD ideal gases, and JWL detonation products (or Custom).'
     },
+    'base_preset': {
+        key: 'base_preset',
+        label: 'Base Material Preset',
+        category: 'Material Constitutive',
+        shortDesc: 'Origin preset ID retained when material parameters are customized',
+        detailedDesc: 'Stores the calibrated preset name that a modified Material node was originally derived from, enabling non-standard parameter diffing, provenance badges, and 1-click revert. Cleared when explicitly detached to standalone Custom.'
+    },
     'solid_model': {
         key: 'solid_model',
         label: 'Pillar 1: Solid Reactant EOS',
@@ -6918,6 +6925,7 @@ export function shouldSkipNodeParameter(
     }
 
     if (nodeType === 'Material') {
+        if (key === 'base_preset') return true;
         if (!ctx.hasMPM && key === 'transfer_scheme') return true;
         if (!ctx.hasFEM && !ctx.hasMPM && [
             'enable_strain_erosion', 'erosion_strain', 'enable_stress_erosion', 'erosion_stress',

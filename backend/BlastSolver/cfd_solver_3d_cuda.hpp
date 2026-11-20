@@ -39,11 +39,21 @@ private:
     mutable size_t d_solid_mask_fsi_capacity = 0;
     mutable SolidVelocityTile3D* d_solid_vel_fsi = nullptr;
     mutable size_t d_solid_vel_fsi_capacity = 0;
+    mutable FluidFractionTile3D<RealType>* d_fluid_frac_fsi = nullptr;
+    mutable size_t d_fluid_frac_fsi_capacity = 0;
+    mutable ConservativeTile3D<RealType, IsMultiMaterial>* d_fsi_Q_tmp = nullptr;
+    mutable size_t d_fsi_Q_tmp_capacity = 0;
+    mutable FluidDragTile3D* d_fsi_drag_fsi = nullptr;
+    mutable size_t d_fsi_drag_fsi_capacity = 0;
+    mutable float* d_fsi_part_forces = nullptr;
+    mutable size_t d_fsi_part_forces_capacity = 0;
+    mutable bool has_prev_alpha_f = false;
     mutable void* d_tile_has_boundary_buf = nullptr;
     mutable size_t d_tile_has_boundary_capacity = 0;
     mutable UncoveringMaskTile3D* d_prev_mask = nullptr;
     mutable bool has_prev_mask = false;
     mutable bool constants_dirty = true;
+    mutable bool states_pred_synced = false;
     mutable int step_count = 0;
 
     void bind_constants() const;
@@ -95,6 +105,10 @@ private:
     mutable std::vector<uint8_t> paged_solid_mask;
     mutable bool has_paged_solid_vel = false;
     mutable std::vector<SolidVelocityTile3D> paged_solid_vel;
+    mutable bool has_paged_fluid_frac = false;
+    mutable std::vector<FluidFractionTile3D<RealType>> paged_fluid_frac;
+    mutable bool has_paged_fsi_drag = false;
+    mutable std::vector<FluidDragTile3D> paged_fsi_drag;
     mutable bool has_paged_tile_boundary = false;
     mutable std::vector<uint8_t> paged_tile_boundary;
 
@@ -124,10 +138,7 @@ public:
     }
     void setDetonatorLocation(double x, double y, double z, double start_time = 0.0) override;
     void setFluxScheme(const std::string& scheme_name) override;
-    void setSpaceTimeScheme(SpaceTimeScheme3D scheme) override {
-        CFDSolver3DImplBase::setSpaceTimeScheme(scheme);
-        constants_dirty = true;
-    }
+    void setSpaceTimeScheme(SpaceTimeScheme3D scheme) override;
     void setSpatialOrder(int order) override;
     void setTemporalOrder(int order) override;
     void setBoundaryConditions(BCType3D xmin, BCType3D xmax, BCType3D ymin, BCType3D ymax, BCType3D zmin, BCType3D zmax) override;
@@ -152,6 +163,8 @@ public:
     void setSolidMask(const uint8_t* mask) override;
     void setSolidVelocities(const double* v) override;
     std::pair<double, double> getConservationTotals() const override;
+    CFDFluidLedger3D getFluidLedger() const override;
+    bool downloadFluidDiagnostics(std::vector<uint8_t>& solid, std::vector<double>& rho) const override;
 
     std::vector<float> sampleGauge(const Gauge3D& gauge) const override;
     std::vector<float> extractSlice(const Slice3D& slice) const override;

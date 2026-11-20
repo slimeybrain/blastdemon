@@ -107,20 +107,28 @@ MemoryEstimate estimateCFD3DMemory(int nx, int ny, int nz, bool is_cuda, bool is
     size_t total_tiles = static_cast<size_t>(ntx) * static_cast<size_t>(nty) * static_cast<size_t>(ntz);
     
     size_t real_size = is_double ? sizeof(double) : sizeof(float);
-    size_t num_vars = is_multimat ? 10 : 5;
+    size_t prim_vars = is_multimat ? 11 : 7;
+    size_t cons_vars = is_multimat ? 9 : 5;
     
-    size_t tile_primitive_bytes = 512 * real_size * num_vars;
-    size_t tile_conservative_bytes = 512 * real_size * num_vars;
-    size_t tile_geom_bytes = 512 * real_size * 3;
-    size_t tile_aux_bytes = 512 * 4; // Flags, indices, predictors
+    size_t tile_primitive_bytes = 512 * real_size * prim_vars;
+    size_t tile_conservative_bytes = 512 * real_size * cons_vars;
+    size_t tile_predictor_bytes = 512 * real_size * cons_vars;
+    size_t tile_geom_bytes = 512 * 16;
+    size_t tile_aux_bytes = 64; // Per-tile flags, indices, reductions
     
-    size_t bytes_per_tile = tile_primitive_bytes + tile_conservative_bytes + tile_geom_bytes + tile_aux_bytes;
-    
-    // CFD 3D double buffers state tiles on both Host and GPU
-    size_t host_bytes = static_cast<size_t>(total_tiles * bytes_per_tile * 1.3);
-    size_t gpu_bytes = is_cuda ? static_cast<size_t>(total_tiles * bytes_per_tile * 1.5) : 0;
-    
-    return {host_bytes, gpu_bytes};
+    if (is_cuda) {
+        size_t gpu_bytes_per_tile = tile_primitive_bytes + tile_conservative_bytes + tile_predictor_bytes + tile_geom_bytes + tile_aux_bytes;
+        size_t gpu_bytes = (total_tiles * gpu_bytes_per_tile) + (128ULL * 1024ULL * 1024ULL);
+        // CUDA 3D CFD keeps tiles resident on GPU; Host RAM only holds staging/slice buffers and metadata.
+        size_t snx = static_cast<size_t>(nx), sny = static_cast<size_t>(ny), snz = static_cast<size_t>(nz);
+        size_t max_face_cells = std::max({snx * sny, snx * snz, sny * snz});
+        size_t host_bytes = (max_face_cells * 64ULL) + (128ULL * 1024ULL * 1024ULL);
+        return {host_bytes, gpu_bytes};
+    } else {
+        size_t cpu_bytes_per_tile = tile_primitive_bytes + tile_conservative_bytes + tile_geom_bytes + (512 * 4);
+        size_t host_bytes = static_cast<size_t>(total_tiles * cpu_bytes_per_tile * 1.2) + (64ULL * 1024ULL * 1024ULL);
+        return {host_bytes, 0};
+    }
 }
 
 MemoryEstimate estimateCFD2DMemory(int nr, int nz, bool is_cuda, bool is_double, bool is_multimat) {
@@ -140,13 +148,13 @@ MemoryEstimate estimateMPM3DMemory(int nx, int ny, int nz, size_t particle_count
     size_t grid_nodes = static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz);
     size_t directory_bytes = 0;
     if (is_sparse) {
-        size_t ntx = static_cast<size_t>((nx + 3) / 4);
-        size_t nty = static_cast<size_t>((ny + 3) / 4);
-        size_t ntz = static_cast<size_t>((nz + 3) / 4);
+        size_t ntx = static_cast<size_t>((nx + 7) / 8);
+        size_t nty = static_cast<size_t>((ny + 7) / 8);
+        size_t ntz = static_cast<size_t>((nz + 7) / 8);
         size_t total_tiles = ntx * nty * ntz;
-        directory_bytes = total_tiles * sizeof(int);
-        size_t est_active_tiles = std::min<size_t>(total_tiles, std::max<size_t>(4096ULL, (particle_count / 32ULL) * 3ULL + 4096ULL));
-        grid_nodes = est_active_tiles * 64ULL;
+        directory_bytes = total_tiles * sizeof(int) * 2ULL;
+        size_t est_active_tiles = std::min<size_t>(total_tiles, std::max<size_t>(512ULL, ((particle_count + 255ULL) / 256ULL) * 3ULL + 256ULL));
+        grid_nodes = est_active_tiles * 512ULL;
     }
     
     if (is_cuda) {
@@ -154,11 +162,12 @@ MemoryEstimate estimateMPM3DMemory(int nx, int ny, int nz, size_t particle_count
         //   d_grid           = sizeof(MPMGridNode3D) = alignas(32) struct: 44B padded to 64B
         //   d_grid_n         = sizeof(float)          = 4B
         //   d_active_nodes   = sizeof(int)            = 4B
-        //                    Total per grid node      = 72B
+        //   d_mat_tag        = sizeof(int)            = 4B
+        //                    Total per grid node      = 76B
         //   d_soa_buffer     = 34 floats + 4 ints     = 152B  }
         //   d_compaction_indices = 2 ints              = 8B    } per particle = 160B
         //   Base buffers & scratch overhead = 64 MB
-        size_t gpu_bytes = directory_bytes + (grid_nodes * 72ULL) + (particle_count * 160ULL) + (64ULL * 1024ULL * 1024ULL);
+        size_t gpu_bytes = directory_bytes + (grid_nodes * 76ULL) + (particle_count * 160ULL) + (64ULL * 1024ULL * 1024ULL);
         // Host RAM: Particle staging buffer during init + solver base overhead (~64 MB)
         // Note: m_host_grid is lazy and not allocated during simulation execution.
         size_t host_bytes = directory_bytes + (particle_count * 256ULL) + (64ULL * 1024ULL * 1024ULL);

@@ -227,25 +227,29 @@ namespace MultiMat {
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixturePressure(RealType E_internal, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted);
+    inline
+    RealType getMixturePressure(RealType E_internal, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted);
 
     template <typename RealType>
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixtureEnergy(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted);
+    inline
+    RealType getMixtureEnergy(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted);
 
     template <typename RealType>
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixtureSoundSpeed(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted);
+    inline
+    RealType getMixtureSoundSpeed(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted);
 
     template <typename RealType>
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getEnergy_IdealGas(RealType p, RealType rho, RealType gamma) {
+    inline
+    RealType getEnergy_IdealGas(RealType p, RealType rho, RealType gamma) {
         return p / ((gamma - (RealType)1.0) * rho);
     }
 
@@ -253,7 +257,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getEnergy_JWL(RealType p, RealType rho, const JWLParams& jwl) {
+    inline
+    RealType getEnergy_JWL(RealType p, RealType rho, const JWLParams& jwl) {
         using std::exp;
         RealType V = (RealType)jwl.rho0 / rho;
         RealType f = (RealType)jwl.A * ((RealType)1.0 - (RealType)jwl.omega_over_R1 / V) * exp(-(RealType)jwl.R1 * V) +
@@ -265,7 +270,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getReferencePressure_Unreacted(const JWLParams& unreacted) {
+    inline
+    RealType getReferencePressure_Unreacted(const JWLParams& unreacted) {
         using std::fmax;
         return fmax((RealType)0.0, (RealType)unreacted.f2_const);
     }
@@ -274,7 +280,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getEnergy_Tait(RealType p, RealType rho, RealType B = 3.039e8, RealType gamma = 7.15, RealType rho0 = 1000.0, RealType gruneisen = 0.28, bool is_caloric = false) {
+    inline
+    RealType getEnergy_Tait(RealType p, RealType rho, RealType B = 3.039e8, RealType gamma = 7.15, RealType rho0 = 1000.0, RealType gruneisen = 0.28, bool is_caloric = false) {
         RealType e_isen = Blast::TaitEOSWater::compute_energy_isentropic<RealType>(rho, B, gamma, rho0);
         if (is_caloric) {
             RealType p_isen = Blast::TaitEOSWater::compute_pressure_isentropic<RealType>(rho, B, gamma, rho0);
@@ -287,7 +294,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixturePressureTait(
+    inline
+    RealType getMixturePressureTait(
         RealType E_internal, RealType rho,
         RealType alpha1, RealType alpha2, RealType arho1, RealType arho2,
         RealType B, RealType gamma_tait, RealType rho0_water, RealType gruneisen,
@@ -345,7 +353,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixturePressureTait(
+    inline
+    RealType getMixturePressureTait(
         RealType E_internal, RealType rho,
         RealType alpha1, RealType alpha2, RealType arho1, RealType arho2,
         const Blast::TaitEOSParams& tait,
@@ -363,7 +372,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixtureEnergyTait(
+    inline
+    RealType getMixtureEnergyTait(
         RealType p, RealType rho,
         RealType alpha1, RealType alpha2, RealType arho1, RealType arho2,
         RealType B, RealType gamma_tait, RealType rho0_water, RealType gruneisen,
@@ -417,7 +427,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixtureEnergyTait(
+    inline
+    RealType getMixtureEnergyTait(
         RealType p, RealType rho,
         RealType alpha1, RealType alpha2, RealType arho1, RealType arho2,
         const Blast::TaitEOSParams& tait,
@@ -435,7 +446,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixtureSoundSpeedTait(
+    inline
+    RealType getMixtureSoundSpeedTait(
         RealType p, RealType rho,
         RealType alpha1, RealType alpha2, RealType arho1, RealType arho2,
         RealType B, RealType gamma_tait, RealType rho0_water, RealType gruneisen,
@@ -502,7 +514,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixtureSoundSpeedTait(
+    inline
+    RealType getMixtureSoundSpeedTait(
         RealType p, RealType rho,
         RealType alpha1, RealType alpha2, RealType arho1, RealType arho2,
         const Blast::TaitEOSParams& tait,
@@ -520,7 +533,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixturePressure(RealType E_internal, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted) {
+    inline
+    RealType getMixturePressure(RealType E_internal, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted) {
         (void)rho;
         (void)arho2;
         if (alpha1 + alpha2 < (RealType)1e-8) {
@@ -568,7 +582,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixtureEnergy(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted) {
+    inline
+    RealType getMixtureEnergy(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted) {
         (void)rho;
         (void)arho2;
         RealType omega0 = fmax((RealType)1e-4, gamma0 - (RealType)1.0);
@@ -613,7 +628,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType getMixtureSoundSpeed(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted) {
+    inline
+    RealType getMixtureSoundSpeed(RealType p, RealType rho, RealType alpha1, RealType alpha2, RealType arho1, RealType arho2, RealType gamma0, const JWLParams& products, const JWLParams& unreacted) {
         using std::exp;
         using std::sqrt;
         using std::fmax;
@@ -667,7 +683,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType computeProgrammedBurn(
+    inline
+    RealType computeProgrammedBurn(
             RealType t, RealType dt,
             RealType x, RealType y, RealType z,
             RealType det_vel, RealType det_start_time,
@@ -722,7 +739,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType computeAfterburn(
+    inline
+    RealType computeAfterburn(
             RealType dt,
             RealType currentTime,
             RealType R_charge,
@@ -836,7 +854,8 @@ __host__ __device__
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-    inline RealType computeAfterburn(
+    inline
+    RealType computeAfterburn(
             RealType dt,
             RealType R_charge,
             RealType det_vel,

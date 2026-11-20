@@ -4,7 +4,7 @@
  * parent-child entity nesting, visibility toggles, filter pipelines, and execution.
  */
 
-import { StateManager, prepareModelSavePayload, resolveResourcePath, getSliceAxisLabel, isExplosiveMaterialNode, isSeabedMaterialNode, isWaterMaterialNode, isSolidMaterialNode, resolveFEMCounts, getLSDynaDeckMeta } from './state-manager.js';
+import { StateManager, prepareModelSavePayload, resolveResourcePath, getSliceAxisLabel, isExplosiveMaterialNode, isSeabedMaterialNode, isWaterMaterialNode, isSolidMaterialNode, resolveFEMCounts, getLSDynaDeckMeta, getMaterialPresetDiff } from './state-manager.js';
 import { Model, Node, NodeType, SimulationStatus, SimulationState, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { PlatformBridge } from './PlatformBridge.js';
 import { CustomDialog } from './custom-dialog.js';
@@ -5611,21 +5611,26 @@ export class PipelineBrowser {
     }
 
     private getCompactMaterialSummary(node: Node): string {
+        const diff = getMaterialPresetDiff(node.parameters);
+        const modSuffix = (diff.basePreset && diff.isModified) ? '*' : '';
         const matType = node.parameters.material_type;
-        if (matType === 'Air') return 'Air (STP)';
-        if (matType === 'JWL Charge') return `JWL (${node.parameters.composition || 'TNT'})`;
-        if (matType === 'Ideal Gas Charge') return `Ideal Gas (${node.parameters.composition || 'TNT'})`;
+        if (matType === 'Air') return `Air (STP)${modSuffix}`;
+        if (matType === 'JWL Charge') return `JWL (${node.parameters.composition || 'TNT'})${modSuffix}`;
+        if (matType === 'Ideal Gas Charge') return `Ideal Gas (${node.parameters.composition || 'TNT'})${modSuffix}`;
 
-        const preset = node.parameters.preset;
-        if (preset && preset !== 'Custom') {
-            if (preset.includes('Water') || preset.includes('Tait')) return 'Tait Water';
-            if (preset.includes('Air')) return 'Air (STP)';
-            if (preset.includes('TNT') || preset.includes('JWL')) return 'JWL TNT';
-            if (preset.includes('Steel') || preset.includes('4150') || preset.includes('4340') || preset.includes('Krupp') || preset.includes('E22') || preset.includes('RHA') || preset.includes('AXS-488')) return 'Steel';
-            if (preset.includes('Concrete')) return 'Concrete';
-            if (preset.includes('Soil') || preset.includes('Sand')) return 'Soil';
-            if (preset.length > 14) return preset.slice(0, 13) + '…';
-            return preset;
+        const effectivePreset = (node.parameters.preset && node.parameters.preset !== 'Custom')
+            ? node.parameters.preset
+            : diff.basePreset;
+        if (effectivePreset) {
+            let shortName = effectivePreset;
+            if (effectivePreset.includes('Water') || effectivePreset.includes('Tait')) shortName = 'Tait Water';
+            else if (effectivePreset.includes('Air')) shortName = 'Air (STP)';
+            else if (effectivePreset.includes('TNT') || effectivePreset.includes('JWL')) shortName = 'JWL TNT';
+            else if (effectivePreset.includes('Steel') || effectivePreset.includes('4150') || effectivePreset.includes('4340') || effectivePreset.includes('Krupp') || effectivePreset.includes('E22') || effectivePreset.includes('RHA') || effectivePreset.includes('AXS-488')) shortName = 'Steel';
+            else if (effectivePreset.includes('Concrete')) shortName = 'Concrete';
+            else if (effectivePreset.includes('Soil') || effectivePreset.includes('Sand')) shortName = 'Soil';
+            else if (effectivePreset.length > 14) shortName = effectivePreset.slice(0, 13) + '…';
+            return `${shortName}${modSuffix}`;
         }
 
         const matModel = node.parameters.material_model;
@@ -5654,6 +5659,11 @@ export class PipelineBrowser {
         if (node.type === 'Material' || (node.type as string).startsWith('MPM') || (node.type as string).startsWith('FEM')) {
             const preset = node.parameters.preset;
             const model = node.parameters.material_model;
+            const diff = getMaterialPresetDiff(node.parameters);
+            if (diff.basePreset && diff.isModified) {
+                const keys = diff.modifiedParams.map(m => m.key).join(', ');
+                return `${diff.basePreset} (Modified — ${diff.modifiedParams.length} param${diff.modifiedParams.length === 1 ? '' : 's'}${keys ? ': ' + keys : ''})`;
+            }
             if (preset && preset !== 'Custom') return `${preset} (${model || 'EOS'})`;
             if (model) return `${model} (Custom)`;
         }

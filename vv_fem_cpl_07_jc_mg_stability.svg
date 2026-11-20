@@ -38,15 +38,15 @@
   <text x="627" y="408" text-anchor="middle" class="tick">4</text>
   <line x1="765" y1="50" x2="765" y2="390" class="grid"/>
   <text x="765" y="408" text-anchor="middle" class="tick">5</text>
-  <path class="corridor-yellow" d="M 75 -7.34e+03 L 213 -7.34e+03 L 351 -7.34e+03 L 489 -7.34e+03 L 627 -7.34e+03 L 765 -7.34e+03 L 765 8.06e+03 L 627 8.06e+03 L 489 8.06e+03 L 351 8.06e+03 L 213 8.06e+03 L 75 8.06e+03 Z"/>
-  <path class="corridor-green" d="M 75 -1.18e+03 L 213 -1.18e+03 L 351 -1.18e+03 L 489 -1.18e+03 L 627 -1.18e+03 L 765 -1.18e+03 L 765 1.9e+03 L 627 1.9e+03 L 489 1.9e+03 L 351 1.9e+03 L 213 1.9e+03 L 75 1.9e+03 Z"/>
+  <path class="corridor-yellow" d="M 75 -7.25e+03 L 213 -7.25e+03 L 351 -7.25e+03 L 489 -7.25e+03 L 627 -7.25e+03 L 765 -7.25e+03 L 765 7.97e+03 L 627 7.97e+03 L 489 7.97e+03 L 351 7.97e+03 L 213 7.97e+03 L 75 7.97e+03 Z"/>
+  <path class="corridor-green" d="M 75 -1.16e+03 L 213 -1.16e+03 L 351 -1.16e+03 L 489 -1.16e+03 L 627 -1.16e+03 L 765 -1.16e+03 L 765 1.88e+03 L 627 1.88e+03 L 489 1.88e+03 L 351 1.88e+03 L 213 1.88e+03 L 75 1.88e+03 Z"/>
   <path class="exact-curve" d="M 75 362 L 213 362 L 351 362 L 489 362 L 627 362 L 765 362 "/>
-  <path class="num-curve" d="M 75 78.3 L 213 212 L 351 362 L 489 82.1 L 627 156 L 765 362 "/>
-  <circle cx="75" cy="78.3" r="3.5" fill="#f0883e"/>
-  <circle cx="213" cy="212" r="3.5" fill="#f0883e"/>
+  <path class="num-curve" d="M 75 124 L 213 201 L 351 362 L 489 78.3 L 627 180 L 765 362 "/>
+  <circle cx="75" cy="124" r="3.5" fill="#f0883e"/>
+  <circle cx="213" cy="201" r="3.5" fill="#f0883e"/>
   <circle cx="351" cy="362" r="3.5" fill="#f0883e"/>
-  <circle cx="489" cy="82.1" r="3.5" fill="#f0883e"/>
-  <circle cx="627" cy="156" r="3.5" fill="#f0883e"/>
+  <circle cx="489" cy="78.3" r="3.5" fill="#f0883e"/>
+  <circle cx="627" cy="180" r="3.5" fill="#f0883e"/>
   <circle cx="765" cy="362" r="3.5" fill="#f0883e"/>
   <line x1="75" y1="390" x2="765" y2="390" class="axis-line"/>
   <line x1="75" y1="50" x2="75" y2="390" class="axis-line"/>

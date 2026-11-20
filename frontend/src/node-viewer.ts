@@ -1,4 +1,4 @@
-import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, syncMPMMaterialParameters, getCompatibleMaterialsForNode, resolveResourcePath, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS } from './state-manager.js';
+import { StateManager, NODE_DEFAULT_PARAMETERS, getMeshDisplayHTML, getMPMDisplayHTML, getFEMDisplayHTML, getGeometryDisplayHTML, getCouplerDisplayHTML, getTelemetryDisplayHTML, getTelemetryHeader, syncMPMMaterialParameters, formatMaterialSummary, getCompatibleMaterialsForNode, resolveResourcePath, NON_PHYSICAL_NODE_TYPES, DISPLAY_ONLY_KEYS } from './state-manager.js';
 import { Node, NodeType, isDomainMesh3DNode, isDomainMesh2DNode } from './types.js';
 import { PropertyEditor } from './property-editor.js';
 import { HostFileBrowserModal, FileFilterPreset, showRecentFoldersQuickMenu, recordRecentFolder } from './host-file-browser.js';
@@ -3503,9 +3503,7 @@ export class NodeViewer {
             matNodes.forEach(mat => {
                 const option = document.createElement('option');
                 option.value = mat.id;
-                const matModel = mat.parameters?.material_model || 'Material';
-                const preset = mat.parameters?.preset;
-                const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                const matSummary = formatMaterialSummary(mat);
                 option.text = `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 8)}] (${matSummary})`;
                 if (mat.id === currentMatId) {
                     option.selected = true;
@@ -3562,9 +3560,7 @@ export class NodeViewer {
             matNodes.forEach(mat => {
                 const option = document.createElement('option');
                 option.value = mat.id;
-                const matModel = mat.parameters?.material_model || 'Material';
-                const preset = mat.parameters?.preset;
-                const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                const matSummary = formatMaterialSummary(mat);
                 option.text = `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 8)}] (${matSummary})`;
                 if (mat.id === currentMatId) {
                     option.selected = true;
@@ -3832,9 +3828,7 @@ export class NodeViewer {
             matNodes.forEach(mat => {
                 const option = document.createElement('option');
                 option.value = mat.id;
-                const matModel = mat.parameters?.material_model || 'Material';
-                const preset = mat.parameters?.preset;
-                const matSummary = preset === 'Custom' ? `${matModel} (Custom)` : (preset || mat.parameters?.composition || matModel);
+                const matSummary = formatMaterialSummary(mat);
                 option.text = `${(mat as any).name || mat.parameters?.name || mat.type} [${mat.id.substring(0, 8)}] (${matSummary})`;
                 if (mat.id === currentMatId) {
                     option.selected = true;
@@ -4751,7 +4745,7 @@ export class NodeViewer {
                 updates['shape_type'] = value === 'Cylinder Generator' ? 'Cylinder' : (value === 'STL File' ? 'STL' : (value === 'Plate Generator' ? 'Plate' : (value === 'LS-DYNA Keyword File' ? 'LS-DYNA File' : 'Box')));
                 if (value === 'STL File' && isHexOrUnset) updates['element_topology'] = 'Tet4_ANP';
             }
-        } else if (node.type === 'Material' && !['preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
+        } else if (node.type === 'Material' && !['preset', 'base_preset', 'material_model', 'name', 'color', 'charge_target', 'seabed_target', 'ambient_air_target', 'water_target', 'domain_target', 'body_target', 'composition', 'material_type', 'provenance', 'reference', 'description', 'notes', 'tags', 'transfer_scheme'].includes(key)) {
             updates['preset'] = 'Custom';
             updates['provenance'] = 'user';
         } else if (key === 'stl_file' || key === 'k_file' || key === 'output_dir' || key === 'vtk_dir' || key === 'external_file_path' || key === 'file_path') {
